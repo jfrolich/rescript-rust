@@ -12216,6 +12216,135 @@ pub fn instance_label(
     (poly_vars, ty_arg, ty_res)
 }
 
+/// The type parameters of a record label paired with the arguments of the
+/// record type a record expression is checked against, for
+/// [`instance_label_arg_at`].
+pub(crate) struct LabelParamSubst {
+    lbl_res: TypeExprRef,
+    record_ty: TypeExprRef,
+    params: smallvec::SmallVec<[TypeExprRef; 8]>,
+    args: super::type_expr::TypeRefList,
+}
+
+impl LabelParamSubst {
+    /// Whether this pairs the parameters of `lbl_res` with the arguments of
+    /// `record_ty`.
+    pub(crate) fn is_for(
+        &self,
+        ctx: &TypeContext,
+        lbl_res: TypeExprRef,
+        record_ty: TypeExprRef,
+    ) -> bool {
+        self.lbl_res == ctx.repr(lbl_res) && self.record_ty == ctx.repr(record_ty)
+    }
+
+    fn arg_for(&self, ctx: &TypeContext, param: TypeExprRef) -> Option<TypeExprRef> {
+        let index = self.params.iter().position(|p| *p == param)?;
+        Some(ctx.type_list_at(self.args, index))
+    }
+}
+
+/// Pair the type parameters of a record label with the arguments of
+/// `record_ty`, when instantiating the label against `record_ty` needs no
+/// unification.
+///
+/// OCaml `type_label_exp` (compiler/ml/typecore.ml:3677-3698) instantiates a
+/// label with fresh variables for the record's type parameters and unifies
+/// the resulting record type with the expected one:
+///
+/// ```text
+/// let vars, ty_arg, ty_res = instance_label true label in
+/// unify env (instance_def ty_res) (instance env ty_expected)
+/// ```
+///
+/// For a record with `n` type parameters that is `n` fresh variables and `n`
+/// unifications per field, so a record expression costs `fields * n`. JSX
+/// component props are the common large case: `props<'a, 'b, ...>` has one
+/// parameter per prop.
+///
+/// When `record_ty` is already an application of the label's own type
+/// constructor, that unification can only link the fresh copy of each
+/// parameter to the argument in the same position, and the label's argument
+/// type is then its declared type with the arguments substituted. This
+/// returns the pairing for that case, and `None` whenever the unification
+/// could do anything else:
+///
+/// - `record_ty` is generic, so `instance` would copy it, or otherwise above
+///   the current level, so unification would lower it;
+/// - the two types are not applications of the same constructor with the same
+///   arity (unification expands abbreviations or fails);
+/// - a parameter is not a distinct generic type variable (constrained
+///   parameters unify structurally);
+/// - an argument has a higher level than `record_ty` (unification lowers it)
+///   or may contain a universal variable (binding a variable to it can fail).
+pub(crate) fn record_label_param_subst(
+    ctx: &TypeContext,
+    lbl_res: TypeExprRef,
+    record_ty: TypeExprRef,
+) -> Option<LabelParamSubst> {
+    let lbl_res = ctx.repr(lbl_res);
+    let record_ty = ctx.repr(record_ty);
+    let record_level = ctx.get_level(record_ty);
+    // A `record_ty` above the current level would be lowered by unification.
+    if lbl_res == record_ty || record_level > ctx.current_level() {
+        return None;
+    }
+    let (params, args) = match (&*ctx.borrow_desc(lbl_res), &*ctx.borrow_desc(record_ty)) {
+        (
+            TypeDesc::Tconstr {
+                path: lbl_path,
+                args: params,
+                ..
+            },
+            TypeDesc::Tconstr { path, args, .. },
+        ) if lbl_path.same(path) && params.len() == args.len() => (*params, *args),
+        _ => return None,
+    };
+
+    let params: smallvec::SmallVec<[TypeExprRef; 8]> =
+        ctx.type_list(params).iter().map(|p| ctx.repr(p)).collect();
+    for (index, param) in params.iter().enumerate() {
+        if ctx.get_level(*param) != GENERIC_LEVEL
+            || !matches!(&*ctx.borrow_desc(*param), TypeDesc::Tvar(_))
+            || params[..index].contains(param)
+        {
+            return None;
+        }
+    }
+
+    let mut budget = 64 + 8 * params.len() as u32;
+    for arg in ctx.type_list(args).iter() {
+        if ctx.get_level(ctx.repr(arg)) > record_level || !surely_univar_free(ctx, arg, &mut budget)
+        {
+            return None;
+        }
+    }
+
+    Some(LabelParamSubst {
+        lbl_res,
+        record_ty,
+        params,
+        args,
+    })
+}
+
+/// The argument type of a label instantiated at the record type `subst` was
+/// made for: `lbl_arg` with fresh copies of its generic nodes, as
+/// `instance_label` makes, except that each type parameter is replaced by
+/// the record type's argument (see [`record_label_param_subst`]).
+///
+/// `lbl_arg` must not be a `Tpoly`: polymorphic fields go through
+/// `instance_label`.
+pub(crate) fn instance_label_arg_at(
+    ctx: &TypeContext,
+    lbl_arg: TypeExprRef,
+    subst: &LabelParamSubst,
+) -> TypeExprRef {
+    let mut cache = CopyCache::new(ctx);
+    cache.param_subst = Some(subst);
+    copy_type_cached(ctx, lbl_arg, &mut cache)
+}
+
 /// OCaml's check_univars: after typing a polymorphic field value,
 /// convert any still-unresolved fresh Tvars back to Tunivar.
 /// This preserves the universal quantification in the typed tree.
@@ -12451,6 +12580,10 @@ pub(crate) struct CopyCache<'c> {
 
     /// Optional OCaml `Ctype.copy ~partial` mode.
     partial: Option<CopyPartial>,
+
+    /// Type parameters to replace by given types instead of fresh variables
+    /// (see [`instance_label_arg_at`]).
+    param_subst: Option<&'c LabelParamSubst>,
 }
 
 /// The variant rows currently being copied (at most a few at once), with
@@ -12501,6 +12634,7 @@ impl<'c> CopyCache<'c> {
             nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: RowMoreMarkers::default(),
             partial: None,
+            param_subst: None,
         }
     }
 
@@ -12512,6 +12646,7 @@ impl<'c> CopyCache<'c> {
             nodes: super::type_expr::TypeExprRefMap::new(),
             row_more_markers: RowMoreMarkers::default(),
             partial: None,
+            param_subst: None,
         }
     }
 
@@ -12526,6 +12661,7 @@ impl<'c> CopyCache<'c> {
                 keep,
                 free_univars: compute_univars_per_node(ctx, ty),
             }),
+            param_subst: None,
         }
     }
 }
@@ -13183,6 +13319,10 @@ pub(crate) fn copy_type_cached(
             level,
         ),
         CopyAction::NewVar(name) => {
+            if let Some(arg) = cache.param_subst.and_then(|subst| subst.arg_for(ctx, ty)) {
+                cache.nodes.insert(ty, arg);
+                return arg;
+            }
             // ctype.ml:775-829: a `newvar ()` stub whose descriptor becomes
             // `copy_type_desc copy desc`, the static `Tvar None`
             // (btype.ml:510).

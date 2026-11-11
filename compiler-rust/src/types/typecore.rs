@@ -5774,6 +5774,7 @@ fn type_pattern_construct(
             (desc, path)
         } else {
             // Module-qualified: use direct lookup
+            let report_ambiguous = ambiguous_name_warning_is_active(tctx);
             match lookup_constructor_in_module_with_ambiguity(
                 lid_txt,
                 tctx.arena,
@@ -5781,6 +5782,7 @@ fn type_pattern_construct(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
                 Some(expected_ty),
+                report_ambiguous,
             ) {
                 Some((path, desc, ambiguous_types)) => {
                     // `NameChoice.disambiguate` (typecore.ml:913-918).
@@ -5823,12 +5825,14 @@ fn type_pattern_construct(
         }
     } else {
         // Unqualified: use disambiguation with expected type
+        let report_ambiguous = ambiguous_name_warning_is_active(tctx);
         match disambiguate_constructor(
             &lid_name,
             expected_ty,
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
+            report_ambiguous,
         ) {
             Err(tpath) => {
                 return Err(wrong_constructor_name_error(
@@ -6441,7 +6445,6 @@ fn type_pattern_record(
                     env,
                     &mut tctx.persistent_env,
                     ctx,
-                    false,
                 )
             });
 
@@ -13958,6 +13961,7 @@ fn type_construct(
             (path, desc)
         } else {
             // Module-qualified: use direct lookup
+            let report_ambiguous = ambiguous_name_warning_is_active(tctx);
             match lookup_constructor_in_module_with_ambiguity(
                 &longident,
                 tctx.arena,
@@ -13965,6 +13969,7 @@ fn type_construct(
                 &mut tctx.persistent_env,
                 tctx.type_ctx,
                 Some(expected_ty),
+                report_ambiguous,
             ) {
                 Some((path, desc, ambiguous_types)) => {
                     // `NameChoice.disambiguate` (typecore.ml:913-918) warns
@@ -14008,12 +14013,14 @@ fn type_construct(
         }
     } else {
         // Unqualified: use disambiguation with expected type
+        let report_ambiguous = ambiguous_name_warning_is_active(tctx);
         match disambiguate_constructor(
             &lid_name,
             expected_ty,
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
+            report_ambiguous,
         ) {
             Err(tpath) => {
                 return Err(wrong_constructor_name_error(
@@ -14439,6 +14446,18 @@ fn fast_exact_unqualified_opath_record_label(
         use_label_candidate(ctx, env, field_name, desc, mark);
     }
     record_label_from_info(label_info, field_name).or_else(|| Some((*first_label).clone()))
+}
+
+/// Whether warning 41 (`Ambiguous_name`) is reported here. It is off by
+/// default, and finding the types a name is ambiguous between compares every
+/// candidate in scope with the ones kept so far, so callers only look for
+/// them when this holds.
+fn ambiguous_name_warning_is_active(tctx: &TypeCheckContext<'_>) -> bool {
+    tctx.warning_config.is_active(&Warning::AmbiguousName {
+        names: Vec::new(),
+        types: Vec::new(),
+        is_label: false,
+    })
 }
 
 /// The end of `disambiguate_record_elem_list` (typecore.ml:1037-1050): the
@@ -15010,6 +15029,7 @@ fn type_record(
     // 1) disambiguate labels
     // 2) sort by lbl_pos before typing each field
     let mut explicit_fields: Vec<ExplicitField<'_>> = Vec::with_capacity(fields.len());
+    let mut last_marked_label_path: Option<Path> = None;
     for (idx, field) in fields.iter().enumerate() {
         let resolved_lid = arena.get_longident(field.lid.txt);
         let field_name = arena.get_string(resolved_lid.last_idx());
@@ -15083,7 +15103,6 @@ fn type_record(
                     env,
                     &mut tctx.persistent_env,
                     ctx,
-                    false,
                 )
             })
         } else {
@@ -15141,7 +15160,6 @@ fn type_record(
                     env,
                     &mut tctx.persistent_env,
                     ctx,
-                    false,
                 )
             });
         if report_ambiguous_label_warnings
@@ -15171,9 +15189,15 @@ fn type_record(
             }
         }
         // `Label.disambiguate` calls the chosen label's `use ()`, which marks
-        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
-        if let Some(label) = disambiguated.as_ref() {
-            mark_type_path_of(ctx, env, label.lbl_res);
+        // its type (`Env.lookup_all_labels`, env.ml:1230-1238). The fields of
+        // one record usually share that type: mark it once.
+        if let Some(path) = disambiguated
+            .as_ref()
+            .and_then(|label| label_result_path(ctx, label))
+            && !last_marked_label_path.is_some_and(|marked| marked.same(&path))
+        {
+            mark_type_path(ctx, env, &path);
+            last_marked_label_path = Some(path);
         }
         explicit_fields.push(ExplicitField {
             original_index: idx,
@@ -15192,6 +15216,10 @@ fn type_record(
             .map(|label| label.lbl_pos)
             .unwrap_or(entry.original_index as i32)
     });
+
+    // The label parameter pairing of the previous field, reused while the
+    // fields belong to the same record type.
+    let mut label_param_subst: Option<crate::types::ctype::LabelParamSubst> = None;
 
     // Type check explicitly written fields in lbl_pos order.
     for explicit_field in explicit_fields.iter() {
@@ -15285,34 +15313,72 @@ fn type_record(
                         ctx.begin_def();
                     }
 
-                    let (poly_vars, ty_arg0, ty_res0) =
-                        crate::types::ctype::instance_label(ctx, true, &env_label);
-                    if separate {
-                        ctx.end_def();
-                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
-                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
-                    }
+                    // When the record type is already an application of this
+                    // label's type constructor, the unification below can only
+                    // bind the label's fresh type parameters to the record
+                    // type's arguments: substitute them directly instead of
+                    // copying and unifying every parameter for every field.
+                    let substituted_ty_arg = if separate
+                        || matches!(
+                            &*ctx.borrow_desc(ctx.repr(env_label.lbl_arg)),
+                            TypeDesc::Tpoly { .. }
+                        ) {
+                        None
+                    } else {
+                        if !label_param_subst
+                            .as_ref()
+                            .is_some_and(|subst| subst.is_for(ctx, env_label.lbl_res, record_ty))
+                        {
+                            label_param_subst = crate::types::ctype::record_label_param_subst(
+                                ctx,
+                                env_label.lbl_res,
+                                record_ty,
+                            );
+                        }
+                        label_param_subst.as_ref().map(|subst| {
+                            crate::types::ctype::instance_label_arg_at(
+                                ctx,
+                                env_label.lbl_arg,
+                                subst,
+                            )
+                        })
+                    };
 
-                    // Match OCaml typecore.ml:3695-3698:
-                    //   unify env (instance_def ty_res) (instance env ty_expected)
-                    //   let ty_arg = instance_def ty_arg
-                    let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                    let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
-                    if let Err(err) =
-                        crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
-                    {
-                        let trace = match err {
-                            TypeError::Unify(trace) => trace,
-                            _ => vec![(ty_res, expected_record_ty)],
-                        };
-                        return Err(TypeCoreError::LabelMismatch {
-                            loc: field.lid.loc,
-                            lid: tctx.arena.get_longident(field.lid.txt).clone(),
-                            trace,
-                            env: Some(tctx.type_ctx.store_typed_env(env)),
-                        });
-                    }
-                    let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
+                    let (poly_vars, ty_arg) = if let Some(ty_arg) = substituted_ty_arg {
+                        (Vec::new(), ty_arg)
+                    } else {
+                        let (poly_vars, ty_arg0, ty_res0) =
+                            crate::types::ctype::instance_label(ctx, true, &env_label);
+                        if separate {
+                            ctx.end_def();
+                            crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
+                            crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
+                        }
+
+                        // Match OCaml typecore.ml:3695-3698:
+                        //   unify env (instance_def ty_res) (instance env ty_expected)
+                        //   let ty_arg = instance_def ty_arg
+                        let ty_res = crate::types::ctype::instance(ctx, ty_res0);
+                        let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
+                        if let Err(err) = crate::types::unify(
+                            ctx,
+                            &mut tctx.unify_state,
+                            ty_res,
+                            expected_record_ty,
+                        ) {
+                            let trace = match err {
+                                TypeError::Unify(trace) => trace,
+                                _ => vec![(ty_res, expected_record_ty)],
+                            };
+                            return Err(TypeCoreError::LabelMismatch {
+                                loc: field.lid.loc,
+                                lid: tctx.arena.get_longident(field.lid.txt).clone(),
+                                trace,
+                                env: Some(tctx.type_ctx.store_typed_env(env)),
+                            });
+                        }
+                        (poly_vars, crate::types::ctype::instance(ctx, ty_arg0))
+                    };
 
                     if separate {
                         // OCaml compiler/ml/typecore.ml:3699-3702 closes the
@@ -16071,7 +16137,6 @@ fn type_field(
             env,
             &mut tctx.persistent_env,
             tctx.type_ctx,
-            true,
         )
     };
     if label_expected_record_ty.is_none()
@@ -16248,7 +16313,6 @@ fn type_setfield(
             env,
             &mut tctx.persistent_env,
             ctx,
-            true,
         )
     });
     if matches!(resolved_lid, Longident::Lident(_))
@@ -22781,7 +22845,7 @@ pub(crate) fn lookup_constructor_in_module(
     ctx: &crate::types::context::TypeContext,
     expected_ty: Option<TypeExprRef>,
 ) -> Option<(Path, crate::types::decl::ConstructorDescription)> {
-    lookup_constructor_in_module_with_ambiguity(lid, arena, env, pers_env, ctx, expected_ty)
+    lookup_constructor_in_module_with_ambiguity(lid, arena, env, pers_env, ctx, expected_ty, false)
         .map(|(path, desc, _)| (path, desc))
 }
 
@@ -22795,6 +22859,7 @@ pub(crate) fn lookup_constructor_in_module_with_ambiguity(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     expected_ty: Option<TypeExprRef>,
+    report_ambiguous: bool,
 ) -> Option<(
     Path,
     crate::types::decl::ConstructorDescription,
@@ -22867,18 +22932,20 @@ pub(crate) fn lookup_constructor_in_module_with_ambiguity(
             }
 
             // OCaml compiler/ml/typecore.ml:990-1008 `NameChoice.disambiguate`
-            // still calls `ambiguous_types` when `opath = None`; that reaches
-            // compare_type_path at typecore.ml:978/786-787 and may force
-            // Env.normalize_path through compiler/ml/env.ml:903-914 before any
-            // nested pattern binders are allocated.
+            // takes the first candidate when `opath = None` and warns with
+            // `ambiguous_types` of the others.
             let (selected_path, selected_desc) = candidates.first().cloned()?;
-            let ambiguous = ambiguous_constructor_warning_types(
-                &selected_desc,
-                candidates.iter().skip(1).map(|(_, desc)| desc),
-                env,
-                pers_env,
-                ctx,
-            );
+            let ambiguous = if report_ambiguous {
+                ambiguous_constructor_warning_types(
+                    &selected_desc,
+                    candidates.iter().skip(1).map(|(_, desc)| desc),
+                    env,
+                    pers_env,
+                    ctx,
+                )
+            } else {
+                Vec::new()
+            };
             Some((selected_path, selected_desc, ambiguous))
         }
         _ => None,
@@ -23382,39 +23449,6 @@ fn label_result_path(
     }
 }
 
-fn force_ambiguous_label_type_path_side_effects<'a>(
-    selected_label: &crate::types::LabelDescription,
-    labels_in_scope_order: impl Iterator<Item = &'a crate::types::LabelDescription>,
-    env: &Env,
-    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
-    ctx: &'a crate::types::context::TypeContext,
-) {
-    let Some(selected_path) = label_result_path(ctx, selected_label) else {
-        return;
-    };
-    let mut unique_paths = vec![selected_path];
-
-    for label in labels_in_scope_order {
-        let Some(label_path) = label_result_path(ctx, label) else {
-            continue;
-        };
-        // OCaml compiler/ml/typecore.ml:973-980 `ambiguous_types`
-        // calls `unique compare_type_path [tpath] others`; `unique`
-        // invokes `compare_type_path` for warning classification even when
-        // the selected label is already known. `compare_type_path` reaches
-        // typecore.ml:776-787 `expand_path`, whose Env.normalize_path fallback
-        // forces ps_sig lazies through compiler/ml/env.ml:903-926 and
-        // env.ml:865-875. Keep that force order for generated record-field
-        // accesses with no expected record path.
-        let already_seen = unique_paths.iter().any(|seen_path| {
-            compare_type_paths_for_label_disambiguation(&label_path, seen_path, env, pers_env, ctx)
-        });
-        if !already_seen {
-            unique_paths.insert(0, label_path);
-        }
-    }
-}
-
 fn should_prefer_expected_record_label(
     expected_label: &crate::types::LabelDescription,
     env_label: &crate::types::LabelDescription,
@@ -23752,6 +23786,7 @@ fn disambiguate_constructor(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
+    report_ambiguous: bool,
 ) -> Result<Option<DisambiguatedConstructor>, Path> {
     // Step 1: Try to extract the variant type path from the expected type
     let opath = extract_variant_type_path_from_expected_with_persistent_env(
@@ -23844,18 +23879,21 @@ fn disambiguate_constructor(
     }
 
     // Step 4: Fall back to the first constructor in scope. OCaml
-    // compiler/ml/typecore.ml:990-1008 still runs
-    // `ambiguous_types` for this `opath = None` branch, so preserve those
-    // compare_type_path/env-normalize side effects before returning.
+    // compiler/ml/typecore.ml:990-1008 warns with `ambiguous_types` of the
+    // others in this `opath = None` branch.
     let cstr = all_constrs.first().unwrap();
     use_constructor_candidate(ctx, env, cstr_name, cstr, marked_constrs[0].1);
-    let ambiguous_types = ambiguous_constructor_warning_types(
-        cstr,
-        all_constrs.iter().skip(1).copied(),
-        env,
-        pers_env,
-        ctx,
-    );
+    let ambiguous_types = if report_ambiguous {
+        ambiguous_constructor_warning_types(
+            cstr,
+            all_constrs.iter().skip(1).copied(),
+            env,
+            pers_env,
+            ctx,
+        )
+    } else {
+        Vec::new()
+    };
     let path = Path::pident(Ident::create_persistent(cstr_name));
     Ok(Some(DisambiguatedConstructor {
         path,
@@ -24141,24 +24179,6 @@ fn lookup_label_by_lid(
     }
 
     let selected = candidates.first().cloned()?;
-    if expected_record_ty.is_none() {
-        // OCaml compiler/ml/typecore.ml:990-1006 `Label.disambiguate` takes
-        // the first remaining label, calls its use callback, then runs
-        // typecore.ml:973-980 `ambiguous_types` over the rest. That reaches
-        // typecore.ml:786-787 `compare_type_path` and may force
-        // compiler/ml/env.ml:903-914 `Env.normalize_path` before the next
-        // record field is processed. Qualified record labels follow the same
-        // path after typecore.ml:1098-1126 `disambiguate_record_elem_list`;
-        // preserve that lazy force order instead of treating qualification as
-        // enough to skip ambiguity side effects.
-        force_ambiguous_label_type_path_side_effects(
-            &selected,
-            candidates.iter().skip(1),
-            env,
-            pers_env,
-            ctx,
-        );
-    }
     Some(selected)
 }
 
@@ -24556,7 +24576,6 @@ fn disambiguate_label(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    force_ambiguous_side_effects: bool,
 ) -> Option<crate::types::LabelDescription> {
     // Extract type path from the record expression's type
     let opath = extract_type_path_from_expected_with_persistent_env(record_ty, env, pers_env, ctx);
@@ -24652,19 +24671,6 @@ fn disambiguate_label(
 
     if selected.is_none() && opath.is_none() {
         selected = all_labels.first().map(|l| (*l).clone());
-    }
-
-    if force_ambiguous_side_effects
-        && opath.is_none()
-        && let Some(label) = selected.as_ref()
-    {
-        force_ambiguous_label_type_path_side_effects(
-            label,
-            all_labels.iter().skip(1).copied(),
-            env,
-            pers_env,
-            ctx,
-        );
     }
 
     // `Label.disambiguate` calls the `use ()` callback of a candidate chosen

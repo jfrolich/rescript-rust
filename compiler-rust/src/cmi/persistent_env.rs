@@ -8594,10 +8594,16 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
             .get(unit.as_str())
             .cloned()
             .or_else(|| registry.cached_modules.get_cloned(&unit))?;
+        // The references of the signature itself come with it, unless it
+        // is registered under another name than its own.
+        let summary = ps.summary();
+        let own_refs = (summary.unit == unit).then(|| &summary.refs);
         let lambdas = if self.lambdas {
             registry
                 .with_info(&unit, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
                 .unwrap_or(0)
+        } else if let Some(refs) = own_refs {
+            return Some(refs.clone());
         } else {
             usize::MAX
         };
@@ -8605,7 +8611,15 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }
-        let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
+        let signature_refs = match own_refs {
+            Some(refs) => refs.clone(),
+            None => Arc::new(super::item_deps::signature_refs(unit, &ps.signature())),
+        };
+        let refs = if self.lambdas {
+            Arc::new(super::item_deps::with_lambda_units(&signature_refs, unit, self))
+        } else {
+            signature_refs
+        };
         registry
             .item_refs_cache
             .write()
