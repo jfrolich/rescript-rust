@@ -48,7 +48,17 @@ impl LambdaCompiler {
             return self.compile_js_object_get(a, property, *obj);
         }
         let args = a.list_small(args);
-        let (prelude, compiled_args) = self.compile_arguments(a, false, args);
+        let (prelude, compiled_args) = match &prim {
+            Primitive::PjsCall(call) => self.compile_arguments_held(a, false, args, |c, args| {
+                c.hold_external_args(&call.arg_types, args)
+            }),
+            Primitive::PjsObjectCreate(obj_params) => {
+                self.compile_arguments_held(a, false, args, |c, args| {
+                    c.hold_external_obj_args(obj_params, args)
+                })
+            }
+            _ => self.compile_arguments(a, false, args),
+        };
         self.compile_primitive_js(&prim, compiled_args.into(), prelude, &loc)
     }
 

@@ -1302,3 +1302,140 @@ fn lowers_nullable_predicates_to_js_null_checks() {
     assert!(nullable_compiled.prelude.is_empty());
     assert!(undefined_compiled.prelude.is_empty());
 }
+
+fn js_val_call(name: &str, arg_types: Vec<Param>, args: Vec<Lambda>) -> Lambda {
+    Lambda::prim(
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
+            prim_name: name.to_string(),
+            arg_types,
+            ffi: ExternalDecl {
+                kind: DeclKind::DeclVal {
+                    name: name.to_string(),
+                },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            },
+        })),
+        args,
+        LamLoc::NONE,
+    )
+}
+
+fn polyvar_param(arg_type: Attr) -> Param {
+    Param {
+        arg_type,
+        arg_label: LabelNoname::ArgEmpty,
+    }
+}
+
+// lam_compile_external_call.ml `hold_arg` (#9217): an event-style argument
+// is read twice, so a call is bound to a temporary and runs once.
+#[test]
+fn event_style_polyvar_call_argument_runs_once() {
+    let mut compiler = LambdaCompiler::new();
+    let next = js_val_call(
+        "next",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(0))],
+    );
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![next],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(
+        print_stmts(&p.arena, &p.block),
+        "let tmp = next(0);\n\non(tmp.NAME, tmp.VAL);"
+    );
+}
+
+// The literal `#click(wrap(h))` passes its tag and payload in place, even
+// with an effectful payload.
+#[test]
+fn event_style_polyvar_literal_with_effectful_payload_passes_in_place() {
+    let mut compiler = LambdaCompiler::new();
+    let wrap = js_val_call(
+        "wrap",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(1))],
+    );
+    let literal = Lambda::prim(
+        Primitive::Pmakeblock(TagInfo::PolyVar("click".to_string()), Mutable::Immutable),
+        vec![Lambda::const_(Constant::Pointer("click".to_string())), wrap],
+        LamLoc::NONE,
+    );
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![literal],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(print_stmts(&p.arena, &p.block), "on(\"click\", wrap(1));");
+}
+
+// An `@int` dispatch switches on its argument in a function; an `await`
+// there would be a syntax error, so it is bound before the call.
+#[test]
+fn int_polyvar_await_argument_is_bound_outside_the_dispatch() {
+    let mut compiler = LambdaCompiler::new();
+    let p_ident = Ident::create_local("p");
+    let awaited = Lambda::prim(Primitive::Pawait, vec![Lambda::var(p_ident)], LamLoc::NONE);
+    let lam = js_val_call(
+        "setLevel",
+        vec![polyvar_param(Attr::Int(vec![
+            ("low".to_string(), 0),
+            ("high".to_string(), 10),
+        ]))],
+        vec![awaited],
+    );
+    let p = compiler.compile_program(&lam);
+    let printed = print_stmts(&p.arena, &p.block);
+    assert!(
+        printed.starts_with("let tmp = await p;"),
+        "await is bound first: {printed}"
+    );
+    assert!(printed.contains("switch (tmp)"), "{printed}");
+}
+
+// A variable is read in place, as is any argument an `@string` dispatch
+// reads once without effects.
+#[test]
+fn polyvar_variable_argument_needs_no_temporary() {
+    let mut compiler = LambdaCompiler::new();
+    let x = Ident::create_local("x");
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![Lambda::var(x)],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(print_stmts(&p.arena, &p.block), "on(x.NAME, x.VAL);");
+}
+
+// lam_compile_external_obj.ml `hold_obj_args`: an `@obj` field with an `@int`
+// dispatch binds an effectful argument too.
+#[test]
+fn obj_polyvar_int_field_call_argument_is_bound() {
+    let mut compiler = LambdaCompiler::new();
+    let next = js_val_call(
+        "next",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(0))],
+    );
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::Int(vec![("low".to_string(), 0), ("high".to_string(), 10)]),
+            obj_arg_label: Label::ObjLabel {
+                name: "level".to_string(),
+            },
+        }]),
+        vec![next],
+        LamLoc::NONE,
+    ));
+    assert_eq!(compiled.prelude.len(), 1, "the call is bound first");
+    let printed = print_expr(&compiler.j, compiled.expr);
+    assert!(printed.contains("switch (tmp)"), "{printed}");
+}

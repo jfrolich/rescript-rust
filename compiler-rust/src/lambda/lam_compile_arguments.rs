@@ -201,6 +201,19 @@ impl LambdaCompiler {
         method_callee: bool,
         args: impl IntoIterator<Item = Lam>,
     ) -> (Block, Vec<Expr>) {
+        self.compile_arguments_held(a, method_callee, args, |_, compiled| compiled)
+    }
+
+    /// `compile_arguments ?hold`: `hold` may add statements to the compiled
+    /// arguments before they are sequenced, such as the bindings of
+    /// `hold_external_args`.
+    pub(crate) fn compile_arguments_held(
+        &mut self,
+        a: &mut LamArena,
+        method_callee: bool,
+        args: impl IntoIterator<Item = Lam>,
+        hold: impl FnOnce(&mut Self, Vec<(Block, Expr)>) -> Vec<(Block, Expr)>,
+    ) -> (Block, Vec<Expr>) {
         let compiled = args
             .into_iter()
             .map(|arg| {
@@ -208,6 +221,7 @@ impl LambdaCompiler {
                 (compiled.prelude, compiled.expr)
             })
             .collect();
+        let compiled = hold(self, compiled);
         self.sequence_arguments(method_callee, compiled)
     }
 
