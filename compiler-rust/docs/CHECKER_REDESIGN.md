@@ -108,7 +108,8 @@ Also: the typed tree is already stored in flat per-module pools
 
 The estimates sum to 27-39% of the build against a needed 30% (37,000 of
 123,000 instructions per line). They are estimates with a wide error; section
-F says how each was derived.
+F says how each was derived. Section H holds the call-site inventory for P3
+and the API inventory for P6, with the corrections they make to both stages.
 
 ## A. Survey of today's code
 
@@ -1064,6 +1065,9 @@ counter.
 
 ### C.10 Environments
 
+H.2.6 lists where today's `Env` API contradicts this section, and H.2.7
+gives the corrected structure. Read them together with what follows.
+
 ```rust
 #[derive(Clone, Copy)]
 pub struct Env { scope: ScopeId, pos: u32 }      // 8 bytes
@@ -1468,10 +1472,10 @@ stated reason). Only additions are listed per stage.
 | P0 | Differential tooling and counters | - | 600 | 0 | yes |
 | P1 | Ground flag and fast paths | P0 | 900 | 4-6% | yes |
 | P2 | Infer instead of unifying with a fresh variable | P0 | 700 | 1.5-2.5% | application: yes; other constructs: one at a time, yes |
-| P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | after a call-site inventory (see P3) |
+| P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | P3a (encode and summarise after dependents are released): yes, from H.1. P3b (build the graph and the digests without the portable form): yes, once the equality test of H.1.7 is in CI |
 | P4 | Process-wide views; delete stamp replay | P3 | 2,500, mostly deletions | 2.5-3.5% | no |
 | P5 | Absolute paths in exports; no lookup copies | P4 | 2,000 | 3-4% | no |
-| P6 | Environment as a binding log | P0 | 2,500 | 3-4% | after an API inventory (see P6) |
+| P6 | Environment as a binding log | P0 | 2,500 | 3-4% | steps 1 to 5 of H.2.8: yes. The switch (step 6 on): yes with the corrected design of H.2.7, not with C.10 as written; first confirm the cost of path moves on the benchmark |
 | P7 | Term store, closed waist, core switch | P1 | 2,000 | 0 | yes |
 | P8 | New core operations | P7 | 7,000 | 4-6% once on | split: simple types yes; rows, univars, GADT no |
 | P9 | Switch on | P8 | 500 plus fixes | 0 | no (triage) |
@@ -1594,10 +1598,13 @@ long-lived branch.
   recompile the same dependents as before.
 - **Saving, 2.5-3.5%** of the 4.6% publishing cost. What remains is the
   graph walk and the digests.
-- **Hand-off.** Needs an inventory of every reader of `PortablePersStruct`
-  (`signature()`, `signature_for_dependent()`, `raw_signature()`,
-  `summary()`), with which of them run before dependents are unblocked. With
-  that list it is mechanical.
+- **Hand-off.** The inventory is H.1. It corrects this stage in four
+  places (H.1.4): the raw-signature copy stays whether or not genType is on;
+  the portable encoding is always produced, because the next build of a
+  watch session and the editor load units from it; the pool stays keyed by
+  the registry's `Arc`; and store binders need their stamp mapping. The
+  stage is split into P3a and P3b (H.1.5), with the order of operations in
+  H.1.6 and the invariants in H.1.7.
 
 ### F.6 P4: process-wide component views; delete stamp replay
 
@@ -1664,8 +1671,14 @@ long-lived branch.
 - **Saving, 3-4%.** Environment lookups are 9% of checking (3.6% of the
   build), dropping environment snapshots 0.98%, persistent maps 1.5%
   build-wide.
-- **Hand-off.** Yes, after a mechanical inventory of the public methods of
-  `Env` and their callers, each tagged extend, look up or other.
+- **Hand-off.** The inventory is H.2. It found that the scope tree of C.10
+  cannot be built behind the existing API: environments are extended
+  without any scope entry or exit, old environments are extended (1.3% of
+  extensions on the test project), and environments cross compilations on
+  a worker (H.2.6). H.2.7 replaces the scope tree by a tree of versions
+  with one current path; H.2.8 gives the migration order and H.2.9 the
+  invariants. `im-rc` stays, because `typemod.rs` uses it elsewhere, and
+  `typed_envs` holds 16-byte values, not 8-byte ones, until P10.
 
 ### F.9 P7: term store, closed waist, core switch
 
@@ -1870,3 +1883,726 @@ P8.
 from a prototype. *Recommendation:* P1 is the calibration. It is small, it
 is predicted at 4-6%, and its result should rescale the others before P7
 and P8 are staffed.
+
+## H. Inventories for P3 and P6
+
+These two inventories are what F.5 and F.8 ask for before the stages are
+handed over. Each lists what the code does today, what the stage does with
+each piece, where the code contradicts the design above, and the correction.
+Paths are relative to `compiler-rust/src/` unless they start with `rewatch/`.
+Functions are named, not line-numbered.
+
+What is measured, estimated and unknown is said where it matters. Nothing in
+this section was measured on the 3,735-module application; the two
+measurements in H.2 were taken on this repository's `tests/tests` project
+(711 modules).
+
+### H.1 P3: call-site inventory
+
+#### H.1.1 Types that carry a signature between compilations
+
+| Type | File | What it is |
+|---|---|---|
+| `Signature` | `types/decl.rs` | The items. Their `TypeExprRef`s are handles of whichever tier holds the nodes |
+| `PersStruct` | `cmi/persistent_env.rs` | A unit as a compilation reads it: name, `ps_sig: Arc<Signature>`, file name, deprecation, CRCs |
+| `PortableSignature` | `cmi/portable_types.rs` | A signature whose handles are indices into its own `PortableTypeGraph`, with a location table and the file names of its locations |
+| `PortableRawSignature` | same | The same for the raw signature (H.1.3) |
+| `PortablePersStruct` | same | What the registry holds: both signatures as `binser::Encoded` bytes, the fingerprint, `shareable`, a lazily computed `SignatureSummary`, and a `ReservedSignature` (the decoded signature, kept for the first dependent) |
+| `SignatureSummary` | `cmi/item_deps.rs` | Per-item declaration digests (`item_hashes`) and per-item references (`refs`), computed from a `PortableSignature` |
+| `ModuleRegistry` | `cmi/persistent_env.rs` | Name to `Arc<PortablePersStruct>` and to `InMemoryModuleInfo` (the `.cmj`-equivalent data). One shared map plus per-worker local maps (`for_worker_snapshot`) |
+| `SharedGraph`, `SharedTypePool` | `types/shared_store.rs` | The immutable pages. The pool belongs to one build generation and maps the *address* of an `Arc<PortablePersStruct>` to the `PersStruct` built from it (`pers_struct`) |
+| `ThreadTypeStore` | `types/thread_store.rs` | Per worker: the same address-keyed map (`pers_struct`, `insert_pers_struct`), signature indexes, component views |
+
+Three facts about these types decide what P3 can and cannot do:
+
+1. **The pool dies with the build.** `thread_store::begin_build` bumps the
+   generation and `shared_store::pool_for` then returns a new pool. A unit
+   that is not recompiled in the next build of a watch session is loaded
+   again from its `PortablePersStruct`. The portable form is therefore needed
+   for every published unit, not only when the incremental store asks.
+2. **The pool is keyed by the address of the `Arc<PortablePersStruct>`** that
+   the registry holds. Whoever pre-fills the pool must use that same `Arc`.
+3. **The saved signature already names the unit's own items by absolute
+   path.** `PersistentEnv::finalize_loaded_signature` rewrites `t` to `M.t`
+   in place (`substitute_type_paths_in_sig`,
+   `qualify_unit_sig_decl_paths_in_place`, `substitute_submodule_paths`)
+   before the signature is serialised. B.4 step 2 and F.7 describe this as
+   new work. It is not: what P5 removes is the copy made at lookup, which
+   happens although the paths are already absolute.
+
+#### H.1.2 The path today, in order
+
+For a module without an interface file. `W` is the worker thread that
+compiles the module, `S` the scheduler thread of `rewatch/src/build/compile.rs`,
+`X` a worker that compiles a dependent, `D` the `digest-prep` thread.
+"Blocks" says whether a dependent cannot start type checking until the step
+is done.
+
+| # | Step | Function (file) | Reads | Writes | Thread | Blocks |
+|---|---|---|---|---|---|---|
+| 1 | Simplify, check and normalise the inferred signature | `simplify_signature`, `coerce_to_inferred_signature`, `check_nongen_schemes`, `normalize_signature` in `compile_preprocessed_structure_in_process_until_js` (`driver.rs`) | typed structure | `published_signature` | W | yes |
+| 2 | Take the stamps `Env.save_signature` would take | `saved_signature_copy` (`driver.rs`), `freshened_signature_bound_idents_from_kind` (`cmi/persistent_env.rs`) | signature | identifier counter only; the copy is dropped | W | yes |
+| 3 | Collect what the typed tree read of other units | `unit_reads::structure_reads` | typed tree | `unit_reads` | W | yes |
+| 4 | Copy A: the raw signature | `copy_lookup_signature_for_subst` (`types/typecore.rs`), first call | signature | new local nodes, `current_raw_sig` | W | yes |
+| 5 | Copy B: the signature to finalise | `copy_lookup_signature_for_subst`, second call | signature | new local nodes | W | yes |
+| 6 | Finalise copy B in place and install it | `PersistentEnv::register_in_memory_signature`, `finalize_loaded_signature`, `collect_alias_rewrites` | copy B | descriptors of copy B (`M.t` paths), the worker's `cache`, alias rewrites | W | yes |
+| 7 | Register copy A as the raw signature | `TypeContext::register_gentype_raw_module_sig`, `register_raw_module_sig` | copy A | two maps of the `TypeContext` | W | yes |
+| 8 | Walk copy B into a portable graph | `extract_module_update`, `serialize_pers_struct`, `serialize_signature`, `TypeGraphSerializer` (`cmi/portable_types.rs`) | copy B through `TypeContext` | `PortableSignature` | W | yes |
+| 9 | Walk copy A into a second portable graph | same, for `find_raw_module_sig` | copy A | `PortableRawSignature` | W | yes |
+| 10 | Fingerprint | `compute_type_graph_fingerprint`, `hash_signature` | portable graph | `u64` | W | yes |
+| 11 | Item digests and references | `SignatureSummary::of`, `signature_refs` (`cmi/item_deps.rs`), called from `PortablePersStruct::encode` | portable signature | `summary` | W | yes |
+| 12 | Encode both signatures | `binser::Encoded::encode` in `PortablePersStruct::encode` | portable signatures | bytes | W | yes |
+| 13 | Encode again when the signature mentions a store binder | `ident::saving_store_stamps` with `TypeContext::saved_store_stamps` | same | bytes, stamps mapped to local ones | W | yes (rare) |
+| 14 | Keep the decoded signature | `reserve_signature` | - | `for_dependent` | W | yes |
+| 15 | Hand over | the `InProcessSignatureReadyHook` closure in `compile_module_in_process_to_js_boundary` (`rewatch/src/build/compile.rs`): `Arc::new`, channel send | - | `SignatureReadyMsg` | W | yes |
+| 16 | Register and unblock | `apply_signature_ready`, `apply_pending_registry_updates`, `ModuleRegistry::register_module_arc`, `register_in_memory_interface`, `unblock_dependents` | fingerprint | registry, interface generation, ready heap | S | yes |
+| 17 | Load in the first dependent | `find_pers_struct_unrecorded`, `portable_types::internalize_pers_struct` | registry entry | - | X | it is the dependent |
+| 18 | Take or decode the signature | `signature_for_dependent` (takes the reserved one; later callers decode) | `for_dependent` or bytes | - | X | other workers needing the same unit wait on the pool's `OnceLock` |
+| 19 | Build the shared graph | `internalize_signature_into_shared`, `SharedTypePool::publish`, `SharedSink`, `remap_signature_refs`, `import_signature_locations`, `ShapeImport` | portable signature | pages, a `Signature` with shared handles | X | same |
+| 20 | Remember it | `SharedTypePool::pers_struct`, `ThreadTypeStore::insert_pers_struct`, `cache_insert`, `record_alias_rewrites`, `register_raw_module_sig` | - | pool slot, worker map, worker cache | X | - |
+| 21 | Raw signature on demand | `register_gentype_portable_raw_module_sig`; later `get_gentype_raw_module_sig`, `internalize_raw_signature` | raw bytes **and a full decode of the main signature** (for its file names) | local nodes | X | no |
+| 22 | Component view, lookup copy | A.5 steps 5 to 7 | shared signature | P4 and P5 | X | - |
+| 23 | Record the dependent's reads | `ModuleRegistry::resolve_signature_reads`, `RegistryUnitSource::refs` | `summary().refs` of every unit read | read sets | X, after its own type check | no |
+| 24 | Digests and stored form | `DigestPrep` (`registry.item_digests`, `encode_stored_module_parts`) | `summary().item_hashes`, the encoded bytes, `InMemoryModuleInfo` | `published_item_digests`, `prepared_interfaces` | D, after the module completes | no |
+
+Variations:
+
+- **Interface file.** `typecheck_preprocessed_signature_in_process`
+  (`driver.rs`) does steps 2, 4 (one copy, the raw signature the
+  implementation is later checked against), 6, 7, 8 to 14 and returns. The
+  caller sends `SignatureReady` itself. `resolve_signature_reads` for the
+  interface runs on W *before* that send; it reads only dependencies'
+  summaries.
+- **Location-free first attempt.** When the parse arena stores no locations
+  the hook is not called at step 15 but after Lambda lowering, because a
+  diagnostic may force a retry with locations. Steps 4 to 14 still run
+  before lowering.
+- **Unchanged interface in a build without cut-off rounds**
+  (`defer_clean_signatures`). A module whose fingerprint equals the previous
+  one does not release its dependents at step 16. They wait until its JS
+  metadata is final, and then `BuildCommandState::record_published_digest`
+  computes `item_digests` **on S**. This is the only place where a digest is
+  on the path of a dependent.
+- **Not shareable.** `graph_is_shareable` is false only for a graph that
+  holds a `Tsubst`. Such a unit, or one published when the pool is full, is
+  loaded per worker (`internalize_signature_into_store`) or per compilation
+  (`internalize_signature`), each of which decodes.
+
+Other writers of the registry, unchanged by P3: `register_namespace_for_package`
+(alias-only signature, empty graph), `LazyStoredModules::materialize_with`
+(decodes a stored unit on first lookup), `register_stored_static` (the
+embedded runtime), `register_disk_module`, the runtime precompile in
+`rewatch/src/build/compile.rs`, `cli/bsc.rs`, and the playground through
+`extract_all_cached_modules`.
+
+#### H.1.3 Readers, and what each needs
+
+| Reader | Function | Needs | When |
+|---|---|---|---|
+| Dependents' type checking | `internalize_pers_struct` | the signature as shared nodes | before the dependent starts |
+| Scheduler | `apply_signature_ready` | `fingerprint` | before dependents are released |
+| Scheduler, unchanged interface only | `record_published_digest` | `summary().item_hashes` and the JS metadata | when the metadata is final |
+| The module itself, during lowering | `find_pers_struct` of its own name (`Typeopt` expansions, optional-pattern lowering) | the finalised `PersStruct` in the worker's `cache` | until `unregister_in_memory_signature` in `finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook` |
+| The module itself | `flat_make_paths_of_signature`, with `get_gentype_raw_module_sig` | the raw signature (local identifiers) | after lowering, **with or without genType** |
+| The implementation of a module with an interface | `check_compunit_inclusion_for_errors`, `implementation_interface_signature`, `read_raw_sig_shared` | the interface's raw signature | inclusion check |
+| Local-module alias resolution | `self_alias_raw_parent_module_item` (`types/env_lazy.rs`), `find_raw_module_sig` | the raw signature of a loaded unit | lookups |
+| genType | `persistent_alias_module_type` (`gentype/translate_structure.rs`) | the raw signature of the unit and of dependencies | after type checking |
+| Read sets | `resolve_signature_reads`, `lambda_reads` | `summary().refs` of dependencies | after each dependent's type check; at the end of the build |
+| Incremental store, writer | `DigestPrep`, `UnitDigests` and `encode_stored_module_parts` (`rewatch/src/build/incremental.rs`), `state_db.rs` | `item_digests`, the whole `PortablePersStruct` encoded with the module info and genType declarations (`cmi/stored_module.rs`) | after the module completes; at the end of the build |
+| Incremental store, reader | `register_stored_parts`, `decode_stored`, `materialize_with` | bytes to `PortablePersStruct` | start of the next process |
+| Watch mode, next build | step 17 again for every unit that was not recompiled | the encoded signature | next build |
+| Editor tooling | `WatchProject::registry`, `typecheck_structure_for_tooling` (`rewatch/src/build/tooling.rs`, `driver.rs`) | a registry snapshot; loads units like a dependent | on demand, possibly between builds |
+| Playground | `extract_all_cached_modules` | `serialize_pers_struct` of every cached unit | after a compile |
+
+The methods of `PortablePersStruct` and their callers:
+
+| Method | Callers | Before dependents are released |
+|---|---|---|
+| `fingerprint` (field) | signature hook, interface path, `RegistryUnitSource::refs` (cache key) | yes |
+| `signature_for_dependent()` | `internalize_pers_struct` (three branches) | no: it is the dependent |
+| `signature()` | `summary()` on first use; `internalize_raw_signature` (file names only); `RegistryUnitSource::refs` when a unit is registered under another name | no |
+| `raw_signature()`, `has_raw_signature()` | `internalize_raw_signature`, `internalize_pers_struct` | no |
+| `summary()` | `item_deps::item_digests`, `RegistryUnitSource::refs` | only in the unchanged-interface case above |
+| `release_signature_for_dependent()` | `apply_pending_registry_updates` (a unit without dependents) | on S |
+| `shareable` (field) | `internalize_pers_struct` | - |
+
+#### H.1.4 Where the code contradicts F.5
+
+1. **"The two saving copies are reduced to the one genType needs (and that
+   one is skipped when genType is off)."** Copy A is not genType's alone. It
+   is the raw signature that `flat_make_paths_of_signature` reads for every
+   module, that an implementation is checked against when the copy is of an
+   interface, that `env_lazy.rs` reads to resolve aliases, and that is
+   shipped to dependents as `PortableRawSignature`. It cannot be skipped
+   when genType is off. Copy B exists because step 6 rewrites paths in
+   place; it goes away when the rewrite happens during the walk of step 8.
+   *Correction:* P3 removes copy B, keeps copy A. Whether copy A can be the
+   uncopied `published_signature` once nothing rewrites it in place is a
+   separate change, gated by genType parity and by the fixtures that check
+   an implementation against its interface.
+2. **"The portable encoding is produced ... only when the incremental store
+   or a non-shareable consumer asks."** By fact 1 of H.1.1 it is needed for
+   every unit that a later build of the same process, or the editor, may
+   load. *Correction:* always produce it, off the path of dependents.
+3. **"Registers the resulting `PersStruct` in the shared pool under the
+   unit's name."** The pool is keyed by the address of the registry's `Arc`
+   (fact 2). *Correction:* keep the key; the publishing worker creates the
+   `Arc<PortablePersStruct>` and fills the pool slot for it before it sends
+   `SignatureReady`.
+4. **Digests "computed by hashing that graph".** The hashing code
+   (`hash_sig_item` and its helpers, `RefWalker`) reads
+   `PortableTypeEntry`. Only the fingerprint is needed before dependents are
+   released (plus `item_hashes` in the unchanged-interface case). Hashing a
+   `SharedGraph` instead needs a second reader for the same functions and a
+   proof that both give the same digests.
+5. **Not mentioned: store binders.** A signature can mention an identifier
+   created in a worker's store (a functor application's result). Step 13
+   saves it with the local stamp it stands for, so that the saved form does
+   not depend on which worker built the store data. A shared graph built
+   straight from the `TypeContext` must apply the same mapping to the
+   identifiers of signature items and to the paths in type nodes.
+6. **Not mentioned: `internalize_raw_signature` decodes the whole main
+   signature** to read `cmi_longident_names`. That is a decode per unit and
+   per compilation that asks for a raw signature.
+7. **Not mentioned: the second graph.** Step 9 walks and step 12 encodes the
+   raw signature for every unit, although most dependents never ask for it.
+
+#### H.1.5 What P3 does with each step
+
+P3 is split in two. P3a moves work without changing any data structure that
+is read. P3b removes the portable form from the path altogether.
+
+**P3a (hand-off: yes).**
+
+| Step | Disposition |
+|---|---|
+| 1 to 7 | keep |
+| 8, 10 | keep on W |
+| 9 | keep on W (it needs the `TypeContext`) |
+| 11 | **move**: `summary` stays a `OnceLock`, filled by its first reader. Readers are X after its type check, D, and S in the unchanged-interface case; for that case W fills it before it sends `JsMetadataReady`, so S only reads |
+| 12 | **move**: `PortablePersStruct` holds the decoded `PortableSignature` and `PortableRawSignature` in a mutex-guarded slot and the bytes in a `OnceLock`. `signature()`, `raw_signature()` and serialisation (a hand-written `Serialize`, since `cmi/stored_module.rs` encodes the struct by reference) fill the `OnceLock` from the slot and empty the slot. D is the first to ask, after the module completes. Drivers without a digest thread (`cli/bsc.rs`, the runtime precompile, tooling, the playground) encode on first use |
+| 13 | **replace**: when `saved_store_stamps` is not empty, W applies it to the decoded signatures in place before step 10: a walk over the identifiers of the items and the paths of the graph entries. The graph W builds and the bytes D encodes are then what today's decode returns. The second encode goes away |
+| 14 | **replace** with step 19 on W: after step 10, W wraps the struct in its `Arc`, builds the shared graph from the decoded signature it still holds (`internalize_signature_into_shared`, unchanged) and fills the pool slot (`SharedTypePool::pers_struct`) and its own worker map. `ReservedSignature`, `signature_for_dependent` and `release_signature_for_dependent` are **deleted** |
+| 15, 16 | keep. The hook and the result structs of `driver.rs` (`InProcessSignatureReady`, `InProcessPreJsCompileResult`, `InProcessJsMetadataReady`, `InProcessInterfaceResult`, `InProcessCompileResult`) carry `Arc<PortablePersStruct>` so that the address W used is the one the registry stores |
+| 17 | keep. In the same build the pool slot is filled, so the closure passed to `pers_struct` does not run |
+| 18, 19 | run only for a unit that this build did not publish (stored, or published by an earlier build of a watch session), for the non-shareable fallback and when the pool is full; then they decode as today |
+| 20, 22, 23, 24 | keep |
+| 21 | **fix**: store `cmi_longident_names` in `PortableRawSignature` (or beside the encoded signature) so that no main signature is decoded for it |
+
+What P3a saves is the encoding and the summary on W (they move to D or to
+their first reader), the decode or the retained copy on X, and the build of
+the graph on X while other workers wait for it. Shares of the 4.6% are not
+measured; P0's counters should split publishing into walk, fingerprint,
+summary, encode, and load.
+
+What P3a costs: the decoded signatures live from publication until D has
+encoded them, where today only the first dependent's copy does.
+`PortablePersStruct`'s documentation says the decoded form was once the
+largest part of a large build's memory, so peak memory on the benchmark is
+part of the gate.
+
+**P3b (hand-off: after its equality test is green).**
+
+| Step | Disposition |
+|---|---|
+| 5, 6 | **replace**: no copy B. The path rewrite of `finalize_loaded_signature` becomes a map applied while walking (`build_subst_maps_for_module` already computes it). The module's own `cache` entry (the reader "the module itself, during lowering") gets the shared `PersStruct` |
+| 8, 19 | **replace** with one walk: `TypeGraphSerializer` gets a sink trait with two implementations, the portable graph and `SharedGraphParts`. The walk must also do what `internalize_signature_into_shared` does besides nodes: locations (`DeclLocTable`, `DeclLocKind::Shared`), file names (`SharedTypePool::intern_longident_name`), variant layouts and shapes (`ShapeImport`), object-field mutability cells, the level of `Tlink` entries, and the store-binder mapping of contradiction 5 |
+| 10, 11 | **replace**: the hash functions read through a trait implemented for `HashGraph` and for a shared graph. The portable implementation stays, for stored units |
+| 12 | D serialises the frozen graph into the portable form: the inverse of `internalize_desc`, reading `SharedPages` without a `TypeContext` |
+
+P3b is where a mistake changes what dependents see, so it lands only with
+the test of H.1.7 invariant 5 running in CI.
+
+#### H.1.6 Order of operations after P3
+
+After P3a, for a module without an interface:
+
+1. W: type check; steps 1 to 7.
+2. W: walk the signature and the raw signature into portable graphs.
+3. W: fingerprint.
+4. W: create `Arc<PortablePersStruct>` holding the decoded signatures (no
+   bytes, no summary).
+5. W: build the `SharedGraph`, publish its pages, fill the pool slot for the
+   `Arc` and the worker's own map.
+6. W: send `SignatureReady` with the `Arc` and the fingerprint (after
+   lowering instead, for a location-free attempt).
+7. S: register the `Arc`, compare fingerprints, release dependents.
+8. X: `internalize_pers_struct` finds the pool slot filled; no decode, no
+   graph build.
+9. W, in parallel with 7 and 8: lowering, JS. Before `JsMetadataReady` in a
+   build without cut-off rounds: fill `summary`.
+10. D, after `Completed`: fill `summary` if empty, encode both signatures,
+    compute `item_digests`, encode the stored module.
+11. End of build: `DigestPrep::finish`; the incremental store is written.
+12. Next build in the same process: `begin_build` drops the pool. A unit
+    that is not recompiled is loaded from its bytes (steps 17 to 20 of
+    H.1.2), which D produced.
+
+After P3b, steps 2 and 5 are one walk, step 3 hashes the graph, and step 10
+serialises from the frozen graph.
+
+#### H.1.7 Invariants a reviewer can check
+
+1. **No encoding before release.** Between the end of type checking and the
+   `SignatureReady` send, W calls neither `binser::Encoded::encode` nor
+   `SignatureSummary::of`. Check with a debug-only thread-local flag set
+   around that interval and asserted in both functions.
+2. **No decode in the publishing build.** In a clean build of any project,
+   `binser::Encoded::decode` of a signature runs only for stored units and
+   non-shareable units. Add a counter to `perf_counters.rs`; a clean build
+   of `tests/tests` must report zero for units compiled in that build.
+3. **One `Arc` per publication.** The address W fills the pool with is the
+   address in the registry: `SharedTypePool::pers_struct` called by X for a
+   unit published in this build never runs its closure (same counter).
+4. **Bytes are always produced.** After `DigestPrep::finish`, every
+   registered unit of the build has its bytes; an edit-free second build in
+   a watch session loads every unit without compiling it. The `rewatch`
+   watch and incremental tests cover this.
+5. **Same data (P3b).** For every unit of the standard library and of
+   `tests/tests`: the fingerprint and every `item_hashes` entry computed
+   from the shared graph equal those computed from the portable form, and
+   serialising the frozen graph gives bytes equal to the bytes P3a encodes.
+   Keep both paths behind a debug switch until this holds in CI.
+6. **Raw signature unchanged.** `flat_make_paths_of_signature`, the
+   interface inclusion check and genType read the same raw signature as
+   before: genType output parity and the `super_errors` interface-mismatch
+   fixtures.
+7. **Determinism.** The bytes written to the incremental store for a unit do
+   not depend on the worker count (build `tests/tests` with 1 and with 8
+   workers and compare the stored interfaces).
+8. **Scheduling unchanged.** A watch-mode edit that changes an interface and
+   one that does not recompile the same dependents as before (the gate of
+   F.5).
+
+Unknown: whether any published graph is ever non-shareable in practice
+(`Tsubst` in a saved signature); how many compilations have a non-empty
+`saved_store_stamps` table, and of those how many signatures mention a
+store binder; how the 4.6% splits between the steps.
+
+### H.2 P6: API inventory
+
+#### H.2.1 What an `Env` is today
+
+`Env { id: u64, scope_id: u64, data: Rc<EnvData> }` (`types/env.rs`).
+`EnvData` holds seven tables and six small fields:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `values`, `types`, `modules`, `module_components`, `modtypes` | `IdTbl<T>` | local bindings (a persistent map plus a list of the last 16), under a chain of opened layers |
+| `constrs`, `labels` | `TycompTbl<T>` | the same, keeping every binding of a name |
+| `functor_args` | `HashSet<Ident>` | modules bound by `add_module_arg` |
+| `local_constraints` | persistent map `Path -> TypeDeclaration` | GADT equations |
+| `type_label_families` | persistent map `Ident -> LabelArrayRef` | the label array of each local record type |
+| `implicit_open_roots` | persistent set of names | `Pervasives`, `Stdlib` |
+| `flags` | `EnvFlags` | `in_signature`, `implicit_coercion` |
+| `pending_open_slot` | `Option<u32>` | armed before an open, cleared after it |
+| `scope_caches` | `Rc<ScopeCaches>` | memo tables, replaced when `scope_id` changes |
+
+The API is a mutable value: callers clone an `Env` and call `add_*` on the
+clone. There is no call that enters or leaves a scope. `Clone` gives the
+copy a new `id`; `clone_preserve_id` keeps it. Every `add_*` gives a new
+`id`; those that change what module-path resolution reads also give a new
+`scope_id` (`bump_scope`).
+
+#### H.2.2 Operations
+
+"Sites" counts textual call sites outside `types/env.rs`, tests included.
+Hot callers are named where the code shows them; how often each runs per
+build is not measured, except for the totals in H.2.5.
+
+**Extend.**
+
+| Operation | Returns | Scope change | Sites | Callers | Notes for the log |
+|---|---|---|---|---|---|
+| `add_value(id, desc)` | - | no | 11 | `typecore.rs`: `add_pattern_variable_value`, `type_let_bindings`, `type_for`, `type_for_of`; `typemod.rs`: `type_structure_item`, `add_signature_items_to_env`; `includemod.rs`: `add_sig_item_to_env`; `cmi/persistent_env.rs`: `add_signature_to_env_with_options_inner` | one entry |
+| `add_type(id, decl)` | - | yes | 17 | `typemod.rs`: `type_structure_item`, `transl_sig_type_declarations_with_ids_and_originals`; `typecore.rs`: `type_newtype`, `peel`; `ctype.rs`: `create_reified_constr`; `env_lazy.rs` | one entry; also *removes* the type's label family |
+| `store_type(ctx, id, decl)` | - | yes | 18 | `typemod.rs` (14): `check_type_decl`, `transl_sig_type_declarations_with_ids_and_originals`, `compute_type_variance_fixpoint`, `add_signature_items_to_env`, `transl_signature`; `includemod.rs`; `variant_layout.rs`: `resolve_shapes`; `raw_lambda/convert.rs`: `init_shape_struct` | `add_type`, then a label family and one label entry per field, last field first |
+| `update_type_variance(id, variance)` | new declaration | yes | 3 | `typemod.rs` | a new entry for the same identifier; keeps the label family |
+| `add_type_label_family(id, array)`, `type_label_family(id)` | - / array | no | 2 / 7 | `typemod.rs`; `typecore.rs`: `find_type_label_family` | an entry keyed by the type's identifier |
+| `add_constructor(id, desc)` | - | no | 7 | `typemod.rs`: `type_structure_item`, `transl_type_extension`; `typecore.rs`: `type_letexception` | one entry |
+| `add_label(id, desc)` | - | no | 3 | `typemod.rs`, `cmi/persistent_env.rs` | one entry |
+| `add_module(id, decl)` and `add_module_with_component_context(..)` | - | yes | 47 / 2 | `typemod.rs` (19): `type_structure_item`, `transl_recmodule_modtypes`, `approx_signature`, `decl_module_type_from_typed_module_type`; `typecore.rs`: `type_letmodule`; `ctype.rs`: `strengthen_signature_for_module_access_path`; `raw_lambda/convert.rs`: `init_shape_struct`; `env_lazy.rs` | two entries (declaration and component thunk). **Captures the environment before the binding** as the thunk's `seed_env` |
+| `add_module_arg(id, decl)`, `is_functor_arg_path(path)` | - / bool | yes | 7 / 3 | `typemod.rs`; `raw_lambda/typeopt.rs`: `abstractness` | `add_module` plus a marker entry |
+| `add_modtype(id, decl)` | - | yes | 16 | `typemod.rs`, `includemod.rs`, `ctype.rs`, `env_lazy.rs` | one entry |
+| `add_prebuilt_open_layers(root, layers)` | - | yes | 2 | `cmi/persistent_env.rs`: `open_components_into_env`, `add_signature_to_env_with_options_inner` | one open entry holding `Rc<OpenedLayers>`, the root path and the slot. This is the only way anything is opened |
+| `set_pending_open_slot(slot)` | - | no | 7 | `typecore.rs`: `type_open`; `typemod.rs`: `transl_signature`, `type_structure_item` | not an entry: make it an argument of the open (H.2.8 step 1) |
+| `add_local_constraint(path, decl)` | - | yes | 3 | `ctype.rs`: `add_gadt_equation`; `typecore.rs`: `add_missing_local_constraints` | one entry keyed by path; called on the unify state's own `Env` |
+| `add_gadt_instance_level()` | - | yes | 2 | `typecore.rs` | an entry with no payload |
+| `mark_implicit_open_root(name)` | - | yes, `id` kept | 2 | `driver.rs`: `load_pervasives` | one entry |
+| `implicit_coercion()`, `in_signature(b)` | new `Env` | no | 1 / 0 | `typemod.rs` | a flags entry |
+| `update_value_type_by_name(name, ty)` | bool | no | 1 | `typecore.rs`: `duplicate_ident_types_for_gadt_cases` | **replaces** the innermost binding of `name`, also when it comes from an open (H.2.4) |
+
+**Look up.**
+
+| Operation | Returns | Sites | Hot callers | Relies on |
+|---|---|---|---|---|
+| `find_value_arc_with_path(name)` | path and description | 1 | `typecore.rs`: `lookup_value_by_lid` (every unqualified identifier) | innermost binding; `Pident` for a local binding, `Pdot(root, name, pos)` through an open |
+| `find_value`, `find_value_with_id` | description | 4 | `typecore.rs`: `ensure_string_idx`, `lookup_value_for_arity_suggestion`, `duplicate_ident_types_for_gadt_cases` | same |
+| `lookup_value(path)` | description | 4 | `typemod.rs`: `push_sig_values_from_env_pattern`; `env_lazy.rs` | `Pident`: exact identifier; `Pdot`: by last name |
+| `find_type_arc_with_path`, `find_type_with_path`, `find_type` | declaration | 10 | `typecore.rs`: `resolve_type_constructor_path`; `ctype.rs`: `unify_types`, `is_instantiable`, `add_gadt_equation`; `printtyp.rs`: `non_shadowed_pervasive_or_stdlib` | innermost binding |
+| `find_type_by_ident`, `find_type_arc_by_ident` | declaration | 9 | `ctype.rs`: `try_expand_head_with_mode`, `get_level_in_env`, `lookup_type_decl_for_path`; `typemod.rs` | **exact identifier, never through an open**; a stamp-0 identifier matches a persistent one of the same name |
+| `lookup_type(path)`, `lookup_type_arc_by_ident` | declaration | 22 | `typecore.rs` (10): `lookup_raw_type_decl_from_module_path`, `resolve_type_constructor_path`; `ctype.rs`: `try_expand_head_with_mode`, `nondep_type_rec`; `raw_lambda/typeopt.rs`: `find_type_decl`; `raw_lambda/matching.rs`: `build_descriptions` | exact identifier, **then by name** (a documented recovery); `Pdot` goes through `lookup_module` |
+| `find_all_constructors_marking(name)`, `find_all_constructors(name)` | candidates, newest first; with marking, each candidate's open slot and the first candidate that open hides | 4 | `typecore.rs`: `disambiguate_constructor`, `with_record_labels`, `pattern_contains_generalized_constructor` | candidate order; the hidden candidate |
+| `find_all_labels_marking(name)`, `find_all_labels(name)` | same | 13 | `typecore.rs`: `disambiguate_label`, `type_pattern_record`, `type_record`, `use_in_scope_label_of_type`, `lookup_label_by_expected_type` | same |
+| `find_constructor`, `find_label` | innermost | 4 | `typemod.rs`, `typecore.rs` | innermost |
+| `find_module_with_path`, `find_module_with_id`, `find_module` | declaration | 30 | `typecore.rs`: `resolve_module_access_path_for_lid`, `resolve_module_lid_impl`, `with_resolved_module_components_for_lid_inner`, `open_module_lid_components_into_env`; `typemod.rs`: `lookup_module_path_for_module_expr`, `lookup_module_paths_by_lid` | innermost; path as for values |
+| `find_module_same`, `lookup_module_ident_exact`, `has_module_ident` | declaration / bool | 12 | `ctype.rs`: `normalize_path_full_inner`; `typecore.rs`: `module_alias_target_for_path` | exact identifier, never through an open |
+| `lookup_module(path)`, `lookup_modtype(path)`, `find_modtype*` | declaration | 56 | `typemod.rs` (23), `typecore.rs`, `includemod.rs`, `raw_lambda/convert.rs` (7) | built on the above |
+| `with_local_module_components`, `local_module_components_shared` | the component thunk of a local module | 5 | `typecore.rs`: `with_resolved_module_components_for_lid_inner`; `env_lazy.rs` | exact identifier; the thunk is shared, not copied |
+| `open_slot_use(kind, name)` | slot of the open a name resolves through, and whether that open hides an earlier binding | 1 | `typecore.rs`: `mark_open_name_use` | D.7 |
+| `path_starts_with_opened_component`, `path_starts_with_implicit_opened_component` | bool | 4 | `ctype.rs`, `env_lazy.rs` | `find_module_with_path` and the implicit roots |
+| `find_local_constraint(path)`, `has_local_constraints()`, `iter_local_constraints()` | declaration / bool / all | 10 / 6 / 1 | `ctype.rs`: `unify_types`, `try_expand_head_with_mode`; `typecore.rs` | `has_local_constraints` must stay a field read: it is tested on every `unify` |
+| `normalize_path`, `normalize_path_prefix` | path | 15 | `ctype.rs`, `includemod.rs`: `strict_normalized_alias_path`; `typecore.rs` | `lookup_module` |
+| `is_in_signature`, `is_implicit_coercion` | bool | 13 | `includemod.rs`, `typecore.rs`, `typemod.rs` | flags |
+
+**Iterate.** Only three iterations have callers:
+
+| Operation | Caller | Order matters |
+|---|---|---|
+| `iter_values()` | `typecore.rs`: `apply_letmodule_local_path_cleanup` (every visible value, opened ones included) | no |
+| `iter_local_constraints()` | `typecore.rs`: `add_missing_local_constraints` | no |
+| `fold_modtype_names()` | `typemod.rs`: `unbound_modtype_alternatives` (the spelling suggestion for an unbound module type) | **yes**: it reproduces the visit order of OCaml's `Ident.fold_name` per layer (`ident_tbl_fold_name_order`), and the order reaches a diagnostic |
+
+No callers (delete before the migration): `in_signature`,
+`find_value_with_path`, `find_type_with_id`, `find_modtype_with_id`,
+`find_constructor_with_origin`, `find_label_with_origin`, `iter_types`,
+`iter_constructors`, `iter_labels`, `iter_modules`, `iter_modtypes`,
+`fold_type_names`, `fold_value_names`, `fold_module_names`,
+`fold_constructor_names`, `fold_label_names`, and with them
+`IdTbl::visible_local_entries` outside `with_current_local_module_aliases`.
+`IdTbl` and `TycompTbl` are re-exported by `types/mod.rs` and used nowhere
+else.
+
+**Identity.**
+
+| Operation | Sites | Used as |
+|---|---|---|
+| `id()` | 24 | `TypeContext::store_typed_env` (de-duplication of snapshots); `TypeContext::check_abbrev_env` (clears the abbreviation memos when the id differs from the previous call's); `UnifyState::set_env` (skip when equal); `raw_lambda/typeopt.rs` (`typeopt_answer` cache key); `typecore.rs`: `pattern_env_ref` and the argument-typing code compare the unify state's environment with the current one |
+| `scope_id()` | 18 | cache keys in `TypeContext`: `find_type_newtype_level` (`get_level_in_env`), `find_normalized_path_full`, `find_resolved_module_type`, and the component cache keys built by `module_components_cache_key` and `scope_local_module_cache_key` in `typecore.rs` |
+| `clone()` | about 150 lines mention an environment clone in `typecore.rs` (52), `typemod.rs` (77), `includemod.rs` (12), `ctype.rs` (6), `cmi/persistent_env.rs` (5) | a new value to extend, or a snapshot |
+| `clone_preserve_id()` | 23 | a snapshot of the same environment |
+
+There is no summary (OCaml's `Env.summary`) in the Rust `Env`.
+
+#### H.2.3 Environments that outlive the scope that made them
+
+| Holder | File | Lifetime | Read or extended later | "A position" is enough |
+|---|---|---|---|---|
+| `TypeContext::typed_envs` (`Vec<Rc<Env>>`), behind every `EnvRef` of the typed tree: `pat_env`, `exp_env`, `ctyp_env`, `mod_env`, `mty_env`, `sig_env`, `str_env`, `str_final_env`, `Texp_open`, `Tcoerce_alias` | `types/context.rs`, `types/typedtree.rs` | the module | read by lowering (`raw_lambda/convert.rs` 6 uses of `get_typed_env`, `matching.rs` 5), by diagnostics (`driver.rs`), by genType (`translate_structure.rs`, one use), by `typecore.rs` (3). **Extended** by lowering: `convert.rs` clones one and calls `add_module`, `add_modtype`, `store_type` (`init_shape_struct`) | yes, if an old position can be extended |
+| `StoredModuleComponents::seed_env` | `types/env_lazy.rs` | as long as the binding's thunk; **across compilations** for thunks built in a store build (they sit in `OpenedLayers::module_components` and in the worker store's views) | read and **extended** when the thunk is forced (`build_local_module_components`), long after the binding | only if environments of other compilations stay valid |
+| `ChildScanCursor::working_env` | `types/env_lazy.rs` | the component table; across compilations for store-built tables | **extended incrementally** each time a later lookup scans further | same |
+| The initial environment | `ThreadTypeStore::initial_env`, `env::initial_env` | the worker's store (a build) | cloned and extended by every compilation on the worker | same |
+| `UnifyState::env`, `UnifyStateSnapshot::env` | `types/ctype.rs` | a unification, or a backtracking snapshot | **extended in place** with GADT equations through `env_mut` | yes |
+| `DelayedUnusedCheck::env` | `types/typecore.rs` | until delayed checks are forced at the end of the module | read by `parmatch` | yes |
+| `PendingMatchCase::case_env`, `PendingSequentialMatchCase::case_env` | `types/typecore.rs` | until the case bodies are typed | read and extended | yes |
+| The `envs` of the signature `Scope` | `types/typemod.rs` | one traversal | read | yes |
+| `RecModuleTypes` | `types/typemod.rs` | typing a recursive module group | read and extended | yes |
+| `Printtyp::printing_env` | `types/printtyp.rs` | one diagnostic | read | yes |
+| Error reports | `driver.rs`: `format_wrong_name_report` takes an `Rc<Env>` from `get_typed_env` | one diagnostic | read | yes |
+
+The editor analysis (`analysis/`) and `rewatch` do not call `get_typed_env`
+or any `Env` method: they read the typed tree and `TypeContext`. `gentype/emit_js.rs`
+has its own unrelated `Env` type.
+
+Three consequences:
+
+1. An old environment is not only read, it is extended, by the checker and
+   by the backend.
+2. Environments cross compilations on a worker (the initial environment and
+   everything reachable from store-built views).
+3. "Captured in a closure" does not occur: delayed work stores an `Env`
+   value in a struct.
+
+#### H.2.4 Behaviour of the persistent tables that callers rely on
+
+1. **A snapshot never changes.** Every holder in H.2.3 relies on it.
+2. **Shadowing.** The innermost binding of a name wins; an open shadows
+   everything bound before it and is shadowed by everything bound after it.
+3. **Lookup by identifier ignores opens** (`IdTbl::find_by_ident`, OCaml's
+   `IdTbl.find_same`), and matches a stamp-0 identifier against a persistent
+   one by name.
+4. **The path of a result** is `Pident(id)` for a local binding and
+   `Pdot(root, name, pos)` for one found through an open, with the position
+   stored in the open's table.
+5. **Constructors and labels return all candidates**: the bindings of the
+   current layer newest first, then the opened table's entries in their
+   stored order, then the layers below. With marking, a candidate from an
+   open carries the open's slot and the first candidate that the open hides
+   (the candidate that follows the open's block).
+6. **`include`** adds each item of the signature as a local binding
+   (`add_signature_to_env_with_options_inner` with `as_opened` false);
+   **`open`** adds one layer per table, built once per opened signature and
+   shared (`OpenedLayers`). An empty table adds no layer.
+7. **Replacement in place.** `update_value_type_by_name` replaces the
+   description of the innermost binding and leaves its identifier, its
+   position and, for a binding that comes from an open, its `Pdot` path and
+   its slot as they were. Snapshots taken before keep the old description.
+   This is OCaml's `Env.copy_types`, used for GADT matches.
+8. **Removal.** `add_type` removes the label family of the identifier it
+   binds; `update_type_variance` does not.
+9. **`scope_id` is stable across value, constructor and label bindings**, so
+   that caches of resolved paths survive ordinary `let` bindings.
+10. **`id` changes on every clone.** `check_abbrev_env` therefore clears the
+    abbreviation memos when it is called with a clone of the previous
+    environment. Whether any output depends on those extra clears is not
+    known.
+11. **Iteration order** matters in one place (`fold_modtype_names`).
+12. **`has_local_constraints` and `find_local_constraint` are on the path of
+    every unification** and are a field test in the common case.
+
+#### H.2.5 Measured: how environments are extended and read
+
+A temporary counter (not committed) recorded, for a build of `tests/tests`
+(711 modules), the tree formed by environment versions: each `add_*` makes a
+new version whose parent is the version it extended; a clone is the same
+version. The "current path" is the path from the root to the newest
+version.
+
+| Quantity | Value |
+|---|---|
+| Extensions | about 52,000 |
+| Lookups through the `find_*`, `lookup_*` and `iter_*` methods of `Env` | about 559,000 |
+| Extensions of a version that is not on the current path, counting extensions only | 678 (1.3%) |
+| Lookups at the newest version | 413,600 (74%) |
+| Lookups at an older version on the current path | 140,000 (25%) |
+| Lookups at a version off the current path | 5,200 (0.9%) |
+| Deepest chain of versions | 1,268 |
+| Entries undone or redone if the current path is moved to each version that is read or extended off it | 116,000 in total, 0.19 per operation; 1,228 for the longest move |
+
+The off-path extensions come from `type_let_bindings`,
+`type_structure_unscoped`, `includemod::add_sig_item_to_env`,
+`add_pattern_variable_value`, `build_local_module_components`,
+`ctype::add_gadt_equation`, `variant_layout::resolve_shapes`,
+`type_function_nary`, `typemod::closed_modtype` and `load_pervasives`, among
+others: it is not one construct that can be special-cased.
+
+Not measured: the same on the 3,735-module application, whose modules are
+larger; instructions per lookup before and after.
+
+#### H.2.6 Where the code contradicts C.10 and F.8
+
+1. **Scopes are not entered or left.** C.10 assigns scope ids in preorder
+   and tests "ancestor" with `a <= s <= a.last_descendant`. The `Env` API
+   has no scope entry or exit, so "behind the existing `Env` API" (F.8)
+   gives the log nothing to number. Deriving scopes from use does not
+   rescue the rule: after `switch x { | A(y) => e1 | B(z) => e2 }` the
+   second case extends the environment that the first case already
+   extended. If both extensions go into the same scope, the position test
+   lets the second case see `y`. If the second starts a new scope, the test
+   needs the position at which that scope forked, not the global one, and a
+   module with 2,000 structure items gets a chain of 2,000 scopes.
+2. **Old environments are extended** (H.2.3, 1.3% of extensions in H.2.5).
+   A preorder numbering cannot place a child under a node whose subtree is
+   closed.
+3. **Environments cross compilations** on a worker. "One append-only log"
+   per compilation has no place for the initial environment's bindings as
+   another compilation's entries, nor for a store-built `seed_env`. C.10's
+   "shared frozen prefix" covers only the initial environment.
+4. **Replacement and removal exist** (H.2.4 items 7 and 8). An append-only
+   log needs a rule for both.
+5. **Identity.** "Two environments with the same scope and position are the
+   same environment" changes when `check_abbrev_env` clears memos (H.2.4
+   item 10). It has to be a step of its own with its own gate.
+6. **The `im-rc` dependency does not go with P6.** `typemod.rs` uses
+   `im_rc::HashMap` and `im_rc::HashSet` for the well-foundedness check of
+   recursive types, independent of `Env`.
+7. **`typed_envs` cannot hold 8-byte values in P6**, and "16-byte" needs
+   the log to be reference-counted: correct as C.10's last paragraph says,
+   but the count is then touched on every clone, as today.
+
+#### H.2.7 Correction: a version tree with a current path
+
+The log is kept; the scope tree is replaced by the tree of versions, and
+the position test by a table that always describes one path of that tree.
+
+```rust
+#[derive(Clone)]
+pub struct Env { log: Rc<EnvLog>, ver: u32 }      // 16 bytes
+
+struct Entry {
+    parent: u32,       // the version this entry extends
+    kind: Kind,        // Value, Type, Module, Components, Modtype,
+                       // Constructor, Label, LabelFamily, FunctorArg,
+                       // LocalConstraint, ImplicitRoot, Open, Flags,
+                       // GadtLevel, Override
+    key: Key,          // (kind, Name), or a Path for LocalConstraint
+    id: Ident,
+    item: u32,         // index into the payload vector of `kind`
+    shadows: u32,      // the entry `visible[key]` held in `parent`, or NONE
+    prev_open: u32,    // nearest Open entry at or above `parent`
+    scope_ver: u32,    // nearest scope-changing entry at or above this one
+    flags: EnvFlags,   // inherited from `parent`; changed by a Flags entry
+    constraints: bool, // a LocalConstraint entry is at or above this one
+}
+
+struct EnvLog {
+    entries: Vec<Entry>,
+    /// For the current path only: the innermost entry of each key.
+    visible: FxHashMap<Key, u32>,
+    on_path: Vec<bool>,          // one bit per entry
+    tip: u32,                    // the newest entry of the current path
+    base: Option<Env>,           // an environment of a frozen log, see below
+    frozen: Cell<bool>,
+    /* payload vectors: values, types, modules, components, ... */
+}
+```
+
+A version is an entry index; version 0 is the empty environment of the log.
+An `Env` sees the entries on the path from its version to the root, then
+what `base` sees.
+
+- **Clone.** Copy. Same version, same identity.
+- **Move the path to `v`** (`make_tip`). If `v` is the tip, nothing. Walk
+  from `v` up to the first entry `a` that is on the path, remembering the
+  entries passed. Undo from the tip up to `a`: for each entry set
+  `visible[key]` back to its `shadows` (or remove the key) and clear its
+  bit. Redo the remembered entries from `a` downwards: set `visible[key]`
+  and the bit. Everything needed is in the entries; there is no separate
+  trail. Extending the tip's parent, which is what leaving a nested
+  expression amounts to, undoes exactly the nested bindings.
+- **Extend `env` with an entry.** `make_tip(env.ver)`; set `shadows` from
+  `visible`; copy `prev_open`, `scope_ver`, `flags` and `constraints` from
+  the parent and adjust them for the entry's kind; push; update `visible`;
+  the new index is the new tip and the new `env.ver`. If the log is frozen,
+  first start a new log whose `base` is `env`.
+- **Look up `(kind, name)` in `env`.**
+  1. If `env.ver` is on the path: start at `visible[key]` and follow
+     `shadows` while the entry's index is greater than `env.ver`. On the
+     path, index order is depth order, so the first entry at or below
+     `env.ver` is the innermost binding `env` sees. For the tip this is one
+     probe. If `env.ver` is off the path: `make_tip(env.ver)`, then one
+     probe.
+  2. Opens: start at the nearest Open entry at or above `env.ver` and
+     follow `prev_open` while the open's index is greater than the binding
+     found in step 1 (or to the end if none was found). The first open
+     whose table (`OpenedLayers`, unchanged) has the name wins and gives
+     the `Pdot` path and the slot; "hides an earlier binding" is whether
+     step 1 or a later open in the walk finds the name.
+  3. If nothing is found and the log has a `base`, look up in `base`.
+- **Look up by identifier.** Step 1 only, following `shadows` until the
+  identifier matches (H.2.4 item 3).
+- **All candidates of a constructor or label.** Merge the `shadows` chain
+  and the `prev_open` chain by index, newest first; an open contributes its
+  bucket in stored order. This is the layer walk of
+  `TycompTbl::find_all_marking`, because a layer boundary is an open.
+- **Replacement** (`update_value_type_by_name`). An Override entry keyed by
+  the name, holding the new description. A value lookup that resolves to a
+  binding or an open older than a visible Override of the same name returns
+  the Override's description with the path, identifier and slot of what it
+  found. A log that has no Override entry skips the check (one flag).
+- **Removal** (label families). `add_type` pushes a LabelFamily entry with
+  no array when a family is visible for the identifier.
+  `type_label_family` returns the innermost LabelFamily entry of the
+  identifier.
+- **`scope_id()`** is `(log, entries[ver].scope_ver)`. The scope-changing
+  kinds are those that call `bump_scope` today. `ScopeCaches` move to a map
+  keyed by `scope_ver` in the log.
+- **`id()`** is `(log, ver)`.
+- **Iteration** (`iter_values`, `iter_local_constraints`,
+  `fold_modtype_names`). Walk the path from the version to the root and
+  through `base`; `fold_modtype_names` groups the entries between opens and
+  feeds each group to `ident_tbl_fold_name_order` as today.
+- **Other logs.** `Env::empty()` is version 0 of one frozen empty log per
+  thread. The worker store freezes the log of the initial environment when
+  it publishes it (`publish_initial_env`); each compilation's first
+  extension starts that compilation's log with the initial environment as
+  `base`. A frozen log is never extended, so the compilations of a worker
+  can read it one after the other; its path may still be moved by a lookup
+  at one of its older versions. An environment held by store-built data (`seed_env`, `working_env`) keeps
+  its log alive through its `Rc`, as it keeps its persistent maps alive
+  today.
+
+What this costs, from H.2.5: a lookup at the tip is one hash probe plus the
+opens that are newer than the result; a lookup at an older version on the
+path follows `shadows` past the newer bindings of the same name, usually
+none; 0.9% of lookups and 1.3% of extensions move the path, 0.19 entries
+per operation on average. A move is bounded by the distance between the
+two versions, 1,228 entries at worst in the measurement.
+
+What it does not need: scope entry and exit calls, a rule for
+out-of-order extension, or any change to a caller.
+
+Unknown, and the reason the hand-off is conditional: the cost of moves on
+large modules, and whether lowering, which reads snapshots in typed-tree
+order after checking, keeps moves short there. If the property test and
+the instruction count of H.2.9 hold, the design stands; if moves dominate
+somewhere, that reader keeps a private `visible` table for its own
+traversal instead of moving the checker's.
+
+#### H.2.8 Migration order
+
+Each step compiles, passes the gates of F.1 and is its own pull request.
+
+1. **Shrink the API.** Delete the methods without callers (H.2.2) and the
+   `IdTbl` and `TycompTbl` re-exports. Replace `set_pending_open_slot` by a
+   `slot` argument of `add_prebuilt_open_layers` and of the functions that
+   reach it (`open_components_into_env`,
+   `add_signature_to_env_with_options_inner`, their callers in
+   `typecore.rs` and `typemod.rs`). No behaviour change.
+2. **Opaque identity.** `id()` and `scope_id()` return `EnvId` and
+   `ScopeId` newtypes with equality and hashing only; the caches in
+   `TypeContext` and the keys built in `typecore.rs` take them. No
+   behaviour change.
+3. **Clone keeps identity.** `Clone` for `Env` stops assigning a new `id`;
+   `clone_preserve_id` becomes `clone` at its 23 sites. This is the one
+   intended behaviour change before the switch: fewer clears in
+   `check_abbrev_env`, more hits in `typeopt_answer` and
+   `store_typed_env`. Gate: error-output parity, JavaScript parity, and the
+   benchmark comparison of E.3. If a difference appears, it names a place
+   that depended on the clear (H.2.4 item 10) and is fixed there, not by
+   restoring the id.
+4. **The log beside the tables.** New `types/env_log.rs` with H.2.7,
+   exposing the same methods as `Env`, unused by the compiler. The property
+   test of F.8, extended with what H.2.3 and H.2.4 found: sequences of
+   bind, open, clone, **extend an old clone**, replace, re-bind a type,
+   lookup by name, by identifier and by path, all candidates with marking,
+   `open_slot_use`, `scope_id` equality, and `fold_modtype_names`, run
+   against both and compared after every operation and again for every
+   retained clone at the end.
+5. **Shadow mode.** A debug switch makes `Env` carry both representations
+   and compare every lookup result. Run the test suites and the standard
+   library with it. Not shipped enabled.
+6. **Switch.** `Env` becomes the log. `IdTbl`, `TycompTbl`, `LayerMap`,
+   `Recent`, `IdOpened`, `TycompOpened` and `EnvData` move under
+   `#[cfg(test)]` for the property test. `OpenedLayers` stays.
+7. **Typed-tree snapshots.** `typed_envs` becomes `Vec<Env>` de-duplicated
+   by version; `get_typed_env` returns `&Env` or a clone instead of
+   `Rc<Env>` (17 call sites).
+8. **Initial environment as a base log**; remove the store replay that only
+   existed to clone it (`cached_initial_env` keeps its `StorePiece` until
+   P4 removes pieces).
+9. **Drop the `Rc`** when C.10's last paragraph applies: after P10 has one
+   checker per worker, the log is reachable from the context and `Env` is
+   two integers. Not part of P6.
+
+`im-rc` stays in `Cargo.toml` until `typemod.rs` stops using it
+(contradiction 6).
+
+#### H.2.9 Invariants a reviewer can check
+
+1. **A clone is frozen.** Any sequence of operations on other environments
+   leaves every lookup through a retained `Env` unchanged (property test,
+   step 4).
+2. **`visible` describes the path.** After every `make_tip`, for every key,
+   `visible[key]` is the newest entry of that key on the path from `tip` to
+   the root, and `on_path[e]` is true exactly for the entries on that path.
+   A debug assertion recomputes this from parent pointers for small logs.
+3. **`shadows` is immutable** after an entry is pushed, and always names an
+   older entry of the same key that is an ancestor.
+4. **Indices grow along a path**: `entries[e].parent < e`.
+5. **Same results as the tables** for every operation of H.2.2, including
+   candidate order, the hidden candidate, `Pdot` positions and
+   `OpenSlotUse` (steps 4 and 5).
+6. **`scope_id` equality** between two environments holds exactly when it
+   holds today (property test), and `id` equality exactly when both are the
+   same version (step 3 already made this true for the tables).
+7. **No entry is written after it is pushed**, except the payload of a
+   lazily forced component thunk, which is a `OnceCell` today and stays one.
+8. **A frozen log is never extended**: an extension of one of its
+   environments starts a new log.
+9. **Warnings.** The unused-open, unused-value and shadowing fixtures give
+   the same output (D.7).
+10. **Cost.** The instruction count of a clean `tests/tests` build goes
+    down at step 6 and does not go up at steps 1 to 5 and 7 to 8. A counter
+    in `perf_counters.rs` reports path moves and entries moved; on the
+    benchmark, entries moved per lookup should stay below one.

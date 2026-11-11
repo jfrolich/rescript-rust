@@ -1,0 +1,1 @@
+- Add a whole-project benchmark script comparing generated output and clean-build instructions between compiler binaries.
