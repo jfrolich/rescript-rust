@@ -25,6 +25,10 @@ fn main() {
         };
         requests.push(Request { module: module.clone(), kind, scope: Vec::new() });
     }
+    // A second run shows what an import costs once the library is parsed.
+    let first = std::time::Instant::now();
+    let _ = resolve(&Files::Os, importer, &requests);
+    eprintln!("first run: {:?}", first.elapsed());
     let start = std::time::Instant::now();
     match resolve(&Files::Os, importer, &requests) {
         Err(message) => eprintln!("error: {message}"),
@@ -48,6 +52,8 @@ fn main() {
                 }
             }
             eprintln!("{:?} in {:?}", resolution.stats, start.elapsed());
+            let full = rescript_ts_import::full_check(&Files::Os, importer, std::slice::from_ref(module));
+            eprintln!("full check of the same files: {full:?}");
         }
     }
 }

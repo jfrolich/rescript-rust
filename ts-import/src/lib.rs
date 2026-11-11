@@ -87,8 +87,10 @@ pub struct Stats {
     pub lib_files: usize,
     /// Lines in the non-library files.
     pub lines: usize,
-    /// Types the checker created to answer the requests.
+    /// Types the checker has created once the requests are answered.
     pub types: usize,
+    /// Microseconds spent: loading the files and resolving the requests.
+    pub micros: u128,
     /// The non-library files, for dependency tracking.
     pub inputs: Vec<String>,
     /// The `tsconfig.json` whose options were used.
@@ -113,12 +115,13 @@ pub fn resolve(files: &Files, importer: &str, requests: &[Request]) -> Result<Re
             modules.push(request.module.clone());
         }
     }
+    let _one_at_a_time = session::lock();
+    let started = std::time::Instant::now();
     let session = Session::open(files, importer, &modules)?;
     let program = session.program;
     let context = Context::default();
     let mut handle = program.get_type_checker(&context);
     let checker = &mut *handle;
-    let types_before = checker.type_count as usize;
 
     // The module symbol behind each specifier, or why there is none.
     let module_symbols: Vec<Result<P<Symbol>, String>> = modules
@@ -141,7 +144,7 @@ pub fn resolve(files: &Files, importer: &str, requests: &[Request]) -> Result<Re
         };
         expansions.push(expansion);
     }
-    let types = (converter.c.type_count as usize).saturating_sub(types_before);
+    let types = converter.c.type_count as usize;
 
     let mut stats = Stats { types, tsconfig: session.tsconfig.clone(), ..Stats::default() };
     for &file in program.source_files() {
@@ -153,7 +156,39 @@ pub fn resolve(files: &Files, importer: &str, requests: &[Request]) -> Result<Re
             stats.inputs.push(file.file_name().to_string());
         }
     }
+    stats.micros = started.elapsed().as_micros();
     Ok(Resolution { expansions, stats })
+}
+
+/// What type checking the same files in full costs, for comparison with
+/// [`Stats`]: every non-library file the modules load is checked, as `tsc`
+/// would with `skipLibCheck`.
+#[derive(Clone, Debug, Default)]
+pub struct FullCheck {
+    /// Types the checker created.
+    pub types: usize,
+    /// Errors TypeScript reports in those files. An import ignores them
+    /// unless they are in what it imports.
+    pub errors: usize,
+    pub micros: u128,
+}
+
+/// Type checks everything `modules` load, the work an import avoids.
+pub fn full_check(files: &Files, importer: &str, modules: &[String]) -> Result<FullCheck, String> {
+    let _one_at_a_time = session::lock();
+    let started = std::time::Instant::now();
+    let session = Session::open(files, importer, modules)?;
+    let program = session.program;
+    let context = Context::default();
+    let mut errors = 0;
+    for &file in program.source_files() {
+        if program.is_source_file_default_library(file.path()) || file.path() == session.root.path() {
+            continue;
+        }
+        errors += program.get_semantic_diagnostics(&context, Some(file)).len();
+    }
+    let handle = program.get_type_checker(&context);
+    Ok(FullCheck { types: handle.type_count as usize, errors, micros: started.elapsed().as_micros() })
 }
 
 fn find_export(

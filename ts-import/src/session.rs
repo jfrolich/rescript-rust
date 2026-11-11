@@ -10,13 +10,14 @@
 //! converter asks the checker for the type of one export.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::fmt::Display;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 
-use tsrs_ast::{Node, SourceFile};
-use tsrs_compiler::{Program, ProgramOptions, new_compiler_host, new_program};
+use tsrs_ast::{Node, SourceFile, SourceFileParseOptions};
+use tsrs_compiler::{CompilerHost, Program, ProgramOptions, new_compiler_host, new_program};
 use tsrs_core::{CompilerOptions, P, Tristate, tspath};
-use tsrs_tsoptions::{self as tsoptions, ParseConfigHost};
+use tsrs_tsoptions::{self as tsoptions, ParseConfigHost, ParsedCommandLine};
 use tsrs_vfs::{Entries, FS, FileInfo, FileMode, bundled::embed as bundled, osvfs, vfstest};
 
 /// Where TypeScript sources are read from.
@@ -88,6 +89,71 @@ impl FS for Overlay {
     fn realpath(&self, path: &str) -> String {
         if self.files.contains_key(path) { path.to_string() } else { self.base.realpath(path) }
     }
+}
+
+/// A compiler host that parses each of TypeScript's own `lib.*.d.ts` files
+/// once per process. Every program needs the same hundred of them, they never
+/// change, and a parsed file binds once and may be shared between programs
+/// (the language server does the same). Without this each importing ReScript
+/// file would parse and keep its own copy of the library.
+struct LibCachingHost {
+    inner: Arc<dyn CompilerHost>,
+}
+
+fn lib_files() -> &'static Mutex<HashMap<SourceFileParseOptions, P<SourceFile>>> {
+    static FILES: OnceLock<Mutex<HashMap<SourceFileParseOptions, P<SourceFile>>>> = OnceLock::new();
+    FILES.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl CompilerHost for LibCachingHost {
+    fn fs(&self) -> &dyn FS {
+        self.inner.fs()
+    }
+    fn default_library_path(&self) -> &str {
+        self.inner.default_library_path()
+    }
+    fn get_current_directory(&self) -> &str {
+        self.inner.get_current_directory()
+    }
+    fn trace(&self, msg: &'static tsrs_diagnostics::Message, args: &[&dyn Display]) {
+        self.inner.trace(msg, args);
+    }
+    fn get_source_file(&self, opts: SourceFileParseOptions) -> Option<P<SourceFile>> {
+        if !tsrs_vfs::bundled::is_bundled(&opts.file_name) {
+            return self.inner.get_source_file(opts);
+        }
+        let mut files = lib_files().lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(&file) = files.get(&opts) {
+            return Some(file);
+        }
+        let file = self.inner.get_source_file(opts.clone())?;
+        files.insert(opts, file);
+        Some(file)
+    }
+    fn get_content_mapped_source_files(
+        &self,
+        parse_options: SourceFileParseOptions,
+        mapper: &tsrs_contentmapper::Mapper,
+    ) -> Result<tsrs_contentmapper::SourceFiles, tsrs_contentmapper::Error> {
+        self.inner.get_content_mapped_source_files(parse_options, mapper)
+    }
+    fn content_mapper_project(&self) -> Option<Arc<dyn tsrs_contentmapper::Project>> {
+        self.inner.content_mapper_project()
+    }
+    fn get_resolved_project_reference(
+        &self,
+        file_name: &str,
+        path: tspath::Path,
+    ) -> Option<P<ParsedCommandLine>> {
+        self.inner.get_resolved_project_reference(file_name, path)
+    }
+}
+
+/// tsrs keeps process-wide state and shares the parsed library files, which
+/// bind on first use, so one import resolves at a time.
+pub(crate) fn lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: Mutex<()> = Mutex::new(());
+    LOCK.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 struct ConfigHost {
@@ -219,7 +285,9 @@ impl Session {
             }
         };
 
-        let compiler_host = new_compiler_host(&dir, fs, &bundled::lib_path(), None, None, None);
+        let compiler_host: Arc<dyn CompilerHost> = Arc::new(LibCachingHost {
+            inner: new_compiler_host(&dir, fs, &bundled::lib_path(), None, None, None),
+        });
         let mut options = ProgramOptions::new(P::new(config), compiler_host);
         options.single_threaded = Tristate::True;
         let program = new_program(options);
