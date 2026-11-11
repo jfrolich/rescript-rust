@@ -1503,7 +1503,9 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let name = super::module::parse_extension_id(p, id_start_idx);
 
-            let payload = match super::module::parse_quote_payload(p, &name) {
+            let payload = match super::module::parse_quote_payload(p, &name)
+                .or_else(|| super::module::parse_macro_arguments(p, &name))
+            {
                 Some(payload) => payload,
                 None => {
                     let payload = super::module::parse_payload_region(p);

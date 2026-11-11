@@ -222,3 +222,199 @@ fn generic_macro_makes_one_function_per_type() {
     assert!(js.contains("\"user_age\""), "{js}");
     assert!(js.contains("value.address") || js.contains("address"), "{js}");
 }
+
+fn compile_ok(project: &mut Project, filename: &str, source: &str) -> String {
+    match project.compile(filename, source) {
+        Ok(js) => {
+            println!(
+                "--- {filename} expanded\n{}\n--- {filename} js\n{js}",
+                project.expanded.clone().unwrap_or_default()
+            );
+            js
+        }
+        Err(error) => panic!("{filename} failed:\n{error}"),
+    }
+}
+
+#[test]
+fn derive_on_a_type_adds_declarations() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let js = compile_ok(
+        &mut project,
+        "Account.res",
+        r#"
+@Json.codec
+type account = {id: string, balance: float}
+
+let json = account_encode({id: "a1", balance: 12.5})
+"#,
+    );
+    assert!(js.contains("account_encode"), "{js}");
+    assert!(js.contains("exports.account_encode"), "{js}");
+    assert!(!js.contains("exports.encode$"), "{js}");
+}
+
+#[test]
+fn recursive_types_and_variants() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let js = compile_ok(
+        &mut project,
+        "Tree.res",
+        r#"
+type rec tree = {value: int, children: array<tree>}
+type shape = Circle(float) | Rect({width: float, height: float}) | Point
+
+let encodeTree = (t: tree) => Json.encode(t)
+let encodeShape = (s: shape) => Json.encode(s)
+"#,
+    );
+    assert!(js.contains("encode$tree"), "{js}");
+    assert!(js.contains("\"Circle\""), "{js}");
+}
+
+#[test]
+fn generic_waits_for_inference() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let js = compile_ok(
+        &mut project,
+        "Save.res",
+        r#"
+type user = {name: string}
+let store = (_user: user, _body: JSON.t) => ()
+let save = user => {
+  let body = Json.encode(user)
+  store(user, body)
+}
+"#,
+    );
+    assert!(js.contains("encode$user"), "{js}");
+}
+
+#[test]
+fn generic_with_compile_time_argument() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Power.res",
+        r#"
+open Macro
+
+@generic
+let rec pow = (base: code<float>, n: int): code<float> =>
+  n == 0 ? %code(1.0) : %code(${base} *. ${pow(base, n - 1)})
+"#,
+    );
+    let js = compile_ok(&mut project, "Cube.res", "let cube = x => Power.pow(x, 3)\n");
+    assert!(js.contains("* 1.0"), "{js}");
+}
+
+#[test]
+fn type_macro() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Partial.res",
+        r#"
+open Macro
+
+@macro
+let t = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | _ => error("Partial.t needs a record type")
+  }
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "Patch.res",
+        r#"
+type user = {name: string, age: int}
+type userPatch = %Partial.t(user)
+let patch: userPatch = {age: 3}
+"#,
+    );
+    assert!(js.contains("age: 3"), "{js}");
+}
+
+#[test]
+fn module_and_item_macros() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Gen.res",
+        r#"
+open Macro
+
+@macro
+let constants = (prefix: string, count: int): decls =>
+  Code.decls(
+    Array.fromInitializer(~length=count, i =>
+      %code(let ${Pat.var(prefix ++ Int.toString(i))} = ${Code.int(i * 10)})
+    ),
+  )
+
+@macro
+let span = (b: Decl.value): decls =>
+  %code(let ${b.pat} = Gen.wrap(${Code.string(b.name)}, ${b.expr}))
+
+let wrap = (name: string, f: 'a => 'b): ('a => 'b) => x => {
+  Console.log(name)
+  f(x)
+}
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "UseGen.res",
+        r#"
+module K = %Gen.constants("k", 3)
+%%Gen.constants("top", 2)
+let sum = K.k1 + K.k2 + top1
+
+@Gen.span
+let double = x => x * 2
+"#,
+    );
+    assert!(js.contains("\"double\""), "{js}");
+    assert!(js.contains("30") || js.contains("k2"), "{js}");
+}
+
+#[test]
+fn comptime_evaluates_now() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Table.res",
+        "let squares = n => Array.fromInitializer(~length=n, i => i * i)\nlet config = () => {\"name\": \"x\"}\n",
+    );
+    let js = compile_ok(
+        &mut project,
+        "UseTable.res",
+        "let table = %comptime(Table.squares(5))\nlet label = %comptime(String.toUpperCase(\"abc\") ++ \"!\")\n",
+    );
+    assert!(js.contains("16"), "{js}");
+    assert!(js.contains("\"ABC!\""), "{js}");
+    assert!(!js.contains("Table"), "{js}");
+}
+
+#[test]
+fn macro_errors_point_at_the_use() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    let error = project
+        .compile("Bad.res", "let f = (g: int => int) => Json.encode(g)\n")
+        .unwrap_err();
+    println!("{error}");
+    assert!(error.contains("Bad.res:1:"), "{error}");
+    assert!(error.contains("unsupported type"), "{error}");
+
+    let error = project
+        .compile("Unknown.res", "let f = x => Json.encode(x)\n")
+        .unwrap_err();
+    println!("{error}");
+    assert!(error.contains("generated per type"), "{error}");
+}

@@ -336,7 +336,10 @@ impl Discovery {
         for (at, functions) in std::mem::take(&mut self.new_groups) {
             self.edits.push(Edit::insert(
                 at,
-                format!("@warning(\"-39\") let rec {}\n", functions.join("\nand ")),
+                format!(
+                    "@{INSTANCES_ATTRIBUTE} @warning(\"-39\") let rec {}\n",
+                    functions.join("\nand ")
+                ),
             ));
         }
         PassResult {
@@ -977,15 +980,19 @@ pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructure
     }
 }
 
-/// Whether a structure item is a group of generated instances: a
-/// `let rec` of names with a `$`, which only generated code can contain.
-/// The group is not part of the module's signature.
+/// The attribute on a group of generated instances.
+pub const INSTANCES_ATTRIBUTE: &str = "res.macroInstances";
+
+/// Whether a structure item is a group of generated instances. The group is
+/// not part of the module's signature and is not exported.
 pub(crate) fn is_instance_group(arena: &ParseArena, item: &ParsedStructureItem) -> bool {
     if let ParsedStructureItemDesc::Pstr_value((RecFlag::Recursive, bindings)) = &item.pstr_desc
         && let Some(first) = arena.vb_list(*bindings).first()
-        && let PatternDesc::Ppat_var(name) = &arena.get_pat(first.pvb_pat).ppat_desc
     {
-        return arena.get_string(name.txt).contains('$');
+        return first
+            .pvb_attributes
+            .iter()
+            .any(|attr| arena.get_string(attr.0.txt) == INSTANCES_ATTRIBUTE);
     }
     false
 }
@@ -1234,7 +1241,14 @@ pub(crate) fn type_extension(
     }
     with_discovery(tctx, |tctx, discovery| {
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+            // A record or variant body is the right-hand side of a type
+            // declaration, which takes no parentheses.
+            let text = if code.trim_start().starts_with(['{', '|']) {
+                code
+            } else {
+                format!("({code})")
+            };
+            discovery.edits.push(Edit::replace(at.0, at.1, text));
         }
     });
     Some(pending(tctx, loc))
