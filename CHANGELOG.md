@@ -42,6 +42,8 @@
 
 #### :house: Internal
 
+- Compute the item digests and item references of a compiled module's interface once, when it is published, instead of decoding the stored interface again for each. https://github.com/jfrolich/rescript-rust/pull/87
+
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
 
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
