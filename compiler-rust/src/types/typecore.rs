@@ -15202,7 +15202,11 @@ fn type_record(
                 },
                 |summary| summary.all_regular,
             );
-            (labels.len() >= 20 && all_regular).then(|| labels.clone())
+            // Sparse whenever a label is omitted, not only for large
+            // records: component props usually have fewer than 20 labels and
+            // most of them optional.
+            ((labels.len() >= 20 || labels.len() > fields.len()) && all_regular)
+                .then(|| labels.clone())
         })
     } else {
         None
