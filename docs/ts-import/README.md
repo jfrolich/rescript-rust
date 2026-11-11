@@ -199,7 +199,7 @@ One row per gap, with the solution this document proposes, what it needs, and wh
 | Gap | Declarations | Imported today as | Solution | Needs | Status |
 |---|---|---|---|---|---|
 | **Unions** | **8.4%** | | | | |
-| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | closed | A variant | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | done; the tests are an `if` chain, see [many cases](#object-cases-told-apart-by-their-fields) |
+| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | closed | A variant | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | done |
 | Library interfaces: `EventEmitter \| EventTarget`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject`, `ArrayBufferLike` | 2.5% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter | not started |
 | React's own types: `ReactNode`, in 70 declarations | 2.1% | `unknown` | [A table of known React types](#library-interfaces): `React.element` | converter | not started |
 | Plain objects without a tag: `{result} \| {error}`, `{value: string} \| {value: number}` | closed | A variant | Object cases, told apart by a field that is present or by its kind | language: object cases | done |
@@ -342,7 +342,32 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 
 **Where the tests go.** Where the test of the single object case is today: after the literal cases, the primitive kinds and the class instances, and guarded against `null` as it is today. A `switch` that does not name every case tests only the ones it names.
 
-**Many cases.** Not implemented: the tests are a chain of `if`s, one per case. vite's syntax tree has 162 object cases, so a `switch` over it runs up to 161 tests. That is correct but slow and unreadable. When one field's literal tells most of the cases apart, the tests should be a `switch` on that field, with the cases that share a literal told apart inside its arm: `switch (x.type) { case "Literal": if ("regex" in x) ... }`.
+**Many cases.** When one field's literals tell most of the cases apart, the tests are a `switch` on that field. The field is the one that is a set of literals in the most cases, and the switch is used when those cases have at least four different literals on it. Cases that share a literal are told apart inside its arm, with their other checks; cases without a literal on the field are tested under `default`. Smaller variants keep the `if` chain.
+
+```js
+function name(node) {
+  switch (node.type) {
+    case "Literal":
+      if ("raw" in node && typeof node.value === "string") {
+        return node.value; // StringLiteral
+      } else if ("raw" in node) {
+        return node.value.toString(); // NumericLiteral
+      } else {
+        return node.regex.pattern; // RegExpLiteral
+      }
+    case "Identifier":
+      return node.name;
+    case "ThisExpression":
+      return "this";
+    case "Super":
+      return "super";
+    default:
+      return "..." + name(node.argument); // SpreadElement, the last case
+  }
+}
+```
+
+A `switch` over all 162 cases of vite's syntax tree is one `switch (node.type)` with 165 labels; the longest `if` chain left inside an arm has two tests.
 
 **What is trusted.** A record built in ReScript has its declared fields and no others, so for those values the tests are exact. A value that comes from JavaScript can carry more: an object that TypeScript calls `{error: string}` may also have a `result`. TypeScript's own `in` narrowing makes the same assumption. As everywhere in untagged variants, recognition trusts the type.
 
@@ -450,9 +475,9 @@ else { /* IdentifierName */ }
 
 That is what the compiler generates. Building and reading are both exact, and the cases keep their TypeScript names.
 
-Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case. A field every member has is required, and a field only some have is optional. A field whose types differ should be the union of the members' types; today it is `unknown`, with a note, unless all the types are literals.
+Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case. A field every member has is required, and a field only some have is optional. A field whose types differ gets their join where there is one: `string` for `"width" | "height"` and `string`, `Null.t<float>` for `number` and `number | null`. Without a join it is `unknown`, with a note.
 
-The import does this. The 188 members of vite's tree become the variant `node` with 162 cases, 13 of them merged from several members, and `parent` has that type. Not done: a merged case whose fields mention a type variable. Such a union is still `unknown`.
+The import does this. The 188 members of vite's tree become the variant `node` with 162 cases, 13 of them merged from several members, and `parent` has that type. A merged case takes the type variables its fields mention as parameters. One merge is wrong to make: the string, number, boolean and null literals of the tree differ in the type of `value`, but `value: null` counts as having no kind, so no `typeof` check separates it and the four become one case. Giving `null` a kind is not done.
 
 ### Library interfaces
 
@@ -582,7 +607,7 @@ type never
 
 ### Order of work
 
-1. **Finish object cases**: the `switch` on one field for variants with many cases, type variables in merged cases, and library interfaces as records, which most of the remaining unions wait for.
+1. **Library interfaces as records and the table of React types.** Together 4.6% of the declarations, more than half of the unions that remain.
 2. **Type parameters and stable names.** They change no count, but today an import can be wrong without a note, and a library upgrade can rename a type.
 3. **Event maps.** A third of all notes.
 4. **Overloads, namespaces and constructors**: about 10% of the declarations touched, all converter or standard-library work.
