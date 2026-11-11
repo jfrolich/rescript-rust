@@ -1305,7 +1305,7 @@ pub enum PrimitiveRepr {
 }
 
 impl PrimitiveRepr {
-    /// `Ffi_debug.primitive_repr`: the strings the sexp parity printers
+    /// `Ffi_debug.primitive_repr`: the strings the sexp debugging printers
     /// show for a primitive.
     pub fn debug_strings(&self, arena: &crate::parse_arena::ParseArena) -> Vec<String> {
         use crate::types::external_ffi_types::debug;

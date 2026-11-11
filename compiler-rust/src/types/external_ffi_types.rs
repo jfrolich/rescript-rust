@@ -279,11 +279,11 @@ pub fn inclusion_compatible(impl_: &ExternalFfi, intf: &ExternalFfi) -> bool {
 }
 
 // ============================================================================
-// Ffi_debug: the fork's textual rendering for the sexp parity printers
+// Ffi_debug: the fork's textual rendering for the sexp debugging printers
 // (compiler/ml/ffi_debug.ml).
 // ============================================================================
 
-/// The fork's textual rendering of the FFI types for the sexp parity
+/// The fork's textual rendering of the FFI types for the sexp debugging
 /// printers (`compiler/ml/ffi_debug.ml`).
 pub mod debug {
     use super::*;
