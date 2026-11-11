@@ -11708,6 +11708,41 @@ mod tests {
         assert_eq!(String::from_utf8_lossy(&again), printed);
     }
 
+    /// typecore.ml Pexp_try types the finally block with
+    /// `~nonreturning_warning:false`: a finally block that always throws
+    /// gets no warning 21, while a throw followed by code inside the block
+    /// still does.
+    #[test]
+    fn finally_block_that_always_throws_has_no_nonreturning_warning() {
+        let compile = |source: &str| {
+            let mut options = super::CompilerOptions::default();
+            options.nopervasives = true;
+            super::compile_source_in_process(
+                &format!(
+                    "external throw: exn => 'a = \"%raise\"\nexternal log: int => unit = \"log\"\nexception B\n{source}"
+                ),
+                "Finally.res",
+                "Finally",
+                &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(),
+                false,
+                None,
+            )
+            .expect("compiles")
+            .warnings
+        };
+        for silent in [
+            "let k = () => try { 1 } finally { throw(B) }\n",
+            "let k = () => try { 1 } finally { log(1); throw(B) }\n",
+            "let k = () => try { 1 } catch { | B => 2 } finally { throw(B) }\n",
+        ] {
+            let warnings = compile(silent);
+            assert!(!warnings.contains("Warning number 21"), "{silent}: {warnings}");
+        }
+        let warnings = compile("let k = () => try { 1 } finally { throw(B); log(2) }\n");
+        assert!(warnings.contains("Warning number 21"), "{warnings}");
+    }
+
     /// GenTypeMain.ml:93-107's walk over a parsed interface whose `"BAD"`
     /// strings are replaced with a PPX's undecodable template `Fo\xo`:
     /// `Ok(ignore_interface)`, or the offset of the template it raised at.

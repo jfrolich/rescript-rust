@@ -7578,6 +7578,25 @@ fn type_statement<'a>(
     env: &Env,
     expr: &ParsedExpression,
 ) -> TypeCoreResult<Expression> {
+    type_statement_with(tctx, env, expr, NonreturningWarning::Report)
+}
+
+/// Whether `type_statement_with` warns about a statement that never returns
+/// (typecore.ml `type_statement ?nonreturning_warning`).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NonreturningWarning {
+    Report,
+    /// A statement that ends its construct, so no code follows it: a
+    /// finally block that always throws.
+    Skip,
+}
+
+fn type_statement_with<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    expr: &ParsedExpression,
+    nonreturning_warning: NonreturningWarning,
+) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     ctx.begin_def();
     let typed = type_exp(tctx, env, expr, None)?;
@@ -7587,7 +7606,9 @@ fn type_statement<'a>(
     // variable generalizable past the current level (it never returns).
     let ty = crate::types::ctype::expand_head(ctx, env, typed.exp_type);
     let tv = ctx.new_var(None);
-    if matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(..)) && ctx.get_level(ty) > ctx.get_level(tv)
+    if nonreturning_warning == NonreturningWarning::Report
+        && matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(..))
+        && ctx.get_level(ty) > ctx.get_level(tv)
     {
         let loc = final_subexpression(tctx.arena, expr).pexp_loc;
         tctx.report_warning(loc, Warning::NonreturningStatement);
@@ -12680,10 +12701,12 @@ fn type_try(
 
     // JavaScript runs the finally block after the body or catch has already
     // decided how the try is left, so a break or continue there would cancel
-    // a pending exception or result (typecore.ml Pexp_try).
+    // a pending exception or result (typecore.ml Pexp_try). A finally block
+    // that always throws ends the try with no code after it, so it gets no
+    // nonreturning-statement warning.
     let typed_finally = match finally {
         Some(finally) => Some(Box::new(with_control_flow_boundary(tctx, true, |tctx| {
-            type_statement(tctx, env, finally)
+            type_statement_with(tctx, env, finally, NonreturningWarning::Skip)
         })?)),
         None => None,
     };
