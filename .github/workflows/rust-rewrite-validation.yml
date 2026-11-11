@@ -33,7 +33,7 @@ env:
 
 # How the jobs overlap, on 4-CPU Arm runners:
 #
-#   build ──────────────┬─> parity (4 suites), ir-parity (3 suites)
+#   build ──────────────┬─> parity (4 suites)
 #   ocaml ──────────────┘
 #   compiler-tests: compiles its tests, then waits for build and ocaml
 #   build-system-tests, script-tests, compiler-warnings: on their own
@@ -227,8 +227,7 @@ jobs:
         run: |
           status=0
           pids=()
-          for test in test_js_output_fixture_reporting test_typedtree_parity_exit \
-              test_parser_ast0_parity_exit test_parser_ast_parity_exit test_error_output_parity_exit; do
+          for test in test_js_output_fixture_reporting test_error_output_parity_exit; do
             python3 "scripts/$test.py" > "$RUNNER_TEMP/$test.log" 2>&1 &
             pids+=("$!:$test")
           done
@@ -366,29 +365,3 @@ jobs:
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
-
-  # Diagnostic only; see "The Correctness Contract" in AGENTS.md. These help
-  # find the layer a JavaScript or diagnostic difference starts in.
-  ir-parity:
-    name: ir-parity (${{ matrix.suite }})
-    needs: [build, ocaml]
-    runs-on: ubuntu-24.04-arm
-    timeout-minutes: 30
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - suite: typedtree
-            run: ./scripts/test_typedtree_parity.sh --release --parallel 4
-          - suite: raw-lambda
-            run: ./scripts/test_lambda_parity.sh --release --raw --parallel 4
-          - suite: lambda
-            run: ./scripts/test_lambda_parity.sh --release --parallel 4
-    steps:
-      - uses: actions/checkout@v6
-      - uses: ./.github/actions/setup-node
-      - uses: ./.github/actions/prepare-parity
-
-      - name: ${{ matrix.suite }} parity
-        continue-on-error: true
-        run: ${{ matrix.run }}

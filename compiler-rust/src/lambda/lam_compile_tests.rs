@@ -5730,6 +5730,40 @@ fn recursive_self_referential_record_bindings_lower_to_dummy_object_updates_like
 }
 
 #[test]
+fn recursive_array_record_binding_starts_as_an_empty_array() {
+    // A record with the runtime names "0", "1" is filled by index, so its
+    // recursive placeholder is `[]`, not `{}`.
+    let mut compiler = LambdaCompiler::new();
+    let cell = Ident::create_local("cell");
+    let lam = Lambda::letrec(
+        vec![(
+            cell,
+            Lambda::prim(
+                Primitive::Pmakeblock(
+                    TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                        fields: vec![("0".to_string(), false), ("1".to_string(), false)],
+                        logical_field_count: None,
+                        mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                        array: true,
+                    })),
+                    Mutable::Immutable,
+                ),
+                vec![Lambda::const_(Constant::Int { i: 1, comment: None }), Lambda::var(cell)],
+                LamLoc::NONE,
+            ),
+        )],
+        Lambda::unit(),
+    );
+
+    let compiled = compiler.compile_expr_lam(&lam);
+    let rendered = dump::block(&compiler.j, &compiled.prelude);
+    assert!(
+        rendered.starts_with("let[Variable] cell = Array[Mutable]()"),
+        "expected an empty array placeholder:\n{rendered}"
+    );
+}
+
+#[test]
 fn mutually_recursive_record_bindings_lower_to_runtime_update_dummy_calls() {
     let mut compiler = LambdaCompiler::new();
     let a = Ident::create_local("a");

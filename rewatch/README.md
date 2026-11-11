@@ -52,7 +52,7 @@ location-enabled retry, then dropped with the AST after compilation.
 - Source maps, editor tooling and requested IR dumps use locations.
 
 The default standalone parser API still retains complete location side tables for
-formatting, AST marshalling and parity tests. Location-free compilation does not change
+formatting and AST marshalling. Location-free compilation does not change
 the OCaml wire representation.
 
 ## Building and testing
