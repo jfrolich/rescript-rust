@@ -7032,7 +7032,7 @@ fn normalize_module_path_via_ctx(
 
             // Strategy 2: try to find the parent module's signature from sig caches.
             let prefix_name = prefix.name();
-            if let Some((_, sig)) = ctx_ref.find_resolved_module_sig(&prefix_name) {
+            if let Some((_, sig)) = ctx_ref.find_resolved_module_sig(&prefix_name, None) {
                 for item in sig.iter() {
                     if let SignatureItem::SigModule(id, md, _) = item {
                         if id.name() == name {

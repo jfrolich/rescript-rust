@@ -2924,6 +2924,7 @@ impl PersistentEnv {
         root: Path,
         env: &mut Env,
         ctx: &TypeContext,
+        slot: Option<u32>,
     ) -> bool {
         // Don't rename at open time — OCaml's ps_sig is only forced later
         // when find_module is called from normalize_path during type expansion.
@@ -2999,7 +3000,7 @@ impl PersistentEnv {
                 ctx.register_qualified_module_components_shared(components_key, components.clone());
                 components
             });
-        open_components_into_env(&components, root, env, ctx);
+        open_components_into_env(&components, root, env, ctx, slot);
         true
     }
 
@@ -7792,13 +7793,14 @@ pub(crate) fn open_module_components_into_env(
     root: Path,
     env: &mut Env,
     ctx: &TypeContext,
+    slot: Option<u32>,
 ) {
     // OCaml compiler/ml/env.ml:1874-1877 calls `get_components
     // (find_module_descr root)` and compiler/ml/env.ml:1841-1860 installs that
     // same component table into the opened environment. Reuse the component view
     // that module lookup already forced so opened `comp_modules` and
     // `comp_components` share the same lazy state.
-    open_components_into_env(components, root, env, ctx);
+    open_components_into_env(components, root, env, ctx, slot);
 }
 
 /// The layer tables that opening the component table `components` adds.
@@ -7816,6 +7818,7 @@ fn build_opened_layers(
         false,
         Some(components),
         Some(&mut out),
+        None,
     );
     out.expect("opened layers built")
 }
@@ -7827,11 +7830,12 @@ fn open_components_into_env(
     root: Path,
     env: &mut Env,
     ctx: &TypeContext,
+    slot: Option<u32>,
 ) {
     let layers = components.opened_layers(ctx, || {
         build_opened_layers(components, ctx)
     });
-    env.add_prebuilt_open_layers(root, &layers);
+    env.add_prebuilt_open_layers(root, &layers, slot);
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -7844,6 +7848,7 @@ fn add_signature_to_env_with_options_inner(
     apply_path_subst: bool,
     precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
     opened_out: Option<&mut Option<crate::types::env::OpenedLayers>>,
+    slot: Option<u32>,
 ) {
     // Apply path substitution: rewrite Tconstr paths from internal
     // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
@@ -8254,7 +8259,7 @@ fn add_signature_to_env_with_options_inner(
         );
         match opened_out {
             Some(out) => *out = Some(layers),
-            None => env.add_prebuilt_open_layers(*module_path, &layers),
+            None => env.add_prebuilt_open_layers(*module_path, &layers, slot),
         }
     }
 }

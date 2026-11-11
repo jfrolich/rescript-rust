@@ -107,7 +107,7 @@ pub use ctype::{
 };
 
 // env exports
-pub use env::{Env, EnvError, EnvFlags, EnvResult, IdTbl, TycompTbl, initial_env};
+pub use env::{Env, EnvError, EnvFlags, EnvResult, initial_env};
 
 // typecore exports
 pub use typecore::{

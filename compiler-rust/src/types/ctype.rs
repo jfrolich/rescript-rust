@@ -2736,7 +2736,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
     }
 
     let cache_key = module_path.name();
-    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key, None) {
         if cached_path.same(module_path) {
             return Some(cached_sig);
         }
@@ -2810,7 +2810,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, *module_path, sig.clone());
+        ctx.register_resolved_module_sig(&cache_key, None, *module_path, sig.clone());
     }
 
     result
@@ -2824,7 +2824,7 @@ fn resolve_module_signature_through_persistent_env_shared(
     use crate::types::decl::{ModuleType, SignatureItem};
 
     let cache_key = module_path.name();
-    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key, None) {
         if cached_path.same(module_path) {
             return Some(cached_sig);
         }
@@ -2877,7 +2877,7 @@ fn resolve_module_signature_through_persistent_env_shared(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, *module_path, sig.clone());
+        ctx.register_resolved_module_sig(&cache_key, None, *module_path, sig.clone());
     }
 
     result

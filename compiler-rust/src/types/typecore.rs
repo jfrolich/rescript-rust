@@ -16635,7 +16635,6 @@ fn type_open(
         Some(lid.loc),
     );
     let slot = tctx.open_signature_slot(*override_flag, loc);
-    open_env.set_pending_open_slot(slot);
 
     let persistent_root_open = match open_lid {
         Longident::Lident(mod_idx) => {
@@ -16653,7 +16652,7 @@ fn type_open(
                     // env.ml:1012: `Pident (Ident.create_persistent s)`.
                     let root =
                         Path::pident(tctx.type_ctx.create_ast_persistent_ident(tctx.arena, *mod_idx));
-                    if pers.open_module(mod_name, root, &mut open_env, tctx.type_ctx) {
+                    if pers.open_module(mod_name, root, &mut open_env, tctx.type_ctx, slot) {
                         Some(root)
                     } else {
                         None
@@ -16679,6 +16678,7 @@ fn type_open(
         &mut open_env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
+        slot,
     ) {
         path
     } else {
@@ -16690,7 +16690,6 @@ fn type_open(
         }
     };
 
-    open_env.set_pending_open_slot(None);
     tctx.set_open_slot_root(slot, &path);
 
     // Type check the body expression in the extended environment
@@ -22302,18 +22301,20 @@ impl Env {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
                 if let Ok((access_path_hint, md)) = self.find_module_with_path(mod_name) {
-                    let module_cache_key = path_cache_key(&access_path_hint)
+                    let (module_cache_key, scope) = path_cache_key(&access_path_hint)
                         .map(|key| {
-                            format!(
-                                "module::access::{}::subst{}",
-                                scope_local_module_cache_key(&key, &access_path_hint, self),
-                                apply_subst as u8
+                            (
+                                format!("module::access::{}::subst{}", key, apply_subst as u8),
+                                scope_local_module_cache_key(&access_path_hint, self),
                             )
                         })
                         .unwrap_or_else(|| {
-                            format!("module::lident::{}::subst{}", mod_name, apply_subst as u8)
+                            (
+                                format!("module::lident::{}::subst{}", mod_name, apply_subst as u8),
+                                None,
+                            )
                         });
-                    if let Some(cached) = ctx.find_resolved_module_sig(&module_cache_key) {
+                    if let Some(cached) = ctx.find_resolved_module_sig(&module_cache_key, scope) {
                         return Some(cached);
                     }
                     if apply_subst {
@@ -22326,6 +22327,7 @@ impl Env {
                             )?;
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
+                            scope,
                             resolved_path,
                             resolved_sig.clone(),
                         );
@@ -22342,6 +22344,7 @@ impl Env {
                         let sig = Arc::new(sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
+                            scope,
                             path,
                             sig.clone(),
                         );
@@ -25752,12 +25755,8 @@ fn module_path_requires_env_scoped_cache(env: &Env, module_path: &Path) -> bool 
     env.module_path_requires_env_scoped_cache(module_path)
 }
 
-fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -> String {
-    if module_path_requires_env_scoped_cache(env, module_path) {
-        format!("{base_key}::env{}", env.scope_id())
-    } else {
-        base_key.to_string()
-    }
+fn scope_local_module_cache_key(module_path: &Path, env: &Env) -> Option<super::env::ScopeId> {
+    module_path_requires_env_scoped_cache(env, module_path).then_some(env.scope_id())
 }
 
 fn module_components_cache_key(
@@ -26339,6 +26338,7 @@ pub(crate) fn open_module_lid_components_into_env(
     target_env: &mut Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
+    slot: Option<u32>,
 ) -> Option<Path> {
     // OCaml compiler/ml/typemod.ml:88-90 and typecore.ml open modules through
     // `Env.open_signature`, which in compiler/ml/env.ml:1874-1877 forces the
@@ -26375,7 +26375,7 @@ pub(crate) fn open_module_lid_components_into_env(
         |path: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
             let path = *path.expect("lookup path requested");
             crate::cmi::persistent_env::open_module_components_into_env(
-                components, path, target_env, ctx,
+                components, path, target_env, ctx, slot,
             );
             Some(path)
         };
