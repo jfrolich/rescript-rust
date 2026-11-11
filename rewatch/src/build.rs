@@ -229,6 +229,34 @@ fn executable_hash(path: &Path) -> Option<blake3::Hash> {
     Some(hash)
 }
 
+// Printer selection changes generated text, including the runtime cache. Keep
+// the legacy identity byte-for-byte unchanged, but never reuse oxc outputs when
+// switching back to legacy (or vice versa).
+fn printer_compiler_hash(hash: blake3::Hash, printer: Option<&str>) -> blake3::Hash {
+    if printer == Some("oxc") {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"RESCRIPT_JS_PRINTER=oxc");
+        hasher.finalize()
+    } else {
+        hash
+    }
+}
+
+#[cfg(test)]
+mod printer_identity_tests {
+    use super::printer_compiler_hash;
+
+    #[test]
+    fn legacy_identity_is_unchanged_and_oxc_is_distinct() {
+        let hash = blake3::hash(b"compiler");
+        for value in [None, Some("legacy"), Some("unknown")] {
+            assert_eq!(printer_compiler_hash(hash, value), hash);
+        }
+        assert_ne!(printer_compiler_hash(hash, Some("oxc")), hash);
+    }
+}
+
 pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
     get_compiler_info_with_mode(project_context, false)
 }
@@ -251,6 +279,10 @@ fn get_compiler_info_with_mode(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
+    let bsc_hash = printer_compiler_hash(
+        bsc_hash,
+        std::env::var("RESCRIPT_JS_PRINTER").ok().as_deref(),
+    );
     let runtime_path = compile::get_runtime_path(&project_context.current_config, project_context)?;
     Ok(CompilerInfo {
         bsc_path,
