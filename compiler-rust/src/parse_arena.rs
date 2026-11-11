@@ -578,7 +578,7 @@ pub struct ParseArena {
     /// public rewrite entry points report it before any later error.
     ppx_deferred_error: Option<crate::binary_ast::ppx::PpxError>,
     /// Whether the builtin spice mapper stands in for a configured external
-    /// spice PPX (see `driver::is_builtin_external_ppx`).
+    /// spice derive (see `binary_ast::derive`).
     builtin_spice_disabled: bool,
     /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
     /// this arena, which decides the error a `let?` binding raises

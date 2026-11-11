@@ -35,7 +35,7 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
-use super::spice_ppx;
+use super::derive;
 use crate::parser::ast::{
     Extension, PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource, SpreadElement,
 };
@@ -9697,7 +9697,7 @@ fn rewrite_structure_impl(
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let spice_mapper_active =
-        apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
+        apply_spice && derive::structure_uses_spice_mapper(structure, arena);
 
     // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
     // recurses as `head :: structure_mapper rest`. Constructor arguments are
@@ -10249,10 +10249,10 @@ fn try_rewrite_signature_items(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
     let mut rewritten = Vec::new();
-    let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
+    let spice_mapper_active = derive::signature_uses_spice_mapper(items, arena);
     for item in items {
         let expanded_items =
-            spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
+            derive::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
                 .map_err(PpxError::message)?;
         for expanded in expanded_items {
             if let SignatureItemDesc::Psig_value(vd) = &expanded.psig_desc {
@@ -10356,7 +10356,7 @@ fn try_rewrite_structure_item(
     spice_mapper_active: bool,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+    for expanded in derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10371,7 +10371,7 @@ fn try_rewrite_structure_item(
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
-        spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
+        derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
     try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)

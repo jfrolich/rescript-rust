@@ -10,7 +10,7 @@ use crate::types::path::PathView;
 use std::ffi::OsString;
 use std::fmt;
 use std::path::{Component, Path as FsPath, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use ahash::AHashSet;
 use anyhow::{Context, Result, anyhow};
@@ -54,8 +54,6 @@ use crate::types::{
 // We match this by starting at 999 and consuming one stamp.
 const OCAML_NON_PREDEF_STAMP_START: i32 = 999;
 static SKIP_CLI_CLEANUP: AtomicBool = AtomicBool::new(false);
-static EXTERNAL_PPX_TEMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
-use crate::binary_ast::writer::{AST_IMPL_MAGIC_NUMBER, AST_INTF_MAGIC_NUMBER};
 
 /// Internal control flow: discard a location-free attempt before publishing
 /// it, then compile the same source with location side tables enabled.
@@ -594,6 +592,8 @@ fn place_location_free_warnings(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Stop after typing and publish the interface without generating code.
+    pub check_only: bool,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
     pub dump_lambda: bool,
     /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
@@ -669,10 +669,7 @@ pub struct CompilerOptions {
     /// Mirror `Js_config.no_builtin_ppx` / `-bs-no-builtin-ppx`.
     pub no_builtin_ppx: bool,
     /// Run the builtin Spice mapper in place of a configured spice PPX
-    /// (set by the in-process build, which then omits it from `external_ppxs`).
     pub spice_ppx: bool,
-    /// External `-ppx` rewriters, in command-line order.
-    pub external_ppxs: Vec<String>,
     /// TypeScript files `%ts` imports read instead of the file system, as
     /// absolute paths with their contents (tests, the playground).
     pub ts_files: Option<Vec<(String, String)>>,
@@ -846,6 +843,7 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            check_only: false,
             dump_lambda: false,
             dump_typed_sexp: false,
             dump_typed_sexp_locs: false,
@@ -879,7 +877,6 @@ impl Default for CompilerOptions {
             transparent_modules: false,
             no_builtin_ppx: false,
             spice_ppx: false,
-            external_ppxs: Vec::new(),
             ts_files: None,
             nopervasives: false,
             module_name: None,
@@ -902,11 +899,7 @@ impl Default for CompilerOptions {
 }
 
 impl CompilerOptions {
-    /// Whether the builtin spice mapper (`binary_ast::spice_ppx`) rewrites the
-    /// AST. The `bsc` CLI runs every configured `-ppx` executable as OCaml
-    /// does (cmd_ppx_apply.ml:97-110); the in-process build sets `spice_ppx`
-    /// instead of passing a configured spice PPX, so the builtin mapper
-    /// replaces a per-module subprocess.
+    /// Whether the built-in spice derive rewrites the current AST directly.
     pub fn builtin_spice(&self) -> bool {
         self.spice_ppx
     }
@@ -1039,335 +1032,6 @@ fn warning_config_for_options_file_config_and_leading_attrs(
 
 fn apply_file_config_warning_ops(config: &mut WarningConfig, file_config: &FileConfigOverrides) {
     apply_warning_ops_to_config(config, file_config_warning_ops(file_config));
-}
-
-fn shell_quote_path(path: &std::path::Path) -> String {
-    let value = path.to_string_lossy();
-    let mut quoted = String::with_capacity(value.len() + 2);
-    quoted.push('\'');
-    for ch in value.chars() {
-        if ch == '\'' {
-            quoted.push_str("'\\''");
-        } else {
-            quoted.push(ch);
-        }
-    }
-    quoted.push('\'');
-    quoted
-}
-
-fn temp_ppx_file(input_name: &str) -> Result<PathBuf> {
-    let basename = FsPath::new(input_name)
-        .file_name()
-        .and_then(|name| name.to_str())
-        .filter(|name| !name.is_empty())
-        .unwrap_or("input");
-    let pid = std::process::id();
-    for _ in 0..1000 {
-        let counter = EXTERNAL_PPX_TEMP_COUNTER.fetch_add(1, Ordering::SeqCst);
-        let path = std::env::temp_dir().join(format!("ppx{pid:x}{counter:x}{basename}"));
-        match std::fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-        {
-            Ok(_) => return Ok(path),
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-            Err(err) => {
-                return Err(err).with_context(|| format!("Failed to create {}", path.display()));
-            }
-        }
-    }
-    Err(anyhow!(
-        "Failed to create external preprocessor temporary file"
-    ))
-}
-
-fn format_external_ppx_cannot_run_report(filename: &str, command: &str) -> String {
-    format!(
-        "\n  We've found a bug for you!\n  {filename}\n\n  Error while running external preprocessor\nCommand line: {command}\n\n\n"
-    )
-}
-
-fn format_external_ppx_wrong_magic_report(filename: &str, magic: &str) -> String {
-    format!(
-        "\n  We've found a bug for you!\n  {filename}\n\n  External preprocessor does not produce a valid file\nCommand line: {magic}\n\n\n"
-    )
-}
-
-fn external_ppx_cannot_run(filename: &str, command: &str) -> anyhow::Error {
-    UserDiagnostic::new(format_external_ppx_cannot_run_report(filename, command), 2).into()
-}
-
-fn external_ppx_wrong_magic(filename: &str, magic: &str) -> anyhow::Error {
-    UserDiagnostic::new(format_external_ppx_wrong_magic_report(filename, magic), 2).into()
-}
-
-fn check_external_ppx_output_magic(
-    output_path: &std::path::Path,
-    magic: &[u8],
-    filename: &str,
-) -> Result<()> {
-    let bytes = std::fs::read(output_path).unwrap_or_default();
-    let buffer = if bytes.len() < magic.len() {
-        String::new()
-    } else {
-        String::from_utf8_lossy(&bytes[..magic.len()]).into_owned()
-    };
-    if buffer.as_bytes() != magic {
-        return Err(external_ppx_wrong_magic(filename, &buffer));
-    }
-    Ok(())
-}
-
-/// `Cmd_ppx_apply.rewrite` (cmd_ppx_apply.ml:78-95): write the Parsetree0
-/// input, run each rewriter on the previous one's output, and return the
-/// last output file's contents.
-fn run_external_ppxs(
-    ppxs: &[String],
-    filename: &str,
-    write_input: impl FnOnce(&std::path::Path) -> std::io::Result<()>,
-    magic: &[u8],
-) -> Result<Vec<u8>> {
-    let input_path = temp_ppx_file(filename)?;
-    write_input(&input_path)
-        .with_context(|| format!("Failed to write {}", input_path.display()))?;
-    let mut temp_files = vec![input_path.clone()];
-    let mut current = input_path;
-    let result = (|| {
-        for ppx in ppxs {
-            let output_path = temp_ppx_file(filename)?;
-            temp_files.push(output_path.clone());
-            let command = format!(
-                "{} {} {}",
-                ppx,
-                shell_quote_path(&current),
-                shell_quote_path(&output_path)
-            );
-            let status = std::process::Command::new("sh")
-                .arg("-c")
-                .arg(&command)
-                .status();
-            if !status.as_ref().is_ok_and(|status| status.success()) || !output_path.exists() {
-                return Err(external_ppx_cannot_run(filename, &command));
-            }
-            check_external_ppx_output_magic(&output_path, magic, filename)?;
-            current = output_path;
-        }
-        std::fs::read(&current).with_context(|| format!("Failed to read {}", current.display()))
-    })();
-    for path in temp_files {
-        let _ = std::fs::remove_file(path);
-    }
-    result
-}
-
-/// `Ast_mapper.ppx_context` (ast_mapper.ml:571-640): the
-/// `[@@@ocaml.ppx.context]` record the rewriters receive.
-fn ppx_context_attribute(
-    arena: &mut ParseArena,
-    options: &CompilerOptions,
-) -> crate::binary_ast::parsetree0::Attribute {
-    use crate::binary_ast::parsetree0 as pt0;
-    use crate::location::Located as OldLocated;
-    let none = arena.to_location(arena.none_loc());
-    let mk = |desc: pt0::ExpressionDesc| pt0::Expression {
-        pexp_desc: desc,
-        pexp_loc: none,
-        pexp_attributes: vec![],
-    };
-    let lid = |arena: &mut ParseArena, name: &str| {
-        OldLocated::new(Longident::Lident(arena.intern(name)), none)
-    };
-    let string = |s: &str| {
-        mk(pt0::ExpressionDesc::Constant(pt0::Constant::String(
-            crate::string_literal::normalize_semantic(s).into_owned(),
-            None,
-        )))
-    };
-    let list = |arena: &mut ParseArena, items: Vec<pt0::Expression>| {
-        let mut tail = mk(pt0::ExpressionDesc::Construct(lid(arena, "[]"), None));
-        for item in items.into_iter().rev() {
-            tail = mk(pt0::ExpressionDesc::Construct(
-                lid(arena, "::"),
-                Some(Box::new(mk(pt0::ExpressionDesc::Tuple(vec![item, tail])))),
-            ));
-        }
-        tail
-    };
-    let path_string = |p: &PathBuf| p.to_string_lossy().into_owned();
-    // `-I` prepends to `Clflags.include_dirs`; `Res_compmisc.init_path` puts
-    // them back in command-line order ahead of the stdlib directory.
-    let include_dirs: Vec<_> = options
-        .include_paths
-        .iter()
-        .rev()
-        .map(path_string)
-        .collect();
-    let mut load_path: Vec<_> = options.include_paths.iter().map(path_string).collect();
-    if let Some(runtime) = &options.runtime_path {
-        load_path.push(path_string(&runtime.join("lib").join("ocaml")));
-    }
-    let include_dirs = include_dirs.iter().map(|s| string(s)).collect();
-    let load_path = load_path.iter().map(|s| string(s)).collect();
-    let open_modules = options
-        .open_modules
-        .iter()
-        .rev()
-        .map(|s| string(s))
-        .collect();
-    let fields = vec![
-        (lid(arena, "tool_name"), string("ReScript")),
-        (lid(arena, "include_dirs"), list(arena, include_dirs)),
-        (lid(arena, "load_path"), list(arena, load_path)),
-        (lid(arena, "open_modules"), list(arena, open_modules)),
-        (
-            lid(arena, "debug"),
-            mk(pt0::ExpressionDesc::Construct(
-                lid(arena, if options.debug { "true" } else { "false" }),
-                None,
-            )),
-        ),
-        (lid(arena, "cookies"), list(arena, Vec::new())),
-    ];
-    let record = mk(pt0::ExpressionDesc::Record(fields, None));
-    (
-        OldLocated::new("ocaml.ppx.context".to_string(), none),
-        pt0::Payload::PStr(vec![pt0::StructureItem {
-            pstr_desc: pt0::StructureItemDesc::Eval(record, vec![]),
-            pstr_loc: none,
-        }]),
-    )
-}
-
-fn ppx_output_error(filename: &str, error: impl std::fmt::Display) -> anyhow::Error {
-    anyhow!("External preprocessor output for {filename} could not be read: {error}")
-}
-
-/// `Cmd_ppx_apply.apply_rewriters_str` (cmd_ppx_apply.ml:97-110) with
-/// `~restore:false`: add the ppx context, run the rewriters over the
-/// Parsetree0 form, read the result back and drop the context again.
-pub fn apply_external_structure_ppxs(
-    options: &CompilerOptions,
-    filename: &str,
-    arena: &mut ParseArena,
-    structure: Structure,
-) -> Result<Structure> {
-    use crate::binary_ast::parsetree0 as pt0;
-    arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = &options.external_ppxs;
-    if ppxs.is_empty() {
-        // The builtin spice mapper stands in for a configured spice PPX, and
-        // OCaml hands that PPX the Parsetree0 form and reads it back
-        // (cmd_ppx_apply.ml:97-110), so the AST still takes that round trip.
-        if options.builtin_spice() {
-            let ast0 = crate::binary_ast::mapper_to0::map_structure(arena, &structure);
-            return Ok(crate::binary_ast::mapper_from0::map_structure(
-                arena, &ast0,
-            )?);
-        }
-        return Ok(structure);
-    }
-    let context = ppx_context_attribute(arena, options);
-    let none = arena.to_location(arena.none_loc());
-    let mut ast0 = crate::binary_ast::mapper_to0::map_structure(arena, &structure);
-    ast0.insert(
-        0,
-        pt0::StructureItem {
-            pstr_desc: pt0::StructureItemDesc::Attribute(context),
-            pstr_loc: none,
-        },
-    );
-    let output = run_external_ppxs(
-        ppxs,
-        filename,
-        |path| {
-            crate::binary_ast::writer::write_external_ppx_input(
-                path,
-                filename,
-                arena,
-                AST_IMPL_MAGIC_NUMBER,
-                &ast0,
-            )
-        },
-        AST_IMPL_MAGIC_NUMBER,
-    )?;
-    let output =
-        crate::binary_ast::parsetree0_unmarshal::read_ppx_output(&output, AST_IMPL_MAGIC_NUMBER)
-            .map_err(|e| ppx_output_error(filename, e.0))?;
-    let mut ast0 = crate::binary_ast::parsetree0_unmarshal::Decoder::new(arena)
-        .structure(&output.ast)
-        .map_err(|e| ppx_output_error(filename, e.0))?;
-    if matches!(
-        ast0.first().map(|item| &item.pstr_desc),
-        Some(pt0::StructureItemDesc::Attribute((name, _))) if name.txt == "ocaml.ppx.context"
-    ) {
-        ast0.remove(0);
-    }
-    Ok(crate::binary_ast::mapper_from0::map_structure(
-        arena, &ast0,
-    )?)
-}
-
-/// `Cmd_ppx_apply.apply_rewriters_sig` (cmd_ppx_apply.ml:112-125).
-pub fn apply_external_signature_ppxs(
-    options: &CompilerOptions,
-    filename: &str,
-    arena: &mut ParseArena,
-    signature: Signature,
-) -> Result<Signature> {
-    use crate::binary_ast::parsetree0 as pt0;
-    arena.set_builtin_spice(options.builtin_spice());
-    let ppxs = &options.external_ppxs;
-    if ppxs.is_empty() {
-        // See `apply_external_structure_ppxs` (cmd_ppx_apply.ml:112-125).
-        if options.builtin_spice() {
-            let ast0 = crate::binary_ast::mapper_to0::map_signature(arena, &signature);
-            return Ok(crate::binary_ast::mapper_from0::map_signature(
-                arena, &ast0,
-            )?);
-        }
-        return Ok(signature);
-    }
-    let context = ppx_context_attribute(arena, options);
-    let none = arena.to_location(arena.none_loc());
-    let mut ast0 = crate::binary_ast::mapper_to0::map_signature(arena, &signature);
-    ast0.insert(
-        0,
-        pt0::SignatureItem {
-            psig_desc: pt0::SignatureItemDesc::Attribute(context),
-            psig_loc: none,
-        },
-    );
-    let output = run_external_ppxs(
-        ppxs,
-        filename,
-        |path| {
-            crate::binary_ast::writer::write_external_ppx_input(
-                path,
-                filename,
-                arena,
-                AST_INTF_MAGIC_NUMBER,
-                &ast0,
-            )
-        },
-        AST_INTF_MAGIC_NUMBER,
-    )?;
-    let output =
-        crate::binary_ast::parsetree0_unmarshal::read_ppx_output(&output, AST_INTF_MAGIC_NUMBER)
-            .map_err(|e| ppx_output_error(filename, e.0))?;
-    let mut ast0 = crate::binary_ast::parsetree0_unmarshal::Decoder::new(arena)
-        .signature(&output.ast)
-        .map_err(|e| ppx_output_error(filename, e.0))?;
-    if matches!(
-        ast0.first().map(|item| &item.psig_desc),
-        Some(pt0::SignatureItemDesc::Attribute((name, _))) if name.txt == "ocaml.ppx.context"
-    ) {
-        ast0.remove(0);
-    }
-    Ok(crate::binary_ast::mapper_from0::map_signature(
-        arena, &ast0,
-    )?)
 }
 
 /// `Js_config.string_of_jsx_module !Js_config.jsx_module`
@@ -6691,7 +6355,7 @@ pub struct ImplementationFrontend {
 }
 
 /// Everything OCaml runs between parsing and type checking an implementation:
-/// parser warnings, external PPXs (`Cmd_ppx_apply.apply_rewriters`) and
+/// parser warnings and
 /// `Ppx_entry.rewrite_implementation` (compiler/frontend/ppx_entry.ml:45-60),
 /// together with the frontend checks Rust performs around them. This is also
 /// what `bsc -bs-ast` does before writing the AST
@@ -6721,15 +6385,7 @@ pub fn run_implementation_frontend(
         options.ts_files.as_deref(),
     )
     .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
-    // cmd_ppx_apply.ml `apply_rewriters_str`: with external PPXs configured,
-    // the removed `ocaml.` spellings are rejected before the bridge renames
-    // them.
-    if !options.external_ppxs.is_empty() {
-        ppx::check_removed_ocaml_spellings_structure(&structure, parser.arena())
-            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
-    }
-    let structure =
-        apply_external_structure_ppxs(options, filename, parser.arena_mut(), structure)?;
+    parser.arena_mut().set_builtin_spice(options.builtin_spice());
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_attributes(&structure, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -7977,7 +7633,7 @@ pub struct InterfaceFrontend {
 }
 
 /// The interface counterpart of [`run_implementation_frontend`]: parser
-/// warnings, external PPXs and `Ppx_entry.rewrite_signature`
+/// warnings and `Ppx_entry.rewrite_signature`
 /// (compiler/frontend/ppx_entry.ml:27-43). Warning reports go to `out`.
 pub fn run_interface_frontend(
     parser: &mut Parser<'_>,
@@ -7992,13 +7648,7 @@ pub fn run_interface_frontend(
     if parser.has_errors() {
         return Err(parser_error_to_anyhow(parser, source, filename));
     }
-    // cmd_ppx_apply.ml `apply_rewriters_sig`.
-    if !options.external_ppxs.is_empty() {
-        ppx::check_removed_ocaml_spellings_signature(&signature, parser.arena())
-            .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
-    }
-    let signature =
-        apply_external_signature_ppxs(options, filename, parser.arena_mut(), signature)?;
+    parser.arena_mut().set_builtin_spice(options.builtin_spice());
     let frontend_warnings =
         ppx::collect_leading_builtin_warning_signature_attributes(&signature, parser.arena())
             .map_err(|err| ppx_error_to_anyhow(err, parser.arena(), source, filename))?;
@@ -9669,6 +9319,7 @@ fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
 }
 
 /// Result of an in-process `.res` compilation.
+#[derive(Default)]
 pub struct InProcessCompileResult {
     /// The JavaScript when the compile has no output path, else empty.
     pub js_output: String,
@@ -9705,9 +9356,10 @@ pub struct InProcessCompileResult {
 
 /// Owned in-process compilation state after typechecking and Lambda lowering,
 /// before JS backend metadata from dependencies is required.
+#[derive(Default)]
 pub struct InProcessPreJsCompileResult {
-    /// The unit's Lambda program, ready for the JS backend.
-    pub lowered_lambda: crate::lambda::arena::LamProgram,
+    /// The unit's Lambda program, or None when compilation stopped after typing.
+    pub lowered_lambda: Option<crate::lambda::arena::LamProgram>,
     /// The modules the program references, whose `.cmj` metadata the JS
     /// backend may read.
     pub possible_required_modules: AHashSet<ModuleId>,
@@ -9861,6 +9513,9 @@ fn with_gentype_artifact<R>(
         crate::gentype::main::TypedArtifact<'_>,
     ) -> R,
 ) -> Option<R> {
+    if options.check_only {
+        return None;
+    }
     let config = options.gentype_config.as_ref()?;
     let GentypeUnit {
         annots,
@@ -10971,6 +10626,46 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
 
+    if options.check_only {
+        if let Some(inclusion) = interface_inclusion {
+            report_compunit_inclusion_warnings(&mut tctx, inclusion.warnings);
+        }
+        // The earlier typing warnings already carry located parse slots.
+        // Only inclusion warnings appended since then still need placement.
+        if !place_location_free_warnings(
+            arena, options, &mut located_warnings,
+            &mut tctx.warnings[post_type_warning_start..],
+        ) {
+            return Err(LocationRetry::Warning.into());
+        }
+        let warnings = format_type_warnings_lazy(
+            located_warnings.as_ref().unwrap_or(arena),
+            &source,
+            filename,
+            &tctx.warnings,
+        );
+        if type_warnings_have_errors(&tctx.warnings) {
+            return Err(UserDiagnostic::new(warnings, 2).into());
+        }
+        if !has_interface && let Some(hook) = signature_ready {
+            let _ = hook(InProcessSignatureReady {
+                pers_struct: pers_struct.take(),
+            })?;
+        }
+        return Ok(InProcessPreJsCompileResult {
+            signature: published_signature,
+            pers_struct,
+            warnings,
+            unit_reads,
+            loaded_units: tctx
+                .persistent_env
+                .as_ref()
+                .map(PersistentEnv::loaded_units)
+                .unwrap_or_default(),
+            ..Default::default()
+        });
+    }
+
     // Capture typed tree sexp for the playground (only if requested).
     let typed_tree_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -11277,7 +10972,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         })?;
     }
     Ok(InProcessPreJsCompileResult {
-        lowered_lambda,
+        lowered_lambda: Some(lowered_lambda),
         possible_required_modules,
         flat_make_paths,
         ident_stamp_at_js_boundary,
@@ -11324,6 +11019,14 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     registry: &ModuleRegistry,
     metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
 ) -> Result<InProcessCompileResult> {
+    if options.check_only {
+        return Ok(InProcessCompileResult {
+            signature: pre_js.signature,
+            pers_struct: pre_js.pers_struct,
+            warnings: pre_js.warnings,
+            ..Default::default()
+        });
+    }
     let _span = info_span!(
         "compiler.in_process_js_finish",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -11354,7 +11057,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         .map(|target| target.module_format)
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
-    let mut lowered_lambda = Some(pre_js.lowered_lambda);
+    let mut lowered_lambda = pre_js.lowered_lambda;
     let (
         program,
         module_path_resolver,

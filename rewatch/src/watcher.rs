@@ -899,6 +899,7 @@ mod tests {
     fn test_package(name: &str, path: &str) -> Package {
         let package_path = PathBuf::from(path);
         Package {
+            check_only: false,
             name: name.to_string(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
                 name: name.to_string(),
