@@ -6,6 +6,7 @@
 //! still read the parse arena and request a located retry when it stores no
 //! coordinates.
 
+use crate::raw_lambda::builder::RawLambdaBuilder;
 use std::cell::RefCell;
 use std::sync::Arc;
 
@@ -85,23 +86,18 @@ impl LamLocBuilder {
 /// The parse arena, the conversion's location builder and its raw Lambda
 /// arena, threaded through
 /// `Matching` where OCaml reads `pat.pat_loc` and attaches it to nodes.
-#[derive(Clone, Copy)]
-pub struct LocArena<'a> {
+pub struct LocArena<'a, B: RawLambdaBuilder> {
     /// The parse arena locations are read from.
     pub arena: &'a ParseArena,
     /// The builder location handles are recorded in.
     pub locs: &'a LamLocBuilder,
     /// The raw Lambda arena the conversion builds into.
-    pub b: &'a crate::raw_lambda::RawArena,
+    pub b: &'a B,
 }
 
-impl<'a> LocArena<'a> {
+impl<'a, B: RawLambdaBuilder> LocArena<'a, B> {
     /// Bundles the conversion's arenas and location builder.
-    pub fn new(
-        arena: &'a ParseArena,
-        locs: &'a LamLocBuilder,
-        b: &'a crate::raw_lambda::RawArena,
-    ) -> Self {
+    pub fn new(arena: &'a ParseArena, locs: &'a LamLocBuilder, b: &'a B) -> Self {
         Self { arena, locs, b }
     }
 
@@ -111,10 +107,17 @@ impl<'a> LocArena<'a> {
     }
 }
 
-impl std::ops::Deref for LocArena<'_> {
+impl<B: RawLambdaBuilder> std::ops::Deref for LocArena<'_, B> {
     type Target = ParseArena;
 
     fn deref(&self) -> &ParseArena {
         self.arena
+    }
+}
+
+impl<'a, B: RawLambdaBuilder> Copy for LocArena<'a, B> {}
+impl<'a, B: RawLambdaBuilder> Clone for LocArena<'a, B> {
+    fn clone(&self) -> Self {
+        *self
     }
 }
