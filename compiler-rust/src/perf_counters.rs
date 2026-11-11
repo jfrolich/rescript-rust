@@ -14,7 +14,7 @@ use crate::types::typecore::ComponentLookupApi;
 pub(crate) use checker::{
     CopyCause, ExpectedVar, census_exported_signature, census_generalize, census_instance,
     census_unify, census_update_level, record_copy, record_expected_var, record_fresh_var,
-    record_local_type_nodes, record_store_build_nodes,
+    record_local_type_nodes, record_plain_update_level, record_store_build_nodes,
 };
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -886,6 +886,10 @@ mod checker {
     static INSTANCE: WalkCounters = WalkCounters::new();
     static GENERALIZE: WalkCounters = WalkCounters::new();
     static UPDATE_LEVEL: WalkCounters = WalkCounters::new();
+    /// Level updates (counted in `UPDATE_LEVEL` too) that
+    /// `ctype::lower_plain_levels` completed, and the nodes they lowered.
+    static PLAIN_UPDATE_LEVEL_CALLS: AtomicU64 = AtomicU64::new(0);
+    static PLAIN_UPDATE_LEVEL_NODES: AtomicU64 = AtomicU64::new(0);
 
     const UNIFY_SHAPES: usize = 8;
     const UNIFY_SHAPE_NAMES: [&str; UNIFY_SHAPES] = [
@@ -927,6 +931,8 @@ mod checker {
             .chain(&UNIFY)
             .chain(walks.iter().flat_map(|walk| walk.all()))
             .chain([
+                &PLAIN_UPDATE_LEVEL_CALLS,
+                &PLAIN_UPDATE_LEVEL_NODES,
                 &TYPE_CONTEXTS,
                 &LOCAL_NODES,
                 &STORE_BUILDS,
@@ -977,6 +983,12 @@ mod checker {
             .get_or_insert_with(HashMap::new)
             .entry((location.file(), location.line()))
             .or_default() += 1;
+    }
+
+    /// A level update took the plain path and lowered `nodes` nodes.
+    pub(crate) fn record_plain_update_level(nodes: usize) {
+        PLAIN_UPDATE_LEVEL_CALLS.fetch_add(1, Ordering::Relaxed);
+        PLAIN_UPDATE_LEVEL_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
     }
 
     /// A fresh variable was made only to be the expected type of an
@@ -1502,6 +1514,15 @@ mod checker {
         INSTANCE.print("instance", "copied_nodes");
         GENERALIZE.print("generalize", "visits");
         UPDATE_LEVEL.print("update_level", "visits");
+        let update_calls = UPDATE_LEVEL.calls.load(Ordering::Relaxed);
+        let update_visits = UPDATE_LEVEL.visits.load(Ordering::Relaxed);
+        let plain_calls = PLAIN_UPDATE_LEVEL_CALLS.load(Ordering::Relaxed);
+        let plain_nodes = PLAIN_UPDATE_LEVEL_NODES.load(Ordering::Relaxed);
+        eprintln!(
+            "[compiler-counter] update_level_plain calls={plain_calls} ({}) nodes={plain_nodes} ({})",
+            percent(plain_calls, update_calls),
+            percent(plain_nodes, update_visits),
+        );
 
         let unify_total: u64 = UNIFY
             .iter()

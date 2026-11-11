@@ -2714,6 +2714,9 @@ fn lower_plain_levels(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef)
         .then(|| level_update_is_plain(ctx, env, level, ty, &mut TypeExprRefSet::new()));
     let mut lowered = smallvec::SmallVec::new();
     if lower(ctx, level, ty, &mut lowered) {
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::record_plain_update_level(lowered.len());
+        }
         assert!(
             general_is_plain != Some(false),
             "plain level update skipped an expansion or an escaping constructor"
