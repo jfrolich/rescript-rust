@@ -84,6 +84,8 @@
 
 #### :house: Internal
 
+- Skip the walk that collects a program's assigned variables when it contains no assignment; the walk ran for every optimization pass and every inlined call. https://github.com/jfrolich/rescript-rust/pull/94
+
 - Load a compiled module's interface into its first dependent without decoding it again, and keep the syntax tree nodes the built-in frontend pass leaves unchanged instead of copying them. https://github.com/jfrolich/rescript-rust/pull/89 https://github.com/jfrolich/rescript-rust/pull/85
 
 - Compute the item digests and item references of a compiled module's interface once, when it is published, instead of decoding the stored interface again for each. https://github.com/jfrolich/rescript-rust/pull/87
