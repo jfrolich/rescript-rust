@@ -7,8 +7,9 @@ export function parse(input: unknown): unknown {
   return input;
 }
 
-// A union with nothing to tell its members apart at run time.
-export type Target = { id: string } | { name: string };
+// A union with nothing to tell its members apart at run time: both have
+// `id`, and `label` may be missing from either.
+export type Target = { id: string; label?: string } | { id: string };
 export function resolve(target: Target): string {
   return "";
 }

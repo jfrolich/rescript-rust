@@ -54,6 +54,15 @@
     ]
   },
   {
+    "id": "shapes",
+    "title": "Objects in unions",
+    "summary": "Plain objects are told apart by their fields, so a union of them is a variant.",
+    "files": [
+      "jobs.ts",
+      "Demo.res"
+    ]
+  },
+  {
     "id": "module",
     "title": "A whole module",
     "summary": "module Api = %ts(...) imports every export; type t = %ts(\"...#Name\") imports one type.",
