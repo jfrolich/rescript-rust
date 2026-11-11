@@ -121,7 +121,6 @@ pub fn write_in_process_record(
                 .unwrap_or_default();
             remove_obsolete_outputs(package, build_state.recorded_outputs.get(package_name), &current);
             build::state_db::write_record(package, previous, &record);
-            build::state_db::remove_legacy_files(package);
             drop_in_background(record);
         });
 }
@@ -223,8 +222,7 @@ fn remove_gentype_file(package: &Package, source: &Path) {
 
 /// Read the previous in-process build's records and remove the outputs of
 /// sources it compiled that no longer exist: the JS output and any typed
-/// artifacts in `lib/bs` and `lib/ocaml`. Returns (removed sources, recorded
-/// sources).
+/// artifacts in `lib/rescript`. Returns (removed sources, recorded sources).
 pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
@@ -251,11 +249,12 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
             }
             removed += 1;
             let basename = helpers::file_path_to_compiler_asset_basename(path, &package.namespace);
-            let dir = path.parent().unwrap_or_else(|| Path::new(""));
-            for extension in ["cmi", "cmt", "cmti", "cmj", "in-process-js.json"] {
-                let file = format!("{basename}.{extension}");
-                let _ = std::fs::remove_file(package.get_build_path().join(dir).join(&file));
-                let _ = std::fs::remove_file(package.get_ocaml_build_path().join(&file));
+            // Another build (such as rescript-ocaml's) may have left the
+            // removed module's typed artifacts, which dependents would
+            // otherwise still find on the `-I` path.
+            for extension in ["cmi", "cmt", "cmti", "cmj"] {
+                let _ =
+                    std::fs::remove_file(package.get_build_path().join(format!("{basename}.{extension}")));
             }
             if path
                 .extension()
@@ -375,15 +374,33 @@ pub fn clean_package(show_progress: bool, plain_output: bool, package: &Package)
         let _ = std::io::stdout().flush();
     }
 
-    let path_str = package.get_build_path();
-    let path = std::path::Path::new(&path_str);
-    let _ = std::fs::remove_dir_all(path);
+    clean_artifacts(package);
+}
 
-    let path_str = package.get_ocaml_build_path();
-    let path = std::path::Path::new(&path_str);
-    let _ = std::fs::remove_dir_all(path);
-
-    // The build state database lives in the build directory removed above;
-    // remove what older builds kept elsewhere.
-    build::state_db::remove_legacy_files(package);
+/// Remove every artifact of `package`: empty its artifact directory but for
+/// the lock files (a clean runs while it holds the build lock, and a watcher
+/// holds the watch lock), and remove the artifact directories of earlier
+/// versions. Mirrors rewatch-ocaml/build_artifacts.ml `clean`.
+fn clean_artifacts(package: &Package) {
+    let artifact_dir = package.get_build_path();
+    if let Ok(entries) = std::fs::read_dir(&artifact_dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            if name.to_str().is_some_and(crate::lock::is_lock_file) {
+                continue;
+            }
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(file_type) if file_type.is_dir() => {
+                    let _ = std::fs::remove_dir_all(path);
+                }
+                _ => {
+                    let _ = std::fs::remove_file(path);
+                }
+            }
+        }
+    }
+    for legacy in package.legacy_build_paths() {
+        let _ = std::fs::remove_dir_all(legacy);
+    }
 }

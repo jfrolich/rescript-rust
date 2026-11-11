@@ -59,6 +59,28 @@ impl LockKind {
     }
 }
 
+/// Where a project's locks live: its artifact directory, `lib/rescript`
+/// (as rewatch-ocaml's `Build_lock`).
+pub fn lock_dir(project_folder: &Path) -> std::path::PathBuf {
+    crate::build::packages::get_build_path(project_folder)
+}
+
+/// Whether `name` in an artifact directory belongs to a lock, which a clean
+/// keeps: a lock's PID marker, its guard, or another build system's takeover
+/// marker and candidates (rewatch-ocaml's `Build_artifacts.is_lock_file`).
+pub fn is_lock_file(name: &str) -> bool {
+    [LockKind::Build, LockKind::Watch].iter().any(|kind| {
+        let lock = kind.file_name();
+        name == lock
+            || name.strip_suffix(".takeover") == Some(lock)
+            || name
+                .strip_prefix('.')
+                .and_then(|name| name.strip_suffix(".guard"))
+                == Some(lock)
+    }) || name.starts_with(".build-lock-")
+        || name.starts_with(".watch-lock-")
+}
+
 const TIMEOUT_SECONDS: u64 = 60;
 
 fn get(kind: LockKind, folder: &str) -> Lock {
@@ -67,7 +89,7 @@ fn get(kind: LockKind, folder: &str) -> Lock {
         return Lock::Error(Error::ProjectFolderMissing(project_folder.to_path_buf()));
     }
 
-    let lib_dir = project_folder.join("lib");
+    let lib_dir = lock_dir(project_folder);
     let location = lib_dir.join(kind.file_name());
     let pid = process::id();
 
@@ -150,8 +172,7 @@ pub fn drop_lock(kind: LockKind, folder: &str) -> Result<()> {
         return Ok(());
     }
 
-    let lib_dir = project_folder.join("lib");
-    let location = lib_dir.join(kind.file_name());
+    let location = lock_dir(project_folder).join(kind.file_name());
 
     match fs::read_to_string(&location) {
         Ok(contents) if contents.trim() == process::id().to_string() => {
@@ -196,6 +217,30 @@ mod tests {
     }
 
     #[test]
+    fn lock_files_are_recognized() {
+        for name in [
+            "build.lock",
+            "watch.lock",
+            ".build.lock.guard",
+            ".watch.lock.guard",
+            "watch.lock.takeover",
+            ".build-lock-1234.tmp",
+            ".watch-lock-1234.tmp",
+        ] {
+            assert!(is_lock_file(name), "{name} belongs to a lock");
+        }
+        for name in [
+            ".compiler.log",
+            "rescript.sqlite",
+            "A.cmi",
+            "build.lock.guard",
+            "lock",
+        ] {
+            assert!(!is_lock_file(name), "{name} is no lock file");
+        }
+    }
+
+    #[test]
     fn creates_lock_when_project_folder_exists() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
@@ -210,12 +255,13 @@ mod tests {
         }
 
         assert!(
-            project_folder.join("lib").exists(),
-            "lib directory should be created"
+            project_folder.join("lib").join("rescript").exists(),
+            "lib/rescript directory should be created"
         );
         assert!(
             project_folder
                 .join("lib")
+                .join("rescript")
                 .join(LockKind::Watch.file_name())
                 .exists(),
             "lockfile should be created"
@@ -226,7 +272,7 @@ mod tests {
     fn ignores_marker_without_held_guard() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = lock_dir(&project_folder);
         fs::create_dir_all(&lib_dir).expect("lib directory should be created");
         fs::write(lib_dir.join(LockKind::Watch.file_name()), "1").expect("lockfile should be written");
 
@@ -243,7 +289,7 @@ mod tests {
     fn returns_locked_for_active_watch_lock() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = lock_dir(&project_folder);
         let current_pid = process::id();
 
         fs::create_dir_all(&lib_dir).expect("lib directory should be created");
@@ -266,7 +312,7 @@ mod tests {
     fn waits_for_active_build_lock_to_be_removed() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = lock_dir(&project_folder);
         let build_lock_path = lib_dir.join(LockKind::Build.file_name());
         let current_pid = process::id();
 
@@ -342,7 +388,7 @@ mod tests {
     fn drop_lock_does_not_remove_another_process_lock() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = lock_dir(&project_folder);
         let build_lock_path = lib_dir.join(LockKind::Build.file_name());
         let other_pid = process::id().checked_add(1).expect("PID should not overflow");
 
@@ -365,7 +411,7 @@ mod tests {
     fn drop_lock_removes_existing_build_lock() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().join("project");
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = lock_dir(&project_folder);
         let build_lock_path = lib_dir.join(LockKind::Build.file_name());
 
         fs::create_dir_all(&lib_dir).expect("lib directory should be created");

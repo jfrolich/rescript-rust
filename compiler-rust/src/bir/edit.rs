@@ -106,7 +106,7 @@ impl Bir {
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
             self.parents[id.index()] = None;
-            self.weights[id.index()] = (0, 0);
+            self.weights[id.index()] = 0;
             if !self.cold.is_empty() {
                 self.cold[id.index()] = None;
             }
@@ -115,7 +115,7 @@ impl Bir {
             let id = NodeId(index(self.nodes.len()));
             self.nodes.push(node);
             self.parents.push(None);
-            self.weights.push((0, 0));
+            self.weights.push(0);
             self.capture_chain.push((0, false));
             if !self.cold.is_empty() {
                 self.cold.push(None);
@@ -369,12 +369,6 @@ impl Bir {
             Op::Fun | Op::JFun | Op::While | Op::SWhile | Op::For | Op::SForRange
         )
     }
-    fn invalidate_weights(&mut self) {
-        self.weight_epoch = self
-            .weight_epoch
-            .checked_add(1)
-            .expect("weight epoch overflow");
-    }
     fn register_kind(&mut self, node: Node, add: bool) {
         if self.is_weighted_switch(node) {
             if add {
@@ -382,7 +376,6 @@ impl Bir {
             } else {
                 self.weighted_switches -= 1;
             }
-            self.invalidate_weights();
         }
         if Self::is_capture_kind(node) {
             if add {
@@ -398,12 +391,13 @@ impl Bir {
             return 1;
         }
         let requested = id;
-        let mut path = SmallVec::<[(NodeId, u32); 8]>::new();
+        let mut path = std::mem::take(&mut self.weight_path);
+        debug_assert!(path.is_empty());
         let mut weight;
         loop {
             self.visit();
-            let (epoch, cached) = self.weights[id.index()];
-            if epoch == self.weight_epoch && cached != 0 {
+            let cached = self.weights[id.index()];
+            if cached != 0 {
                 weight = cached;
                 break;
             }
@@ -411,18 +405,19 @@ impl Bir {
                 path.push((id, self.edge_weight(parent, id)));
                 id = parent;
             } else {
-                self.weights[id.index()] = (self.weight_epoch, 1);
+                self.weights[id.index()] = 1;
                 weight = 1;
                 break;
             }
         }
-        for (id, multiplier) in path.into_iter().rev() {
+        for (id, multiplier) in path.drain(..).rev() {
             weight = weight
                 .checked_mul(multiplier)
                 .expect("Bir use weight overflow");
-            self.weights[id.index()] = (self.weight_epoch, weight);
+            self.weights[id.index()] = weight;
         }
-        debug_assert!(self.weights[requested.index()].1 != 0);
+        self.weight_path = path;
+        debug_assert!(self.weights[requested.index()] != 0);
         weight
     }
     fn adjust_direct(&mut self, id: NodeId, delta: i64) {
@@ -452,8 +447,13 @@ impl Bir {
         }
     }
     fn adjust_counts(&mut self, root: NodeId, delta: i64) {
-        let mut stack = vec![(root, delta)];
+        let mut stack = std::mem::take(&mut self.count_stack);
+        debug_assert!(stack.is_empty());
+        stack.push((root, delta));
         while let Some((id, delta)) = stack.pop() {
+            // This walk changes precisely the use weights of moved content or
+            // a newly doubled default. All other cached paths stay valid.
+            self.weights[id.index()] = 0;
             self.adjust_direct(id, delta);
             for child in self.view(id).children() {
                 stack.push((
@@ -464,6 +464,7 @@ impl Bir {
                 ));
             }
         }
+        self.count_stack = stack;
     }
 
     pub(super) fn effects(
@@ -765,14 +766,12 @@ impl Bir {
         self.unbind(replacement);
         self.nodes[target.index()] = content;
         self.tails_valid = false;
-        if self.weighted_switches != 0 {
-            self.invalidate_weights();
-        }
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
             self.parents[child.index()] = Some(target);
         }
         self.nodes[replacement.index()] = Node::free();
+        self.weights[replacement.index()] = 0;
         self.parents[replacement.index()] = None;
         self.free_nodes.push(replacement);
         if !self.cold.is_empty() {
@@ -781,6 +780,10 @@ impl Bir {
         }
         self.bind(target);
         self.adjust_counts(target, i64::from(target_weight));
+        // The slot keeps its parent edge and therefore its incoming weight,
+        // even when its contents change kind. Descendant caches were cleared
+        // above; no node outside the replaced subtree changed weight.
+        self.weights[target.index()] = target_weight;
         self.repair(target);
         if let Some(parent) = parent {
             self.repair(parent);
@@ -801,7 +804,10 @@ impl Bir {
     }
     fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
         self.tails_valid = false;
-        let mut stack = vec![(root, self.weight(root))];
+        let root_weight = self.weight(root);
+        let mut stack = std::mem::take(&mut self.release_stack);
+        debug_assert!(stack.is_empty());
+        stack.push((root, root_weight));
         while let Some((id, weight)) = stack.pop() {
             if Some(id) == keep {
                 continue;
@@ -817,6 +823,7 @@ impl Bir {
             self.adjust_direct(id, -i64::from(weight));
             self.unbind(id);
             self.register_kind(self.nodes[id.index()], false);
+            self.weights[id.index()] = 0;
             if id != root || free_root {
                 self.nodes[id.index()] = Node::free();
                 self.parents[id.index()] = None;
@@ -826,6 +833,7 @@ impl Bir {
                 self.free_nodes.push(id);
             }
         }
+        self.release_stack = stack;
     }
     fn drain_dead(&mut self) {
         // A worklist avoids recursive cascades when releasing one value kills another.
@@ -1198,6 +1206,26 @@ mod tests {
 
     #[test]
     fn seeded_random_edits_validate_after_every_edit() {
+        fn with_weighted_default(b: &mut Bir, body: NodeId) -> NodeId {
+            let scrutinee = lit(b);
+            let header = b.switch_header(SwitchHeader {
+                keys: vec![],
+                clauses: vec![],
+                constants: 0,
+                consts_full: false,
+                blocks_full: false,
+                has_default: true,
+                dispatch: SwitchDispatch::Direct,
+            });
+            b.new_node(
+                View::Switch {
+                    scrutinee,
+                    actions: &[body],
+                    header,
+                },
+                0,
+            )
+        }
         // xorshift64: fixed seed and no dependency on a platform RNG or hash order.
         let mut state = 0x7b8c_9d01_2345_6789u64;
         let mut rand = || {
@@ -1208,8 +1236,18 @@ mod tests {
         };
         let mut b = Bir::for_typed_exprs(64);
         let vars: Vec<_> = (0..8).map(|i| b.new_var_id(Name::new("free"), i)).collect();
-        let mut root = lit(&mut b);
+        let initial = var(&mut b, vars[0]);
+        let mut root = with_weighted_default(&mut b, initial);
+        b.validate(Some(root), false).unwrap();
         for step in 0..5000 {
+            // Start every edit in a weighted module with all cache entries warm,
+            // so the oracle also detects missing local invalidation.
+            assert!(b.weighted_switches > 0);
+            let mut pending = vec![root];
+            while let Some(id) = pending.pop() {
+                b.weight(id);
+                pending.extend(b.view(id).children());
+            }
             match rand() % 9 {
                 0 => {
                     let new = var(&mut b, vars[(rand() % 8) as usize]);
@@ -1290,6 +1328,9 @@ mod tests {
                     b.validate(None, false).unwrap();
                     root = lit(&mut b);
                 }
+            }
+            if b.weighted_switches == 0 {
+                root = with_weighted_default(&mut b, root);
             }
             b.mark_tail_positions(root);
             b.validate(Some(root), true)
@@ -2669,6 +2710,52 @@ mod incremental_cost_tests {
     }
 
     #[test]
+    fn weighted_module_leaf_replacements_do_not_walk_the_spine() {
+        let mut b = Bir::default();
+        let (root, leaf) = chain(&mut b, 10_000);
+        let View::Let {
+            value: Some(value), ..
+        } = b.view(root)
+        else {
+            panic!()
+        };
+        let scrutinee = b.new_node(View::JNull, 0);
+        let default = b.new_node(View::JNull, 0);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![],
+            clauses: vec![],
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: crate::lambda::SwitchDispatch::Direct,
+        });
+        let switch = b.new_node(
+            View::Switch {
+                scrutinee,
+                actions: &[default],
+                header,
+            },
+            0,
+        );
+        b.replace(value, switch);
+        b.validate(Some(root), false).unwrap();
+        assert_eq!(b.weighted_switches, 1);
+        assert_eq!(b.weights[leaf.index()], 0);
+        b.steps.set(0);
+        for _ in 0..10_000 {
+            let new = b.new_node(View::JNull, 0);
+            b.replace(leaf, new);
+        }
+        let steps = b.steps.get();
+        println!(
+            "COST weighted-module replace 10000 times at depth 10000: {steps} visits (bound 64*n)"
+        );
+        assert!(steps <= 64 * 10_000, "{steps} visits");
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
     fn fifty_thousand_distinct_strings_have_linear_lookup_comparisons() {
         let mut b = Bir::default();
         let ids: Vec<_> = (0..50_000)
@@ -2886,5 +2973,156 @@ mod bulk_tests {
             let incremental = sample(seed, false);
             assert_eq!(bulk.vars.flags, incremental.vars.flags, "seed {seed}");
         }
+    }
+}
+
+#[cfg(test)]
+mod local_weight_tests {
+    use super::*;
+    use crate::lambda::SwitchDispatch;
+    use crate::name::Name;
+
+    fn weighted(b: &mut Bir, default: NodeId) -> NodeId {
+        let scrutinee = b.new_node(View::JNull, 0);
+        let header = b.switch_header(SwitchHeader {
+            keys: vec![],
+            clauses: vec![],
+            constants: 0,
+            consts_full: false,
+            blocks_full: false,
+            has_default: true,
+            dispatch: SwitchDispatch::Direct,
+        });
+        b.new_node(
+            View::Switch {
+                scrutinee,
+                actions: &[default],
+                header,
+            },
+            0,
+        )
+    }
+
+    #[test]
+    fn switch_edits_preserve_unrelated_caches_and_clear_only_moved_weights() {
+        let mut b = Bir::default();
+        let var = b.new_var_id(Name::new("free"), 0);
+        let left_use = b.new_node(View::Var { var }, 0);
+        let left = weighted(&mut b, left_use);
+        let moved = b.new_node(View::Var { var }, 0);
+        assert_eq!(b.weight(left_use), 2);
+        assert_eq!(b.weight(moved), 1);
+
+        // Creating another weighted switch invalidates its default, not left.
+        let right = weighted(&mut b, moved);
+        assert_eq!(b.weights[left_use.index()], 2);
+        assert_eq!(b.weights[moved.index()], 0);
+        assert_eq!(b.weight(moved), 2);
+        let root = b.new_node(
+            View::Seq {
+                first: left,
+                second: right,
+            },
+            0,
+        );
+        b.validate(Some(root), false).unwrap();
+        assert_eq!(b.vars.uses(var), 4);
+
+        // Promote the default out of its weighted parent: the surviving slot
+        // keeps weight 1, whereas the old default's slot becomes free.
+        b.replace(right, moved);
+        assert_eq!(b.weights[left_use.index()], 2);
+        assert_eq!(b.weights[right.index()], 1);
+        assert_eq!(b.weights[moved.index()], 0);
+        assert_eq!(b.vars.uses(var), 3);
+        b.validate(Some(root), false).unwrap();
+
+        // Slot reuse starts unknown, even when that slot used to have weight 2.
+        let reused = b.new_node(View::Var { var }, 0);
+        assert_eq!(reused, moved);
+        assert_eq!(b.weights[reused.index()], 0);
+        let new_switch = weighted(&mut b, reused);
+        b.replace(right, new_switch);
+        assert_eq!(b.weights[left_use.index()], 2);
+        assert_eq!(b.weights[reused.index()], 0);
+        assert_eq!(b.weight(reused), 2);
+        assert_eq!(b.vars.uses(var), 4);
+        b.validate(Some(root), false).unwrap();
+
+        // Replacing a switch by an ordinary node and releasing its old default
+        // must not invalidate a cached default in a different subtree.
+        let plain = b.new_node(View::JNull, 0);
+        b.replace(right, plain);
+        assert_eq!(b.weights[left_use.index()], 2);
+        assert_eq!(b.weights[reused.index()], 0);
+        assert_eq!(b.vars.uses(var), 2);
+        b.validate(Some(root), false).unwrap();
+        b.release(root);
+        b.validate(None, false).unwrap();
+    }
+
+    #[test]
+    fn nested_default_promotion_reweights_descendants_without_touching_siblings() {
+        let mut b = Bir::default();
+        let var = b.new_var_id(Name::new("v"), 0);
+        let inner_use = b.new_node(View::Var { var }, 0);
+        let inner = weighted(&mut b, inner_use);
+        let outer = weighted(&mut b, inner);
+        let sibling = b.new_node(View::Var { var }, 0);
+        let root = b.new_node(
+            View::Seq {
+                first: outer,
+                second: sibling,
+            },
+            0,
+        );
+        assert_eq!(b.weight(inner_use), 4);
+        assert_eq!(b.weight(sibling), 1);
+        assert_eq!(b.vars.uses(var), 5);
+        b.replace(outer, inner);
+        assert_eq!(b.weights[sibling.index()], 1);
+        assert_eq!(b.weights[outer.index()], 1);
+        assert_eq!(b.weights[inner_use.index()], 0);
+        assert_eq!(b.weight(inner_use), 2);
+        assert_eq!(b.vars.uses(var), 3);
+        b.validate(Some(root), false).unwrap();
+    }
+
+    #[test]
+    fn count_release_and_weight_walks_reuse_their_buffers() {
+        let mut b = Bir::default();
+        let values: Vec<_> = (0..100).map(|_| b.new_node(View::JNull, 0)).collect();
+        let mut root = b.new_node(View::JArray { values: &values }, 0);
+        root = weighted(&mut b, root);
+        let count_buffer = b.count_stack.as_ptr();
+        let count_capacity = b.count_stack.capacity();
+        assert!(count_capacity >= values.len());
+        for _ in 0..10 {
+            b.adjust_counts(root, 0);
+            assert!(b.count_stack.is_empty());
+            assert_eq!(b.count_stack.as_ptr(), count_buffer);
+            assert_eq!(b.count_stack.capacity(), count_capacity);
+        }
+        b.weight(values[0]);
+        let weight_buffer = b.weight_path.as_ptr();
+        let weight_capacity = b.weight_path.capacity();
+        assert!(weight_capacity > 0);
+        for &id in &values[1..] {
+            b.weight(id);
+        }
+        assert!(b.weight_path.is_empty());
+        assert_eq!(b.weight_path.as_ptr(), weight_buffer);
+        assert_eq!(b.weight_path.capacity(), weight_capacity);
+        b.release(root);
+        let release_buffer = b.release_stack.as_ptr();
+        let release_capacity = b.release_stack.capacity();
+        assert!(release_capacity >= values.len());
+        let values: Vec<_> = (0..100).map(|_| b.new_node(View::JNull, 0)).collect();
+        let root = b.new_node(View::JArray { values: &values }, 0);
+        b.release(root);
+        assert!(b.release_stack.is_empty());
+        assert_eq!(b.release_stack.as_ptr(), release_buffer);
+        assert_eq!(b.release_stack.capacity(), release_capacity);
+        b.validate(None, false).unwrap();
     }
 }

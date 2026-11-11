@@ -2,7 +2,7 @@ use crate::helpers;
 
 use super::build_types::{BuildCommandState, CompilerInfo};
 use super::packages;
-use super::{clean, logs, state_db};
+use super::{clean, state_db};
 use ahash::AHashMap;
 use rayon::prelude::*;
 
@@ -74,13 +74,24 @@ pub fn verify_compiler_info_with(
         .values()
         .par_bridge()
         .filter(|package| {
+            // A build of ReScript 12 or earlier, or of an earlier version of
+            // this build system, left lib/bs or lib/ocaml: the clean removes
+            // them, even when this version built the package before (as on
+            // another branch). Mirrors rewatch-ocaml/compiler_info.ml
+            // `legacy_build_exists`.
+            if package.legacy_build_paths().iter().any(|path| path.exists()) {
+                return true;
+            }
+            // No recorded build: nothing to compare. Another build system's
+            // artifacts in lib/rescript (rescript-ocaml's, or the OCaml
+            // reference build's) stay, as rewatch-ocaml keeps them when it
+            // finds no compiler-info.json; in-process builds read none of
+            // them.
             let Some(meta) = metas
                 .get(&package.name)
                 .filter(|meta| meta.contains_key(BSC_HASH))
             else {
-                // No recorded build: if the build folder holds a compiler log
-                // anyway, it came from a build we know nothing about.
-                return logs::does_ocaml_build_compiler_log_exist(package);
+                return false;
             };
             let Some(current) = current_entries(package, compiler, source_map_args) else {
                 return true;
@@ -196,7 +207,7 @@ mod tests {
     }
 
     fn write_test_compiler_info(package: &Package, compiler: &CompilerInfo, source_map_args: Vec<&str>) {
-        fs::create_dir_all(package.get_ocaml_build_path()).expect("ocaml build directory should be created");
+        fs::create_dir_all(package.get_build_path()).expect("artifact directory should be created");
         let source_map_args: Vec<String> = source_map_args.into_iter().map(str::to_string).collect();
         let entries = current_entries(package, compiler, &source_map_args)
             .expect("rescript config hash should be available");
@@ -233,7 +244,6 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let old_compiler = test_compiler(temp_dir.path());
         let package = test_package(temp_dir.path(), "dep");
-        let build_path = package.get_build_path();
         let db = state_db::path(&package);
         write_test_compiler_info(&package, &old_compiler, vec![]);
         state_db::write_runtime_interfaces(&db, "key", &[("Stdlib".to_string(), vec![1, 2, 3])]);
@@ -249,8 +259,63 @@ mod tests {
             result,
             CompilerCheckResult::CleanedPackagesDueToCompiler
         ));
-        assert!(!build_path.exists());
+        // The clean empties the artifact directory, database included.
+        assert!(!db.exists());
         assert!(state_db::read_runtime_interfaces(&db, "key").is_none());
+    }
+
+    /// A lib/bs or lib/ocaml left by an earlier version cleans the package,
+    /// which removes it, also when this version's record matches.
+    #[test]
+    fn verify_compiler_info_cleans_package_with_legacy_artifact_directories() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let compiler = test_compiler(temp_dir.path());
+        let package = test_package(temp_dir.path(), "dep");
+        write_test_compiler_info(&package, &compiler, vec![]);
+        let [legacy_bs, legacy_ocaml] = package.legacy_build_paths();
+        fs::create_dir_all(legacy_bs.join("src")).expect("lib/bs should be created");
+        fs::write(legacy_bs.join("src").join("A.cmi"), "old").expect("old artifact should be written");
+        fs::create_dir_all(&legacy_ocaml).expect("lib/ocaml should be created");
+        fs::write(legacy_ocaml.join("A.cmi"), "old").expect("old artifact should be written");
+        // The clean runs while the build holds its lock in lib/rescript.
+        let build_path = package.get_build_path();
+        fs::write(build_path.join("build.lock"), "1").expect("lock should be written");
+        fs::write(build_path.join(".build.lock.guard"), "").expect("guard should be written");
+        fs::create_dir_all(build_path.join("incremental")).expect("editor directory should be created");
+        fs::write(build_path.join("incremental").join("A.cmt"), "").expect("editor file should be written");
+        let db = state_db::path(&package);
+
+        let result = verify_compiler_info(&packages_map(package), &compiler, &[]);
+
+        assert!(matches!(
+            result,
+            CompilerCheckResult::CleanedPackagesDueToCompiler
+        ));
+        assert!(!legacy_bs.exists());
+        assert!(!legacy_ocaml.exists());
+        assert!(!db.exists());
+        assert!(!build_path.join("incremental").exists());
+        assert!(build_path.join("build.lock").exists());
+        assert!(build_path.join(".build.lock.guard").exists());
+    }
+
+    /// Without a record of this build system, the artifacts of another build
+    /// (rescript-ocaml's, or the OCaml reference build's) in the artifact
+    /// directory stay.
+    #[test]
+    fn verify_compiler_info_keeps_another_build_systems_artifacts() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let compiler = test_compiler(temp_dir.path());
+        let package = test_package(temp_dir.path(), "dep");
+        let build_path = package.get_build_path();
+        fs::create_dir_all(&build_path).expect("artifact directory should be created");
+        fs::write(build_path.join(".compiler.log"), "#Start(0)\n#Done(0)\n").expect("log should be written");
+        fs::write(build_path.join("A.cmi"), "other").expect("artifact should be written");
+
+        let result = verify_compiler_info(&packages_map(package), &compiler, &[]);
+
+        assert!(matches!(result, CompilerCheckResult::SameCompilerAsLastRun));
+        assert!(build_path.join("A.cmi").exists());
     }
 
     #[test]
@@ -258,7 +323,7 @@ mod tests {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let compiler = test_compiler(temp_dir.path());
         let package = test_package(temp_dir.path(), "dep");
-        let build_path = package.get_build_path();
+        let db = state_db::path(&package);
         let source_map_args = vec!["-bs-source-map".to_string(), "linked".to_string()];
         write_test_compiler_info(&package, &compiler, vec!["-bs-source-map", "false"]);
 
@@ -268,6 +333,6 @@ mod tests {
             result,
             CompilerCheckResult::CleanedPackagesDueToCompiler
         ));
-        assert!(!build_path.exists());
+        assert!(!db.exists());
     }
 }
