@@ -17,6 +17,15 @@ concurrency:
   # A trunk run is left to finish, so that it saves its caches.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  RUST_BACKTRACE: "1"
+  # Everything here checks behaviour, which link-time optimization does not
+  # change, and fat LTO is most of a release build's time. The Instruction
+  # count workflow builds the shipped configuration.
+  CARGO_PROFILE_RELEASE_LTO: "off"
+
+# `build` makes the rescript executable that the parity jobs and the
+# compiler tests use; the build system tests compile on their own meanwhile.
 jobs:
   compiler-warnings:
     runs-on: ubuntu-24.04
@@ -34,14 +43,57 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --manifest-path compiler-rust/Cargo.toml --all-features --no-deps
 
-  release-parity:
+  build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      RUST_BACKTRACE: "1"
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
 
+      # rust-toolchain.toml pins the toolchain of every Rust build here.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      # Only the compiled dependencies are cached: Cargo rebuilds this
+      # repository's crates after a fresh checkout whatever is restored.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rewatch -> target
+          shared-key: validation-release
+          save-if: ${{ github.event_name == 'push' }}
+
+      - name: Build release Rust compiler and build system
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          tar -cf rescript.tar rewatch/target/release/rescript
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: rescript
+          path: rescript.tar
+          retention-days: 3
+
+  build-system-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: rewatch -> target
+          shared-key: validation-release
+          save-if: false
+
+      - uses: ./.github/actions/setup-node
+
+      - name: Test release build system
+        run: cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      # The parity scripts' own tests, here because this job needs no
+      # executable and finishes before the parity jobs.
       - name: Test parity failure reporting
         run: |
           python3 scripts/test_js_output_fixture_reporting.py
@@ -50,35 +102,24 @@ jobs:
           python3 scripts/test_parser_ast_parity_exit.py
           python3 scripts/test_error_output_parity_exit.py
 
-      # rust-toolchain.toml pins the toolchain of every Rust build here.
+  compiler-tests:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
-      # Saved by trunk runs only (see the end of the job). Cargo rebuilds this
-      # repository's crates after a fresh checkout whatever is restored, so
-      # what a run gets from it is the compiled dependencies.
-      - uses: actions/cache/restore@v5
-        id: rust-cache
+      - uses: Swatinem/rust-cache@v2
         with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler-rust/target
-            rewatch/target
-          key: rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+          workspaces: compiler-rust -> target
+          shared-key: validation-compiler-tests
+          save-if: ${{ github.event_name == 'push' }}
 
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/setup-linux-dependencies
-
-      # The compiler crate is not built on its own here: the build system
-      # links it, and the compiler test step below compiles it standalone.
-      - name: Build release Rust compiler and build system
-        id: rust-build
-        run: |
-          cargo build --release --locked --manifest-path rewatch/Cargo.toml
-          ./scripts/rust_compiler_shims.sh release
 
       # The same OCaml as ci.yml: diagnostics are laid out by OCaml's Format,
       # whose break sizing changed in 5.5, and the Rust formatter follows it.
@@ -88,17 +129,13 @@ jobs:
           os: ubuntu-24.04
           cache-prefix: opam-rewrite-validation-v1
 
+      - uses: ./.github/actions/download-rescript
+
       - name: Build native reference compiler and libraries
-        # Finds the rescript executable built above up to date.
+        # Finds the downloaded rescript executable up to date.
         run: opam exec -- make lib
 
-      - name: Compare exact CLI output filenames and marshal debug output
-        run: |
-          python3 scripts/test_bsc_output_filenames.py
-          python3 scripts/test_marshal_debug_flags.py
-
       - name: Build native test corpus for compiler unit fixtures
-        id: fixtures
         # The fixtures compile tests/tests sources file by file against .cmi
         # files, which only the OCaml reference build writes.
         run: |
@@ -107,62 +144,92 @@ jobs:
 
       # The suite includes subprocess timing assertions. Run tests serially so
       # those benchmarks do not compete with one another for CPU time.
-      # This step builds only the test binary, which nothing ships from, so it
-      # skips link-time optimization: that is most of the build's time.
       - name: Test release Rust compiler
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "off"
         run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
 
-      - name: Test release build system
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: cargo test --release --locked --manifest-path rewatch/Cargo.toml
+  # The parity suites that gate a change: JavaScript output and diagnostics.
+  parity:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
 
-      - name: Typedtree parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_typedtree_parity.sh --release --parallel 2
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-linux-dependencies
+      - uses: ./.github/actions/setup-ocaml
+        with:
+          compiler: "5.5.2"
+          os: ubuntu-24.04
+          cache-prefix: opam-rewrite-validation-v1
 
-      - name: Raw Lambda parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_lambda_parity.sh --release --raw --parallel 2
+      - uses: ./.github/actions/download-rescript
 
-      - name: Optimized Lambda parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_lambda_parity.sh --release --parallel 2
+      - name: Build native reference compiler and libraries
+        run: opam exec -- make lib
+
+      # Diagnostic cases that read the runtime's or Belt's compiled files
+      # (`-I packages/@rescript/belt/lib/ocaml`) need the OCaml compiler's.
+      - name: Build the runtime and Belt with the OCaml compiler
+        run: |
+          PROJECT_ROOT="$PWD" RUST_TARGET=release bash -c \
+            'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
+
+      - name: Compare exact CLI output filenames and marshal debug output
+        run: |
+          python3 scripts/test_bsc_output_filenames.py
+          python3 scripts/test_marshal_debug_flags.py
 
       - name: JavaScript output parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         run: ./scripts/test_js_output_parity.sh --release
 
       - name: Diagnostic parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
+        if: ${{ !cancelled() }}
         # Compare normal user-facing errors, not runtime-specific backtraces.
         run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
-
-      # Keep successful build artifacts even when a later assertion fails.
-      # The job still fails; this only avoids rebuilding unchanged code.
-      - uses: actions/cache/save@v5
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler-rust/target
-            rewatch/target
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
 
       - name: Preserve failed parity diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7
         with:
-          name: parity-diagnostics-${{ github.event.pull_request.number }}
+          name: parity-diagnostics-${{ github.event.pull_request.number || github.sha }}
           path: .parity-cache
           include-hidden-files: true
           if-no-files-found: ignore
           retention-days: 7
+
+  # Diagnostic only; see "The Correctness Contract" in AGENTS.md. These help
+  # find the layer a JavaScript or diagnostic difference starts in.
+  ir-parity:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/setup-linux-dependencies
+      - uses: ./.github/actions/setup-ocaml
+        with:
+          compiler: "5.5.2"
+          os: ubuntu-24.04
+          cache-prefix: opam-rewrite-validation-v1
+
+      - uses: ./.github/actions/download-rescript
+
+      - name: Build native reference compiler and libraries
+        run: opam exec -- make lib
+
+      - name: Typedtree parity
+        continue-on-error: true
+        run: ./scripts/test_typedtree_parity.sh --release --parallel 4
+
+      - name: Raw Lambda parity
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: ./scripts/test_lambda_parity.sh --release --raw --parallel 4
+
+      - name: Optimized Lambda parity
+        if: ${{ !cancelled() }}
+        continue-on-error: true
+        run: ./scripts/test_lambda_parity.sh --release --parallel 4
