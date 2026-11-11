@@ -3850,9 +3850,9 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
                 }
             }
             ppf.str(" in record ");
-            info(ppf, &right_record_name.name());
-            ppf.str(", but in record ");
             info(ppf, &left_record_name.name());
+            ppf.str(", but in record ");
+            info(ppf, &right_record_name.name());
             match right_as {
                 Some(as_name) => {
                     ppf.str(" it is configured to be ");
@@ -3871,9 +3871,9 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
             ppf.str("The field ");
             info(ppf, label);
             ppf.str(" is missing in record ");
-            info(ppf, &right_record_name.name());
-            ppf.str(", but present in record ");
             info(ppf, &left_record_name.name());
+            ppf.str(", but present in record ");
+            info(ppf, &right_record_name.name());
         }
         V::MutableMismatch { label } => {
             ppf.str("The field ");

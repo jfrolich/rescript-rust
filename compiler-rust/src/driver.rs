@@ -11824,6 +11824,72 @@ mod tests {
         assert!(err.contains("Some required record fields are missing: b d."), "{err}");
     }
 
+    /// ctype.ml `constructor_coercion`: a variant coercion that fails on an
+    /// inline record's fields explains the first such constructor, naming
+    /// its records `v1.C` and `v2.C` (printtyp.ml prints the source record
+    /// first); a constructor that fails otherwise gives no reason.
+    #[test]
+    fn variant_coercion_explains_inline_record_fields() {
+        let compile = |source: &str| {
+            let mut options = super::CompilerOptions::default();
+            options.nopervasives = true;
+            super::compile_source_in_process(
+                source,
+                "Coerce.res",
+                "Coerce",
+                &options,
+                &crate::cmi::persistent_env::ModuleRegistry::new(),
+                false,
+                None,
+            )
+            .map(|result| result.js_output)
+            .map_err(|err| {
+                // The record names are highlighted; compare the plain text.
+                let text = format!("{err:#}");
+                let mut plain = String::with_capacity(text.len());
+                let mut rest = text.as_str();
+                while let Some(start) = rest.find("\x1b[") {
+                    plain.push_str(&rest[..start]);
+                    let tail = &rest[start..];
+                    rest = tail.find('m').map_or("", |end| &tail[end + 1..]);
+                }
+                plain.push_str(rest);
+                plain
+            })
+        };
+        let err = compile(
+            "type v1 = A(int) | B({x: float}) | C({y: int}) | D\ntype v2 = A(int) | B({x: float}) | C({mutable y: int}) | D\nlet toV2 = (a: v1) => (a :> v2)\n",
+        )
+        .expect_err("y is mutable in v2.C");
+        assert!(
+            err.contains("The record v1.C cannot be coerced to the record v2.C because:"),
+            "{err}"
+        );
+        assert!(
+            err.contains("The field y is mutable in record v2.C, but not in record v1.C."),
+            "{err}"
+        );
+        let err = compile(
+            "type v1 = A({x: float})\ntype v2 = A({x: float, y: int})\nlet toV2 = (a: v1) => (a :> v2)\n",
+        )
+        .expect_err("y is missing in v1.A");
+        assert!(
+            err.contains("The field y is missing in record v1.A, but present in record v2.A"),
+            "{err}"
+        );
+        let err = compile(
+            "type x = {x: int}\ntype y = {x: int, z: int}\nlet toY = (a: x) => (a :> y)\n",
+        )
+        .expect_err("z is missing in x");
+        assert!(
+            err.contains("The field z is missing in record x, but present in record y"),
+            "{err}"
+        );
+        let err = compile("type v1 = A(int)\ntype v2 = A(string)\nlet f = (a: v1) => (a :> v2)\n")
+            .expect_err("payloads differ");
+        assert!(!err.contains("cannot be coerced to the record"), "{err}");
+    }
+
     /// GenTypeMain.ml:93-107's walk over a parsed interface whose `"BAD"`
     /// strings are replaced with a PPX's undecodable template `Fo\xo`:
     /// `Ok(ignore_interface)`, or the offset of the template it raised at.

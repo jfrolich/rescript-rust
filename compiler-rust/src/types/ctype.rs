@@ -6284,6 +6284,15 @@ fn subtype_row(
     }
 }
 
+/// Whether a variant constructor coerces to the same-named constructor of the
+/// target variant, and if not, whether the error can say why
+/// (ctype.ml `constructor_coercion`).
+enum ConstructorCoercion {
+    Coerces,
+    FailsWith(SubtypeContext),
+    FailsUnexplained,
+}
+
 /// The `Tconstr (_, [], _), Tconstr (_, [], _)` case of `subtype_rec`
 /// (ctype.ml:3760-3950): coercion between variants and between records.
 #[allow(clippy::too_many_arguments)]
@@ -6352,9 +6361,12 @@ fn subtype_concrete_typedecls(
                     .enumerate()
                     .map(|(position, c)| (c.cd_id.name(), (position, c)))
                     .collect();
+            // ctype.ml:3769-3817: every constructor is checked; the error
+            // explains the first failure it can, an inline record's fields.
             let mut has_violation = false;
+            let mut context = None;
             for (position1, c) in c1.iter().enumerate() {
-                let violation = match (&c.cd_args, c2_by_name.get(c.cd_id.name())) {
+                let coercion = match (&c.cd_args, c2_by_name.get(c.cd_id.name())) {
                     (
                         crate::types::decl::ConstructorArguments::CstrRecord(fields1),
                         Some((
@@ -6377,14 +6389,25 @@ fn subtype_concrete_typedecls(
                                 match subtype_list(
                                     ctx, env, subtypes, trace, crate::types::type_expr::PoolSlice::from(&tl1), crate::types::type_expr::PoolSlice::from(&tl2), &mut probe,
                                 ) {
-                                    Ok(()) => probe.len() != cstrs.len(),
-                                    Err(_) => true,
+                                    Ok(()) if probe.len() == cstrs.len() => {
+                                        ConstructorCoercion::Coerces
+                                    }
+                                    // A field type mismatch gets no reason yet.
+                                    Ok(()) | Err(_) => ConstructorCoercion::FailsUnexplained,
                                 }
                             } else {
-                                true
+                                // The inline record types are named like the
+                                // compiler prints them, e.g. `v1.A`.
+                                ConstructorCoercion::FailsWith(
+                                    SubtypeContext::RecordFieldsMismatch {
+                                        left_record_name: Path::pdot(p1, c.cd_id.name()),
+                                        right_record_name: Path::pdot(p2, c.cd_id.name()),
+                                        issues: violations,
+                                    },
+                                )
                             }
                         } else {
-                            true
+                            ConstructorCoercion::FailsUnexplained
                         }
                     }
                     (
@@ -6401,19 +6424,28 @@ fn subtype_concrete_typedecls(
                         {
                             let mut probe = cstrs.clone();
                             match subtype_list(ctx, env, subtypes, trace, tl1.into(), tl2.into(), &mut probe) {
-                                Ok(()) => probe.len() != cstrs.len(),
-                                Err(_) => true,
+                                Ok(()) if probe.len() == cstrs.len() => {
+                                    ConstructorCoercion::Coerces
+                                }
+                                Ok(()) | Err(_) => ConstructorCoercion::FailsUnexplained,
                             }
                         } else {
-                            true
+                            ConstructorCoercion::FailsUnexplained
                         }
                     }
-                    _ => true,
+                    _ => ConstructorCoercion::FailsUnexplained,
                 };
-                has_violation |= violation;
+                match coercion {
+                    ConstructorCoercion::Coerces => {}
+                    ConstructorCoercion::FailsWith(reason) => {
+                        has_violation = true;
+                        context.get_or_insert(reason);
+                    }
+                    ConstructorCoercion::FailsUnexplained => has_violation = true,
+                }
             }
             if has_violation {
-                push_subtype_cstr(cstrs, trace, t1, t2, None);
+                push_subtype_cstr(cstrs, trace, t1, t2, context);
             }
             Ok(())
         }
