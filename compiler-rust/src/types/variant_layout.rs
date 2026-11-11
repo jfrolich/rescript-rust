@@ -42,6 +42,25 @@ pub(crate) enum RuntimeAnnotation {
 const NOT_UNDEFINED: &str = "notUndefined";
 const INSTANCE_OF: &str = "instanceOf";
 const TYPE_OF: &str = "typeOf";
+/// On a type with `@instanceOf`: the module the class is imported from.
+const MODULE: &str = "module";
+/// On a private record with `@instanceOf`: `@extends(: parent)` names its
+/// superclass.
+pub(crate) const EXTENDS: &str = "extends";
+
+/// What kind of declaration a runtime annotation is written on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AnnotatedKind {
+    /// An abstract type or a type abbreviation: every annotation.
+    AbstractOrAbbreviation,
+    /// A private record: `@instanceOf`, with `@extends`. Only its module
+    /// builds its values, so a record literal cannot pass for an instance.
+    PrivateRecord,
+    /// A record anyone can build.
+    PublicRecord,
+    /// A variant or an open type.
+    Other,
+}
 
 /// ast_untagged_variants.ml `unsupported_class`: why a syntactically valid
 /// `@instanceOf` path is still not accepted.
@@ -315,18 +334,64 @@ fn annotation_error(err: impl Into<AnnotationError>) -> TypeModError {
 /// annotations of a declaration whose kind is `is_abstract_or_abbreviation`.
 pub(crate) fn check_runtime_annotation<'a>(
     loc: Location,
-    is_abstract_or_abbreviation: bool,
+    kind: AnnotatedKind,
     attrs: impl IntoIterator<Item = AnnotationAttribute<'a>>,
 ) -> TypeModResult<()> {
-    match process_runtime_annotation(attrs, loc).map_err(annotation_error)? {
-        None => Ok(()),
-        Some(_) if is_abstract_or_abbreviation => Ok(()),
-        Some(annotation) => Err(annotation_error((
-            loc,
+    let attrs: Vec<AnnotationAttribute<'a>> = attrs.into_iter().collect();
+    let extends = attrs.iter().any(|attr| attr.name == EXTENDS);
+    let annotation = process_runtime_annotation(attrs, loc).map_err(annotation_error)?;
+    let error = |err: AstUntaggedVariantError| Err(annotation_error((loc, err)));
+    // A superclass is named on a record that is a class itself. An abstract
+    // class type names its superclass by abbreviating it.
+    if extends
+        && !(kind == AnnotatedKind::PrivateRecord
+            && matches!(annotation, Some(RuntimeAnnotation::InstanceOf(_))))
+    {
+        return error(AstUntaggedVariantError::ExtendsWithoutClassRecord);
+    }
+    match (annotation, kind) {
+        (None, _) | (Some(_), AnnotatedKind::AbstractOrAbbreviation) => Ok(()),
+        (Some(RuntimeAnnotation::InstanceOf(_)), AnnotatedKind::PrivateRecord) => Ok(()),
+        (Some(RuntimeAnnotation::InstanceOf(name)), AnnotatedKind::PublicRecord) => {
+            error(AstUntaggedVariantError::ClassOnPublicRecord(name))
+        }
+        (Some(annotation), _) => error(
             AstUntaggedVariantError::RuntimeAnnotationOnRepresentedType(
                 runtime_attribute_name(&annotation).to_string(),
             ),
-        ))),
+        ),
+    }
+}
+
+/// The name of the class a declaration with `@instanceOf(path)` declares:
+/// with `@module("m")` beside it, the class `path` of that module.
+fn declared_class_name(ctx: &TypeContext, decl: &TypeDeclaration, path: &str) -> TypeModResult<String> {
+    let module = decl
+        .type_attributes
+        .iter()
+        .find(|attr| attr.attr_name.txt == MODULE);
+    match module {
+        None => Ok(path.to_string()),
+        Some(attr) => match attr.attr_payload.semantic_string() {
+            Ok(Some(module)) if !module.is_empty() => {
+                Ok(crate::types::variant_runtime::module_class_name(path, module))
+            }
+            Ok(_) => Err(annotation_error((
+                ctx.resolve_loc(attr.attr_name.loc),
+                AstUntaggedVariantError::InvalidClassModule,
+            ))),
+            Err(loc) => Err(TypeModError::InvalidStringEscape {
+                loc: ctx.resolve_loc(loc),
+            }),
+        },
+    }
+}
+
+/// The class a type is declared to be, with its ancestors.
+fn declared_class(ctx: &TypeContext, env: &Env, path: &Path) -> Option<Instance> {
+    match find_type(ctx, env, path)?.type_shape.block_type() {
+        Some(BlockType::Instance(class @ Instance::Class { .. })) => Some(class.clone()),
+        _ => None,
     }
 }
 
@@ -409,10 +474,13 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
 
 /// variant_layout.ml `declaration_shape`: the shape a declaration states,
 /// resolved against what the type it abbreviates states in `env`.
+///
+/// `superclass` is the type an `@extends(: parent)` on the declaration names.
 pub(crate) fn declaration_shape(
     ctx: &TypeContext,
     env: &Env,
     decl: &TypeDeclaration,
+    superclass: Option<&Path>,
 ) -> TypeModResult<ValueShape> {
     Ok(
         match declared_runtime_annotation(ctx, decl).map_err(annotation_error)? {
@@ -420,7 +488,8 @@ pub(crate) fn declaration_shape(
             Some(RuntimeAnnotation::TypeOf(block_type)) => {
                 ValueShape::recognized_as(block_type, ShapeBlocks::fresh())
             }
-            Some(RuntimeAnnotation::InstanceOf(name)) => {
+            Some(RuntimeAnnotation::InstanceOf(path)) => {
+                let name = declared_class_name(ctx, decl, &path)?;
                 // The name is the attribute's payload string.
                 let name_string = decl
                     .type_attributes
@@ -436,8 +505,17 @@ pub(crate) fn declaration_shape(
                         _ => ShapeString::attribute(ctx, attr.attr_name.loc),
                     })
                     .expect("an @instanceOf annotation is an attribute");
+                // The superclass is the class of the abbreviated type or, for
+                // a record, of the type `@extends` names. In a recursive group
+                // that type's shape is known from the second round on.
+                let superclass = match decl.type_manifest {
+                    Some(manifest) => recognized_as(ctx, env, manifest),
+                    None => superclass
+                        .and_then(|path| declared_class(ctx, env, path))
+                        .map(BlockType::Instance),
+                };
                 let (ancestors, ancestor_blocks) =
-                    match decl.type_manifest.and_then(|m| recognized_as(ctx, env, m)) {
+                    match superclass {
                         Some(BlockType::Instance(Instance::Class {
                             name: inner,
                             ancestors,
@@ -488,11 +566,15 @@ pub(crate) fn declaration_shape(
 /// which can abbreviate each other. Each round resolves one more level of
 /// abbreviation within the group, so the rounds stop when one changes
 /// nothing.
+///
+/// `superclasses` holds, for each declaration, the type its `@extends`
+/// names.
 pub(crate) fn resolve_shapes(
     ctx: &TypeContext,
     env: &Env,
     ids: &[Ident],
     decls: &[TypeDeclaration],
+    superclasses: &[Option<Path>],
 ) -> TypeModResult<Vec<ValueShape>> {
     let with_group = |shapes: &[ValueShape]| {
         let mut env = env.clone();
@@ -509,7 +591,11 @@ pub(crate) fn resolve_shapes(
     loop {
         let shapes = decls
             .iter()
-            .map(|decl| declaration_shape(ctx, &round_env, decl))
+            .enumerate()
+            .map(|(index, decl)| {
+                let superclass = superclasses.get(index).and_then(Option::as_ref);
+                declaration_shape(ctx, &round_env, decl, superclass)
+            })
             .collect::<TypeModResult<Vec<_>>>()?;
         if n <= 1 || shapes == previous {
             return Ok(shapes);
@@ -770,18 +856,34 @@ pub(crate) fn layout_from_type_variant(
 /// typedecl.ml `check_manifest_annotation`: an annotation on an abbreviation
 /// is a claim about the abbreviated type, so it must agree with what the
 /// compiler knows about that type.
+///
+/// For a record with `@extends`, `extends` is the declared type's own path
+/// and the type named, when it is one.
 pub(crate) fn check_manifest_annotation(
     ctx: &TypeContext,
     loc: Location,
     env: &Env,
     decl: &TypeDeclaration,
+    extends: Option<(&Path, Option<&Path>)>,
 ) -> TypeModResult<()> {
     use crate::raw_lambda::typeopt::{Abstractness, Undefinedness};
     let annotation = declared_runtime_annotation(ctx, decl).map_err(annotation_error)?;
+    if let Some((own, superclass)) = extends
+        && decl.type_attributes.iter().any(|attr| attr.attr_name.txt == EXTENDS)
+    {
+        check_extends(ctx, loc, env, decl, &annotation, own, superclass)?;
+    }
     let (Some(outer), Some(manifest)) = (annotation, decl.type_manifest) else {
         return Ok(());
     };
     let error = |err: AstUntaggedVariantError| Err(annotation_error((loc, err)));
+    // A class is compared by its name, which includes its module.
+    let outer = match outer {
+        RuntimeAnnotation::InstanceOf(path) => {
+            RuntimeAnnotation::InstanceOf(declared_class_name(ctx, decl, &path)?)
+        }
+        outer => outer,
+    };
     let name = runtime_attribute_name(&outer).to_string();
     let stands_for_another = || {
         error(AstUntaggedVariantError::RuntimeAnnotationOnTypeParameter(
@@ -875,5 +977,59 @@ pub(crate) fn check_manifest_annotation(
                 ),
             )
         }
+    }
+}
+
+/// A private record with `@instanceOf` and `@extends(: parent)`: the named
+/// type is a class, the record is not its own ancestor, and the record
+/// coerces to it, so it has the superclass's fields at the same types.
+fn check_extends(
+    ctx: &TypeContext,
+    loc: Location,
+    env: &Env,
+    decl: &TypeDeclaration,
+    annotation: &Option<RuntimeAnnotation>,
+    own: &Path,
+    superclass: Option<&Path>,
+) -> TypeModResult<()> {
+    let error = |err: AstUntaggedVariantError| Err(annotation_error((loc, err)));
+    let Some(RuntimeAnnotation::InstanceOf(path)) = annotation else {
+        return error(AstUntaggedVariantError::ExtendsWithoutClassRecord);
+    };
+    let name = declared_class_name(ctx, decl, path)?;
+    let Some(superclass) = superclass else {
+        return error(AstUntaggedVariantError::ExtendsNotAClass);
+    };
+    let Some(Instance::Class {
+        name: parent,
+        ancestors,
+        ..
+    }) = declared_class(ctx, env, superclass)
+    else {
+        return error(AstUntaggedVariantError::ExtendsNotAClass);
+    };
+    if parent == name || ancestors.contains(&name) {
+        return error(AstUntaggedVariantError::ClassTwiceInChain(name));
+    }
+    // An abstract class type has no fields to compare, and nothing coerces
+    // to it but its own abbreviations.
+    let parent_is_record = matches!(
+        find_type(ctx, env, superclass).as_deref().map(|decl| &decl.type_kind),
+        Some(TypeKind::TypeRecord(..))
+    );
+    if !parent_is_record {
+        return Ok(());
+    }
+    // Both at their most general instance: the fields are then compared up
+    // to the parameters of the two types.
+    let instance = |path: &Path| {
+        let arity = find_type(ctx, env, path).map_or(0, |decl| decl.type_params.len());
+        ctx.new_constr(path.clone(), (0..arity).map(|_| ctx.new_var(None)).collect())
+    };
+    let own_type = instance(own);
+    let parent_type = instance(superclass);
+    match crate::types::ctype::subtype_now(ctx, env, own_type, parent_type) {
+        Ok(()) => Ok(()),
+        Err(_) => error(AstUntaggedVariantError::ExtendsFieldsMismatch(parent)),
     }
 }

@@ -218,9 +218,21 @@ where
 
 impl LambdaCompiler {
     fn class_constructor(&mut self, name: &str) -> Expr {
-        let mut parts = name.split('.');
-        let global = parts.next().expect("class path has global");
-        let mut expr = JE::var(Ident::create_persistent(global), &mut self.j);
+        let (path, module) = crate::types::variant_runtime::split_class_name(name);
+        let mut parts = path.split('.');
+        let first = parts.next().expect("class path has global");
+        let mut expr = match module {
+            // The export of the module, imported like a `@module` external.
+            Some(module) => {
+                let module = crate::types::external_ffi_types::ExternalModuleName {
+                    bundle: module.to_string(),
+                    module_bind_name: crate::types::external_ffi_types::ModuleBindName::PhintNothing,
+                    import_attributes: None,
+                };
+                self.translate_scoped_module_value(Some(&module), first, &[])
+            }
+            None => JE::var(Ident::create_persistent(first), &mut self.j),
+        };
         for property in parts {
             expr = self.static_index(expr, property);
         }

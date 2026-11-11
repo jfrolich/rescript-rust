@@ -103,6 +103,24 @@ impl ClassBlocks {
     }
 }
 
+/// The name of a class imported from a module, as `Instance::Class` holds
+/// it: the class path, `@`, the module specifier (`Mesh@three`). A class
+/// path has no `@`, so the first one separates the two. A global class is
+/// its path alone. The module is part of the name so that two classes named
+/// alike in different modules are different classes everywhere a class is
+/// compared: cases of a variant, ancestors, interfaces.
+pub fn module_class_name(path: &str, module: &str) -> String {
+    format!("{path}@{module}")
+}
+
+/// The class path of a class name and the module it is imported from.
+pub fn split_class_name(name: &str) -> (&str, Option<&str>) {
+    match name.split_once('@') {
+        Some((path, module)) => (path, Some(module)),
+        None => (name, None),
+    }
+}
+
 impl Instance {
     /// variant_runtime.ml `Instance.to_string`.
     pub fn as_str(&self) -> &str {

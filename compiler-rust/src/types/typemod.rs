@@ -4712,11 +4712,81 @@ fn check_declaration_runtime_annotation(
             loc: arena.to_location(name.loc),
         }
     });
+    use crate::types::variant_layout::AnnotatedKind;
+    let kind = match (&decl.ptype_kind, decl.ptype_private) {
+        (crate::parser::ast::TypeKind::Ptype_abstract, _) => AnnotatedKind::AbstractOrAbbreviation,
+        (crate::parser::ast::TypeKind::Ptype_record(_), crate::parser::ast::PrivateFlag::Private) => {
+            AnnotatedKind::PrivateRecord
+        }
+        (crate::parser::ast::TypeKind::Ptype_record(_), crate::parser::ast::PrivateFlag::Public) => {
+            AnnotatedKind::PublicRecord
+        }
+        _ => AnnotatedKind::Other,
+    };
     crate::types::variant_layout::check_runtime_annotation(
         arena.to_location(decl.ptype_loc),
-        matches!(decl.ptype_kind, crate::parser::ast::TypeKind::Ptype_abstract),
+        kind,
         attrs,
     )
+}
+
+/// The superclasses of `declared`, in the order of `ids`, which can hold
+/// synthetic declarations too.
+fn superclasses_for(
+    ids: &[Ident],
+    declared: &[Ident],
+    superclasses: &[Option<Path>],
+) -> Vec<Option<Path>> {
+    ids.iter()
+        .map(|id| {
+            declared
+                .iter()
+                .position(|declared| declared.same(id))
+                .and_then(|index| superclasses.get(index).cloned().flatten())
+        })
+        .collect()
+}
+
+/// For each declaration of a group, the type its `@extends(: parent)` names:
+/// another declaration of the group, or a type of the environment.
+fn extends_superclasses(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    arena: &ParseArena,
+    decls: &[crate::parser::ast::TypeDeclaration],
+    ids: &[Ident],
+) -> TypeModResult<Vec<Option<Path>>> {
+    let mut superclasses = Vec::with_capacity(decls.len());
+    for decl in decls {
+        let payload = decl.ptype_attributes.iter().find_map(|(name, payload)| {
+            (arena.get_string(name.txt) == crate::types::variant_layout::EXTENDS).then_some(payload)
+        });
+        let Some(crate::parser::ast::Payload::PTyp(core_type)) = payload else {
+            superclasses.push(None);
+            continue;
+        };
+        let core_type = arena.get_core_type(*core_type);
+        let crate::parser::ast::CoreTypeDesc::Ptyp_constr((lid, _)) = &core_type.ptyp_desc else {
+            superclasses.push(None);
+            continue;
+        };
+        let longident = arena.get_longident(lid.txt);
+        let in_group = match longident {
+            Longident::Lident(name) => decls
+                .iter()
+                .position(|other| arena.get_string(other.ptype_name.txt) == arena.get_string(*name))
+                .and_then(|index| ids.get(index)),
+            _ => None,
+        };
+        let path = match in_group {
+            Some(id) => Path::pident(*id),
+            None => {
+                crate::types::typecore::find_type_for_lid(tctx, env, core_type.ptyp_loc, longident)?.0
+            }
+        };
+        superclasses.push(Some(path));
+    }
+    Ok(superclasses)
 }
 
 fn check_unboxed_type_attributes(
@@ -5498,6 +5568,17 @@ pub enum AstUntaggedVariantError {
     SubclassOfPublicAbbreviation(String, String),
     ClassOnPublicAbbreviation(String),
     ClassTwiceInChain(String),
+    /// `@instanceOf` on a record that is not private.
+    ClassOnPublicRecord(String),
+    /// `@module` beside `@instanceOf` without a module name.
+    InvalidClassModule,
+    /// `@extends` on a declaration that is not a private record with
+    /// `@instanceOf`.
+    ExtendsWithoutClassRecord,
+    /// `@extends` names something that is not a type declared as a class.
+    ExtendsNotAClass,
+    /// The record does not coerce to the superclass `@extends` names.
+    ExtendsFieldsMismatch(String),
 }
 
 impl AstUntaggedVariantError {
@@ -5591,6 +5672,21 @@ impl AstUntaggedVariantError {
             ),
             AstUntaggedVariantError::SubclassOfArray(name) => format!(
                 "@instanceOf(\"{name}\") cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
+            ),
+            AstUntaggedVariantError::ClassOnPublicRecord(name) => format!(
+                "A record declared an instance of {name} must be private: write `= private {{...}}`, so that a record literal cannot be used as an instance of {name}."
+            ),
+            AstUntaggedVariantError::InvalidClassModule => {
+                "@module beside @instanceOf expects the name of the module the class is imported from, as a string.".to_string()
+            }
+            AstUntaggedVariantError::ExtendsWithoutClassRecord => {
+                "@extends names the superclass of a class declared on a record: it can only be used on a private record with @instanceOf. An abstract class type names its superclass by abbreviating it: `type dog = private animal`.".to_string()
+            }
+            AstUntaggedVariantError::ExtendsNotAClass => {
+                "@extends expects a type declared as a class with @instanceOf, written as `@extends(: parent)`.".to_string()
+            }
+            AstUntaggedVariantError::ExtendsFieldsMismatch(parent) => format!(
+                "This record extends {parent}, so it must have every field of that record, with the same type, name at run time, optionality and mutability."
             ),
             AstUntaggedVariantError::ClassOnPublicAbbreviation(name) => format!(
                 "A class must be declared on an abstract type or a private abbreviation: write `= private ...`, so that values of the abbreviated type are not instances of {name} without a coercion, and another abbreviation cannot declare them instances of another class."
@@ -5771,8 +5867,10 @@ fn resolve_declaration_group_shapes(
     env: &Env,
     ids: &[Ident],
     decls: &[crate::types::decl::TypeDeclaration],
+    superclasses: &[Option<Path>],
 ) -> TypeModResult<Vec<(Ident, crate::types::ValueShape)>> {
-    let shapes = crate::types::variant_layout::resolve_shapes(ctx, env, ids, decls)?;
+    let shapes =
+        crate::types::variant_layout::resolve_shapes(ctx, env, ids, decls, superclasses)?;
     Ok(ids.iter().copied().zip(shapes).collect())
 }
 
@@ -9136,12 +9234,13 @@ fn transl_with_constraint<'a>(
             var: Some(unbound),
         });
     }
-    decl.type_shape = crate::types::variant_layout::declaration_shape(ctx, env, &decl)?;
+    decl.type_shape = crate::types::variant_layout::declaration_shape(ctx, env, &decl, None)?;
     crate::types::variant_layout::check_manifest_annotation(
         ctx,
         arena.to_location(sdecl.ptype_loc),
         env,
         &decl,
+        None,
     )?;
     // `name_recursion` (typedecl.ml:1474-1484).
     if is_fixed
@@ -18368,11 +18467,17 @@ fn type_structure_item<'a>(
             // typedecl.ml:1578-1580: what each declaration states about its
             // values at run time, resolved in the environment it is declared
             // in (`Variant_layout.resolve_shapes ~env decls`).
+            let group_superclasses: Vec<Option<Path>>;
             {
                 let ids: Vec<Ident> = final_env_entries.iter().map(|(id, ..)| *id).collect();
                 let group: Vec<crate::types::TypeDeclaration> =
                     final_env_entries.iter().map(|(_, decl, ..)| decl.clone()).collect();
-                let shapes = resolve_declaration_group_shapes(ctx, env, &ids, &group)?;
+                group_superclasses =
+                    extends_superclasses(tctx, env, arena, decls, &declared_type_ids)?;
+                let superclasses =
+                    superclasses_for(&ids, &declared_type_ids, &group_superclasses);
+                let shapes =
+                    resolve_declaration_group_shapes(ctx, env, &ids, &group, &superclasses)?;
                 for (type_id, decl, _, _) in final_env_entries.iter_mut() {
                     if let Some(shape) = shape_for(&shapes, type_id) {
                         decl.type_shape = shape;
@@ -18506,12 +18611,18 @@ fn type_structure_item<'a>(
                 check_variant_declaration_well_formed(ctx, &new_env, decl)?;
             }
             // typedecl.ml:1650-1653 `check_manifest_annotation` over the group.
-            for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+            for (index, (sdecl, decl)) in
+                decls.iter().zip(original_internal_decls_for_checks.iter()).enumerate()
+            {
+                let own = declared_type_ids.get(index).map(|id| Path::pident(*id));
                 crate::types::variant_layout::check_manifest_annotation(
                     ctx,
                     arena.to_location(sdecl.ptype_loc),
                     &new_env,
                     decl,
+                    own.as_ref().map(|own| {
+                        (own, group_superclasses.get(index).and_then(Option::as_ref))
+                    }),
                 )?;
             }
             // typedecl.ml:1603 `List.iter2 (check_constraints ...) sdecl_list decls`.
@@ -20666,14 +20777,24 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         }
     }
     // typedecl.ml:1578-1580 `Variant_layout.resolve_shapes ~env decls`.
+    let group_superclasses = match &loop_result {
+        Ok(()) => extends_superclasses(tctx, env, arena, decls, &declared_type_ids)?,
+        Err(_) => Vec::new(),
+    };
     let loop_result = loop_result.and_then(|()| {
         let ids: Vec<Ident> = if has_fixed_rows {
             type_entry_ids.clone()
         } else {
             declared_type_ids.clone()
         };
-        let shapes =
-            resolve_declaration_group_shapes(ctx, env, &ids, &internal_decls_for_generalize)?;
+        let superclasses = superclasses_for(&ids, &declared_type_ids, &group_superclasses);
+        let shapes = resolve_declaration_group_shapes(
+            ctx,
+            env,
+            &ids,
+            &internal_decls_for_generalize,
+            &superclasses,
+        )?;
         for (decl, id) in internal_decls_for_generalize.iter_mut().zip(&ids) {
             if let Some(shape) = shape_for(&shapes, id) {
                 decl.type_shape = shape;
@@ -20800,12 +20921,17 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
         check_variant_declaration_well_formed(ctx, &variance_env, decl)?;
     }
     // typedecl.ml:1650-1653 `check_manifest_annotation` over the group.
-    for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {
+    for (index, (sdecl, decl)) in
+        decls.iter().zip(original_internal_decls_for_checks.iter()).enumerate()
+    {
+        let own = declared_type_ids.get(index).map(|id| Path::pident(*id));
         crate::types::variant_layout::check_manifest_annotation(
             ctx,
             arena.to_location(sdecl.ptype_loc),
             &variance_env,
             decl,
+            own.as_ref()
+                .map(|own| (own, group_superclasses.get(index).and_then(Option::as_ref))),
         )?;
     }
     for (sdecl, decl) in decls.iter().zip(original_internal_decls_for_checks.iter()) {

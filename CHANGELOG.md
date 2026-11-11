@@ -24,6 +24,7 @@
 
 #### :rocket: New Feature
 
+- Declare a class on a private record with `@instanceOf`, name its superclass with `@extends(: parent)`, and import the class with `@module` beside `@instanceOf`; such records are untagged variant cases, tested subclass first, and upcast with `:>`. https://github.com/jfrolich/rescript-rust/pull/103
 - Support Windows 11 on ARM by installing the x64 binaries, which Windows runs through its x64 emulation. https://github.com/rescript-lang/rescript/pull/8776
 - Allow `$` in identifiers, e.g. `let count$ = signal(0)`. https://github.com/rescript-lang/rescript/pull/8791
 - Allow an untagged variant to have both a boolean literal case and a boolean payload case, e.g. `@unboxed type t = | @as(true) A | B(bool)`, like for strings and numbers. https://github.com/rescript-lang/rescript/pull/8777
