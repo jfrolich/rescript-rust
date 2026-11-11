@@ -978,3 +978,33 @@ type pair = {@as("0") x?: int, @as("1") y?: int}
         "{err:#}"
     );
 }
+
+// #9200 (ctype.ml `get_new_abstract_name`): the second `'a` would be named
+// `$a1`, which the `'a1` before it already took, so it gets `$a2`; the
+// printer then has no clash to disambiguate with stamps.
+#[test]
+fn numbered_existential_names_stay_distinct() {
+    let source = r#"
+type rec a2 = A2('a): a2
+type rec a1 = A1('a1): a1
+type rec a3 = A3('a): a3
+let f = (A2(y), A1(x), A3(z)) => z == x
+"#;
+    let err = compile_test_source_to_js(source, "gadt_existential_numbered_name.res").unwrap_err();
+    let message = format!("{err:#}");
+    let mut plain = String::new();
+    let mut chars = message.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|c| *c == 'm');
+        } else {
+            plain.push(c);
+        }
+    }
+    let message = plain;
+    assert!(message.contains("This has type: $a1"), "{message}");
+    assert!(
+        message.contains("being compared to something of type: $a2"),
+        "{message}"
+    );
+}

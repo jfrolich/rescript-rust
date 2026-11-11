@@ -453,6 +453,14 @@ pub(crate) struct OpenSlotEvent {
 /// A saved position: resolved file name (or raw handle), line, bol, cnum.
 type PositionKey = (Result<u32, String>, i32, i32, i32);
 
+/// OCaml `Ctype.reified_var_counter_key`: the next index for each base
+/// name, and the names already given.
+#[derive(Default)]
+pub(crate) struct ReifiedNames {
+    counters: crate::fast_hash::AHashMap<String, usize>,
+    used: crate::fast_hash::AHashSet<String>,
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -502,9 +510,9 @@ pub struct TypeContext {
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
     simple_abbrevs: Cell<AbbrevMemoRef>,
-    /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
-    /// GADT constraint variables.
-    reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
+    /// OCaml `Ctype.reified_var_counter_key`, for `get_new_abstract_name`
+    /// when reifying local GADT constraint variables.
+    reified_var_counters: RefCell<ReifiedNames>,
     /// OCaml `Ctype.existential_constructors_key` (ctype.ml:936-944): the
     /// constructor binding each existential type `instance_constructor`
     /// created in this compilation, by the stamp of its identifier.
@@ -1108,7 +1116,7 @@ impl TypeContext {
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
+            reified_var_counters: RefCell::new(ReifiedNames::default()),
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
@@ -1404,7 +1412,9 @@ impl TypeContext {
 
     /// OCaml `Ctype.reset_reified_var_counter` (ctype.ml:906).
     pub(crate) fn reset_reified_var_counter(&self) {
-        self.reified_var_counters.borrow_mut().clear();
+        let mut names = self.reified_var_counters.borrow_mut();
+        names.counters.clear();
+        names.used.clear();
     }
 
     /// The `Hashtbl.replace` into `existential_constructors_key` in OCaml
@@ -1426,17 +1436,29 @@ impl TypeContext {
             .copied()
     }
 
-    /// Match OCaml `Ctype.get_new_abstract_name`.
+    /// Match OCaml `Ctype.get_new_abstract_name`. A numbered name can equal
+    /// a base name ending in digits, as `$a1` for the second `'a` and the
+    /// first `'a1`, so names already given are skipped.
     pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
         self.poison_store_build_for("next_reified_abstract_name");
-        let mut counters = self.reified_var_counters.borrow_mut();
-        let index = counters.get(prefix).map_or(0, |previous| previous + 1);
-        counters.insert(prefix.to_string(), index);
-        if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}{index}")
+        let mut names = self.reified_var_counters.borrow_mut();
+        let ReifiedNames { counters, used } = &mut *names;
+        let name = |index: usize| {
+            if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
+                prefix.to_string()
+            } else {
+                format!("{prefix}{index}")
+            }
+        };
+        let mut index = counters.get(prefix).map_or(0, |previous| previous + 1);
+        let mut candidate = name(index);
+        while used.contains(&candidate) {
+            index += 1;
+            candidate = name(index);
         }
+        counters.insert(prefix.to_string(), index);
+        used.insert(candidate.clone());
+        candidate
     }
 
     /// Cache a resolved module signature.
