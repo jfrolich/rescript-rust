@@ -1,0 +1,1 @@
+- Add `rescript build --check-only` to parse and type check without generating code or writing build state; code-generation diagnostics are omitted.
