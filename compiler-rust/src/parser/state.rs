@@ -476,6 +476,18 @@ impl<'src> Parser<'src> {
     }
 
     /// Record a diagnostic error at specific positions.
+    /// Report a character that is not a token where it stands, as the
+    /// scanner does: outside the parser's error regions.
+    pub fn report_unknown_character(&mut self, ch: char, start_pos: Position) {
+        let mut end_pos = start_pos;
+        end_pos.cnum += 1;
+        self.diagnostics.push(ParserDiagnostic {
+            start_pos,
+            end_pos,
+            category: DiagnosticCategory::unknown_uchar(ch),
+        });
+    }
+
     pub fn err_at(&mut self, start_pos: Position, end_pos: Position, category: DiagnosticCategory) {
         if let Some(region) = self.regions.last_mut() {
             if *region == RegionStatus::Report {

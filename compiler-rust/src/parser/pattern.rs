@@ -94,6 +94,12 @@ fn parse_template_constant(
     fn skip_tokens(p: &mut Parser<'_>) {
         if p.token != Token::Eof {
             p.next();
+            // The rest of the template is scanned as ordinary tokens, where
+            // a `$` is not one: OCaml's scanner reports it. `${` is a token
+            // here (the hole of a macro quote), so report it the same way.
+            if p.token == Token::DollarLbrace {
+                p.report_unknown_character('$', p.start_pos);
+            }
             if p.token == Token::Backtick {
                 p.next();
             } else {
