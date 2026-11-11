@@ -4112,18 +4112,42 @@ pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<
 /// Name of the extension a macro quote hole `${expr}` is kept as.
 pub const HOLE_EXTENSION: &str = "res.hole";
 
+/// Name of the extension a splice hole `${...expr}` is kept as.
+pub const SPLICE_HOLE_EXTENSION: &str = "res.hole.splice";
+
+/// Whether the parser is at `${...`: the start of a splice hole.
+pub(super) fn at_splice_hole(p: &mut Parser<'_>) -> bool {
+    p.token == Token::DollarLbrace
+        && p.lookahead(|p| {
+            p.next();
+            p.token == Token::DotDotDot
+        })
+}
+
 /// `${expr}`: a hole in a macro quote (`%code(...)`, `%type(...)`,
 /// `%pat(...)`). It is an extension node named [`HOLE_EXTENSION`] whose
 /// payload is the expression, so no parsetree node kind is added.
+///
+/// `${...expr}` is a splice hole: it stands for the items of a list (the
+/// arguments of a call, the fields of a record, the cases of a switch), and
+/// is the extension [`SPLICE_HOLE_EXTENSION`].
 pub(super) fn parse_hole_extension(p: &mut Parser<'_>) -> Extension {
     let start_pos_idx = p.start_pos_idx();
     p.expect(Token::DollarLbrace);
+    let splice = p.token == Token::DotDotDot;
+    if splice {
+        p.next();
+    }
     let expr = super::expr::parse_expr(p);
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
     let expr_loc = expr.pexp_loc;
     let expr_idx = p.arena_mut().push_expr(expr);
-    let name = p.arena_mut().push_string(HOLE_EXTENSION);
+    let name = p.arena_mut().push_string(if splice {
+        SPLICE_HOLE_EXTENSION
+    } else {
+        HOLE_EXTENSION
+    });
     let item = StructureItem {
         pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
         pstr_loc: expr_loc,

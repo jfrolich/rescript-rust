@@ -135,6 +135,13 @@ fn is_valid_bigint_literal(s: &str) -> bool {
 // Placeholder Transformation
 // ============================================================================
 
+/// Whether the next token continues a block with another expression. A
+/// splice hole `${...cases}` after a case of a switch does not: it stands
+/// for more cases, not for an expression of the case before it.
+fn block_continues(p: &mut Parser<'_>) -> bool {
+    grammar::is_block_expr_start(&p.token) && !super::module::at_splice_hole(p)
+}
+
 /// Check and emit "consecutive expressions" error if expressions on same line without semicolon.
 ///
 /// Matches OCaml's `parse_newline_or_semicolon_expr_block`:
@@ -147,7 +154,7 @@ pub fn parse_newline_or_semicolon_expr_block(p: &mut Parser<'_>) {
         return;
     }
 
-    if grammar::is_block_expr_start(&p.token) {
+    if block_continues(p) {
         // Check if we're on the same line as the previous token
         // OCaml: if p.prev_end_pos.pos_lnum < p.start_pos.pos_lnum then () else err
         if p.prev_end_pos.line >= p.start_pos.line {
@@ -3177,6 +3184,12 @@ fn parse_braced_or_record_expr(p: &mut Parser<'_>) -> Expression {
             p.expect(Token::Rbrace);
             expr
         }
+        // `{${...fields}}`: a record whose first row is a splice hole.
+        Token::DollarLbrace if super::module::at_splice_hole(p) => {
+            let expr = parse_record_expr(p, start_pos_idx, None, vec![]);
+            p.expect(Token::Rbrace);
+            expr
+        }
         Token::Lident(ref s) if s == "async" && super::core::is_es6_arrow_expression(p, false) => {
             p.expect(Token::Lident("async".into()));
             let expr =
@@ -3376,6 +3389,14 @@ fn remove_module_name_from_punned_field_value(p: &mut Parser<'_>, exp: Expressio
 
 /// OCaml `parse_record_expr_row` (compiler/syntax/src/res_core.ml:3440-3508).
 fn parse_record_expr_row(p: &mut Parser<'_>) -> Option<ExpressionRecordField> {
+    if super::module::at_splice_hole(p) {
+        let (lid, expr) = parse_splice_hole_row(p);
+        return Some(ExpressionRecordField {
+            lid,
+            expr,
+            opt: false,
+        });
+    }
     let attrs = parse_attributes(p);
     if p.token == Token::DotDotDot {
         p.err(DiagnosticCategory::Message(
@@ -3688,7 +3709,7 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
             let (rec_flag, bindings) =
                 super::module::parse_let_bindings_item(p, unwrap, attrs, start_pos_idx);
             parse_newline_or_semicolon_expr_block(p);
-            let next = if grammar::is_block_expr_start(&p.token) {
+            let next = if block_continues(p) {
                 parse_expr_block(p)
             } else {
                 let loc = p.mk_loc_current();
@@ -3731,7 +3752,7 @@ fn parse_expr_block_item(p: &mut Parser<'_>) -> Expression {
                 e1.pexp_attributes = all;
             }
             parse_newline_or_semicolon_expr_block(p);
-            if grammar::is_block_expr_start(&p.token) {
+            if block_continues(p) {
                 let e2 = parse_expr_block(p);
                 let loc = p.mk_loc_spanning_preserve_ghost(e1.pexp_loc, e2.pexp_loc);
                 let e1 = p.arena_mut().push_expr(e1);
@@ -3761,7 +3782,7 @@ fn parse_expr_block_first(p: &mut Parser<'_>, first: Option<Expression>) -> Expr
         None => parse_expr_block_item(p),
     };
     parse_newline_or_semicolon_expr_block(p);
-    let block_expr = if grammar::is_block_expr_start(&p.token) {
+    let block_expr = if block_continues(p) {
         let next = parse_expr_block_item(p);
         let loc = p.mk_loc_spanning_preserve_ghost(item.pexp_loc, next.pexp_loc);
         let item = p.arena_mut().push_expr(item);
@@ -4161,8 +4182,39 @@ fn parse_pattern_matching(p: &mut Parser<'_>) -> Vec<Case> {
     cases
 }
 
+/// A splice hole that stands for rows of a record or cases of a switch:
+/// the hole as an expression, and a name for the place the row or case
+/// keeps for it. Only the lowering of a quote reads it.
+fn parse_splice_hole_row(p: &mut Parser<'_>) -> (Loc<LidentIdx>, ExprIdx) {
+    let start_pos_idx = p.start_pos_idx();
+    let extension = super::module::parse_hole_extension(p);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let expr = p.arena_mut().push_expr(Expression {
+        pexp_desc: ExpressionDesc::Pexp_extension(Box::new(extension)),
+        pexp_loc: loc,
+        pexp_attributes: Attributes::new(),
+    });
+    let lid = p.push_lident_static(super::module::SPLICE_HOLE_EXTENSION);
+    (with_loc(lid, loc), expr)
+}
+
 /// OCaml `parse_pattern_match_case` (compiler/syntax/src/res_core.ml:3972-3995).
 fn parse_pattern_match_case(p: &mut Parser<'_>) -> Option<Case> {
+    // `switch x { | A => 1 ${...cases} }`: cases a macro quote splices in.
+    if super::module::at_splice_hole(p) {
+        let (lid, rhs) = parse_splice_hole_row(p);
+        let lhs = p.arena_mut().push_pat(Pattern {
+            ppat_desc: PatternDesc::Ppat_any,
+            ppat_loc: lid.loc,
+            ppat_attributes: Attributes::new(),
+        });
+        return Some(Case {
+            pc_bar: None,
+            pc_lhs: lhs,
+            pc_guard: None,
+            pc_rhs: rhs,
+        });
+    }
     p.begin_region();
     p.leave_breadcrumb(Grammar::PatternMatchCase);
     if p.token != Token::Bar {

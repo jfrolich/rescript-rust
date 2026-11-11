@@ -529,7 +529,8 @@ pub fn is_dict_row_start(token: &Token<'_>) -> bool {
 pub fn is_record_row_start(token: &Token<'_>) -> bool {
     matches!(
         token,
-        Token::DotDotDot | Token::Uident(_) | Token::Lident(_)
+        // `${`: a splice hole of a macro quote, `{a: 1, ${...fields}}`.
+        Token::DotDotDot | Token::Uident(_) | Token::Lident(_) | Token::DollarLbrace
     ) || token.is_keyword()
 }
 
