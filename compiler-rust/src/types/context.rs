@@ -503,7 +503,10 @@ pub(crate) struct OpenSlotEvent {
 type PositionKey = (Result<u32, String>, i32, i32, i32);
 
 /// A compilation-local signature and its component-table name index.
-type IndexedSignature = (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>);
+type IndexedSignature = (
+    Arc<super::decl::Signature>,
+    Arc<super::env_lazy::SignatureIndex>,
+);
 
 /// A module's values by name: each value's path and declaration.
 type ResolvedModuleValues =

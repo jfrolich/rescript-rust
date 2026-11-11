@@ -1786,10 +1786,13 @@ fn build_local_module_components(
     let env = stored.seed_env.as_ref();
     let access_path = &stored.access_path;
     let md = &stored.module_decl;
-    let parent_substitution_context = stored
-        .parent_context
-        .as_ref()
-        .map(|(parent_access_path, parent_sig)| (parent_access_path, parent_sig.as_ref().as_slice()));
+    let parent_substitution_context =
+        stored
+            .parent_context
+            .as_ref()
+            .map(|(parent_access_path, parent_sig)| {
+                (parent_access_path, parent_sig.as_ref().as_slice())
+            });
     let source_prefix = stored.source_prefix.get();
     if ctx.persistent_env_is_in_process()
         && let super::decl::ModuleType::MtyAlias(_, alias_path)

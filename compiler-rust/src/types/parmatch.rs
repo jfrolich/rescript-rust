@@ -745,10 +745,10 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     Desc::Constant(_) => chosen.pat = inner,
                     Desc::Construct { cstr, .. }
                         if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_))
-                            && self.oracle.is_block_that_cannot_be_undefined(cstr)
-                        => {
-                            chosen.pat = inner;
-                        }
+                            && self.oracle.is_block_that_cannot_be_undefined(cstr) =>
+                    {
+                        chosen.pat = inner;
+                    }
                     _ => {}
                 }
             }

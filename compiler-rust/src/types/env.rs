@@ -18,7 +18,9 @@
 use super::asttypes::{MutableFlag, PrivateFlag};
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind, LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem, TypeDeclaration, TypeKind, ValueDescription,
+    ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
+    LabelDescription, ModtypeDeclaration, ModuleDeclaration, ModuleType, Signature, SignatureItem,
+    TypeDeclaration, TypeKind, ValueDescription,
 };
 use super::path::Path;
 use super::type_expr::{TypeDesc, TypeExprRef};
@@ -1316,7 +1318,10 @@ impl Env {
     pub(crate) fn find_all_constructors_marking(
         &self,
         name: &str,
-    ) -> Vec<(&ConstructorDescription, OpenSlotMark<'_, ConstructorDescription>)> {
+    ) -> Vec<(
+        &ConstructorDescription,
+        OpenSlotMark<'_, ConstructorDescription>,
+    )> {
         self.data
             .constrs
             .find_all_marking(name)

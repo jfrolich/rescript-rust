@@ -2427,9 +2427,10 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
             ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
         }
         (Some(Some(name)), Some(Some(_existing)))
-            if ctx.get_level(t1_repr) < ctx.get_level(t2_repr) => {
-                ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
-            }
+            if ctx.get_level(t1_repr) < ctx.get_level(t2_repr) =>
+        {
+            ctx.set_desc(t2_repr, TypeDesc::Tvar(Some(name)));
+        }
         _ => {}
     }
 
@@ -6291,16 +6292,23 @@ fn subtype_concrete_typedecls(
                                 ..
                             },
                         )),
-                    )
-                        if variant_constructor_tag(&layout1, position1)
-                            == variant_constructor_tag(&layout2, *position2)
-                        => {
-                            let mut probe = cstrs.clone();
-                            match subtype_list(ctx, env, subtypes, trace, tl1.into(), tl2.into(), &mut probe) {
-                                Ok(()) => probe.len() != cstrs.len(),
-                                Err(_) => true,
-                            }
+                    ) if variant_constructor_tag(&layout1, position1)
+                        == variant_constructor_tag(&layout2, *position2) =>
+                    {
+                        let mut probe = cstrs.clone();
+                        match subtype_list(
+                            ctx,
+                            env,
+                            subtypes,
+                            trace,
+                            tl1.into(),
+                            tl2.into(),
+                            &mut probe,
+                        ) {
+                            Ok(()) => probe.len() != cstrs.len(),
+                            Err(_) => true,
                         }
+                    }
                     _ => true,
                 };
                 has_violation |= violation;
@@ -11326,10 +11334,7 @@ fn copy_sep_row(
                         link,
                     } => RowField::Reither {
                         constant,
-                        types: types
-                            .iter()
-                            .map(|t| copy(*t))
-                            .collect(),
+                        types: types.iter().map(|t| copy(*t)).collect(),
                         matched: if row.row_fixed { fixed } else { matched },
                         link: if keep {
                             link
@@ -11345,12 +11350,10 @@ fn copy_sep_row(
         row_more: more,
         row_closed: row.row_closed,
         row_fixed: row.row_fixed && fixed,
-        row_name: row.row_name.as_ref().map(|(path, types)| {
-            (
-                *path,
-                types.iter().map(|t| copy(*t)).collect(),
-            )
-        }),
+        row_name: row
+            .row_name
+            .as_ref()
+            .map(|(path, types)| (*path, types.iter().map(|t| copy(*t)).collect())),
     }
 }
 

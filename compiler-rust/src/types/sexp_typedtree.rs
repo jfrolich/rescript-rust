@@ -14,8 +14,8 @@ use crate::types::path::PathView;
 use crate::types::tast_arena::{TExprIdx, TypedArena};
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
-    Case, Constant, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind,
-    Loc, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
+    Case, Constant, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind, Loc,
+    ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
     Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
     StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
     TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,

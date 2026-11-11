@@ -112,8 +112,9 @@ pub(crate) struct ThreadTypeStore {
     /// Component views of persistent-rooted module paths built as store
     /// builds, with the replay record of building them (OCaml builds such a
     /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
-    shared_components:
-        RefCell<HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>>,
+    shared_components: RefCell<
+        HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>,
+    >,
     /// Label descriptions of large regular records of dependency types,
     /// built as store builds (see `typecore::build_record_label_descriptions_info`).
     record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,

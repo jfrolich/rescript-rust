@@ -4498,7 +4498,13 @@ type ObjectFieldForInclusion = (crate::name::Name, FieldKind, TypeExprRef);
 
 /// A field present on both sides: its name, then the implementation's and
 /// the signature's kind and type.
-type PairedObjectField = (crate::name::Name, FieldKind, TypeExprRef, FieldKind, TypeExprRef);
+type PairedObjectField = (
+    crate::name::Name,
+    FieldKind,
+    TypeExprRef,
+    FieldKind,
+    TypeExprRef,
+);
 
 fn associate_object_fields_for_inclusion(
     impl_fields: Vec<ObjectFieldForInclusion>,
