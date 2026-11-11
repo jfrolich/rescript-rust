@@ -5,9 +5,7 @@
 //! `js_ir::build`).
 
 use crate::js_ir::CallInfo;
-use crate::js_ir::arena::{
-    Block, Clause, Expr, ExprKind, FunInfo, JsArena, PropName, StringClauseInfo,
-};
+use crate::js_ir::arena::{Clause, Expr, ExprKind, FunInfo, JsArena, PropName, StringClauseInfo};
 use crate::js_ir::build::{exp as E, expression_has_no_side_effects, int_of, stmt as S};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::lambda::lam_compat::Comparison;
@@ -828,15 +826,6 @@ pub(crate) fn string_switch_iife(
         .collect();
     let switch = S::string_switch(scrutinee, clauses, None, j);
     iife(&[switch], j)
-}
-
-pub(crate) fn block_with_return_expr_iife(mut block: Block, expr: Expr, j: &mut JsArena) -> Expr {
-    if block.is_empty() {
-        return expr;
-    }
-
-    block.push(S::return_(expr, j));
-    iife(&block, j)
 }
 
 pub(crate) fn is_type_object_expr(expr: Expr, j: &mut JsArena) -> Expr {

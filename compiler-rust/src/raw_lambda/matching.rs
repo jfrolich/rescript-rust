@@ -8527,24 +8527,6 @@ fn compile_test_wrapper<'p, K: Clone>(
     result
 }
 
-/// Extract all record label descriptions from a Tpat_record pattern's fields.
-/// Sorted by field position (lbl_pos).
-fn get_all_labels_from_record_fields(
-    fields: &[(
-        crate::types::typedtree::Loc<crate::parse_arena::LidentIdx>,
-        std::sync::Arc<LabelDescription>,
-        TPatIdx,
-        bool,
-    )],
-) -> Vec<LabelDescription> {
-    let mut labels: Vec<LabelDescription> = fields
-        .iter()
-        .map(|(_, lbl, _, _)| (**lbl).clone())
-        .collect();
-    labels.sort_by_key(|l| l.lbl_pos);
-    labels
-}
-
 /// `lbl.lbl_all` of a record pattern's first label (compiler/ml/matching.ml:
 /// 2564-2568 passes it to `divide_record`).
 fn resolve_all_record_labels(

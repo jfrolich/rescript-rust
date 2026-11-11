@@ -272,10 +272,7 @@ pub(crate) fn type_cannot_contain_undefined_no_env(ctx: &TypeContext, ty: TypeEx
                         if let Some(manifest) = decl.type_manifest {
                             return rec(ctx, manifest, seen);
                         }
-                        match &decl.type_kind {
-                            TypeKind::TypeRecord(_, _) => true,
-                            _ => false,
-                        }
+                        matches!(&decl.type_kind, TypeKind::TypeRecord(_, _))
                     } else {
                         false
                     }

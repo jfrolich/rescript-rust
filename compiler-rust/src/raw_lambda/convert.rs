@@ -2696,8 +2696,8 @@ impl<'a> RawLambdaConverter<'a> {
                         } else {
                             let (pos, info) = raw_record_field_access(lbl);
                             rb.prim(
-                                Primitive::Pfield(pos, info), &
-                                vec![*base_var],
+                                Primitive::Pfield(pos, info),
+                                &[*base_var],
                                 self.lam_loc(loc),
                             )
                         };
@@ -5296,7 +5296,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let loc = self.lam_loc(expr.exp_loc);
                 rb.prim(
                     primitive,
-                    &vec![rb.prim(Primitive::Pmakearray, &parts, loc)],
+                    &[rb.prim(Primitive::Pmakearray, &parts, loc)],
                     loc,
                 )
             }
@@ -5619,7 +5619,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 rb.prim(
                     Primitive::Pmakedict,
-                    &vec![rb.prim(Primitive::Pmakearray, &rows, loc)],
+                    &[rb.prim(Primitive::Pmakearray, &rows, loc)],
                     loc,
                 )
             };
@@ -6884,7 +6884,7 @@ impl<'a> RawLambdaConverter<'a> {
             let body = self.transl_external_application(loc, env, prim, val_type, args);
             return rb.function_(
                 prim.prim_arity,
-                (&params),
+                &params,
                 body,
                 FunctionAttribute::default(),
                 self.lam_loc(loc),
