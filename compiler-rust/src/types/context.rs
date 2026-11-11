@@ -135,6 +135,25 @@ impl TypeNodes {
     }
 }
 
+/// A compilation's own type nodes. With the compiler counters on, their
+/// number is reported when the compilation is dropped.
+struct OwnTypeNodes(TypeNodes);
+
+impl Deref for OwnTypeNodes {
+    type Target = TypeNodes;
+    fn deref(&self) -> &TypeNodes {
+        &self.0
+    }
+}
+
+impl Drop for OwnTypeNodes {
+    fn drop(&mut self) {
+        if crate::perf_counters::enabled() {
+            crate::perf_counters::record_local_type_nodes(self.0.len());
+        }
+    }
+}
+
 /// A type descriptor read by value. `TypeDesc` is `Copy`, so a reader never
 /// holds a borrow of the node store; the lifetime only ties the copy to the
 /// context it was read from.
@@ -558,7 +577,7 @@ pub struct TypeContext {
     current_abbreviations: Cell<AbbrevMemoRef>,
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
-    types: TypeNodes,
+    types: OwnTypeNodes,
 
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
@@ -677,6 +696,9 @@ pub struct TypeContext {
     /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
+    /// With the compiler counters on: the type nodes already counted as
+    /// copied for some cause (see `counted_copy`).
+    counted_copy_nodes: Cell<usize>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -1126,7 +1148,7 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: TypeNodes::new(),
+            types: OwnTypeNodes(TypeNodes::new()),
             store,
             store_descs: TypeNodes::new(),
             type_lists: Default::default(),
@@ -1171,6 +1193,7 @@ impl TypeContext {
             mutabilities: RefCell::new(Vec::new()),
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
+            counted_copy_nodes: Cell::new(0),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -2322,18 +2345,43 @@ impl TypeContext {
         self.alloc_type(desc, GENERIC_LEVEL)
     }
 
+    /// Count a variable made by `new_var` and its variants. A variable made
+    /// inside a copy session belongs to the copy.
+    #[cold]
+    #[inline(never)]
+    fn count_fresh_var(&self, location: &'static std::panic::Location<'static>) {
+        if self.copy_sessions.borrow().is_empty() {
+            crate::perf_counters::record_fresh_var(location);
+        }
+    }
+
     /// Create a new type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_type(TypeDesc::Tvar(name))
     }
 
     /// Create a new type variable at the global level.
+    #[track_caller]
+    #[inline]
     pub fn new_global_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_generic_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_generic_type(TypeDesc::Tvar(name))
     }
 
@@ -3628,6 +3676,34 @@ impl TypeContext {
         f()
     }
 
+    /// Run the copy `copy` and, with the compiler counters on, count the
+    /// type nodes it allocates as copied for `cause`. Nodes of a counted
+    /// copy nested in it are counted once, for the inner cause.
+    #[inline]
+    pub(crate) fn counted_copy<R>(
+        &self,
+        cause: crate::perf_counters::CopyCause,
+        copy: impl FnOnce() -> R,
+    ) -> R {
+        if !self.compiler_counters_enabled {
+            return copy();
+        }
+        let allocated = self.allocated_type_nodes();
+        let counted = self.counted_copy_nodes.get();
+        let result = copy();
+        let nested = self.counted_copy_nodes.get() - counted;
+        let own = self.allocated_type_nodes() - allocated - nested;
+        self.counted_copy_nodes.set(counted + nested + own);
+        crate::perf_counters::record_copy(cause, own);
+        result
+    }
+
+    /// The type nodes this compilation has allocated so far, in its own
+    /// pool and in the worker store.
+    fn allocated_type_nodes(&self) -> usize {
+        self.types.len() + self.store.type_count()
+    }
+
     /// btype.ml `begin_type_copy_session`.
     pub(crate) fn begin_copy_session(&self) {
         self.copy_sessions.borrow_mut().push(CopySession::default());
@@ -4524,6 +4600,11 @@ impl TypeContext {
         let result = build();
         self.store_build_depth.set(depth);
         super::thread_store::set_store_build_depth(depth);
+        if depth == 0 && self.compiler_counters_enabled {
+            crate::perf_counters::record_store_build_nodes(
+                self.store.type_count() - self.store_build_type_start.get(),
+            );
+        }
         let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
         let guards = std::mem::replace(&mut *self.store_build_guards.borrow_mut(), outer_guards);
         let mut poisoned = self.store_build_poisoned.replace(outer_poisoned);

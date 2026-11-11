@@ -10951,6 +10951,13 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     &tctx.warnings,
                 )
             })?;
+        if type_ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_exported_signature(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+            );
+        }
         if options.dumps.contains(&DumpKind::Sig) {
             dumps.push(canonical_signature_dump(
                 &type_ctx,
@@ -11874,6 +11881,9 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &tctx.warnings,
             )
         })?;
+    if type_ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+    }
     if options.dumps.contains(&DumpKind::Sig) {
         dumps.push(canonical_signature_dump(
             &type_ctx,

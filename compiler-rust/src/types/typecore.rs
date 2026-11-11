@@ -7545,8 +7545,41 @@ pub(crate) fn type_exp<'a>(
     expr: &ParsedExpression,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    if tctx.type_ctx.compiler_counters_enabled() {
+        crate::perf_counters::record_expected_var(expected_var_use(expr));
+    }
     let expected_ty = tctx.type_ctx.new_var(None);
     type_expect(tctx, env, expr, expected_ty, context)
+}
+
+/// For the compiler counters: the construct a fresh variable becomes the
+/// expected type of, with its case in section C.9 of
+/// `compiler-rust/docs/CHECKER_REDESIGN.md` (1: the construct only unifies
+/// its type with the expected type at the end; 3: it passes the expected
+/// type to one child in tail position; 4: it threads it to several
+/// children; 5: the variable is visible to someone else meanwhile, which is
+/// also the answer for every construct the design does not list).
+fn expected_var_use(expr: &ParsedExpression) -> crate::perf_counters::ExpectedVar {
+    use crate::parser::ast::ExpressionDesc as E;
+    let (construct, case) = match &expr.pexp_desc {
+        E::Pexp_ident(_) => ("ident", 1),
+        E::Pexp_constant(_) => ("constant", 1),
+        E::Pexp_field(..) => ("field", 1),
+        E::Pexp_construct(..) => ("construct", 1),
+        E::Pexp_apply(_) => ("apply", 1),
+        E::Pexp_let((crate::parser::ast::RecFlag::Nonrecursive, _, _)) => ("let", 3),
+        E::Pexp_let((crate::parser::ast::RecFlag::Recursive, _, _)) => ("let rec", 5),
+        E::Pexp_sequence(..) => ("sequence", 3),
+        E::Pexp_open(..) => ("open", 3),
+        E::Pexp_letmodule(..) => ("letmodule", 3),
+        E::Pexp_ifthenelse(_) | E::Pexp_ternary(_) => ("if", 4),
+        E::Pexp_match(_) => ("switch", 4),
+        E::Pexp_try(_) => ("try", 4),
+        E::Pexp_array(_) => ("array", 4),
+        E::Pexp_fun(_) => ("fun", 5),
+        _ => ("other", 5),
+    };
+    crate::perf_counters::ExpectedVar { construct, case }
 }
 
 /// Match OCaml `type_statement`:
@@ -9822,6 +9855,17 @@ fn type_application(
     //   lower_args env [] ty;
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
+    if ctx.compiler_counters_enabled() {
+        // Section C.9: the two variables of an application, one the
+        // expected type of the function, one made below only to lower the
+        // function type's level.
+        for construct in ["application: function", "application: lowering"] {
+            crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
+                construct,
+                case: 1,
+            });
+        }
+    }
     let funct_ty = ctx.new_var(None);
     tctx.deprecated_function_call = true;
     let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
@@ -21000,7 +21044,9 @@ pub(crate) fn copy_type_expr_mapping_paths<TP: Fn(&Path) -> Path>(
     cache: &mut TypeExprRefMap<TypeExprRef>,
     map_path: &TP,
 ) -> TypeExprRef {
-    copy_lookup_type_expr_with_paths(ctx, ty, cache, map_path)
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        copy_lookup_type_expr_with_paths(ctx, ty, cache, map_path)
+    })
 }
 
 fn copy_lookup_type_expr_with_paths<TP>(
@@ -21088,7 +21134,7 @@ where
     }
 
     let level = ctx.get_level(ty);
-    let placeholder = ctx.new_var(None);
+    let placeholder = ctx.new_type(TypeDesc::Tvar(None));
     ctx.set_level(placeholder, level);
     cache.insert(ty, placeholder);
 
@@ -21548,7 +21594,9 @@ pub(crate) fn copy_lookup_type_decl_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::TypeDeclaration {
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| copy_lookup_type_decl(decl, ctx, &mut cache))
+    })
 }
 
 fn copy_lookup_value_description_with_paths<TP>(
@@ -21574,8 +21622,10 @@ pub(crate) fn copy_lookup_value_description_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ValueDescription {
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| {
-        copy_lookup_value_description_with_paths(desc, ctx, &mut cache, &clone_copy_lookup_path)
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| {
+            copy_lookup_value_description_with_paths(desc, ctx, &mut cache, &clone_copy_lookup_path)
+        })
     })
 }
 
@@ -21966,7 +22016,9 @@ pub(crate) fn copy_lookup_signature_for_subst(
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| copy_lookup_signature(sig_items, ctx, &mut cache))
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| copy_lookup_signature(sig_items, ctx, &mut cache))
+    })
 }
 
 #[track_caller]
@@ -21987,8 +22039,10 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| {
-        copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| {
+            copy_lookup_signature_with_paths(sig_items, ctx, &mut cache, type_path, module_path)
+        })
     })
 }
 
@@ -22011,15 +22065,17 @@ where
         );
     }
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| {
-        copy_lookup_signature_with_paths_and_idents(
-            sig_items,
-            ctx,
-            &mut cache,
-            type_path,
-            module_path,
-            Some(new_idents.into_iter()),
-        )
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| {
+            copy_lookup_signature_with_paths_and_idents(
+                sig_items,
+                ctx,
+                &mut cache,
+                type_path,
+                module_path,
+                Some(new_idents.into_iter()),
+            )
+        })
     })
 }
 
@@ -22032,7 +22088,9 @@ pub(crate) fn copy_lookup_module_type_for_subst(
     ctx: &TypeContext,
 ) -> crate::types::decl::ModuleType {
     let mut cache = TypeExprRefMap::new();
-    ctx.with_copy_session(|| copy_lookup_module_type(module_type, ctx, &mut cache))
+    ctx.counted_copy(crate::perf_counters::CopyCause::Lookup, || {
+        ctx.with_copy_session(|| copy_lookup_module_type(module_type, ctx, &mut cache))
+    })
 }
 
 // ============================================================================
