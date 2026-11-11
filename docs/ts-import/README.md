@@ -190,278 +190,56 @@ let {parse, resolve, log, byId, debounce} = %ts("./loose.ts")
 ```
 <!-- /example -->
 
-To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 585 values and 2,292 types, and all twelve compile. 66% of the declarations have an exact ReScript type. The other 34% carry at least one note:
-
-| Gap | Declarations affected | Imported as | What would close it |
-|---|---|---|---|
-| Union whose members cannot be told apart at run time | 18.1% | `unknown` | Steps 1 to 3 of the [plan](#plan-bridging-the-rest). |
-| `any` | 9.9% | A type variable as an argument, `unknown` as a result | Nothing: `any` is a hole in the TypeScript, not in ReScript. |
-| Overloads | 6.9% | The first signature | Step 5: one external per signature (`parse`, `parseWithRadix`). |
-| Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | Step 13: bounded type variables. For object bounds the open object type `{.. "id": string}` already exists, but not for records. |
-| Rest parameter in a callback type | 3.5% | One array argument | Step 11: a wrapper type in the standard library, or `@variadic` on function types. |
-| Constructor types, classes as values | 2.8% | `unknown` | Step 10: a constructor type in the standard library. |
-| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | Step 8 where the parameter is a key of a known object type. Otherwise import at an instantiation, `%ts("./m.ts#Pick<User, 'id'>")`, which TypeScript can evaluate. |
-| Enum and namespace objects as values | 2.5% | Skipped (the enum's type is imported) | Step 4: a module with one value per member. |
-| Tuples with optional or rest elements, one-element tuples | 2.3% | `array` | Step 8 for a tuple that is a rest parameter: its elements become the arguments. Step 14 for the rest. |
-| Generic function type nested in a type | 2.1% | `unknown` for its own type parameters | Step 9: an unboxed record with a polymorphic field. |
-| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | Steps 8 and 9. |
-| Explicit `this` parameter | 1.1% | Dropped | Step 7: `@this` already expresses it. |
-| `object` and `{}` | 1.0% | `unknown` | Step 14. |
-| Functions with properties | 1.0% | The function | Step 6: an abstract type that converts to the function and to a record of its properties. |
-| Named properties next to an index signature | 0.7% | The named properties | Step 14. Language: a record with a `dict` remainder. |
-| `never` outside a result | 0.6% | `unknown` | Step 12: a type without values in the standard library. |
-| Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | Change B of the plan: a single-case unboxed variant. |
-
-Two kinds of union that used to be in the first row are imported exactly now: `string | symbol` (124 declarations, all event names and property keys) and unions of classes such as `Readable | Writable` or `Car | Vehicle`. What is left, 522 declarations, is not one problem:
-
-- **Tagged unions that share a tag** (about 180). The syntax tree `Node` of vite's parser is a union of interfaces tagged by `type`, where six of them say `type: "Literal"` and six more `type: "Identifier"`. A `@tag` variant needs distinct tags.
-- **More than one plain object.** React's `ReactNode` (about 70), `{result} | {error}`, `AddressInfo | {}`. Nothing at run time tells two plain objects apart unless a field does; the upstream proposal for that is objects told apart by a field they share (rescript-lang/rescript issue 7988).
-- **Library interfaces** (about 140). `NodeJS.ReadableStream | WritableStream`, `EventEmitter | EventTarget`, `EventListener | EventListenerObject`, `boolean | AddEventListenerOptions`, `T | PromiseLike<T>`. TypeScript declares these as interfaces, so nothing says which class to test for, and the import makes a library interface an abstract type. The DOM option objects could be records; the converter does not do that yet.
-- **Unions of tuples** (about 40): the arguments of an event listener, `[] | [err: Error] | [chunk: any]`.
-
-Steps 1 to 3 and 8 of the [plan](#plan-bridging-the-rest) cover all four. Step 1 uses the language change for object cases; the others need no language change.
-
-## Plan: bridging the rest
-
-66.5% of the surveyed declarations are imported exactly today. This is a plan to reach about 89.5%. What stays out is `any` (9.9% of the declarations: a hole in the TypeScript, not in ReScript) and types computed from a type parameter that TypeScript cannot evaluate before the parameter is known (0.6%).
-
-Most of the distance is converter work. Steps 2 to 9 need no change to the language or the standard library: the ReScript to generate exists, and every encoding shown for them compiles with the current compiler. Step 1 uses one language change, [object cases told apart by their fields](#object-cases-told-apart-by-their-fields). None of the steps is implemented yet.
-
-| # | Step | Needs | Declarations made exact | Exact after |
-|---|---|---|---|---|
-| | Today | | | 66.5% |
-| 1 | Members of a union that share a tag become cases told apart by another field | converter and the object-case language change | 182 | 72.8% |
-| 2 | Library types that are imported as nothing today | converter | 84 | 75.7% |
-| 3 | Members that cannot be told apart become one opaque case | converter | 78 | 78.4% |
-| 4 | Namespaces and enum objects as modules | converter | 72 | 80.9% |
-| 5 | One external per overload | converter | 50 | 82.7% |
-| 6 | Functions with properties | converter | 20 | 83.4% |
-| 7 | `this` parameters as `@this` | converter | 10 | 83.7% |
-| 8 | Generics over the keys of an object type as a GADT of keys | converter | 3 | 83.8% |
-| 9 | Generic function types as unboxed records | converter | 0 | 83.8% |
-| 10 | Constructors as values | standard library | 77 | 86.5% |
-| 11 | Callbacks with a rest parameter | standard library | 15 | 87.0% |
-| 12 | A type without values for `never` | standard library | 4 | 87.1% |
-| 13 | Bounded type variables (part of it converter work, see A below) | language | 22 | 87.9% |
-| 14 | `{}` and `object`, index signatures beside named properties, one-element tuples, deeper nesting | language and converter | 46 | 89.5% |
-
-A step's count is the number of declarations whose last note it removes, in this order. That understates steps 8, 9 and 11, which share declarations with each other and with `any`. Counted by notes (the places in a type where something is lost) step 8 removes 3,434 of the 11,014 notes, almost a third: they are the `on`, `once` and `emit` methods of every stream, socket and server of Node.
-
-The counts are estimates. Each note of the survey was assigned to the step that would remove it, by its kind and the TypeScript type it quotes. Step 2 is the least certain, because its causes have not been looked at one by one.
-
-Several ideas below come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, the names of overloads, readers on opaque unions, functions with properties as modules, branded types, a table of known React and DOM types, stable names and a corpus of pinned packages in CI.
-
-### Before the steps: what the survey does not count
-
-The survey counts what an import loses. It does not count an import that is wrong without a note, a type that is exact but not the one a ReScript user expects, or a name that changes between two versions of a library. These come first, because they decide whether an import can be trusted, and none of them changes the numbers in the table.
-
-| | Change | Needs |
-|---|---|---|
-| A | A rule for type parameters | converter |
-| B | Branded primitives stay distinct | converter |
-| C | Known React and DOM types map to the standard library | converter |
-| D | Generated names that do not depend on the order of conversion | converter |
-| E | A corpus of pinned packages in CI | tests |
-
-**A. Type parameters.** Today every type parameter becomes a type variable. That is wrong in two places:
-
-- **Only in the result.** `json<T>(): Promise<T>` is imported as `unit => promise<'t>`, and ReScript infers `'t` from the use, so `let user: user = await json()` compiles with no cast in sight. TypeScript lets the caller choose `T` too, but writes it at the call (`json<User>()`). 24 of the 585 imported functions of the survey have a type variable only in their result. Most are constructors and hooks, where choosing is the point (`new EventEmitter<Events>()`, `createRef<T>()`), and there the variable is a type argument of the returned type. The rule: a variable that is a type argument of the returned type stays a variable; one that is the result, or the element of a promise, an array or a tuple in it, is `unknown`, with a note.
-- **With a bound, in one argument.** `greet<T extends string>(name: T): void` is imported as `'t => unit`, which accepts anything. A bounded parameter that occurs in one argument and not in the result is its bound: `string => unit`. Where it also occurs in the result (`pipe<T extends Writable>(destination: T): T`) the variable is kept with a note, until [bounded type variables](#bounded-type-variables) exist. This moves part of step 13 into the converter.
-
-Some result-only variables are a lost link: React's `useState<S>(initialState: S | (() => S))` comes out as `unknown => ('s, ...)` because the argument's union is `unknown` today. Step 3 restores the link.
-
-**B. Branded primitives.** `type UserId = string & {__brand: "user"}` is imported as `string`, so any string is a user id. A single-case unboxed variant keeps it distinct at no cost:
-
-```rescript
-@unboxed type userId = UserId(string)
-
-let UserId(raw) = lookup(UserId("u1")) // lookup("u1")
-```
-
-**C. Known types.** `react` is imported as structure today: `ReactNode` is an opaque union, events are records. A user of `@rescript/react` expects `React.element`, `ReactEvent.Mouse.t`, `React.ref<Nullable.t<Dom.element>>`, `JsxDOM.style` and `Dom.element`. A table maps these TypeScript types to the existing ReScript types before the converter walks them. This matters more to React code than any single row of the survey, and the survey cannot show it.
-
-**D. Stable names.** Names of generated types come from where a type is first met (`parkWhat`, `refAttributesRef`) and get a number on a collision (`dict2`, `ref2`). A new version of a library can change the order of conversion and rename a type that user code refers to. A name should depend on the TypeScript declaration alone: the declaration's own name, else the path from the nearest named declaration (`socket.on.listener`), and on a collision the module it comes from, never a counter. rescript-bindgen keeps a committed file of the names it gave out; an import inside the compiler has no such file, so the scheme itself has to be stable.
-
-**E. A corpus.** The survey runs on whatever is installed, and `installed_packages_compile` skips what is missing. The packages should be pinned, with the output and the notes of each kept as a baseline: a change that stops one compiling, or adds notes, fails; one that removes notes updates the baseline.
-
-
-### 1. Members that share a tag
-
-The syntax tree of vite's parser is a union of 183 interfaces tagged by `type`. Thirteen tags are used by more than one interface, 37 interfaces in all, and that is enough to make the whole union `unknown`, and with it the `parent` of every node.
-
-```ts
-interface StringLiteral { type: "Literal"; value: string; raw: string | null }
-interface NumericLiteral { type: "Literal"; value: number; raw: string | null }
-interface RegExpLiteral { type: "Literal"; value: RegExp | null; regex: Regex }
-interface IdentifierName { type: "Identifier"; name: string }
-type Node = StringLiteral | NumericLiteral | RegExpLiteral | IdentifierName // and 179 more
-```
-
-A tag that does not decide the member alone is one field among others. Such a union is imported as an untagged union of object cases, with the language change [object cases told apart by their fields](#object-cases-told-apart-by-their-fields): every member is a case, the tag is a literal check, and where members share a tag another field decides.
-
-```rescript
-@unboxed
-type node =
-  | StringLiteral({@as("type") type_: [#Literal], value: string, raw: Null.t<string>})
-  | NumericLiteral({@as("type") type_: [#Literal], value: float, raw: Null.t<string>})
-  | RegExpLiteral({@as("type") type_: [#Literal], value: Null.t<RegExp.t>, regex: regex})
-  | IdentifierName({@as("type") type_: [#Identifier], name: string})
-```
-
-```js
-if (x.type === "Literal" && "regex" in x) { /* RegExpLiteral */ }
-else if (x.type === "Literal" && typeof x.value === "string") { /* StringLiteral */ }
-else if (x.type === "Literal") { /* NumericLiteral */ }
-else { /* IdentifierName */ }
-```
-
-Building and reading are both exact, and the cases keep their TypeScript names.
-
-Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. JavaScript cannot tell them apart without walking the elements, so they become one case whose fields have the union of the members' types. That case is exact for reading and accepts more than TypeScript when building. Measured on the oxc types vite uses: the 37 members that share a tag become 22 cases, and 15 members end up in 8 merged cases. The Literal members, the four `Property` members, the three member expressions and the two module declarations are told apart; the identifier variants, the binding and assignment patterns, `Directive` and `ExpressionStatement`, and `BlockStatement` and `FunctionBody` are merged.
-
-### 2. Library types
-
-Three kinds of type from declaration files come out as an abstract type or as `unknown` today, and take every union they are in with them:
-
-- A class that is also a namespace, such as `EventEmitter` of `node:events`, the superclass of every stream and server.
-- Interfaces of the DOM library that only carry data (`AddEventListenerOptions`) or are a function (`EventListener`). They should be records and function types; `boolean | AddEventListenerOptions` is then an ordinary variant.
-- Interfaces that a class implements (`NodeJS.ReadableStream`). Where nothing names the class they fall under step 3.
-
-### 3. One opaque case
-
-`ReactNode` has two members that are plain objects and one that is any iterable. JavaScript cannot tell them apart, so neither can a variant. Today the whole union is `unknown`. Instead, the members that share a runtime test become one case with an abstract payload, and each of them converts to it:
-
-```rescript
-@typeOf("object") type reactNodeObject
-external element: reactElement => reactNodeObject = "%identity"
-external iterable: iterable<'node> => reactNodeObject = "%identity"
-
-@unboxed
-type rec reactNode =
-  | String(string)
-  | Number(float)
-  | BigInt(bigint)
-  | Boolean(bool)
-  | Promise(promise<reactNode>)
-  | Object(reactNodeObject)
-  | @as(null) Null
-
-let child = Object(element(someElement))
-```
-
-Building a value is exact, and a `switch` tells apart everything JavaScript can. It stops at `Object`, as JavaScript does. A union with a bare type parameter (`T | PromiseLike<T>`) is opaque as a whole: an abstract type with one conversion per member. With this step no union is imported as `unknown` any more.
-
-Conversions go both ways. Where the library hands a value over, a conversion into the opaque type is no use: each member also gets a reader, `asElement: reactNodeObject => reactElement`, which the caller uses after establishing which member it has, as in TypeScript after a type guard. The conversions are grouped in a module per opaque type:
-
-```rescript
-module ReactNodeObject = {
-  @typeOf("object") type t
-  external fromElement: reactElement => t = "%identity"
-  external asElement: t => reactElement = "%identity"
-}
-```
-
-### 5. Overloads
-
-Each signature becomes an external. The first keeps the name; the others are named after what they add: a parameter (`parseWithRadix`), or for signatures of the same length the first parameter whose type differs (`wrapForCount`). A counter (`parse2`) says nothing about which one to call. For an overloaded method they are `@send` externals next to the record, because a record cannot have two fields with one JavaScript name.
-
-```rescript
-@module("./api.ts") external parse: string => float = "parse"
-@module("./api.ts") external parseWithRadix: (string, float) => float = "parse"
-@send external write: (writable, string) => bool = "write"
-@send external writeWithEncoding: (writable, string, string) => bool = "write"
-```
-
-### 6. Functions with properties
-
-i18next's `t` and an axios instance are functions with properties. Today the properties are dropped. Instead the type is a module with the call as a conversion and one accessor per property:
-
-```rescript
-module Translator = {
-  type t
-  external asFn: t => (string => string) = "%identity"
-  @get external locale: t => string = "locale"
-  @send external setLocale: (t, string) => unit = "setLocale"
-}
-
-let hello = Translator.asFn(t)("hello") // t("hello")
-```
-
-### 8. Generics over the keys of an object type
-
-```ts
-interface SocketEvents { close: []; data: [chunk: Buffer]; error: [err: Error] }
-class Socket {
-  on<E extends keyof SocketEvents>(event: E, listener: (...args: SocketEvents[E]) => void): this
-}
-```
-
-`SocketEvents[E]` has no value before `E` is known, so today the listener takes `array<unknown>` and the method carries several notes. But `E` ranges over three names, and each name fixes the listener. That is a GADT whose constructors are the keys:
-
-```rescript
-type rec socketEvent<_> =
-  | @as("close") Close: socketEvent<unit => unit>
-  | @as("data") Data: socketEvent<buffer => unit>
-  | @as("error") Error: socketEvent<JsError.t => unit>
-
-type rec socket = {on: 'listener. (socketEvent<'listener>, 'listener) => socket}
-
-socket.on(Data, chunk => Console.log(chunk)) // socket.on("data", chunk => ...)
-```
-
-The same covers `get<K extends keyof T>(key: K): T[K]` and overloads that differ only in a literal first argument.
-
-### 9. Generic function types
-
-A function type with type parameters of its own can only be a record field in ReScript. An unboxed record with one field is that function at run time:
-
-```rescript
-@unboxed type eachVisit = {call: 'item. array<'item> => array<'item>}
-external each: eachVisit => unit = "each"
-
-each({call: items => items->Array.toReversed}) // each(items => items.toReversed())
-```
-
-### 10 to 12. The standard library
-
-```rescript
-// `typeof EventEmitter`: a value that is called with `new`.
-type constructor<'args, 'instance>
-@val @scope("Reflect")
-external construct: (constructor<'args, 'instance>, 'args) => 'instance = "construct"
-
-// `(...args: string[]) => void` as a callback: JavaScript passes any number
-// of arguments, ReScript receives them as one array.
-type variadic<'arg, 'result>
-let variadic: (array<'arg> => 'result) => variadic<'arg, 'result> // f => (...args) => f(args)
-
-// `never`
-type never
-```
-
-`variadic` is the only step that adds code at run time, a wrapper around the callback. The alternative is in the language: `@variadic` on a function type, with the compiler emitting the rest parameter.
-
-The language steps are specified in the next section.
+To see which gaps matter, every export of twelve modules was imported: `react`, `react-dom`, `semver`, `chalk`, `vite` and seven Node built-ins (`fs`, `path`, `url`, `child_process`, `os`, `events`, `http`). That is 585 values and 2,292 types, and all twelve compile. 66% of the declarations have an exact ReScript type. The other 34% carry at least one note.
+
+### The gaps and how to close them
+
+One row per gap, with the solution this document proposes, what it needs, and where it stands. *Converter* is work in the import alone: the ReScript it would generate compiles today. *Language* is a change to ReScript, described under [language changes](#language-changes). A declaration can have several gaps, so the shares add up to more than 34%. The unions are split by cause, because each cause has its own solution; those shares come from sorting the notes by the TypeScript type they quote, and are approximate.
+
+| Gap | Declarations | Imported today as | Solution | Needs | Status |
+|---|---|---|---|---|---|
+| **Unions** | **18.1%** | | | | |
+| Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | about 6.7% | `unknown` | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases | being implemented |
+| Library interfaces: `NodeJS.ReadableStream \| WritableStream`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject` | about 4.9% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter, then object cases | not started |
+| Plain objects without a tag: `ReactNode`, `{result} \| {error}`, `AddressInfo \| {}` | about 3.0% | `unknown` | Object cases, told apart by a field that is present or by its kind | language: object cases | being implemented |
+| Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | about 1.5% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
+| Nothing tells the members apart: `T \| PromiseLike<T>`, two types with the same fields | about 1.3% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
+| Not yet looked at one by one | about 2.5% | `unknown` | | | |
+| `string \| symbol`, unions of classes (`Car \| Vehicle`, `Readable \| Writable`) | | | `@typeOf("symbol")`; [classes on records](#classes-on-records) | language | done |
+| **Other gaps** | | | | | |
+| `any` | 9.9% | A type variable as an argument, `unknown` as a result | None. `any` is a hole in the TypeScript, not in ReScript. | | stays |
+| Overloads | 6.9% | The first signature | [One external per signature](#overloads), named after what it adds | converter | not started |
+| Constraint on a type parameter (`T extends U`) | 3.8% | An unconstrained type variable | [The bound](#type-parameters) when the parameter is in one argument only; otherwise a bounded type variable | converter, then language | not started |
+| Rest parameter in a callback type | 3.5% | One array argument | [A wrapper type](#standard-library-types) that turns the arguments into an array | standard library | not started |
+| Constructor types, classes as values | 2.8% | `unknown` | [A constructor type](#standard-library-types) with `Reflect.construct` | standard library | not started |
+| Conditional, mapped and indexed types over a type parameter | 2.8% | The constraint, or `unknown` | A GADT of keys where the parameter ranges over the keys of a known type ([event maps](#event-maps)); the rest stays | converter | not started |
+| Enum and namespace objects as values | 2.5% | Skipped | [A module](#namespaces-and-enum-objects) with one value per member | converter | not started |
+| Tuples with optional or rest elements, one-element tuples | 2.3% | `array` | Most are the arguments of event listeners: [event maps](#event-maps). One-element tuples stay arrays. | converter | not started |
+| Generic function type inside another type | 2.1% | `unknown` for its own type parameters | [An unboxed record](#generic-function-types) with a polymorphic field | converter | not started |
+| Type parameter out of scope where the type is declared | 2.1% | `unknown`, or the constraint | Mostly the event name of an event map: [event maps](#event-maps). The rest as generic function types. | converter | not started |
+| Explicit `this` parameter | 1.1% | Dropped | `@this` | converter | not started |
+| `object` and `{}` | 1.0% | `unknown` | The open object type `{..}` for `object`; `{}` (any value but `null` and `undefined`) stays `unknown` | converter | not started |
+| Functions with properties | 1.0% | The function | [A module](#functions-with-properties) with the call and one accessor per property | converter | not started |
+| Named properties next to an index signature | 0.7% | The named properties | [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | language | not designed |
+| `never` outside a result | 0.6% | `unknown` | [A type without values](#standard-library-types) | standard library | not started |
+| Branded primitives (`string & {__brand: "Id"}`) | 0.3% | The primitive | [A single-case unboxed variant](#branded-primitives) | converter | not started |
+
+If every row but `any` and the types TypeScript cannot compute is closed, about 89% of the declarations are exact, against 66% today. That number is an estimate: each note of the survey was assigned to the solution that would remove it.
+
+Two things the survey does not measure come before any of these rows, because they decide whether an import can be trusted at all: [type parameters](#type-parameters) that let a caller choose a result type silently, and [names](#stable-names) that can change between two versions of a library.
 
 ## Language changes
 
-The plan needs three changes to the language. One is implemented, two are specified here.
+Four of the solutions need a change to ReScript. Everything else in the table is converter or standard-library work.
 
-| Change | Status | What it covers |
+| Change | Status | What it closes |
 |---|---|---|
-| [Classes on records](#classes-on-records) | implemented | Unions of classes: `Car \| Vehicle \| string`, `Readable \| Writable`, with the fields of the class still readable. |
-| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | specified, not implemented | Unions of plain objects: `{result} \| {error}`, React's `ReactNode`, members of a union that share a tag (step 1, 182 declarations). About 85 more become cases a `switch` can open instead of one opaque case (step 3). |
-| [Bounded type variables](#bounded-type-variables) | specified, not implemented | `T extends Writable`: 86 declarations have a constraint, and for 22 it is the last thing missing (step 13). |
+| [Classes on records](#classes-on-records) | implemented, Rust compiler only | Unions of classes, with the fields of the class readable. Together with `symbol` cases, 39 fewer unions with a note in the survey. |
+| [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | being implemented, Rust compiler only | The first three union rows: members that share a tag, library interfaces once they are records, plain objects without a tag. About 420 declarations, 14.6%. The largest single gain. |
+| [Bounded type variables](#bounded-type-variables) | specified | Constraints where the parameter also decides the result, such as `pipe<T extends Writable>(destination: T): T`. Part of the 3.8%. |
+| [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | not designed | Named properties next to an index signature, 0.7%. |
 
-The counts for the two that are not implemented are estimates from the survey's notes; they are measured once the import uses the change.
-
-Three things the earlier version of this document listed as language changes turn out not to need one:
-
-- **Overloaded methods.** A record cannot have two fields with one JavaScript name, but `@send` externals next to the record can: `write` and `write2` (step 5).
-- **Generic function types and constructor types.** An unboxed record with a polymorphic field (step 9), and a type in the standard library (step 10).
-- **Rest parameters in callbacks.** A wrapper in the standard library (step 11).
-
-Named properties beside an index signature (`{[header: string]: string; accept?: string}`, 20 declarations) would need a record with a `dict` remainder. It is not designed here.
+These were considered and are not needed, because the converter or the standard library covers them with ReScript that compiles today: two record fields with one JavaScript name (overloaded methods become `@send` externals), polymorphic function types outside record fields (an unboxed record with one field), a constructor type and an empty type (standard-library types), and `@variadic` on function types (a wrapper; the language change would only save the wrapper's closure at run time).
 
 ### Classes on records
 
@@ -508,7 +286,7 @@ This follows the upstream RFC "Class hierarchies in WebAPI" (rescript-lang/rescr
 
 ### Object cases told apart by their fields
 
-Status: specified, not implemented.
+Status: being implemented, in the Rust compiler only.
 
 An `@unboxed` variant can have one case whose payload is a plain object, because `typeof` answers `"object"` for all of them. This change allows several, when a field shows which one a value is.
 
@@ -567,7 +345,7 @@ The literals of a type are those of a polymorphic variant without payloads (`[#c
 
 **Interfaces.** The tests follow from the declaration alone, so an interface and its implementation agree on them when they agree on the cases, as they must already.
 
-**In the import.** A union of object types becomes one case per member when an order exists. The members that still cannot be told apart share one opaque case (step 3), which is then the exception: a bare type parameter, or two types with the same fields.
+**In the import.** A union of object types becomes one case per member when an order exists. Members that no check separates are merged into one case when they share a tag (see [members that share a tag](#members-that-share-a-tag)), and otherwise fall back to an [opaque type](#nothing-tells-the-members-apart).
 
 ### Bounded type variables
 
@@ -593,7 +371,200 @@ let wrong = pipe(file, "text")  // error: string is not a writable
 - A variable that nothing else decides is the bound.
 - A bound that is an object type needs none of this: `({.. "id": string} as 'item)` exists.
 
-The converter closes two cases without it: a bounded type parameter that occurs in one argument and not in the result is imported as its bound (rule A of the plan); and a bounded method of a record becomes an external, where the bound can be written.
+The converter closes most constraints without it: a bounded type parameter that occurs in one argument and not in the result is imported as its bound (see [type parameters](#type-parameters)). This change is for the rest, where the parameter also decides the result.
+
+### A record with a `dict` remainder
+
+Status: not designed.
+
+`{[header: string]: string; accept?: string}` has named properties and an index signature. It is imported today with the named properties only. It needs a record type whose other fields are a `dict`. Node's HTTP headers are the main case.
+
+
+
+## Converter and standard-library work
+
+Every encoding in this section was compiled with the current compiler. None of it is implemented in the import yet. Several of the ideas come from [rescript-bindgen](https://github.com/juspay/rescript-bindgen), a generator of ReScript bindings for React component packages that also reads types through the TypeScript checker: the rule for type parameters, names of overloads, conversions in both directions on opaque types, functions with properties as modules, branded types, a table of known React types, stable names and a corpus of pinned packages.
+
+### Type parameters
+
+Today every type parameter becomes a type variable. That is wrong in two places.
+
+**Only in the result.** `json<T>(): Promise<T>` is imported as `unit => promise<'t>`. ReScript infers `'t` from the use, so `let user: user = await json()` compiles, and nothing at the call shows that the type was chosen there. TypeScript lets the caller choose `T` too, but writes it at the call (`json<User>()`). In the survey, 24 of the 585 functions have a type variable only in their result. Most are constructors and hooks, where choosing is the point (`new EventEmitter<Events>()`, `createRef<T>()`): there the variable is a type argument of the returned type. The rule: a variable that is a type argument of the returned type stays a variable; a variable that is the result, or the element of a promise, an array or a tuple in it, becomes `unknown`, with a note.
+
+**With a bound, in one argument.** `greet<T extends string>(name: T): void` is imported as `'t => unit`, which accepts anything. A bounded parameter that occurs in one argument and not in the result is its bound: `string => unit`. Where it also occurs in the result, the variable is kept with a note until [bounded type variables](#bounded-type-variables) exist.
+
+### Stable names
+
+Generated types are named after where they are first met (`parkWhat`, `refAttributesRef`) and get a number on a collision (`dict2`, `ref2`). A new version of a library can change the order of conversion and so rename a type that user code refers to. A name should depend on the TypeScript declaration alone: the declaration's own name, else the path from the nearest named declaration (`socket.on.listener`), and on a collision the module it comes from, never a counter. rescript-bindgen keeps a committed file of the names it gave out; an import inside the compiler has no such file, so the scheme itself has to be stable.
+
+### Members that share a tag
+
+The syntax tree of vite's parser is a union of 183 interfaces tagged by `type`. Thirteen tags are used by more than one interface, 37 interfaces in all, and that is enough to make the whole union `unknown`, and with it the `parent` of every node.
+
+```ts
+interface StringLiteral { type: "Literal"; value: string; raw: string | null }
+interface NumericLiteral { type: "Literal"; value: number; raw: string | null }
+interface RegExpLiteral { type: "Literal"; value: RegExp | null; regex: Regex }
+interface IdentifierName { type: "Identifier"; name: string }
+type Node = StringLiteral | NumericLiteral | RegExpLiteral | IdentifierName // and 179 more
+```
+
+With object cases, every member is a case. The tag is a literal check, and where members share a tag another field decides:
+
+```rescript
+@unboxed
+type node =
+  | StringLiteral({@as("type") type_: [#Literal], value: string, raw: Null.t<string>})
+  | NumericLiteral({@as("type") type_: [#Literal], value: float, raw: Null.t<string>})
+  | RegExpLiteral({@as("type") type_: [#Literal], value: Null.t<RegExp.t>, regex: regex})
+  | IdentifierName({@as("type") type_: [#Identifier], name: string})
+```
+
+```js
+if (x.type === "Literal" && "regex" in x) { /* RegExpLiteral */ }
+else if (x.type === "Literal" && typeof x.value === "string") { /* StringLiteral */ }
+else if (x.type === "Literal") { /* NumericLiteral */ }
+else { /* IdentifierName */ }
+```
+
+Building and reading are both exact, and the cases keep their TypeScript names.
+
+Some members that share a tag differ in no field a check can see. `ArrayPattern` and `ArrayAssignmentTarget` are both `{type: "ArrayPattern", elements: [...]}`; only the types of the elements differ. They become one case whose fields have the union of the members' types: exact for reading, and accepting more than TypeScript when building. On the oxc types vite uses, the 37 members that share a tag become 22 cases, 8 of them merged from 15 members.
+
+### Library interfaces
+
+Three kinds of type from declaration files come out as an abstract type or as `unknown` today, and take every union they are in with them:
+
+- Interfaces of the DOM library that only carry data (`AddEventListenerOptions`) or are a function (`EventListener`). Imported as records and function types, `boolean | AddEventListenerOptions` is an ordinary variant.
+- Interfaces that a class implements (`NodeJS.ReadableStream`, `WritableStream`). Imported as records, object cases tell them apart by a method one has and the other does not (`read`, `write`).
+- A class that is also a namespace, such as `EventEmitter` of `node:events`, the superclass of every stream and server.
+
+React's types are a case of their own. A user of `@rescript/react` expects `React.element`, `ReactEvent.Mouse.t`, `React.ref<Nullable.t<Dom.element>>`, `JsxDOM.style` and `Dom.element`, not a structural import of `@types/react`. A table maps those TypeScript types to the existing ReScript types before the converter walks them. The survey cannot show what this is worth, but for React code it matters more than any single row.
+
+### Event maps
+
+```ts
+interface SocketEvents { close: []; data: [chunk: Buffer]; error: [err: Error] }
+class Socket {
+  on<E extends keyof SocketEvents>(event: E, listener: (...args: SocketEvents[E]) => void): this
+}
+```
+
+`SocketEvents[E]` has no value before `E` is known, so today the listener takes `array<unknown>`, with several notes. But `E` ranges over three names, and each name fixes the listener. That is a GADT whose constructors are the names:
+
+```rescript
+type rec socketEvent<_> =
+  | @as("close") Close: socketEvent<unit => unit>
+  | @as("data") Data: socketEvent<buffer => unit>
+  | @as("error") Error: socketEvent<JsError.t => unit>
+
+type rec socket = {on: 'listener. (socketEvent<'listener>, 'listener) => socket}
+
+socket.on(Data, chunk => Console.log(chunk)) // socket.on("data", chunk => ...)
+```
+
+This is the `on`, `once` and `emit` of every stream, socket and server of Node: 3,434 of the 11,014 notes of the survey, almost a third. It changes few declarations from inexact to exact, because the same methods also take `any`. The same encoding covers `get<K extends keyof T>(key: K): T[K]` and overloads that differ only in a literal first argument.
+
+### Nothing tells the members apart
+
+Where no check separates the members, as in `T | PromiseLike<T>`, the union is an abstract type with a conversion from each member, for values ReScript passes in, and a reader to each member, for values the library hands back. The caller uses a reader after establishing which member it has, as in TypeScript after a type guard.
+
+```rescript
+module Awaitable = {
+  type t<'t>
+  external fromValue: 't => t<'t> = "%identity"
+  external fromPromise: promise<'t> => t<'t> = "%identity"
+  external asValue: t<'t> => 't = "%identity"
+  external asPromise: t<'t> => promise<'t> = "%identity"
+}
+```
+
+With this fallback no union is imported as `unknown`.
+
+### Overloads
+
+Each signature becomes an external. The first keeps the name; the others are named after what they add: a parameter (`parseWithRadix`), or, for signatures of the same length, the first parameter whose type differs (`wrapForCount`). An overloaded method becomes `@send` externals next to the record, because a record cannot have two fields with one JavaScript name.
+
+```rescript
+@module("./api.ts") external parse: string => float = "parse"
+@module("./api.ts") external parseWithRadix: (string, float) => float = "parse"
+@send external write: (writable, string) => bool = "write"
+@send external writeWithEncoding: (writable, string, string) => bool = "write"
+```
+
+### Functions with properties
+
+i18next's `t` and an axios instance are functions with properties. Today the properties are dropped. Instead the type is a module with the call as a conversion and one accessor per property:
+
+```rescript
+module Translator = {
+  type t
+  external asFn: t => (string => string) = "%identity"
+  @get external locale: t => string = "locale"
+  @send external setLocale: (t, string) => unit = "setLocale"
+}
+
+let hello = Translator.asFn(t)("hello") // t("hello")
+```
+
+### Generic function types
+
+A function type with type parameters of its own can only be a record field in ReScript. An unboxed record with one field is that function at run time:
+
+```rescript
+@unboxed type eachVisit = {call: 'item. array<'item> => array<'item>}
+external each: eachVisit => unit = "each"
+
+each({call: items => items->Array.toReversed}) // each(items => items.toReversed())
+```
+
+### Namespaces and enum objects
+
+`export namespace constants { ... }`, `fs.promises` and the object of an `enum` are values. Each becomes a module whose members are externals with `@scope`:
+
+```rescript
+module Promises = {
+  @module("node:fs") @scope("promises") external readFile: string => promise<string> = "readFile"
+}
+```
+
+### Branded primitives
+
+`type UserId = string & {__brand: "user"}` is imported as `string`, so any string is a user id. A single-case unboxed variant keeps it distinct at no cost:
+
+```rescript
+@unboxed type userId = UserId(string)
+
+let UserId(raw) = lookup(UserId("u1")) // lookup("u1")
+```
+
+### Standard-library types
+
+```rescript
+// `typeof EventEmitter`: a value that is called with `new`.
+type constructor<'args, 'instance>
+@val @scope("Reflect")
+external construct: (constructor<'args, 'instance>, 'args) => 'instance = "construct"
+
+// `(...args: string[]) => void` as a callback: JavaScript passes any number
+// of arguments, ReScript receives them as one array.
+type variadic<'arg, 'result>
+let variadic: (array<'arg> => 'result) => variadic<'arg, 'result> // f => (...args) => f(args)
+
+// `never`
+type never
+```
+
+`variadic` is the only solution here that adds code at run time, a wrapper around the callback.
+
+### Order of work
+
+1. **Object cases**, with members that share a tag and library interfaces as records. Together the largest gain, about 14.6% of the declarations. The compiler part is being implemented.
+2. **Type parameters and stable names.** They change no count, but today an import can be wrong without a note, and a library upgrade can rename a type.
+3. **Event maps.** A third of all notes.
+4. **Overloads, namespaces and constructors**: about 12% of the declarations touched, all converter or standard-library work.
+5. **A corpus of pinned packages** with their output and notes kept as a baseline, so that a change which stops one compiling, or adds notes, fails a test. Today the survey runs on whatever is installed.
+6. The remaining rows, then bounded type variables and the `dict` remainder.
 
 ## How it works
 
