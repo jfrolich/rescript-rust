@@ -35,3 +35,46 @@ parity_build_ocaml_reference() {
     done
     return $status
 }
+
+# Called once before comparisons. The wrapper exports the built tool to its
+# child suites, so a combined run builds it only once. Exact mode needs no Rust
+# tool and retains byte-for-byte comparison.
+parity_init_comparison() {
+    PARITY_COMPARE_MODE="${PARITY_COMPARE_MODE:-exact}"
+    echo "Comparison mode: $PARITY_COMPARE_MODE"
+    if [[ "$PARITY_COMPARE_MODE" == reformat && -z "${PARITY_REFORMAT_BIN:-}" ]]; then
+        local target="$PROJECT_ROOT/scripts/js-reformat/target"
+        cargo build --locked --manifest-path "$PROJECT_ROOT/scripts/js-reformat/Cargo.toml" \
+            --target-dir "$target" || return
+        export PARITY_REFORMAT_BIN="$target/debug/js-reformat"
+    fi
+    export PARITY_COMPARE_MODE
+}
+
+# Write diagnostics to stdout for the caller's existing diff artifact. The
+# normalizer accepts trees, so stage the pair with the same basename. Keeping
+# the source paths in the diagnostic identifies either side of a parse error.
+parity_compare_js() {
+    local reference="$1" candidate="$2" status=0
+    if [[ "${PARITY_COMPARE_MODE:-exact}" == exact ]]; then
+        diff -u --text "$reference" "$candidate"
+        return
+    fi
+    local temp name
+    temp=$(mktemp -d) || return
+    name=$(basename "$reference")
+    if mkdir "$temp/reference" "$temp/candidate" &&
+        cp "$reference" "$temp/reference/$name" && cp "$candidate" "$temp/candidate/$name"; then
+        "$PARITY_REFORMAT_BIN" compare "$temp/reference" "$temp/candidate" \
+            --split-file --drop-decoration-comments > "$temp/report" 2>&1 || status=$?
+    else
+        status=2
+    fi
+    if [[ "$status" -ne 0 ]]; then
+        if [[ -f "$temp/report" ]]; then cat "$temp/report"; fi
+        printf 'Reference: %s\nCandidate: %s\n' "$reference" "$candidate"
+    fi
+    find "$temp" -type f -delete
+    find "$temp" -depth -type d -empty -delete
+    return "$status"
+}

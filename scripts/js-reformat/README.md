@@ -12,12 +12,20 @@ scripts/js-reformat/target/debug/js-reformat compare reference normalized --cand
 scripts/js-reformat/target/debug/js-reformat check normalized
 ```
 
-All commands accept `--strip-comments`. Files with lowercase `.js`, `.mjs`,
+The crate also exports `reformat(source: &str, options: ReformatOptions) ->
+Result<String, String>` for tests in other crates. All options default to false.
+
+All commands accept `--strip-comments`, `--split-file`, and
+`--drop-decoration-comments`. Files with lowercase `.js`, `.mjs`,
 `.cjs`, and `.jsx` extensions are visited recursively in sorted relative-path
 order; other files and symlinks are ignored. Even `.cjs` files are parsed as ES
 modules with JSX enabled, not as CommonJS scripts. Parentheses are not preserved
 by the parser (`preserve_parens: false`); codegen inserts precedence parentheses.
-All other parser and codegen options are defaults.
+JSX sequence expressions are always wrapped so the result parses again (including
+nested elements and attribute containers). OXC 0.158.0 ignores explicit
+`ParenthesizedExpression` nodes when printing, so the tool reparses the generated
+body, uses the recovered JSX sequence spans to insert parentheses, and verifies
+the repaired body parses. All other parser and codegen options are defaults.
 
 `format` creates matching relative paths, overwrites matching output files, and
 leaves unrelated output files alone. Prefer a separate output tree outside the
@@ -52,17 +60,41 @@ not a lossless source formatter. `--strip-comments` uses
 `CommentOptions::disabled()` (normal, JSDoc, annotations, and legal comments
 all disabled), leaving `const x = 1;` and a final newline in the example above.
 
+## File-envelope and decoration modes
+
+`--split-file` is for generated ReScript output. Lines through the exact generated
+header are a verbatim preamble, including arbitrary file directives before it.
+Without that header, no preamble is inferred: arbitrary directives cannot be
+identified reliably. JavaScript directives such as `"use strict"` remain AST nodes.
+The suffix of parser-recognized purity, empty-output and `sourceMappingURL`
+comments is a verbatim trailer, including the whitespace after the last body
+token. Matching text inside a string/template is not a trailer. The body alone
+is normalized; `compare` therefore compares envelope bytes exactly, even with
+`--strip-comments`. Header presence, trailer spelling and final newlines matter.
+
+`--drop-decoration-comments` removes block comments immediately before numeric
+literals, allowing whitespace and opening parentheses (which OXC removes).
+It does not match strings, bigint literals, or comments before unary minus.
+It is opt-in; ordinary comments keep the existing OXC behavior. Neither mode
+changes the compiler's emitted output or the parity scripts.
+
+```sh
+scripts/js-reformat/target/debug/js-reformat check tests/tests/src --split-file --drop-decoration-comments
+scripts/js-reformat/target/debug/js-reformat check packages/@rescript/runtime/lib --split-file --drop-decoration-comments
+```
+
 ## Repository corpus check
 
-Measured with the debug binary using `/usr/bin/time -p`, with comments enabled:
+With both modes enabled, the debug binary reports:
 
-| Tree | Files | Parse failures | Byte-level non-fixed points | Wall time |
-| --- | ---: | ---: | ---: | ---: |
-| `tests/tests/src` | 718 | 2 | 0 | 0.26 s |
-| `packages/@rescript/runtime/lib` | 226 | 0 | 0 | 0.05 s |
+| Tree | Files | Parse failures | Byte-level non-fixed points |
+| --- | ---: | ---: | ---: |
+| `tests/tests/src` | 719 | 0 | 0 |
+| `packages/@rescript/runtime/lib` | 226 | 0 | 0 |
 
-`directives.mjs` fails the initial parse (expected semicolon).
-`jsx_preserve_cases.mjs` parses initially, but its reformatted JSX fails the
-second parse (comma operator in a JSX expression). Thus only 716 test-tree
-files successfully complete the fixed-point check; the two failures are not
-claims of successful normalization. Neither existing fixture is modified.
+`directives.mjs` needs the preamble split: `first directive;` is arbitrary text,
+not JavaScript. `jsx_preserve_cases.mjs` needs the JSX comma-expression repair.
+`gpr_4632.mjs` also tests decorations before parenthesized numeric literals, whose
+parentheses disappear during normalization. No committed output is changed.
+Unparsable files are listed with diagnostics, processing continues through the
+remaining files, and exit status 2 takes precedence over differences (status 1).

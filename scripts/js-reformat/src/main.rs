@@ -1,39 +1,10 @@
-use oxc_allocator::Allocator;
-use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
-use oxc_parser::{ParseOptions, Parser};
-use oxc_span::SourceType;
+use js_reformat::{ReformatOptions, reformat};
 use std::{
     collections::BTreeSet,
     env, fs,
     path::{Path, PathBuf},
     process::ExitCode,
 };
-
-fn reformat(source: &str, strip: bool) -> Result<String, String> {
-    let allocator = Allocator::default();
-    let parsed = Parser::new(&allocator, source, SourceType::mjs().with_jsx(true))
-        .with_options(ParseOptions {
-            preserve_parens: false,
-            ..ParseOptions::default()
-        })
-        .parse();
-    if !parsed.diagnostics.is_empty() {
-        return Err(parsed
-            .diagnostics
-            .iter()
-            .map(|e| format!("{e:?}"))
-            .collect::<Vec<_>>()
-            .join("\n"));
-    }
-    let mut options = CodegenOptions::default();
-    if strip {
-        options.comments = CommentOptions::disabled();
-    }
-    Ok(Codegen::new()
-        .with_options(options)
-        .build(&parsed.program)
-        .code)
-}
 
 fn files(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
     fn visit(root: &Path, dir: &Path, paths: &mut BTreeSet<PathBuf>) -> std::io::Result<()> {
@@ -59,13 +30,18 @@ fn files(root: &Path) -> Result<BTreeSet<PathBuf>, String> {
     Ok(paths)
 }
 
-fn load(root: &Path, path: &Path, formatted: bool, strip: bool) -> Result<String, String> {
+fn load(
+    root: &Path,
+    path: &Path,
+    formatted: bool,
+    options: ReformatOptions,
+) -> Result<String, String> {
     let full = root.join(path);
     let source = fs::read_to_string(&full).map_err(|e| format!("{}: {e}", full.display()))?;
     if formatted {
         Ok(source)
     } else {
-        reformat(&source, strip).map_err(|e| format!("{}: {e}", full.display()))
+        reformat(&source, options).map_err(|e| format!("{}: {e}", full.display()))
     }
 }
 
@@ -113,12 +89,16 @@ fn show_difference(path: &Path, a: Option<&str>, b: Option<&str>) {
 }
 
 fn run() -> Result<u8, String> {
-    let mut strip = false;
+    let mut options = ReformatOptions::default();
     let mut candidate_formatted = false;
     let mut args = Vec::new();
     for arg in env::args_os().skip(1) {
         if arg == "--strip-comments" {
-            strip = true;
+            options.strip_comments = true;
+        } else if arg == "--split-file" {
+            options.split_file = true;
+        } else if arg == "--drop-decoration-comments" {
+            options.drop_decoration_comments = true;
         } else if arg == "--candidate-formatted" {
             candidate_formatted = true;
         } else {
@@ -132,7 +112,7 @@ fn run() -> Result<u8, String> {
         _ => 0,
     };
     if expected == 0 || args.len() != expected || (candidate_formatted && command != "compare") {
-        return Err("Usage: js-reformat format <in-dir> <out-dir> | compare <reference-dir> <candidate-dir> [--candidate-formatted] | check <dir> [--strip-comments (all commands)]".into());
+        return Err("Usage: js-reformat format <in-dir> <out-dir> | compare <reference-dir> <candidate-dir> [--candidate-formatted] | check <dir> [--strip-comments] [--split-file] [--drop-decoration-comments] (all commands)".into());
     }
     let root = Path::new(&args[1]);
     let paths = files(root)?;
@@ -145,11 +125,11 @@ fn run() -> Result<u8, String> {
         for path in &union {
             let left = paths
                 .contains(*path)
-                .then(|| load(root, path, false, strip))
+                .then(|| load(root, path, false, options))
                 .transpose();
             let right = candidate_paths
                 .contains(*path)
-                .then(|| load(candidate, path, candidate_formatted, strip))
+                .then(|| load(candidate, path, candidate_formatted, options))
                 .transpose();
             match (left, right) {
                 (Ok(left), Ok(right)) => {
@@ -173,9 +153,9 @@ fn run() -> Result<u8, String> {
     } else {
         // Snapshot the file list before writing, including for in-place formatting.
         for path in &paths {
-            let result = load(root, path, false, strip).and_then(|text| {
+            let result = load(root, path, false, options).and_then(|text| {
                 if command == "check" {
-                    if reformat(&text, strip)? != text {
+                    if reformat(&text, options)? != text {
                         different += 1;
                         println!("{}: not a fixed point", path.display());
                     }
