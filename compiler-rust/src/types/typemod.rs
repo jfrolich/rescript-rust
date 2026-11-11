@@ -16667,7 +16667,9 @@ fn type_structure_unscoped<'a>(
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
         }
-        if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
+        if !rescript_hide_structure_item(&typed_item.str_desc, arena)
+            && !crate::macros::discover::is_instance_group(arena, item)
+        {
             sig_items.extend(item_sig);
         }
         typed_items.push(typed_item);

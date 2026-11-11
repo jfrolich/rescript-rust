@@ -665,7 +665,7 @@ pub enum ExprContext {
 pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
     match token {
         Token::Lparen => Token::Rparen,
-        Token::Lbrace => Token::Rbrace,
+        Token::Lbrace | Token::DollarLbrace => Token::Rbrace,
         Token::Lbracket => Token::Rbracket,
         Token::List => Token::Rbrace,
         Token::Dict => Token::Rbrace,
@@ -703,6 +703,7 @@ pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
                 Token::Lbracket
                 | Token::Lparen
                 | Token::Lbrace
+                | Token::DollarLbrace
                 | Token::List
                 | Token::Dict
                 | Token::LessThan,

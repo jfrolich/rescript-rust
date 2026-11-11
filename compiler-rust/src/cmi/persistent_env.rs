@@ -589,6 +589,9 @@ pub struct ModuleRegistry {
     /// as an implicit dependency (e.g., via `-open Pervasives`) but hasn't
     /// been compiled yet in the current wave.
     source_fallback_paths: SharedRegistryMap<PathBuf>,
+    /// The source-fallback modules are the modules of `@rescript/runtime`
+    /// (the playground and tests, which have the runtime as source only).
+    source_fallback_is_runtime: bool,
     /// Package roots of registered modules that carry no `InMemoryModuleInfo`
     /// (namespace units), for load-path visibility.
     module_package_roots: SharedRegistryMap<PathBuf>,
@@ -1042,6 +1045,13 @@ impl ModuleRegistry {
         }
     }
 
+    /// Declare the source-fallback modules to be the modules of
+    /// `@rescript/runtime`: the playground and tests have the runtime as
+    /// source only, type check it on demand and import it from the package.
+    pub fn set_source_fallback_is_runtime(&mut self, is_runtime: bool) {
+        self.source_fallback_is_runtime = is_runtime;
+    }
+
     pub fn insert_source_fallback_path(&mut self, name: String, path: PathBuf) {
         if self.write_to_local {
             self.local_source_fallback_paths.insert(name, path);
@@ -1137,6 +1147,8 @@ pub struct PersistentEnv {
     /// has its source path, the module is type-checked from source on the fly.
     /// Shared through the build registry so worker snapshots do not clone it.
     source_fallback_paths: SharedRegistryMap<PathBuf>,
+    /// See `ModuleRegistry::source_fallback_is_runtime`.
+    source_fallback_is_runtime: bool,
     /// Current depth of source-fallback recursion. Each `typecheck_source_signature`
     /// call increments this. Used to prevent stack overflow from deep dependency chains.
     source_fallback_depth: usize,
@@ -1255,6 +1267,7 @@ impl PersistentEnv {
             in_process_mode: false,
             disk_modules: SharedRegistryMap::default(),
             source_fallback_paths: SharedRegistryMap::default(),
+            source_fallback_is_runtime: false,
             source_fallback_depth: 0,
             portable_cache: SharedRegistryMap::default(),
             module_package_roots: SharedRegistryMap::default(),
@@ -1289,6 +1302,7 @@ impl PersistentEnv {
             in_process_mode: true,
             disk_modules: registry.disk_modules.clone(),
             source_fallback_paths: registry.source_fallback_paths.clone(),
+            source_fallback_is_runtime: registry.source_fallback_is_runtime,
             source_fallback_depth: 0,
             portable_cache: registry.cached_modules.clone(),
             module_package_roots: registry.module_package_roots.clone(),
@@ -2304,6 +2318,7 @@ impl PersistentEnv {
             in_process_mode: self.in_process_mode,
             disk_modules: self.disk_modules.clone(),
             source_fallback_paths: self.source_fallback_paths.clone(),
+            source_fallback_is_runtime: self.source_fallback_is_runtime,
             source_fallback_depth: self.source_fallback_depth + 1,
             portable_cache: self.portable_cache.clone(),
             module_package_roots: self.module_package_roots.clone(),
@@ -2989,7 +3004,9 @@ impl PersistentEnv {
 
     pub fn module_is_runtime(&self, name: &str) -> bool {
         self.in_memory_info_with(name, |info| info.is_runtime)
-            .unwrap_or(false)
+            .unwrap_or_else(|| {
+                self.source_fallback_is_runtime && self.source_fallback_path_entry(name).is_some()
+            })
     }
 }
 

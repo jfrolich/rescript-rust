@@ -336,10 +336,7 @@ impl Discovery {
         for (at, functions) in std::mem::take(&mut self.new_groups) {
             self.edits.push(Edit::insert(
                 at,
-                format!(
-                    "%%private(@warning(\"-39\") let rec {})\n",
-                    functions.join("\nand ")
-                ),
+                format!("@warning(\"-39\") let rec {}\n", functions.join("\nand ")),
             ));
         }
         PassResult {
@@ -362,13 +359,7 @@ impl Discovery {
     fn add_instance(&mut self, function: String) {
         let ordinal = self.text.origin(self.item_start);
         if let Some(end) = self.group_ends.get(&ordinal).copied() {
-            // `%%private(let rec a = ... )`: stay inside the parentheses.
-            let at = if end > 0 && self.text.slice(end - 1, end) == ")" {
-                end - 1
-            } else {
-                end
-            };
-            self.edits.push(Edit::insert(at, format!("\nand {function}")));
+            self.edits.push(Edit::insert(end, format!("\nand {function}")));
             return;
         }
         match self
@@ -980,14 +971,23 @@ pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructure
     discovery.item_start = start;
     discovery.item_pending = false;
     // An instance group that an earlier pass added.
-    if let ParsedStructureItemDesc::Pstr_value((RecFlag::Recursive, bindings)) = &item.pstr_desc
-        && let Some(first) = arena.vb_list(*bindings).first()
-        && let PatternDesc::Ppat_var(name) = &arena.get_pat(first.pvb_pat).ppat_desc
-        && arena.get_string(name.txt).contains('$')
-    {
+    if is_instance_group(arena, item) {
         let ordinal = discovery.text.origin(start);
         discovery.group_ends.insert(ordinal, end);
     }
+}
+
+/// Whether a structure item is a group of generated instances: a
+/// `let rec` of names with a `$`, which only generated code can contain.
+/// The group is not part of the module's signature.
+pub(crate) fn is_instance_group(arena: &ParseArena, item: &ParsedStructureItem) -> bool {
+    if let ParsedStructureItemDesc::Pstr_value((RecFlag::Recursive, bindings)) = &item.pstr_desc
+        && let Some(first) = arena.vb_list(*bindings).first()
+        && let PatternDesc::Ppat_var(name) = &arena.get_pat(first.pvb_pat).ppat_desc
+    {
+        return arena.get_string(name.txt).contains('$');
+    }
+    false
 }
 
 /// A top-level item was typed (`ok`) or failed. Resolves the generic uses

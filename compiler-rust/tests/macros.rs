@@ -42,6 +42,7 @@ impl Project {
             }
         }
         registry.set_source_fallback_paths(modules);
+        registry.set_source_fallback_is_runtime(true);
         let javascript: Arc<Mutex<HashMap<String, String>>> = Default::default();
         let sources = javascript.clone();
         let host = Arc::new(QuickJsHost::new(Arc::new(move |name: &str| {
@@ -88,7 +89,7 @@ impl Project {
                             PathBuf::from(filename),
                             false,
                             Default::default(),
-                            false,
+                            module_name == "Macro",
                         ),
                     );
                 }
@@ -137,4 +138,87 @@ fn expression_macro() {
         .unwrap();
     println!("--- Main.res expanded\n{}\n--- js\n{js}", project.expanded.clone().unwrap_or_default());
     assert!(js.contains("\"age + 1 =\""), "{js}");
+}
+
+const JSON: &str = r#"
+open Macro
+
+@generic
+let encode = (value: code<'a>): code<JSON.t> =>
+  switch Type.info(typeOf(value)) {
+  | String => %code(JSON.Encode.string(${value}))
+  | Int => %code(JSON.Encode.int(${value}))
+  | Float => %code(JSON.Encode.float(${value}))
+  | Bool => %code(JSON.Encode.bool(${value}))
+  | Option(_) =>
+    %code(
+      switch ${value} {
+      | Some(v) => encode(v)
+      | None => JSON.Encode.null
+      }
+    )
+  | Array(_) => %code(JSON.Encode.array(${value}->Array.map(v => encode(v))))
+  | Record({fields}) =>
+    let entries = fields->Array.map(f => {
+      let key = f.attrs->Attr.string("Json.key")->Option.getOr(f.jsName)
+      %code((${Code.string(key)}, encode(${value->Code.field(f.name)})))
+    })
+    %code(JSON.Encode.object(Dict.fromArray(${Code.array(entries)})))
+  | Variant({constructors}) =>
+    Code.switch_(
+      value,
+      constructors->Array.map(c => {
+        let (pattern, args) = Pat.constructor(c)
+        let encoded = args->Array.map(arg => %code(encode(${arg})))
+        (
+          pattern,
+          %code(
+            JSON.Encode.object(
+              Dict.fromArray([
+                ("tag", JSON.Encode.string(${Code.string(c.name)})),
+                ("args", JSON.Encode.array(${Code.array(encoded)})),
+              ]),
+            )
+          ),
+        )
+      }),
+    )
+  | Abstract({name}) =>
+    switch Type.companion(typeOf(value), "toJson") {
+    | Some(toJson) => %code(${toJson}(${value}))
+    | None => error(`${name} is abstract and its module has no toJson`)
+    }
+  | _ => error(`unsupported type ${Type.name(typeOf(value))}`)
+  }
+
+@macro
+let codec = (t: Type.decl): decls =>
+  %code(
+    let ${Pat.var(t.name ++ "_encode")} = (value: ${t.typ}) => encode(value)
+  )
+"#;
+
+const USER: &str = r#"
+type address = {street: string, city: string}
+
+type user = {
+  name: string,
+  @Json.key("user_age") age: int,
+  email: option<string>,
+  address: address,
+  tags: array<string>,
+}
+
+let alice = {name: "Alice", age: 30, email: None, address: {street: "Main St", city: "Utrecht"}, tags: ["admin"]}
+let json = Json.encode(alice)
+"#;
+
+#[test]
+fn generic_macro_makes_one_function_per_type() {
+    let mut project = Project::new();
+    project.compile("Json.res", JSON).unwrap();
+    let js = project.compile("User.res", USER).unwrap();
+    println!("--- User.res expanded\n{}\n--- js\n{js}", project.expanded.clone().unwrap_or_default());
+    assert!(js.contains("\"user_age\""), "{js}");
+    assert!(js.contains("value.address") || js.contains("address"), "{js}");
 }
