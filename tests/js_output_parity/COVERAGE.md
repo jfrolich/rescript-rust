@@ -114,7 +114,7 @@ cross-module optimization modes.
 
 ## Non-Focused Gates
 
-- Local JS snapshot corpus: `./scripts/test_js_output_parity.sh --skip-spice-ppx`.
+- Local JS snapshot corpus: `./scripts/test_js_output_parity.sh`.
 - Runtime/stdlib output corpus: `./scripts/test_stdlib_output_parity.sh`.
 - External Tella output corpus, used as a mining and regression signal:
   `./scripts/test_tella_output_parity.sh --quick`.
@@ -123,5 +123,6 @@ cross-module optimization modes.
 
 - Source forms that the ReScript parser/typechecker does not accept as
   compiling ReScript programs.
-- Parser AST, typedtree, lambda, and diagnostic parity. Those have their own
-  gates and are only used here as regression checks around output fixture work.
+- Diagnostic parity, which has its own gate
+  (`./scripts/test_error_output_parity.sh`). Intermediate representations
+  (parse tree, typed tree, Lambda) are not compared at all.
