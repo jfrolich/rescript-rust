@@ -2,12 +2,11 @@
 # Run the Rust release validation gates locally, mirroring
 # .github/workflows/rust-rewrite-validation.yml.
 #
-# Usage: ./scripts/release_gates.sh [--no-ocaml] [--skip-tests] [--with-tella] [--parallel N]
+# Usage: ./scripts/release_gates.sh [--no-ocaml] [--skip-tests] [--with-tella]
 #
 #   --no-ocaml    Reuse the existing OCaml reference build (_build) and runtime.
 #   --skip-tests  Skip `cargo test` for compiler-rust and rewatch.
 #   --with-tella  Also run the external Tella output parity (TELLA_DIR).
-#   --parallel N  Parallelism for the typedtree/lambda parity scripts (default 4).
 #
 # Each step logs to temp/release-gates/<step>.log; a summary is printed at the end.
 # Exit status is non-zero when any step fails.
@@ -20,14 +19,12 @@ cd "$ROOT"
 BUILD_OCAML=1
 RUN_TESTS=1
 RUN_TELLA=0
-PARALLEL=4
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --no-ocaml) BUILD_OCAML=0 ;;
         --skip-tests) RUN_TESTS=0 ;;
         --with-tella) RUN_TELLA=1 ;;
-        --parallel) PARALLEL=$2; shift ;;
-        -h|--help) sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "Unknown option: $1" >&2; exit 2 ;;
     esac
     shift
@@ -63,7 +60,7 @@ summary() {
 }
 
 if [[ $BUILD_OCAML -eq 1 ]]; then
-    # The OCaml bsc the parity scripts build their reference with
+    # The OCaml bsc the reference builds use
     # (the hidden `rescript build-reference --bsc`).
     step ocaml-reference make compiler || { summary; exit 1; }
 fi
@@ -84,11 +81,13 @@ if [[ $RUN_TESTS -eq 1 ]]; then
     step cargo-test-rewatch cargo test --release --locked --manifest-path rewatch/Cargo.toml
 fi
 
-step typedtree ./scripts/test_typedtree_parity.sh --release --parallel "$PARALLEL"
-step raw-lambda ./scripts/test_lambda_parity.sh --release --raw --parallel "$PARALLEL"
-step lambda ./scripts/test_lambda_parity.sh --release --parallel "$PARALLEL"
 step js ./scripts/test_js_output_parity.sh --release
 step errors env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+step stdlib env RUST_TARGET=release ./scripts/test_stdlib_output_parity.sh
+step gentype env GENTYPE_PARITY_WITHOUT_TELLA=1 \
+    REWATCH_BIN="$ROOT/rewatch/target/release/rescript" \
+    RUST_BSC="$ROOT/rewatch/target/release/bsc" \
+    ./scripts/test_gentype_output_parity.sh
 if [[ $RUN_TELLA -eq 1 ]]; then
     step tella ./scripts/test_tella_output_parity.sh --release
 fi

@@ -13,8 +13,7 @@ use std::sync::{Arc, Mutex};
 use std::{fmt::Display, ops::Deref, path::PathBuf, time::SystemTime};
 
 /// Intermediate representations a build writes for every module it compiles
-/// (the hidden `--dump` option of `rescript build`), for comparing them with
-/// the OCaml compiler's `-dtyped-sexp`/`-drawlambda`/`-dlambda-sexp` output.
+/// (the hidden `--dump` option of `rescript build`), for debugging.
 #[derive(Debug, Clone)]
 pub struct DumpRequest {
     pub kinds: Vec<rescript_compiler::driver::DumpKind>,

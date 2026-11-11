@@ -12,7 +12,7 @@ For a surface-language expression, declaration, or module feature, follow the
 parsetree node through these modules:
 
 - [`parsetree.ml`](parsetree.ml) defines the current untyped AST.
-  `parsetree0.ml` is the frozen compatibility AST and must not be changed.
+  `parsetree0.ml` is the former PPX AST; it is no longer frozen.
 - [`typecore.ml`](typecore.ml) checks expressions and patterns.
 - [`typetexp.ml`](typetexp.ml) translates source type expressions.
 - [`typedecl.ml`](typedecl.ml) checks type declarations.

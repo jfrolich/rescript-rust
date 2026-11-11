@@ -261,13 +261,13 @@ pub struct BuildArgs {
     #[arg(long, default_value_t = false)]
     pub prod: bool,
 
-    /// Test-only: write these intermediate representations of every compiled
+    /// Debugging: write these intermediate representations of every compiled
     /// module (comma-separated: typedtree, typedtree-locs, rawlambda, lambda,
     /// lambda-locs) to `--dump-dir`. Forces a full build.
     #[arg(long, hide = true, value_delimiter = ',', value_parser = parse_dump_kind, requires = "dump_dir")]
     pub dump: Vec<rescript_compiler::driver::DumpKind>,
 
-    /// Test-only: directory for `--dump`, as `<dir>/<package>/<source path>.<kind>`.
+    /// Debugging: directory for `--dump`, as `<dir>/<package>/<source path>.<kind>`.
     #[arg(long, hide = true)]
     pub dump_dir: Option<std::path::PathBuf>,
 }

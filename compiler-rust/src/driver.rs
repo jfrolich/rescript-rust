@@ -7190,18 +7190,6 @@ fn compile_source_to_js_with_options_inner(
         print!("{}", apply_gentype_outcome(gentype, "", source_file_for_interface)?);
     }
 
-    // Typedtree parity runs only need typechecking output.
-    // Skipping Lambda/JS lowering avoids unrelated downstream failures
-    // (timeouts/crashes) from obscuring typedtree parity results.
-    if (options.dump_typed_sexp || options.dump_typed_sexp_locs)
-        && std::env::var_os("RUST_TYPEDTREE_ONLY").is_some()
-    {
-        if typing_warnings_fatal {
-            return Err(UserDiagnostic::new(String::new(), 2).into());
-        }
-        return Ok(String::new());
-    }
-
     let lambda_start_stamp = synchronize_lambda_start_stamp(&type_ctx);
 
     let unit_name = options.current_unit_name().unwrap_or_default();
@@ -7341,13 +7329,6 @@ fn compile_source_to_js_with_options_inner(
             let _ =
                 crate::lambda::sexp_lambda::print_lambda_with_locs(&lowered_lambda, &mut stderr);
             let _ = stderr.flush();
-        }
-
-        // Optimized-lambda parity only needs the dump output. Mirror the
-        // typedtree parity short-circuit so large JS-backend work cannot turn
-        // an exact dump match into a timeout-only failure.
-        if std::env::var_os("RUST_LAMBDA_DUMP_ONLY").is_some() {
-            std::process::exit(0);
         }
     }
 

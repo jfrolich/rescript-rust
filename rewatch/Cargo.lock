@@ -1709,7 +1709,7 @@ dependencies = [
 
 [[package]]
 name = "rescript"
-version = "13.0.0-alpha.7"
+version = "13.0.0-alpha.8"
 dependencies = [
  "ahash",
  "anyhow",
@@ -1746,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "rescript-cli"
-version = "13.0.0-alpha.7"
+version = "13.0.0-alpha.8"
 dependencies = [
  "anyhow",
  "console",

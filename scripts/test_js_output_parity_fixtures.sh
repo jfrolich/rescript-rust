@@ -25,7 +25,7 @@ OPTIONS:
   -h, --help        Show this help
 
 Compatibility no-ops accepted when called through test_js_output_parity.sh:
-  --skip-parser-ast --skip-syntax --skip-spice-ppx --skip-js
+  --skip-syntax --skip-js
 
 ENV:
   OCAML_BSC, RUST_BSC, TIMEOUT_SECONDS can override defaults.
@@ -47,7 +47,7 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
-        --skip-parser-ast|--skip-syntax|--skip-spice-ppx)
+        --skip-syntax)
             shift
             ;;
         --skip-js)

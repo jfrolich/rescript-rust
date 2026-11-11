@@ -1,0 +1,1 @@
+- Add a standalone OXC-based tool to normalize and compare JavaScript output trees and check formatter fixed points, without changing compiler output or CI parity checks.

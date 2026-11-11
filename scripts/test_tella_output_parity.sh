@@ -34,9 +34,9 @@ while [[ $# -gt 0 ]]; do
             VERBOSE=true
             shift
             ;;
-        --skip-parser-ast|--skip-syntax|--skip-spice-ppx)
+        --skip-syntax)
             # Accepted for compatibility when called through test_js_output_parity.sh,
-            # where these options belong to the local per-file parity harness.
+            # where this option belongs to the local per-file harness.
             shift
             ;;
         --skip-js)

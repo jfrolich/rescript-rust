@@ -55,16 +55,16 @@ code, read the matching OCaml source first.
 | Main implementation driver | `compiler/core/js_implementation.ml` | `src/driver.rs` | OCaml `implementation` parses, applies external PPX, runs `Ppx_entry`, then `after_parsing_impl`. Rust direct source mode follows the same broad stage order in `compile_source_to_js_with_options`, with external-PPX caveats documented below. |
 | Interface driver | `compiler/core/js_implementation.ml`, `compiler/ml/typemod.ml` | `src/driver.rs` | OCaml interfaces parse as signatures, run signature PPX/config/warnings, typecheck, self-check, force delayed checks, and write `.cmi`/`.cmti`. Rust in-process mode publishes a registry signature; direct Rust helpers currently typecheck/dump but do not write OCaml-compatible interface artifacts. |
 | ReScript syntax parser | `compiler/syntax/`, `compiler/ml/parsetree.ml` | `src/parser/*`, `src/parse_arena.rs` | Rust parser uses arena indices instead of OCaml heap records, but output shape and locations must match. |
-| Frozen PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | `parsetree0` is a compatibility wire format. Do not evolve it for new syntax. |
+| Former PPX AST boundary | `compiler/ml/parsetree0.ml`, `ast_mapper_to0.ml`, `ast_mapper_from0.ml`, `binary_ast.ml` | `src/binary_ast/parsetree0.rs`, `mapper_to0.rs`, `mapper_from0.rs`, `writer.rs`, `marshal.rs` | PPX is not supported going forward; `parsetree0` is not frozen and not compared with OCaml. |
 | Frontend and PPX rewrites | `compiler/frontend/*`, `compiler/core/cmd_ppx_apply.ml`, `compiler/frontend/ppx_entry.ml`, `compiler/frontend/ast_config.ml` | `src/binary_ast/ppx.rs`, `src/parser/jsx_ppx.rs`, `src/driver.rs`, `rewatch/src/build/parse.rs` | Order is observable through warnings, errors, AST dumps, and generated code. Rust has several mode-specific caveats listed below. |
 | Initial environment | `compiler/core/res_compmisc.ml`, `compiler/ml/env.ml` | `src/types/predef.rs`, `src/types/env.rs`, `src/cmi/persistent_env.rs`, `src/driver.rs` | Pervasives/Stdlib loading and implicit opens must preserve OCaml lookup and force order. |
 | Persistent environment | `compiler/ml/env.ml`, `compiler/ml/cmi_format.ml`, `compiler/ml/cmi_format.mli`, `compiler/core/js_cmj_format.ml` | `src/cmi/persistent_env.rs`, `src/cmi/cmi_format.rs`, `src/cmi/sig_reader.rs`, `src/cmi/portable_types.rs` | Rust reads OCaml `.cmi`/`.cmj` data and has an in-memory registry mode. Disk writing of `.cmi`/`.cmj` is not currently equivalent to OCaml. |
 | Lazy module components | `compiler/ml/env.ml` (`EnvLazy` module), `compiler/ml/subst.ml` | `src/types/env_lazy.rs`, `src/types/env.rs`, `src/types/context.rs` | This is a high-risk parity area. Rust must preserve OCaml API boundaries such as `find_module_descr` versus `find_module`. |
-| Core type operations | `compiler/ml/ctype.ml`, `compiler/ml/btype.ml` | `src/types/ctype.rs`, `src/types/btype.rs`, `src/types/type_expr.rs` | Physical sharing created by `instance`, `copy`, `link_type`, `unify`, generalization, and row mutation is observable in typedtree sexp parity. |
+| Core type operations | `compiler/ml/ctype.ml`, `compiler/ml/btype.ml` | `src/types/ctype.rs`, `src/types/btype.rs`, `src/types/type_expr.rs` | Physical sharing created by `instance`, `copy`, `link_type`, `unify`, generalization, and row mutation decides what unifies and how types print; the typed tree's own sharing need not match OCaml. |
 | Type declarations and data representation | `compiler/ml/typedecl.ml`, `compiler/ml/datarepr.ml`, `compiler/ml/typetexp.ml` | `src/types/typemod.rs`, `src/types/typecore.rs`, `src/types/decl.rs` | Constructors, labels, records, variants, objects, externals, and type attributes must build equivalent declarations. |
 | Expression and pattern typing | `compiler/ml/typecore.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/parmatch.ml` | `src/types/typecore.rs`, `src/raw_lambda/typeopt.rs` | Includes expression inference, pattern typing, labels, application, rows, warnings, and error messages. |
 | Module and signature typing | `compiler/ml/typemod.ml`, `compiler/ml/includemod.ml`, `compiler/ml/mtype.ml` | `src/types/typemod.rs`, `src/types/includemod.rs` | Includes structures, signatures, functors, includes, opens, recursive modules, interface inclusion, delayed checks, and signature simplification. |
-| Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Serializer must reflect typechecker output. It must not normalize content to hide typechecker differences. |
+| Typedtree definitions and dumps | `compiler/ml/typedtree.ml`, `compiler/ml/sexp_typedtree.ml` | `src/types/typedtree.rs`, `src/types/sexp_typedtree.rs` | Debugging dumps only; they are not compared with OCaml's. |
 | Typedtree to first Lambda representation | `compiler/ml/translcore.ml`, `compiler/ml/translmod.ml`, `compiler/ml/matching.ml`, `compiler/ml/typeopt.ml`, `compiler/ml/lambda.ml` | `src/raw_lambda/convert.rs`, `src/raw_lambda/matching.rs`, `src/raw_lambda/typeopt.rs`, `src/raw_lambda/mod.rs` | Rust `RawLambda` is the counterpart of OCaml `Lambda.lambda`. |
 | First Lambda to JS-backend Lambda, then optimization | `compiler/core/lam_convert.ml`, `compiler/core/lam.ml`, `compiler/core/lam_compile_main.ml`, `compiler/core/lam_pass_*.ml` | `src/raw_lambda/lower.rs`, `src/lambda/mod.rs`, `src/lambda/lam_compile_main.rs`, `src/lambda/lam_pass_*.rs` | OCaml also has this second Lambda-level representation: `Lam_convert.convert` converts `Lambda.lambda` into backend `Lam.t`. Pass order is fixed by the OCaml backend. |
 | JavaScript backend | `compiler/core/lam_compile.ml`, `compiler/core/js_*.ml`, `compiler/core/j.ml`, `compiler/core/js_cmj_format.ml` | `src/lambda/lam_compile.rs`, `src/lambda/js_*`, `src/js_ir/*`, `src/cmi/persistent_env.rs` | Includes JS IR, externals, primitives, module paths, exports, side effects, printer behavior, and `.cmj` metadata reads. |
@@ -159,15 +159,16 @@ typechecks and dumps typed output but does not write OCaml-compatible `.cmi` or
 
 These details are not implementation trivia; tests and users can observe them.
 
-- Identifier stamps are part of compiler output. Typedtree sexps, Lambda dumps,
-  generated JS names, export identifiers, and module metadata all depend on
-  stamp allocation order.
-- Type expression identity is physical identity. OCaml typedtree sexp dedup is
-  based on `type_expr.id`, not structural equality. Rust must preserve the same
-  sharing through `TypeExprRef`.
-- Lazy environment force order is semantic for parity. Forcing a component table
-  can allocate paths, substitute declarations, copy type nodes, and cache child
-  components in an order that later dumps expose.
+Only the generated JavaScript (with gentype output and source maps), the
+ReScript the parser and printer emit, and the type system's results (accepted
+programs, inferred and printed types, errors and warnings) are compared with
+OCaml. Intermediate representations (parse tree, parsetree0, `.ast` files,
+typed tree, Lambda) and identifier stamps are not; they may differ freely.
+
+- Identifier stamps matter only where they reach that output, for example the
+  names and order of generated JS bindings.
+- Lazy environment force order matters only where it changes types, paths or
+  diagnostics.
 - Path spelling is observable. `Pident`, `Pdot`, `Papply`, flattened module names,
   generated nested module names, and alias paths must be produced by the same
   declaration/substitution flow as OCaml.
@@ -259,8 +260,8 @@ Compiler options affect every later stage:
 - `-nopervasives`, implicit opens, `-bs-jsx`, debug flags, warning flags, and
   file-level `@@config` affect frontend and typechecker behavior.
 - Dump flags such as `-dtyped-sexp`, `-drawlambda`, and `-dlambda-sexp` expose
-  intermediate representations and can short-circuit downstream work in parity
-  scripts.
+  intermediate representations for debugging and skip the work after the
+  dumped stage.
 - In-process options can skip JS rendering, capture intermediates, publish
   signatures through hooks, or compile multiple JS targets from one Lambda tree.
 
@@ -408,7 +409,7 @@ Important files:
 Binary AST algorithm:
 
 1. Walk the current parsetree and extract a dependency section.
-2. Map the current parsetree to frozen `parsetree0` when writing the PPX wire
+2. Map the current parsetree to `parsetree0` when writing the PPX wire
    format.
 3. Serialize the dependency section and OCaml marshal-compatible AST payload.
 4. In subprocess mode, rewatch or the compiler can write `.ast`/`.iast` files
@@ -427,11 +428,10 @@ Dependency extraction algorithm:
 
 OCaml reference alignment:
 
-- `parsetree0` corresponds to the frozen OCaml/ReScript PPX boundary. New syntax
-  should change the current parsetree and mapper modules, not mutate
-  `parsetree0`.
-- OCaml marshal compatibility is required because external PPX tools are outside
-  the Rust compiler.
+- PPX is not supported going forward, so `parsetree0` is no longer a frozen
+  boundary and its bytes are not compared with OCaml. External `-ppx` flags and
+  the builtin Spice mapper still round-trip through it, so new syntax must
+  survive the mappers; changing `parsetree0` is allowed.
 
 Rust-specific diversion:
 
@@ -978,11 +978,11 @@ Typemod.type_module
 ### `btype.ml`: Mutable Type-Node Substrate
 
 `btype.ml` is not just utility code. It defines the mutable graph discipline
-that typedtree parity exposes.
+the type checker's results depend on.
 
 - Every type node has `desc`, `level`, and `id`. `id` is allocated by `newty2`
-  from a mutable counter. Rust `TypeExprRef` must preserve equivalent physical
-  identity and allocation order where dumps expose it.
+  from a mutable counter. Rust need not reproduce OCaml's ids or sharing; only
+  what they decide (unification, generalization, printed types) must match.
 - `generic_level`, `lowest_level`, and `pivot_level` are special marker levels.
   `pivot_level - level` is used to mark nodes during traversals without
   side tables. Rust can use side tables internally, but the observable order and
@@ -1015,7 +1015,6 @@ Rust parity implications:
 
 - Any arena optimization must keep type-node identity stable and must not turn
   OCaml's mutating mark/unmark/backtrack pattern into structural rebuilding.
-- Physical identity, not structural content, drives typedtree sexp dedup.
 - Row helpers are algorithmic operations, not serializer conveniences.
 
 ### `ctype.ml`: Levels, Instantiation, Expansion, And Unification
@@ -1512,12 +1511,13 @@ Nonexpansive/value restriction:
 
 Rust parity implications:
 
-- For typedtree parity, the order "type patterns, run delayed forces, type
-  expressions, check let-pattern partiality, close level, value restriction,
-  generalize" must be preserved.
+- The order "type patterns, run delayed forces, type expressions, check
+  let-pattern partiality, close level, value restriction, generalize" decides
+  generalization and warnings; change it only where types and diagnostics stay
+  the same.
 - Record typing is highly sensitive to expected-type propagation and final
-  `instance env ty_expected` calls. Sparse record representations must expand
-  to the same typedtree and RawLambda-facing shape.
+  `instance env ty_expected` calls. Sparse record representations must lower
+  to the same JavaScript.
 - Application typing has nested definition levels. Collapsing them can change
   level numbers and generalization.
 
@@ -1918,8 +1918,6 @@ Why this stage is sensitive:
 - Match compilation affects generated JS shape and performance.
 - It affects warning behavior through partial/fragile match analysis.
 - Static-exit shape affects later Lambda simplification and output byte parity.
-- Typeopt lookups can force environment components, so matching can affect
-  typedtree/lambda parity indirectly when it queries declarations.
 
 ## Stage 15: RawLambda To Lambda
 
@@ -2293,8 +2291,6 @@ Known algorithmic risk areas:
   lookup/normalization.
 - Stdlib/Pervasives special cases should be justified by the implicit-open path
   in `res_compmisc.ml` and `env.ml`, not by a single observed parity fixture.
-- Serializer-level normalization is not a valid typedtree parity fix. The
-  serializer should faithfully emit the typechecker result.
 
 Current semantic and coverage caveats:
 
@@ -2365,10 +2361,6 @@ parity.
   `after_parsing_impl`. Warning order, config timing, JSX, extension expansion,
   and built-in rewrite ordering should be checked against OCaml before changing
   this area.
-- Typedtree and Lambda dump parity can depend on internal performance
-  representations such as sparse record nodes and sparse extras. Those
-  representations are valid only because serializers and RawLambda lowering
-  restore the OCaml-facing shape at observable boundaries.
 
 ## Performance Improvements Versus OCaml
 
@@ -2510,8 +2502,8 @@ Optimization workflow:
 3. Read the OCaml reference implementation for the same stage.
 4. Simplify Rust toward the OCaml boundary rather than adding a compatibility
    layer.
-5. Check typedtree parity, Lambda parity when relevant, JS output parity, and
-   error-output parity before committing source changes.
+5. Check JS output parity and error-output parity before committing source
+   changes.
 6. For docs-only README changes, parity is not required.
 
 ## Workflow For Architecture Changes
@@ -2529,7 +2521,7 @@ Use this process for compiler behavior changes:
    equivalence, and fixture-specific logic.
 6. Add or update focused tests for the behavior.
 7. Run focused parity first, then full non-tella parity, then tella parity when
-   the change affects typedtree/Lambda/output behavior.
+   the change can affect output.
 8. For performance work, run release measurements after correctness is stable.
 
 Use this process for documentation changes:
@@ -2537,3 +2529,52 @@ Use this process for documentation changes:
 1. Update this README in `compiler-rust/`.
 2. Keep root README focused on project-level user/contributor information.
 3. No parity run is required for README-only changes.
+
+## Parse-only instruction benchmark
+
+Run `scripts/bench_parse.sh` from a checkout with Cargo on `PATH`. It builds
+`examples/parse_bench.rs` in release mode and benchmarks `tests/tests/src` and
+`packages/@rescript/runtime` in `scan` and `parse` modes. With Valgrind installed
+it uses the instruction-count CI flags (`--tool=cachegrind --cache-sim=no`)
+and reports instructions per source line; otherwise it reports timing only.
+Set `ITERATIONS=N` to repeat the corpus (default 1). To select other inputs:
+
+```sh
+cargo run --release --manifest-path compiler-rust/Cargo.toml --example parse_bench -- \
+  --mode parse --iterations 1 tests/tests/src packages/@rescript/runtime
+```
+
+Files are recursively collected, canonicalized, sorted and deduplicated; symlinks
+are skipped. All input is read and decoded using the build's Latin-1 conversion
+before timing starts. A line is an LF-terminated line or a final nonempty line
+without LF (empty files have zero lines). Files, lines and bytes describe one
+corpus pass; diagnostics count all iterations, and nanoseconds/instructions per
+line divide by `lines * iterations`. The timed region includes allocation and
+AST destruction, but no I/O, printing, frontend rewrites, JSX transform or type
+checking. Parsing uses `Parser::new` (locations enabled), `parse_structure` for
+`.res` and `parse_signature` for `.resi`, just like the compiler before its
+frontend. Scanner mode repeatedly calls `Scanner::scan` to EOF; it deliberately
+has no parser context for JSX, templates or regexes, so its lexical diagnostics
+can differ from parse mode. The `parse_errors` field counts diagnostics (lexical
+ones in scan mode), not files with errors; errors do not fail the benchmark.
+
+Cachegrind counts the **whole process**, including startup, discovery, loading
+and output; timing measures only the in-memory loop. Compare the same corpus,
+iterations, checkout path, toolchain and machine. This is an instruction-work
+metric, not hardware retired instructions or a timing measurement under Valgrind.
+
+Initial x86-64 Linux measurements, Valgrind 3.22.0, release fat LTO, one iteration,
+894 files / 67,935 lines / 1,745,497 bytes:
+
+| Mode | Run 1 instructions | Run 2 instructions | Run 1 instructions/line | Run 2 instructions/line |
+| --- | ---: | ---: | ---: | ---: |
+| scan | 192,651,045 | 192,651,164 | 2835.814308 | 2835.816059 |
+| parse | 632,055,990 | 631,790,848 | 9303.834401 | 9299.931523 |
+
+Parse mode reported zero errors; scanner mode reported 210 lexical diagnostics.
+**Repeatability limitation:** scan differed by 0.000062%, but parse differed by
+0.04195%, exceeding a 0.01% comparison threshold. The parser still constructs
+randomly seeded hash tables, a likely source of this noise. Increasing to 20 iterations did not reliably remove
+this variation. Do not use this benchmark to gate changes at 0.01% until that
+noise is resolved; the benchmark does not substitute a different parser or
+change production hashing just to improve its scores.

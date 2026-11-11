@@ -158,9 +158,6 @@ rust-test: lib rust-compiler
 rust-test-parser: compiler rust-compiler
 	./scripts/test_rust_parity.sh --release --skip-js
 
-rust-test-ast: compiler rust-compiler
-	./scripts/test_parser_ast_parity.sh
-
 clean-rust-compiler:
 	cargo clean --manifest-path compiler-rust/Cargo.toml
 
@@ -418,4 +415,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean

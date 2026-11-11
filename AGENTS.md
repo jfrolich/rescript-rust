@@ -61,9 +61,7 @@ The Makefile’s targets build on each other in this order:
 
 - **We are NOT bound by OCaml compatibility** - The ReScript compiler originated as a fork of the OCaml compiler, but we maintain our own AST and can make breaking changes. Focus on what's best for ReScript's JavaScript compilation target.
 
-- **Never modify `parsetree0.ml`** - Existing PPX (parser extensions) rely on this frozen v0 version. When changing `parsetree.ml`, always update the mapping modules `ast_mapper_from0.ml` and `ast_mapper_to0.ml` to maintain PPX compatibility while allowing the main parsetree to evolve. **Test the bridge with the existing infra** — do not build new harnesses for this:
-  - Add a source fixture exercising the new syntax to `tests/syntax_tests/data/ast-mapping/`. Every file there is run through `res_parser -test-ast-conversion` (which round-trips the parsetree through the frozen v0 AST before printing) as part of `make test-syntax`; the printed output must match the snapshot in its `expected/` directory.
-  - For exact-identity invariants (locations, attributes) or the v0 wire shape itself, add cases to `tests/ounit_tests/ounit_ast_mapper0_tests.ml`, which tests `ast_mapper_to0`/`ast_mapper_from0` directly.
+- **PPX is not supported going forward; `parsetree0.ml` is not frozen** - Nothing compares the v0 parsetree or `.ast` bytes with OCaml. The v0 form and its mappers (`ast_mapper_to0`/`ast_mapper_from0`) remain only because external `-ppx` flags and the builtin Spice mapper still round-trip through them, so a new construct must not be dropped there; change `parsetree0` when that is simpler than encoding around it.
 
 - **Missing test coverage** - Always add tests for syntax, lambda, and end-to-end behavior
 
@@ -123,13 +121,13 @@ Do not add mechanisms whose only purpose is reproducing OCaml's typedtree
 sharing, stamp order or force order. Remove existing ones when they are in the
 way and the contract still holds.
 
-**Typedtree sexp and Lambda parity are diagnostics, not requirements.**
-`scripts/test_typedtree_parity.sh` and `scripts/test_lambda_parity.sh` help
-locate which layer a JavaScript or diagnostic difference comes from. A change
-that alters them is worth a look, but a typedtree or Lambda difference is
-acceptable when the JavaScript and the type-checking results are unchanged.
-Never make the typedtree serializer normalize, sort or rewrite its input to hide
-a difference; it must print what the type checker produced.
+**No intermediate representation is compared with OCaml.** The parse tree,
+the PPX-facing parsetree0 and `.ast` files, the typed tree, raw and optimized
+Lambda, and identifier stamps may all differ from OCaml's; there are no parity
+tests for them. The dump flags (`-dparsetree`, `-dtypedtree`, `-drawlambda`,
+`-dlambda-sexp`, ...) remain as debugging aids for finding where a JavaScript
+or diagnostic difference starts. The checks of ReScript the parser and printer
+emit (formatting, JSX output, syntax errors) stay, through the syntax tests.
 
 Beyond the two points above, keep these working:
 
@@ -150,15 +148,18 @@ cite the OCaml location (`compiler/ml/<file>.ml:<line>`) in a comment.
 
 - Refactors with no intended behaviour change: `cargo build` and `cargo test`
   for `compiler-rust` and `rewatch`, plus `./scripts/test_js_output_parity.sh`.
-- Type checker changes: also `./scripts/test_error_output_parity.sh`. Run
-  typedtree parity to see what moved, and confirm any difference is
-  JS-invisible and type-invisible.
-- Lambda or JS backend changes: JS output parity is the gate; Lambda parity
-  shows where a difference starts.
+- Type checker changes: also `./scripts/test_error_output_parity.sh` and the
+  `super_errors` build tests.
+- Lambda or JS backend changes: JS output parity (including
+  `./scripts/test_stdlib_output_parity.sh` and
+  `./scripts/test_gentype_output_parity.sh`) is the gate.
+- Parser or printer changes: `make test-syntax` and
+  `./scripts/test_rust_parity.sh --skip-js` (the Rust parser against the
+  ReScript and syntax-error snapshots).
 
 ### Rebuilding the OCaml bsc
 
-If you modify OCaml source files (e.g., `compiler/ml/sexp_typedtree.ml`), rebuild with:
+If you modify OCaml source files (e.g., under `compiler/ml/`), rebuild with:
 ```bash
 eval $(opam env) && dune clean --root . && dune build --root .
 ```
@@ -432,6 +433,8 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 #### Measurement
 
 - **Always benchmark with `hyperfine`** — Every performance change must have before/after numbers. "Should be faster" is not evidence. Use `hyperfine` with multiple runs and a representative `--prepare` step for clean-build measurements, then report the mean, standard deviation, and min/max range.
+
+- **CI blocks instruction increases** — The `Instruction count` workflow counts the instructions of a clean `tests/tests` build (cachegrind, one worker thread) with the pull request's `rescript` and its base's, both built like a release, and fails when the pull request's executes more than 0.1% more. When a change has to cost more, give one of its commits an `Instruction-count-increase: <why>` trailer. On Linux, `scripts/compare_build_instructions.py` runs the same comparison locally.
 
 - **Profile before optimizing** — Use flamegraphs (`cargo flamegraph`), `perf stat` (cache misses, branch misses), or DHAT (heap profiling) to find actual bottlenecks. Don't guess.
 
@@ -799,10 +802,12 @@ make rewatch-pgo
 
 ### Comparing Against the OCaml Compiler
 
-When the Rust output differs from OCaml, run both compilers on the same `.res`
-file and compare layer by layer (`-dparsetree`, `-dtypedtree`, `-drawlambda`,
-then the JavaScript) to find where the difference starts. Fix the cause in that
-layer; do not patch the symptom in a later one. Commit each fix on its own.
+When the Rust JavaScript or a diagnostic differs from OCaml, run both
+compilers on the same `.res` file and compare layer by layer (`-dparsetree`,
+`-dtypedtree`, `-drawlambda`, then the JavaScript) to find where the difference
+starts. This is a debugging aid: a difference in an intermediate layer is fine
+on its own. Fix the cause in the layer it starts in; do not patch the symptom in
+a later one. Commit each fix on its own.
 
 ### Key Design Decisions
 

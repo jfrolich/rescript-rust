@@ -215,8 +215,8 @@ impl<'src> Scanner<'src> {
     /// For OCaml parity, we use `line_offset + offset16` for cnum.
     /// This matches OCaml where `pos_cnum = scanner.line_offset + scanner.offset16`,
     /// giving us UTF-16 code unit counting for columns.
-    /// `line_offset` and `char_pos` are character-indexed (not byte-indexed)
-    /// to preserve binary AST parity with the OCaml implementation.
+    /// `line_offset` and `char_pos` are character-indexed (not byte-indexed),
+    /// as OCaml's are, so error locations match.
     pub fn position(&self) -> Position {
         Position::new(
             self.filename,

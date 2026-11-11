@@ -4,7 +4,7 @@ on:
   # Every pull request, including ones stacked on another PR's branch.
   pull_request:
   # The trunk as well. A cache saved by a pull request run is visible to that
-  # pull request alone, so the trunk runs are what save the OPAM, package and
+  # pull request alone, so the trunk runs are what save the OPAM, OCaml and
   # Rust caches that pull requests start from.
   push:
     branches: [ocaml-to-rust-rewrite]
@@ -17,14 +17,54 @@ concurrency:
   # A trunk run is left to finish, so that it saves its caches.
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  RUST_BACKTRACE: "1"
+  # Everything here checks behaviour, which link-time optimization does not
+  # change, and fat LTO is most of a release build's time. The Instruction
+  # count workflow builds the shipped configuration.
+  CARGO_PROFILE_RELEASE_LTO: "off"
+  # Keep rustc's incremental state in the cached target directories, so a
+  # pull request recompiles what it changed rather than whole crates.
+  CARGO_PROFILE_RELEASE_INCREMENTAL: "true"
+  # Decide whether a file changed by its contents, not its mtime: a fresh
+  # checkout dates every file now, which would make every restored crate
+  # stale. A nightly Cargo flag; rust-toolchain.toml pins a nightly.
+  CARGO_UNSTABLE_CHECKSUM_FRESHNESS: "true"
+
+# How the jobs overlap, on 4-CPU Arm runners:
+#
+#   build ──────────────┬─> parity (4 suites)
+#   ocaml ──────────────┘
+#   compiler-tests: compiles its tests, then waits for build and ocaml
+#   build-system-tests, script-tests, compiler-warnings: on their own
+#
+# Rust target directories are cached by trunk runs and restored by pull
+# requests (build-system-tests saves the release one, compiler-tests the dev
+# one), so a pull request compiles what changed against the trunk.
 jobs:
+  # Warning-free Clippy and rustdoc for the compiler crate. Its check
+  # artifacts are cached by trunk runs like the other Rust targets.
   compiler-warnings:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-24.04-arm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v6
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install --component clippy
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            compiler-rust/target
+          key: validation-compiler-warnings-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-compiler-warnings-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock') }}-
+            validation-compiler-warnings-v1-${{ runner.os }}-${{ runner.arch }}-
+
       - name: Check all compiler targets and feature configurations
         run: |
           cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --all-features -- -D warnings
@@ -34,134 +74,293 @@ jobs:
           RUSTDOCFLAGS: "-D warnings"
         run: cargo doc --locked --manifest-path compiler-rust/Cargo.toml --all-features --no-deps
 
-  release-parity:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    env:
-      RUST_BACKTRACE: "1"
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            compiler-rust/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  build:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v6
-
-      - name: Test parity failure reporting
-        run: |
-          python3 scripts/test_js_output_fixture_reporting.py
-          python3 scripts/test_typedtree_parity_exit.py
-          python3 scripts/test_parser_ast0_parity_exit.py
-          python3 scripts/test_parser_ast_parity_exit.py
-          python3 scripts/test_error_output_parity_exit.py
 
       # rust-toolchain.toml pins the toolchain of every Rust build here.
       - name: Install the pinned Rust toolchain
         run: rustup toolchain install
 
-      # Saved by trunk runs only (see the end of the job). Cargo rebuilds this
-      # repository's crates after a fresh checkout whatever is restored, so
-      # what a run gets from it is the compiled dependencies.
       - uses: actions/cache/restore@v5
-        id: rust-cache
         with:
           path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler-rust/target
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
             rewatch/target
-          key: rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          key: validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-
 
-      - uses: ./.github/actions/setup-node
-      - uses: ./.github/actions/setup-linux-dependencies
-
-      # The compiler crate is not built on its own here: the build system
-      # links it, and the compiler test step below compiles it standalone.
       - name: Build release Rust compiler and build system
-        id: rust-build
         run: |
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
-          ./scripts/rust_compiler_shims.sh release
+          tar -cf rescript.tar rewatch/target/release/rescript
 
-      # The same OCaml as ci.yml: diagnostics are laid out by OCaml's Format,
-      # whose break sizing changed in 5.5, and the Rust formatter follows it.
-      - uses: ./.github/actions/setup-ocaml
+      - uses: actions/upload-artifact@v7
         with:
-          compiler: "5.5.2"
-          os: ubuntu-24.04
+          name: rescript
+          path: rescript.tar
+          retention-days: 3
+
+  # The OCaml reference compiler and parser. They change rarely, so they are
+  # cached by the sources dune builds them from, and OPAM is only set up when
+  # that cache misses.
+  ocaml:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    env:
+      OCAML_VERSION: "5.5.2"
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Hash the OCaml sources
+        id: sources
+        run: |
+          # The files the Makefile's dune build depends on.
+          hash=$({
+            echo "$OCAML_VERSION"
+            git ls-files -s -- compiler analysis tools rewatch-ocaml tests |
+              awk '$4 ~ /(\.(ml|mli|c|h|dune)|\/dune|\/dune-project)$/'
+            git ls-files -s -- dune-project dune '*.opam'
+          } | sha256sum | cut -c1-32)
+          echo "hash=$hash" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache/restore@v5
+        id: cached
+        with:
+          path: ocaml-bin
+          key: ocaml-reference-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.sources.outputs.hash }}
+
+      - uses: ./.github/actions/setup-ocaml
+        if: ${{ steps.cached.outputs.cache-hit != 'true' }}
+        with:
+          compiler: ${{ env.OCAML_VERSION }}
+          os: ubuntu-24.04-arm
           cache-prefix: opam-rewrite-validation-v1
 
-      - name: Build native reference compiler and libraries
-        # Finds the rescript executable built above up to date.
-        run: opam exec -- make lib
-
-      - name: Compare exact CLI output filenames and marshal debug output
+      - name: Build the OCaml compiler and parser
+        if: ${{ steps.cached.outputs.cache-hit != 'true' }}
         run: |
-          python3 scripts/test_bsc_output_filenames.py
-          python3 scripts/test_marshal_debug_flags.py
+          opam exec -- dune build compiler/bsc/rescript_compiler_main.exe compiler/syntax/cli/res_cli.exe
+          mkdir -p ocaml-bin
+          cp _build/default/compiler/bsc/rescript_compiler_main.exe ocaml-bin/bsc
+          cp _build/default/compiler/syntax/cli/res_cli.exe ocaml-bin/res_parser
 
-      - name: Build native test corpus for compiler unit fixtures
-        id: fixtures
-        # The fixtures compile tests/tests sources file by file against .cmi
-        # files, which only the OCaml reference build writes.
+      # Saved by pull requests too: the cache is small, and keyed by content.
+      - uses: actions/cache/save@v5
+        if: ${{ steps.cached.outputs.cache-hit != 'true' }}
+        with:
+          path: ocaml-bin
+          key: ${{ steps.cached.outputs.cache-primary-key }}
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ocaml
+          path: ocaml-bin
+          retention-days: 3
+
+  build-system-tests:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: ./.github/actions/setup-node
+
+      # Builds what the build job builds, and the tests on top.
+      - name: Test release build system
         run: |
-          PROJECT_ROOT="$PWD" RUST_TARGET=release bash -c \
-            'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      # This job saves the release cache rather than the build job, which
+      # the parity jobs wait for: saving a gigabyte takes a while.
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # The parity scripts' own tests. They need nothing built.
+  script-tests:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Test parity failure reporting
+        run: |
+          status=0
+          pids=()
+          for test in test_js_output_fixture_reporting test_error_output_parity_exit; do
+            python3 "scripts/$test.py" > "$RUNNER_TEMP/$test.log" 2>&1 &
+            pids+=("$!:$test")
+          done
+          for entry in "${pids[@]}"; do
+            test=${entry#*:}
+            if wait "${entry%%:*}"; then
+              echo "::group::$test passed"
+            else
+              status=1
+              echo "::group::$test FAILED"
+            fi
+            cat "$RUNNER_TEMP/$test.log"
+            echo "::endgroup::"
+          done
+          exit $status
+
+  compiler-tests:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      # To see when the build and ocaml jobs have uploaded their artifacts.
+      actions: read
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            compiler-rust/target
+          key: validation-compiler-tests-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-compiler-tests-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock') }}-
+            validation-compiler-tests-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      # The tests run in half a second; building them is the cost, and a
+      # dev build is the faster one.
+      - name: Build the Rust compiler tests
+        run: cargo test --locked --no-run --manifest-path compiler-rust/Cargo.toml
+
+      - uses: actions/cache/save@v5
+        if: ${{ github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            compiler-rust/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - uses: ./.github/actions/setup-node
+
+      # The tests read .cmi files of tests/tests that only the OCaml compiler
+      # writes, so they need the other jobs' executables. Rather than
+      # waiting for those jobs before starting, this job builds the tests
+      # meanwhile and waits here.
+      - name: Wait for the build and ocaml jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          api="repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          deadline=$((SECONDS + 1800))
+          until names=$(gh api "$api/artifacts" --jq '.artifacts[].name') &&
+                grep -qx rescript <<< "$names" && grep -qx ocaml <<< "$names"; do
+            failed=$(gh api "$api/attempts/$GITHUB_RUN_ATTEMPT/jobs" --jq \
+              '.jobs[] | select((.name == "build" or .name == "ocaml") and .status == "completed" and .conclusion != "success") | .name' || true)
+            if [[ -n "$failed" ]]; then
+              echo "::error::No executables to test with: job $failed failed"
+              exit 1
+            fi
+            if (( SECONDS > deadline )); then
+              echo "::error::Timed out waiting for the build and ocaml jobs"
+              exit 1
+            fi
+            sleep 10
+          done
+
+      - uses: ./.github/actions/prepare-parity
 
       # The suite includes subprocess timing assertions. Run tests serially so
       # those benchmarks do not compete with one another for CPU time.
-      # This step builds only the test binary, which nothing ships from, so it
-      # skips link-time optimization: that is most of the build's time.
-      - name: Test release Rust compiler
-        env:
-          CARGO_PROFILE_RELEASE_LTO: "off"
-        run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+      - name: Test Rust compiler
+        run: cargo test --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
 
-      - name: Test release build system
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: cargo test --release --locked --manifest-path rewatch/Cargo.toml
+  # The parity suites that gate a change (see "The Correctness Contract" in
+  # AGENTS.md), each its own check so that a pull request shows which one
+  # failed.
+  parity:
+    name: parity (${{ matrix.suite }})
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: javascript
+            run: |
+              python3 scripts/test_bsc_output_filenames.py
+              python3 scripts/test_marshal_debug_flags.py
+              ./scripts/test_js_output_parity.sh --release
+          - suite: diagnostics
+            # Compare normal user-facing errors, not runtime-specific backtraces.
+            run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+          - suite: stdlib
+            run: RUST_TARGET=release ./scripts/test_stdlib_output_parity.sh
+          - suite: gentype
+            # The in-repo suites; the Tella suite needs a private checkout.
+            run: |
+              GENTYPE_PARITY_WITHOUT_TELLA=1 \
+              REWATCH_BIN="$PWD/rewatch/target/release/rescript" \
+              RUST_BSC="$PWD/rewatch/target/release/bsc" \
+                ./scripts/test_gentype_output_parity.sh
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
 
-      - name: Typedtree parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_typedtree_parity.sh --release --parallel 2
-
-      - name: Raw Lambda parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_lambda_parity.sh --release --raw --parallel 2
-
-      - name: Optimized Lambda parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Diagnostic only; see "The Correctness Contract" in AGENTS.md.
-        continue-on-error: true
-        run: ./scripts/test_lambda_parity.sh --release --parallel 2
-
-      - name: JavaScript output parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        run: ./scripts/test_js_output_parity.sh --release
-
-      - name: Diagnostic parity
-        if: ${{ !cancelled() && steps.fixtures.outcome == 'success' }}
-        # Compare normal user-facing errors, not runtime-specific backtraces.
-        run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
-
-      # Keep successful build artifacts even when a later assertion fails.
-      # The job still fails; this only avoids rebuilding unchanged code.
-      - uses: actions/cache/save@v5
-        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            compiler-rust/target
-            rewatch/target
-          key: ${{ steps.rust-cache.outputs.cache-primary-key }}
+      - name: ${{ matrix.suite }} parity
+        run: ${{ matrix.run }}
 
       - name: Preserve failed parity diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7
         with:
-          name: parity-diagnostics-${{ github.event.pull_request.number }}
+          name: parity-${{ matrix.suite }}-${{ github.event.pull_request.number || github.sha }}
           path: .parity-cache
           include-hidden-files: true
           if-no-files-found: ignore

@@ -13,6 +13,7 @@ RUN_COMPILER=true
 INCLUDE_SUPER_ERRORS=true
 FILE_ARG=""
 TIMEOUT_SECONDS="${TIMEOUT_SECONDS:-10}"
+PARITY_JOBS="${PARITY_JOBS:-$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo 1)}"
 
 usage() {
     cat <<'EOF'
@@ -34,6 +35,8 @@ OPTIONS:
 ENV:
   OCAML_BSC, RUST_BSC, OCAML_PARSER, RUST_PARSER can override binary paths.
   TIMEOUT_SECONDS defaults to 10.
+  PARITY_JOBS is how many cases run at once; it defaults to the number of
+  CPUs, and 1 runs every case and compares it before starting the next.
 EOF
 }
 
@@ -149,12 +152,60 @@ cd "$PROJECT_ROOT"
 mkdir -p "$PROJECT_ROOT/src"
 
 safe_name() {
-    printf '%s' "$1" | tr '/ ' '__' | tr -c 'A-Za-z0-9_.-' '_'
+    printf '%s' "${1//[^A-Za-z0-9_.-]/_}"
+}
+
+# Set variable $1 to the safe name of $2, without a subshell: the case loops
+# call this a few thousand times.
+set_safe_name() {
+    printf -v "$1" '%s' "${2//[^A-Za-z0-9_.-]/_}"
+}
+
+# With PARITY_JOBS above 1 the cases run in two phases. In the `collect`
+# phase the case loops queue each case's OCaml and Rust commands as one task
+# instead of running them; the tasks then run PARITY_JOBS at a time, each
+# case's two commands one after the other as before. In the `compare` phase
+# the same loops compare the captured outputs in order, and a command whose
+# output was not captured runs then. Packages and interfaces a case needs are
+# still prepared serially, in the collect phase, before any task runs.
+PHASE=direct
+TASK_FILE=""
+pending_task=""
+
+# Queue command $2... (capturing into $1 the way run_capture does when $0 is
+# `out`, or as run_capture_stderr when it is `err`) for the current case.
+queue_capture() {
+    local mode="$1" output="$2"
+    shift 2
+    local command redirect status_file
+    printf -v command '%q ' timeout "$TIMEOUT_SECONDS" "$@"
+    if [[ "$mode" == "out" ]]; then
+        printf -v redirect '> %q 2>&1' "$output"
+    else
+        printf -v redirect '> %q 2> %q' "$output.stdout" "$output"
+    fi
+    printf -v status_file '%q' "$output.status"
+    pending_task+="$command$redirect; printf '%s\\n' \$? > $status_file; "
+}
+
+# End the current case's task in the collect phase.
+flush_task() {
+    if [[ -n "$pending_task" ]]; then
+        printf '%s\0' "$pending_task" >> "$TASK_FILE"
+        pending_task=""
+    fi
 }
 
 run_capture() {
     local output="$1"
     shift
+    if [[ "$PHASE" == "collect" ]]; then
+        queue_capture out "$output" "$@"
+        return 0
+    fi
+    if [[ "$PHASE" == "compare" && -f "$output.status" ]]; then
+        return 0
+    fi
     local status=0
     if timeout "$TIMEOUT_SECONDS" "$@" > "$output" 2>&1; then
         status=0
@@ -167,6 +218,13 @@ run_capture() {
 run_capture_stderr() {
     local output="$1"
     shift
+    if [[ "$PHASE" == "collect" ]]; then
+        queue_capture err "$output" "$@"
+        return 0
+    fi
+    if [[ "$PHASE" == "compare" && -f "$output.status" ]]; then
+        return 0
+    fi
     local status=0
     if timeout "$TIMEOUT_SECONDS" "$@" > "$output.stdout" 2> "$output"; then
         status=0
@@ -200,8 +258,12 @@ compare_outputs() {
     local rust_out="$4"
     local diff_out="$5"
     local ocaml_status rust_status
-    ocaml_status=$(cat "$ocaml_out.status")
-    rust_status=$(cat "$rust_out.status")
+    if [[ "$PHASE" == "collect" ]]; then
+        flush_task
+        return 0
+    fi
+    read -r ocaml_status < "$ocaml_out.status" || true
+    read -r rust_status < "$rust_out.status" || true
 
     total=$((total + 1))
     if [[ "$VERBOSE" == "true" ]]; then
@@ -290,7 +352,7 @@ run_parser_cases() {
         fi
 
         local safe ocaml_out rust_out diff_out
-        safe=$(safe_name "parser_${number}_${source_file}")
+        set_safe_name safe "parser_${number}_${source_file}"
         ocaml_out="$CACHE_DIR/parser/ocaml_${safe}.out"
         rust_out="$CACHE_DIR/parser/rust_${safe}.out"
         diff_out="$CACHE_DIR/diffs/${safe}.diff"
@@ -368,13 +430,14 @@ run_compiler_case() {
     shift
     local flags=("$@")
     local safe ocaml_out rust_out diff_out
-    safe=$(safe_name "compiler_${source_file}")
+    set_safe_name safe "compiler_${source_file}"
     ocaml_out="$CACHE_DIR/compiler/ocaml_${safe}.out"
     rust_out="$CACHE_DIR/compiler/rust_${safe}.out"
     diff_out="$CACHE_DIR/diffs/${safe}.diff"
 
     prebuild_ocaml_packages "${flags[@]}" || return 1
-    if [[ "$source_file" == .parity-cache/error-output/compiler/* ]]; then
+    if [[ "$source_file" == .parity-cache/error-output/compiler/* &&
+          ! ( "$PHASE" == "compare" && -f "$ocaml_out.status" ) ]]; then
         prepare_cached_case "$source_file" "${flags[@]}" || return 1
     fi
     run_capture_stderr "$ocaml_out" "$OCAML_BSC" "${flags[@]}" "$source_file"
@@ -429,6 +492,26 @@ run_compiler_cases() {
         echo -e "${YELLOW}No compiler diagnostics fixtures matched.${RESET}"
     fi
 }
+
+# Run the queued commands of the parser and compiler cases. The JSX warning
+# cases are few and check statuses inline, so they always run directly.
+if [[ "$PARITY_JOBS" -gt 1 ]]; then
+    TASK_FILE="$CACHE_DIR/tasks"
+    : > "$TASK_FILE"
+    PHASE=collect
+    if [[ "$RUN_PARSER" == "true" ]]; then
+        run_parser_cases > /dev/null || true
+    fi
+    if [[ "$RUN_COMPILER" == "true" ]]; then
+        run_compiler_cases > /dev/null || true
+    fi
+    flush_task
+    if [[ -s "$TASK_FILE" ]]; then
+        xargs -0 -n 1 -P "$PARITY_JOBS" bash -c < "$TASK_FILE" || true
+    fi
+    rm -f "$TASK_FILE"
+    PHASE=compare
+fi
 
 if [[ "$RUN_PARSER" == "true" ]]; then
     run_parser_cases || true

@@ -1,8 +1,7 @@
-//! S-expression printer for AST - matches OCaml res_ast_debugger.ml output exactly
+//! S-expression printer for AST, after OCaml's res_ast_debugger.ml
 //!
-//! This module produces sexp output that is byte-for-byte identical to the OCaml
-//! `res_parser -print sexp` output, enabling AST parity testing between the
-//! Rust and OCaml parsers.
+//! The `res_parser -print sexp` debugging output. It is not compared with the
+//! OCaml parser's.
 //!
 //! Uses the same Doc-based pretty printing algorithm as OCaml's Res_doc module.
 
