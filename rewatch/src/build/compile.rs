@@ -2281,8 +2281,6 @@ fn build_package_compiler_options(
 
     Ok(rescript_compiler::driver::CompilerOptions {
         include_paths,
-        // The file build compiled from `lib/bs` with `-I ../ocaml` first.
-        interface_cmi_dir: Some(PathBuf::from("../ocaml")),
         runtime_path,
         open_modules,
         collect_unit_reads: true,

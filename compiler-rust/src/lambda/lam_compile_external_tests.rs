@@ -1205,7 +1205,7 @@ fn module_side_effect_reason_keeps_empty_reason_for_impure_nops() {
 fn resolves_local_module_paths_from_ast_metadata() {
     let project = tempdir().expect("failed to create project tempdir");
     let source_dir = project.path().join("src");
-    let build_dir = project.path().join("lib").join("bs").join("src");
+    let build_dir = project.path().join("lib").join("rescript");
     fs::create_dir_all(&source_dir).expect("failed to create source dir");
     fs::create_dir_all(&build_dir).expect("failed to create build dir");
 

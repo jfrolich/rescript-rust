@@ -76,13 +76,14 @@ mod tests {
         corpora
     }
 
-    /// Returns true if a path contains `/lib/bs` or `/lib/ocaml` as directory segments.
+    /// Returns true if a path contains `/lib/rescript`, or `/lib/bs` or
+    /// `/lib/ocaml` of earlier versions, as directory segments.
     fn is_duplicate_lib_subtree(path: &Path) -> bool {
         let mut prev_was_lib = false;
 
         for component in path.components() {
             let name = component.as_os_str().to_string_lossy();
-            if prev_was_lib && (name == "bs" || name == "ocaml") {
+            if prev_was_lib && (name == "rescript" || name == "bs" || name == "ocaml") {
                 return true;
             }
             prev_was_lib = name == "lib";

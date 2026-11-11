@@ -607,7 +607,7 @@ pub struct CompilerOptions {
     /// Include paths for finding .cmi files (from -I flags)
     pub include_paths: Vec<PathBuf>,
     /// Runtime package path (from -runtime-path flag)
-    /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
+    /// Used to locate stdlib CMIs at {runtime_path}/lib/rescript/
     pub runtime_path: Option<PathBuf>,
     /// Additional modules opened implicitly from `-open` flags.
     pub open_modules: Vec<String>,
@@ -683,12 +683,6 @@ pub struct CompilerOptions {
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
-    /// Where the file compile finds the interface's `.cmi`, spelled as its
-    /// `-I` entry (`find_in_path_uncap`, typemod.ml:1742-1749), for the
-    /// interface-mismatch report: a build's is `../ocaml`, its package's
-    /// `lib/ocaml` seen from `lib/bs`. `None`: next to the source, where
-    /// `bsc` writes it.
-    pub interface_cmi_dir: Option<PathBuf>,
     /// GenType configuration derived from `-bs-gentype-*` flags.
     pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
@@ -882,7 +876,6 @@ impl Default for CompilerOptions {
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
-            interface_cmi_dir: None,
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
@@ -1202,7 +1195,7 @@ fn ppx_context_attribute(
         .collect();
     let mut load_path: Vec<_> = options.include_paths.iter().map(path_string).collect();
     if let Some(runtime) = &options.runtime_path {
-        load_path.push(path_string(&runtime.join("lib").join("ocaml")));
+        load_path.push(path_string(&runtime.join("lib").join("rescript")));
     }
     let include_dirs = include_dirs.iter().map(|s| string(s)).collect();
     let load_path = load_path.iter().map(|s| string(s)).collect();
@@ -8303,7 +8296,7 @@ pub fn compile_file_to_js_with_options(
 ///
 /// Matches OCaml's `res_compmisc.ml:init_path()`:
 /// - Expands `-I` directories
-/// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
+/// - Appends `{runtime_path}/lib/rescript` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
     build_load_path_with_display(options).0
 }
@@ -8358,7 +8351,7 @@ fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec
     let stdlib_dir = options
         .runtime_path
         .as_ref()
-        .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
+        .map(|runtime_path| runtime_path.join("lib").join("rescript"));
     let cwd = crate::process_cwd::current_dir().ok();
 
     let mut paths = Vec::new();
@@ -12294,10 +12287,12 @@ mod tests {
 
     #[test]
     fn normalize_load_path_entry_expands_relative_paths_against_cwd() {
-        let cwd = std::path::Path::new("/repo/tests/tests/lib/bs");
+        let cwd = std::path::Path::new("/repo/tests/tests/lib/rescript");
         let normalized =
-            normalize_load_path_entry(std::path::Path::new("../ocaml"), None, Some(cwd));
-        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/ocaml"));
+            normalize_load_path_entry(std::path::Path::new("../../src"), None, Some(cwd));
+        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/src"));
+        let normalized = normalize_load_path_entry(std::path::Path::new("."), None, Some(cwd));
+        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/rescript"));
     }
 
     #[test]
@@ -12324,12 +12319,12 @@ mod tests {
     fn normalize_load_path_entry_expands_plus_paths_from_stdlib() {
         let normalized = normalize_load_path_entry(
             std::path::Path::new("+compiler-libs"),
-            Some(std::path::Path::new("/runtime/lib/ocaml")),
+            Some(std::path::Path::new("/runtime/lib/rescript")),
             Some(std::path::Path::new("/repo")),
         );
         assert_eq!(
             normalized,
-            PathBuf::from("/runtime/lib/ocaml/compiler-libs")
+            PathBuf::from("/runtime/lib/rescript/compiler-libs")
         );
     }
 
