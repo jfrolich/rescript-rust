@@ -245,23 +245,29 @@ impl SourceText {
             let at = self.origin(from);
             return (at, at);
         }
-        let first = self.generated(from);
-        let last = self.generated(to - 1);
+        // For a generated character these are the start and the end of its
+        // macro use.
         let mut range = (self.origin(from), self.origin_end(to));
         // The rest of a range that is partly in generated code is an
         // argument of the same use.
-        if let Some(last) = &last
-            && (first.is_some() || (last.use_start..last.use_end).contains(&range.0))
-        {
-            range.0 = last.use_start;
-        }
-        if let Some(first) = &first
-            && (last.is_some()
-                || (first.use_start..first.use_end).contains(&range.1.saturating_sub(1)))
-        {
-            range.1 = first.use_end;
+        match (self.use_at(from), self.use_at(to - 1)) {
+            (None, Some(last)) if (last.start..last.end).contains(&range.0) => range.0 = last.start,
+            (Some(first), None)
+                if (first.start..first.end).contains(&range.1.saturating_sub(1)) =>
+            {
+                range.1 = first.end;
+            }
+            _ => {}
         }
         (range.0, range.1.max(range.0))
+    }
+
+    /// The macro use the character at `offset` was generated for.
+    fn use_at(&self, offset: u32) -> Option<Use> {
+        match self.marks[(offset as usize).min(self.marks.len() - 1)].use_id {
+            0 => None,
+            id => Some(self.uses[id as usize - 1]),
+        }
     }
 
     /// The generated code that the characters `from..to` are in: `None` for
