@@ -46,7 +46,7 @@
 //! - [`mapper_to0`] - Current parsetree → parsetree0 conversion
 //! - [`mapper_from0`] - parsetree0 → current parsetree conversion
 //! - [`ppx`] - Built-in PPX rewrites applied before marshalling
-//! - [`derive`] - Single seam for removable built-in derives
+//! - [`mod@derive`] - Single seam for removable built-in derives
 //! - [`spice_ppx`] - Built-in spice PPX
 //! - [`ast_iter`] - Port of OCaml `Ast_iterator` for the current parsetree
 //! - [`ffi_types`] - Marshalling of digested externals (`External_ffi_types`)
