@@ -118,13 +118,16 @@ pub mod recover {
     }
 
     /// Check if list parsing should abort based on breadcrumbs.
+    ///
+    /// Looks at the innermost grammar first, like OCaml's breadcrumb list
+    /// (res_core.ml:110-118): the list being parsed usually ends at one of
+    /// its own terminators, so the walk stops at once instead of crossing
+    /// every enclosing grammar.
     pub fn should_abort_list_parse(p: &Parser<'_>) -> bool {
-        for (g, _) in p.breadcrumbs() {
-            if grammar::is_part_of_list(g, &p.token) {
-                return true;
-            }
-        }
-        false
+        p.breadcrumbs()
+            .iter()
+            .rev()
+            .any(|(g, _)| grammar::is_part_of_list(g, &p.token))
     }
 
     /// Skip tokens and maybe retry parsing.
