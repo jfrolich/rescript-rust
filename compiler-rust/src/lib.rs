@@ -40,6 +40,7 @@ pub mod context;
 pub mod debug_flags;
 pub mod diagnostics;
 pub mod driver;
+pub mod emit;
 pub mod fast_hash;
 /// GenType TypeScript emitter port.
 pub mod gentype;
