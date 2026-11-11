@@ -511,7 +511,7 @@ let literal = node => switch node {{ | NumericLiteral({{value}}) => value | _ =>
     ));
     assert_eq!(
         function(&js, "isBlock"),
-        r#"if (typeof node !== "object") { return false; } switch (node.type) { case "BlockStatement" : return true; default: return false; }"#
+        r#"switch (node.type) { case "BlockStatement" : return true; default: return false; }"#
     );
     assert!(function(&js, "literal").contains(r#"switch (node.type) { case "Literal" :"#), "{js}");
 }
@@ -527,3 +527,23 @@ fn three_literals_keep_the_if_chain() {
     );
 }
 
+
+#[test]
+fn only_object_cases_need_no_object_guard() {
+    // Every value of `t` is an object, so a match with a default tests only
+    // fields; with a string case beside them, strings are told apart first.
+    let js = js(r#"
+@unboxed type t = A({a: int}) | B({b: int}) | C({c: int})
+let isA = v => switch v { | A(_) => true | _ => false }
+@unboxed type u = A({a: int}) | B({b: int}) | S(string)
+let isUA = (v: u) => switch v { | A(_) => true | _ => false }
+"#);
+    assert_eq!(
+        function(&js, "isA"),
+        r#"return "a" in v;"#
+    );
+    assert_eq!(
+        function(&js, "isUA"),
+        r#"if (typeof v === "string") { return false; } else { return "a" in v; }"#
+    );
+}

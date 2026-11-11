@@ -322,6 +322,7 @@ fn payload_part<A: Clone>(
     block_cases: &[BlockType],
     object_cases: &[ObjectCase],
     null_guard: bool,
+    only_objects: bool,
     fallback: Option<&A>,
     has_default: bool,
     arms: &[(BlockType, A)],
@@ -431,7 +432,9 @@ fn payload_part<A: Clone>(
                 None => test,
             });
         }
-        entries.push((Some(is_object), false, Some(region)));
+        // Every value is an object when every case is an object case.
+        let check = (!only_objects).then_some(is_object);
+        entries.push((check, false, Some(region)));
     }
     if let Some(body) = arm(&BlockType::Unknown) {
         entries.push((None, false, Some(body)));
@@ -453,9 +456,12 @@ fn payload_part<A: Clone>(
         entries.push((Some(check), is_class, body));
     }
     if let Some(fields) = field_check
-        && let Some((Some(check), _, _)) = entries.last_mut()
+        && let Some((check, _, _)) = entries.last_mut()
     {
-        *check = p.and(*check, fields);
+        *check = Some(match *check {
+            Some(check) => p.and(check, fields),
+            None => fields,
+        });
     }
     // Consecutive checks leading to the default share one `if`.
     let mut merged: Vec<Entry> = Vec::with_capacity(entries.len());
@@ -1029,6 +1035,11 @@ fn plan_tree<A: Clone>(
         fallback.as_ref()
     };
     let mut payload_has_default = !payloads_complete && fallback.is_some();
+    // Every value is an object: no literal case, and no payload of another
+    // kind.
+    let only_objects = literal_cases.is_empty()
+        && !object_cases.is_empty()
+        && block_cases.iter().all(|kind| *kind == BlockType::Object);
     if literals_complete && literal_arms.is_empty() {
         let payload = payload_part(
             p,
@@ -1036,6 +1047,7 @@ fn plan_tree<A: Clone>(
             block_cases,
             object_cases,
             false,
+            only_objects,
             fallback.as_ref(),
             payload_has_default,
             &payload_arms,
@@ -1060,6 +1072,7 @@ fn plan_tree<A: Clone>(
             block_cases,
             object_cases,
             unnamed.iter().any(|l| **l == LiteralTag::Null),
+            only_objects,
             fallback.as_ref(),
             true,
             &payload_arms,
@@ -1108,6 +1121,7 @@ fn plan_tree<A: Clone>(
         block_cases,
         object_cases,
         null_guard,
+        only_objects,
         fallback.as_ref(),
         payload_has_default,
         &payload_arms,
