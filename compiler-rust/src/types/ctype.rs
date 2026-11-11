@@ -5555,9 +5555,19 @@ pub(crate) fn extract_concrete_typedecl(
     Some((path, concrete, decl))
 }
 
+/// `Variant_coercion.is_bool_or_unit` (variant_coercion.ml:22-26): `bool`
+/// and `unit` are declared as variants, but their values are `true`, `false`
+/// and `undefined` at runtime, not what a declared variant's constructors
+/// compile to, so no variant coercion or spread applies to them.
+pub(crate) fn is_bool_or_unit(path: &Path) -> bool {
+    path.same(&crate::types::predef::path_bool())
+        || path.same(&crate::types::predef::path_unit())
+}
+
 /// `Variant_coercion.can_try_coerce_variant_to_primitive`
-/// (variant_coercion.ml:139-157): the concrete variant path, constructors,
-/// layout and unboxed flag of a parameterless variant other than `bool`.
+/// (variant_coercion.ml:125-140): the concrete variant path, constructors,
+/// layout and unboxed flag of a parameterless variant other than `bool` and
+/// `unit`.
 fn can_try_coerce_variant_to_primitive_opt(
     ctx: &TypeContext,
     concrete: Option<(Path, Path, crate::types::TypeDeclaration)>,
@@ -5565,13 +5575,27 @@ fn can_try_coerce_variant_to_primitive_opt(
     let (_, path, decl) = concrete?;
     match &decl.type_kind {
         crate::types::TypeKind::TypeVariant(constructors, _)
-            if decl.type_params.is_empty() && !path.same(&crate::types::predef::path_bool()) =>
+            if decl.type_params.is_empty() && !is_bool_or_unit(&path) =>
         {
             let unboxed = variant_runtime_configuration(ctx, &decl).unboxed;
             Some((path, constructors.to_vec(), unboxed))
         }
         _ => None,
     }
+}
+
+/// `Variant_coercion.can_try_coerce_polyvariant_to_variant`
+/// (variant_coercion.ml:275-279): whether a closed polymorphic variant may
+/// coerce to this concrete declaration, a variant other than `bool` and `unit`.
+fn can_try_coerce_polyvariant_to_variant(
+    concrete: Option<(Path, Path, crate::types::TypeDeclaration)>,
+) -> bool {
+    matches!(
+        concrete,
+        Some((_, path, decl))
+            if matches!(decl.type_kind, crate::types::TypeKind::TypeVariant(..))
+                && !is_bool_or_unit(&path)
+    )
 }
 
 /// OCaml `coerces_into_private_type env t1 t2` (ctype.ml:3504-3516):
@@ -5927,10 +5951,7 @@ fn subtype_rec(
         (TypeDesc::Tvariant(row), TypeDesc::Tconstr { args, .. })
             if row_repr(ctx, &ctx.row_desc(row)).row_closed
                 && args.is_empty()
-                && matches!(
-                    extract_concrete_typedecl(ctx, env, t2).map(|(_, _, decl)| decl.type_kind),
-                    Some(crate::types::TypeKind::TypeVariant(..))
-                ) =>
+                && can_try_coerce_polyvariant_to_variant(extract_concrete_typedecl(ctx, env, t2)) =>
         {
             // Polymorphic variant to variant.
             let row = row_repr(ctx, &ctx.row_desc(row));
@@ -6305,13 +6326,19 @@ fn subtype_concrete_typedecls(
     t2: TypeExprRef,
     cstrs: &mut SubtypeAcc,
 ) -> TypeResult<()> {
-    let (Some((p1, _, decl1)), Some((p2, _, decl2))) = (
+    let (Some((p1, concrete1, decl1)), Some((p2, concrete2, decl2))) = (
         extract_concrete_typedecl(ctx, env, t1),
         extract_concrete_typedecl(ctx, env, t2),
     ) else {
         push_subtype_cstr(cstrs, trace, t1, t2, None);
         return Ok(());
     };
+    if is_bool_or_unit(&concrete1) || is_bool_or_unit(&concrete2) {
+        // ctype.ml:3701-3706: no other type coerces to or from `bool` or
+        // `unit`, and the variant errors below would describe them as variants.
+        push_subtype_cstr(cstrs, trace, t1, t2, None);
+        return Ok(());
+    }
     match (&decl1.type_kind, &decl2.type_kind) {
         (
             crate::types::TypeKind::TypeVariant(c1, layout_ref1),

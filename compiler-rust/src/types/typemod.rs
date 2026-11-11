@@ -4863,6 +4863,18 @@ fn resolve_variant_spread_sources(
                     let (path, source_decl) =
                         resolve_type_constructor_path(tctx, env, &spread_lid, None);
                     if let Some(source_decl) = source_decl {
+                        // variant_type_spread.ml:47-50: `bool` and `unit` would
+                        // build `true`, `false` and `undefined`, but be matched
+                        // and coerced as the strings of their names.
+                        if matches!(
+                            source_decl.type_kind,
+                            crate::types::TypeKind::TypeVariant(..)
+                        ) && crate::types::ctype::is_bool_or_unit(&path)
+                        {
+                            return Err(TypeModError::VariantSpreadInvalidType {
+                                loc: spread_loc,
+                            });
+                        }
                         is_pdot = matches!(path.view(), PathView::Pdot(..));
                         found = Some(handle_source_decl(
                             &source_decl,
