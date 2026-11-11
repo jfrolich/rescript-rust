@@ -28,7 +28,7 @@ use rescript::{
 
 /// The registry `rescript bsc` compiles against. The file compile finds
 /// other units' `.cmi` files in its `-I` directories; in process, an `-I`
-/// directory that is a package's `lib/ocaml` compiles that package (with its
+/// directory that is a package's `lib/rescript` compiles that package (with its
 /// dependencies) into memory instead, leaving its files alone, and the
 /// runtime is compiled otherwise.
 fn bsc_registry(
@@ -38,8 +38,8 @@ fn bsc_registry(
     let runtime = std::fs::canonicalize(runtime_path).ok();
     let mut packages = Vec::new();
     for dir in include_dirs {
-        // `lib/ocaml` need not exist yet: the build writes it.
-        if !dir.ends_with("lib/ocaml") {
+        // `lib/rescript` need not exist yet: the build writes it.
+        if !dir.ends_with("lib/rescript") {
             continue;
         }
         let Some(Ok(package)) = dir.parent().and_then(Path::parent).map(std::fs::canonicalize) else {
@@ -56,7 +56,7 @@ fn bsc_registry(
         [package] => build::plan::build_in_memory(package)
             .map_err(|err| anyhow::anyhow!("bsc: building {} failed:\n{err:#}", package.display())),
         _ => Err(anyhow::anyhow!(
-            "bsc: at most one package's lib/ocaml can be an -I directory in process"
+            "bsc: at most one package's lib/rescript can be an -I directory in process"
         )),
     }
 }

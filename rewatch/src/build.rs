@@ -1016,7 +1016,7 @@ mod tests {
     fn with_build_lock_holds_lock_while_running_work() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path();
-        let build_lock_path = project_folder.join("lib").join(LockKind::Build.file_name());
+        let build_lock_path = crate::lock::lock_dir(project_folder).join(LockKind::Build.file_name());
 
         let result = with_build_lock(project_folder, || {
             assert!(
@@ -1037,7 +1037,7 @@ mod tests {
     fn with_build_lock_drops_lock_after_error_result() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path();
-        let build_lock_path = project_folder.join("lib").join(LockKind::Build.file_name());
+        let build_lock_path = crate::lock::lock_dir(project_folder).join(LockKind::Build.file_name());
 
         let result: Result<(), &str> = with_build_lock(project_folder, || Err("failed"));
 
@@ -1057,14 +1057,14 @@ mod tests {
         });
 
         assert!(result.is_err());
-        assert!(!project_folder.join("lib/build.lock").exists());
+        assert!(!crate::lock::lock_dir(project_folder).join("build.lock").exists());
     }
 
     #[test]
     fn build_waits_for_lock_before_initializing() {
         let temp_dir = TempDir::new().expect("temp dir should be created");
         let project_folder = temp_dir.path().to_path_buf();
-        let lib_dir = project_folder.join("lib");
+        let lib_dir = crate::lock::lock_dir(&project_folder);
         let build_lock_path = lib_dir.join(LockKind::Build.file_name());
         fs::create_dir_all(&lib_dir).expect("lib directory should be created");
         fs::write(&build_lock_path, process::id().to_string()).expect("lockfile should be written");

@@ -5,9 +5,9 @@
 //! reads and writes those files. This runs that file-backed build with a
 //! given `bsc` executable: for every module, after the modules it depends
 //! on, the `bsc` command lines (parse to `.ast`, compile the interface,
-//! compile the implementation), copying the artifacts into `lib/ocaml` after
-//! each command so dependents find them. Normal builds never run a compiler
-//! executable.
+//! compile the implementation), run in the package's flat `lib/rescript`,
+//! where they write the artifacts dependents find. Normal builds never run a
+//! compiler executable.
 
 use super::build_types::*;
 use super::{compile, deps, mark_modules_dirty, packages, parse};
@@ -19,23 +19,19 @@ use anyhow::{Result, anyhow};
 use std::path::{Path, PathBuf};
 
 /// One module of the build. Run `commands` in order, each with `bsc` and the
-/// working directory `cwd`, after the steps of every module in `deps`; after
-/// each command copy each `(from, to)` of `copies` (a missing `from` is
-/// skipped).
+/// working directory `cwd` (the package's artifact directory, created first),
+/// after the steps of every module in `deps`.
 struct Step {
     module: String,
     package: String,
     deps: Vec<String>,
     cwd: PathBuf,
-    /// Directories to create before running the commands.
-    mkdirs: Vec<PathBuf>,
     commands: Vec<Vec<String>>,
-    copies: Vec<(PathBuf, PathBuf)>,
 }
 
 /// Build the project at `path` with the `bsc` executable `bsc`. Prints the
 /// failures to stderr and returns whether every module built. Each package's
-/// compiler output (colours stripped) goes to its `lib/bs/.compiler.log` as a
+/// compiler output (colours stripped) goes to its `lib/rescript/.compiler.log` as a
 /// `rescript build` writes it (compile.rs): errors as modules fail, then the
 /// warnings sorted by module name.
 ///
@@ -144,10 +140,8 @@ fn run_step(bsc: &Path, step: &Step) -> StepOutput {
 }
 
 fn run_step_commands(bsc: &Path, step: &Step, out: &mut StepOutput) -> Option<String> {
-    for dir in std::iter::once(&step.cwd).chain(&step.mkdirs) {
-        if let Err(err) = std::fs::create_dir_all(dir) {
-            return Some(format!("{}: {}\n{err}", step.package, step.module));
-        }
+    if let Err(err) = std::fs::create_dir_all(&step.cwd) {
+        return Some(format!("{}: {}\n{err}", step.package, step.module));
     }
     for args in &step.commands {
         let output = match std::process::Command::new(bsc)
@@ -169,21 +163,14 @@ fn run_step_commands(bsc: &Path, step: &Step, out: &mut StepOutput) -> Option<St
             ));
         }
         out.warnings.push_str(&String::from_utf8_lossy(&output.stderr));
-        // Publish what each command wrote before the next one runs: an
-        // implementation compile finds its interface's .cmi in lib/ocaml.
-        for (from, to) in &step.copies {
-            if from.exists() {
-                let _ = std::fs::copy(from, to);
-            }
-        }
     }
     None
 }
 
 /// The project at `path` with every module parsed and its dependencies
 /// read, every module marked dirty. Discovers the packages without
-/// `initialize_build`: its compiler check and cleanup would delete the build
-/// folders (and the runtime's `lib/ocaml` sources the in-process build reads).
+/// `initialize_build`: its compiler check and cleanup would delete the
+/// artifact directories the reference build writes.
 fn parsed_state(path: &Path, prod: bool) -> Result<BuildCommandState> {
     let project_context = ProjectContext::new(path)?;
     let compiler = super::get_compiler_info(&project_context)?;
@@ -311,25 +298,12 @@ fn mlmap_step(build_state: &BuildCommandState, package: &packages::Package, name
             .map(|arg| arg.to_string()),
     );
     args.push(format!("{namespace}.mlmap"));
-    let build_path = package.get_build_path();
-    let ocaml_path = package.get_ocaml_build_path();
-    let copies = ["cmi", "cmt", "cmj", "mlmap"]
-        .iter()
-        .map(|ext| {
-            (
-                build_path.join(format!("{namespace}.{ext}")),
-                ocaml_path.join(format!("{namespace}.{ext}")),
-            )
-        })
-        .collect();
     Ok(Step {
         module: namespace.to_string(),
         package: package.name.clone(),
         deps: Vec::new(),
-        cwd: build_path,
-        mkdirs: vec![ocaml_path],
+        cwd: package.get_build_path(),
         commands: vec![args],
-        copies,
     })
 }
 
@@ -356,14 +330,10 @@ fn source_step(
     ppx_overrides: &[(String, PathBuf)],
 ) -> Result<Step> {
     let project_context = &build_state.project_context;
-    let build_path = package.get_build_path();
-    let ocaml_path = package.get_ocaml_build_path();
     let implementation = &source_file.implementation.path;
     let interface = source_file.interface.as_ref().map(|interface| &interface.path);
     let gentype_dirs: &[PathBuf] = package.gentype_dirs.as_deref().unwrap_or(&[]);
-    let mut mkdirs = vec![ocaml_path.clone()];
     let mut commands = Vec::new();
-    let mut copies = Vec::new();
 
     // Parse each source file to its `.ast`/`.iast`.
     let mut parse = |source: &PathBuf| -> Result<PathBuf> {
@@ -377,14 +347,7 @@ fn source_step(
             None,
         )?;
         override_ppxs(&mut args, ppx_overrides);
-        if let Some(parent) = build_path.join(&ast_path).parent() {
-            mkdirs.push(parent.to_path_buf());
-        }
         commands.push(args);
-        copies.push((
-            build_path.join(&ast_path),
-            ocaml_path.join(ast_path.file_name().unwrap()),
-        ));
         Ok(ast_path)
     };
     let iast_path = interface.map(&mut parse).transpose()?;
@@ -412,27 +375,6 @@ fn source_step(
     }
     commands.push(compile(&ast_path, false)?);
 
-    // Publish the compiled interface where dependent packages look (`-I lib/ocaml`).
-    let basename = helpers::file_path_to_compiler_asset_basename(implementation, &package.namespace);
-    let dir = build_path.join(implementation.parent().unwrap_or(Path::new("")));
-    let extensions: &[&str] = if interface.is_some() {
-        &["cmi", "cmj", "cmt", "cmti"]
-    } else {
-        &["cmi", "cmj", "cmt"]
-    };
-    for ext in extensions {
-        copies.push((
-            dir.join(format!("{basename}.{ext}")),
-            ocaml_path.join(format!("{basename}.{ext}")),
-        ));
-    }
-    for source in interface.into_iter().chain([implementation]) {
-        copies.push((
-            Path::new(&package.path).join(source),
-            ocaml_path.join(source.file_name().unwrap()),
-        ));
-    }
-
     // A namespace's step only compiles its alias map; a dependency on another
     // package's namespace also needs that package's members (the map's deps).
     let mut deps: Vec<String> = Vec::new();
@@ -452,7 +394,7 @@ fn source_step(
         }
     }
     // Members of a namespace compile with `-bs-ns`, which opens the map:
-    // its .cmi must be in lib/ocaml first.
+    // its .cmi must be in lib/rescript first.
     deps.extend(
         build_state
             .modules
@@ -462,15 +404,11 @@ fn source_step(
     );
     deps.sort();
     deps.dedup();
-    mkdirs.sort();
-    mkdirs.dedup();
     Ok(Step {
         module: module_name.to_string(),
         package: package.name.clone(),
         deps,
-        cwd: build_path,
-        mkdirs,
+        cwd: package.get_build_path(),
         commands,
-        copies,
     })
 }
