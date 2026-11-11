@@ -331,7 +331,7 @@ fn flat_make_alias(
                     return lam;
                 };
                 let (primitive, pos, name, base, loc) =
-                    (primitive.clone(), *pos, name.clone(), *base, loc);
+                    (primitive.clone(), *pos, *name, *base, loc);
                 let base = resolve(a, seen, base, groups);
                 if let Some((Primitive::Pmakeblock(TagInfo::Module(names), _), args, _)) =
                     a.as_prim(base)

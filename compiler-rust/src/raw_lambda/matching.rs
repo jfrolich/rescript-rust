@@ -1089,7 +1089,7 @@ fn all_record_args(
             // Fill in the actual patterns from the provided fields
             for (id, lbl, pat, opt) in lbls {
                 if (lbl.lbl_pos as usize) < result.len() {
-                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), pat.clone(), *opt);
+                    result[lbl.lbl_pos as usize] = (*id, lbl.clone(), *pat, *opt);
                 }
             }
             result

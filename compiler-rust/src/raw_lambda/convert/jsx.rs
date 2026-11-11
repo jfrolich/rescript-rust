@@ -322,7 +322,7 @@ impl<'a> RawLambdaConverter<'a> {
                                                 name: lbl.lbl_runtime_name,
                                             },
                                         ),
-                                        &vec![rb.var(init_id)],
+                                        &[rb.var(init_id)],
                                         loc,
                                     ),
                                 ),

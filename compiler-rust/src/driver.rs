@@ -2471,7 +2471,7 @@ fn type_mod_error_to_anyhow_styled(
         )
         .into(),
         TypeModError::CoreError(TypeCoreError::InvalidStringEscapeAt { loc }) => {
-            invalid_string_escape_report(type_ctx, filename, &loc)
+            invalid_string_escape_report(type_ctx, filename, loc)
         }
         TypeModError::CoreError(TypeCoreError::InvalidStringEscapeSequence { loc }) => UserDiagnostic::new(
             format_compiler_error_report(arena, source, filename, *loc, "Invalid string escape sequence"),
@@ -3349,14 +3349,14 @@ fn type_mod_error_to_anyhow_styled(
             format_compiler_error_report_from_location(
                 source,
                 filename,
-                &loc,
+                loc,
                 &render_js_name_clash_message(
                     kind,
                     other_kind,
-                    &js_name,
+                    js_name,
                     &code_frame::format_location(
                         &crate::types::includemod::location_filename(
-                            type_ctx, filename, &other_loc,
+                            type_ctx, filename, other_loc,
                         ),
                         &other_loc.loc_start,
                         &other_loc.loc_end,
@@ -7488,7 +7488,7 @@ fn build_name_based_coercion(
                 {
                     ModuleCoercion::Tcoerce_alias(
                         EnvRef(0),
-                        crate::types::Path::clone(&impl_path),
+                        crate::types::Path::clone(impl_path),
                         Box::new(ModuleCoercion::Tcoerce_none),
                     )
                 } else {
@@ -7504,7 +7504,7 @@ fn build_name_based_coercion(
                 // coercion at the same boundary.
                 ModuleCoercion::Tcoerce_alias(
                     EnvRef(0),
-                    crate::types::Path::clone(&impl_path),
+                    crate::types::Path::clone(impl_path),
                     Box::new(ModuleCoercion::Tcoerce_none),
                 )
             }
@@ -12250,7 +12250,7 @@ mod tests {
             )
             .map(|result| result.gentype)
         };
-        let error = compile("@genType(`x`) let x = 1\n").err().expect("retried");
+        let error = compile("@genType(`x`) let x = 1\n").expect_err("retried");
         assert!(matches!(
             error.downcast_ref::<super::LocationRetry>(),
             Some(super::LocationRetry::Warning)

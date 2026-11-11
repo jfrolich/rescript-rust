@@ -2692,12 +2692,12 @@ impl<'a> RawLambdaConverter<'a> {
                     (None, Some(base_var)) => {
                         let value = if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_))
                         {
-                            base_var.clone()
+                            *base_var
                         } else {
                             let (pos, info) = raw_record_field_access(lbl);
                             rb.prim(
                                 Primitive::Pfield(pos, info), &
-                                vec![base_var.clone()],
+                                vec![*base_var],
                                 self.lam_loc(loc),
                             )
                         };
@@ -3104,7 +3104,7 @@ impl<'a> RawLambdaConverter<'a> {
                             _ => None,
                         }),
                     other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
-                        let alias_path = other.ident_or_alias_path().unwrap().clone();
+                        let alias_path = *other.ident_or_alias_path().unwrap();
                         if alias_path.same(module_path) {
                             return None;
                         }
@@ -3166,7 +3166,7 @@ impl<'a> RawLambdaConverter<'a> {
             match mty {
                 ModuleType::MtySignature(sig) => runtime_field_position(&sig, field_name),
                 other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
-                    let alias_path = other.ident_or_alias_path().unwrap().clone();
+                    let alias_path = *other.ident_or_alias_path().unwrap();
                     if alias_path.same(module_path) {
                         return None;
                     }
@@ -5296,7 +5296,7 @@ impl<'a> RawLambdaConverter<'a> {
                 let loc = self.lam_loc(expr.exp_loc);
                 rb.prim(
                     primitive,
-                    &vec![rb.prim(Primitive::Pmakearray, &parts, loc.clone())],
+                    &vec![rb.prim(Primitive::Pmakearray, &parts, loc)],
                     loc,
                 )
             }
@@ -5611,7 +5611,7 @@ impl<'a> RawLambdaConverter<'a> {
                     .iter()
                     .map(|(key, value)| {
                         let ll = vec![
-                            rb.const_(Constant::String(key.txt.clone().into())),
+                            rb.const_(Constant::String(key.txt.clone())),
                             this.convert_expr_raw(value),
                         ];
                         this.raw_block_or_prim(0, TagInfo::Tuple, ll, src_loc)
@@ -5619,8 +5619,8 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 rb.prim(
                     Primitive::Pmakedict,
-                    &vec![rb.prim(Primitive::Pmakearray, &rows, loc.clone())],
-                    loc.clone(),
+                    &vec![rb.prim(Primitive::Pmakearray, &rows, loc)],
+                    loc,
                 )
             };
         let parts = ast_dict::group(
@@ -6884,7 +6884,7 @@ impl<'a> RawLambdaConverter<'a> {
             let body = self.transl_external_application(loc, env, prim, val_type, args);
             return rb.function_(
                 prim.prim_arity,
-                &&params,
+                (&params),
                 body,
                 FunctionAttribute::default(),
                 self.lam_loc(loc),
@@ -7934,7 +7934,7 @@ mod tests {
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
-                                                    std::sync::Arc::new(main_path.clone()),
+                                                    std::sync::Arc::new(main_path),
                                                 ),
                                                 md_attributes: Vec::new(),
                                                 md_loc: crate::types::DeclLoc::none(),

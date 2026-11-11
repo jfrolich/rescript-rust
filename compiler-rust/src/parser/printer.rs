@@ -10421,14 +10421,14 @@ fn print_jsx_children(
             let (inside, outside) = if leading {
                 let split = comments
                     .iter()
-                    .rposition(|comment| standalone(comment))
+                    .rposition(&standalone)
                     .map_or(0, |i| i + 1);
                 let inside = comments.split_off(split);
                 (inside, comments)
             } else {
                 let split = comments
                     .iter()
-                    .position(|comment| standalone(comment))
+                    .position(&standalone)
                     .unwrap_or(comments.len());
                 let outside = comments.split_off(split);
                 (comments, outside)

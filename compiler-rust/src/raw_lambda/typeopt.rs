@@ -105,7 +105,7 @@ fn type_cannot_contain_undefined_rec(
                     TypeKind::TypeVariant(_, _) if visiting.iter().any(|p| p.same(path)) => true,
                     TypeKind::TypeVariant(cdecls, _) => {
                         let visiting: Vec<Path> =
-                            std::iter::once(path.clone()).chain(visiting.iter().cloned()).collect();
+                            std::iter::once(*path).chain(visiting.iter().cloned()).collect();
                         let visiting = visiting.as_slice();
                         let check_case = |cd: &crate::types::ConstructorDeclaration,
                                               case: Option<
@@ -204,7 +204,7 @@ pub(crate) enum Abstractness {
 pub(crate) fn abstractness(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Abstractness {
     let expanded = crate::types::ctype::expand_head_opt(ctx, env, ty);
     let path = match &*ctx.get_desc(expanded) {
-        TypeDesc::Tconstr { path, .. } => path.clone(),
+        TypeDesc::Tconstr { path, .. } => *path,
         _ => return Abstractness::NotAbstract,
     };
     match crate::types::ctype::lookup_type_decl_for_path(ctx, env, &path) {
@@ -310,7 +310,7 @@ fn get_unboxed_type_representation(
         }
         let ty = ctx.repr(crate::types::ctype::expand_head_opt(ctx, env, ty));
         let (path, args) = match &*ctx.get_desc(ty) {
-            TypeDesc::Tconstr { path, args, .. } => (path.clone(), args.clone()),
+            TypeDesc::Tconstr { path, args, .. } => (*path, *args),
             _ => return Some(ty),
         };
         let Some(decl) = find_type_decl(ctx, env, &path) else {
@@ -516,7 +516,7 @@ mod tests {
             type_representation: crate::types::TypeRepresentation::Boxed,
             type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
-            type_path: Some(path.clone()),
+            type_path: Some(path),
         };
         let mut env = Env::empty();
         env.add_module(

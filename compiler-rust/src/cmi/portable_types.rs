@@ -2287,8 +2287,7 @@ mod identity_tests {
                     },
                 )
             })
-            .collect::<Vec<_>>()
-            .into();
+            .collect::<Vec<_>>();
         let save = |ctx: &TypeContext, sig: &Signature| {
             serialize_signature(sig, ctx, None, &mut PortableFileNames::default())
         };

@@ -116,7 +116,7 @@ pub fn of_payload(arena: &mut ParseArena, payload: &Payload) -> Option<RawSource
             _ => None,
         },
         ExpressionDesc::Pexp_template(template) => match template.source_segments.as_slice() {
-            [source] if template.values.is_empty() => Some(RawSource::Template(source.clone())),
+            [source] if template.values.is_empty() => Some(RawSource::Template(*source)),
             _ => None,
         },
         _ => None,
@@ -183,7 +183,7 @@ pub fn to_extension(
                 }),
             }
         }
-        RawSource::Template(s) => template(s.clone()),
+        RawSource::Template(s) => template(*s),
     };
     let expr = arena.push_shared_expr(expression(desc));
     (

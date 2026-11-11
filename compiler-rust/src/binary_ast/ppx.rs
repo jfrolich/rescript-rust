@@ -11111,8 +11111,7 @@ mod tests {
             values: vec![],
         }));
         let error = collect_leading_builtin_warning_attributes(&structure, &arena)
-            .err()
-            .expect("an invalid escape is an error");
+            .expect_err("an invalid escape is an error");
         assert_eq!(error.message_text(), "Invalid string escape sequence");
         assert_eq!(error.loc(), Some(loc));
     }
@@ -11478,8 +11477,7 @@ let e = () =>
         let structure_error = |source: &str| {
             let (mut arena, structure) = parse_structure(source);
             let error = rewrite_structure(&structure, &mut arena, false)
-                .err()
-                .expect("the deriver is rejected");
+                .expect_err("the deriver is rejected");
             located(&arena, error)
         };
         let signature_error = |source: &str| {
@@ -11492,8 +11490,7 @@ let e = () =>
             );
             let mut arena = parser.into_arena();
             let error = rewrite_signature(&signature, &mut arena, false)
-                .err()
-                .expect("the deriver is rejected");
+                .expect_err("the deriver is rejected");
             located(&arena, error)
         };
         let unknown = "@deriving(lenses)\ntype t = {name: string}\n";
@@ -11531,7 +11528,7 @@ let e = () =>
         let StructureItemDesc::Pstr_value(value) = &structure[0].pstr_desc else {
             panic!("expected value binding");
         };
-        let (_, bindings) = &*value;
+        let (_, bindings) = value;
         let ExpressionDesc::Pexp_tuple(items) =
             &arena.get_expr(arena.vb_list(*bindings)[0].pvb_expr).pexp_desc
         else {
