@@ -1028,7 +1028,15 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                 .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
                 .collect::<AHashSet<String>>();
 
-            let mlmap = namespaces::gen_mlmap(package, &namespace, &depending_modules)?;
+            // Only the file-backed reference build reads the map; in-process
+            // builds register the namespace from the package (see
+            // `compile::namespace_aliases`), so a check-only build, which
+            // writes nothing, only names it.
+            let mlmap = if build_state.check_only {
+                namespaces::mlmap_path(package, &namespace)
+            } else {
+                namespaces::gen_mlmap(package, &namespace, &depending_modules)?
+            };
 
             // mlmap will be compiled in the AST generation step
             // compile_mlmap(&package, namespace, &project_root);
