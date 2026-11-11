@@ -64,9 +64,9 @@ project="$work/project"
 mkdir -p "$project/src" "$work/orphan" "$work/empty" "$work/malformed"
 mkdir -p "$work/malformed-parent/child/src" "$work/config-directory/rescript.json"
 mkdir -p "$work/missing-dependency/src"
-mkdir -p "$work/malformed-lock/src" "$work/malformed-lock/lib"
-mkdir -p "$work/watch-lock-order/src" "$work/watch-lock-order/lib"
-mkdir -p "$work/signal-lock/src" "$work/signal-lock/lib"
+mkdir -p "$work/malformed-lock/src" "$work/malformed-lock/lib/rescript"
+mkdir -p "$work/watch-lock-order/src" "$work/watch-lock-order/lib/rescript"
+mkdir -p "$work/signal-lock/src" "$work/signal-lock/lib/rescript"
 mkdir -p "$work/signal-lock-owner/src"
 mkdir -p "$work/interface-mismatch/src"
 mkdir -p "$work/exotic-module-rust/src" "$work/exotic-module-ocaml/src"
@@ -82,13 +82,13 @@ mkdir -p "$work/active-permission/node_modules/a" \
   "$work/active-permission/node_modules/b"
 mkdir -p "$work/source-path-file"
 mkdir -p "$work/missing-runtime-package"
-mkdir -p "$work/clean-missing-bsc/src" "$work/clean-missing-bsc/lib/bs"
+mkdir -p "$work/clean-missing-bsc/src" "$work/clean-missing-bsc/lib/rescript"
 mkdir -p "$work/clean-missing-runtime/src" \
-  "$work/clean-missing-runtime/lib/bs"
+  "$work/clean-missing-runtime/lib/rescript"
 for implementation in rust ocaml; do
   mkdir -p "$work/clean-duplicate-$implementation/src/one" \
     "$work/clean-duplicate-$implementation/src/two" \
-    "$work/clean-duplicate-$implementation/lib/bs"
+    "$work/clean-duplicate-$implementation/lib/rescript"
 done
 mkdir -p "$work/missing-source-folder/src" \
   "$work/missing-source-folder/node_modules/dep"
@@ -219,7 +219,7 @@ for clean_project in clean-missing-bsc clean-missing-runtime; do
   printf '{"name":"%s","sources":["src"]}\n' "$clean_project" \
     >"$work/$clean_project/rescript.json"
   printf 'let value = 1\n' >"$work/$clean_project/src/A.res"
-  printf 'owned compiler artifact\n' >"$work/$clean_project/lib/bs/marker"
+  printf 'owned compiler artifact\n' >"$work/$clean_project/lib/rescript/marker"
 done
 for implementation in rust ocaml; do
   duplicate_clean="$work/clean-duplicate-$implementation"
@@ -230,7 +230,7 @@ for implementation in rust ocaml; do
   printf 'let value = 2\n' >"$duplicate_clean/src/two/A.res"
   printf 'generated\n' >"$duplicate_clean/src/one/A.js"
   printf 'generated\n' >"$duplicate_clean/src/two/A.js"
-  printf 'owned compiler artifact\n' >"$duplicate_clean/lib/bs/marker"
+  printf 'owned compiler artifact\n' >"$duplicate_clean/lib/rescript/marker"
 done
 printf '{"name":"missing-source-folder","sources":["src"],"dependencies":["dep"]}\n' \
   >"$work/missing-source-folder/rescript.json"
@@ -748,7 +748,7 @@ run_missing_bsc_case build-missing-bsc build "$project"
 run_missing_bsc_case format-missing-bsc format "$project/src/A.res"
 RESCRIPT_BSC_EXE="$work/missing-bsc" run_both clean "$work/clean-missing-bsc"
 if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
-  [ -e "$work/clean-missing-bsc/lib/bs/marker" ]; then
+  [ -e "$work/clean-missing-bsc/lib/rescript/marker" ]; then
   echo "clean-missing-bsc: expected both implementations to clean without a compiler" >&2
   dump_both
   exit 1
@@ -756,7 +756,7 @@ fi
 checked=$((checked + 1))
 run_both --unset RESCRIPT_RUNTIME clean "$work/clean-missing-runtime"
 if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
-  [ -e "$work/clean-missing-runtime/lib/bs/marker" ]; then
+  [ -e "$work/clean-missing-runtime/lib/rescript/marker" ]; then
   echo "clean-missing-runtime: expected both implementations to clean without a runtime" >&2
   dump_both
   exit 1
@@ -891,13 +891,13 @@ fi
 run_case js-post-build-nonzero reject reject build "$work/failed-js-post-build"
 js_post_build_error="js-post-build command failed for $work/failed-js-post-build/src/A.js"
 require_both_errors_contain js-post-build-nonzero "$js_post_build_error"
-printf 'not-a-pid' >"$work/malformed-lock/lib/build.lock"
+printf 'not-a-pid' >"$work/malformed-lock/lib/rescript/build.lock"
 run_case build-malformed-lock reject reject build "$work/malformed-lock"
-if [ "$(cat "$work/malformed-lock/lib/build.lock")" != not-a-pid ]; then
+if [ "$(cat "$work/malformed-lock/lib/rescript/build.lock")" != not-a-pid ]; then
   echo "OCaml replaced a malformed build lock with unknown ownership" >&2
   exit 1
 fi
-if [ -n "$(find "$work/malformed-lock/lib" -maxdepth 1 \
+if [ -n "$(find "$work/malformed-lock/lib/rescript" -maxdepth 1 \
   -name '.build-lock-*.tmp' -print -quit)" ]; then
   echo "OCaml left a build-lock candidate after acquisition failed" >&2
   exit 1
@@ -912,7 +912,7 @@ signal_lock_owner_pid=$!
 background_pids="$background_pids $signal_lock_owner_pid"
 wait_for_text "$work/signal-lock-owner.out" "Finished initial compilation"
 printf '%s' "$(lock_owner_pid "$signal_lock_owner_pid")" \
-  >"$work/signal-lock/lib/build.lock"
+  >"$work/signal-lock/lib/rescript/build.lock"
 "$ocaml" watch "$work/signal-lock" \
   >"$work/signal-lock.out" 2>"$work/signal-lock.err" &
 signal_lock_watch_pid=$!
@@ -939,13 +939,13 @@ fi
 kill -TERM "$signal_lock_owner_pid"
 wait "$signal_lock_owner_pid" 2>/dev/null || true
 checked=$((checked + 1))
-printf 'not-a-pid' >"$work/malformed-lock/lib/watch.lock"
+printf 'not-a-pid' >"$work/malformed-lock/lib/rescript/watch.lock"
 run_case watch-malformed-lock reject reject watch "$work/malformed-lock"
-if [ "$(cat "$work/malformed-lock/lib/watch.lock")" != not-a-pid ]; then
+if [ "$(cat "$work/malformed-lock/lib/rescript/watch.lock")" != not-a-pid ]; then
   echo "OCaml replaced a malformed watch lock with unknown ownership" >&2
   exit 1
 fi
-if [ -n "$(find "$work/malformed-lock/lib" -maxdepth 1 \
+if [ -n "$(find "$work/malformed-lock/lib/rescript" -maxdepth 1 \
   -name '.watch-lock-*.tmp' -print -quit)" ]; then
   echo "OCaml left a watch-lock candidate after acquisition failed" >&2
   exit 1
@@ -975,7 +975,7 @@ for implementation in rust ocaml; do
     exit 1
   fi
   printf '%s' "$native_owner_pid" \
-    >"$work/watch-lock-order/lib/watch.lock"
+    >"$work/watch-lock-order/lib/rescript/watch.lock"
   set +e
   "$executable" watch "$work/watch-lock-order" \
     >"$work/$implementation.out" 2>"$work/$implementation.err"
@@ -1001,8 +1001,8 @@ if ! cmp -s "$work/rust.err" "$work/ocaml.err"; then
   exit 1
 fi
 run_both build "$work/exotic-module-{impl}"
-rust_mlmap="$work/exotic-module-rust/lib/bs/Ns.mlmap"
-ocaml_mlmap="$work/exotic-module-ocaml/lib/bs/Ns.mlmap"
+rust_mlmap="$work/exotic-module-rust/lib/rescript/Ns.mlmap"
+ocaml_mlmap="$work/exotic-module-ocaml/lib/rescript/Ns.mlmap"
 if [ "$(classify "$rust_status")" != accept ] || \
   [ "$(classify "$ocaml_status")" != accept ] || \
   ! cmp -s "$rust_mlmap" "$ocaml_mlmap" || \
@@ -1244,7 +1244,7 @@ for implementation in rust ocaml; do
   watch_pid=$!
   background_pids="$background_pids $watch_pid"
   wait_for_file "$watch_project/src/A.js"
-  wait_for_text "$watch_project/lib/ocaml/.compiler.log" "#Done("
+  wait_for_text "$watch_project/lib/rescript/.compiler.log" "#Done("
   printf '{ invalid json\n' >"$watch_project/rescript.json"
   wait_for_text "$watch_err" "$config_error"
   if ! kill -0 "$watch_pid" 2>/dev/null; then
@@ -1263,7 +1263,7 @@ for implementation in rust ocaml; do
   printf '{"name":"watch-config","sources":["src"],"package-specs":{"module":"esmodule","in-source":true,"suffix":".mjs"}}\n' \
     >"$watch_project/rescript.json"
   wait_for_file "$watch_project/src/A.mjs"
-  wait_for_file "$watch_project/lib/bs/build.ninja"
+  wait_for_file "$watch_project/lib/rescript/compiler-info.json"
   if ! terminate_and_wait "$watch_pid" "$implementation recoverable-config watcher"; then
     cat "$watch_out" "$watch_err" >&2
     exit 1
@@ -1500,7 +1500,7 @@ for implementation in rust ocaml; do
   fi
   printf 'let value = 3\n' >"$quiet_watch_project/src/A.res"
   wait_for_line_count "$quiet_watch_marker" 3
-  rm "$quiet_watch_project/lib/watch.lock"
+  rm "$quiet_watch_project/lib/rescript/watch.lock"
   wait_for_exit "$quiet_watch_pid"
   wait "$quiet_watch_pid"
   if [ -s "$work/quiet-watch-$implementation.out" ] || \
@@ -1540,10 +1540,10 @@ run_both clean "$work/clean-duplicate-{impl}"
 if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
   [ -e "$work/clean-duplicate-rust/src/one/A.js" ] || \
   [ -e "$work/clean-duplicate-rust/src/two/A.js" ] || \
-  [ -e "$work/clean-duplicate-rust/lib/bs/marker" ] || \
+  [ -e "$work/clean-duplicate-rust/lib/rescript/marker" ] || \
   [ -e "$work/clean-duplicate-ocaml/src/one/A.js" ] || \
   [ -e "$work/clean-duplicate-ocaml/src/two/A.js" ] || \
-  [ -e "$work/clean-duplicate-ocaml/lib/bs/marker" ]; then
+  [ -e "$work/clean-duplicate-ocaml/lib/rescript/marker" ]; then
   echo "clean-duplicate-modules: cleanup behavior differs unexpectedly" >&2
   dump_both
   exit 1
@@ -1578,8 +1578,8 @@ if $windows_posix_shell; then
   # remove its locks. Its external termination intentionally leaves a stale
   # watch lock, and a build lock if the rebuild was still finishing, so remove
   # those harness artifacts before checking failure paths.
-  rm -f "$work/missing-dependency/lib/watch.lock" \
-    "$work/missing-dependency/lib/build.lock"
+  rm -f "$work/missing-dependency/lib/rescript/watch.lock" \
+    "$work/missing-dependency/lib/rescript/build.lock"
 fi
 printf '{"name":"missing-dependency","sources":["src"],"dependencies":["absent"]}\n' \
   >"$work/missing-dependency/rescript.json"
@@ -1590,8 +1590,8 @@ run_case --cwd "$work/configless-dependency" \
   format-configless-dependency exit2 exit2 format
 run_case --cwd "$work/malformed-dependency" \
   format-malformed-dependency exit2 exit2 format
-if [ -e "$work/missing-dependency/lib/build.lock" ] || \
-  [ -e "$work/missing-dependency/lib/watch.lock" ]; then
+if [ -e "$work/missing-dependency/lib/rescript/build.lock" ] || \
+  [ -e "$work/missing-dependency/lib/rescript/watch.lock" ]; then
   echo "OCaml dependency failures left a build or watch lock behind" >&2
   exit 1
 fi

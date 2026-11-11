@@ -31,4 +31,5 @@ Dep01 (packages/dep01/src/Dep01.res)
 Possible solutions:
 - Extract shared code into a new module both depend on.
 
-Incremental build failed. Error: [2K  Failed to Compile. See Errors Above
+Incremental build failed. Error: [2K
+  Failed to Compile. See Errors Above
