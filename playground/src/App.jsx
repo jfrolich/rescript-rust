@@ -43,6 +43,8 @@ const READONLY_OPTIONS = {
   domReadOnly: true,
   renderLineHighlight: "none",
   padding: { top: 8 },
+  wordWrap: "on",
+  wrappingIndent: "deepIndent",
 };
 
 function languageOf(filename) {
