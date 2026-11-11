@@ -60,7 +60,6 @@ let filter_map f =
   aux []
 
 let dump_path path = Str.global_replace (Str.regexp_string "\\") "/" path
-let is_uncurried_internal path = starts_with (Path.name path) "Js.Fn.arity"
 
 let flatten_long_ident ?(jsx = false) ?(cut_at_offset = None) lid =
   let extend_path s path =
@@ -117,10 +116,14 @@ let identify_pexp pexp =
   | Pexp_assert _ -> "Pexp_assert"
   | Pexp_pack _ -> "Pexp_pack"
   | Pexp_extension _ -> "Pexp_extension"
+  | Pexp_raw _ -> "Pexp_raw"
+  | Pexp_todo _ -> "Pexp_todo"
   | Pexp_open _ -> "Pexp_open"
   | Pexp_await _ -> "Pexp_await"
   | Pexp_jsx_element _ -> "Pexp_jsx_element"
   | Pexp_regexp _ -> "Pexp_regexp"
+  | Pexp_dict _ -> "Pexp_dict"
+  | Pexp_spread _ -> "Pexp_spread"
   | Pexp_template _ -> "Pexp_template"
   | Pexp_tagged_template _ -> "Pexp_tagged_template"
 
@@ -139,6 +142,8 @@ let identify_ppat pat =
   | Ppat_or _ -> "Ppat_or"
   | Ppat_constraint _ -> "Ppat_constraint"
   | Ppat_type _ -> "Ppat_type"
+  | Ppat_variant_spread _ -> "Ppat_variant_spread"
+  | Ppat_dict _ -> "Ppat_dict"
   | Ppat_unpack _ -> "Ppat_unpack"
   | Ppat_exception _ -> "Ppat_exception"
   | Ppat_extension _ -> "Ppat_extension"
@@ -158,10 +163,9 @@ let rec unwrap_if_option (t : Types.type_expr) =
   | _ -> t
 
 let is_jsx_component (vb : Parsetree.value_binding) =
-  vb.pvb_attributes
-  |> List.exists (function
-    | {Location.txt = "react.component" | "jsx.component"}, _payload -> true
-    | _ -> false)
+  match vb.pvb_jsx_component with
+  | Some {pjc_kind = Pjc_labelled _} -> true
+  | Some {pjc_kind = Pjc_with_props} | None -> false
 
 let check_name name ~prefix ~exact =
   if exact then name = prefix else starts_with name prefix
@@ -238,23 +242,6 @@ let rec flatten_any_namespace_in_path path =
       (* Namespaces are in reverse order, so "URL-RescriptBun" where RescriptBun is the namespace. *)
       (parts |> List.rev) @ flatten_any_namespace_in_path tail
     else head :: flatten_any_namespace_in_path tail
-
-let print_maybe_exotic_ident ?(allow_uident = false) txt =
-  let len = String.length txt in
-
-  let rec loop i =
-    if i == len then txt
-    else if i == 0 then
-      match String.unsafe_get txt i with
-      | 'A' .. 'Z' when allow_uident -> loop (i + 1)
-      | 'a' .. 'z' | '_' -> loop (i + 1)
-      | _ -> "\"" ^ txt ^ "\""
-    else
-      match String.unsafe_get txt i with
-      | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '\'' | '_' -> loop (i + 1)
-      | _ -> "\"" ^ txt ^ "\""
-  in
-  if Res_token.is_keyword_txt txt then "\"" ^ txt ^ "\"" else loop 0
 
 let find_package_json root =
   let path = Uri.to_path root in

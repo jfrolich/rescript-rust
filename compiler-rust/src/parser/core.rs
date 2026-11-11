@@ -118,13 +118,16 @@ pub mod recover {
     }
 
     /// Check if list parsing should abort based on breadcrumbs.
+    ///
+    /// Looks at the innermost grammar first, like OCaml's breadcrumb list
+    /// (res_core.ml:110-118): the list being parsed usually ends at one of
+    /// its own terminators, so the walk stops at once instead of crossing
+    /// every enclosing grammar.
     pub fn should_abort_list_parse(p: &Parser<'_>) -> bool {
-        for (g, _) in p.breadcrumbs() {
-            if grammar::is_part_of_list(g, &p.token) {
-                return true;
-            }
-        }
-        false
+        p.breadcrumbs()
+            .iter()
+            .rev()
+            .any(|(g, _)| grammar::is_part_of_list(g, &p.token))
     }
 
     /// Skip tokens and maybe retry parsing.
@@ -149,6 +152,13 @@ pub mod recover {
         // Case 1: keyword on same line - skip it and don't retry
         if p.token.is_keyword() && p.prev_end_pos.line == p.start_pos.line {
             p.next();
+            return false;
+        }
+
+        // Something is missing before a comma, e.g. the value in
+        // `{a: , b: 1}`: leave the comma to the enclosing list instead of
+        // skipping to the next row.
+        if matches!(p.token, Token::Comma) {
             return false;
         }
 
@@ -608,40 +618,6 @@ pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (Str
 }
 
 // ============================================================================
-// Special Attributes
-// ============================================================================
-
-/// Create the if-let attribute `@res.iflet`.
-pub fn if_let_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.iflet");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-/// Create the await attribute `@res.await` with location.
-pub fn make_await_attr(arena: &mut ParseArena, loc: Location) -> Attribute {
-    let str_idx = arena.intern("res.await");
-    (with_loc(str_idx, loc), Payload::PStr(Box::default()))
-}
-
-/// Create the spread attribute `@res.spread`.
-pub fn spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.spread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-/// Create the dict-spread attribute `@res.dictSpread` (upstream #8369).
-pub fn dict_spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.dictSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-/// Create the pattern variant spread attribute.
-pub fn make_pat_variant_spread_attr(arena: &mut ParseArena) -> Attribute {
-    let str_idx = arena.intern("res.patVariantSpread");
-    (mknoloc(str_idx), Payload::PStr(Box::default()))
-}
-
-// ============================================================================
 // Parsing Context
 // ============================================================================
 
@@ -653,8 +629,11 @@ pub enum ExprContext {
     Ordinary,
     /// True branch of ternary.
     TernaryTrueBranch,
-    /// When expression in pattern match.
+    /// An expression followed by a block, such as a condition or a switch
+    /// scrutinee (OCaml `WhenExpr`).
     When,
+    /// A switch guard, which the case's `=>` follows (OCaml `GuardExpr`).
+    Guard,
     /// Switch case right-hand side (stop at `|`).
     SwitchCaseRhs,
 }
@@ -729,6 +708,35 @@ pub fn skip_doc_comments(p: &mut Parser<'_>) {
     while matches!(p.token, Token::DocComment { .. }) {
         p.next();
     }
+}
+
+/// Whether the current token is `|` or a run of doc comments followed by `|`.
+/// OCaml `is_bar_or_doc_comment_then_bar` (compiler/syntax/src/res_core.ml).
+pub fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
+    match p.token {
+        Token::Bar => true,
+        Token::DocComment { .. } => p.lookahead(|state| {
+            skip_doc_comments(state);
+            matches!(state.token, Token::Bar)
+        }),
+        _ => false,
+    }
+}
+
+/// The doc comments before the `|` of a constructor or tag, as `res.doc`
+/// attributes in source order. The printer puts every doc comment of a
+/// constructor on its own line before the `|`. OCaml `parse_doc_comments`
+/// (compiler/syntax/src/res_core.ml).
+pub fn parse_doc_comments(p: &mut Parser<'_>) -> Vec<Attribute> {
+    let mut attrs = Vec::new();
+    while let Token::DocComment { loc, content } = &p.token {
+        let loc = *loc;
+        let content = content.clone();
+        p.next();
+        let loc = p.from_location(&loc);
+        attrs.push(doc_comment_to_attribute(p.arena_mut(), loc, content));
+    }
+    attrs
 }
 
 /// Convert a doc comment to a res.doc attribute.

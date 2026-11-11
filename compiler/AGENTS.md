@@ -11,6 +11,8 @@ commands below are relative to the repository root unless stated otherwise.
   - Add a source fixture exercising the new syntax to `tests/syntax_tests/data/ast-mapping/`. Every file there is run through `res_parser -test-ast-conversion` (which round-trips the parsetree through the frozen v0 AST before printing) as part of `make test-syntax`; the printed output must match the snapshot in its `expected/` directory.
   - For exact-identity invariants (locations, attributes) or the v0 wire shape itself, add cases to `tests/ounit_tests/ounit_ast_mapper0_tests.ml`, which tests `ast_mapper_to0`/`ast_mapper_from0` directly.
 
+- **Don't bump magic numbers** - Changing a serialized type (parsetree, typed tree, `.cmi` signature) needs no edit of the magic numbers in `compiler/ext/config.ml`. `yarn changelog:release` bumps them when `compiler/ml`, `compiler/ext` or `compiler/flow_parser` changed since the previous release, and the changelog check rejects pull requests that bump them.
+
 - **Missing test coverage** - Always add tests for syntax, lambda, and end-to-end behavior
 
 - **Test early and often** - Add tests immediately after modifying each compiler layer to catch problems early, rather than waiting until all changes are complete
@@ -96,7 +98,7 @@ Read the relevant area guide linked from the [root instructions](../AGENTS.md#ar
 # Raw lambda (unoptimized intermediate representation)
 ./packages/@rescript/<platform>/bin/bsc.exe -drawlambda myfile.res
 
-# Use lambda printing for debugging (add in compiler/core/lam_print.ml)
+# Use lambda printing for debugging (Printlambda in compiler/ml/printlambda.ml)
 ```
 
 #### Common Debug Scenarios
@@ -139,5 +141,5 @@ The compiler is designed for fast feedback loops and scales to large codebases:
 
 - Remember Lambda IR is the core optimization layer
 - All `lam_*.ml` files process this representation
-- Use `lam_print.ml` for debugging lambda expressions
+- Use `compiler/ml/printlambda.ml` for debugging lambda expressions
 - Test both with and without optimization passes

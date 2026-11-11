@@ -5,7 +5,7 @@ See [`Error`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/
 */
 
 /** Represents a JavaScript error. */
-@notUndefined
+@instanceOf("Error")
 type t
 
 /**
@@ -91,6 +91,7 @@ module EvalError: {
   */
   let throwWithMessage: string => 'a
 }
+
 module RangeError: {
   /**
   Creates a new `RangeError` with the provided `message`.
@@ -109,6 +110,7 @@ module RangeError: {
   */
   let throwWithMessage: string => 'a
 }
+
 module ReferenceError: {
   /**
   Creates a new `ReferenceError` with the provided `message`.
@@ -127,6 +129,7 @@ module ReferenceError: {
   */
   let throwWithMessage: string => 'a
 }
+
 module SyntaxError: {
   /**
   Creates a new `SyntaxError` with the provided `message`.
@@ -145,6 +148,7 @@ module SyntaxError: {
   */
   let throwWithMessage: string => 'a
 }
+
 module TypeError: {
   /**
   Creates a new `TypeError` with the provided `message`.
@@ -163,6 +167,7 @@ module TypeError: {
   */
   let throwWithMessage: string => 'a
 }
+
 module URIError: {
   /**
   Creates a new `URIError` with the provided `message`.

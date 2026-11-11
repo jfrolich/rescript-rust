@@ -46,20 +46,35 @@ let is_const_some (cst : Lambda.structured_constant) : bool =
   | Const_some _ -> true
   | _ -> false
 
+(* How deep inlining may nest: simplifying an inlined body can inline the
+   functions it calls, and so on. Without a bound, a chain of small functions
+   that each call the previous one gets the whole chain inlined into every
+   function, which is quadratic in the length of the chain. Functions marked
+   [@inline] are always inlined. *)
+let max_inline_depth = 4
+
 let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
+  (* Inlining keeps the reads of assigned variables in order (see
+     [Lam_beta_reduce]). Only [Lam_pass_sroa], which runs later, makes
+     [Lassign]s now, so this is usually empty; computing it here keeps the
+     inlining sound if that changes. *)
+  let meta = {meta with assignable = Lambda_traverse.assigned_variables lam} in
+  let inline_depth = ref 0 in
   let rec simpl (lam : Lambda.t) : Lambda.t =
     match lam with
-    (* 7432: prevent optimization in JSX preserve mode *)
+    (* In JSX preserve mode, keep a JSX tag like [M.make] as it is: flattening
+       it may give a variable with a lowercase name, which JSX reads as an
+       intrinsic element (#7432) *)
     | Lprim
         {
-          primitive = Pjs_call {prim_name = "jsx" | "jsxs"} as primitive;
-          args = (Lprim {primitive = Pfield (_, _)} as field_arg) :: rest;
+          primitive = Pjsx _ as primitive;
+          args = (Lprim {primitive = Pfield (_, _)} as tag) :: rest;
           loc;
         }
-      when !Js_config.jsx_preserve ->
+      when !((Clflags.current ()).jsx_preserve) ->
       let rest' = Ext_list.map_sharing rest simpl in
       if rest' == rest then lam
-      else Lambda.prim ~primitive ~args:(field_arg :: rest') loc
+      else Lambda.prim ~primitive ~args:(tag :: rest') loc
     | Lprim {primitive = Pfield (i, info) as primitive; args = [arg]; loc} -> (
       (* ATTENTION:
          Main use case, we should detect inline all immutable block .. *)
@@ -77,6 +92,12 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
         } as x -> (
       match Hash_ident.find_opt meta.ident_tbl v with
       | Some (OptionalBlock (l, _)) -> l
+      (* [v] bound to [Some(l)]: unwrapping gives back [l], whether or not
+         it was nested. Only substitute forms that are safe to repeat. *)
+      | Some (Normal_optional (Lvar _ as l)) -> l
+      | Some (Normal_optional (Lconst c as l))
+        when not (Lambda.const_is_allocating c) ->
+        l
       | _ -> if p = Pval_from_option_not_nest then lvar else x)
     | Lifthenelse (Lprim {primitive = Pis_not_none; args = [Lvar id]}, l2, l3)
       -> (
@@ -130,7 +151,7 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
                 _;
               } as l1;
           ap_args = args;
-          ap_info;
+          ap_loc;
         } -> (
       match Lam_compile_env.query_external_id_info ident fld_name with
       | {
@@ -145,28 +166,25 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
                    | Some v -> v <> Parameter
                    | None -> true)
                  | _ -> true)
-             && Lam_analysis.lfunction_can_be_inlined lfunction ->
+             && Lambda.lfunction_can_be_inlined lfunction ->
         simpl (Lam_beta_reduce.propagate_beta_reduce meta params body args)
       | _ ->
         let fn = simpl l1 in
         let args' = Ext_list.map_sharing args simpl in
-        if fn == l1 && args' == args then lam
-        else Lambda.apply fn args' ap_info ?ap_transformed_jsx:None)
+        if fn == l1 && args' == args then lam else Lambda.apply fn args' ap_loc)
     (* Function inlining interact with other optimizations...
 
        - parameter attributes
        - scope issues
        - code bloat
     *)
-    | Lapply
-        {ap_func = Lvar v as fn; ap_args = args; ap_info; ap_transformed_jsx}
-      -> (
+    | Lapply {ap_func = Lvar v as fn; ap_args = args; ap_loc} -> (
       (* Check info for always inlining *)
       let ap_args = Ext_list.map_sharing args simpl in
       let[@local] normal () =
         let fn' = simpl fn in
         if fn' == fn && ap_args == args then lam
-        else Lambda.apply fn' ap_args ap_info ~ap_transformed_jsx
+        else Lambda.apply fn' ap_args ap_loc
       in
       match Hash_ident.find_opt meta.ident_tbl v with
       | Some
@@ -177,9 +195,9 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
                    ( Lfunction ({params; body; attr = {is_a_functor}} as m),
                      rec_flag );
              })
-        when Lam_analysis.lfunction_can_be_inlined m ->
+        when Lambda.lfunction_can_be_inlined m ->
         if Ext_list.same_length ap_args params then
-          if is_a_functor (* && (Set_ident.mem v meta.export_idents) && false *)
+          if is_a_functor (* && (Set_ident.mem meta.export_idents v) && false *)
           then
             (* TODO: check l1 if it is exported,
                if so, maybe not since in that case,
@@ -189,15 +207,11 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
             (* Ext_log.dwarn __LOC__ "beta .. %s/%d" v.name v.stamp ; *)
             simpl
               (Lam_beta_reduce.propagate_beta_reduce meta params body ap_args)
-          else if
-            (* Lam_analysis.size body < Lam_analysis.small_inline_size *)
-            (* ap_inlined = Always_inline || *)
-            Lam_analysis.ok_to_inline_fun_when_app m ap_args
-          then
+          else if Lam_analysis.ok_to_inline_fun_when_app m ap_args then
             let param_map =
               Lam_closure.is_closed_with_map meta.export_idents params body
             in
-            let is_export_id = Set_ident.mem meta.export_idents v in
+            let is_export_id = Set_ident.mem v meta.export_idents in
             match (is_export_id, param_map) with
             | false, (_, param_map) | true, (true, param_map) -> (
               match rec_flag with
@@ -211,10 +225,19 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
                       Lam_hit.hit_variable v lam)
                   (*avoid nontermination, e.g, `g(g)`*)
                 then normal ()
-                else
-                  simpl
-                    (Lam_beta_reduce.propagate_beta_reduce_with_map meta
-                       param_map params body ap_args))
+                else if
+                  !inline_depth >= max_inline_depth
+                  && m.attr.inline <> Always_inline
+                then normal ()
+                else (
+                  incr inline_depth;
+                  let inlined =
+                    simpl
+                      (Lam_beta_reduce.propagate_beta_reduce_with_map meta
+                         param_map params body ap_args)
+                  in
+                  decr inline_depth;
+                  inlined))
             | _ -> normal ()
           else normal ()
         else normal ()
@@ -222,7 +245,7 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
     | Lapply
         {ap_func = Lfunction ({params; body} as lfunction); ap_args = args; _}
       when Ext_list.same_length params args
-           && Lam_analysis.lfunction_can_be_inlined lfunction ->
+           && Lambda.lfunction_can_be_inlined lfunction ->
       simpl (Lam_beta_reduce.propagate_beta_reduce meta params body args)
     | Lstringswitch (l, sw, d) -> (
       let known_constant =
@@ -238,7 +261,7 @@ let simplify_alias (meta : Lam_stats.t) (lam : Lambda.t) : Lambda.t =
         (* Switch on the constant the scrutinee is bound to. *)
         Lambda.stringswitch (Lambda.const c)
           (Ext_list.map_snd sw simpl)
-          (Ext_option.map d simpl)
+          (Option.map simpl d)
       | None -> Lambda_traverse.shallow_map_sharing simpl lam)
     | _ -> Lambda_traverse.shallow_map_sharing simpl lam
   in

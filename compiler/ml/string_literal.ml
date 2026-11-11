@@ -252,6 +252,29 @@ let decode_raw_template_source source =
   loop 0;
   Buffer.contents buffer
 
+(* The inverse of [decode_raw_template_source]: escape backquotes, [${] and
+   the backslashes that decoding would otherwise consume. *)
+let encode_raw_template_source source =
+  let length = String.length source in
+  let buffer = Buffer.create length in
+  String.iteri
+    (fun index character ->
+      let next =
+        if index + 1 < length then Some (String.unsafe_get source (index + 1))
+        else None
+      in
+      match character with
+      | '`' -> Buffer.add_string buffer "\\`"
+      | '$' when next = Some '{' -> Buffer.add_string buffer "\\$"
+      | '\\' -> (
+        match next with
+        | None | Some ('\\' | '$' | '`' | '\n' | '\r' | '\226') ->
+          Buffer.add_string buffer "\\\\"
+        | Some _ -> Buffer.add_char buffer character)
+      | _ -> Buffer.add_char buffer character)
+    source;
+  Buffer.contents buffer
+
 type encode_js_mode = String | Template
 
 let encode_js mode s =
@@ -283,6 +306,8 @@ let encode_js mode s =
 
 let encode_js_string = encode_js String
 
+(** Encode a semantic UTF-8 string as a canonical JavaScript template-segment
+    body. *)
 let encode_js_template = encode_js Template
 
 let string_from_source source : string_literal option =

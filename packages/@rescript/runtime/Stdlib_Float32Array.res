@@ -1,7 +1,12 @@
 /** The `Float32Array` typed array represents an array of 32-bit floating point numbers in platform byte order. See [Float32Array on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float32Array)
 */
-@editor.completeFrom(Stdlib.TypedArray)
-type t = Stdlib_TypedArray.t<float>
+@instanceOf("Float32Array")
+type t = private Stdlib_TypedArray.t<float>
+
+include Stdlib_TypedArray.Impl({
+  type t = t
+  type elt = float
+})
 
 module Constants = {
   /**`bytesPerElement` returns the element size. See [BYTES_PER_ELEMENT on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/BYTES_PER_ELEMENT)
@@ -23,29 +28,6 @@ external fromArray: array<float> => t = "Float32Array"
 external fromBuffer: (Stdlib_ArrayBuffer.t, ~byteOffset: int=?, ~length: int=?) => t =
   "Float32Array"
 
-/** `fromBufferToEnd` creates a `Float32Array` from an `ArrayBuffer.t`, starting at a particular offset and continuing through to the end. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float32Array/Float32Array)
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: Float32Array.fromBuffer(),
-})
-@new
-external fromBufferToEnd: (Stdlib_ArrayBuffer.t, ~byteOffset: int) => t = "Float32Array"
-
-/** `fromBufferWithRange` creates a `Float32Array` from an `ArrayBuffer.t`, starting at a particular offset and consuming `length` **bytes**. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float32Array/Float32Array)
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: Float32Array.fromBuffer(),
-})
-@new
-external fromBufferWithRange: (Stdlib_ArrayBuffer.t, ~byteOffset: int, ~length: int) => t =
-  "Float32Array"
-
 /** `fromLength` creates a zero-initialized `Float32Array` to hold the specified count of numbers; this is **not** a byte length. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Float32Array/Float32Array)
 
 **Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
@@ -57,18 +39,6 @@ external fromLength: int => t = "Float32Array"
 */
 @val
 external fromArrayLikeOrIterable: ('a, ~map: ('b, int) => float=?) => t = "Float32Array.from"
-
-/** `fromArrayLikeOrIterableWithMap` creates a `Float32Array` from an array-like or iterable object and applies the mapping function to each item. The mapping function expects (value, index). See [TypedArray.from on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/from)
-*/
-@deprecated({
-  reason: "Use `fromArrayLikeOrIterable` instead",
-  migrate: Float32Array.fromArrayLikeOrIterable(
-    %insert.unlabelledArgument(0),
-    ~map=%insert.unlabelledArgument(1),
-  ),
-})
-@val
-external fromArrayLikeOrIterableWithMap: ('a, ('b, int) => float) => t = "Float32Array.from"
 
 /**
   `ignore(floatArray)` ignores the provided floatArray and returns unit.

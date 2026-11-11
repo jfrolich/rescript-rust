@@ -265,7 +265,6 @@ pub fn parser_args(
     )?;
     let jsx_args = root_config.get_jsx_args();
     let jsx_module_args = root_config.get_jsx_module_args();
-    let jsx_mode_args = root_config.get_jsx_mode_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
     let experimental_features_args = root_config.get_experimental_features_args();
     let bsc_flags = config::flatten_flags(&package_config.compiler_flags);
@@ -279,7 +278,6 @@ pub fn parser_args(
             ppx_flags,
             jsx_args,
             jsx_module_args,
-            jsx_mode_args,
             jsx_preserve_args,
             experimental_features_args,
             warning_args,
@@ -386,7 +384,6 @@ fn generate_ast(
         let flags = [
             root_config.get_jsx_args(),
             root_config.get_jsx_module_args(),
-            root_config.get_jsx_mode_args(),
             root_config.get_jsx_preserve_args(),
             root_config.get_experimental_features_args(),
             package
@@ -547,6 +544,14 @@ fn source_bytes_to_latin1(bytes: Vec<u8>) -> String {
     }
 }
 
+/// Frontend warning reports as `bsc -bs-ast` writes them: the parser keeps
+/// one `char` per source byte, so names and messages taken from the source
+/// are turned back into their UTF-8 bytes, as the compiler's own stderr
+/// writer does (`driver::write_stderr`).
+fn frontend_output(warnings: &str) -> String {
+    rescript_compiler::source_text::decode_internal_utf8_runs(warnings).into_owned()
+}
+
 fn parse_source(
     source_file: &Path,
     bytes: Vec<u8>,
@@ -582,11 +587,11 @@ fn parse_source(
             );
             let frontend = match frontend {
                 Ok(frontend) => frontend,
-                Err(err) => return Err(anyhow!("{warnings}{err}")),
+                Err(err) => return Err(anyhow!("{}{err}", frontend_output(&warnings))),
             };
             // `bsc -bs-ast` exits 2 when a frontend warning is an error.
             if frontend.warnings_fatal {
-                return Err(anyhow!(warnings));
+                return Err(anyhow!(frontend_output(&warnings)));
             }
             let signature = frontend.signature;
 
@@ -603,7 +608,11 @@ fn parse_source(
                     source_len: source.len(),
                     retry_source: None,
                 }));
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
+            Ok((
+                (!warnings.is_empty()).then(|| frontend_output(&warnings)),
+                stored,
+                deps,
+            ))
         } else {
             let structure = module::parse_structure(&mut parser);
             let frontend = rescript_compiler::driver::run_implementation_frontend(
@@ -616,10 +625,10 @@ fn parse_source(
             );
             let frontend = match frontend {
                 Ok(frontend) => frontend,
-                Err(err) => return Err(anyhow!("{warnings}{err}")),
+                Err(err) => return Err(anyhow!("{}{err}", frontend_output(&warnings))),
             };
             if frontend.warnings_fatal {
-                return Err(anyhow!(warnings));
+                return Err(anyhow!(frontend_output(&warnings)));
             }
             let structure = frontend.structure;
 
@@ -637,7 +646,11 @@ fn parse_source(
                     source_len: source.len(),
                     retry_source: None,
                 }));
-            Ok(((!warnings.is_empty()).then_some(warnings), stored, deps))
+            Ok((
+                (!warnings.is_empty()).then(|| frontend_output(&warnings)),
+                stored,
+                deps,
+            ))
         }
     })
 }
@@ -779,6 +792,39 @@ mod tests {
                 let (_, _, full_deps) = super::parse_saved_source(&source, true).unwrap();
                 assert_eq!(deps, full_deps);
                 assert!(deps.iter().any(|name| name == "Other"));
+                tx.send(()).unwrap();
+            })
+            .unwrap();
+        rx.recv_timeout(std::time::Duration::from_secs(5))
+            .expect("frontend timed out or failed");
+    }
+
+    /// Frontend warnings are written like `bsc` writes them: the message of
+    /// `%todo("...")` comes from the source, which the parser keeps one
+    /// `char` per byte, and is shown as its UTF-8 text.
+    #[test]
+    fn frontend_warnings_show_source_text_as_utf8() {
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::Builder::new()
+            .stack_size(16 * 1024 * 1024)
+            .spawn(move || {
+                let source = std::sync::Arc::new(super::ParseSource {
+                    file_path: std::path::PathBuf::from("Todo.res"),
+                    source: "let f = () => %todo(\"m\u{e9}ssage \u{20ac}\")\n"
+                        .as_bytes()
+                        .to_vec(),
+                    source_path_for_ast: "Todo.res".to_string(),
+                    open_deps: vec![],
+                    options: Default::default(),
+                });
+                for locations in [false, true] {
+                    let (warnings, _, _) = super::parse_saved_source(&source, locations).unwrap();
+                    let warnings = warnings.expect("warning 110");
+                    assert!(
+                        warnings.contains("Todo found: m\u{e9}ssage \u{20ac}"),
+                        "{warnings}"
+                    );
+                }
                 tx.send(()).unwrap();
             })
             .unwrap();

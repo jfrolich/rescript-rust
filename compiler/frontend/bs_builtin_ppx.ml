@@ -47,10 +47,6 @@
    And if it is inlined some where
 *)
 
-let () =
-  Ast_derive_projector.init ();
-  Ast_derive_js_mapper.init ()
-
 let succeed attr attrs =
   match attrs with
   | [_] -> ()
@@ -62,20 +58,11 @@ type mapper = Ast_mapper.mapper
 
 let default_mapper = Ast_mapper.default_mapper
 
-let mark_hoisted_function_attributes (bindings : Parsetree.value_binding list) =
-  Ext_list.iter bindings (fun {pvb_attributes} ->
-      Ext_list.iter pvb_attributes (fun (({txt}, _) as attr) ->
-          if txt = "res.hoistedFunction" then
-            Used_attributes.mark_used_attribute attr))
-
 (* [Ast_mapper.default_mapper.expr], with non-recursive binding groups
    routed through tuple/module-record pattern flattening ([let rec] groups
    only admit variable patterns, so they map per binding). Every fallback in
    [expr_mapper] funnels through here, so the flattening applies uniformly. *)
 let default_expr_mapper (self : mapper) (e : Parsetree.expression) =
-  (match e.pexp_desc with
-  | Pexp_let (_, bindings, _) -> mark_hoisted_function_attributes bindings
-  | _ -> ());
   match e.pexp_desc with
   | Pexp_let (Nonrecursive, vbs, body) ->
     {
@@ -103,9 +90,6 @@ let pat_mapper (self : mapper) (p : Parsetree.pattern) =
   match p.ppat_desc with
   | Ppat_constant (Pconst_integer (s, Some 'l')) ->
     {p with ppat_desc = Ppat_constant (Pconst_integer (s, None))}
-  | Ppat_constant (Pconst_json _) ->
-    Location.raise_errorf ~loc:p.ppat_loc
-      "Tagged template literals are not supported in patterns"
   | _ -> default_pat_mapper self p
 
 (* Unpack requires core_type package for type inference:
@@ -115,10 +99,21 @@ let local_module_type_name txt =
   ^ (Longident.flatten txt |> List.fold_left (fun ll l -> ll ^ "_" ^ l) "")
   ^ "__"
 
-let expr_mapper ~async_context ~in_function_def (self : mapper)
-    (e : Parsetree.expression) =
-  let old_in_function_def = !in_function_def in
-  in_function_def := false;
+(* [module type __List__ = module type of List], the module type a dynamic
+   import of [List] unpacks to, declared once per module *)
+let local_module_type_decl ~await_context
+    ({txt; loc} : Longident.t Asttypes.loc) (me : Parsetree.module_expr) =
+  let name = local_module_type_name txt in
+  if Hashtbl.mem !await_context name then []
+  else (
+    Hashtbl.add !await_context name name;
+    [
+      Ast_helper.(
+        Str.modtype ~loc
+          (Mtd.mk ~loc {txt = name; loc} ~typ:(Mty.typeof_ ~loc me)));
+    ])
+
+let expr_mapper ~async_context (self : mapper) (e : Parsetree.expression) =
   match e.pexp_desc with
   (* Its output should not be rewritten anymore *)
   | Pexp_regexp {pattern; flags} ->
@@ -130,9 +125,11 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
         ~pval_prim:(Prim_name "#raw_expr")
         ~pval_type:
           (Ast_helper.Typ.arrow
-             [{attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()}]
+             [
+               Parg_type {attrs = []; lbl = Nolabel; typ = Ast_helper.Typ.any ()};
+             ]
              (Ast_helper.Typ.any ()))
-        [Ast_helper.Exp.constant ~loc (Pconst_raw_source source)]
+        [Ast_helper.Exp.constant ~loc (Ast_helper.Const.string source)]
     in
     Ast_helper.Exp.constraint_ ~loc
       ~attrs:(self.attributes self e.pexp_attributes)
@@ -140,6 +137,11 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
       (Ast_comb.to_regexp_type loc)
   | Pexp_extension extension ->
     Ast_exp_extension.handle_extension e self extension
+  | Pexp_raw {kind; name_loc; source} ->
+    Ast_exp_handle_external.handle_raw_node ~loc:name_loc kind source
+  | Pexp_todo {name_loc; message} ->
+    Ast_exp_extension.todo ~loc:name_loc ~expr_loc:e.pexp_loc
+      (Option.bind message Ast_payload.semantic_string_of_expression)
   | Pexp_constant (Pconst_integer (s, Some 'l')) ->
     {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
   (* End rewriting *)
@@ -163,8 +165,10 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
   | Pexp_fun {newtypes; params; body; async} -> (
     match Ast_attributes.process_attributes_rev e.pexp_attributes with
     | Nothing, _ ->
-      (* Handle @async x => y => ... is in async context *)
-      async_context := (old_in_function_def && !async_context) || async;
+      (* A [Pexp_fun] holds all parameters of one function, so a [Pexp_fun]
+         in its body is another function: in [async x => y => await y], the
+         inner function is not async and compiles to a plain arrow. *)
+      async_context := async;
       let attrs = self.attributes self e.pexp_attributes in
       let params =
         Ext_list.map params (fun (p : Parsetree.fun_param) ->
@@ -174,13 +178,7 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
               p_pat = self.pat self p.p_pat;
             })
       in
-      let saved_in_function_def = !in_function_def in
-      in_function_def := true;
-      (* Keep reporting the body as part of a function definition so nested
-         functions propagate async context exactly like the legacy curried
-         mapper did (GH #7974). *)
       let body = self.expr self body in
-      in_function_def := saved_in_function_def;
       let newtypes =
         Ext_list.map newtypes (fun (name, nt_attrs) ->
             (name, self.attributes self nt_attrs))
@@ -371,8 +369,11 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
         [
           {
             pvb_pat =
-              ( {ppat_desc = Ppat_record _}
-              | {ppat_desc = Ppat_alias ({ppat_desc = Ppat_record _}, _)} ) as p;
+              ( {ppat_desc = Ppat_record _ | Ppat_dict _}
+              | {
+                  ppat_desc =
+                    Ppat_alias ({ppat_desc = Ppat_record _ | Ppat_dict _}, _);
+                } ) as p;
             pvb_expr;
             pvb_constraint = None;
             pvb_attributes;
@@ -398,81 +399,53 @@ let expr_mapper ~async_context ~in_function_def (self : mapper)
      the attribute to the whole expression, in general, when shuffuling the ast
      it is very hard to place attributes correctly
   *)
-  (* module M = await List *)
-  | Pexp_letmodule
-      (lid, ({pmod_desc = Pmod_ident {txt}; pmod_attributes} as me), expr)
-    when Res_parsetree_viewer.has_await_attribute pmod_attributes ->
-    let safe_module_type_lid : Ast_helper.lid =
-      {txt = Lident (local_module_type_name txt); loc = me.pmod_loc}
+  (* module M = await List, module M = await (List: ListType) *)
+  | Pexp_letmodule (lid, me, expr) -> (
+    let dynamic_import module_type_lid imported =
+      {
+        e with
+        pexp_desc =
+          Pexp_letmodule
+            ( lid,
+              Ast_await.create_await_module_expression ~module_type_lid me
+                imported,
+              self.expr self expr );
+      }
     in
-    {
-      e with
-      pexp_desc =
-        Pexp_letmodule
-          ( lid,
-            Ast_await.create_await_module_expression
-              ~module_type_lid:safe_module_type_lid me,
-            self.expr self expr );
-    }
-  (* module M = await (List: ListType) *)
-  | Pexp_letmodule
-      ( lid,
-        ({
-           pmod_desc =
-             Pmod_constraint
-               ( {pmod_desc = Pmod_ident _; pmod_attributes = attrs1},
-                 {pmty_desc = Pmty_ident mtyp_lid} );
-           pmod_attributes = attrs2;
-         } as me),
-        expr )
-    when Res_parsetree_viewer.has_await_attribute attrs1
-         || Res_parsetree_viewer.has_await_attribute attrs2 ->
-    {
-      e with
-      pexp_desc =
-        Pexp_letmodule
-          ( lid,
-            Ast_await.create_await_module_expression ~module_type_lid:mtyp_lid
-              me,
-            self.expr self expr );
-    }
+    match Ast_await.awaited_module_path me with
+    | Some (module_lid, imported, None) ->
+      dynamic_import
+        {
+          txt = Lident (local_module_type_name module_lid.txt);
+          loc = module_lid.loc;
+        }
+        imported
+    | Some (_, imported, Some {pmty_desc = Pmty_ident mtyp_lid}) ->
+      dynamic_import mtyp_lid imported
+    | Some (_, _, Some _) | None -> default_expr_mapper self e)
   | _ -> default_expr_mapper self e
 
-let expr_mapper ~async_context ~in_function_def (self : mapper)
-    (e : Parsetree.expression) =
+let check_await ~async_context ~loc =
+  if !async_context = false then
+    Location.raise_errorf ~loc "Await on expression not in an async context"
+
+let expr_mapper ~async_context (self : mapper) (e : Parsetree.expression) =
   let async_saved = !async_context in
-  let result = expr_mapper ~async_context ~in_function_def self e in
+  let result = expr_mapper ~async_context self e in
   async_context := async_saved;
-  let check_await () =
-    if !async_context = false then
-      Location.raise_errorf ~loc:e.pexp_loc
-        "Await on expression not in an async context"
-  in
+  let loc = e.pexp_loc in
   match e.pexp_desc with
-  | Pexp_letmodule (_, {pmod_desc = Pmod_ident _; pmod_attributes}, _)
-    when Ast_attributes.has_await_payload pmod_attributes ->
-    check_await ();
-    result
-  | Pexp_letmodule
-      ( _,
-        {
-          pmod_desc =
-            Pmod_constraint
-              ({pmod_desc = Pmod_ident _; pmod_attributes = attrs1}, _);
-          pmod_attributes = attrs2;
-        },
-        _ )
-    when Ast_attributes.has_await_payload attrs1
-         || Ast_attributes.has_await_payload attrs2 ->
-    check_await ();
+  | Pexp_letmodule (_, me, _)
+    when Option.is_some (Ast_await.awaited_module_path me) ->
+    check_await ~async_context ~loc;
     result
   | _ -> (
     match result.pexp_desc with
     | Pexp_await e ->
-      check_await ();
+      check_await ~async_context ~loc;
       Ast_await.create_await_expression e
     | Pexp_for_await_of _ ->
-      check_await ();
+      check_await ~async_context ~loc;
       result
     | _ -> result)
 
@@ -506,6 +479,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
                 {
                   value_desc with
                   pval_prim = Some (Ast_external_mk.inline_string semantic);
+                  pval_jsx_component = None;
                   pval_attributes = [];
                 };
           }
@@ -519,6 +493,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
                 {
                   value_desc with
                   pval_prim = Some (Ast_external_mk.inline_int s);
+                  pval_jsx_component = None;
                   pval_attributes = [];
                 };
           }
@@ -531,6 +506,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
                 {
                   value_desc with
                   pval_prim = Some (Ast_external_mk.inline_bigint s);
+                  pval_jsx_component = None;
                   pval_attributes = [];
                 };
           }
@@ -543,6 +519,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
                 {
                   value_desc with
                   pval_prim = Some (Ast_external_mk.inline_float s);
+                  pval_jsx_component = None;
                   pval_attributes = [];
                 };
           }
@@ -556,6 +533,7 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
                 {
                   value_desc with
                   pval_prim = Some (Ast_external_mk.inline_bool (txt = "true"));
+                  pval_jsx_component = None;
                   pval_attributes = [];
                 };
           }
@@ -565,9 +543,6 @@ let signature_item_mapper (self : mapper) (sigi : Parsetree.signature_item) :
 
 let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
     Parsetree.structure_item =
-  (match str.pstr_desc with
-  | Pstr_value (_, bindings) -> mark_hoisted_function_attributes bindings
-  | _ -> ());
   match str.pstr_desc with
   | Pstr_value (_, vbs)
     when List.exists
@@ -599,6 +574,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
             pvb_pat = {ppat_desc = Ppat_var pval_name} as pvb_pat;
             pvb_expr;
             pvb_constraint = None;
+            pvb_jsx_component;
             pvb_attributes;
             pvb_loc;
           };
@@ -608,9 +584,6 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
     let has_inline_property =
       Ast_attributes.has_inline_payload pvb_attributes
     in
-    Option.iter
-      (fun (_, payload) -> Ast_payload.reject_json_literal_payload payload)
-      has_inline_property;
     match
       (has_inline_property, (Ast_payload.unwrap_braces pvb_expr).pexp_desc)
     with
@@ -631,6 +604,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_name;
               pval_type = Ast_literal.type_string ();
               pval_loc = pvb_loc;
+              pval_jsx_component = None;
               pval_attributes = [];
               pval_prim = Some (Ast_external_mk.inline_string semantic);
             };
@@ -646,6 +620,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_name;
               pval_type = Ast_literal.type_int ();
               pval_loc = pvb_loc;
+              pval_jsx_component = None;
               pval_attributes = [];
               pval_prim = Some (Ast_external_mk.inline_int s);
             };
@@ -660,6 +635,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_name;
               pval_type = Ast_literal.type_float;
               pval_loc = pvb_loc;
+              pval_jsx_component = None;
               pval_attributes = [];
               pval_prim = Some (Ast_external_mk.inline_float s);
             };
@@ -676,6 +652,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
               pval_name;
               pval_type = Ast_literal.type_bool ();
               pval_loc = pvb_loc;
+              pval_jsx_component = None;
               pval_attributes = [];
               pval_prim = Some (Ast_external_mk.inline_bool (txt = "true"));
             };
@@ -691,6 +668,7 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
                   pvb_pat;
                   pvb_expr;
                   pvb_constraint = None;
+                  pvb_jsx_component;
                   pvb_attributes;
                   pvb_loc;
                 };
@@ -702,11 +680,25 @@ let structure_item_mapper (self : mapper) (str : Parsetree.structure_item) :
       (Ast_tuple_pattern_flatten.value_bindings_mapper self vbs)
   | _ -> default_mapper.structure_item self str
 
-let local_module_name =
-  let v = ref 0 in
-  fun () ->
-    incr v;
-    "local_" ^ string_of_int !v
+type mapper_context = {
+  async_context: bool ref;
+  await_context: (string, string) Hashtbl.t ref;
+}
+
+(* The mapper itself is shared by compiler requests, but its traversal state
+   belongs to the domain running a request. In particular, another domain's
+   function body must not change whether an await is accepted here. *)
+let mapper_context_key =
+  Request_local.new_key (fun () ->
+      {async_context = ref true; await_context = ref (Hashtbl.create 10)})
+
+let mapper_context () = Domain.DLS.get mapper_context_key
+
+let local_module_name () =
+  let state = Compiler_request_state.current () in
+  state.builtin_ppx_local_module_counter <-
+    state.builtin_ppx_local_module_counter + 1;
+  "local_" ^ string_of_int state.builtin_ppx_local_module_counter
 
 let expand_reverse (stru : Ast_structure.t) (acc : Ast_structure.t) :
     Ast_structure.t =
@@ -749,6 +741,9 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
     | Pstr_extension (({txt = "raw"; loc}, payload), _attrs) ->
       Ast_exp_handle_external.handle_raw_structure loc payload
       :: structure_mapper ~await_context self rest
+    | Pstr_raw {name_loc; source} ->
+      Ast_exp_handle_external.handle_raw_structure_node ~loc:name_loc source
+      :: structure_mapper ~await_context self rest
     (* | Pstr_extension (({txt = "i"}, _),_)
        ->
        structure_mapper self rest *)
@@ -771,48 +766,61 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
         | _ -> expand_reverse acc (structure_mapper ~await_context self rest)
       in
       aux [] stru
-    (* Dynamic import of module transformation: module M = @res.await List *)
-    | Pstr_module
-        ({pmb_expr = {pmod_desc = Pmod_ident {txt; loc}; pmod_attributes} as me}
-         as mb)
-      when Res_parsetree_viewer.has_await_attribute pmod_attributes ->
-      let item = self.structure_item self item in
-      let safe_module_type_name = local_module_type_name txt in
-      let has_local_module_name =
-        Hashtbl.find_opt !await_context safe_module_type_name
-      in
-      (* module __List__ = module type of List *)
-      let module_type_decl =
-        match has_local_module_name with
-        | Some _ -> []
-        | None ->
-          Hashtbl.add !await_context safe_module_type_name safe_module_type_name;
-          [
-            Ast_helper.(
-              Str.modtype ~loc
-                (Mtd.mk ~loc
-                   {txt = safe_module_type_name; loc}
-                   ~typ:(Mty.typeof_ ~loc me)));
-          ]
-      in
-      let safe_module_type_lid : Ast_helper.lid =
-        {txt = Lident safe_module_type_name; loc = mb.pmb_expr.pmod_loc}
-      in
-      module_type_decl
-      @
-      (* module M = @res.await List *)
-      {
-        item with
-        pstr_desc =
-          Pstr_module
-            {
-              mb with
-              pmb_expr =
-                Ast_await.create_await_module_expression
-                  ~module_type_lid:safe_module_type_lid mb.pmb_expr;
-            };
-      }
-      :: structure_mapper ~await_context self rest
+    (* Dynamic import of module transformation: module M = await List *)
+    | Pstr_module mb -> (
+      let awaited = Ast_await.awaited_module_path mb.pmb_expr in
+      (* This structure may be a functor body or a module in a function, so
+         check the context, as [expr_mapper] does for [module M = await List]
+         in an expression *)
+      if Option.is_some awaited then
+        check_await ~async_context:(mapper_context ()).async_context
+          ~loc:mb.pmb_expr.pmod_loc;
+      match awaited with
+      | Some (module_lid, imported, None) ->
+        let item = self.structure_item self item in
+        let safe_module_type_lid : Ast_helper.lid =
+          {
+            txt = Lident (local_module_type_name module_lid.txt);
+            loc = mb.pmb_expr.pmod_loc;
+          }
+        in
+        (* Before mapping the rest, which may import the same module *)
+        let module_type_decl =
+          local_module_type_decl ~await_context module_lid imported
+        in
+        module_type_decl
+        @
+        (* module M = await List *)
+        {
+          item with
+          pstr_desc =
+            Pstr_module
+              {
+                mb with
+                pmb_expr =
+                  Ast_await.create_await_module_expression
+                    ~module_type_lid:safe_module_type_lid mb.pmb_expr imported;
+              };
+        }
+        :: structure_mapper ~await_context self rest
+      | Some (_, imported, Some {pmty_desc = Pmty_ident module_type_lid}) ->
+        (* module M = await (List: ListType) *)
+        let item = self.structure_item self item in
+        {
+          item with
+          pstr_desc =
+            Pstr_module
+              {
+                mb with
+                pmb_expr =
+                  Ast_await.create_await_module_expression ~module_type_lid
+                    mb.pmb_expr imported;
+              };
+        }
+        :: structure_mapper ~await_context self rest
+      | Some (_, _, Some _) | None ->
+        self.structure_item self item
+        :: structure_mapper ~await_context self rest)
     | Pstr_value (_, vbs) ->
       let item = self.structure_item self item in
       (* [ module __List__ = module type of List ] *)
@@ -822,27 +830,15 @@ let rec structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t)
         | ({pvb_expr} : Parsetree.value_binding) :: tl ->
           let rec aux (expr : Parsetree.expression) =
             match expr.pexp_desc with
-            | Pexp_letmodule
-                ( _,
-                  ({pmod_desc = Pmod_ident {txt; loc}; pmod_attributes} as me),
-                  expr )
-              when Res_parsetree_viewer.has_await_attribute pmod_attributes -> (
-              let safe_module_type_name = local_module_type_name txt in
-              let has_local_module_name =
-                Hashtbl.find_opt !await_context safe_module_type_name
-              in
-
-              match has_local_module_name with
-              | Some _ -> aux expr
-              | None ->
-                Hashtbl.add !await_context safe_module_type_name
-                  safe_module_type_name;
-                Ast_helper.(
-                  Str.modtype ~loc
-                    (Mtd.mk ~loc
-                       {txt = safe_module_type_name; loc}
-                       ~typ:(Mty.typeof_ ~loc me)))
-                :: aux expr)
+            | Pexp_letmodule (_, me, expr) -> (
+              match Ast_await.awaited_module_path me with
+              | Some (module_lid, imported, None) ->
+                (* Before [aux expr], which may import the same module *)
+                let module_type_decl =
+                  local_module_type_decl ~await_context module_lid imported
+                in
+                module_type_decl @ aux expr
+              | _ -> acc)
             | Pexp_let (_, vbs, expr) -> aux expr @ spelunk_vbs acc vbs
             | Pexp_braces {expr} -> aux expr
             | Pexp_ifthenelse (_, then_expr, Some else_expr) ->
@@ -878,15 +874,53 @@ let structure_mapper ~await_context (self : mapper) (stru : Ast_structure.t) =
   await_context := await_saved;
   result
 
+(* Outside the dynamic import forms, which the [expr] and [structure] mappers
+   rewrite before mapping their children, [await] on a module has no effect.
+   Remove it, keeping its attributes on the module it wraps, so the type
+   checker sees the same module expressions as without it: it treats some
+   shapes specially, e.g. a module path in [module type of] or [()] as the
+   argument of a generative functor. *)
+let module_expr_mapper ~async_context (self : mapper)
+    (me : Parsetree.module_expr) =
+  let _, me = Ast_await.remove_awaits false me in
+  match me.pmod_desc with
+  | Pmod_functor (arg, arg_ty, body) ->
+    (* A functor compiles to a JS function that is not async, so its body is
+       not in an async context, whatever the context around the functor, such
+       as the top level of a file or an async function. This holds also where
+       the optimizer inlines an application of the functor into an async
+       function. The parameter's module type is not evaluated and keeps the
+       context. *)
+    let loc = self.location self me.pmod_loc in
+    let attrs = self.attributes self me.pmod_attributes in
+    let arg = {arg with loc = self.location self arg.loc} in
+    let arg_ty = Option.map (self.module_type self) arg_ty in
+    let async_saved = !async_context in
+    async_context := false;
+    let body = self.module_expr self body in
+    async_context := async_saved;
+    Ast_helper.Mod.functor_ ~loc ~attrs arg arg_ty body
+  | _ -> default_mapper.module_expr self me
+
 let mapper : mapper =
   {
     default_mapper with
-    expr = expr_mapper ~async_context:(ref true) ~in_function_def:(ref false);
+    module_expr =
+      (fun self module_expr ->
+        let context = mapper_context () in
+        module_expr_mapper ~async_context:context.async_context self module_expr);
+    expr =
+      (fun self expression ->
+        let context = mapper_context () in
+        expr_mapper ~async_context:context.async_context self expression);
     pat = pat_mapper;
     typ = typ_mapper;
     signature_item = signature_item_mapper;
     structure_item = structure_item_mapper;
-    structure = structure_mapper ~await_context:(ref (Hashtbl.create 10));
+    structure =
+      (fun self structure ->
+        let context = mapper_context () in
+        structure_mapper ~await_context:context.await_context self structure);
     (* Ad-hoc way to internalize stuff *)
     label_declaration =
       (fun self lbl ->

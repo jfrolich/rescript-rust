@@ -87,8 +87,17 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
     ) -> Vec<Stmt> {
         let mut a = LamArena::new();
-        let switch = Self::decoded_switch(&mut a, switch);
-        self.compile_untagged_variant_switch_return_statements(&mut a, scrut, &switch)
+        let sw = import_switch(&mut a, switch);
+        let plan = sw.untagged_plan(&a).expect("untagged switch plan");
+        let fallback = sw.fail(&a);
+        self.compile_untagged_plan(
+            &mut a,
+            crate::lambda::lam_compile_variant::UntaggedMode::Return,
+            &mut None,
+            scrut,
+            fallback,
+            &plan,
+        )
     }
 
     pub(crate) fn compile_untagged_variant_switch_assignment_statements_lam(
@@ -98,8 +107,17 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
     ) -> Vec<Stmt> {
         let mut a = LamArena::new();
-        let switch = Self::decoded_switch(&mut a, switch);
-        self.compile_untagged_variant_switch_assignment_statements(&mut a, result, scrut, &switch)
+        let sw = import_switch(&mut a, switch);
+        let plan = sw.untagged_plan(&a).expect("untagged switch plan");
+        let fallback = sw.fail(&a);
+        self.compile_untagged_plan(
+            &mut a,
+            crate::lambda::lam_compile_variant::UntaggedMode::Assign(result),
+            &mut None,
+            scrut,
+            fallback,
+            &plan,
+        )
     }
 
     pub(crate) fn compile_untagged_variant_switch_effect_statements_lam(
@@ -108,8 +126,17 @@ impl LambdaCompiler {
         switch: &LambdaSwitch,
     ) -> Vec<Stmt> {
         let mut a = LamArena::new();
-        let switch = Self::decoded_switch(&mut a, switch);
-        self.compile_untagged_variant_switch_effect_statements(&mut a, scrut, &switch)
+        let sw = import_switch(&mut a, switch);
+        let plan = sw.untagged_plan(&a).expect("untagged switch plan");
+        let fallback = sw.fail(&a);
+        self.compile_untagged_plan(
+            &mut a,
+            crate::lambda::lam_compile_variant::UntaggedMode::Effect,
+            &mut None,
+            scrut,
+            fallback,
+            &plan,
+        )
     }
 
     pub(crate) fn compile_let_binding_lam(
@@ -150,10 +177,11 @@ impl LambdaCompiler {
         &mut self,
         block: &mut Vec<Stmt>,
         extracted: ExtractedExports,
+        finished: OutputFinished,
     ) -> Vec<Ident> {
         let mut j = std::mem::take(&mut self.j);
         let (exports, _) =
-            self.coerce_toplevel_exports_with_name_reservations(&mut j, block, extracted);
+            self.coerce_toplevel_exports_with_name_reservations(&mut j, block, extracted, finished);
         self.j = j;
         exports
     }
@@ -163,17 +191,6 @@ pub(crate) fn module_side_effect_reason_tree(lam: &Lambda) -> Option<String> {
     let mut a = LamArena::new();
     let lam = a.import(lam);
     module_side_effect_reason(&a, lam)
-}
-
-/// `(dependencies, groups)` of recursive bindings given as trees.
-pub(crate) fn recursive_binding_groups_tree(bindings: &[(Ident, Lambda)]) -> Vec<Vec<usize>> {
-    let mut a = LamArena::new();
-    let bindings: Vec<_> = bindings
-        .iter()
-        .map(|(id, value)| (*id, a.import(value)))
-        .collect();
-    let dependencies = recursive_binding_dependencies(&a, &bindings);
-    recursive_binding_groups(&a, &bindings, &dependencies)
 }
 
 /// The JS-backend simplification of a tree program, exported back to a tree.
@@ -187,4 +204,36 @@ pub(crate) fn simplify_tree_for_js_backend(lam: &Lambda) -> Lambda {
         &mut no_external_arity,
     );
     s.arena.export(s.lam)
+}
+
+impl LambdaCompiler {
+    pub(crate) fn compile_assign_to_target_output_tree(
+        &mut self,
+        result: &Ident,
+        lam: &Lambda,
+    ) -> BlockOutput {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_assign_to_target_output(&mut a, result, lam)
+    }
+    pub(crate) fn compile_effect_block_output_tree(&mut self, lam: &Lambda) -> BlockOutput {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_effect_block_output(&mut a, lam)
+    }
+    pub(crate) fn compile_return_output_tree(&mut self, lam: &Lambda) -> BlockOutput {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_return_output(&mut a, lam)
+    }
+    pub(crate) fn compile_let_binding_output_tree(
+        &mut self,
+        kind: LetKind,
+        id: &Ident,
+        lam: &Lambda,
+    ) -> BlockOutput {
+        let mut a = LamArena::new();
+        let lam = a.import(lam);
+        self.compile_let_binding_output(&mut a, kind, id, lam)
+    }
 }

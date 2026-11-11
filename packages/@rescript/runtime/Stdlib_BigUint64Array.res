@@ -1,7 +1,12 @@
 /** The `BigUint64Array` typed array represents an array of 64-bit unsigned integers in platform byte order. See [BigUint64Array on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigUint64Array)
 */
-@editor.completeFrom(Stdlib.TypedArray)
-type t = Stdlib_TypedArray.t<bigint>
+@instanceOf("BigUint64Array")
+type t = private Stdlib_TypedArray.t<bigint>
+
+include Stdlib_TypedArray.Impl({
+  type t = t
+  type elt = bigint
+})
 
 module Constants = {
   /**`bytesPerElement` returns the element size. See [BYTES_PER_ELEMENT on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/BYTES_PER_ELEMENT)
@@ -23,29 +28,6 @@ external fromArray: array<bigint> => t = "BigUint64Array"
 external fromBuffer: (Stdlib_ArrayBuffer.t, ~byteOffset: int=?, ~length: int=?) => t =
   "BigUint64Array"
 
-/** `fromBufferToEnd` creates a `BigUint64Array` from an `ArrayBuffer.t`, starting at a particular offset and continuing through to the end. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigUint64Array/BigUint64Array)
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: BigUint64Array.fromBuffer(),
-})
-@new
-external fromBufferToEnd: (Stdlib_ArrayBuffer.t, ~byteOffset: int) => t = "BigUint64Array"
-
-/** `fromBufferWithRange` creates a `BigUint64Array` from an `ArrayBuffer.t`, starting at a particular offset and consuming `length` **bytes**. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigUint64Array/BigUint64Array)
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: BigUint64Array.fromBuffer(),
-})
-@new
-external fromBufferWithRange: (Stdlib_ArrayBuffer.t, ~byteOffset: int, ~length: int) => t =
-  "BigUint64Array"
-
 /** `fromLength` creates a zero-initialized `BigUint64Array` to hold the specified count of numbers; this is **not** a byte length. See [TypedArray constructor on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/BigUint64Array/BigUint64Array)
 
 **Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
@@ -57,18 +39,6 @@ external fromLength: int => t = "BigUint64Array"
 */
 @val
 external fromArrayLikeOrIterable: ('a, ~map: ('b, int) => bigint=?) => t = "BigUint64Array.from"
-
-/** `fromArrayLikeOrIterableWithMap` creates a `BigUint64Array` from an array-like or iterable object and applies the mapping function to each item. The mapping function expects (value, index). See [TypedArray.from on MDN](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/TypedArray/from)
-*/
-@deprecated({
-  reason: "Use `fromArrayLikeOrIterable` instead",
-  migrate: BigUint64Array.fromArrayLikeOrIterable(
-    %insert.unlabelledArgument(0),
-    ~map=%insert.unlabelledArgument(1),
-  ),
-})
-@val
-external fromArrayLikeOrIterableWithMap: ('a, ('b, int) => bigint) => t = "BigUint64Array.from"
 
 /**
   `ignore(bigUintArray)` ignores the provided bigUintArray and returns unit.

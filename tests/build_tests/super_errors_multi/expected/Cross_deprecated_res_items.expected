@@ -1,0 +1,46 @@
+Warning number 3
+  /.../fixtures/Cross_deprecated_res_items/User.res:1:9-19
+
+  1 │ let a = Legacy.oldF(1)
+  2 │ let b = Legacy.compute(1)
+  3 │ let c = Legacy.OldM.v
+
+  deprecated: Legacy.oldF
+  Use newF instead
+
+
+  Warning number 3
+  /.../fixtures/Cross_deprecated_res_items/User.res:2:9-22
+
+  1 │ let a = Legacy.oldF(1)
+  2 │ let b = Legacy.compute(1)
+  3 │ let c = Legacy.OldM.v
+  4 │ let d: Legacy.oldT = 1
+
+  deprecated: Legacy.compute
+  Use computeNew instead
+
+
+  Warning number 3
+  /.../fixtures/Cross_deprecated_res_items/User.res:3:9-21
+
+  1 │ let a = Legacy.oldF(1)
+  2 │ let b = Legacy.compute(1)
+  3 │ let c = Legacy.OldM.v
+  4 │ let d: Legacy.oldT = 1
+  5 │ 
+
+  deprecated: module Legacy.OldM
+Use NewM instead
+
+
+  Warning number 3
+  /.../fixtures/Cross_deprecated_res_items/User.res:4:8-18
+
+  2 │ let b = Legacy.compute(1)
+  3 │ let c = Legacy.OldM.v
+  4 │ let d: Legacy.oldT = 1
+  5 │ 
+
+  deprecated: Legacy.oldT
+  Use newT instead

@@ -256,18 +256,31 @@ fn set_field_dbg_info(info: &SetFieldDbgInfo) -> Sexp {
     }
 }
 
+fn variant_instance(instance: &crate::types::VariantInstance) -> Sexp {
+    match instance {
+        crate::types::VariantInstance::Array(_) => Sexp::atom("Array"),
+        crate::types::VariantInstance::Class {
+            name, ancestors, ..
+        } => Sexp::list(vec![
+            Sexp::atom("Class"),
+            string(name),
+            Sexp::list(ancestors.iter().map(|ancestor| string(ancestor)).collect()),
+        ]),
+    }
+}
+
 fn variant_block_type(block: &crate::types::VariantBlockType) -> Sexp {
     use crate::types::VariantBlockType as B;
     match block {
-        B::Int => Sexp::atom("IntType"),
+        B::Number => Sexp::atom("NumberType"),
         B::String => Sexp::atom("StringType"),
-        B::Float => Sexp::atom("FloatType"),
         B::Bigint => Sexp::atom("BigintType"),
         B::Boolean => Sexp::atom("BooleanType"),
         B::Instance(instance) => Sexp::list(vec![
             Sexp::atom("InstanceType"),
-            Sexp::atom(instance.as_str()),
+            variant_instance(instance),
         ]),
+        B::Symbol => Sexp::atom("SymbolType"),
         B::Function => Sexp::atom("FunctionType"),
         B::Object => Sexp::atom("ObjectType"),
         B::Unknown => Sexp::atom("UnknownType"),
@@ -313,10 +326,7 @@ fn variant_tag(tag: &crate::types::VariantTag) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("tag"),
         string(&tag.name),
-        tag.literal.as_ref().map_or_else(
-            || Sexp::atom("None"),
-            |literal| Sexp::list(vec![Sexp::atom("Some"), variant_literal_tag(literal)]),
-        ),
+        variant_literal_tag(&tag.literal),
     ])
 }
 
@@ -340,9 +350,6 @@ fn variant_matching_facts(facts: &crate::types::VariantMatchingFacts) -> Sexp {
         ),
         Sexp::list(facts.block_types.iter().map(variant_block_type).collect()),
         Sexp::list(facts.literal_tags.iter().map(variant_literal_tag).collect()),
-        bool_sexp(facts.has_null),
-        bool_sexp(facts.has_undefined),
-        bool_sexp(facts.has_other_literal),
     ])
 }
 
@@ -473,10 +480,24 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
                 .chain(excluded.iter().map(|label| string(label)))
                 .collect(),
         ),
-        Primitive::PjsCall(call) => Sexp::list(vec![
-            Sexp::atom("Pjs_call"),
-            string(&call.prim_name),
-            bool_sexp(call.transformed_jsx),
+        // Skip arg_types and ffi for brevity.
+        Primitive::PjsCall(call) => {
+            Sexp::list(vec![Sexp::atom("Pjs_call"), string(&call.prim_name)])
+        }
+        Primitive::Pjsx(jsx) => Sexp::list(vec![
+            Sexp::atom("Pjsx"),
+            string(&jsx.jsx_name),
+            bool_sexp(jsx.jsx_multi),
+            bool_sexp(jsx.jsx_fragment),
+            bool_sexp(jsx.jsx_spread),
+            Sexp::list(
+                jsx.jsx_props
+                    .iter()
+                    .map(|(name, optional)| Sexp::list(vec![string(name), bool_sexp(*optional)]))
+                    .collect(),
+            ),
+            opt(|n: &usize| int(*n as i32), &jsx.jsx_children),
+            bool_sexp(jsx.jsx_key),
         ]),
         Primitive::PjsObjectCreate(_) => Sexp::atom("Pjs_object_create"),
         Primitive::Praise => Sexp::atom("Praise"),
@@ -555,11 +576,12 @@ fn primitive(prim: &Primitive, _with_locs: bool) -> Sexp {
         Primitive::Pmakelist => Sexp::atom("Pmakelist"),
         Primitive::Pmakedict => Sexp::atom("Pmakedict"),
         Primitive::PdictHas => Sexp::atom("Pdict_has"),
+        Primitive::PdictSpread => Sexp::atom("Pdict_spread"),
+        Primitive::ParraySpread => Sexp::atom("Parray_spread"),
+        Primitive::PlistSpread => Sexp::atom("Plist_spread"),
         Primitive::Parrayrefu => Sexp::atom("Parrayrefu"),
         Primitive::Parraysetu => Sexp::atom("Parraysetu"),
         Primitive::Parrayrefs => Sexp::atom("Parrayrefs"),
-        Primitive::Parraysets => Sexp::atom("Parraysets"),
-        Primitive::Pisint => Sexp::atom("Pisint"),
         Primitive::PisPolyVarBlock => Sexp::atom("Pis_poly_var_block"),
         Primitive::Pawait => Sexp::atom("Pawait"),
         Primitive::PtaggedTemplate(raw_sources) => {
@@ -611,14 +633,12 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
                 ap_func,
                 ap_args,
                 ap_info,
-                ap_transformed_jsx,
             } = __apply2.as_ref();
             Sexp::list(vec![
                 Sexp::atom("Lapply"),
                 lambda(ap_func, with_locs),
                 Sexp::list(ap_args.iter().map(|a| lambda(a, with_locs)).collect()),
                 ap_info_sexp(ap_info, with_locs),
-                bool_sexp(*ap_transformed_jsx),
             ])
         }
         Lambda::Lfunction(__func1) => {
@@ -700,6 +720,11 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
             ident(exn),
             lambda(handler, with_locs),
         ]),
+        Lambda::LtryFinally(body, finally) => Sexp::list(vec![
+            Sexp::atom("Ltryfinally"),
+            lambda(body, with_locs),
+            lambda(finally, with_locs),
+        ]),
         Lambda::LifThenElse(cond, then_, else_) => Sexp::list(vec![
             Sexp::atom("Lifthenelse"),
             lambda(cond, with_locs),
@@ -738,10 +763,9 @@ fn lambda(lam: &Lambda, with_locs: bool) -> Sexp {
     }
 }
 
-fn ap_info_sexp(info: &ApInfo, _with_locs: bool) -> Sexp {
+fn ap_info_sexp(_info: &ApInfo, _with_locs: bool) -> Sexp {
     Sexp::list(vec![
         Sexp::atom("ap_info"),
-        inline_attribute(&info.inlined),
         // TODO: add location if with_locs
     ])
 }
@@ -822,7 +846,7 @@ mod tests {
         let constant_key = crate::lambda::SwitchKey::Constructor(
             crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                 name: crate::name::Name::new("Null"),
-                literal: None,
+                literal: crate::types::VariantLiteralTag::String("Null".to_string()),
             }),
         );
         let block_key =
@@ -830,7 +854,7 @@ mod tests {
                 crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: crate::name::Name::new("Boolean"),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("Boolean".to_string()),
                     },
                     tag_name: None,
                 }),

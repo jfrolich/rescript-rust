@@ -1,4 +1,4 @@
-@notUndefined
+@instanceOf("Intl.ListFormat")
 type t
 
 type listType = [
@@ -6,6 +6,7 @@ type listType = [
   | #disjunction
   | #unit
 ]
+
 type style = [
   | #long
   | #short

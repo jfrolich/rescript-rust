@@ -13,6 +13,7 @@ module V4C = {
     let _ = ref
     React.string(label)
   }
+
   let make = React.component({
     let \"UnannotatedRefProp$V4C" = (props: props<_>) => make(props)
 

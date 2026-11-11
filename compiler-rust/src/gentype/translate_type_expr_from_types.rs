@@ -102,6 +102,21 @@ pub fn translate_obj_type(
     }
 }
 
+/// The Temporal types declared by TypeScript's `ESNext.Temporal` library.
+fn is_temporal_value_type(name: &str) -> bool {
+    matches!(
+        name,
+        "Duration"
+            | "Instant"
+            | "PlainDate"
+            | "PlainDateTime"
+            | "PlainMonthDay"
+            | "PlainTime"
+            | "PlainYearMonth"
+            | "ZonedDateTime"
+    )
+}
+
 /// `TranslateTypeExprFromTypes.translateConstr`: translate the type
 /// constructor `path` applied to translated `params_translation`, mapping
 /// built-in types to TypeScript ones.
@@ -126,7 +141,7 @@ pub fn translate_constr(
 
     match (path_list.as_slice(), params_translation) {
         (["bool"], []) => tr(common::boolean_t()),
-        (["int"] | ["float"], []) => tr(common::number_t()),
+        (["int"] | ["char"] | ["float"], []) => tr(common::number_t()),
         (["string"] | ["Stdlib", "String", "t"], []) => tr(common::string_t()),
         (["Stdlib", "BigInt", "t"], []) => tr(common::bigint_t()),
         (["Stdlib", "Date", "t"], []) => tr(common::date_t()),
@@ -158,7 +173,27 @@ pub fn translate_constr(
         ) => tr(ident(name)),
         (["Stdlib", "Symbol", "t"], []) => tr(ident("symbol")),
         (["Stdlib", "Intl", intl_module, "t"], []) => tr(ident(&format!("Intl.{intl_module}"))),
-        (["Stdlib", "Error", "t"] | ["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
+        (["Stdlib", "Temporal", temporal_module, "t"], [])
+            if is_temporal_value_type(temporal_module) =>
+        {
+            tr(ident(&format!("Temporal.{temporal_module}")))
+        }
+        // Conversions between Temporal types return the shared types of
+        // `Stdlib_Temporal_Common`, like `Stdlib_Temporal_Common.plainDate`.
+        (
+            ["Stdlib", "Temporal", "Common", temporal_type]
+            | ["Stdlib", "Temporal_Common", temporal_type],
+            [],
+        ) if is_temporal_value_type(
+            &crate::lambda::lam_compile_external::capitalize_ascii_first(temporal_type),
+        ) =>
+        {
+            tr(ident(&format!(
+                "Temporal.{}",
+                crate::lambda::lam_compile_external::capitalize_ascii_first(temporal_type)
+            )))
+        }
+        (["Stdlib", "JsError", "t"], []) => tr(ident("Error")),
         (["Stdlib", "Iterable", "t"] | ["iterable"], [param]) => {
             with_type(param, builtin(vec![param.type_.clone()], "Iterable"))
         }
@@ -512,7 +547,7 @@ pub fn translateTypeExprFromTypes_(
         | TypeDesc::Tnil
         | TypeDesc::Tpoly { .. }
         | TypeDesc::Tsubst(_)
-        | TypeDesc::Tunivar(_) => Translation {
+        | TypeDesc::Tunivar(..) => Translation {
             dependencies: vec![],
             type_: unknown(),
         },
@@ -743,7 +778,7 @@ fn label_name(label: &ArgLabel) -> String {
 fn is_js_t_preserved(ctx: &TypeContext, type_expr: &TypeExprRef) -> bool {
     matches!(
         type_expr_desc(ctx, type_expr),
-        TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
+        TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. }
     )
 }
 

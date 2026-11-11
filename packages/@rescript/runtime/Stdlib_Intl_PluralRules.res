@@ -1,4 +1,4 @@
-@notUndefined
+@instanceOf("Intl.PluralRules")
 type t
 
 type localeType = [#cardinal | #ordinal]
@@ -94,6 +94,7 @@ rules->Intl.PluralRules.select(1.) == #one
 ```
 */
 @send external select: (t, float) => rule = "select"
+
 /**
 `selectInt(rules, value)` is like `select` but accepts an integer.
 

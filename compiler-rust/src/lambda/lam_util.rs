@@ -74,11 +74,17 @@ fn refine_let_parts(
         // (Return) `let[k] x = e in x` -> `e` (lam_util.ml:100-104).
         Node::Var(w) if a.ident(w) == param => return Some(arg),
         // (Prim) `let[k] x = e in prim p [x]` -> `prim p [e]` unless `p`
-        // constructs a block (lam_util.ml:105-111).
+        // constructs a block or a JSX element (lam_util.ml:103-113): a JSX
+        // element whose only argument is its tag keeps the tag bound, so a
+        // function bound by `let` gets the binding's name, which React shows
+        // (`keeps_binding`, lam_util.ml:56-61).
         Node::Prim { args, info } => {
             if let [w] = a.list(args)
                 && a.as_var(*w).is_some_and(|w| w == param)
-                && !matches!(a.prim_payload(info).primitive, Primitive::Pmakeblock(_, _))
+                && !matches!(
+                    a.prim_payload(info).primitive,
+                    Primitive::Pmakeblock(_, _) | Primitive::Pjsx(_)
+                )
             {
                 let args = a.add_list(&[arg]);
                 return Some(a.prim_with(info, args));

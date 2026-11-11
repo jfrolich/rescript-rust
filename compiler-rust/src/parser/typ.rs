@@ -8,7 +8,9 @@ use std::borrow::Cow;
 use std::collections::HashSet;
 
 use super::ast::*;
-use super::core::{ast_helper, recover, with_loc};
+use super::core::{
+    ast_helper, is_bar_or_doc_comment_then_bar, parse_doc_comments, recover, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::grammar;
 use super::grammar::Grammar;
@@ -352,6 +354,7 @@ pub fn parse_poly_type_expr(p: &mut Parser<'_>) -> CoreType {
                     let loc = p.mk_loc_idx(typ_start_idx, end_pos_idx);
                     let typ_idx = p.arena_mut().push_core_type(typ);
                     let arg = TypeArg {
+                        fixed: None,
                         attrs: Attributes::new(),
                         lbl: ArgLabel::Nolabel,
                         typ: typ_idx,
@@ -549,6 +552,7 @@ pub(super) fn parse_arrow_type_rest(
 
     let param_type_idx = p.arena_mut().push_core_type(param_type);
     let arg = TypeArg {
+        fixed: None,
         attrs: Attributes::new(),
         lbl: ArgLabel::Nolabel,
         typ: param_type_idx,
@@ -660,6 +664,7 @@ fn parse_es6_arrow_type(p: &mut Parser<'_>, attrs: Attributes) -> CoreType {
         let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
         let typ_idx = p.arena_mut().push_core_type(typ);
         let arg = TypeArg {
+            fixed: None,
             attrs,
             lbl,
             typ: typ_idx,
@@ -1447,6 +1452,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let typ_idx = p.arena_mut().push_core_type(typ);
         params.push((
             TypeArg {
+                fixed: None,
                 attrs: arrow_attrs,
                 lbl: label,
                 typ: typ_idx,
@@ -1515,6 +1521,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let unit_type_idx = p.arena_mut().push_core_type(unit_type);
         params.push((
             TypeArg {
+                fixed: None,
                 attrs: Attributes::new(),
                 lbl: ArgLabel::Nolabel,
                 typ: unit_type_idx,
@@ -1949,7 +1956,7 @@ fn parse_tag_specs(p: &mut Parser<'_>) -> Vec<RowField> {
     while matches!(p.token, Token::Bar | Token::DocComment { .. })
         && is_bar_or_doc_comment_then_bar(p)
     {
-        let doc_attrs = parse_optional_doc_comment_attr(p);
+        let doc_attrs = Attributes::from_vec(parse_doc_comments(p));
         p.expect(Token::Bar);
         let tag = parse_tag_spec(p);
         fields.push(prepend_row_field_attrs(p, tag, doc_attrs));
@@ -1974,7 +1981,7 @@ fn parse_tag_spec_first(p: &mut Parser<'_>) -> Vec<RowField> {
     let bar_first = is_bar_or_doc_comment_then_bar(p);
     match p.token {
         Token::Bar | Token::DocComment { .. } if bar_first => {
-            let doc_attrs = parse_optional_doc_comment_attr(p);
+            let doc_attrs = Attributes::from_vec(parse_doc_comments(p));
             p.expect(Token::Bar);
             let tag = parse_tag_spec(p);
             vec![prepend_row_field_attrs(p, tag, doc_attrs)]
@@ -2030,22 +2037,6 @@ fn parse_polymorphic_variant_type_spec_hash(
         tuples.push(parse_polymorphic_variant_type_args(p));
     }
     RowField::Rtag(with_loc(Cow::Owned(ident), loc), attrs, constant, tuples)
-}
-
-/// Check if the current token is `|` or is a doc comment followed by `|`.
-/// This matches OCaml's is_bar_or_doc_comment_then_bar function.
-fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
-    match &p.token {
-        Token::Bar => true,
-        Token::DocComment { .. } => {
-            // Look ahead to see if there's a Bar after the doc comment
-            p.lookahead(|state| {
-                state.next(); // skip doc comment
-                matches!(state.token, Token::Bar)
-            })
-        }
-        _ => false,
-    }
 }
 
 // ============================================================================

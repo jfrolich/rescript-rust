@@ -288,7 +288,10 @@ pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
         }
     }
     match &p.pat_desc {
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => {}
         PatternDesc::Tpat_tuple(pats)
         | PatternDesc::Tpat_construct(_, _, pats)
         | PatternDesc::Tpat_array(pats) => {
@@ -306,6 +309,11 @@ pub fn walk_pat<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, p: &Pattern) {
                 sub.pat(sub.arena().pattern(*p));
             }
         }
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                sub.pat(sub.arena().pattern(entry.tdp_pattern));
+            }
+        }
         PatternDesc::Tpat_or(p1, p2, _) => {
             sub.pat(sub.arena().pattern(*p1));
             sub.pat(sub.arena().pattern(*p2));
@@ -320,10 +328,8 @@ fn walk_record_fields<'t, I: TastIterator<'t> + ?Sized>(
     extended: Option<TExprIdx>,
 ) {
     let ta = sub.arena();
-    for (_, _, def, _) in fields {
-        if let RecordLabelDefinition::Overridden(_, e) = def {
-            sub.expr(ta.expr(*e));
-        }
+    for (_, _, e) in fields {
+        sub.expr(ta.expr(*e));
     }
     if let Some(e) = extended {
         sub.expr(ta.expr(e));
@@ -345,8 +351,7 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
         ExpressionDesc::Texp_ident(..)
         | ExpressionDesc::Texp_constant(_)
         | ExpressionDesc::Texp_break
-        | ExpressionDesc::Texp_continue
-        | ExpressionDesc::Texp_extension_constructor(..) => {}
+        | ExpressionDesc::Texp_continue => {}
         ExpressionDesc::Texp_let(rec_flag, vbs, body) => {
             sub.value_bindings(rec_flag, sub.arena().value_bindings(*vbs));
             sub.expr(ta.expr(*body));
@@ -370,15 +375,28 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
             sub.cases(ta.cases(*cases));
             sub.cases(ta.cases(*exn_cases));
         }
-        ExpressionDesc::Texp_try(e, cases) => {
+        ExpressionDesc::Texp_try(e, cases, finally) => {
             sub.expr(ta.expr(*e));
             sub.cases(ta.cases(*cases));
+            if let Some(finally) = finally {
+                sub.expr(ta.expr(*finally));
+            }
         }
         ExpressionDesc::Texp_tuple(es)
         | ExpressionDesc::Texp_construct(_, _, es)
-        | ExpressionDesc::Texp_array(es) => {
+        | ExpressionDesc::Texp_array(es)
+        | ExpressionDesc::Texp_spread(_, es) => {
             for e in ta.exprs(*es) {
                 sub.expr(e);
+            }
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            for entry in ta.dict_entries(*entries) {
+                match entry {
+                    DictEntry::Tdict_entry(_, e) | DictEntry::Tdict_spread(e) => {
+                        sub.expr(ta.expr(*e))
+                    }
+                }
             }
         }
         ExpressionDesc::Texp_variant(_, eo) => {
@@ -387,11 +405,6 @@ pub fn walk_expr<'t, I: TastIterator<'t> + ?Sized>(sub: &mut I, e: &Expression) 
             }
         }
         ExpressionDesc::Texp_record {
-            fields,
-            extended_expression,
-            ..
-        }
-        | ExpressionDesc::Texp_record_sparse {
             fields,
             extended_expression,
             ..

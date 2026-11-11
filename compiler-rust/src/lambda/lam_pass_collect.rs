@@ -201,6 +201,8 @@ where
         Node::TryWith { body, handler, .. } => {
             all_lambdas(a, ident_tbl, &[body, handler], external)
         }
+        // lam_arity_analysis.ml: `Ltryfinally (body, _) -> get_arity meta body`
+        Node::TryFinally { body, .. } => get_arity_impl(a, ident_tbl, body, external),
         // lam_arity_analysis.ml:129
         Node::If { then_, else_, .. } => all_lambdas(a, ident_tbl, &[then_, else_], external),
         // lam_arity_analysis.ml:130

@@ -102,10 +102,18 @@ pub mod loc {
     /// and characters.
     pub fn print_loc(normalized_range: NormalizedRange, loc: &Location) -> String {
         // OCaml compiler/gentype/Log_.ml:54-77 gets the filename from
-        // Location.get_pos_info. Rust Location stores an interned filename id,
-        // so the eventual integrated port must pass the arena/source resolver
-        // here to recover the exact filename string.
+        // Location.get_pos_info. Rust Location stores an interned filename id;
+        // callers that know the file use `print_in_file`.
         let file = if loc.is_none() { "" } else { "<source>" };
+        print_loc_in_file(file, normalized_range, loc)
+    }
+
+    /// `print_loc` of a location in `file`.
+    pub fn print_loc_in_file(
+        file: &str,
+        normalized_range: NormalizedRange,
+        loc: &Location,
+    ) -> String {
         if file == "//toplevel//" {
             format!("Characters {}-{}", loc.loc_start.cnum, loc.loc_end.cnum)
         } else {
@@ -129,14 +137,21 @@ pub mod loc {
         }
     }
 
+    fn normalized_range(loc: &Location) -> NormalizedRange {
+        loc.normalize_range()
+            .map(|(start_line, start_char, end_line, end_char)| {
+                ((start_line, start_char), (end_line, end_char))
+            })
+    }
+
     /// `loc` as `file:line:char-char`.
     pub fn print(loc: &Location) -> String {
-        let normalized_range =
-            loc.normalize_range()
-                .map(|(start_line, start_char, end_line, end_char)| {
-                    ((start_line, start_char), (end_line, end_char))
-                });
-        print_loc(normalized_range, loc)
+        print_loc(normalized_range(loc), loc)
+    }
+
+    /// Log_.ml:79-87 `Loc.print` of a location in `file`.
+    pub fn print_in_file(file: &str, loc: &Location) -> String {
+        print_loc_in_file(file, normalized_range(loc), loc)
     }
 }
 
@@ -152,7 +167,15 @@ pub fn log_kind<F>(body: F, color: fn(&str) -> String, loc: &Location, name: &st
 where
     F: FnOnce() -> String,
 {
-    println!("\n{}\n{}\n{}", color(name), loc::print(loc), body());
+    print!("{}", log_kind_text(&color(name), &loc::print(loc), &body()));
+}
+
+/// Log_.ml:99-102: `@[<v 2>@,%a@,%a@,%a@]@.`, the name, location and body on
+/// lines indented by two after an empty line; the box indents the body's own
+/// line breaks too.
+pub fn log_kind_text(name: &str, loc: &str, body: &str) -> String {
+    let body = body.replace('\n', "\n  ");
+    format!("\n  {name}\n  {loc}\n  {body}\n")
 }
 
 /// Print an informational diagnostic.
@@ -161,4 +184,34 @@ where
     F: FnOnce() -> String,
 {
     log_kind(body, color::info, loc, name);
+}
+
+/// The genType warnings (Log_.ml:99-104) one translation prints, in order.
+/// A compile replays them once GenType runs (after the unit's JavaScript is
+/// written); a translation cached for importers keeps its own and the
+/// importer that reads it replays them.
+#[derive(Debug, Default)]
+pub struct Notes(std::cell::RefCell<Vec<String>>);
+
+impl Notes {
+    /// `Log_.info ~loc ~name body` of a location in `file`.
+    pub fn info(&self, file: &str, loc: &Location, name: &str, body: &str) {
+        color::setup();
+        self.0.borrow_mut().push(log_kind_text(
+            &color::info(name),
+            &loc::print_in_file(file, loc),
+            body,
+        ));
+    }
+
+    /// Add notes printed elsewhere, such as those of a cached translation
+    /// an importer replays.
+    pub fn extend(&self, notes: impl IntoIterator<Item = String>) {
+        self.0.borrow_mut().extend(notes);
+    }
+
+    /// The notes added so far, leaving none.
+    pub fn take(&self) -> Vec<String> {
+        std::mem::take(&mut *self.0.borrow_mut())
+    }
 }

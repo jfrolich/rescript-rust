@@ -29,6 +29,21 @@ use super::utf8;
 /// We use a value outside the valid char range.
 const EOF_CHAR: char = '\u{FFFF}';
 
+/// `Res_scanner.byte_order_mark`: the UTF-8 byte order mark that `src`
+/// starts with, or "". The scanner skips it, and the formatter keeps it.
+/// A Latin-1 decoded source holds the mark's three bytes as three chars.
+pub fn byte_order_mark(src: &str) -> &str {
+    const LATIN1_BOM: &str = "\u{EF}\u{BB}\u{BF}";
+    const UTF8_BOM: &str = "\u{FEFF}";
+    if src.starts_with(LATIN1_BOM) {
+        &src[..LATIN1_BOM.len()]
+    } else if src.starts_with(UTF8_BOM) {
+        &src[..UTF8_BOM.len()]
+    } else {
+        ""
+    }
+}
+
 /// A snapshot of scanner state for lookahead/restore.
 #[derive(Debug, Clone)]
 pub struct ScannerSnapshot {
@@ -69,6 +84,10 @@ pub struct Scanner<'src> {
     lnum: i32,
     /// Collected diagnostics.
     diagnostics: Vec<ParserDiagnostic>,
+    /// Byte offset of the first LF skipped between tokens since the last
+    /// `take_line_break` (res_scanner.ml `line_break`). Literals and
+    /// comments consume their own line breaks.
+    line_break: Option<usize>,
 }
 
 /// Result of scanning a token.
@@ -87,12 +106,17 @@ impl<'src> Scanner<'src> {
     /// filename should be an interned StrIdx from the arena.
     pub fn new(filename: StrIdx, src: &'src str) -> Self {
         let bytes = src.as_bytes();
-        let (ch, ch_len) = if bytes.is_empty() {
+        // res_scanner.ml:152-167: skip a byte order mark: it is not part of
+        // the program, and the first line starts after it, as in an editor.
+        let bom = byte_order_mark(src);
+        let offset = bom.len();
+        let char_pos = bom.chars().count();
+        let (ch, ch_len) = if offset >= bytes.len() {
             (EOF_CHAR, 0)
-        } else if bytes[0] < 0x80 {
-            (bytes[0] as char, 1)
+        } else if bytes[offset] < 0x80 {
+            (bytes[offset] as char, 1)
         } else {
-            let (cp, len) = utf8::decode_codepoint(bytes, 0);
+            let (cp, len) = utf8::decode_codepoint(bytes, offset);
             (char::from_u32(cp as u32).unwrap_or(EOF_CHAR), len)
         };
 
@@ -102,13 +126,20 @@ impl<'src> Scanner<'src> {
             bytes,
             ch,
             ch_len,
-            offset: 0,
-            char_pos: 0,
+            offset,
+            char_pos,
             offset16: 0,
-            line_offset: 0,
+            line_offset: char_pos,
             lnum: 1,
             diagnostics: Vec::new(),
+            line_break: None,
         }
+    }
+
+    /// The first LF skipped between tokens since the previous call, and
+    /// forget it (res_parser.ml `read`).
+    pub fn take_line_break(&mut self) -> Option<usize> {
+        self.line_break.take()
     }
 
     /// Get collected diagnostics.
@@ -260,8 +291,14 @@ impl<'src> Scanner<'src> {
             }
         };
 
-        // Handle newlines - update line tracking
-        if self.ch == '\n' {
+        // res_scanner.ml:88-97: a line ends at LF, or at a CR not followed by
+        // LF. CRLF ends a line once, at its LF.
+        let newline = match self.ch {
+            '\n' => true,
+            '\r' => self.bytes.get(self.offset + self.ch_len) != Some(&b'\n'),
+            _ => false,
+        };
+        if newline {
             self.line_offset = next_char_pos;
             self.offset16 = 0;
             self.lnum += 1;
@@ -349,6 +386,9 @@ impl<'src> Scanner<'src> {
     /// Skip whitespace characters.
     fn skip_whitespace(&mut self) {
         while Self::is_whitespace(self.ch) {
+            if self.ch == '\n' && self.line_break.is_none() {
+                self.line_break = Some(self.offset);
+            }
             self.next();
         }
     }
@@ -409,7 +449,7 @@ impl<'src> Scanner<'src> {
         let start_off = self.offset;
 
         // Skip valid identifier characters (all ASCII, so byte == char)
-        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'') {
+        while matches!(self.ch, 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '\'' | '$') {
             self.next();
         }
 
@@ -755,6 +795,7 @@ impl<'src> Scanner<'src> {
             loc: crate::location::Location::from_positions(start_pos, end_pos),
             prev_tok_end_pos: Position::default(),
             prev_tok_is_question: false,
+            jsx_container: None,
         })
     }
 
@@ -846,6 +887,7 @@ impl<'src> Scanner<'src> {
                 loc,
                 prev_tok_end_pos: Position::default(),
                 prev_tok_is_question: false,
+                jsx_container: None,
             })
         }
     }
@@ -935,7 +977,7 @@ impl<'src> Scanner<'src> {
 
             let token = match self.ch {
                 // Identifiers and keywords
-                'A'..='Z' | 'a'..='z' => self.scan_identifier(),
+                'A'..='Z' | 'a'..='z' | '$' => self.scan_identifier(),
 
                 // Numbers
                 '0'..='9' => self.scan_number(),
@@ -995,7 +1037,7 @@ impl<'src> Scanner<'src> {
                 '"' => self.scan_string(),
 
                 '_' => {
-                    if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_') {
+                    if matches!(self.peek(), 'A'..='Z' | 'a'..='z' | '0'..='9' | '_' | '$') {
                         self.scan_identifier()
                     } else {
                         self.next();
@@ -1341,7 +1383,7 @@ impl<'src> Scanner<'src> {
                     let flags = Cow::Borrowed(self.substring(flags_start, self.offset));
                     break (pattern, flags);
                 }
-                c if c == '\n' || c == EOF_CHAR => {
+                c if c == '\n' || c == '\r' || c == EOF_CHAR => {
                     let end_pos = self.position();
                     self.error(
                         start_pos,
@@ -1516,6 +1558,16 @@ impl<'src> Scanner<'src> {
                 DiagnosticCategory::message("A quoted identifier can't be empty string."),
             );
             Token::Lident(Cow::Borrowed(ident))
+        } else if name == "_" {
+            // `_` is the wildcard and the placeholder of underscore apply
+            // sugar; a quoted `_` couldn't be told apart from them.
+            let end_pos = self.position();
+            self.error(
+                start_pos,
+                end_pos,
+                DiagnosticCategory::message("`_` can't be used as a quoted identifier."),
+            );
+            Token::Lident(Cow::Borrowed(name))
         } else if Self::is_uident(name) {
             Token::Lident(Cow::Borrowed(ident))
         } else {
@@ -1591,6 +1643,93 @@ mod tests {
 
         let result = scanner.scan();
         assert_eq!(result.token, Token::Lident(Cow::Borrowed("world")));
+    }
+
+    /// tests/syntax_tests/res_test.ml:89-137: the scanner skips a UTF-8 byte
+    /// order mark and ends a line at a CR without an LF, and code frames show
+    /// the lines the positions refer to.
+    #[test]
+    fn byte_order_mark_and_lone_cr() {
+        fn parse(
+            source: &str,
+        ) -> (
+            crate::parser::Parser<'_>,
+            Vec<crate::parser::ast::StructureItem>,
+        ) {
+            let mut parser = crate::parser::Parser::new("bom.res", source);
+            let structure = crate::parser::module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source:?}");
+            (parser, structure)
+        }
+        fn position_of_y(source: &str) -> crate::location::Position {
+            let (parser, structure) = parse(source);
+            *parser.arena().loc_start(structure[1].pstr_loc)
+        }
+        let line_and_column = |pos: crate::location::Position| (pos.line, pos.cnum - pos.bol);
+        let bom = "\u{EF}\u{BB}\u{BF}";
+        let source = format!("{bom}let x = 1");
+        let (parser, structure) = parse(&source);
+        assert_eq!(structure.len(), 1);
+        assert_eq!(
+            line_and_column(*parser.arena().loc_start(structure[0].pstr_loc)),
+            (1, 0)
+        );
+        // Sources are read as Latin-1, one char per byte, so the first line
+        // starts at byte 3, after the mark, as `line_offset = offset` does
+        // in res_scanner.ml.
+        let start = *parser.arena().loc_start(structure[0].pstr_loc);
+        assert_eq!((start.bol, start.cnum), (3, 3));
+        for (source, expected) in [
+            ("let x = 1\rlet y = 2".to_string(), (2, 0)),
+            ("let x = 1 // c\rlet y = 2".to_string(), (2, 0)),
+            ("let x = 1 /* c */\r  let y = 2".to_string(), (2, 2)),
+            ("let x = 1\r\nlet y = 2".to_string(), (2, 0)),
+            ("let x = 1\r\rlet y = 2".to_string(), (3, 0)),
+            ("let x = 1\n\rlet y = 2".to_string(), (3, 0)),
+            (format!("{bom}let x = 1; let y = 2"), (1, 11)),
+            (format!("{bom}let x = 1\rlet y = 2"), (2, 0)),
+        ] {
+            assert_eq!(
+                line_and_column(position_of_y(&source)),
+                expected,
+                "{source:?}"
+            );
+        }
+        // A regex literal ends at a line break.
+        let mut parser = crate::parser::Parser::new("regex.res", "let r = /a\rb/");
+        crate::parser::module::parse_structure(&mut parser);
+        assert!(parser.has_errors());
+        // Code frames show the lines the positions refer to.
+        let frame = |source: &str| {
+            let start = position_of_y(source);
+            let end = crate::location::Position {
+                cnum: start.cnum + 3,
+                ..start
+            };
+            let printed = crate::parser::code_frame::print(source, &start, &end);
+            let mut plain = String::new();
+            let mut chars = printed.chars();
+            while let Some(c) = chars.next() {
+                if c == '\u{1b}' {
+                    for c in chars.by_ref() {
+                        if c == 'm' {
+                            break;
+                        }
+                    }
+                } else {
+                    plain.push(c);
+                }
+            }
+            plain
+        };
+        assert_eq!(
+            frame(&format!("{bom}let x = 1; let y = 2")),
+            "  1 │ let x = 1; let y = 2\n"
+        );
+        assert_eq!(
+            frame("let x = 1\rlet y = 2\rlet z = 3"),
+            "  1 │ let x = 1\n  2 │ let y = 2\n  3 │ let z = 3\n"
+        );
     }
 
     #[test]

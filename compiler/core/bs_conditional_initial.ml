@@ -24,6 +24,7 @@
 
 let setup_env () =
   Env.Persistent_signature.load := Bs_cmi_load.load_cmi;
+  Build_file_store.set_disk_reader Bs_cmi_load.read_file;
   Matching.make_test_sequence_variant_constant :=
     Polyvar_pattern_match.make_test_sequence_variant_constant;
   Matching.call_switcher_variant_constant :=
@@ -31,15 +32,9 @@ let setup_env () =
   Matching.call_switcher_variant_constr :=
     Polyvar_pattern_match.call_switcher_variant_constr;
   Ctype.variant_is_subtype := Matching_polyfill.variant_is_subtype;
-  Clflags.dump_location := false;
+  (* bsc's defaults, which differ from OCaml's in [Clflags.create]. *)
+  Clflags.reset ();
   Parmatch.print_res_pat := Pattern_printer.print_pattern;
-  (* default true
-     otherwise [bsc -I sc src/hello.ml ] will include current directory to search path
-  *)
-  Clflags.debug := true;
-  Clflags.binary_annotations := true;
-  (* Turn on [-no-alias-deps] by default -- double check *)
-  Oprint.out_ident := Outcome_printer_ns.out_ident;
   Printtyp.print_res_poly_identifier := Res_printer.polyvar_ident_to_string
 (*; Switch.cut := 100*)
 (* tweakable but not very useful *)

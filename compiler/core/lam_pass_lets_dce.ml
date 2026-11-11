@@ -11,14 +11,17 @@
 (***********************************************************************)
 (* Adapted for Javascript backend : Hongbo Zhang,  *)
 
-let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lambda.t
-    =
+let lets_helper ~assignable (count_var : Ident.t -> Lam_pass_count.used_info)
+    lam : Lambda.t =
   let subst : Lambda.t Hash_ident.t = Hash_ident.create 16 in
   let string_table : string Hash_ident.t = Hash_ident.create 16 in
   let used v = (count_var v).times > 0 in
   let rec simplif (lam : Lambda.t) =
     match lam with
-    | Lvar v -> Hash_ident.find_default subst v lam
+    | Lvar v -> (
+      match Hash_ident.find_opt subst v with
+      | Some lam -> lam
+      | None -> lam)
     | Llet ((Strict | Alias | StrictOpt), v, Lvar w, l2) ->
       Hash_ident.add subst v (simplif (Lambda.var w));
       simplif l2
@@ -29,7 +32,7 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lambda.t
       match (count_var v, l1) with
       | {times = 0; _}, _ -> simplif l2
       | {times = 1; captured = false}, _
-      | {times = 1; captured = true}, (Lconst _ | Lvar _)
+      | {times = 1; captured = true}, Lvar _
       | ( _,
           ( Lconst
               ( Const_int _ | Const_assertfalse | Const_constructor _
@@ -42,6 +45,12 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lambda.t
          do constant folding independently
       *)
         ->
+        Hash_ident.add subst v (simplif l1);
+        simplif l2
+      (* A captured constant is moved into the closure only when it allocates
+         nothing: a block would be a new one on each call. *)
+      | {times = 1; captured = true}, Lconst c
+        when not (Lambda.const_is_allocating c) ->
         Hash_ident.add subst v (simplif l1);
         simplif l2
       | _, Lconst (Const_string s) ->
@@ -102,8 +111,9 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lambda.t
     | Lapply
         {ap_func = Lfunction ({params; body} as lfunction); ap_args = args; _}
       when Ext_list.same_length params args
-           && Lam_analysis.lfunction_can_be_inlined lfunction ->
-      simplif (Lam_beta_reduce.no_names_beta_reduce params body args)
+           && Lambda.lfunction_can_be_inlined lfunction ->
+      simplif
+        (Lam_beta_reduce.no_names_beta_reduce ~assignable params body args)
     | Lprim {primitive = Pstringadd; args = [l; r]; loc} -> (
       let l' = simplif l in
       let r' = simplif r in
@@ -130,14 +140,17 @@ let lets_helper (count_var : Ident.t -> Lam_pass_count.used_info) lam : Lambda.t
   simplif lam
 
 (* To transform let-bound references into variables *)
-let apply_lets occ lambda =
+let apply_lets ~assignable occ lambda =
   let count_var v =
     match Hash_ident.find_opt occ v with
     | None -> Lam_pass_count.dummy_info ()
     | Some v -> v
   in
-  lets_helper count_var lambda
+  lets_helper ~assignable count_var lambda
 
 let simplify_lets (lam : Lambda.t) : Lambda.t =
-  let occ = Lam_pass_count.collect_occurs lam in
-  apply_lets occ lam
+  (* The count and the rewrite reduce immediately applied functions alike.
+     See [Lam_pass_remove_alias.simplify_alias] for [assignable]. *)
+  let assignable = Lambda_traverse.assigned_variables lam in
+  let occ = Lam_pass_count.collect_occurs ~assignable lam in
+  apply_lets ~assignable occ lam

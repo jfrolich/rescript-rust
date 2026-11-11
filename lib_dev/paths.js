@@ -43,6 +43,16 @@ export const docstringTestDir = path.resolve(testDir, "docstring_tests");
 export const commonjsTestDir = path.resolve(testDir, "commonjs_tests");
 
 /**
+ * path: `<projectDir>/packages/@rescript/runtime/`
+ */
+export const runtimeDir = path.resolve(
+  projectDir,
+  "packages",
+  "@rescript",
+  "runtime",
+);
+
+/**
  * path: `<projectDir>/compiler/common/bs_version.ml`
  */
 export const compilerVersionFile = path.resolve(
@@ -72,6 +82,9 @@ export const compilerBinDir = path.resolve(
 );
 
 /**
- * path: `<projectDir>/_build/install/default/bin/ounit_tests`
+ * path: `<projectDir>/_build/install/default/bin/ounit_tests[.exe]`
  */
-export const ounitTestBin = path.join(compilerBinDir, "ounit_tests");
+export const ounitTestBin = path.join(
+  compilerBinDir,
+  process.platform === "win32" ? "ounit_tests.exe" : "ounit_tests",
+);

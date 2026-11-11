@@ -80,36 +80,13 @@ pub fn is_if_then_else_expr(expr: &Expression) -> bool {
     matches!(&expr.pexp_desc, ExpressionDesc::Pexp_ifthenelse(_))
 }
 
-/// Check if attributes contain the "res.iflet" marker.
-pub fn has_if_let_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.iflet")
-}
-
-/// Check if an expression is an "if let" expression.
-/// This is a `Pexp_match` with the `res.iflet` attribute.
-pub fn is_if_let_expr(arena: &ParseArena, expr: &Expression) -> bool {
-    matches!(&expr.pexp_desc, ExpressionDesc::Pexp_match(_))
-        && has_if_let_attribute(arena, &expr.pexp_attributes)
-}
-
-/// Represents the kind of condition in an if-chain.
-#[derive(Debug)]
-pub enum IfConditionKind<'a> {
-    /// Regular if condition: `if expr { ... }`
-    If(&'a Expression),
-    /// If-let pattern matching: `if let pattern = expr { ... }`
-    IfLet(&'a Pattern, &'a Expression),
-}
-
 /// Collect all the branches of an if-expression chain.
-/// Returns a list of (location, condition_kind, then_expr) tuples and the final else expression.
+/// Returns a list of (location, condition, then_expr) tuples and the final else expression.
 pub fn collect_if_expressions<'a>(
     arena: &'a crate::parse_arena::ParseArena,
     expr: &'a Expression,
 ) -> (
-    Vec<(&'a LocIdx, IfConditionKind<'a>, &'a Expression)>,
+    Vec<(&'a LocIdx, &'a Expression, &'a Expression)>,
     Option<&'a Expression>,
 ) {
     let mut acc = Vec::new();
@@ -123,50 +100,11 @@ pub fn collect_if_expressions<'a>(
                 let (ref if_idx, ref then_idx, ref opt_else) = **inner;
                 let if_expr: &Expression = arena.get_expr(*if_idx);
                 let then_expr: &Expression = arena.get_expr(*then_idx);
-                acc.push((expr_loc, IfConditionKind::If(if_expr), then_expr));
+                acc.push((expr_loc, if_expr, then_expr));
                 match opt_else {
                     Some(else_idx) => current = arena.get_expr(*else_idx),
                     None => return (acc, None),
                 }
-            }
-            // if let with no else (pattern matches unit constructor in else branch)
-            ExpressionDesc::Pexp_match(inner)
-                if is_if_let_expr(arena, current)
-                    && inner.1.len() == 2
-                    && arena.case_list(inner.1)[0].pc_guard.is_none()
-                    && matches!(
-                        &arena.get_expr(arena.case_list(inner.1)[1].pc_rhs).pexp_desc,
-                        ExpressionDesc::Pexp_construct(lid, _) if arena.is_lident(lid.txt, "()")
-                    ) =>
-            {
-                let (ref condition_idx, ref cases) = *inner;
-                let pattern: &Pattern = arena.get_pat(arena.case_list(*cases)[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(arena.case_list(*cases)[0].pc_rhs);
-                let condition: &Expression = arena.get_expr(*condition_idx);
-                acc.push((
-                    expr_loc,
-                    IfConditionKind::IfLet(pattern, condition),
-                    then_expr,
-                ));
-                return (acc, None);
-            }
-            // if let with else branch
-            ExpressionDesc::Pexp_match(inner)
-                if is_if_let_expr(arena, current)
-                    && inner.1.len() == 2
-                    && arena.case_list(inner.1)[0].pc_guard.is_none() =>
-            {
-                let (ref condition_idx, ref cases) = *inner;
-                let pattern: &Pattern = arena.get_pat(arena.case_list(*cases)[0].pc_lhs);
-                let then_expr: &Expression = arena.get_expr(arena.case_list(*cases)[0].pc_rhs);
-                let else_expr: &Expression = arena.get_expr(arena.case_list(*cases)[1].pc_rhs);
-                let condition: &Expression = arena.get_expr(*condition_idx);
-                acc.push((
-                    expr_loc,
-                    IfConditionKind::IfLet(pattern, condition),
-                    then_expr,
-                ));
-                current = else_expr;
             }
             // End of chain
             _ => {
@@ -374,7 +312,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(Constant::Json(_) | Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_constant(Constant::Char { .. }) => true,
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -385,7 +323,6 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         _ if is_block_expr(arena, expr) => true,
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(payload) => is_multiline_text(payload.source(arena)),
-            Constant::RawSource(source) => is_multiline_text(arena.get_string(*source)),
             _ => false,
         },
         _ => false,
@@ -495,123 +432,52 @@ pub fn should_inline_rhs_binary_expr(arena: &ParseArena, expr: &Expression) -> b
 // Dict and List Utilities
 // ============================================================================
 
-/// A source fragment in a dictionary spread expression.
-pub enum DictExprPart<'a> {
-    /// Literal dictionary rows encoded as a `Primitive_dict.make` argument.
-    Rows(&'a Expression),
-    /// An expression introduced with dictionary spread syntax.
-    Spread(&'a Expression),
+/// A part of a dict literal with spreads (`Res_parsetree_viewer.dict_expr_part`).
+pub enum DictExprPart {
+    /// Rows between spreads, as the array `[("a", 1), ...]`.
+    Rows(Expression),
+    /// A spread expression.
+    Spread(ExprIdx),
 }
 
-/// Recover the source fragments of a dictionary spread expression.
-///
-/// This mirrors `collect_spread_dict_expr_parts` in the OCaml parsetree
-/// viewer. The parser encodes `dict{...a, "b": c}` as an attributed call to
-/// `Primitive_dict.spread`; the printer uses these fragments to reconstruct
-/// the surface syntax.
-pub fn collect_spread_dict_expr_parts<'a>(
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> Option<Vec<DictExprPart<'a>>> {
-    fn literal_dict_rows<'a>(
-        arena: &'a ParseArena,
-        expr: &'a Expression,
-    ) -> Option<&'a Expression> {
-        let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
-            return None;
-        };
-        let function = arena.get_expr(apply.funct);
-        let ExpressionDesc::Pexp_ident(identifier) = &function.pexp_desc else {
-            return None;
-        };
-        let Longident::Ldot(parent, field) = arena.get_longident(identifier.txt) else {
-            return None;
-        };
-        let Longident::Lident(module_name) = parent.as_ref() else {
-            return None;
-        };
-        if arena.get_string(*module_name) != "Primitive_dict"
-            || arena.get_string(*field) != "make"
-            || apply.args.len() != 1
-            || !matches!(arena.apply_args(apply.args)[0].0, ArgLabel::Nolabel)
-        {
-            return None;
-        }
-        let rows = arena.get_expr(arena.apply_args(apply.args)[0].1);
-        is_tuple_array(arena, rows).then_some(rows)
-    }
-
-    let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc else {
-        return None;
-    };
-    let function = arena.get_expr(apply.funct);
-    let ExpressionDesc::Pexp_ident(identifier) = &function.pexp_desc else {
-        return None;
-    };
-    let Longident::Ldot(parent, field) = arena.get_longident(identifier.txt) else {
-        return None;
-    };
-    let Longident::Lident(module_name) = parent.as_ref() else {
-        return None;
-    };
-    if arena.get_string(*module_name) != "Primitive_dict"
-        || arena.get_string(*field) != "spread"
-        || !function
-            .pexp_attributes
-            .iter()
-            .any(|attribute| arena.get_string(attribute.0.txt) == "res.dictSpread")
-        || apply.args.len() != 2
-        || !arena
-            .apply_args(apply.args)
-            .iter()
-            .all(|(label, _)| matches!(label, ArgLabel::Nolabel))
-    {
-        return None;
-    }
-
-    let target = arena.get_expr(arena.apply_args(apply.args)[0].1);
-    let sources = arena.get_expr(arena.apply_args(apply.args)[1].1);
-    let ExpressionDesc::Pexp_array(source_indices) = &sources.pexp_desc else {
-        return None;
-    };
-
-    let mut parts = Vec::with_capacity(source_indices.len() + 1);
-    for part in std::iter::once(target).chain(
-        arena
-            .expr_list(*source_indices)
-            .iter()
-            .map(|idx| arena.get_expr(*idx)),
-    ) {
-        if let Some(rows) = literal_dict_rows(arena, part) {
-            if !matches!(&rows.pexp_desc, ExpressionDesc::Pexp_array(items) if items.is_empty()) {
-                parts.push(DictExprPart::Rows(rows));
-            }
-        } else {
-            parts.push(DictExprPart::Spread(part));
-        }
-    }
-    Some(parts)
-}
-
-/// Check if an expression is an array of tuples (for dict detection).
-/// Used to detect dict{} syntax which desugars to Primitive_dict.make([("key", value), ...])
-pub fn is_tuple_array(arena: &ParseArena, expr: &Expression) -> bool {
-    if let ExpressionDesc::Pexp_array(items) = &expr.pexp_desc {
-        arena
-            .expr_list(*items)
-            .iter()
-            .all(|e| matches!(&arena.get_expr(*e).pexp_desc, ExpressionDesc::Pexp_tuple(_)))
-    } else {
-        false
-    }
-}
-
-/// Check if a pattern has the res.dictPattern attribute.
-/// Used to detect dict{} pattern syntax which desugars to @res.dictPattern {...}
-pub fn has_dict_pattern_attribute(arena: &ParseArena, attrs: &[Attribute]) -> bool {
-    attrs
+/// `Res_parsetree_viewer.dict_has_spread`.
+pub fn dict_has_spread(entries: &[DictEntry]) -> bool {
+    entries
         .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.dictPattern")
+        .any(|entry| matches!(entry, DictEntry::Pdict_spread(_)))
+}
+
+/// `Res_parsetree_viewer.dict_expr_rows`: the rows of a dict literal without
+/// spreads as the array `[("a", 1), ...]`, see `Ast_dict`.
+pub fn dict_expr_rows(arena: &mut ParseArena, loc: LocIdx, entries: &[DictEntry]) -> Expression {
+    let rows: Vec<_> = entries
+        .iter()
+        .filter_map(|entry| match entry {
+            DictEntry::Pdict_entry(key, value) => Some((*key, *value)),
+            DictEntry::Pdict_spread(_) => None,
+        })
+        .collect();
+    crate::binary_ast::ast_dict::rows_array(arena, loc, &rows)
+}
+
+/// `Res_parsetree_viewer.dict_expr_parts`: the parts of a dict literal with
+/// spreads, the spreads and such arrays for the rows between them.
+pub fn dict_expr_parts(
+    arena: &mut ParseArena,
+    loc: LocIdx,
+    entries: &[DictEntry],
+) -> Vec<DictExprPart> {
+    use crate::binary_ast::ast_dict;
+    ast_dict::parts(entries)
+        .into_iter()
+        .map(|part| match part {
+            ast_dict::Part::Rows(rows) => {
+                let rows_loc = ast_dict::rows_loc(arena, loc, &rows);
+                DictExprPart::Rows(ast_dict::rows_array(arena, rows_loc, &rows))
+            }
+            ast_dict::Part::Spread(spread) => DictExprPart::Spread(spread),
+        })
+        .collect()
 }
 
 /// Check if a pattern is "huggable" (can be printed without line breaks).
@@ -622,6 +488,7 @@ pub fn is_huggable_pattern(pat: &Pattern) -> bool {
         PatternDesc::Ppat_array(_)
             | PatternDesc::Ppat_tuple(_)
             | PatternDesc::Ppat_record(_)
+            | PatternDesc::Ppat_dict(_)
             | PatternDesc::Ppat_variant(_)
             | PatternDesc::Ppat_construct(_, _)
     )
@@ -700,28 +567,6 @@ pub fn collect_list_patterns<'a>(
             }
         }
         return (acc, current);
-    }
-}
-
-// ============================================================================
-// Array Collection
-// ============================================================================
-
-/// Collect expressions from an array (or tuple).
-pub fn collect_array_expressions<'a>(
-    arena: &'a ParseArena,
-    expr: &'a Expression,
-) -> (Vec<&'a Expression>, Option<&'a Expression>) {
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_array(exprs) => (
-            arena
-                .expr_list(*exprs)
-                .iter()
-                .map(|idx| arena.get_expr(*idx))
-                .collect(),
-            None,
-        ),
-        _ => (vec![], Some(expr)),
     }
 }
 
@@ -894,154 +739,10 @@ pub fn fun_expr<'a>(
 // Attribute Processing
 // ============================================================================
 
-/// `Res_parsetree_viewer.filter_fragile_match_attributes`
-/// (res_parsetree_viewer.ml:506-521): drop the `@warning("-4")` that the
-/// parser attaches to if-let matches.
-pub fn filter_fragile_match_attributes<'a>(
-    arena: &ParseArena,
-    attrs: &'a Attributes,
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| {
-            if arena.get_string(attr.0.txt) != "warning" {
-                return true;
-            }
-            let Payload::PStr(items) = &attr.1 else {
-                return true;
-            };
-            let [item] = items.as_slice() else {
-                return true;
-            };
-            let StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
-                return true;
-            };
-            !matches!(
-                &arena.get_expr(inner.0).pexp_desc,
-                ExpressionDesc::Pexp_constant(constant)
-                    if matches!(constant, Constant::String(s) if s.semantic(arena) == "-4")
-            )
-        })
-        .collect()
-}
-
-/// Check if expression has spread attribute (...).
-pub fn has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.spread")
-}
-
-/// Check if pattern has spread attribute (...).
-pub fn pattern_has_spread_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    has_spread_attr(arena, attrs)
-}
-
-/// Check if expression is `Primitive_array.spread` with @res.spread attribute.
-/// This is the desugared form of `[...xs, a, b]`.
-pub fn is_spread_belt_array_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    is_primitive_spread(arena, expr, "Primitive_array")
-}
-
-/// Check if expression is `Primitive_list.spread` with @res.spread attribute.
-/// This is the desugared form of `list{...xs, a, b}`.
-pub fn is_spread_belt_list_concat(arena: &ParseArena, expr: &Expression) -> bool {
-    is_primitive_spread(arena, expr, "Primitive_list")
-}
-
-fn is_primitive_spread(arena: &ParseArena, expr: &Expression, module_name: &str) -> bool {
-    let ExpressionDesc::Pexp_ident(loc_idx) = &expr.pexp_desc else {
-        return false;
-    };
-    let Longident::Ldot(parent, name_idx) = arena.get_longident(loc_idx.txt) else {
-        return false;
-    };
-    matches!(parent.as_ref(), Longident::Lident(base_idx)
-        if arena.get_string(*base_idx) == module_name)
-        && arena.get_string(*name_idx) == "spread"
-        && has_spread_attr(arena, &expr.pexp_attributes)
-}
-
-/// Filter out parsing-only attributes (res.braces, res.ternary, res.await, etc.)
-pub fn filter_parsing_attrs<'a>(arena: &ParseArena, attrs: &'a Attributes) -> Vec<&'a Attribute> {
-    filter_parsing_attrs_slice(arena, attrs.as_slice())
-}
-
-/// Like `filter_parsing_attrs` but takes a plain slice instead of Attributes.
-pub fn filter_parsing_attrs_slice<'a>(
-    arena: &ParseArena,
-    attrs: &'a [Attribute],
-) -> Vec<&'a Attribute> {
-    attrs
-        .iter()
-        .filter(|attr| !is_parsing_attr(arena, attr))
-        .collect()
-}
-
-/// Whether `attr` is one of the parser-internal markers that
-/// `filter_parsing_attrs` drops.
-pub fn is_parsing_attr(arena: &ParseArena, attr: &Attribute) -> bool {
-    matches!(
-        arena.get_string(attr.0.txt),
-        "res.iflet"
-            | "res.ternary"
-            | "res.await"
-            | "res.patVariantSpread"
-            | "res.dictPattern"
-            | "res.dictSpread"
-    )
-}
-
-/// `filter_parsing_attrs attrs <> []`, without building the filtered list.
-pub fn has_non_parsing_attrs(arena: &ParseArena, attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attr| !is_parsing_attr(arena, attr))
-}
-
-/// Check if an attribute is printable (not an internal parsing attribute).
-pub fn is_printable_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
-    !matches!(
-        arena.get_string(attr.0.txt),
-        "res.iflet" | "res.await" | "res.ternary" | "res.dictPattern"
-    )
-}
-
-/// Check if attributes contain any printable attributes.
-pub fn has_printable_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs.iter().any(|a| is_printable_attribute(arena, a))
-}
-
-/// Check if expression has any attributes (excluding internal parsing ones).
-pub fn has_attributes(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs.iter().any(|attr| {
-        let name = arena.get_string(attr.0.txt);
-        if matches!(name, "res.iflet" | "res.ternary" | "res.await") {
-            return false;
-        }
-        // res_parsetree_viewer.ml:395-405: the fragile-match warning of an
-        // if-let does not count.
-        if name == "warning" && is_fragile_match_warning_payload(arena, &attr.1) {
-            return !has_if_let_attribute(arena, attrs);
-        }
-        true
-    })
-}
-
-/// `PStr [Pstr_eval (Pexp_constant (Pconst_string ("-4", None)), _)]`.
-fn is_fragile_match_warning_payload(arena: &ParseArena, payload: &Payload) -> bool {
-    let Payload::PStr(items) = payload else {
-        return false;
-    };
-    let [item] = items.as_slice() else {
-        return false;
-    };
-    let StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
-        return false;
-    };
-    matches!(
-        &arena.get_expr(inner.0).pexp_desc,
-        ExpressionDesc::Pexp_constant(constant)
-            if matches!(constant, Constant::String(s) if s.semantic(arena) == "-4")
-    )
+/// Attributes on a module expression print before it and bind less tightly
+/// than an application or a constraint.
+pub fn mod_expr_has_attributes(mod_expr: &ModuleExpr) -> bool {
+    !mod_expr.pmod_attributes.is_empty()
 }
 
 // ============================================================================
@@ -1229,8 +930,10 @@ pub struct TypeParameter<'a> {
     pub attrs: &'a Attributes,
     /// Parameter label.
     pub lbl: &'a ArgLabel,
-    /// Parameter type.
+    /// Parameter type; for a fixed argument, the `_` it is written with.
     pub typ: &'a CoreType,
+    /// OCaml `Parg_fixed`: the value of an `@as(value) _` argument.
+    pub fixed: Option<&'a crate::parser::ast::FixedArg>,
 }
 
 /// `Res_parsetree_viewer.arrow_type` (res_parsetree_viewer.ml:3-7): an arrow
@@ -1251,6 +954,7 @@ pub fn arrow_type<'a>(
                     attrs: &param.attrs,
                     lbl: &param.lbl,
                     typ: arena.get_core_type(param.typ),
+                    fixed: param.fixed.as_deref(),
                 })
                 .collect();
             (&typ.ptyp_attributes, params, arena.get_core_type(*ret))
@@ -1279,7 +983,11 @@ pub fn mod_expr_apply<'a>(
         mod_expr: &'a ModuleExpr,
     ) -> (Vec<&'a ModuleExpr>, &'a ModuleExpr) {
         match &mod_expr.pmod_desc {
-            ModuleExprDesc::Pmod_apply(next_idx, arg_idx) => {
+            // An inner application with attributes is kept as the callee, so
+            // the printer can parenthesize it with its attributes.
+            ModuleExprDesc::Pmod_apply(next_idx, arg_idx)
+                if acc.is_empty() || !mod_expr_has_attributes(mod_expr) =>
+            {
                 let arg: &ModuleExpr = arena.get_mod_expr(*arg_idx);
                 let next: &ModuleExpr = arena.get_mod_expr(*next_idx);
                 let mut new_acc = vec![arg];
@@ -1335,13 +1043,6 @@ pub fn mod_expr_functor<'a>(
     }
     let (params, body) = loop_functor(arena, Vec::new(), mod_expr);
     (params, body)
-}
-
-/// Check if attributes contain the await attribute.
-pub fn has_await_attribute(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| arena.get_string(attr.0.txt) == "res.await")
 }
 
 // ============================================================================
@@ -1443,18 +1144,19 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
 /// Split attributes into doc comments and all others, keeping their order.
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
-    attrs: &'a Attributes,
+    attrs: &'a [Attribute],
 ) -> (Vec<&'a Attribute>, Vec<&'a Attribute>) {
-    let mut doc_comments = Vec::new();
-    let mut others = Vec::new();
-    for attr in attrs {
-        if is_doc_comment_attribute(arena, attr) {
-            doc_comments.push(attr);
-        } else {
-            others.push(attr);
-        }
-    }
-    (doc_comments, others)
+    // Only the doc comments before every other attribute: one after an
+    // attribute stays in its place, so that printing keeps the order of the
+    // attributes.
+    let split = attrs
+        .iter()
+        .position(|attr| !is_doc_comment_attribute(arena, attr))
+        .unwrap_or(attrs.len());
+    (
+        attrs[..split].iter().collect(),
+        attrs[split..].iter().collect(),
+    )
 }
 
 // ============================================================================

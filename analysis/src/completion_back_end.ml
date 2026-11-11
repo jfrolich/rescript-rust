@@ -967,22 +967,64 @@ and get_completions_for_context_path ~state ~debug ~full ~opens ~raw_opens ~pos
   match context_path with
   | CPString ->
     if Debug.verbose () then print_endline "[ctx_path]--> CPString";
-    [Completion.create "dummy" ~env ~kind:(Completion.Value Predef.type_string)]
+    [
+      Completion.create "dummy" ~env
+        ~kind:(Completion.Value (Predef.type_string ()));
+    ]
   | CPBool ->
     if Debug.verbose () then print_endline "[ctx_path]--> CPBool";
-    [Completion.create "dummy" ~env ~kind:(Completion.Value Predef.type_bool)]
+    [
+      Completion.create "dummy" ~env
+        ~kind:(Completion.Value (Predef.type_bool ()));
+    ]
   | CPInt ->
     if Debug.verbose () then print_endline "[ctx_path]--> CPInt";
-    [Completion.create "dummy" ~env ~kind:(Completion.Value Predef.type_int)]
+    [
+      Completion.create "dummy" ~env
+        ~kind:(Completion.Value (Predef.type_int ()));
+    ]
   | CPFloat ->
     if Debug.verbose () then print_endline "[ctx_path]--> CPFloat";
-    [Completion.create "dummy" ~env ~kind:(Completion.Value Predef.type_float)]
+    [
+      Completion.create "dummy" ~env
+        ~kind:(Completion.Value (Predef.type_float ()));
+    ]
   | CPArray None ->
     if Debug.verbose () then print_endline "[ctx_path]--> CPArray (no payload)";
     [
       Completion.create "array" ~env
         ~kind:(Completion.Value (Ctype.newconstr Predef.path_array []));
     ]
+  | CPDict None ->
+    if Debug.verbose () then print_endline "[ctx_path]--> CPDict (no payload)";
+    [
+      Completion.create "dict" ~env
+        ~kind:(Completion.Value (Ctype.newconstr Predef.path_dict []));
+    ]
+  | CPDict (Some cp) -> (
+    if Debug.verbose () then print_endline "[ctx_path]--> CPDict (with payload)";
+    match mode with
+    | Regular -> (
+      match
+        cp
+        |> get_completions_for_context_path ~state ~debug ~full ~opens
+             ~raw_opens ~pos ~env ~exact:true ~scope
+        |> completions_get_completion_type ~full ~state
+      with
+      | None -> []
+      | Some (typ, env) ->
+        [
+          Completion.create "dummy" ~env
+            ~kind:
+              (Completion.ExtractedType (Tdict (env, ExtractedType typ), `Type));
+        ])
+    | Pipe ->
+      (* Pipe completion with dict just needs to know that it's a dict, not
+         what inner type it has. *)
+      [
+        Completion.create "dummy" ~env
+          ~kind:(Completion.Value (Ctype.newconstr Predef.path_dict []));
+      ])
   | CPArray (Some cp) -> (
     if Debug.verbose () then
       print_endline "[ctx_path]--> CPArray (with payload)";
@@ -1931,12 +1973,32 @@ let rec complete_typed_value ?(type_arg_context : type_arg_context option)
           ~env;
       ]
     else []
+  | Tdict (env, typ) as extracted_type ->
+    if Debug.verbose () then print_endline "[complete_typed_value]--> Tdict";
+    if prefix = "" then
+      [
+        create "dict{}" ~includes_snippets:true ~insert_text:"dict{$0}"
+          ~sort_text:"A"
+          ~kind:
+            (match typ with
+            | ExtractedType _ ->
+              ExtractedType
+                ( extracted_type,
+                  match mode with
+                  | Pattern _ -> `Type
+                  | Expression -> `Value )
+            | TypeExpr typ -> Value (Ctype.newconstr Predef.path_dict [typ]))
+          ~env;
+      ]
+    else []
   | Tstring env ->
     if Debug.verbose () then print_endline "[complete_typed_value]--> Tstring";
     if prefix = "" then
       [
         create "\"\"" ~includes_snippets:true ~insert_text:"\"$0\""
-          ~sort_text:"A" ~kind:(Value Predef.type_string) ~env;
+          ~sort_text:"A"
+          ~kind:(Value (Predef.type_string ()))
+          ~env;
       ]
     else []
   | Tfunction {env; typ; args; return_type}
@@ -2013,7 +2075,7 @@ let rec complete_typed_value ?(type_arg_context : type_arg_context option)
     if Debug.verbose () then print_endline "[complete_typed_value]--> Texn";
     [
       create
-        (["Exn"; "Error(error)"] |> ident)
+        (["JsExn(error)"] |> ident)
         ~kind:(Label "Catches errors from JavaScript errors.")
         ~docstring:
           [

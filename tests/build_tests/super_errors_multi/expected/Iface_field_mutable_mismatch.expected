@@ -6,12 +6,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_field_mutable_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_field_mutable_mismatch/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_field_mutable_mismatch/Foo.res:1:1-21):
     type t = {count: int}
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_field_mutable_mismatch/Foo.resi:1:1-29):
     type t = {mutable count: int}
-  /.../fixtures/Iface_field_mutable_mismatch/Foo.resi:1:1-29:
-    Expected declaration
-  /.../fixtures/Iface_field_mutable_mismatch/Foo.res:1:1-21:
-    Actual declaration
+  
   The mutability of field count is different.

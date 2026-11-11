@@ -1,21 +1,8 @@
-@notUndefined
+@instanceOf("DataView")
 type t
 
 @new
 external fromBuffer: (Stdlib_ArrayBuffer.t, ~byteOffset: int=?, ~length: int=?) => t = "DataView"
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: DataView.fromBuffer(),
-})
-@new
-external fromBufferToEnd: (Stdlib_ArrayBuffer.t, ~byteOffset: int) => t = "DataView"
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: DataView.fromBuffer(),
-})
-@new
-external fromBufferWithRange: (Stdlib_ArrayBuffer.t, ~byteOffset: int, ~length: int) => t =
-  "DataView"
 
 @get external buffer: t => Stdlib_ArrayBuffer.t = "buffer"
 @get external byteLength: t => int = "byteLength"

@@ -2,7 +2,8 @@
 //!
 //! A compiled unit publishes a digest for each of its top-level items (its
 //! declaration plus the JS metadata other modules' code generation reads for
-//! it: constants, arities, inlinable lambdas, hoisted exports) and one
+//! it: constants, arities and inlinable lambdas; the flat `make` exports
+//! follow from the declaration) and one
 //! module-level part (`@`: purity, package, file). A dependent records which
 //! items of each unit it read: the paths its typed tree mentions, closed over
 //! the declarations of what it read (reading `N.f : M.t => unit` also reads
@@ -207,10 +208,6 @@ fn sig_item_kind_name(item: &SignatureItem) -> Option<(Kind, Name)> {
     })
 }
 
-fn sig_item_key(item: &SignatureItem) -> Option<String> {
-    sig_item_kind_name(item).map(|(kind, name)| item_key(kind, &name))
-}
-
 fn hash_one(value: &impl Hash) -> u64 {
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     value.hash(&mut hasher);
@@ -225,43 +222,21 @@ pub fn item_digests(
 ) -> BTreeMap<String, u64> {
     let mut digests: BTreeMap<String, u64> = BTreeMap::new();
     if let Some(ps) = ps {
-        let ps = ps.signature();
-        let graph = super::portable_types::HashGraph::of(&ps.type_graph);
-        // Hoisted exports grouped by their top-level name, in their original
-        // relative order.
-        let mut hoisted_by_name: ahash::AHashMap<&str, Vec<&crate::lambda::HoistedExport>> =
-            ahash::AHashMap::new();
-        if let Some(info) = info {
-            for hoisted in info.cmj_hoisted_exports.iter() {
-                if let Some(first) = hoisted.path.first() {
-                    hoisted_by_name
-                        .entry(first.as_str())
-                        .or_default()
-                        .push(hoisted);
-                }
-            }
-        }
-        for item in &ps.ps_sig {
-            let Some(key) = sig_item_key(item) else {
-                continue;
-            };
+        for &(kind, name, declaration) in &ps.summary().item_hashes {
+            let key = item_key(kind, &name);
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
             if let Some(previous) = digests.get(&key) {
                 previous.hash(&mut hasher);
             }
-            super::portable_types::hash_sig_item(&mut hasher, item, &graph);
+            declaration.hash(&mut hasher);
             // The JS metadata dependents' code generation reads for the item,
             // without locations and identifier stamps (see `digest_ser`).
-            if let (Some(info), Some(name)) =
-                (info, key.strip_prefix("v:").or(key.strip_prefix("m:")))
-            {
+            if let (Some(info), Kind::Value | Kind::Module) = (info, kind) {
+                let name = name.as_str();
                 let mut canonical = super::digest_ser::Canonical::new(&mut hasher);
                 canonical.hash(&info.cmj_export_constants.get(name));
                 canonical.hash(&info.cmj_export_arities.get(name));
                 canonical.hash(&info.cmj_export_lambdas.get(name));
-                for hoisted in hoisted_by_name.get(name).into_iter().flatten() {
-                    canonical.hash(*hoisted);
-                }
             }
             digests.insert(key, hasher.finish());
         }
@@ -484,6 +459,7 @@ impl RefWalker<'_> {
 }
 
 /// The references of the items of one unit's signature, computed once.
+#[derive(Debug, Clone, PartialEq)]
 pub struct UnitRefs {
     /// Item (kind and name) to the references of its declaration(s) and
     /// inlinable lambda.
@@ -492,9 +468,51 @@ pub struct UnitRefs {
     pub aliases: ahash::AHashMap<(Kind, Name), Vec<UnitRead>>,
 }
 
-/// The references of every item of `ps`.
-pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
-    let ps = ps.signature();
+/// What incremental builds read of a published signature: computed from the
+/// decoded signature once, so that neither item digests nor reference
+/// resolution decode it again.
+#[derive(Debug)]
+pub struct SignatureSummary {
+    /// The unit `refs` belong to.
+    pub unit: Name,
+    /// Kind, name and declaration digest of each top-level item, in
+    /// signature order (a shadowed name appears once per declaration).
+    pub item_hashes: Vec<(Kind, Name, u64)>,
+    /// The references of each item's declaration ([`signature_refs`]).
+    pub refs: Arc<UnitRefs>,
+}
+
+impl SignatureSummary {
+    /// The summary of `sig`, the published signature of `unit`.
+    pub fn of(unit: &str, sig: &super::portable_types::PortableSignature) -> Self {
+        let unit = Name::new(unit);
+        let graph = super::portable_types::HashGraph::of(&sig.type_graph);
+        let item_hashes = sig
+            .ps_sig
+            .iter()
+            .filter_map(|item| {
+                let (kind, name) = sig_item_kind_name(item)?;
+                let mut hasher = std::collections::hash_map::DefaultHasher::new();
+                super::portable_types::hash_sig_item(&mut hasher, item, &graph);
+                Some((kind, name, hasher.finish()))
+            })
+            .collect();
+        SignatureSummary {
+            unit,
+            item_hashes,
+            refs: Arc::new(signature_refs(unit, sig)),
+        }
+    }
+}
+
+fn sort_refs(refs: &mut Vec<UnitRead>) {
+    refs.sort_by(|a, b| (a.unit, &a.segs, a.kind).cmp(&(b.unit, &b.segs, b.kind)));
+    refs.dedup();
+}
+
+/// The references of the declaration of every item of `unit`'s signature,
+/// without what inlinable bodies refer to.
+pub fn signature_refs(unit: Name, ps: &super::portable_types::PortableSignature) -> UnitRefs {
     let own_keys: ahash::AHashSet<(Kind, Name)> =
         ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
     let mut refs: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
@@ -515,38 +533,42 @@ pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -
         walker.epoch += 1;
         // A top-level module alias reads its target only through a path
         // into it (see `aliases`); its digest covers the target's name.
-        let is_alias = matches!(
-            item,
-            SignatureItem::SigModule(_, md, _) if matches!(md.md_type, ModuleType::MtyAlias(..))
-        );
-        if !is_alias {
-            walker.item(item);
-        }
-        let mut out = std::mem::take(&mut walker.out);
-        match item {
-            SignatureItem::SigValue(id, _) | SignatureItem::SigModule(id, _, _) => {
-                for lambda_unit in source.lambda_units(unit, id.name()) {
-                    out.push(UnitRead {
-                        unit: lambda_unit,
-                        segs: Segs::new(),
-                        kind: Kind::Module,
-                    });
-                }
-            }
-            _ => {}
-        }
         if let SignatureItem::SigModule(_, md, _) = item
             && let ModuleType::MtyAlias(_, target) = &md.md_type
         {
             let mut targets = Vec::new();
             read_of_path(target, Kind::Module, Some(unit), &mut targets);
             aliases.entry(key).or_default().extend(targets);
+        } else {
+            walker.item(item);
         }
-        out.sort_by(|a, b| (a.unit, &a.segs, a.kind).cmp(&(b.unit, &b.segs, b.kind)));
-        out.dedup();
+        let mut out = std::mem::take(&mut walker.out);
+        sort_refs(&mut out);
         refs.entry(key).or_default().extend(out);
     }
     UnitRefs { refs, aliases }
+}
+
+/// `refs` (the [`signature_refs`] of `unit`) plus the units the inlinable
+/// body of each value and module refers to.
+pub fn with_lambda_units(refs: &UnitRefs, unit: Name, source: &dyn UnitSource) -> UnitRefs {
+    let mut refs = refs.clone();
+    for ((kind, name), item_refs) in refs.refs.iter_mut() {
+        if !matches!(kind, Kind::Value | Kind::Module) {
+            continue;
+        }
+        let lambda_units = source.lambda_units(unit, name.as_str());
+        if lambda_units.is_empty() {
+            continue;
+        }
+        item_refs.extend(lambda_units.into_iter().map(|lambda_unit| UnitRead {
+            unit: lambda_unit,
+            segs: Segs::new(),
+            kind: Kind::Module,
+        }));
+        sort_refs(item_refs);
+    }
+    refs
 }
 
 /// What resolving reads needs to know about the units.
@@ -556,7 +578,7 @@ pub trait UnitSource {
     /// Units whose reads need no recording (the runtime, which does not
     /// change within a build).
     fn ignored(&self, unit: Name) -> bool;
-    /// The item references of a unit ([`unit_refs`] of its signature),
+    /// The item references of a unit ([`signature_refs`] of its signature),
     /// `None` when it is not known.
     fn refs(&self, unit: Name) -> Option<Arc<UnitRefs>>;
 }
@@ -646,4 +668,307 @@ pub fn read_digest<'a>(
         digests.get(key).hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Units by name, each with the references and aliases of its items.
+    #[derive(Default)]
+    struct Units {
+        units: ahash::AHashMap<Name, Arc<UnitRefs>>,
+        ignored: ahash::AHashSet<Name>,
+    }
+
+    impl UnitSource for Units {
+        fn lambda_units(&self, _unit: Name, _name: &str) -> Vec<Name> {
+            Vec::new()
+        }
+        fn ignored(&self, unit: Name) -> bool {
+            self.ignored.contains(&unit)
+        }
+        fn refs(&self, unit: Name) -> Option<Arc<UnitRefs>> {
+            self.units.get(&unit).cloned()
+        }
+    }
+
+    fn read(unit: &str, segs: &[&str], kind: Kind) -> UnitRead {
+        UnitRead {
+            unit: Name::new(unit),
+            segs: segs.iter().map(|seg| Name::new(seg)).collect(),
+            kind,
+        }
+    }
+
+    fn unit(
+        items: &[(Kind, &str, Vec<UnitRead>)],
+        aliases: &[(&str, UnitRead)],
+    ) -> Arc<UnitRefs> {
+        Arc::new(UnitRefs {
+            refs: items
+                .iter()
+                .map(|(kind, name, refs)| ((*kind, Name::new(name)), refs.clone()))
+                .collect(),
+            aliases: aliases
+                .iter()
+                .map(|(name, target)| ((Kind::Module, Name::new(name)), vec![target.clone()]))
+                .collect(),
+        })
+    }
+
+    /// The resolved reads as sorted `Unit.key` strings.
+    fn resolved(initial: Vec<UnitRead>, source: &Units) -> Vec<String> {
+        let mut out: Vec<String> = resolve_reads(initial, source)
+            .into_iter()
+            .flat_map(|(unit, keys)| {
+                keys.into_iter()
+                    .map(move |key| format!("{unit}.{}", key.to_key_string()))
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// The published signature of a unit `Unit` with `type t = Dep.t` and
+    /// `let make: Dep.Sub.u => t`.
+    fn published_unit() -> PortablePersStruct {
+        use crate::ident::Ident;
+        use crate::types::decl::{RecStatus, TypeDeclaration, ValueDescription, ValueKind};
+        let ctx = crate::types::TypeContext::new(Arc::new(crate::context::IdGenerator::new()));
+        let dep = Path::pident(Ident::create_persistent("Dep"));
+        let t_id = Ident::create_local("t");
+        let dep_t = ctx.new_constr(Path::pdot(dep, "t"), vec![]);
+        let dep_sub_u = ctx.new_constr(Path::pdot(Path::pdot(dep, "Sub"), "u"), vec![]);
+        let own_t = ctx.new_constr(Path::pident(t_id), vec![]);
+        let signature = vec![
+            SignatureItem::SigType(
+                t_id,
+                Arc::new(TypeDeclaration {
+                    type_params: vec![],
+                    type_arity: 0,
+                    type_kind: TypeKind::TypeAbstract,
+                    type_private: crate::types::PrivateFlag::Public,
+                    type_manifest: Some(dep_t),
+                    type_variance: vec![],
+                    type_newtype_level: None,
+                    type_loc: crate::types::DeclLoc::none(),
+                    type_attributes: vec![],
+                    type_immediate: false,
+                    type_representation: crate::types::TypeRepresentation::Boxed,
+                    type_inlined_types: vec![],
+                    type_path: None,
+                    type_shape: crate::types::ValueShape::Unstated,
+                }),
+                RecStatus::TrecNot,
+            ),
+            SignatureItem::SigValue(
+                Ident::create_local("make"),
+                ValueDescription {
+                    val_type: ctx.new_arrow_simple(dep_sub_u, own_t),
+                    val_kind: ValueKind::ValReg,
+                    val_loc: crate::types::DeclLoc::none(),
+                    val_attributes: Default::default(),
+                    val_path: None,
+                },
+            ),
+        ];
+        super::super::portable_types::serialize_pers_struct(
+            &super::super::persistent_env::PersStruct {
+                ps_name: "Unit".to_string(),
+                ps_sig: Arc::new(signature),
+                ps_filename: "Unit.res".to_string(),
+                ps_deprecated: None,
+                ps_crcs: vec![],
+                ps_alias_rewrites: Default::default(),
+            },
+            &ctx,
+            None,
+        )
+    }
+
+    #[test]
+    fn a_signature_read_from_storage_summarizes_like_the_published_one() {
+        let published = published_unit();
+        let summary = published.summary();
+        assert_eq!(summary.unit, Name::new("Unit"));
+        assert_eq!(
+            summary
+                .item_hashes
+                .iter()
+                .map(|(kind, name, _)| item_key(*kind, name))
+                .collect::<Vec<_>>(),
+            ["t:t", "v:make"]
+        );
+        assert_eq!(
+            summary.refs.refs[&(Kind::Type, Name::new("t"))],
+            [read("Dep", &["t"], Kind::Type)]
+        );
+        assert_eq!(
+            summary.refs.refs[&(Kind::Value, Name::new("make"))],
+            [read("Dep", &["Sub", "u"], Kind::Type), read("Unit", &["t"], Kind::Type)]
+        );
+
+        // Stored and read back, the summary is not there: it is computed
+        // from the decoded signature, with the same result.
+        let stored: PortablePersStruct =
+            crate::binser::from_slice(&crate::binser::to_vec(&published).unwrap()).unwrap();
+        let restored = stored.summary();
+        assert_eq!(restored.item_hashes, summary.item_hashes);
+        assert_eq!(restored.refs, summary.refs);
+        assert_eq!(
+            item_digests(Some(&stored), None),
+            item_digests(Some(&published), None)
+        );
+    }
+
+    fn encoded(sig: &super::super::portable_types::PortableSignature) -> Vec<u8> {
+        crate::binser::to_vec(sig).unwrap()
+    }
+
+    #[test]
+    fn the_first_dependent_gets_the_signature_as_published() {
+        let published = published_unit();
+        let decoded = encoded(&published.signature());
+        assert!(published.has_signature_for_dependent());
+        // The signature set aside is what decoding gives, handed out once.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+        assert!(!published.has_signature_for_dependent());
+        // Later dependents decode.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+    }
+
+    #[test]
+    fn a_unit_without_dependents_gives_up_its_signature_for_them() {
+        let published = published_unit();
+        let decoded = encoded(&published.signature());
+        published.release_signature_for_dependent();
+        assert!(!published.has_signature_for_dependent());
+        // A dependent that shows up anyway decodes.
+        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+    }
+
+    #[test]
+    fn stored_and_copied_structs_set_no_signature_aside() {
+        let published = published_unit();
+        let copy = published.clone();
+        let stored: PortablePersStruct =
+            crate::binser::from_slice(&crate::binser::to_vec(&published).unwrap()).unwrap();
+        for other in [&copy, &stored] {
+            assert!(!other.has_signature_for_dependent());
+            assert_eq!(
+                encoded(&other.signature_for_dependent()),
+                encoded(&published.signature())
+            );
+        }
+        // Copying and storing took nothing from the original.
+        assert!(published.has_signature_for_dependent());
+    }
+
+    #[test]
+    fn lambda_units_extend_value_and_module_references() {
+        struct Lambdas;
+        impl UnitSource for Lambdas {
+            fn lambda_units(&self, _unit: Name, name: &str) -> Vec<Name> {
+                if name == "make" {
+                    vec![Name::new("Inlined"), Name::new("Dep")]
+                } else {
+                    Vec::new()
+                }
+            }
+            fn ignored(&self, _unit: Name) -> bool {
+                false
+            }
+            fn refs(&self, _unit: Name) -> Option<Arc<UnitRefs>> {
+                None
+            }
+        }
+        let published = published_unit();
+        let base = &published.summary().refs;
+        let extended = with_lambda_units(base, Name::new("Unit"), &Lambdas);
+        let whole = |unit: &str| read(unit, &[], Kind::Module);
+        let mut expected = base.refs[&(Kind::Value, Name::new("make"))].clone();
+        expected.extend([whole("Inlined"), whole("Dep")]);
+        sort_refs(&mut expected);
+        assert_eq!(extended.refs[&(Kind::Value, Name::new("make"))], expected);
+        assert_eq!(
+            extended.refs[&(Kind::Type, Name::new("t"))],
+            base.refs[&(Kind::Type, Name::new("t"))]
+        );
+        assert_eq!(extended.aliases, base.aliases);
+    }
+
+    #[test]
+    fn reads_close_over_declarations_and_aliases() {
+        let mut source = Units::default();
+        // `A.f : B.t => C.Sub.u`, `B.t = D.t` (a cycle back through `D.t = B.t`),
+        // `C.Sub` a plain submodule, `NS.Child = Child`, `Child.x : B.t`.
+        source.units.insert(
+            Name::new("A"),
+            unit(
+                &[(
+                    Kind::Value,
+                    "f",
+                    vec![read("B", &["t"], Kind::Type), read("C", &["Sub", "u"], Kind::Type)],
+                )],
+                &[],
+            ),
+        );
+        source.units.insert(
+            Name::new("B"),
+            unit(&[(Kind::Type, "t", vec![read("D", &["t"], Kind::Type)])], &[]),
+        );
+        source.units.insert(
+            Name::new("D"),
+            unit(&[(Kind::Type, "t", vec![read("B", &["t"], Kind::Type)])], &[]),
+        );
+        source.units.insert(
+            Name::new("C"),
+            unit(&[(Kind::Module, "Sub", vec![read("Rt", &["x"], Kind::Value)])], &[]),
+        );
+        source.units.insert(
+            Name::new("NS"),
+            unit(
+                &[(Kind::Module, "Child", vec![])],
+                &[("Child", read("Child", &[], Kind::Module))],
+            ),
+        );
+        source.units.insert(
+            Name::new("Child"),
+            unit(
+                &[
+                    (Kind::Value, "x", vec![read("B", &["t"], Kind::Type)]),
+                    (Kind::Value, "y", vec![read("Unknown", &["t"], Kind::Type)]),
+                ],
+                &[],
+            ),
+        );
+        source.ignored.insert(Name::new("Rt"));
+
+        // One value: its declaration's types, transitively; the runtime
+        // unit is not recorded.
+        assert_eq!(
+            resolved(vec![read("A", &["f"], Kind::Value)], &source),
+            ["A.@", "A.v:f", "B.@", "B.t:t", "C.@", "C.m:Sub", "D.@", "D.t:t"]
+        );
+        // Through an alias the rest of the path is read in the target, and
+        // the same alias read with another rest is followed again.
+        assert_eq!(
+            resolved(
+                vec![
+                    read("NS", &["Child", "x"], Kind::Value),
+                    read("NS", &["Child", "x"], Kind::Value),
+                    read("NS", &["Child", "missing"], Kind::Value),
+                ],
+                &source
+            ),
+            ["B.@", "B.t:t", "Child.@", "Child.v:missing", "Child.v:x", "D.@", "D.t:t", "NS.@", "NS.m:Child"]
+        );
+        // The alias itself reads the whole target; a unit without a known
+        // signature is read whole.
+        assert_eq!(
+            resolved(vec![read("NS", &["Child"], Kind::Module)], &source),
+            ["B.@", "B.t:t", "Child.*", "Child.@", "D.@", "D.t:t", "NS.@", "NS.m:Child", "Unknown.*", "Unknown.@"]
+        );
+    }
 }

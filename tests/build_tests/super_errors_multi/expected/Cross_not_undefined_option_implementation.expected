@@ -1,0 +1,19 @@
+We've found a bug for you!
+  /.../fixtures/Cross_not_undefined_option_implementation/Hidden.res:1:1-20
+
+  1 │ type t = option<int>
+  2 │ let none: t = None
+  3 │ 
+
+  The implementation /.../fixtures/Cross_not_undefined_option_implementation/Hidden.res
+  does not match the interface /.../fixtures/Cross_not_undefined_option_implementation/Hidden.resi:
+  
+  Actual declaration (/.../fixtures/Cross_not_undefined_option_implementation/Hidden.res:1:1-20):
+    type t = option<int>
+  
+  Expected declaration (/.../fixtures/Cross_not_undefined_option_implementation/Hidden.resi:1:15-20):
+    @notUndefined type t
+  
+  Their runtime representations differ:
+    Actual declaration: can hold undefined
+    Expected declaration: @notUndefined

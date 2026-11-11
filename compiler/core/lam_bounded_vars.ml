@@ -74,7 +74,10 @@ let rewrite (map : _ Hash_ident.t) (lam : Lambda.t) : Lambda.t =
     | Some x -> Some (aux x)
   and aux (lam : Lambda.t) : Lambda.t =
     match lam with
-    | Lvar v -> Hash_ident.find_default map v lam
+    | Lvar v -> (
+      match Hash_ident.find_opt map v with
+      | Some lam -> lam
+      | None -> lam)
     | Llet (str, v, l1, l2) ->
       let v = rebind v in
       let l1 = aux l1 in
@@ -118,10 +121,10 @@ let rewrite (map : _ Hash_ident.t) (lam : Lambda.t) : Lambda.t =
       (* here it makes sure that global vars are not rebound *)
       Lambda.prim ~primitive ~args:(Ext_list.map args aux) loc
     | Lglobal_module _ -> lam
-    | Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx} ->
+    | Lapply {ap_func; ap_args; ap_loc} ->
       let fn = aux ap_func in
       let args = Ext_list.map ap_args aux in
-      Lambda.apply ~ap_transformed_jsx fn args ap_info
+      Lambda.apply fn args ap_loc
     | Lswitch
         ( l,
           {
@@ -151,6 +154,10 @@ let rewrite (map : _ Hash_ident.t) (lam : Lambda.t) : Lambda.t =
       let v = rebind v in
       let l2 = aux l2 in
       Lambda.try_ l1 v l2
+    | Ltryfinally (l1, l2) ->
+      let l1 = aux l1 in
+      let l2 = aux l2 in
+      Lambda.try_finally l1 l2
     | Lifthenelse (l1, l2, l3) ->
       let l1 = aux l1 in
       let l2 = aux l2 in

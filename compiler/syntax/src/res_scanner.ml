@@ -22,6 +22,7 @@ type t = {
       (* current number of utf16 code units since line start *)
   mutable line_offset: int; (* current line offset *)
   mutable lnum: int; (* current line number *)
+  mutable line_break: int;
 }
 
 let position scanner =
@@ -85,11 +86,15 @@ let next scanner =
       then 2
       else 1
   in
+  (* A line ends at LF, or at a CR not followed by LF. CRLF ends a line once,
+     at its LF. *)
   let newline =
-    scanner.ch = '\n'
-    (* What about CRLF (\r + \n) on windows?
-       \r\n will always be terminated by a \n
-       -> we can just bump the line count on \n *)
+    match scanner.ch with
+    | '\n' -> true
+    | '\r' ->
+      next_offset >= String.length scanner.src
+      || String.unsafe_get scanner.src next_offset <> '\n'
+    | _ -> false
   in
   if newline then (
     scanner.line_offset <- next_offset;
@@ -141,16 +146,26 @@ let peek_char scanner target_char =
 
 let peek_slash scanner = peek_char scanner '/'
 
+let byte_order_mark src =
+  let bom = "\xEF\xBB\xBF" in
+  if String.starts_with ~prefix:bom src then bom else ""
+
 let make ~filename src =
+  (* Skip a byte order mark: it is not part of the program, and the first line
+     starts after it, as in an editor *)
+  let offset = String.length (byte_order_mark src) in
   {
     filename;
     src;
     err = (fun ~start_pos:_ ~end_pos:_ _ -> ());
-    ch = (if src = "" then hacky_eof_char else String.unsafe_get src 0);
-    offset = 0;
+    ch =
+      (if offset >= String.length src then hacky_eof_char
+       else String.unsafe_get src offset);
+    offset;
     offset16 = 0;
-    line_offset = 0;
+    line_offset = offset;
     lnum = 1;
+    line_break = -1;
   }
 
 (* generic helpers *)
@@ -160,8 +175,12 @@ let is_whitespace ch =
   | ' ' | '\t' | '\n' | '\r' -> true
   | _ -> false
 
+(* Record the first LF skipped between tokens. Literals and comments consume
+   their own line breaks. *)
 let rec skip_whitespace scanner =
   if is_whitespace scanner.ch then (
+    if scanner.ch = '\n' && scanner.line_break < 0 then
+      scanner.line_break <- scanner.offset;
     next scanner;
     skip_whitespace scanner)
 
@@ -178,7 +197,7 @@ let scan_identifier scanner =
   let start_off = scanner.offset in
   let rec skip_good_chars scanner =
     match scanner.ch with
-    | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '\'' ->
+    | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '\'' | '$' ->
       next scanner;
       skip_good_chars scanner
     | _ -> ()
@@ -331,6 +350,13 @@ let scan_exotic_identifier scanner =
     scanner.err ~start_pos ~end_pos
       (Diagnostics.message "A quoted identifier can't be empty string.");
     Token.Lident ident)
+  else if name = "_" then (
+    (* `_` is the wildcard and the placeholder of underscore apply sugar;
+       a quoted `_` couldn't be told apart from them. *)
+    let end_pos = position scanner in
+    scanner.err ~start_pos ~end_pos
+      (Diagnostics.message "`_` can't be used as a quoted identifier.");
+    Token.Lident name)
   else if Ext_ident.is_uident name then Token.Lident ident
     (* Exotic ident with uppercase letter should be encoded to avoid confusing in OCaml parsetree *)
   else Token.Lident name
@@ -612,7 +638,7 @@ let scan_regex ~start_pos:opening_pos ~prefix_length scanner =
         scan_flags ()
       in
       (pattern, flags)
-    | ch when ch == '\n' || ch == hacky_eof_char ->
+    | ch when ch == '\n' || ch == '\r' || ch == hacky_eof_char ->
       let end_pos = position scanner in
       scanner.err ~start_pos ~end_pos (Diagnostics.message "unterminated regex");
       let pattern =
@@ -779,7 +805,7 @@ let rec scan scanner =
   let token =
     match scanner.ch with
     (* peeking 0 char *)
-    | 'A' .. 'Z' | 'a' .. 'z' -> scan_identifier scanner
+    | 'A' .. 'Z' | 'a' .. 'z' | '$' -> scan_identifier scanner
     | '0' .. '9' -> scan_number scanner
     | '`' ->
       next scanner;
@@ -823,7 +849,8 @@ let rec scan scanner =
     (* peeking 1 char *)
     | '_' -> (
       match peek scanner with
-      | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' -> scan_identifier scanner
+      | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '$' ->
+        scan_identifier scanner
       | _ ->
         next scanner;
         Token.Underscore)

@@ -36,6 +36,7 @@ let local_external_apply loc ?(pval_attributes = [])
               pval_type;
               pval_loc = loc;
               pval_prim = Some pval_prim;
+              pval_jsx_component = None;
               pval_attributes;
             };
         ],
@@ -55,7 +56,7 @@ let inline_bool b = inline_const (Const_bool b)
 let inline_int i = inline_const (Const_int i)
 
 let inline_bigint s =
-  let negative, digits = Bigint_utils.parse_bigint s in
-  inline_const (Const_bigint {negative; digits})
+  let positive, digits = Bigint_utils.parse_bigint s in
+  inline_const (Const_bigint {positive; digits})
 
 let inline_float s = inline_const (Const_float s)

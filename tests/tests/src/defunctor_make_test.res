@@ -1,12 +1,15 @@
 module Comparable: {
   type comparator<'a>
   let getcompare: comparator<'a> => ('a, 'a) => int
+
   module type C = {
     type id
     type key
     let compare: comparator<key>
   }
+
   type compare<'key, 'id> = module(C with type key = 'key and type id = 'id)
+
   module Make: (
     M: {
       type key
@@ -16,11 +19,13 @@ module Comparable: {
 } = {
   type comparator<'a> = ('a, 'a) => int
   let getcompare: comparator<'a> => ('a, 'a) => int = x => x
+
   module type C = {
     type id
     type key
     let compare: comparator<key>
   }
+
   type compare<'key, 'id> = module(C with type key = 'key and type id = 'id)
 
   module Make = (
@@ -71,13 +76,13 @@ let bal = (l, x, d, r) => {
   }
   if hl > hr + 2 {
     switch l {
-    | Empty => invalid_arg("Map.bal")
+    | Empty => throw(Invalid_argument("Map.bal"))
     | Node(ll, lv, ld, lr, _) =>
       if height(ll) >= height(lr) {
         create(ll, lv, ld, create(lr, x, d, r))
       } else {
         switch lr {
-        | Empty => invalid_arg("Map.bal")
+        | Empty => throw(Invalid_argument("Map.bal"))
         | Node(lrl, lrv, lrd, lrr, _) =>
           create(create(ll, lv, ld, lrl), lrv, lrd, create(lrr, x, d, r))
         }
@@ -85,13 +90,13 @@ let bal = (l, x, d, r) => {
     }
   } else if hr > hl + 2 {
     switch r {
-    | Empty => invalid_arg("Map.bal")
+    | Empty => throw(Invalid_argument("Map.bal"))
     | Node(rl, rv, rd, rr, _) =>
       if height(rr) >= height(rl) {
         create(create(l, x, d, rl), rv, rd, rr)
       } else {
         switch rl {
-        | Empty => invalid_arg("Map.bal")
+        | Empty => throw(Invalid_argument("Map.bal"))
         | Node(rll, rlv, rld, rlr, _) =>
           create(create(l, x, d, rll), rlv, rld, create(rlr, rv, rd, rr))
         }
@@ -156,10 +161,12 @@ module V0 = Comparable.Make({
   type key = int
   let compare = (x: key, y) => Pervasives.compare((x: key), y)
 })
+
 module V1 = Comparable.Make({
   type key = int
   let compare = (x: key, y) => Pervasives.compare(x, y)
 })
+
 let v0 = empty(module(V0))
 let v1 = empty(module(V1))
 

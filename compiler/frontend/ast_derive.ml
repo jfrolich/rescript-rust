@@ -27,32 +27,52 @@ type tdcls = Parsetree.type_declaration list
 type gen = {
   structure_gen: tdcls -> Asttypes.rec_flag -> Ast_structure.t;
   signature_gen: tdcls -> Asttypes.rec_flag -> Ast_signature.t;
-  expression_gen: (Parsetree.core_type -> Parsetree.expression) option;
 }
 
-(* the first argument is [config] payload
-   {[
-     { x = {uu} }
-   ]}
-*)
-type derive_table = (Parsetree.expression option -> gen) Map_string.t
+(* Derivers that used to be built in. They get a dedicated error pointing to
+   the replacement instead of the generic "is not supported" one. *)
+let removed_deriver_hint = function
+  | "abstract" ->
+    Some
+      "Use a record type instead. Records compile to plain JavaScript objects \
+       and support optional fields (`field?: t`), mutable fields and `@as` \
+       field renaming."
+  | "jsConverter" ->
+    Some
+      "Records already compile to plain JavaScript objects and polymorphic \
+       variants to their (`@as`-renamed) names, so the conversion functions \
+       are no longer needed."
+  | _ -> None
 
-let derive_table : derive_table ref = ref Map_string.empty
-
-let register key value = derive_table := Map_string.add !derive_table key value
+(* The derivers [@deriving(...)] supports, by name. *)
+let dispatch (({txt = name; loc}, config) : Ast_payload.action) =
+  match name with
+  | "accessors" ->
+    Ast_derive_projector.check_config config;
+    {
+      structure_gen = Ast_derive_projector.structure_gen;
+      signature_gen = Ast_derive_projector.signature_gen;
+    }
+  | _ -> (
+    match removed_deriver_hint name with
+    | Some hint ->
+      Location.raise_errorf ~loc "@deriving(%s) has been removed. %s" name hint
+    | None ->
+      Location.raise_errorf ~loc
+        "@deriving(%s) is not supported. The only deriver is \
+         @deriving(accessors)."
+        name)
 
 let gen_signature tdcls (actions : Ast_payload.action list)
     (explict_nonrec : Asttypes.rec_flag) : Ast_signature.t =
   Ext_list.flat_map actions (fun action ->
-      (Ast_payload.table_dispatch !derive_table action).signature_gen tdcls
-        explict_nonrec)
+      (dispatch action).signature_gen tdcls explict_nonrec)
 
 open Ast_helper
 
 let gen_structure_signature loc (tdcls : tdcls) (action : Ast_payload.action)
     (explicit_nonrec : Asttypes.rec_flag) =
-  let derive_table = !derive_table in
-  let u = Ast_payload.table_dispatch derive_table action in
+  let u = dispatch action in
 
   let a = u.structure_gen tdcls explicit_nonrec in
   let b = u.signature_gen tdcls explicit_nonrec in

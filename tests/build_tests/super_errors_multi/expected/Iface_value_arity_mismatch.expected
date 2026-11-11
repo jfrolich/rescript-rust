@@ -6,12 +6,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_value_arity_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_value_arity_mismatch/Foo.resi:
-  Values do not match:
+  
+  Actual declaration (/.../fixtures/Iface_value_arity_mismatch/Foo.res:1:5):
     let f: int => int => int
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_value_arity_mismatch/Foo.resi:1:1-24):
     let f: (int, int) => int
+  
   The implementation contains a function taking 1 argument where the interface expects one taking 2 arguments.
-  /.../fixtures/Iface_value_arity_mismatch/Foo.resi:1:1-24:
-    Expected declaration
-  /.../fixtures/Iface_value_arity_mismatch/Foo.res:1:5:
-    Actual declaration

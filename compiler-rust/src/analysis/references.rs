@@ -175,17 +175,6 @@ pub fn get_loc_item(
             }
             Some(*li3)
         }
-        [li1, li, ..]
-            if match &li1.loc_type {
-                LocType::Typed(_, t, _) => match &*full.source.typed.type_ctx.get_desc(*t) {
-                    TypeDesc::Tconstr { path, .. } => super::shared::is_uncurried_internal(path),
-                    _ => false,
-                },
-                _ => false,
-            } =>
-        {
-            Some(*li)
-        }
         [li, ..] => Some(*li),
         [] => None,
     };
@@ -533,7 +522,11 @@ pub fn type_definition_for_loc_item(
             let (env, declared) = dig_constructor(session, &env, &path)?;
             Some((
                 session.file(env.file).uri.clone(),
-                Loc::of_location(&session.types(env.file).resolve_loc(declared.item.decl.type_loc)),
+                Loc::of_location(
+                    &session
+                        .types(env.file)
+                        .resolve_loc(declared.item.decl.type_loc),
+                ),
             ))
         }
     }

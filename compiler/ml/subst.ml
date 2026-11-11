@@ -55,14 +55,15 @@ let add_modtype id ty s = {s with modtypes = Tbl.add id ty s.modtypes}
 let for_saving s = {s with for_saving = true}
 
 let loc s x =
-  if s.for_saving && not !Clflags.keep_locs then Location.none else x
+  if s.for_saving && not !((Clflags.current ()).keep_locs) then Location.none
+  else x
 
 let remove_loc =
   let open Ast_mapper in
   {default_mapper with location = (fun _this _loc -> Location.none)}
 
 let attrs s x =
-  if s.for_saving && not !Clflags.keep_locs then
+  if s.for_saving && not !((Clflags.current ()).keep_locs) then
     remove_loc.Ast_mapper.attributes remove_loc x
   else x
 
@@ -109,12 +110,13 @@ let to_subst_by_type_function s p =
 
 (* Special type ids for saved signatures *)
 
-let new_id = ref (-1)
-let reset_for_saving () = new_id := -1
+let reset_for_saving () =
+  (Compiler_request_state.current ()).substitution_saved_id <- -1
 
 let newpersty desc =
-  decr new_id;
-  {desc; level = generic_level; id = !new_id}
+  let state = Compiler_request_state.current () in
+  state.substitution_saved_id <- state.substitution_saved_id - 1;
+  {desc; level = generic_level; id = state.substitution_saved_id}
 
 (* ensure that all occurrences of 'Tvar None' are physically shared *)
 let tvar_none = Tvar None
@@ -232,8 +234,6 @@ let rec typexp_rec s ty =
 *)
 let type_expr s ty = with_copy_session (fun () -> typexp_rec s ty)
 
-let typexp = type_expr
-
 let label_declaration s l =
   {
     ld_id = l.ld_id;
@@ -283,6 +283,7 @@ let type_declaration s decl =
         type_attributes = attrs s decl.type_attributes;
         type_immediate = decl.type_immediate;
         type_representation = decl.type_representation;
+        type_shape = decl.type_shape;
         type_inlined_types = decl.type_inlined_types;
       })
 
@@ -303,7 +304,7 @@ let extension_constructor s ext =
         ext_ret_type = may_map (typexp_rec s) ext.ext_ret_type;
         ext_private = ext.ext_private;
         ext_attributes = attrs s ext.ext_attributes;
-        ext_loc = (if s.for_saving then Location.none else ext.ext_loc);
+        ext_loc = loc s ext.ext_loc;
         ext_is_exception = ext.ext_is_exception;
       })
 

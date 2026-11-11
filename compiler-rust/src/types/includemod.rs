@@ -18,12 +18,12 @@ use crate::types::Path;
 use crate::types::asttypes::MutableFlag as FieldKind;
 use crate::types::ctype;
 use crate::types::decl::{
-    Attribute, AttributePayload, ConstructorArguments, ConstructorDeclaration,
-    ExtensionConstructor, LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType,
-    RecStatus, Signature, SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind,
-    ValueDescription, ValueKind,
+    Attribute, ConstructorArguments, ConstructorDeclaration, ExtensionConstructor,
+    LabelDeclaration, ModtypeDeclaration, ModuleDeclaration, ModuleType, RecStatus, Signature,
+    SignatureItem, TypeDeclaration, TypeInlinedType, TypeKind, ValueDescription, ValueKind,
 };
 use crate::types::env::Env;
+use crate::types::includecore::TypeMismatch;
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc};
 use crate::types::typedtree::ModuleCoercion;
 use crate::types::{TypeContext, TypeExprRef};
@@ -39,26 +39,11 @@ pub type IncludeModResult<T> = Result<T, IncludeModError>;
 // Keep the error of every inclusion-check `Result` small; box declarations.
 const _: () = assert!(std::mem::size_of::<IncludeModError>() <= 64);
 
-fn deprecated_payload_from_attrs<'a>(
-    attrs: &'a [Attribute],
-    names: &[&str],
-) -> Option<&'a AttributePayload> {
-    attrs
-        .iter()
-        .find(|attr| names.iter().any(|name| attr.attr_name.txt == *name))
-        .map(|attr| &attr.attr_payload)
-}
-
-fn deprecated_payload_reason(payload: &AttributePayload) -> &str {
-    match payload {
-        AttributePayload::Deprecated { reason, .. } | AttributePayload::Str(reason) => {
-            reason.as_str()
-        }
-        AttributePayload::Empty => "",
-        _ => "",
-    }
-}
-
+/// `Builtin_attributes.check_deprecated_inclusion`
+/// (builtin_attributes.ml:119-122): `deprecated_of_attrs` of both sides,
+/// whose `string_of_opt_payload` reads the record form as `""` and raises
+/// on an invalid template. The pair is evaluated right to left, as
+/// ocamlopt evaluates tuples: the signature's attributes first.
 fn deprecated_inclusion_warning(
     type_ctx: &TypeContext,
     name: &str,
@@ -66,64 +51,84 @@ fn deprecated_inclusion_warning(
     sig_attrs: &[Attribute],
     def_loc: crate::types::DeclLoc,
     use_loc: crate::types::DeclLoc,
-) -> Option<Warning> {
-    let impl_payload =
-        deprecated_payload_from_attrs(impl_attrs, &["deprecated", "ocaml.deprecated"])?;
-    if deprecated_payload_from_attrs(sig_attrs, &["deprecated", "ocaml.deprecated"]).is_some() {
-        return None;
-    }
-    let reason = deprecated_payload_reason(impl_payload);
+) -> IncludeModResult<Option<Warning>> {
+    let invalid_escape = |loc| IncludeModError::InvalidStringEscape { loc };
+    let sig_reason =
+        crate::types::typecore::deprecated_of_decl_attrs(sig_attrs).map_err(invalid_escape)?;
+    let impl_reason =
+        crate::types::typecore::deprecated_of_decl_attrs(impl_attrs).map_err(invalid_escape)?;
+    let (Some(reason), None) = (impl_reason, sig_reason) else {
+        return Ok(None);
+    };
     let message = if reason.is_empty() {
         name.to_string()
     } else {
         format!("{name}\n  {reason}")
     };
-    Some(Warning::Deprecated {
+    Ok(Some(Warning::Deprecated {
         message,
         def_loc: type_ctx.resolve_loc(def_loc),
         use_loc: type_ctx.resolve_loc(use_loc),
         can_be_automigrated: false,
-    })
+    }))
 }
 
-fn deprecated_mutable_inclusion_warning(
+/// An inclusion check's result, with a payload reader's error taken out:
+/// it is a `Location.Error`, not an `Includemod.Error`, so it escapes the
+/// check and whatever reports its errors.
+pub fn escaped<T>(
     type_ctx: &TypeContext,
-    name: &str,
-    impl_attrs: &[Attribute],
-    sig_attrs: &[Attribute],
-    def_loc: crate::types::DeclLoc,
-    use_loc: crate::types::DeclLoc,
-) -> Option<Warning> {
-    let impl_payload = deprecated_payload_from_attrs(
-        impl_attrs,
-        &["deprecated_mutable", "ocaml.deprecated_mutable"],
-    )?;
-    if deprecated_payload_from_attrs(
-        sig_attrs,
-        &["deprecated_mutable", "ocaml.deprecated_mutable"],
-    )
-    .is_some()
+    result: IncludeModResult<T>,
+) -> Result<IncludeModResult<T>, crate::types::typecore::TypeCoreError> {
+    match result
+        .as_ref()
+        .err()
+        .and_then(IncludeModError::invalid_string_escape)
     {
-        return None;
+        Some(loc) => Err(crate::types::typecore::invalid_escape_at(type_ctx, loc)),
+        None => Ok(result),
     }
-    let reason = deprecated_payload_reason(impl_payload);
-    let message = if reason.is_empty() {
-        format!("mutating field {name}")
-    } else {
-        format!("mutating field {name}\n  {reason}")
-    };
-    Some(Warning::Deprecated {
-        message,
-        def_loc: type_ctx.resolve_loc(def_loc),
-        use_loc: type_ctx.resolve_loc(use_loc),
-        can_be_automigrated: false,
-    })
 }
 
-/// Errors that can occur during module inclusion checking.
+impl IncludeModError {
+    /// The location of the first payload reader's error in checking order,
+    /// wherever the error that carries it was nested: OCaml raises it at
+    /// once, before any error the check would have reported.
+    fn invalid_string_escape(&self) -> Option<crate::types::DeclLoc> {
+        match self {
+            IncludeModError::InvalidStringEscape { loc } => Some(*loc),
+            IncludeModError::ModuleTypeDeclarationMismatch { error, .. }
+            | IncludeModError::ModuleTypesMismatch { error, .. }
+            | IncludeModError::InModule { error, .. }
+            | IncludeModError::InFunctorBody { error, .. }
+            | IncludeModError::InFunctorArg { error, .. }
+            | IncludeModError::AtModtype { error, .. }
+            | IncludeModError::Reversed { error } => error.invalid_string_escape(),
+            IncludeModError::SignatureMismatch(errors) => errors
+                .iter()
+                .find_map(IncludeModError::invalid_string_escape),
+            _ => None,
+        }
+    }
+}
+
+/// `Includemod.Error`'s list of `(pos list, Env.t, symptom)` (includemod.ml),
+/// as a tree: each node that carries an error below it stands for the
+/// position or the entry OCaml conses onto that error's list.
 #[derive(Debug, Clone)]
 pub enum IncludeModError {
-    /// Missing signature field in implementation.
+    /// A `@deprecated` payload with an invalid escape: its reader's
+    /// `Location.Error` (ast_payload.ml:39-51), which escapes inclusion
+    /// checking.
+    InvalidStringEscape {
+        /// The payload's location.
+        loc: crate::types::DeclLoc,
+    },
+    /// `Dont_match` (includemod.ml): the module types do not match, which
+    /// the enclosing `modtypes` reports as their `Module_types` entry.
+    DontMatch,
+    /// `Missing_field (id, loc, kind, item)`: an expected item the
+    /// implementation lacks.
     MissingField {
         /// The missing item.
         id: Ident,
@@ -131,8 +136,10 @@ pub enum IncludeModError {
         loc: crate::types::DeclLoc,
         /// What kind of item it is, as printed (e.g. "value", "type").
         kind: &'static str,
+        /// The signature's item.
+        item: Box<SignatureItem>,
     },
-    /// Value type mismatch.
+    /// `Value_descriptions (id, vd1, vd2)`.
     ValueTypeMismatch {
         /// The value.
         name: Ident,
@@ -140,17 +147,11 @@ pub enum IncludeModError {
         actual: Box<ValueDescription>,
         /// The signature's declaration.
         expected: Box<ValueDescription>,
-        /// The implementation's and the signature's arity, when they differ.
+        /// `find_arity_mismatch env vd1.val_type vd2.val_type`: the
+        /// implementation's and the signature's arity, when they differ.
         arity_mismatch: Option<(usize, usize)>,
     },
-    /// Type declaration mismatch.
-    TypeMismatch {
-        /// The type.
-        name: Ident,
-        /// Why the declarations differ.
-        reason: String,
-    },
-    /// Type declaration mismatch with enough context to print OCaml's report.
+    /// `Type_declarations (id, decl1, decl2, errs)`.
     TypeDeclarationMismatch {
         /// The type.
         name: Ident,
@@ -158,10 +159,10 @@ pub enum IncludeModError {
         actual: Box<TypeDeclaration>,
         /// The signature's declaration.
         expected: Box<TypeDeclaration>,
-        /// How they differ.
-        detail: TypeDeclarationMismatchDetail,
+        /// `Includecore.type_declarations`'s differences, never empty.
+        errs: Vec<TypeMismatch>,
     },
-    /// Extension constructor mismatch.
+    /// `Extension_constructors (id, ext1, ext2)`.
     ExtensionConstructorMismatch {
         /// The constructor.
         name: Ident,
@@ -170,14 +171,9 @@ pub enum IncludeModError {
         /// The signature's constructor.
         expected: Box<ExtensionConstructor>,
     },
-    /// Module type mismatch.
-    ModuleTypeMismatch {
-        /// The module type.
-        name: Ident,
-        /// Why the declarations differ.
-        reason: String,
-    },
-    /// Module type declaration mismatch.
+    /// `Modtype_infos (id, info1, info2)` before the errors of the
+    /// equivalence check (includemod.ml `modtype_infos`); `expected` is
+    /// `Subst.modtype_declaration subst info2`.
     ModuleTypeDeclarationMismatch {
         /// The module type.
         name: Ident,
@@ -188,9 +184,11 @@ pub enum IncludeModError {
         /// Why they are not equivalent.
         error: Box<IncludeModError>,
     },
-    /// Equivalent module type declarations require a structure-field permutation.
+    /// `Modtype_permutation`.
     ModtypePermutation,
-    /// Nested module types do not include one another.
+    /// `Module_types (mty1, Subst.modtype subst mty2)` before the errors of
+    /// the comparison (includemod.ml `modtypes`); a `DontMatch` error
+    /// stands for none.
     ModuleTypesMismatch {
         /// The implementation's module type.
         actual: Box<ModuleType>,
@@ -199,405 +197,651 @@ pub enum IncludeModError {
         /// Why the first is not included in the second.
         error: Box<IncludeModError>,
     },
-    /// A module alias normalized to a path whose compiled interface is missing.
+    /// `Unbound_module_path path`.
     UnboundModulePath {
         /// The normalized path.
         path: Path,
     },
-    /// Nested include error reported in a module context.
+    /// The errors under `Module id`.
     InModule {
         /// The module.
         name: Ident,
         /// The error inside it.
         error: Box<IncludeModError>,
     },
-    /// Nested include error reported in a functor result context.
+    /// The errors under `Body param`, a functor's result.
     InFunctorBody {
         /// The functor's parameter.
         param: Ident,
-        /// The implementation's functor type.
-        actual: Box<ModuleType>,
-        /// The signature's functor type.
-        expected: Box<ModuleType>,
         /// The error in the result.
         error: Box<IncludeModError>,
     },
-    /// Nested include error reported in a module type position.
+    /// The errors under `Arg param`, a functor's parameter, where inclusion
+    /// goes the other way.
+    InFunctorArg {
+        /// The functor's parameter.
+        param: Ident,
+        /// The error in the parameter.
+        error: Box<IncludeModError>,
+    },
+    /// The errors under `Modtype id`.
     AtModtype {
         /// The module type.
         name: Ident,
         /// The error inside it.
         error: Box<IncludeModError>,
     },
-    /// Functor parameter mismatch.
-    FunctorParamMismatch(String),
-    /// Functor result mismatch.
-    FunctorResultMismatch(String),
-    /// Not a functor.
-    NotAFunctor,
-    /// Signature mismatch with details.
+    /// The errors under `Reverse`: the second half of an equivalence check
+    /// of module types, compared the other way round.
+    Reversed {
+        /// The error in the reversed check.
+        error: Box<IncludeModError>,
+    },
+    /// Several errors at the same position, in order.
     SignatureMismatch(Vec<IncludeModError>),
 }
 
-/// Structured counterpart of `Includecore.type_mismatch`.
-///
-/// Most inclusion checks still produce a pre-rendered detail while they are
-/// ported, but semantic mismatches must remain distinguishable from their
-/// diagnostic text. In particular, `TagName` originates from the canonical
-/// variant layout rather than from a formatted declaration.
-#[derive(Debug, Clone)]
-pub enum TypeDeclarationMismatchDetail {
-    /// The `@tag` attributes differ.
-    TagName,
-    /// The variances differ.
-    Variance,
-    /// Any other difference, as its message.
-    Rendered(String),
+/// The formatter an inclusion report prints into.
+type Ppf<'b> = crate::parser::formatter::Formatter<&'b mut Vec<u8>>;
+
+/// `Format.pp_print_string`: a string as wide as its bytes (format.ml
+/// `pp_print_string` measures `String.length`).
+fn pp_text(ppf: &mut Ppf<'_>, s: &str) {
+    ppf.string_as(s.len(), s);
 }
 
-impl TypeDeclarationMismatchDetail {
-    fn message(&self) -> &str {
-        match self {
-            Self::TagName => "Their @tag annotations differ.",
-            Self::Variance => "Their variances do not agree.",
-            Self::Rendered(message) => message,
-        }
-    }
+/// What an inclusion report is printed under.
+pub(crate) enum ReportHeading<'a> {
+    /// `Typemod.report_error (Not_included errs)`:
+    /// `@[<v>Signature mismatch:@,@,%a@]`.
+    SignatureMismatch,
+    /// `Includemod.compunit`'s errors, whose list starts with
+    /// `([], Env.empty, Interface_mismatch (impl_name, intf_name))`.
+    Interface {
+        impl_name: &'a str,
+        intf_name: &'a str,
+    },
+    /// `Typemod.report_error (With_mismatch (lid, explanation))`.
+    WithMismatch { lid: &'a str },
+    /// `Typemod.report_error (With_makes_applicative_functor_ill_typed (lid,
+    /// path, explanation))`.
+    WithMakesApplicativeFunctorIllTyped { lid: &'a str, path: &'a str },
 }
 
-impl From<String> for TypeDeclarationMismatchDetail {
-    fn from(value: String) -> Self {
-        Self::Rendered(value)
-    }
-}
-
-impl From<&str> for TypeDeclarationMismatchDetail {
-    fn from(value: &str) -> Self {
-        Self::Rendered(value.to_string())
-    }
-}
-
-/// Render an inclusion error as OCaml's "Signature mismatch" report.
+/// `Typemod.report_error (Not_included errs)` (typemod.ml).
 pub fn format_error(type_ctx: &TypeContext, filename: &str, error: &IncludeModError) -> String {
-    let mut output = String::new();
-    output.push_str("  Signature mismatch:\n");
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
-    output
+    format_report(type_ctx, filename, error, ReportHeading::SignatureMismatch)
 }
 
-pub(crate) fn format_error_without_signature_header(
+/// An inclusion report under `heading`, printed at column 2, the column of
+/// a report's message in its vertical box, ending in a newline.
+pub(crate) fn format_report(
     type_ctx: &TypeContext,
     filename: &str,
     error: &IncludeModError,
+    heading: ReportHeading<'_>,
 ) -> String {
-    let mut output = String::new();
-    format_include_error(type_ctx, filename, error, &mut Vec::new(), &mut output);
-    output
-}
-
-/// OCaml `Includemod.show_loc` (includemod.ml:489-490):
-/// `@\n@[<2>%a:@ %s@]`, which stays on one line when it fits the 78-column
-/// margin and otherwise breaks with a 2-space indent.
-fn push_show_loc(output: &mut String, location: &str, message: &str) {
-    // Width is measured on the plain text; colour codes are Format tags.
-    let fits = 2 + location.len() + 2 + message.len() <= 77;
-    let location = code_frame::colorize_location(location);
-    if fits {
-        output.push_str("  ");
-        output.push_str(&location);
-        output.push_str(": ");
-        output.push_str(message);
-        output.push('\n');
-    } else {
-        output.push_str("  ");
-        output.push_str(&location);
-        output.push_str(":\n    ");
-        output.push_str(message);
-        output.push('\n');
+    use crate::parser::formatter::BoxKind;
+    let mut entries = Vec::new();
+    if let ReportHeading::Interface {
+        impl_name,
+        intf_name,
+    } = heading
+    {
+        entries.push(ReportEntry {
+            cxt: Vec::new(),
+            symptom: ReportSymptom::Interface {
+                impl_name,
+                intf_name,
+            },
+        });
     }
+    flatten_error(error, &mut Vec::new(), &mut entries);
+    let mut buf = Vec::new();
+    {
+        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+        ppf.string_as(2, "");
+        let ppf = &mut ppf;
+        match heading {
+            ReportHeading::Interface { .. } => report_error(ppf, type_ctx, filename, &entries),
+            ReportHeading::SignatureMismatch => {
+                ppf.open_vbox(0);
+                pp_text(ppf, "Signature mismatch:");
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
+            // `@[<v>@[In this `with' constraint, the new definition of %a@
+            // does not match its original definition@ in the constrained
+            // signature:@]@,@,%a@]`
+            ReportHeading::WithMismatch { lid } => {
+                ppf.open_vbox(0);
+                ppf.open_box(BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!("In this `with' constraint, the new definition of {lid}"),
+                );
+                ppf.space();
+                pp_text(ppf, "does not match its original definition");
+                ppf.space();
+                pp_text(ppf, "in the constrained signature:");
+                ppf.close_box();
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
+            // `@[<v>@[This `with' constraint on %a makes the applicative
+            // functor @ type %s ill-typed in the constrained signature:@]@,@,%a@]`
+            ReportHeading::WithMakesApplicativeFunctorIllTyped { lid, path } => {
+                ppf.open_vbox(0);
+                ppf.open_box(BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!("This `with' constraint on {lid} makes the applicative functor "),
+                );
+                ppf.space();
+                pp_text(
+                    ppf,
+                    &format!("type {path} ill-typed in the constrained signature:"),
+                );
+                ppf.close_box();
+                ppf.cut();
+                ppf.cut();
+                report_error(ppf, type_ctx, filename, &entries);
+                ppf.close_box();
+            }
+        }
+        ppf.flush();
+    }
+    if buf.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("  ");
+    out.push_str(&String::from_utf8_lossy(&buf));
+    out.push('\n');
+    out
 }
 
-/// One step of `Includemod.error` contexts (includemod.ml:28-32).
-#[derive(Clone)]
-enum IncludeContext {
+/// One position of `Includemod.pos` (includemod.ml).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum IncludePos {
     Module(Ident),
     Modtype(Ident),
+    Arg(Ident),
     Body(Ident),
+    Reverse,
 }
 
-/// `Includemod.context` (includemod.ml:591-631) for a context listed from
-/// the outermost step, when it fits on one line.
-fn include_context_text(cxt: &[IncludeContext]) -> String {
-    fn argname(id: &Ident) -> &str {
-        if id.name() == "*" { "" } else { id.name() }
-    }
-    fn context(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Module(id), rem @ ..] => format!("module {}{}", id.name(), args(rem)),
-            [IncludeContext::Modtype(id), rem @ ..] => {
-                format!("module type {} = {}", id.name(), context_mty(rem))
-            }
-            [IncludeContext::Body(x), rem @ ..] => {
-                format!("functor ({}) -> {}", argname(x), context_mty(rem))
-            }
-            [] => "<here>".to_string(),
-        }
-    }
-    fn context_mty(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Module(_) | IncludeContext::Modtype(_), ..] => {
-                format!("sig {} end", context(cxt))
-            }
-            _ => context(cxt),
-        }
-    }
-    fn args(cxt: &[IncludeContext]) -> String {
-        match cxt {
-            [IncludeContext::Body(x), rem @ ..] => format!("({}){}", argname(x), args(rem)),
-            _ => format!(" : {}", context_mty(cxt)),
-        }
-    }
-    context(cxt)
+/// The symptom of an entry of the error list.
+enum ReportSymptom<'e> {
+    /// `Interface_mismatch (impl_name, intf_name)`.
+    Interface {
+        impl_name: &'e str,
+        intf_name: &'e str,
+    },
+    /// `Module_types (mty1, mty2)`.
+    ModuleTypes {
+        actual: &'e ModuleType,
+        expected: &'e ModuleType,
+    },
+    /// `Modtype_infos (id, info1, info2)`.
+    ModtypeInfos {
+        name: &'e Ident,
+        actual: &'e ModtypeDeclaration,
+        expected: &'e ModtypeDeclaration,
+    },
+    /// Any other symptom, the error that is it.
+    Leaf(&'e IncludeModError),
 }
 
-/// The context part of `include_err` (includemod.ml:633-650): nothing at the
-/// top, `In module A.B:` inside plain submodules, otherwise
-/// `At position <context>`.
-fn push_include_context(cxt: &[IncludeContext], output: &mut String) {
-    if cxt.is_empty() {
-        return;
-    }
-    if cxt
-        .iter()
-        .all(|step| matches!(step, IncludeContext::Module(_)))
-    {
-        output.push_str("  In module ");
-        let names: Vec<&str> = cxt
-            .iter()
-            .map(|step| match step {
-                IncludeContext::Module(id) => id.name(),
-                _ => unreachable!(),
-            })
-            .collect();
-        output.push_str(&names.join("."));
-        output.push_str(":\n");
-    } else {
-        output.push_str("  At position ");
-        output.push_str(&include_context_text(cxt));
-        output.push('\n');
-    }
+/// An entry `(cxt, env, symptom)` of `Includemod.Error`'s list; `cxt` is
+/// listed from the outermost position, `List.rev` of OCaml's.
+struct ReportEntry<'e> {
+    cxt: Vec<IncludePos>,
+    symptom: ReportSymptom<'e>,
 }
 
-/// `Module_types` in `include_symptom`, with the elision that stands in for
-/// `is_big` in `report_error`.
-fn push_module_types_symptom(
-    type_ctx: &TypeContext,
-    actual: &ModuleType,
-    expected: &ModuleType,
-    error: &IncludeModError,
-    output: &mut String,
+/// The list OCaml builds for `error`, in order, each entry under the
+/// positions above it.
+fn flatten_error<'e>(
+    error: &'e IncludeModError,
+    cxt: &mut Vec<IncludePos>,
+    out: &mut Vec<ReportEntry<'e>>,
 ) {
-    let actual_text = format_module_type(type_ctx, actual);
-    let expected_text = format_module_type(type_ctx, expected);
-    if should_elide_module_mismatch(&actual_text, &expected_text)
-        || should_elide_type_declaration_module_mismatch(error)
-    {
-        output.push_str("  ...\n");
-    } else if is_compact_type_declaration_mismatch(error) {
-        output.push_str("  Modules do not match: ");
-        output.push_str(&actual_text);
-        output.push_str(" is not included in ");
-        output.push_str(&expected_text);
-        output.push('\n');
-    } else {
-        output.push_str(&format_modules_do_not_match(&actual_text, &expected_text));
-    }
-}
-
-/// `report_error` (includemod.ml:663-676) over Rust's nested error tree: each
-/// entry of OCaml's flat error list is printed with its own context.
-fn format_include_error(
-    type_ctx: &TypeContext,
-    filename: &str,
-    error: &IncludeModError,
-    cxt: &mut Vec<IncludeContext>,
-    output: &mut String,
-) {
+    let mut under = |pos, error: &'e IncludeModError, out: &mut Vec<ReportEntry<'e>>| {
+        cxt.push(pos);
+        flatten_error(error, cxt, out);
+        cxt.pop();
+    };
     match error {
         IncludeModError::SignatureMismatch(errors) => {
             for error in errors {
-                format_include_error(type_ctx, filename, error, cxt, output);
+                flatten_error(error, cxt, out);
             }
-            return;
         }
-        IncludeModError::InModule { name, error } => {
-            cxt.push(IncludeContext::Module(*name));
-            format_include_error(type_ctx, filename, error, cxt, output);
-            cxt.pop();
-            return;
+        IncludeModError::InModule { name, error } => under(IncludePos::Module(*name), error, out),
+        IncludeModError::AtModtype { name, error } => under(IncludePos::Modtype(*name), error, out),
+        IncludeModError::InFunctorBody { param, error } => {
+            under(IncludePos::Body(*param), error, out)
         }
-        IncludeModError::AtModtype { name, error } => {
-            cxt.push(IncludeContext::Modtype(*name));
-            format_include_error(type_ctx, filename, error, cxt, output);
-            cxt.pop();
-            return;
+        IncludeModError::InFunctorArg { param, error } => {
+            under(IncludePos::Arg(*param), error, out)
         }
-        IncludeModError::InFunctorBody {
-            param,
-            actual,
-            expected,
-            error,
-        } => {
-            // `modtypes` on the functor results (includemod.ml:388-396) runs
-            // in `Body param :: cxt`.
-            cxt.push(IncludeContext::Body(*param));
-            push_include_context(cxt, output);
-            push_module_types_symptom(type_ctx, actual, expected, error, output);
-            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
-                format_include_error(type_ctx, filename, error, cxt, output);
-            }
-            cxt.pop();
-            return;
-        }
-        _ => {}
-    }
-    push_include_context(cxt, output);
-    match error {
-        IncludeModError::SignatureMismatch(_)
-        | IncludeModError::InModule { .. }
-        | IncludeModError::AtModtype { .. }
-        | IncludeModError::InFunctorBody { .. } => unreachable!(),
+        IncludeModError::Reversed { error } => under(IncludePos::Reverse, error, out),
         IncludeModError::ModuleTypesMismatch {
             actual,
             expected,
             error,
         } => {
-            push_module_types_symptom(type_ctx, actual, expected, error, output);
-            // A bare `ModuleTypeMismatch` below stands for `Dont_match`, which
-            // only contributes the `Module_types` entry (includemod.ml:222-229).
-            if !matches!(**error, IncludeModError::ModuleTypeMismatch { .. }) {
-                format_include_error(type_ctx, filename, error, cxt, output);
+            out.push(ReportEntry {
+                cxt: cxt.clone(),
+                symptom: ReportSymptom::ModuleTypes { actual, expected },
+            });
+            if !matches!(**error, IncludeModError::DontMatch) {
+                flatten_error(error, cxt, out);
             }
         }
-        IncludeModError::UnboundModulePath { path } => {
-            output.push_str("  Unbound module ");
-            output.push_str(&path.name());
-            output.push('\n');
-        }
-        IncludeModError::TypeDeclarationMismatch {
+        IncludeModError::ModuleTypeDeclarationMismatch {
             name,
             actual,
             expected,
-            detail,
+            error,
         } => {
-            // includemod.ml:555-561:
-            // "@[<hv>%s:@;<1 2>%a@ %s@;<1 2>%a@]" -- one line when it fits.
-            let actual_text = format_type_declaration(type_ctx, name, actual);
-            let expected_text = format_type_declaration(type_ctx, name, expected);
-            if hv_fits_on_one_line(&[
-                "Type declarations do not match:",
-                &actual_text,
-                "is not included in",
-                &expected_text,
-            ]) {
-                output.push_str("  Type declarations do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
+            out.push(ReportEntry {
+                cxt: cxt.clone(),
+                symptom: ReportSymptom::ModtypeInfos {
+                    name,
+                    actual,
+                    expected,
+                },
+            });
+            flatten_error(error, cxt, out);
+        }
+        // `modtypes` turns every `Dont_match` into its `Module_types` entry.
+        IncludeModError::DontMatch => {
+            debug_assert!(false, "Dont_match escaped its modtypes");
+        }
+        _ => out.push(ReportEntry {
+            cxt: cxt.clone(),
+            symptom: ReportSymptom::Leaf(error),
+        }),
+    }
+}
+
+/// Whether a symptom shows the declarations that differ. A permutation of
+/// fields doesn't, so the comparison of the module types around it stays
+/// (includemod.ml `report_error`).
+fn shows_declarations(symptom: &ReportSymptom<'_>) -> bool {
+    match symptom {
+        ReportSymptom::ModuleTypes { .. } | ReportSymptom::ModtypeInfos { .. } => true,
+        ReportSymptom::Interface { .. } => false,
+        ReportSymptom::Leaf(error) => matches!(
+            error,
+            IncludeModError::MissingField { .. }
+                | IncludeModError::ValueTypeMismatch { .. }
+                | IncludeModError::TypeDeclarationMismatch { .. }
+                | IncludeModError::ExtensionConstructorMismatch { .. }
+        ),
+    }
+}
+
+/// `Includemod.report_error` (includemod.ml): the error is a path of
+/// symptoms from the whole module down to the items that differ. A module or
+/// module type comparison is left out when a later symptom shows the
+/// declarations that differ; each entry follows a blank line and, when its
+/// position differs from the one before, a line naming where it is.
+fn report_error(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    entries: &[ReportEntry<'_>],
+) {
+    ppf.open_vbox(0);
+    let mut previous: Option<&[IncludePos]> = None;
+    for (index, entry) in entries.iter().enumerate() {
+        if matches!(
+            entry.symptom,
+            ReportSymptom::ModuleTypes { .. } | ReportSymptom::ModtypeInfos { .. }
+        ) && entries[index + 1..]
+            .iter()
+            .any(|later| shows_declarations(&later.symptom))
+        {
+            continue;
+        }
+        if previous.is_some() {
+            ppf.cut();
+            ppf.cut();
+        }
+        let show_context = previous != Some(entry.cxt.as_slice());
+        include_err(ppf, type_ctx, filename, show_context, entry);
+        previous = Some(&entry.cxt);
+    }
+    ppf.close_box();
+}
+
+/// `include_err ~show_context` (includemod.ml): `@[<v>%a%a@]` of the
+/// position and the symptom. Inclusion is reversed in each functor parameter
+/// on the way, and in the second half of an equivalence check of module
+/// types.
+fn include_err(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    show_context: bool,
+    entry: &ReportEntry<'_>,
+) {
+    let swapped = entry
+        .cxt
+        .iter()
+        .filter(|pos| matches!(pos, IncludePos::Arg(_) | IncludePos::Reverse))
+        .count()
+        % 2
+        == 1;
+    ppf.open_vbox(0);
+    if show_context {
+        let cxt: Vec<IncludePos> = entry
+            .cxt
+            .iter()
+            .copied()
+            .filter(|pos| *pos != IncludePos::Reverse)
+            .collect();
+        pp_include_context(ppf, &cxt);
+    }
+    include_symptom(ppf, type_ctx, filename, swapped, &entry.symptom);
+    ppf.close_box();
+}
+
+/// `Includemod.context` (includemod.ml) for a context listed from the
+/// outermost step.
+fn pp_context(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
+    use crate::parser::formatter::BoxKind;
+    match cxt {
+        // `@[<2>module %a%a@]`
+        [IncludePos::Module(id), rem @ ..] => {
+            ppf.open_box(BoxKind::Box, 2);
+            pp_text(ppf, "module ");
+            pp_text(ppf, id.name());
+            pp_context_args(ppf, rem);
+            ppf.close_box();
+        }
+        // `@[<2>module type %a =@ %a@]`
+        [IncludePos::Modtype(id), rem @ ..] => {
+            ppf.open_box(BoxKind::Box, 2);
+            pp_text(ppf, "module type ");
+            pp_text(ppf, id.name());
+            pp_text(ppf, " =");
+            ppf.space();
+            pp_context_mty(ppf, rem);
+            ppf.close_box();
+        }
+        // `(%s) =>@ %a`
+        [IncludePos::Body(x), rem @ ..] => {
+            pp_text(ppf, "(");
+            pp_text(ppf, context_argname(x));
+            pp_text(ppf, ") =>");
+            ppf.space();
+            pp_context_mty(ppf, rem);
+        }
+        // `(%a:@ %a) => ...`
+        [IncludePos::Arg(x), rem @ ..] => {
+            pp_text(ppf, "(");
+            pp_text(ppf, x.name());
+            pp_text(ppf, ":");
+            ppf.space();
+            pp_context_mty(ppf, rem);
+            pp_text(ppf, ") => ...");
+        }
+        [IncludePos::Reverse, rem @ ..] => pp_context(ppf, rem),
+        [] => pp_text(ppf, "<here>"),
+    }
+}
+
+/// `context_mty`: `@[<2>{@ %a@;<1 -2>}@]` around a module step.
+fn pp_context_mty(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
+    match cxt {
+        [IncludePos::Module(_) | IncludePos::Modtype(_), ..] => {
+            ppf.open_box(crate::parser::formatter::BoxKind::Box, 2);
+            pp_text(ppf, "{");
+            ppf.space();
+            pp_context(ppf, cxt);
+            ppf.break_(1, -2);
+            pp_text(ppf, "}");
+            ppf.close_box();
+        }
+        _ => pp_context(ppf, cxt),
+    }
+}
+
+/// `args`: `:@ %a`, the module step's type, a functor's parameters
+/// included.
+fn pp_context_args(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
+    pp_text(ppf, ":");
+    ppf.space();
+    pp_context_mty(ppf, cxt);
+}
+
+/// `argname`: the anonymous parameter `*` prints as nothing.
+fn context_argname(id: &Ident) -> &str {
+    if id.name() == "*" { "" } else { id.name() }
+}
+
+/// `path_of_modules` (includemod.ml): the path of the modules a context goes
+/// through, outermost first, printed by `Printtyp.path`, when it goes through
+/// modules only.
+fn path_of_modules(cxt: &[IncludePos]) -> Option<String> {
+    if cxt.is_empty() {
+        return None;
+    }
+    let mut names = Vec::with_capacity(cxt.len());
+    for pos in cxt {
+        match pos {
+            IncludePos::Module(id) => names.push(id.name()),
+            IncludePos::Modtype(_)
+            | IncludePos::Arg(_)
+            | IncludePos::Body(_)
+            | IncludePos::Reverse => return None,
+        }
+    }
+    Some(names.join("."))
+}
+
+/// The `context` of `report_error` (includemod.ml): where in the module an
+/// error is, as a line before it. A module type or a functor's result at the
+/// end of a module path is named in words; any other position is shown as a
+/// module type with `<here>`.
+fn pp_include_context(ppf: &mut Ppf<'_>, cxt: &[IncludePos]) {
+    if cxt.is_empty() {
+        return;
+    }
+    let line = match path_of_modules(cxt) {
+        Some(path) => Some(format!("In module {path}:")),
+        None => match cxt.split_last() {
+            Some((IncludePos::Modtype(id), [])) => Some(format!("In module type {}:", id.name())),
+            Some((IncludePos::Modtype(id), modules)) => {
+                path_of_modules(modules).map(|path| format!("In module type {path}.{}:", id.name()))
+            }
+            Some((IncludePos::Body(_), modules)) => {
+                path_of_modules(modules).map(|path| format!("In the result of functor {path}:"))
+            }
+            Some((IncludePos::Arg(x), modules)) => path_of_modules(modules)
+                .map(|path| format!("In the parameter {} of functor {path}:", x.name())),
+            _ => None,
+        },
+    };
+    match line {
+        Some(line) => pp_text(ppf, &line),
+        // `@[<hv 2>At position@ %a@]`
+        None => {
+            ppf.open_hvbox(2);
+            pp_text(ppf, "At position");
+            ppf.space();
+            pp_context(ppf, cxt);
+            ppf.close_box();
+        }
+    }
+    ppf.cut();
+    ppf.cut();
+}
+
+/// `show_declaration label loc pp ppf x` (includemod.ml):
+/// `@[<v 2>%s (%a):@,%a@]`, a declaration under a label naming its side and
+/// its location, `Location.print_loc` writing the file name and range in
+/// zero-width colour tags.
+fn pp_show_declaration(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    label: &str,
+    loc: crate::types::DeclLoc,
+    declaration: &str,
+) {
+    let loc = type_ctx.resolve_loc(loc);
+    let location = code_frame::format_location(
+        &location_filename(type_ctx, filename, &loc),
+        &loc.loc_start,
+        &loc.loc_end,
+    );
+    ppf.open_vbox(2);
+    pp_text(ppf, label);
+    pp_text(ppf, " (");
+    ppf.string_as(location.len(), &code_frame::colorize_location(&location));
+    pp_text(ppf, "):");
+    ppf.cut();
+    crate::types::printtyp::pp_doc(ppf, declaration);
+    ppf.close_box();
+}
+
+/// `show_declarations ~swapped pp ppf (x1, loc1, x2, loc2)` (includemod.ml):
+/// `x1` is included in `x2`; in a functor's parameter, where inclusion goes
+/// the other way, `swapped` is true and `x2` is the actual declaration.
+#[allow(clippy::too_many_arguments)]
+fn pp_show_declarations(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    swapped: bool,
+    x1: &str,
+    loc1: crate::types::DeclLoc,
+    x2: &str,
+    loc2: crate::types::DeclLoc,
+) {
+    let ((actual, actual_loc), (expected, expected_loc)) = if swapped {
+        ((x2, loc2), (x1, loc1))
+    } else {
+        ((x1, loc1), (x2, loc2))
+    };
+    pp_show_declaration(
+        ppf,
+        type_ctx,
+        filename,
+        "Actual declaration",
+        actual_loc,
+        actual,
+    );
+    ppf.cut();
+    ppf.cut();
+    pp_show_declaration(
+        ppf,
+        type_ctx,
+        filename,
+        "Expected declaration",
+        expected_loc,
+        expected,
+    );
+}
+
+/// `include_symptom ~swapped env ppf symptom` (includemod.ml).
+fn include_symptom(
+    ppf: &mut Ppf<'_>,
+    type_ctx: &TypeContext,
+    filename: &str,
+    swapped: bool,
+    symptom: &ReportSymptom<'_>,
+) {
+    use crate::parser::formatter::BoxKind;
+    let error = match symptom {
+        // `@[The implementation %s@ does not match the interface %s:@]`
+        ReportSymptom::Interface {
+            impl_name,
+            intf_name,
+        } => {
+            ppf.open_box(BoxKind::Box, 0);
+            pp_text(ppf, &format!("The implementation {impl_name}"));
+            ppf.space();
+            pp_text(ppf, &format!("does not match the interface {intf_name}:"));
+            ppf.close_box();
+            return;
+        }
+        // `@[<v 2>Actual module type:@,%a@]@,@,@[<v 2>Expected module
+        // type:@,%a@]`
+        ReportSymptom::ModuleTypes { actual, expected } => {
+            let (actual, expected) = if swapped {
+                (expected, actual)
             } else {
-                output.push_str("  Type declarations do not match:\n");
-                output.push_str("    ");
-                output.push_str(&actual_text);
-                output.push('\n');
-                output.push_str("  is not included in\n");
-                output.push_str("    ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            }
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.type_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
-            );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.type_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
-            for line in detail.message().lines() {
-                output.push_str("  ");
-                output.push_str(line);
-                output.push('\n');
-            }
+                (actual, expected)
+            };
+            ppf.open_vbox(2);
+            pp_text(ppf, "Actual module type:");
+            ppf.cut();
+            crate::types::printtyp::pp_doc(ppf, &format_module_type(type_ctx, actual));
+            ppf.close_box();
+            ppf.cut();
+            ppf.cut();
+            ppf.open_vbox(2);
+            pp_text(ppf, "Expected module type:");
+            ppf.cut();
+            crate::types::printtyp::pp_doc(ppf, &format_module_type(type_ctx, expected));
+            ppf.close_box();
+            return;
         }
-        IncludeModError::ExtensionConstructorMismatch {
+        ReportSymptom::ModtypeInfos {
             name,
             actual,
             expected,
         } => {
-            output.push_str("  Extension declarations do not match:\n");
-            output.push_str("    ");
-            output.push_str(&format_extension_constructor(type_ctx, name, actual));
-            output.push('\n');
-            output.push_str("  is not included in\n");
-            output.push_str("    ");
-            output.push_str(&format_extension_constructor(type_ctx, name, expected));
-            output.push('\n');
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.ext_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &format_modtype_declaration(type_ctx, name, actual),
+                actual.mtd_loc,
+                &format_modtype_declaration(type_ctx, name, expected),
+                expected.mtd_loc,
             );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.ext_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
+            return;
         }
-        IncludeModError::MissingField { id, loc, kind } => {
-            output.push_str("  The ");
-            output.push_str(kind);
-            output.push_str(" `");
-            output.push_str(id.name());
-            output.push_str("' is required but not provided\n");
-            let loc = type_ctx.resolve_loc(*loc);
-            push_show_loc(
-                output,
-                &code_frame::format_location(
-                    &location_filename(type_ctx, filename, &loc),
-                    &loc.loc_start,
-                    &loc.loc_end,
-                ),
-                "Expected declaration",
+        ReportSymptom::Leaf(error) => error,
+    };
+    match error {
+        IncludeModError::MissingField {
+            id,
+            loc,
+            kind,
+            item,
+        } => {
+            // Reversed, the item is one the actual declaration has and the
+            // expected one lacks.
+            let (sentence, label) = if swapped {
+                (
+                    "is only present in the actual declaration.",
+                    "Actual declaration",
+                )
+            } else {
+                ("is required but not provided.", "Expected declaration")
+            };
+            pp_text(ppf, &format!("The {kind} `{}` {sentence}", id.name()));
+            ppf.cut();
+            ppf.cut();
+            pp_show_declaration(
+                ppf,
+                type_ctx,
+                filename,
+                label,
+                *loc,
+                &format_signature(type_ctx, std::slice::from_ref(&**item)),
             );
         }
         IncludeModError::ValueTypeMismatch {
@@ -606,33 +850,21 @@ fn format_include_error(
             expected,
             arity_mismatch,
         } => {
-            let actual_text = format_value_description(type_ctx, name, actual);
-            let expected_text = format_value_description(type_ctx, name, expected);
-            let inline_width = "  Values do not match: ".len()
-                + actual_text.len()
-                + " is not included in ".len()
-                + expected_text.len();
-            // includemod.ml:549-552 prints "@[<hv 2>Values do not match:@ %a@;<1
-            // -2>is not included in@ %a@]" from column 2; the hv box stays on
-            // one line only when it fits the report's margin (at most 77
-            // columns including the indentation).
-            if !actual_text.contains('\n') && !expected_text.contains('\n') && inline_width <= 77 {
-                output.push_str("  Values do not match: ");
-                output.push_str(&actual_text);
-                output.push_str(" is not included in ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            } else {
-                // The descriptions are emitted with `Format.pp_print_string`
-                // (res_outcome_printer.ml:963-965), so their own line breaks
-                // are copied verbatim and the box indentation does not apply
-                // to continuation lines.
-                output.push_str("  Values do not match:\n    ");
-                output.push_str(&actual_text);
-                output.push_str("\n  is not included in\n    ");
-                output.push_str(&expected_text);
-                output.push('\n');
-            }
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &format_value_description(type_ctx, name, actual),
+                actual.val_loc,
+                &format_value_description(type_ctx, name, expected),
+                expected.val_loc,
+            );
+            // `show_arity_mismatch env ppf d1 d2`, or `d2 d1` when swapped:
+            // `@,@,@[The implementation contains a function taking %s where
+            // the interface expects one taking %s.@]`.
+            let arity_mismatch =
+                arity_mismatch.map(|(n1, n2)| if swapped { (n2, n1) } else { (n1, n2) });
             if let Some((actual_arity, expected_arity)) = arity_mismatch {
                 let arguments = |arity: usize| {
                     if arity == 1 {
@@ -641,90 +873,99 @@ fn format_include_error(
                         format!("{arity} arguments")
                     }
                 };
-                output.push_str("  The implementation contains a function taking ");
-                output.push_str(&arguments(*actual_arity));
-                output.push_str(" where the interface expects one taking ");
-                output.push_str(&arguments(*expected_arity));
-                output.push_str(".\n");
+                ppf.cut();
+                ppf.cut();
+                ppf.open_box(BoxKind::Box, 0);
+                pp_text(
+                    ppf,
+                    &format!(
+                        "The implementation contains a function taking {} where the interface expects one taking {}.",
+                        arguments(actual_arity),
+                        arguments(expected_arity)
+                    ),
+                );
+                ppf.close_box();
             }
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(expected.val_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Expected declaration",
-            );
-            push_show_loc(
-                output,
-                &{
-                    let loc = type_ctx.resolve_loc(actual.val_loc);
-                    code_frame::format_location(
-                        &location_filename(type_ctx, filename, &loc),
-                        &loc.loc_start,
-                        &loc.loc_end,
-                    )
-                },
-                "Actual declaration",
-            );
         }
-        IncludeModError::TypeMismatch { name, reason } => {
-            output.push_str("  Type declarations do not match: ");
-            output.push_str(name.name());
-            output.push_str("\n  ");
-            output.push_str(reason);
-            output.push('\n');
-        }
-        IncludeModError::ModuleTypeMismatch { name, reason } => {
-            output.push_str("  Modules do not match: ");
-            output.push_str(name.name());
-            output.push_str("\n  ");
-            output.push_str(reason);
-            output.push('\n');
-        }
-        IncludeModError::ModuleTypeDeclarationMismatch {
+        IncludeModError::TypeDeclarationMismatch {
             name,
             actual,
             expected,
-            error,
+            errs,
         } => {
-            output.push_str("  Module type declarations do not match:\n");
-            output.push_str("    ");
-            output.push_str(&format_modtype_declaration(type_ctx, name, actual));
-            output.push('\n');
-            output.push_str("  does not match\n");
-            output.push_str("    ");
-            output.push_str(&format_modtype_declaration(type_ctx, name, expected));
-            output.push('\n');
-            format_include_error(type_ctx, filename, error, cxt, output);
+            let printed1 = format_type_declaration(type_ctx, name, actual);
+            let printed2 = format_type_declaration(type_ctx, name, expected);
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &printed1,
+                actual.type_loc,
+                &printed2,
+                expected.type_loc,
+            );
+            if errs.iter().any(|err| *err != TypeMismatch::Manifest) {
+                let (first, second) = if swapped {
+                    ("the expected", "the actual")
+                } else {
+                    ("the actual", "the expected")
+                };
+                // Declarations can print the same and still differ, when a
+                // type they mention differs between the two sides, e.g. a
+                // class the interface leaves abstract. The reasons then say
+                // that first.
+                let read_the_same = printed1 == printed2;
+                ppf.cut();
+                crate::types::includecore::report_type_mismatch(
+                    ppf,
+                    read_the_same,
+                    first,
+                    second,
+                    "declaration",
+                    errs,
+                );
+            }
+        }
+        IncludeModError::ExtensionConstructorMismatch {
+            name,
+            actual,
+            expected,
+        } => {
+            pp_show_declarations(
+                ppf,
+                type_ctx,
+                filename,
+                swapped,
+                &format_extension_constructor(type_ctx, name, actual),
+                actual.ext_loc,
+                &format_extension_constructor(type_ctx, name, expected),
+                expected.ext_loc,
+            );
         }
         IncludeModError::ModtypePermutation => {
-            output.push_str("  Illegal permutation of structure fields\n");
+            pp_text(ppf, "Illegal permutation of structure fields");
         }
-        IncludeModError::FunctorParamMismatch(reason)
-        | IncludeModError::FunctorResultMismatch(reason) => {
-            output.push_str("  ");
-            output.push_str(reason);
-            output.push('\n');
+        IncludeModError::UnboundModulePath { path } => {
+            pp_text(ppf, "Unbound module ");
+            pp_text(ppf, &path.name());
         }
-        IncludeModError::NotAFunctor => {
-            output.push_str("  Not a functor.\n");
+        // Taken out by `escaped` before an inclusion error is reported.
+        IncludeModError::InvalidStringEscape { .. } => {
+            unreachable!("an invalid escape escapes inclusion checking")
+        }
+        IncludeModError::DontMatch
+        | IncludeModError::SignatureMismatch(_)
+        | IncludeModError::InModule { .. }
+        | IncludeModError::AtModtype { .. }
+        | IncludeModError::InFunctorBody { .. }
+        | IncludeModError::InFunctorArg { .. }
+        | IncludeModError::Reversed { .. }
+        | IncludeModError::ModuleTypesMismatch { .. }
+        | IncludeModError::ModuleTypeDeclarationMismatch { .. } => {
+            unreachable!("not a symptom of its own")
         }
     }
-}
-
-fn is_compact_type_declaration_mismatch(error: &IncludeModError) -> bool {
-    matches!(
-        error,
-        IncludeModError::TypeDeclarationMismatch {
-            detail: TypeDeclarationMismatchDetail::Variance,
-            ..
-        }
-    )
 }
 
 pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Location) -> String {
@@ -734,81 +975,10 @@ pub(crate) fn location_filename(type_ctx: &TypeContext, fallback: &str, loc: &Lo
         .unwrap_or_else(|| fallback.to_string())
 }
 
-fn should_elide_module_mismatch(actual: &str, expected: &str) -> bool {
-    actual.len() + expected.len() > 120
-}
-
-fn should_elide_type_declaration_module_mismatch(error: &IncludeModError) -> bool {
-    // OCaml includemod.ml:637-655 bounds the structured `Module_types`
-    // symptom, whose declarations still carry @tag attributes even though
-    // Printtyp omits them. `@as` no longer counts: it is decided at typedecl
-    // into `cd_runtime_tag`/`ld_runtime_name` and leaves the attributes.
-    let has_hidden_tag_layout = matches!(
-        error,
-        IncludeModError::TypeDeclarationMismatch {
-            detail: TypeDeclarationMismatchDetail::TagName,
-            ..
-        }
-    );
-    matches!(error, IncludeModError::TypeDeclarationMismatch { .. })
-        && !is_compact_type_declaration_mismatch(error)
-        && has_hidden_tag_layout
-}
-
-/// Whether an `@[<hv>` box at column 2 holding `parts` separated by break
-/// hints stays on one line under the Format margin. Multi-line parts contain
-/// forced breaks, so the box cannot be horizontal.
-fn hv_fits_on_one_line(parts: &[&str]) -> bool {
-    if parts.iter().any(|part| part.contains('\n')) {
-        return false;
-    }
-    let mut buf = Vec::new();
-    {
-        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
-        ppf.string_as(2, "");
-        ppf.open_box(crate::parser::formatter::BoxKind::HV, 0);
-        for (index, part) in parts.iter().enumerate() {
-            if index > 0 {
-                ppf.break_(1, 2);
-            }
-            ppf.string_as(part.chars().count(), part);
-        }
-        ppf.close_box();
-        ppf.flush();
-    }
-    !buf.contains(&b'\n')
-}
-
 // Declarations and module types print through `Printtyp`'s outcome trees and
 // `Res_outcome_printer` (printtyp.ml:1007-1192, res_outcome_printer.ml:481-842),
-// each rendered as one Doc string at width 80.
-
-/// `Module_types` in `include_symptom` (includemod.ml:566-569):
-/// `@[<hv 2>Modules do not match:@ %a@;<1 -2>is not included in@ %a@]`,
-/// where each module type is one `pp_print_string` of the outcome printer's
-/// rendering (res_outcome_printer.ml:1063-1065), laid out at column 2 of the
-/// error's vertical box.
-fn format_modules_do_not_match(actual: &str, expected: &str) -> String {
-    let mut buf = Vec::new();
-    {
-        let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
-        ppf.string_as(2, "");
-        ppf.open_hvbox(2);
-        ppf.string("Modules do not match:");
-        ppf.break_(1, 0);
-        ppf.string(actual);
-        ppf.break_(1, -2);
-        ppf.string("is not included in");
-        ppf.break_(1, 0);
-        ppf.string(expected);
-        ppf.close_box();
-        ppf.flush();
-    }
-    let mut out = String::from("  ");
-    out.push_str(&String::from_utf8_lossy(&buf));
-    out.push('\n');
-    out
-}
+// each rendered as one Doc string at width 80 that `pp_doc` prints into a
+// report's boxes.
 
 pub(crate) fn format_module_type(type_ctx: &TypeContext, mty: &ModuleType) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_modtype(mty, false);
@@ -845,6 +1015,12 @@ fn format_modtype_declaration(
     crate::types::printtyp::print_out_sig_item(&tree)
 }
 
+/// `Printtyp.signature`: the outcome tree of a signature, printed.
+fn format_signature(type_ctx: &TypeContext, sig: &[SignatureItem]) -> String {
+    let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_signature(sig);
+    crate::types::printtyp::print_out_signature_doc(&tree).to_string(80)
+}
+
 fn format_value_description(type_ctx: &TypeContext, id: &Ident, desc: &ValueDescription) -> String {
     let tree = crate::types::printtyp::Printtyp::new(type_ctx).tree_of_value_description(id, desc);
     crate::types::printtyp::print_out_sig_item(&tree)
@@ -872,12 +1048,14 @@ fn format_extension_constructor(
     crate::types::printtyp::print_out_sig_item(&tree)
 }
 
-#[derive(Clone, Default)]
-struct InclusionSubst {
+/// The substitution `subst` of OCaml's `Includemod.modtypes`.
+#[derive(Clone, Default, Debug)]
+pub struct InclusionSubst {
     type_paths: PathSubstMap,
     module_paths: PathSubstMap,
     modtype_paths: PathSubstMap,
 }
+
 
 impl InclusionSubst {
     fn is_empty(&self) -> bool {
@@ -893,7 +1071,7 @@ impl InclusionSubst {
 /// that is `==`; the remaining `same`-but-not-`==` keys can only exist when the
 /// key or the queried path carries a position hint. `any_pos_key` records
 /// whether any key has one so the common case needs no full-map scan.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 struct PathSubstMap {
     map: HashMap<Path, Path>,
     any_pos_key: bool,
@@ -945,8 +1123,12 @@ fn path_has_pos_hint(path: &Path) -> bool {
 fn strip_pos_hints(path: &Path) -> Path {
     match path.view() {
         PathView::Pident(_) => *path,
-        PathView::Pdot(parent, name, _) => Path::pdot_pos(strip_pos_hints(parent), *name, crate::types::path::NOPOS),
-        PathView::Papply(functor, argument) => Path::papply(strip_pos_hints(functor), strip_pos_hints(argument)),
+        PathView::Pdot(parent, name, _) => {
+            Path::pdot_pos(strip_pos_hints(parent), *name, crate::types::path::NOPOS)
+        }
+        PathView::Papply(functor, argument) => {
+            Path::papply(strip_pos_hints(functor), strip_pos_hints(argument))
+        }
     }
 }
 
@@ -998,7 +1180,7 @@ fn with_local_pident_module_type<R>(
             ModuleType::MtyAlias(_, next)
                 if !(next.same(&current) && namespace == PathNamespace::Module) =>
             {
-                current = *next;
+                current = **next;
                 namespace = PathNamespace::Module;
             }
             _ => return Some(f(&mty)),
@@ -1030,39 +1212,22 @@ pub fn modtypes_with_warnings(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<ModuleCoercion> {
     let subst = InclusionSubst::default();
-    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings).map_err(|error| {
-        if module_type_error_is_alias_unbound_module(mty_impl, mty_sig, &error) {
-            error
-        } else {
-            IncludeModError::ModuleTypesMismatch {
-                actual: Box::new(mty_impl.clone()),
-                expected: Box::new(mty_sig.clone()),
-                error: Box::new(error),
-            }
-        }
-    })
-}
-
-fn module_type_error_is_alias_unbound_module(
-    mty_impl: &ModuleType,
-    mty_sig: &ModuleType,
-    error: &IncludeModError,
-) -> bool {
-    matches!(error, IncludeModError::UnboundModulePath { .. })
-        && (matches!(mty_impl, ModuleType::MtyAlias(..))
-            || matches!(mty_sig, ModuleType::MtyAlias(..)))
+    modtypes_inner(type_ctx, env, &subst, mty_impl, mty_sig, None, warnings)
+        .map_err(|error| wrap_modtypes_error(type_ctx, &subst, mty_impl, mty_sig, error))
 }
 
 /// The error half of OCaml `modtypes` (includemod.ml:187-198): `Dont_match`
-/// (a bare `ModuleTypeMismatch` here) becomes a `Module_types` entry; other
+/// becomes a `Module_types (mty1, Subst.modtype subst mty2)` entry; other
 /// errors from `try_modtypes` get one too unless either side is an alias, in
 /// which case the inner comparison already reported it.
 fn wrap_modtypes_error(
+    type_ctx: &TypeContext,
+    subst: &InclusionSubst,
     mty_impl: &ModuleType,
     mty_sig: &ModuleType,
     error: IncludeModError,
 ) -> IncludeModError {
-    if !matches!(error, IncludeModError::ModuleTypeMismatch { .. })
+    if !matches!(error, IncludeModError::DontMatch)
         && (matches!(mty_impl, ModuleType::MtyAlias(..))
             || matches!(mty_sig, ModuleType::MtyAlias(..)))
     {
@@ -1070,7 +1235,7 @@ fn wrap_modtypes_error(
     }
     IncludeModError::ModuleTypesMismatch {
         actual: Box::new(mty_impl.clone()),
-        expected: Box::new(mty_sig.clone()),
+        expected: Box::new(substitute_module_type_paths(type_ctx, mty_sig, subst)),
         error: Box::new(error),
     }
 }
@@ -1238,10 +1403,7 @@ fn modtypes_inner(
                 let lax_impl_path = normalized_alias_path(type_ctx, env, impl_path);
                 let lax_sig_path = normalized_alias_path(type_ctx, env, &subst_sig_path);
                 if !lax_impl_path.same(&lax_sig_path) {
-                    return Err(IncludeModError::ModuleTypeMismatch {
-                        name: Ident::create_local("module"),
-                        reason: "module aliases do not match".to_string(),
-                    });
+                    return Err(IncludeModError::DontMatch);
                 }
             }
             match (pres_impl, pres_sig) {
@@ -1277,7 +1439,9 @@ fn modtypes_inner(
                         sig_access_path,
                         warnings,
                     )
-                    .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))
+                    .map_err(|error| {
+                        wrap_modtypes_error(type_ctx, subst, &expanded, mty_sig, error)
+                    })
                 }) {
                 coercion?
             } else {
@@ -1288,7 +1452,9 @@ fn modtypes_inner(
                                 type_ctx, env, &impl_path, &mty,
                             )
                         })
-                        .unwrap_or_else(|| ModuleType::MtyAlias(*pres_impl, impl_path));
+                        .unwrap_or_else(|| {
+                            ModuleType::MtyAlias(*pres_impl, std::sync::Arc::new(impl_path))
+                        });
                 // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                 modtypes_inner(
                     type_ctx,
@@ -1299,7 +1465,7 @@ fn modtypes_inner(
                     sig_access_path,
                     warnings,
                 )
-                .map_err(|error| wrap_modtypes_error(&expanded, mty_sig, error))?
+                .map_err(|error| wrap_modtypes_error(type_ctx, subst, &expanded, mty_sig, error))?
             };
             match pres_impl {
                 crate::types::decl::AliasPresence::MtaPresent => Ok(coercion),
@@ -1337,40 +1503,80 @@ fn modtypes_inner(
                 result: result_sig,
             },
         ) => {
-            let empty_subst = InclusionSubst::default();
-            let expected_param_type = param_type_sig.as_deref().map(|pt_sig| {
-                // OCaml compiler/ml/includemod.ml:257-262 computes
-                // `arg2' = Subst.modtype subst arg2` before both the
-                // contravariant argument check and `Env.add_module`.
-                substitute_module_type_paths(type_ctx, pt_sig, subst)
-            });
-
-            // Check parameter (contravariant)
-            let param_coercion = match (param_type_impl, expected_param_type.as_ref()) {
-                (Some(pt_impl), Some(pt_sig)) => {
-                    // Note: parameters are contravariant, so we swap impl/sig
-                    modtypes_inner(type_ctx, env, &empty_subst, pt_sig, pt_impl, None, warnings)?
+            match (param_type_impl.as_deref(), param_type_sig.as_deref()) {
+                // `Mty_functor (param1, None, res1), Mty_functor (_param2,
+                // None, res2)`: the results under `Body param1 :: cxt`.
+                (None, None) => {
+                    let result_coercion = modtypes_inner(
+                        type_ctx,
+                        env,
+                        subst,
+                        result_impl,
+                        result_sig,
+                        sig_access_path,
+                        warnings,
+                    )
+                    .map_err(|error| IncludeModError::InFunctorBody {
+                        param: *param_impl,
+                        error: Box::new(wrap_modtypes_error(
+                            type_ctx,
+                            subst,
+                            result_impl,
+                            result_sig,
+                            error,
+                        )),
+                    })?;
+                    return Ok(match result_coercion {
+                        ModuleCoercion::Tcoerce_none => ModuleCoercion::Tcoerce_none,
+                        cc => ModuleCoercion::Tcoerce_functor(
+                            Box::new(ModuleCoercion::Tcoerce_none),
+                            Box::new(cc),
+                        ),
+                    });
                 }
-                (None, None) => ModuleCoercion::Tcoerce_none,
-                _ => {
-                    return Err(IncludeModError::FunctorParamMismatch(
-                        "parameter presence mismatch".to_string(),
-                    ));
-                }
+                (Some(_), Some(_)) => {}
+                // `_, _ -> raise Dont_match`.
+                _ => return Err(IncludeModError::DontMatch),
+            }
+            let (Some(pt_impl), Some(pt_sig)) = (param_type_impl, param_type_sig) else {
+                unreachable!()
             };
+            // OCaml compiler/ml/includemod.ml:257-262 computes
+            // `arg2' = Subst.modtype subst arg2` before both the
+            // contravariant argument check and `Env.add_module`.
+            let expected_param_type = substitute_module_type_paths(type_ctx, pt_sig, subst);
 
-            // OCaml compiler/ml/includemod.ml:257-262 checks the functor
-            // result under `Subst.add_module param2 (Pident param1) subst`
-            // and an environment extended with the implementation parameter.
+            // `modtypes ~loc env (Arg param1 :: cxt) Subst.identity arg2'
+            // arg1`: parameters are contravariant.
+            let empty_subst = InclusionSubst::default();
+            let param_coercion = modtypes_inner(
+                type_ctx,
+                env,
+                &empty_subst,
+                &expected_param_type,
+                pt_impl,
+                None,
+                warnings,
+            )
+            .map_err(|error| IncludeModError::InFunctorArg {
+                param: *param_impl,
+                error: Box::new(wrap_modtypes_error(
+                    type_ctx,
+                    &empty_subst,
+                    &expected_param_type,
+                    pt_impl,
+                    error,
+                )),
+            })?;
+
+            // `modtypes ~loc (Env.add_module param1 arg2' env) (Body param1
+            // :: cxt) (Subst.add_module param2 (Pident param1) subst) res1
+            // res2`.
             let mut result_env = env.clone();
-            let param_binding_type = expected_param_type
-                .clone()
-                .or_else(|| param_type_impl.as_deref().cloned())
-                .unwrap_or_else(|| ModuleType::MtySignature(std::sync::Arc::new(vec![])));
             result_env.add_module(
                 *param_impl,
                 ModuleDeclaration {
-                    md_type: param_binding_type,
+                    md_type: expected_param_type,
                     md_attributes: vec![],
                     md_loc: crate::types::DeclLoc::none(),
                     md_path: None,
@@ -1391,9 +1597,13 @@ fn modtypes_inner(
             )
             .map_err(|error| IncludeModError::InFunctorBody {
                 param: *param_impl,
-                actual: result_impl.clone(),
-                expected: result_sig.clone(),
-                error: Box::new(error),
+                error: Box::new(wrap_modtypes_error(
+                    type_ctx,
+                    &result_subst,
+                    result_impl,
+                    result_sig,
+                    error,
+                )),
             })?;
 
             // If both parameter and result coercions are identity, return identity
@@ -1446,10 +1656,7 @@ fn modtypes_inner(
             } else {
                 // includemod.ml `try_modtypes`: an identifier that cannot be
                 // expanded does not match a signature (`Dont_match`).
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
@@ -1489,8 +1696,8 @@ fn modtypes_inner(
                 // side can expand, only normalized prefix identity succeeds.
                 let sig_path = substitute_modtype_path(sig_path, subst);
                 if env
-                    .normalize_path_prefix(path)
-                    .same(&env.normalize_path_prefix(&sig_path))
+                    .normalize_path_prefix(type_ctx, path)
+                    .same(&env.normalize_path_prefix(type_ctx, &sig_path))
                 {
                     Ok(ModuleCoercion::Tcoerce_none)
                 } else if let Some(expanded) =
@@ -1507,16 +1714,10 @@ fn modtypes_inner(
                         warnings,
                     )
                 } else {
-                    Err(IncludeModError::ModuleTypeMismatch {
-                        name: Ident::create_local("module"),
-                        reason: "incompatible module types".to_string(),
-                    })
+                    Err(IncludeModError::DontMatch)
                 }
             } else {
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
@@ -1527,8 +1728,8 @@ fn modtypes_inner(
             let path = substitute_modtype_path(path, subst);
             if let ModuleType::MtyIdent(impl_path) = mty_impl
                 && env
-                    .normalize_path_prefix(impl_path)
-                    .same(&env.normalize_path_prefix(&path))
+                    .normalize_path_prefix(type_ctx, impl_path)
+                    .same(&env.normalize_path_prefix(type_ctx, &path))
             {
                 return Ok(ModuleCoercion::Tcoerce_none);
             }
@@ -1561,18 +1762,12 @@ fn modtypes_inner(
                     warnings,
                 )
             } else {
-                Err(IncludeModError::ModuleTypeMismatch {
-                    name: Ident::create_local("module"),
-                    reason: "incompatible module types".to_string(),
-                })
+                Err(IncludeModError::DontMatch)
             }
         }
 
         // Fallback: incompatible module types
-        _ => Err(IncludeModError::ModuleTypeMismatch {
-            name: Ident::create_local("module"),
-            reason: "incompatible module types".to_string(),
-        }),
+        _ => Err(IncludeModError::DontMatch),
     }
 }
 
@@ -1787,11 +1982,13 @@ fn missing_signature_item_error(
     id: &Ident,
     loc: crate::types::DeclLoc,
     field_desc: &FieldDesc,
+    item: &SignatureItem,
 ) -> IncludeModError {
     IncludeModError::MissingField {
         id: *id,
         loc,
         kind: field_desc_kind(field_desc),
+        item: Box::new(item.clone()),
     }
 }
 
@@ -1817,12 +2014,16 @@ fn pair_signature_items<'a>(
             register_paired_signature_substitution(pair, sig_access_path, subst);
             paired.push(pair);
         } else if report_missing {
-            errors.push(missing_signature_item_error(sig_id, sig_loc, &field_desc));
+            errors.push(missing_signature_item_error(
+                sig_id,
+                sig_loc,
+                &field_desc,
+                sig_item,
+            ));
         }
     }
-    // includemod.ml:358-365 conses each missing field onto `unpaired` and
-    // raises the list as built, i.e. in reverse signature order.
-    errors.reverse();
+    // includemod.ml `pair_components` raises the missing fields in the
+    // order of the expected signature.
 
     (len_impl, paired, errors)
 }
@@ -1887,7 +2088,6 @@ fn check_paired_signature_items(
                     impl_ext_constr,
                     sig_ext_constr,
                     subst,
-                    warnings,
                 )?;
                 coercions.push((pair.runtime_pos, ModuleCoercion::Tcoerce_none));
             }
@@ -1902,7 +2102,7 @@ fn check_paired_signature_items(
                     &sig_mod_decl.md_attributes,
                     impl_mod_decl.md_loc,
                     sig_mod_decl.md_loc,
-                ) {
+                )? {
                     warnings.push(warning);
                 }
                 // includemod.ml:399: `Env.mark_module_used env (Ident.name
@@ -1940,6 +2140,8 @@ fn check_paired_signature_items(
                     IncludeModError::InModule {
                         name: *impl_id,
                         error: Box::new(wrap_modtypes_error(
+                            type_ctx,
+                            subst,
                             &impl_mty,
                             &sig_mod_decl.md_type,
                             error,
@@ -2300,7 +2502,7 @@ fn signatures_with_subst(
         .collect::<Vec<_>>();
 
     for sig_item in sig_impl {
-        add_sig_item_to_env(sig_item, &mut include_env);
+        add_sig_item_to_env(type_ctx, sig_item, &mut include_env);
     }
 
     let (len_impl, paired, errors) =
@@ -2378,14 +2580,19 @@ fn find_arity_mismatch(
         if impl_args.len() != sig_args.len() {
             return Some((impl_args.len(), sig_args.len()));
         }
-        if !type_ctx.type_args(impl_args)
+        if !type_ctx
+            .type_args(impl_args)
             .iter()
             .zip(type_ctx.type_args(sig_args).iter())
             .all(|(impl_arg, sig_arg)| impl_arg.label().same_label(sig_arg.label()))
         {
             return None;
         }
-        for (impl_arg, sig_arg) in type_ctx.type_args(impl_args).iter().zip(type_ctx.type_args(sig_args).iter()) {
+        for (impl_arg, sig_arg) in type_ctx
+            .type_args(impl_args)
+            .iter()
+            .zip(type_ctx.type_args(sig_args).iter())
+        {
             if let Some(mismatch) = loop_(type_ctx, env, seen, impl_arg.typ, sig_arg.typ) {
                 return Some(mismatch);
             }
@@ -2420,7 +2627,7 @@ fn value_descriptions(
         &sig_desc.val_attributes,
         impl_desc.val_loc,
         sig_desc.val_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 
@@ -2536,10 +2743,11 @@ fn primitive_coercible(
         }
 }
 
-pub(crate) fn add_sig_item_to_env(item: &SignatureItem, env: &mut Env) {
+/// `Env.add_item` (env.ml:1757-1768): a type goes through `store_type`.
+pub(crate) fn add_sig_item_to_env(ctx: &TypeContext, item: &SignatureItem, env: &mut Env) {
     match item {
         SignatureItem::SigValue(id, desc) => env.add_value(*id, desc.clone()),
-        SignatureItem::SigType(id, decl, _) => env.add_type(*id, decl.clone()),
+        SignatureItem::SigType(id, decl, _) => env.store_type(ctx, *id, decl.clone()),
         SignatureItem::SigModule(id, md, _) => env.add_module(*id, md.clone()),
         SignatureItem::SigModtype(id, mtd) => env.add_modtype(*id, mtd.clone()),
         SignatureItem::SigTypext(_, _, _)
@@ -2791,10 +2999,27 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
     if let Some(replacement) = subst.type_paths.get(path) {
         return replacement;
     }
-    match path.view() {
+    match &path.view() {
         PathView::Pident(_) => *path,
-        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
-        PathView::Papply(functor, arg) => Path::papply(substitute_type_constructor_path(functor, subst), substitute_module_path(arg, subst)),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_type_constructor_path(functor, subst),
+            substitute_module_path(arg, subst),
+        ),
+    }
+}
+
+/// `Subst.module_path s p` (subst.ml:69-75) on a shared path block: an
+/// unreplaced `Pident` is `p` itself, so its uses keep sharing one block.
+fn substitute_module_path_block(
+    path: &std::sync::Arc<Path>,
+    subst: &InclusionSubst,
+) -> std::sync::Arc<Path> {
+    match &path.view() {
+        PathView::Pident(_) if subst.module_paths.get(path).is_none() => path.clone(),
+        _ => std::sync::Arc::new(substitute_module_path(path, subst)),
     }
 }
 
@@ -2802,10 +3027,15 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.module_paths.get(path) {
         return replacement;
     }
-    match path.view() {
+    match &path.view() {
         PathView::Pident(_) => *path,
-        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
-        PathView::Papply(functor, arg) => Path::papply(substitute_module_path(functor, subst), substitute_module_path(arg, subst)),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_module_path(functor, subst),
+            substitute_module_path(arg, subst),
+        ),
     }
 }
 
@@ -2813,10 +3043,15 @@ fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
     if let Some(replacement) = subst.modtype_paths.get(path) {
         return replacement;
     }
-    match path.view() {
+    match &path.view() {
         PathView::Pident(_) => *path,
-        PathView::Pdot(prefix, name, pos) => Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos),
-        PathView::Papply(functor, arg) => Path::papply(substitute_modtype_path(functor, subst), substitute_module_path(arg, subst)),
+        PathView::Pdot(prefix, name, pos) => {
+            Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
+        }
+        PathView::Papply(functor, arg) => Path::papply(
+            substitute_modtype_path(functor, subst),
+            substitute_module_path(arg, subst),
+        ),
     }
 }
 
@@ -2845,7 +3080,9 @@ fn substitute_module_type_paths_no_freshen(
     match mty {
         ModuleType::MtyIdent(path) => ModuleType::MtyIdent(substitute_modtype_path(path, subst)),
         ModuleType::MtyAlias(presence, path) => {
-            ModuleType::MtyAlias(*presence, substitute_module_path(path, subst))
+            // `Subst.module_path` (subst.ml:69-75): an unreplaced `Pident`
+            // target is the block itself.
+            ModuleType::MtyAlias(*presence, substitute_module_path_block(path, subst))
         }
         ModuleType::MtyFunctor {
             param,
@@ -3025,7 +3262,7 @@ fn rewrite_substituted_type_paths(
         TypeDesc::Tlink(target) | TypeDesc::Tsubst(target) => {
             rewrite_substituted_type_paths(type_ctx, *target, subst, seen);
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
     }
 }
 
@@ -3044,6 +3281,9 @@ fn substitute_value_type_paths(
 }
 
 /// Check if type declaration `impl_decl` is a subtype of `sig_decl`.
+/// `Includemod.type_declarations` (includemod.ml): mark the implementation's
+/// type used, then compare it with the expected declaration (already
+/// substituted by the caller).
 pub(crate) fn type_declarations(
     type_ctx: &TypeContext,
     env: &Env,
@@ -3053,60 +3293,61 @@ pub(crate) fn type_declarations(
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     // includemod.ml:66-67: `Env.mark_type_used env (Ident.name id) decl1`.
-    crate::types::typecore::mark_type_used(type_ctx, env, id.name_atom(), type_ctx.resolve_loc(impl_decl.type_loc));
-    // includecore.ml:384-398 marks the implementation's constructors when both
-    // declarations are variants.
-    if let (
-        crate::types::TypeKind::TypeVariant(impl_cstrs, _),
-        crate::types::TypeKind::TypeVariant(_, _),
-    ) = (&impl_decl.type_kind, &sig_decl.type_kind)
-        && !env.is_implicit_coercion()
-    {
-        let usage = if impl_decl.type_private == crate::types::PrivateFlag::Private
-            || sig_decl.type_private == crate::types::PrivateFlag::Public
-        {
-            crate::types::usage::ConstructorUsage::Positive
-        } else {
-            crate::types::usage::ConstructorUsage::Privatize
-        };
-        let mut usage_tables = type_ctx.usage();
-        for cstr in impl_cstrs {
-            usage_tables.mark_constructor_used(
-                usage,
-                id.name(),
-                type_ctx.resolve_loc(impl_decl.type_loc),
-                cstr.cd_id.name(),
-            );
-        }
+    crate::types::typecore::mark_type_used(
+        type_ctx,
+        env,
+        id.name_atom(),
+        type_ctx.resolve_loc(impl_decl.type_loc),
+    );
+    let errs = includecore_type_declarations(
+        type_ctx,
+        env,
+        id.name(),
+        impl_decl,
+        id,
+        sig_decl,
+        false,
+        warnings,
+    )?;
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(type_decl_mismatch(id, impl_decl, sig_decl, errs))
     }
+}
+
+/// `Includecore.type_declarations ?equality ~loc env name decl1 id decl2`
+/// (includecore.ml): the differences that keep `decl1` from being included
+/// in `decl2`, the first failing check's only. `Err` is a payload reader's
+/// error, which escapes the check.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn includecore_type_declarations(
+    type_ctx: &TypeContext,
+    env: &Env,
+    name: &str,
+    impl_decl: &TypeDeclaration,
+    id: Ident,
+    sig_decl: &TypeDeclaration,
+    equality: bool,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<Vec<TypeMismatch>> {
     if let Some(warning) = deprecated_inclusion_warning(
         type_ctx,
-        id.name(),
+        name,
         &impl_decl.type_attributes,
         &sig_decl.type_attributes,
         impl_decl.type_loc,
         sig_decl.type_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 
-    // Check arity (number of type parameters)
-    if impl_decl.type_params.len() != sig_decl.type_params.len() {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "They have different arities.",
-        ));
+    if impl_decl.type_arity != sig_decl.type_arity {
+        return Ok(vec![TypeMismatch::Arity]);
     }
 
     if !private_flags(impl_decl, sig_decl) {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "A private type would be revealed.",
-        ));
+        return Ok(vec![TypeMismatch::Privacy]);
     }
 
     let param_map = build_type_param_map(type_ctx, &impl_decl.type_params, &sig_decl.type_params);
@@ -3118,12 +3359,7 @@ pub(crate) fn type_declarations(
                 &impl_decl.type_params,
                 &sig_decl.type_params,
             ) {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    "Their constraints differ.",
-                ));
+                return Ok(vec![TypeMismatch::Constraint]);
             }
         }
         (Some(impl_manifest), Some(sig_manifest)) => {
@@ -3139,44 +3375,31 @@ pub(crate) fn type_declarations(
                 sig_manifest,
                 sig_decl.type_private,
             ) {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, String::new()));
+                return Ok(vec![TypeMismatch::Manifest]);
             }
         }
         (None, Some(sig_manifest)) => {
-            let manifests_match = type_param_lists_equal_for_inclusion(
+            if !type_param_lists_equal_for_inclusion(
                 type_ctx,
                 env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
-            ) && impl_decl.type_path.as_ref().is_some_and(|path| {
-                let self_ty =
-                    type_ctx.new_generic_constr(*path, sig_decl.type_params.clone());
-                type_exprs_equal_for_inclusion(
-                    type_ctx,
-                    Some(env),
-                    &param_map,
-                    self_ty,
-                    sig_manifest,
-                )
-            });
-            if !manifests_match {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    if type_param_lists_equal_for_inclusion(
-                        type_ctx,
-                        env,
-                        &impl_decl.type_params,
-                        &sig_decl.type_params,
-                    ) {
-                        String::new()
-                    } else {
-                        "Their constraints differ.".to_string()
-                    },
-                ));
+            ) {
+                return Ok(vec![TypeMismatch::Constraint]);
+            }
+            // `let ty1 = Btype.newgenty (Tconstr (Pident id, decl2.type_params,
+            // ref Mnil))` and `Ctype.equal env false [ty1] [ty2]`.
+            let ty1 = type_ctx.new_generic_constr(Path::pident(id), sig_decl.type_params.clone());
+            if !crate::types::ctype::equal(type_ctx, env, false, &[ty1], &[sig_manifest]) {
+                return Ok(vec![TypeMismatch::Manifest]);
             }
         }
+    }
+
+    // includecore.ml: `compare_runtime_annotations env id decl1 decl2` once
+    // the manifests agree.
+    if let Some(err) = compare_runtime_annotations(type_ctx, env, id, impl_decl, sig_decl) {
+        return Ok(vec![err]);
     }
 
     let canonical_unboxed = |decl: &TypeDeclaration| {
@@ -3188,65 +3411,52 @@ pub(crate) fn type_declarations(
     if !matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
         && canonical_unboxed(impl_decl) != canonical_unboxed(sig_decl)
     {
-        let unboxed_decl = if canonical_unboxed(sig_decl) {
-            "the second"
-        } else {
-            "the first"
-        };
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            format!(
-                "Their internal representations differ:\n{unboxed_decl} declaration uses unboxed representation."
-            ),
-        ));
+        return Ok(vec![TypeMismatch::UnboxedRepresentation(
+            canonical_unboxed(sig_decl),
+        )]);
     }
 
     if type_decl_tag_name(type_ctx, impl_decl) != type_decl_tag_name(type_ctx, sig_decl) {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            TypeDeclarationMismatchDetail::TagName,
-        ));
+        return Ok(vec![TypeMismatch::TagName]);
     }
 
-    // Check that the type kinds are compatible
-    match (&impl_decl.type_kind, &sig_decl.type_kind) {
-        // Abstract in signature allows any implementation
-        (_, TypeKind::TypeAbstract) => {}
-
-        (
-            TypeKind::TypeRecord(impl_labels, impl_rep),
-            TypeKind::TypeRecord(sig_labels, sig_rep),
-        ) => {
-            if let Some(detail) = compare_record_declarations(
-                type_ctx,
-                env,
-                &impl_decl.type_params,
-                &sig_decl.type_params,
-                impl_labels,
-                sig_labels,
-                warnings,
-            ) {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
-            }
-            if impl_rep != sig_rep {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    "Their internal representations differ.",
-                ));
-            }
-        }
-
+    let err = match (&impl_decl.type_kind, &sig_decl.type_kind) {
+        (_, TypeKind::TypeAbstract) => Vec::new(),
         (
             TypeKind::TypeVariant(impl_constructors, _),
             TypeKind::TypeVariant(sig_constructors, _),
         ) => {
-            if let Some(detail) = compare_variant_declarations(
+            // includecore.ml: `mark cstrs1 usage name decl1; if equality then
+            // mark cstrs2 Env.Positive (Ident.name id) decl2`.
+            if !env.is_implicit_coercion() {
+                let usage = if impl_decl.type_private == crate::types::PrivateFlag::Private
+                    || sig_decl.type_private == crate::types::PrivateFlag::Public
+                {
+                    crate::types::usage::ConstructorUsage::Positive
+                } else {
+                    crate::types::usage::ConstructorUsage::Privatize
+                };
+                let mut usage_tables = type_ctx.usage();
+                for cstr in impl_constructors {
+                    usage_tables.mark_constructor_used(
+                        usage,
+                        name,
+                        type_ctx.resolve_loc(impl_decl.type_loc),
+                        cstr.cd_id.name(),
+                    );
+                }
+                if equality {
+                    for cstr in sig_constructors {
+                        usage_tables.mark_constructor_used(
+                            crate::types::usage::ConstructorUsage::Positive,
+                            id.name(),
+                            type_ctx.resolve_loc(sig_decl.type_loc),
+                            cstr.cd_id.name(),
+                        );
+                    }
+                }
+            }
+            compare_variant_declarations(
                 type_ctx,
                 env,
                 &impl_decl.type_params,
@@ -3268,261 +3478,531 @@ pub(crate) fn type_declarations(
                     ),
                 ),
                 warnings,
-            ) {
-                return Err(type_decl_mismatch(id, impl_decl, sig_decl, detail));
+            )?
+        }
+        (
+            TypeKind::TypeRecord(impl_labels, impl_rep),
+            TypeKind::TypeRecord(sig_labels, sig_rep),
+        ) => {
+            let err = compare_record_declarations(
+                type_ctx,
+                env,
+                &impl_decl.type_params,
+                &sig_decl.type_params,
+                impl_labels,
+                sig_labels,
+            );
+            if !err.is_empty() || impl_rep == sig_rep {
+                err
+            } else {
+                vec![TypeMismatch::RecordRepresentation]
             }
         }
-
-        (TypeKind::TypeOpen, TypeKind::TypeOpen) => {}
-
-        _ => {
-            return Err(type_decl_mismatch(
-                id,
-                impl_decl,
-                sig_decl,
-                "Their kinds differ.",
-            ));
-        }
+        (TypeKind::TypeOpen, TypeKind::TypeOpen) => Vec::new(),
+        _ => vec![TypeMismatch::Kind],
+    };
+    if !err.is_empty() {
+        return Ok(err);
     }
 
-    if matches!(sig_decl.type_kind, TypeKind::TypeAbstract)
-        && sig_decl.type_manifest.is_none()
-        && !impl_decl.type_immediate
-        && sig_decl.type_immediate
-    {
-        return Err(type_decl_mismatch(
-            id,
-            impl_decl,
-            sig_decl,
-            "the first is not an immediate type.",
-        ));
-    }
-
-    // Match OCaml's Includecore.type_declarations variance check.
-    let sig_is_abstract =
+    let abstr =
         matches!(sig_decl.type_kind, TypeKind::TypeAbstract) && sig_decl.type_manifest.is_none();
-    let need_variance = sig_is_abstract
+    // If attempt to assign a non-immediate type (e.g. string) to a type that
+    // must be immediate, then we error.
+    if abstr && !impl_decl.type_immediate && sig_decl.type_immediate {
+        return Ok(vec![TypeMismatch::Immediate]);
+    }
+
+    let need_variance = abstr
         || matches!(impl_decl.type_private, crate::types::PrivateFlag::Private)
         || matches!(impl_decl.type_kind, TypeKind::TypeOpen);
-    if need_variance && impl_decl.type_variance.len() == sig_decl.type_variance.len() {
-        let abstract_or_private =
-            sig_is_abstract || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
-        let open_sig =
-            matches!(sig_decl.type_kind, TypeKind::TypeOpen) && sig_decl.type_manifest.is_none();
-
-        for (sig_param, (impl_var, sig_var)) in sig_decl.type_params.iter().zip(
+    if !need_variance {
+        return Ok(Vec::new());
+    }
+    let abstr = abstr || matches!(sig_decl.type_private, crate::types::PrivateFlag::Private);
+    let opn = matches!(sig_decl.type_kind, TypeKind::TypeOpen) && sig_decl.type_manifest.is_none();
+    let variance_ok = sig_decl
+        .type_params
+        .iter()
+        .zip(
             impl_decl
                 .type_variance
                 .iter()
                 .zip(sig_decl.type_variance.iter()),
-        ) {
-            let implies = |lhs: bool, rhs: bool| !lhs || rhs;
+        )
+        .all(|(sig_param, (impl_var, sig_var))| {
+            let imp = |lhs: bool, rhs: bool| !lhs || rhs;
             let constrained = !crate::types::btype::is_tvar(type_ctx, *sig_param);
-
-            let (impl_co, impl_cn) = impl_var.get_upper();
-            let (sig_co, sig_cn) = sig_var.get_upper();
-            let upper_ok = if abstract_or_private {
-                implies(impl_co, sig_co) && implies(impl_cn, sig_cn)
-            } else if open_sig || constrained {
-                impl_co == sig_co && impl_cn == sig_cn
+            let (co1, cn1) = impl_var.get_upper();
+            let (co2, cn2) = sig_var.get_upper();
+            let upper_ok = if abstr {
+                imp(co1, co2) && imp(cn1, cn2)
+            } else if opn || constrained {
+                co1 == co2 && cn1 == cn2
             } else {
                 true
             };
+            let (p1, n1, i1, j1) = impl_var.get_lower();
+            let (p2, n2, i2, j2) = sig_var.get_lower();
+            upper_ok
+                && imp(
+                    abstr,
+                    imp(p2, p1) && imp(n2, n1) && imp(i2, i1) && imp(j2, j1),
+                )
+        });
+    Ok(if variance_ok {
+        Vec::new()
+    } else {
+        vec![TypeMismatch::Variance]
+    })
+}
 
-            let (impl_p, impl_n, impl_i, impl_j) = impl_var.get_lower();
-            let (sig_p, sig_n, sig_i, sig_j) = sig_var.get_lower();
-            let lower_ok = implies(
-                abstract_or_private,
-                implies(sig_p, impl_p)
-                    && implies(sig_n, impl_n)
-                    && implies(sig_i, impl_i)
-                    && implies(sig_j, impl_j),
-            );
+/// `'a aligned` (includecore.ml): the entries of two declarations of a
+/// record or a variant, lined up by name.
+enum Aligned<'a, T> {
+    /// An entry in both, with its position in each.
+    Both(&'a T, usize, &'a T, usize),
+    Renamed(&'a T, &'a T),
+    OnlyFirst(&'a T),
+    OnlySecond(&'a T),
+}
 
-            if !(upper_ok && lower_ok) {
-                return Err(type_decl_mismatch(
-                    id,
-                    impl_decl,
-                    sig_decl,
-                    TypeDeclarationMismatchDetail::Variance,
-                ));
+/// The entries both declarations name, in the order of the second, when
+/// the first has them in another order.
+type AlignedOrder = Option<Vec<String>>;
+
+/// `align name l1 l2` (includecore.ml): declarations that agree on their
+/// names, as most do, need no tables.
+fn align<'a, T>(
+    name: fn(&T) -> &str,
+    l1: &'a [T],
+    l2: &'a [T],
+) -> (Vec<Aligned<'a, T>>, AlignedOrder) {
+    if l1.len() == l2.len() && l1.iter().zip(l2).all(|(x1, x2)| name(x1) == name(x2)) {
+        let aligned = l1
+            .iter()
+            .zip(l2)
+            .enumerate()
+            .map(|(i, (x1, x2))| Aligned::Both(x1, i, x2, i))
+            .collect();
+        return (aligned, None);
+    }
+    align_by_name(name, l1, l2)
+}
+
+/// `align_by_name name l1 l2` (includecore.ml): the entries of the second
+/// declaration in its order, then those only the first has, and the common
+/// names in the second's order when the first has them in another. The
+/// entries the other declaration lacks fall into gaps, each after an entry
+/// both have, or at the start; a gap that holds as many in each declaration
+/// holds renamings, paired in order.
+fn align_by_name<'a, T>(
+    name: fn(&T) -> &str,
+    l1: &'a [T],
+    l2: &'a [T],
+) -> (Vec<Aligned<'a, T>>, AlignedOrder) {
+    let positions = |l: &'a [T]| -> HashMap<&'a str, usize> {
+        l.iter().enumerate().map(|(i, x)| (name(x), i)).collect()
+    };
+    let pos1 = positions(l1);
+    let pos2 = positions(l2);
+    let gaps = |l: &'a [T], other: &HashMap<&'a str, usize>| {
+        let mut table: HashMap<Option<&'a str>, Vec<&'a T>> = HashMap::default();
+        let mut gap = None;
+        for x in l {
+            if other.contains_key(name(x)) {
+                gap = Some(name(x));
+            } else {
+                table.entry(gap).or_default().push(x);
+            }
+        }
+        table
+    };
+    let gaps1 = gaps(l1, &pos2);
+    let mut renamings: HashMap<&'a str, &'a T> = HashMap::default();
+    let mut renamed: HashSet<&'a str> = HashSet::default();
+    for (gap, xs2) in gaps(l2, &pos1) {
+        if let Some(xs1) = gaps1.get(&gap)
+            && xs1.len() == xs2.len()
+        {
+            for (x1, x2) in xs1.iter().zip(&xs2) {
+                renamings.insert(name(x2), x1);
+                renamed.insert(name(x1));
             }
         }
     }
-
-    Ok(())
+    let mut aligned: Vec<Aligned<'a, T>> = l2
+        .iter()
+        .enumerate()
+        .map(|(i, x2)| match pos1.get(name(x2)) {
+            Some(&i1) => Aligned::Both(&l1[i1], i1, x2, i),
+            None => match renamings.get(name(x2)) {
+                Some(&x1) => Aligned::Renamed(x1, x2),
+                None => Aligned::OnlySecond(x2),
+            },
+        })
+        .collect();
+    aligned.extend(
+        l1.iter()
+            .filter(|x1| !pos2.contains_key(name(x1)) && !renamed.contains(name(x1)))
+            .map(Aligned::OnlyFirst),
+    );
+    let common = |l: &'a [T], other: &HashMap<&'a str, usize>| -> Vec<&'a str> {
+        l.iter()
+            .map(name)
+            .filter(|n| other.contains_key(n))
+            .collect()
+    };
+    let order2 = common(l2, &pos1);
+    let order = if common(l1, &pos2) == order2 {
+        None
+    } else {
+        Some(order2.into_iter().map(str::to_string).collect())
+    };
+    (aligned, order)
 }
 
-/// How the parameters of an implementation declaration correspond to those
-/// of the signature declaration it is checked against.
-#[derive(Clone, Copy)]
-struct ParamCorrespondence<'a> {
-    impl_params: &'a [TypeExprRef],
-    sig_params: &'a [TypeExprRef],
-    /// Each implementation parameter's signature counterpart.
-    map: &'a HashMap<TypeExprRef, TypeExprRef>,
+/// `compare_records env params1 params2 labels1 labels2` (includecore.ml):
+/// every difference of the fields, lined up by name.
+fn compare_record_declarations(
+    type_ctx: &TypeContext,
+    env: &Env,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    labels1: &[LabelDeclaration],
+    labels2: &[LabelDeclaration],
+) -> Vec<TypeMismatch> {
+    fn name(ld: &LabelDeclaration) -> &str {
+        ld.ld_id.name()
+    }
+    let (aligned, order) = align(name, labels1, labels2);
+    let pairs: Vec<(&LabelDeclaration, &LabelDeclaration)> = aligned
+        .iter()
+        .filter_map(|entry| match entry {
+            Aligned::Both(ld1, _, ld2, _) => Some((*ld1, *ld2)),
+            Aligned::Renamed(..) | Aligned::OnlyFirst(_) | Aligned::OnlySecond(_) => None,
+        })
+        .collect();
+    // The fields whose types differ. All the types are compared at once
+    // first; when that fails, each field with the fields before it that
+    // agree, as they are added to the parameters, cf. PR#7378.
+    let type_mismatches: Vec<Ident> = {
+        let mut all1 = params1.to_vec();
+        all1.extend(pairs.iter().map(|(ld1, _)| ld1.ld_type));
+        let mut all2 = params2.to_vec();
+        all2.extend(pairs.iter().map(|(_, ld2)| ld2.ld_type));
+        if crate::types::ctype::equal(type_ctx, env, true, &all1, &all2) {
+            Vec::new()
+        } else {
+            let mut prior1 = params1.to_vec();
+            let mut prior2 = params2.to_vec();
+            let mut mismatches = Vec::new();
+            for (ld1, ld2) in &pairs {
+                let mut next1 = Vec::with_capacity(prior1.len() + 1);
+                next1.push(ld1.ld_type);
+                next1.extend_from_slice(&prior1);
+                let mut next2 = Vec::with_capacity(prior2.len() + 1);
+                next2.push(ld2.ld_type);
+                next2.extend_from_slice(&prior2);
+                if crate::types::ctype::equal(type_ctx, env, true, &next1, &next2) {
+                    prior1 = next1;
+                    prior2 = next2;
+                } else {
+                    mismatches.push(ld1.ld_id);
+                }
+            }
+            mismatches
+        }
+    };
+    let compare_fields = |ld1: &LabelDeclaration, ld2: &LabelDeclaration| {
+        let mut errs = Vec::new();
+        if ld1.ld_mutable != ld2.ld_mutable {
+            errs.push(TypeMismatch::FieldMutable(ld1.ld_id));
+        }
+        if ld1.ld_optional != ld2.ld_optional {
+            errs.push(TypeMismatch::FieldOptional(ld1.ld_id));
+        }
+        let name1 = ld1.declaration_name();
+        let name2 = ld2.declaration_name();
+        if name1 != name2 {
+            errs.push(TypeMismatch::FieldRuntimeName(
+                ld1.ld_id,
+                name1.to_string(),
+                name2.to_string(),
+            ));
+        }
+        // The type of an optional field is an option, which `FieldOptional`
+        // already reports.
+        if ld1.ld_optional == ld2.ld_optional
+            && type_mismatches.iter().any(|id| id.same(&ld1.ld_id))
+        {
+            errs.push(TypeMismatch::FieldType(ld1.ld_id));
+        }
+        errs
+    };
+    let mut errs = Vec::new();
+    for entry in &aligned {
+        match entry {
+            Aligned::Both(ld1, _, ld2, _) => errs.extend(compare_fields(ld1, ld2)),
+            Aligned::Renamed(ld1, ld2) => errs.push(TypeMismatch::FieldRenamed(
+                name(ld1).to_string(),
+                name(ld2).to_string(),
+            )),
+            Aligned::OnlyFirst(ld1) => errs.push(TypeMismatch::FieldMissing(false, ld1.ld_id)),
+            Aligned::OnlySecond(ld2) => errs.push(TypeMismatch::FieldMissing(true, ld2.ld_id)),
+        }
+    }
+    if let Some(names) = order {
+        errs.push(TypeMismatch::FieldOrder(names));
+    }
+    errs
+}
+
+/// `compare_constructor_arguments env cstr params1 params2 arg1 arg2`
+/// (includecore.ml).
+fn compare_constructor_arguments(
+    type_ctx: &TypeContext,
+    env: &Env,
+    cstr: Ident,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    arg1: &ConstructorArguments,
+    arg2: &ConstructorArguments,
+) -> Vec<TypeMismatch> {
+    match (arg1, arg2) {
+        (ConstructorArguments::CstrTuple(arg1), ConstructorArguments::CstrTuple(arg2)) => {
+            if arg1.len() != arg2.len() {
+                return vec![TypeMismatch::ConstructorArity(cstr)];
+            }
+            // Ctype.equal must be called on all arguments at once, cf.
+            // PR#7378.
+            let mut all1 = params1.to_vec();
+            all1.extend_from_slice(arg1);
+            let mut all2 = params2.to_vec();
+            all2.extend_from_slice(arg2);
+            if crate::types::ctype::equal(type_ctx, env, true, &all1, &all2) {
+                Vec::new()
+            } else {
+                vec![TypeMismatch::ConstructorType(cstr)]
+            }
+        }
+        (ConstructorArguments::CstrRecord(l1), ConstructorArguments::CstrRecord(l2)) => {
+            let errs = compare_record_declarations(type_ctx, env, params1, params2, l1, l2);
+            if errs.is_empty() {
+                errs
+            } else {
+                vec![TypeMismatch::ConstructorRecord(cstr, errs)]
+            }
+        }
+        _ => vec![TypeMismatch::ConstructorType(cstr)],
+    }
 }
 
 /// A variant declaration's constructors and runtime layout.
 type VariantShape<'a> = (&'a [ConstructorDeclaration], crate::types::VariantLayout);
 
-fn compare_record_declarations(
+/// `compare_variants ~loc env params1 params2 ~layout1 ~layout2 cstrs1
+/// cstrs2` (includecore.ml): every difference of the constructors, lined up
+/// by name, each compared at its own position in each layout.
+fn compare_variant_declarations(
     type_ctx: &TypeContext,
     env: &Env,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
-    impl_labels: &[LabelDeclaration],
-    sig_labels: &[LabelDeclaration],
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    (cstrs1, layout1): VariantShape<'_>,
+    (cstrs2, layout2): VariantShape<'_>,
     warnings: &mut Vec<Warning>,
-) -> Option<String> {
-    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
-    compare_record_declarations_with_param_map(
+) -> IncludeModResult<Vec<TypeMismatch>> {
+    fn name(cd: &ConstructorDeclaration) -> &str {
+        cd.cd_id.name()
+    }
+    let (aligned, order) = align(name, cstrs1, cstrs2);
+    let mut errs = Vec::new();
+    for entry in aligned {
+        match entry {
+            Aligned::Both(cd1, i1, cd2, i2) => errs.extend(compare_constructors(
+                type_ctx, env, params1, params2, &layout1, &layout2, cd1, i1, cd2, i2, warnings,
+            )?),
+            Aligned::Renamed(cd1, cd2) => errs.push(TypeMismatch::ConstructorRenamed(
+                name(cd1).to_string(),
+                name(cd2).to_string(),
+            )),
+            Aligned::OnlyFirst(cd1) => {
+                errs.push(TypeMismatch::ConstructorMissing(false, cd1.cd_id))
+            }
+            Aligned::OnlySecond(cd2) => {
+                errs.push(TypeMismatch::ConstructorMissing(true, cd2.cd_id))
+            }
+        }
+    }
+    if let Some(names) = order {
+        errs.push(TypeMismatch::ConstructorOrder(names));
+    }
+    Ok(errs)
+}
+
+/// `compare_constructors ~loc env params1 params2 ~layout1 ~layout2 cd1 i1
+/// cd2 i2` (includecore.ml): `i1` and `i2` are the positions of the
+/// constructors in their layouts.
+#[allow(clippy::too_many_arguments)]
+fn compare_constructors(
+    type_ctx: &TypeContext,
+    env: &Env,
+    params1: &[TypeExprRef],
+    params2: &[TypeExprRef],
+    layout1: &crate::types::VariantLayout,
+    layout2: &crate::types::VariantLayout,
+    cd1: &ConstructorDeclaration,
+    i1: usize,
+    cd2: &ConstructorDeclaration,
+    i2: usize,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<Vec<TypeMismatch>> {
+    if let Some(warning) = deprecated_inclusion_warning(
         type_ctx,
-        env,
-        &ParamCorrespondence {
-            impl_params,
-            sig_params,
-            map: &param_map,
+        cd1.cd_id.name(),
+        &cd1.cd_attributes,
+        &cd2.cd_attributes,
+        cd1.cd_loc,
+        cd2.cd_loc,
+    )? {
+        warnings.push(warning);
+    }
+    let r = match (cd1.cd_res, cd2.cd_res) {
+        (Some(r1), Some(r2)) => {
+            if crate::types::ctype::equal(type_ctx, env, true, &[r1], &[r2]) {
+                compare_constructor_arguments(
+                    type_ctx,
+                    env,
+                    cd1.cd_id,
+                    &[r1],
+                    &[r2],
+                    &cd1.cd_args,
+                    &cd2.cd_args,
+                )
+            } else {
+                vec![TypeMismatch::ConstructorType(cd1.cd_id)]
+            }
+        }
+        (Some(_), None) | (None, Some(_)) => vec![TypeMismatch::ConstructorType(cd1.cd_id)],
+        (None, None) => compare_constructor_arguments(
+            type_ctx,
+            env,
+            cd1.cd_id,
+            params1,
+            params2,
+            &cd1.cd_args,
+            &cd2.cd_args,
+        ),
+    };
+    if !r.is_empty() {
+        return Ok(r);
+    }
+    if constructor_is_nullary(cd1) {
+        return Ok(
+            if layout1.constructor_tag(i1) != layout2.constructor_tag(i2) {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            } else {
+                Vec::new()
+            },
+        );
+    }
+    // A tagged case with a payload carries its tag in the object; an
+    // untagged one is its payload, whatever its `@as`, and is compared by
+    // its payload kind.
+    use crate::types::{VariantBlock, VariantBlockType, VariantConstructorCase};
+    Ok(
+        match (&layout1.constructors[i1], &layout2.constructors[i2]) {
+            (
+                VariantConstructorCase::Block(VariantBlock::Tagged(block1)),
+                VariantConstructorCase::Block(VariantBlock::Tagged(block2)),
+            ) if block1.tag.literal != block2.tag.literal => {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            }
+            // An unknown payload in the second declaration is the only payload
+            // case and has no check, so any first one agrees.
+            (
+                VariantConstructorCase::Block(VariantBlock::Untagged {
+                    block_type: block_type1,
+                    ..
+                }),
+                VariantConstructorCase::Block(VariantBlock::Untagged {
+                    block_type: block_type2,
+                    ..
+                }),
+            ) if block_type1 != block_type2 && *block_type2 != VariantBlockType::Unknown => {
+                vec![TypeMismatch::VariantRepresentation(cd1.cd_id)]
+            }
+            _ => Vec::new(),
         },
-        impl_labels,
-        sig_labels,
-        warnings,
     )
 }
 
-fn compare_record_declarations_with_param_map(
+/// includecore.ml `compare_runtime_annotations`: what the second
+/// declaration states about its values at run time must hold for the first.
+/// Values are recognized by the class or `typeof` the second states, so the
+/// first must state the same; stating nothing hides it. `@notUndefined` lets
+/// clients unbox `option` of the type, so the first must be a type that
+/// cannot hold `undefined` either, or one whose representation the compiler
+/// does not see.
+fn compare_runtime_annotations(
     type_ctx: &TypeContext,
     env: &Env,
-    params: &ParamCorrespondence<'_>,
-    impl_labels: &[LabelDeclaration],
-    sig_labels: &[LabelDeclaration],
-    warnings: &mut Vec<Warning>,
-) -> Option<String> {
-    let ParamCorrespondence {
-        impl_params,
-        sig_params,
-        map: param_map,
-    } = *params;
-    // OCaml compiler/ml/includecore.ml:396 starts record comparison at 1,
-    // so diagnostics report declaration field positions as 1-based.
-    let mut index = 0usize;
-    let len = impl_labels.len().min(sig_labels.len());
-
-    while index < len {
-        let impl_label = &impl_labels[index];
-        let sig_label = &sig_labels[index];
-        if impl_label.ld_id.name() != sig_label.ld_id.name() {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
-                index + 1,
-                impl_label.ld_id.name(),
-                sig_label.ld_id.name()
-            ));
+    id: Ident,
+    impl_decl: &TypeDeclaration,
+    sig_decl: &TypeDeclaration,
+) -> Option<TypeMismatch> {
+    // The second declaration's shape was resolved in its own environment, so
+    // it is what users of the second declaration see.
+    let first_type = |env: &mut Env| {
+        // `Env.add_type ~check:false id decl1 env` and
+        // `Btype.newgenty (Tconstr (Pident id, decl1.type_params, ref Mnil))`.
+        env.store_type(type_ctx, id, impl_decl.clone());
+        type_ctx.new_generic_constr(Path::pident(id), impl_decl.type_params.clone())
+    };
+    match &sig_decl.type_shape {
+        crate::types::ValueShape::Unstated => None,
+        crate::types::ValueShape::NeverUndefined => {
+            let mut env = env.clone();
+            let ty = first_type(&mut env);
+            match crate::raw_lambda::typeopt::undefinedness(type_ctx, &env, ty) {
+                crate::raw_lambda::typeopt::Undefinedness::CannotBeUndefined
+                | crate::raw_lambda::typeopt::Undefinedness::Unseen => None,
+                crate::raw_lambda::typeopt::Undefinedness::StandsForAnother
+                | crate::raw_lambda::typeopt::Undefinedness::CanBeUndefined => {
+                    Some(TypeMismatch::NotUndefined)
+                }
+            }
         }
-        if impl_label.ld_mutable != sig_label.ld_mutable {
-            return Some(format!(
-                "The mutability of field {} is different.",
-                impl_label.ld_id.name()
-            ));
-        }
-        if impl_label.ld_optional != sig_label.ld_optional {
-            return Some(format!(
-                "The optional attribute of field {} is different.",
-                impl_label.ld_id.name()
-            ));
-        }
-        if let Some(warning) = deprecated_mutable_inclusion_warning(
-            type_ctx,
-            impl_label.ld_id.name(),
-            &impl_label.ld_attributes,
-            &sig_label.ld_attributes,
-            impl_label.ld_loc,
-            sig_label.ld_loc,
-        ) {
-            warnings.push(warning);
-        }
-        let impl_runtime_name = impl_label.declaration_name();
-        let sig_runtime_name = sig_label.declaration_name();
-        if impl_runtime_name != sig_runtime_name {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
-                index + 1,
-                impl_runtime_name,
-                sig_runtime_name
-            ));
-        }
-        index += 1;
-    }
-
-    if let Some(label) = sig_labels.get(index) {
-        return Some(format!(
-            "The field {} is only present in the second declaration.",
-            label.ld_id.name()
-        ));
-    }
-    if let Some(label) = impl_labels.get(index) {
-        return Some(format!(
-            "The field {} is only present in the first declaration.",
-            label.ld_id.name()
-        ));
-    }
-
-    // OCaml compiler/ml/includecore.ml:271-313 first compares every record
-    // parameter and field in one Ctype.equal call. Fields are consed while
-    // traversing, so the final comparison visits them in reverse declaration
-    // order before the type parameters.
-    let mut impl_types = Vec::with_capacity(impl_labels.len() + impl_params.len());
-    let mut sig_types = Vec::with_capacity(sig_labels.len() + sig_params.len());
-    impl_types.extend(impl_labels.iter().rev().map(|label| label.ld_type));
-    impl_types.extend_from_slice(impl_params);
-    sig_types.extend(sig_labels.iter().rev().map(|label| label.ld_type));
-    sig_types.extend_from_slice(sig_params);
-    if type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &impl_types, &sig_types) {
-        return None;
-    }
-
-    // The reference retries field-by-field only after the batched fast path
-    // fails, so diagnostics can identify the first incompatible declaration.
-    let mut prior_impl = impl_params.to_vec();
-    let mut prior_sig = sig_params.to_vec();
-    for (impl_label, sig_label) in impl_labels.iter().zip(sig_labels) {
-        // The slow pass re-runs `aux` (includecore.ml:284-312), so
-        // `check_deprecated_mutable_inclusion` warns again for each field up
-        // to the one that is blamed.
-        if let Some(warning) = deprecated_mutable_inclusion_warning(
-            type_ctx,
-            impl_label.ld_id.name(),
-            &impl_label.ld_attributes,
-            &sig_label.ld_attributes,
-            impl_label.ld_loc,
-            sig_label.ld_loc,
-        ) {
-            warnings.push(warning);
-        }
-        prior_impl.insert(0, impl_label.ld_type);
-        prior_sig.insert(0, sig_label.ld_type);
-        if !type_expr_lists_equal_for_inclusion(type_ctx, env, param_map, &prior_impl, &prior_sig) {
-            return Some(format!(
-                "The types for field {} are not equal.",
-                impl_label.ld_id.name()
-            ));
+        crate::types::ValueShape::RecognizedAs(shape2) => {
+            let declared2 = Some(&shape2.block_type);
+            // What the first declaration states, or what its structure gives.
+            let mut env = env.clone();
+            let ty = first_type(&mut env);
+            let declared1 = crate::types::variant_layout::payload_kind(type_ctx, &env, ty);
+            if declared1.as_ref() == declared2 {
+                None
+            } else {
+                Some(TypeMismatch::RuntimeAnnotation(
+                    crate::types::variant_layout::describe_declared_values(declared1.as_ref()),
+                    crate::types::variant_layout::describe_declared_values(declared2),
+                ))
+            }
         }
     }
-
-    None
 }
 
 fn type_decl_mismatch(
     name: Ident,
     actual: &TypeDeclaration,
     expected: &TypeDeclaration,
-    detail: impl Into<TypeDeclarationMismatchDetail>,
+    errs: Vec<TypeMismatch>,
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
         actual: Box::new(actual.clone()),
         expected: Box::new(expected.clone()),
-        detail: detail.into(),
+        errs,
     }
 }
 
@@ -3603,7 +4083,7 @@ fn row_more_can_match_fixed_private_super(type_ctx: &TypeContext, row_more: Type
     let desc = type_ctx.get_desc(row_more);
     matches!(
         &*desc,
-        TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil
+        TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. } | TypeDesc::Tnil
     )
 }
 
@@ -3669,6 +4149,16 @@ fn fixed_private_row_pair_types(
         (RowField::Rabsent, RowField::Reither { .. } | RowField::Rabsent) => true,
         _ => false,
     }
+}
+
+/// How the parameters of an implementation declaration correspond to those
+/// of the signature declaration it is checked against.
+#[derive(Clone, Copy)]
+struct ParamCorrespondence<'a> {
+    impl_params: &'a [TypeExprRef],
+    sig_params: &'a [TypeExprRef],
+    /// Each implementation parameter's signature counterpart.
+    map: &'a HashMap<TypeExprRef, TypeExprRef>,
 }
 
 fn fixed_private_variant_manifest_for_inclusion(
@@ -3781,7 +4271,7 @@ fn fixed_private_object_manifest_for_inclusion(
         let desc = type_ctx.get_desc(impl_rest);
         matches!(
             &*desc,
-            TypeDesc::Tnil | TypeDesc::Tvar(_) | TypeDesc::Tconstr { .. }
+            TypeDesc::Tnil | TypeDesc::Tvar(..) | TypeDesc::Tconstr { .. }
         )
     };
     if !rest_ok {
@@ -3903,165 +4393,6 @@ fn type_manifest_for_inclusion(
     false
 }
 
-fn compare_variant_declarations(
-    type_ctx: &TypeContext,
-    env: &Env,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
-    (impl_constructors, impl_layout): VariantShape<'_>,
-    (sig_constructors, sig_layout): VariantShape<'_>,
-    warnings: &mut Vec<Warning>,
-) -> Option<String> {
-    let param_map = build_type_param_map(type_ctx, impl_params, sig_params);
-    // OCaml compiler/ml/includecore.ml:392 starts variant comparison at 1,
-    // so diagnostics report constructor positions as 1-based.
-    let mut index = 0usize;
-    let len = impl_constructors.len().min(sig_constructors.len());
-
-    while index < len {
-        let impl_constructor = &impl_constructors[index];
-        let sig_constructor = &sig_constructors[index];
-        if impl_constructor.cd_id.name() != sig_constructor.cd_id.name() {
-            return Some(format!(
-                "Fields number {} have different names, {} and {}.",
-                index + 1,
-                impl_constructor.cd_id.name(),
-                sig_constructor.cd_id.name()
-            ));
-        }
-        if let Some(warning) = deprecated_inclusion_warning(
-            type_ctx,
-            impl_constructor.cd_id.name(),
-            &impl_constructor.cd_attributes,
-            &sig_constructor.cd_attributes,
-            impl_constructor.cd_loc,
-            sig_constructor.cd_loc,
-        ) {
-            warnings.push(warning);
-        }
-
-        let (arg_param_map, arg_impl_params, arg_sig_params) =
-            match (impl_constructor.cd_res, sig_constructor.cd_res) {
-                (Some(impl_res), Some(sig_res)) => {
-                    if !type_exprs_equal_for_inclusion(
-                        type_ctx,
-                        Some(env),
-                        &param_map,
-                        impl_res,
-                        sig_res,
-                    ) {
-                        return Some(format!(
-                            "The types for field {} are not equal.",
-                            impl_constructor.cd_id.name()
-                        ));
-                    }
-                    (
-                        build_type_param_map(type_ctx, &[impl_res], &[sig_res]),
-                        vec![impl_res],
-                        vec![sig_res],
-                    )
-                }
-                (Some(_), None) | (None, Some(_)) => {
-                    return Some(format!(
-                        "The types for field {} are not equal.",
-                        impl_constructor.cd_id.name()
-                    ));
-                }
-                (None, None) => (param_map.clone(), impl_params.to_vec(), sig_params.to_vec()),
-            };
-
-        match (&impl_constructor.cd_args, &sig_constructor.cd_args) {
-            (
-                ConstructorArguments::CstrRecord(impl_labels),
-                ConstructorArguments::CstrRecord(sig_labels),
-            ) => {
-                if let Some(detail) = compare_record_declarations_with_param_map(
-                    type_ctx,
-                    env,
-                    &ParamCorrespondence {
-                        impl_params: &arg_impl_params,
-                        sig_params: &arg_sig_params,
-                        map: &arg_param_map,
-                    },
-                    impl_labels,
-                    sig_labels,
-                    warnings,
-                ) {
-                    return Some(detail);
-                }
-            }
-            (
-                ConstructorArguments::CstrTuple(impl_args),
-                ConstructorArguments::CstrTuple(sig_args),
-            ) if impl_args.len() != sig_args.len() => {
-                return Some(format!(
-                    "The arities for field {} differ.",
-                    impl_constructor.cd_id.name()
-                ));
-            }
-            (
-                ConstructorArguments::CstrTuple(impl_args),
-                ConstructorArguments::CstrTuple(sig_args),
-            ) => {
-                for (impl_arg, sig_arg) in impl_args.iter().zip(sig_args.iter()) {
-                    if !type_exprs_equal_for_inclusion(
-                        type_ctx,
-                        Some(env),
-                        &arg_param_map,
-                        *impl_arg,
-                        *sig_arg,
-                    ) {
-                        return Some(format!(
-                            "The types for field {} are not equal.",
-                            impl_constructor.cd_id.name()
-                        ));
-                    }
-                }
-            }
-            _ => {
-                return Some(format!(
-                    "The types for field {} are not equal.",
-                    impl_constructor.cd_id.name()
-                ));
-            }
-        }
-
-        if constructor_is_nullary(impl_constructor) && {
-            let impl_tag = match &impl_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            let sig_tag = match &sig_layout.constructors[index] {
-                crate::types::VariantConstructorCase::Constant(tag) => &tag.literal,
-                crate::types::VariantConstructorCase::Block(_) => unreachable!(),
-            };
-            impl_tag != sig_tag
-        } {
-            return Some(format!(
-                "The internal representations for case {} are not equal.",
-                impl_constructor.cd_id.name()
-            ));
-        }
-
-        index += 1;
-    }
-
-    if let Some(constructor) = sig_constructors.get(index) {
-        return Some(format!(
-            "The field {} is only present in the second declaration.",
-            constructor.cd_id.name()
-        ));
-    }
-    if let Some(constructor) = impl_constructors.get(index) {
-        return Some(format!(
-            "The field {} is only present in the first declaration.",
-            constructor.cd_id.name()
-        ));
-    }
-
-    None
-}
-
 fn constructor_is_nullary(constructor: &ConstructorDeclaration) -> bool {
     matches!(
         &constructor.cd_args,
@@ -4090,18 +4421,6 @@ fn type_exprs_equal_for_inclusion(
 ) -> bool {
     let mut seen = HashSet::new();
     type_exprs_equal_for_inclusion_inner(type_ctx, env, param_map, impl_ty, sig_ty, &mut seen)
-}
-
-pub(crate) fn type_exprs_equal_for_type_declaration(
-    type_ctx: &TypeContext,
-    env: &Env,
-    expected_params: &[TypeExprRef],
-    actual_params: &[TypeExprRef],
-    expected_ty: TypeExprRef,
-    actual_ty: TypeExprRef,
-) -> bool {
-    let param_map = build_type_param_map(type_ctx, expected_params, actual_params);
-    type_exprs_equal_for_inclusion(type_ctx, Some(env), &param_map, expected_ty, actual_ty)
 }
 
 fn type_exprs_equal_for_inclusion_inner(
@@ -4149,7 +4468,8 @@ fn type_exprs_equal_for_inclusion_inner(
         // paths before `expand_head_rigid`. Parameterized constructors must
         // expand first; aliases can expose package types whose comparison has
         // observable Env/Ident allocation side effects.
-        return type_ctx.type_list(impl_args)
+        return type_ctx
+            .type_list(impl_args)
             .iter()
             .zip(type_ctx.type_list(sig_args).iter())
             .all(|(impl_arg, sig_arg)| {
@@ -4176,7 +4496,9 @@ fn type_exprs_equal_for_inclusion_inner(
 
     match (&*type_ctx.get_desc(impl_ty), &*type_ctx.get_desc(sig_ty)) {
         (TypeDesc::Tvar(impl_name), TypeDesc::Tvar(sig_name))
-        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => impl_name == sig_name,
+        | (TypeDesc::Tunivar(impl_name), TypeDesc::Tunivar(sig_name)) => {
+            impl_name == sig_name
+        }
         (
             TypeDesc::Tarrow {
                 args: impl_args,
@@ -4205,7 +4527,8 @@ fn type_exprs_equal_for_inclusion_inner(
         }
         (TypeDesc::Ttuple(impl_items), TypeDesc::Ttuple(sig_items)) => {
             impl_items.len() == sig_items.len()
-                && type_ctx.type_list(impl_items)
+                && type_ctx
+                    .type_list(impl_items)
                     .iter()
                     .zip(type_ctx.type_list(sig_items).iter())
                     .all(|(impl_item, sig_item)| {
@@ -4228,7 +4551,8 @@ fn type_exprs_equal_for_inclusion_inner(
         ) => {
             impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && type_ctx.type_list(impl_args)
+                && type_ctx
+                    .type_list(impl_args)
                     .iter()
                     .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
@@ -4289,7 +4613,8 @@ fn type_exprs_equal_for_inclusion_inner(
             labels_complete
                 && impl_path.same(sig_path)
                 && impl_args.len() == sig_args.len()
-                && type_ctx.type_list(impl_args)
+                && type_ctx
+                    .type_list(impl_args)
                     .iter()
                     .zip(type_ctx.type_list(sig_args).iter())
                     .all(|(impl_arg, sig_arg)| {
@@ -4613,7 +4938,6 @@ fn extension_constructors(
     impl_ext: &ExtensionConstructor,
     sig_ext: &ExtensionConstructor,
     subst: &InclusionSubst,
-    warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<()> {
     // includecore.ml:461-466: `Env.mark_extension_used usage env ext1
     // (Ident.name id)`.
@@ -4666,21 +4990,21 @@ fn extension_constructors(
         return Err(mismatch());
     }
 
-    // OCaml compiler/ml/includecore.ml:470-473 creates an anonymous
-    // constructor identifier before comparing extension arguments. The
-    // comparison uses it for record-constructor diagnostics; preserve the
-    // allocation even when Rust's diagnostic representation does not need the
-    // identifier so subsequent binding stamps follow the same typing order.
-    let _constructor_id = type_ctx.create_ident("");
-
-    if !constructor_arguments_equal_for_inclusion(
+    // `compare_constructor_arguments env (Ident.create "")
+    // ext1.ext_type_params ext2.ext_type_params ext1.ext_args ext2.ext_args
+    // = []` (includecore.ml `extension_constructors`).
+    let constructor_id = type_ctx.create_ident("");
+    if !compare_constructor_arguments(
         type_ctx,
         env,
-        &param_map,
+        constructor_id,
+        &impl_ext.ext_type_params,
+        &sig_ext.ext_type_params,
         &impl_ext.ext_args,
         &sig_ext.ext_args,
-        warnings,
-    ) {
+    )
+    .is_empty()
+    {
         return Err(mismatch());
     }
 
@@ -4709,45 +5033,10 @@ fn extension_constructors(
     Ok(())
 }
 
-fn constructor_arguments_equal_for_inclusion(
-    type_ctx: &TypeContext,
-    env: &Env,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
-    impl_args: &ConstructorArguments,
-    sig_args: &ConstructorArguments,
-    warnings: &mut Vec<Warning>,
-) -> bool {
-    match (impl_args, sig_args) {
-        (
-            ConstructorArguments::CstrTuple(impl_items),
-            ConstructorArguments::CstrTuple(sig_items),
-        ) => {
-            impl_items.len() == sig_items.len()
-                && impl_items
-                    .iter()
-                    .zip(sig_items.iter())
-                    .all(|(impl_item, sig_item)| {
-                        type_exprs_equal_for_inclusion(
-                            type_ctx,
-                            Some(env),
-                            param_map,
-                            *impl_item,
-                            *sig_item,
-                        )
-                    })
-        }
-        (
-            ConstructorArguments::CstrRecord(impl_labels),
-            ConstructorArguments::CstrRecord(sig_labels),
-        ) => {
-            compare_record_declarations(type_ctx, env, &[], &[], impl_labels, sig_labels, warnings)
-                .is_none()
-        }
-        _ => false,
-    }
-}
 
-/// Check if module type declaration `impl_decl` is compatible with `sig_decl`.
+/// `modtype_infos ~loc env cxt subst id info1 info2` (includemod.ml), with
+/// `sig_decl` already `Subst.modtype_declaration subst info2`: the module
+/// types must be equivalent, checked under `Modtype id`.
 fn modtype_declarations(
     type_ctx: &TypeContext,
     env: &Env,
@@ -4763,62 +5052,55 @@ fn modtype_declarations(
         &sig_decl.mtd_attributes,
         impl_decl.mtd_loc,
         sig_decl.mtd_loc,
-    ) {
+    )? {
         warnings.push(warning);
     }
 
-    if impl_decl == sig_decl {
-        return Ok(());
-    }
-    match (&impl_decl.mtd_type, &sig_decl.mtd_type) {
-        // Both abstract - compatible
-        (None, None) => Ok(()),
-
-        // Signature is abstract - implementation can be anything
-        (Some(_), None) => Ok(()),
-
-        // Signature has type but implementation is abstract - error
-        (None, Some(_)) => Err(IncludeModError::ModuleTypeMismatch {
-            name: id,
-            reason: "implementation is abstract but signature requires concrete type".to_string(),
-        }),
-
-        // Both have types - check compatibility (bidirectional)
+    let equivalence = match (&impl_decl.mtd_type, &sig_decl.mtd_type) {
+        (_, None) => Ok(()),
         (Some(impl_mty), Some(sig_mty)) => {
-            if impl_mty == sig_mty {
-                return Ok(());
-            }
-
-            let mismatch = |error| IncludeModError::ModuleTypeDeclarationMismatch {
-                name: id,
-                actual: Box::new(impl_decl.clone()),
-                expected: Box::new(sig_decl.clone()),
-                error: Box::new(with_modtype_context(id, error)),
-            };
-
-            // Module types must be equivalent (both directions), and OCaml
-            // rejects equivalent declarations when either direction needs a
-            // structure-field permutation.
-            let impl_to_sig = modtypes_with_warnings(type_ctx, env, impl_mty, sig_mty, warnings)
-                .map_err(mismatch)?;
-            let sig_to_impl = modtypes_with_warnings(type_ctx, env, sig_mty, impl_mty, warnings)
-                .map_err(mismatch)?;
-            if !matches!(impl_to_sig, ModuleCoercion::Tcoerce_none)
-                || !matches!(sig_to_impl, ModuleCoercion::Tcoerce_none)
-            {
-                return Err(mismatch(IncludeModError::ModtypePermutation));
-            }
-            Ok(())
+            check_modtype_equiv(type_ctx, env, impl_mty, sig_mty, warnings)
         }
-    }
+        // `check_modtype_equiv ~loc env cxt' (Mty_ident (Pident id)) mty2`.
+        (None, Some(sig_mty)) => check_modtype_equiv(
+            type_ctx,
+            env,
+            &ModuleType::MtyIdent(Path::pident(id)),
+            sig_mty,
+            warnings,
+        ),
+    };
+    equivalence.map_err(|error| IncludeModError::ModuleTypeDeclarationMismatch {
+        name: id,
+        actual: Box::new(impl_decl.clone()),
+        expected: Box::new(sig_decl.clone()),
+        error: Box::new(IncludeModError::AtModtype {
+            name: id,
+            error: Box::new(error),
+        }),
+    })
 }
 
-/// `check_modtype_equiv` runs in `Modtype id :: cxt` (includemod.ml:
-/// 473-476); every error below it shares that context.
-fn with_modtype_context(name: Ident, error: IncludeModError) -> IncludeModError {
-    IncludeModError::AtModtype {
-        name,
-        error: Box::new(error),
+/// `check_modtype_equiv ~loc env cxt mty1 mty2` (includemod.ml): each module
+/// type includes the other, without coercion. The reference's build
+/// evaluates the pair of `modtypes` left to right: an error of the forward
+/// check is the one reported, and the reverse check runs under `Reverse`.
+fn check_modtype_equiv(
+    type_ctx: &TypeContext,
+    env: &Env,
+    mty1: &ModuleType,
+    mty2: &ModuleType,
+    warnings: &mut Vec<Warning>,
+) -> IncludeModResult<()> {
+    let c1 = modtypes_with_warnings(type_ctx, env, mty1, mty2, warnings)?;
+    let c2 = modtypes_with_warnings(type_ctx, env, mty2, mty1, warnings).map_err(|error| {
+        IncludeModError::Reversed {
+            error: Box::new(error),
+        }
+    })?;
+    match (c1, c2) {
+        (ModuleCoercion::Tcoerce_none, ModuleCoercion::Tcoerce_none) => Ok(()),
+        _ => Err(IncludeModError::ModtypePermutation),
     }
 }
 
@@ -4899,6 +5181,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path,
         }
@@ -5281,7 +5564,6 @@ mod tests {
             &extension,
             &extension,
             &InclusionSubst::default(),
-            &mut Vec::new(),
         );
 
         assert!(result.is_ok());
@@ -5317,6 +5599,7 @@ mod tests {
                     type_attributes: vec![],
                     type_immediate: false,
                     type_representation: TypeRepresentation::Boxed,
+                    type_shape: crate::types::ValueShape::Unstated,
                     type_inlined_types: vec![],
                     type_path: None,
                 }),
@@ -5328,5 +5611,72 @@ mod tests {
         assert_eq!(signature_values(&sig).len(), 1);
         assert_eq!(signature_types(&sig).len(), 1);
         assert_eq!(signature_modules(&sig).len(), 0);
+    }
+
+    /// The position line of `report_error` (includemod.ml `context`),
+    /// printed at column 2 as in a report, before a symptom.
+    fn include_context_text(cxt: &[IncludePos]) -> String {
+        let mut buf = Vec::new();
+        {
+            let mut ppf = crate::parser::formatter::Formatter::new(&mut buf);
+            ppf.string_as(2, "");
+            ppf.open_vbox(0);
+            pp_include_context(&mut ppf, cxt);
+            pp_text(&mut ppf, "Illegal permutation of structure fields");
+            ppf.close_box();
+            ppf.flush();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn include_context_names_module_paths_in_words() {
+        // The positions of upstream acdf563eef: a module path, a module
+        // type, a functor's result or parameter at the end of one, and any
+        // other position as a module type with `<here>`.
+        let f = Ident::create_local("F");
+        let x = Ident::create_local("X");
+        let y = Ident::create_local("Y");
+        let t = Ident::create_local("T");
+        let symptom = "\n  \n  Illegal permutation of structure fields";
+        let line = |cxt: &[IncludePos]| {
+            include_context_text(cxt)
+                .strip_suffix(symptom)
+                .expect("a blank line before the symptom")
+                .to_string()
+        };
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Module(y)]),
+            "In module F.Y:"
+        );
+        assert_eq!(line(&[IncludePos::Modtype(t)]), "In module type T:");
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Modtype(t)]),
+            "In module type F.T:"
+        );
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Body(x)]),
+            "In the result of functor F:"
+        );
+        assert_eq!(
+            line(&[IncludePos::Module(f), IncludePos::Arg(x)]),
+            "In the parameter X of functor F:"
+        );
+        assert_eq!(
+            line(&[IncludePos::Body(x), IncludePos::Module(y)]),
+            "At position (X) => { module Y: <here> }"
+        );
+        assert_eq!(
+            line(&[IncludePos::Modtype(t), IncludePos::Module(y)]),
+            "At position module type T = { module Y: <here> }"
+        );
+        assert_eq!(
+            line(&[
+                IncludePos::Module(f),
+                IncludePos::Body(x),
+                IncludePos::Module(y)
+            ]),
+            "At position module F: (X) => { module Y: <here> }"
+        );
     }
 }

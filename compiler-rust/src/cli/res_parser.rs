@@ -165,6 +165,13 @@ fn run(args: Vec<String>) {
 
     let filename = args.file.to_string_lossy().to_string();
 
+    // res_cli.ml:96-98: the tokens target bypasses parsing and scans the file
+    // as it is.
+    if args.print == "tokens" {
+        print_tokens(&source, &filename, &mut io::stdout());
+        return;
+    }
+
     // Determine if we're parsing an interface
     let is_interface = args.interface || filename.ends_with(".resi") || filename.ends_with(".mli");
 
@@ -173,6 +180,9 @@ fn run(args: Vec<String>) {
     // Parse structure or signature
     if is_interface {
         let signature = module::parse_signature(&mut parser);
+        // res_cli.ml:87-89: the res target takes the line endings of the
+        // parsed source, like bsc -format.
+        let newline = parser.newline();
 
         // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
         // uncurried-dot syntax through Location.prerr_warning, which writes
@@ -182,7 +192,10 @@ fn run(args: Vec<String>) {
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
         if has_parse_errors {
-            print_diagnostics(&parser, &source, &filename, &mut io::stdout());
+            // res_cli.ml:105-110, 139-144: `Res_diagnostics.print_report`
+            // writes to the stderr formatter, then the CLI exits 1 or, with
+            // -recover, prints the recovered tree on stdout.
+            print_diagnostics(&parser, &source, &filename, &mut io::stderr());
             if !args.recover {
                 process::exit(1);
             }
@@ -203,20 +216,16 @@ fn run(args: Vec<String>) {
                 signature
             };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-            let (signature, jsx_warnings) = match jsx_ppx::transform_signature_with_warnings_result(
+            // The warnings raised before an error are printed before it
+            // escapes (`Location.prerr_warning`).
+            let (result, jsx_warnings) = jsx_ppx::transform_signature_collecting_warnings(
                 signature,
                 args.jsx_version,
                 &args.jsx_module,
                 parser.arena_mut(),
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    eprintln!("{err}");
-                    process::exit(1);
-                }
-            };
+            );
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-            signature
+            result.unwrap_or_else(|err| exit_with_uncaught_error(&err))
         };
 
         // Print in requested format
@@ -232,6 +241,7 @@ fn run(args: Vec<String>) {
             "res" => print_signature_res(
                 &signature,
                 parser.comments().to_vec(),
+                newline,
                 parser.arena_mut(),
                 &mut io::stdout(),
             ),
@@ -243,12 +253,24 @@ fn run(args: Vec<String>) {
                 if has_parse_errors {
                     sexp_locs::print_signature(&signature, parser.arena(), &mut io::stdout());
                 } else {
-                    let rewritten = match ppx::rewrite_signature(&signature, parser.arena_mut()) {
+                    // res_cli.ml:129-132 runs `Bs_builtin_ppx.mapper`: its
+                    // warnings go to stderr as it maps, before any error.
+                    // `res_parser` has no `-enable-experimental`, so LetUnwrap
+                    // is off.
+                    let (rewritten, warnings) =
+                        ppx::rewrite_signature_with_warnings(&signature, parser.arena_mut(), false);
+                    eprint!(
+                        "{}",
+                        crate::driver::format_ppx_warnings(
+                            parser.arena(),
+                            &source,
+                            &filename,
+                            &warnings
+                        )
+                    );
+                    let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
-                        Err(e) => {
-                            eprintln!("PPX rewrite failed: {e}");
-                            process::exit(1);
-                        }
+                        Err(e) => exit_with_uncaught_error(&format!("PPX rewrite failed: {e}")),
                     };
                     sexp_locs::print_signature(&rewritten, parser.arena(), &mut io::stdout());
                 }
@@ -260,12 +282,12 @@ fn run(args: Vec<String>) {
             "ast" => print_signature_ast(&signature, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "ResIntf01311" (raw string, not marshaled) for interfaces
+                // 1. Magic: "ResIntf01317" (raw string, not marshaled) for interfaces
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled signature (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01311");
+                let _ = io::stdout().write_all(b"ResIntf01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -286,7 +308,7 @@ fn run(args: Vec<String>) {
                 let sig0 = mapper_to0::map_signature(parser.arena_mut(), &signature);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResIntf01311");
+                let _ = io::stdout().write_all(b"ResIntf01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -308,6 +330,7 @@ fn run(args: Vec<String>) {
         }
     } else {
         let structure = module::parse_structure(&mut parser);
+        let newline = parser.newline();
 
         // OCaml compiler/syntax/src/res_core.ml:292-300 reports deprecated
         // uncurried-dot syntax through Location.prerr_warning, which writes
@@ -317,7 +340,10 @@ fn run(args: Vec<String>) {
         // Print diagnostics if any
         let has_parse_errors = parser.has_errors();
         if has_parse_errors {
-            print_diagnostics(&parser, &source, &filename, &mut io::stdout());
+            // res_cli.ml:105-110, 139-144: `Res_diagnostics.print_report`
+            // writes to the stderr formatter, then the CLI exits 1 or, with
+            // -recover, prints the recovered tree on stdout.
+            print_diagnostics(&parser, &source, &filename, &mut io::stderr());
             if !args.recover {
                 process::exit(1);
             }
@@ -338,20 +364,16 @@ fn run(args: Vec<String>) {
                 structure
             };
             // Apply JSX PPX transformation and emit JSX preprocessor warnings.
-            let (structure, jsx_warnings) = match jsx_ppx::transform_structure_with_warnings_result(
+            // The warnings raised before an error are printed before it
+            // escapes (`Location.prerr_warning`).
+            let (result, jsx_warnings) = jsx_ppx::transform_structure_collecting_warnings(
                 structure,
                 args.jsx_version,
                 &args.jsx_module,
                 parser.arena_mut(),
-            ) {
-                Ok(result) => result,
-                Err(err) => {
-                    eprintln!("{err}");
-                    process::exit(1);
-                }
-            };
+            );
             print_jsx_preprocessor_warnings(&source, &filename, &jsx_warnings, &mut io::stderr());
-            structure
+            result.unwrap_or_else(|err| exit_with_uncaught_error(&err))
         };
 
         // Print in requested format
@@ -368,6 +390,7 @@ fn run(args: Vec<String>) {
                 let output = printer::print_structure_with_comments(
                     &structure,
                     parser.comments().to_vec(),
+                    newline,
                     parser.arena_mut(),
                 );
                 if !output.is_empty() {
@@ -383,15 +406,22 @@ fn run(args: Vec<String>) {
                 if has_parse_errors {
                     sexp_locs::print_structure(&structure, parser.arena(), &mut io::stdout());
                 } else {
-                    let rewritten = match ppx::rewrite_structure_for_parser_debug(
-                        &structure,
-                        parser.arena_mut(),
-                    ) {
+                    // res_cli.ml:161-165 runs `Bs_builtin_ppx.mapper`, as on
+                    // the interface path above.
+                    let (rewritten, warnings) =
+                        ppx::rewrite_structure_with_warnings(&structure, parser.arena_mut(), false);
+                    eprint!(
+                        "{}",
+                        crate::driver::format_ppx_warnings(
+                            parser.arena(),
+                            &source,
+                            &filename,
+                            &warnings
+                        )
+                    );
+                    let rewritten = match rewritten {
                         Ok(rewritten) => rewritten,
-                        Err(e) => {
-                            eprintln!("PPX rewrite failed: {e}");
-                            process::exit(1);
-                        }
+                        Err(e) => exit_with_uncaught_error(&format!("PPX rewrite failed: {e}")),
                     };
                     sexp_locs::print_structure(&rewritten, parser.arena(), &mut io::stdout());
                 }
@@ -403,12 +433,12 @@ fn run(args: Vec<String>) {
             "ast" => print_structure_ast(&structure, &mut io::stdout()),
             "binary" => {
                 // OCaml -print binary format (current parsetree):
-                // 1. Magic: "ResImpl01311" (raw string, not marshaled) for implementations
+                // 1. Magic: "ResImpl01317" (raw string, not marshaled) for implementations
                 // 2. Marshaled filename (using output_value)
                 // 3. Marshaled structure (using output_value)
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01311");
+                let _ = io::stdout().write_all(b"ResImpl01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -429,7 +459,7 @@ fn run(args: Vec<String>) {
                 let str0 = mapper_to0::map_structure(parser.arena_mut(), &structure);
 
                 // Write magic
-                let _ = io::stdout().write_all(b"ResImpl01311");
+                let _ = io::stdout().write_all(b"ResImpl01317");
 
                 // Marshal filename
                 let mut w = MarshalWriter::new();
@@ -467,6 +497,15 @@ fn print_diagnostics(parser: &Parser<'_>, source: &str, filename: &str, out: &mu
     }
 }
 
+/// `res_cli` catches no exception from `Jsx_ppx` or `Bs_builtin_ppx.mapper`
+/// (res_cli.ml:126-132, 158-165), so their errors end the process as an
+/// uncaught exception, which the OCaml runtime reports on stderr with exit
+/// status 2.
+fn exit_with_uncaught_error(message: &dyn std::fmt::Display) -> ! {
+    eprintln!("{message}");
+    process::exit(2)
+}
+
 fn print_parser_warnings(parser: &Parser<'_>, source: &str, filename: &str, out: &mut impl Write) {
     for warning in parser.warnings() {
         print_parser_warning(source, filename, warning, out);
@@ -497,13 +536,18 @@ fn print_jsx_preprocessor_warnings(
     out: &mut impl Write,
 ) {
     for warning in warnings {
+        let (number, message) = if warning.deprecated {
+            (3, format!("deprecated: {}", warning.message))
+        } else {
+            (22, warning.message.clone())
+        };
         print_warning_frame(
             source,
             filename,
-            22,
+            number,
             &warning.start_pos,
             &warning.end_pos,
-            &warning.message,
+            &message,
             out,
         );
     }
@@ -589,11 +633,12 @@ fn print_tokens(source: &str, filename: &str, out: &mut impl Write) {
 fn print_signature_res(
     signature: &[SignatureItem],
     comments: Vec<Comment>,
+    newline: &str,
     arena: &mut ParseArena,
     out: &mut impl Write,
 ) {
     // Use printer to print signature
-    let output = printer::print_signature_with_comments(signature, comments, arena);
+    let output = printer::print_signature_with_comments(signature, comments, newline, arena);
     if !output.is_empty() {
         // Convert Latin-1 chars back to bytes to preserve original file encoding
         let _ = out.write_all(&latin1_bytes(&output));

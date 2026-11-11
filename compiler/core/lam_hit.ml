@@ -29,7 +29,7 @@ let hit_variables (fv : Set_ident.t) (l : t) : bool =
     match x with
     | None -> false
     | Some a -> hit a
-  and hit_var (id : Ident.t) = Set_ident.mem fv id
+  and hit_var (id : Ident.t) = Set_ident.mem id fv
   and hit_list_snd : 'a. ('a * t) list -> bool =
    fun x -> Ext_list.exists_snd x hit
   and hit_list xs = Ext_list.exists xs hit
@@ -38,7 +38,7 @@ let hit_variables (fv : Set_ident.t) (l : t) : bool =
     | Lvar id -> hit_var id
     | Lassign (id, e) -> hit_var id || hit e
     | Lstaticcatch (e1, (_, _vars), e2) -> hit e1 || hit e2
-    | Ltrywith (e1, _exn, e2) -> hit e1 || hit e2
+    | Ltrywith (e1, _, e2) | Ltryfinally (e1, e2) -> hit e1 || hit e2
     | Lfunction {body; params = _} -> hit body
     | Llet (_str, _id, arg, body) -> hit arg || hit body
     | Lletrec (decl, body) -> hit body || hit_list_snd decl
@@ -75,7 +75,7 @@ let hit_variable (fv : Ident.t) (l : t) : bool =
     | Lvar id -> hit_var id
     | Lassign (id, e) -> hit_var id || hit e
     | Lstaticcatch (e1, (_, _vars), e2) -> hit e1 || hit e2
-    | Ltrywith (e1, _exn, e2) -> hit e1 || hit e2
+    | Ltrywith (e1, _, e2) | Ltryfinally (e1, e2) -> hit e1 || hit e2
     | Lfunction {body; params = _} -> hit body
     | Llet (_str, _id, arg, body) -> hit arg || hit body
     | Lletrec (decl, body) -> hit body || hit_list_snd decl

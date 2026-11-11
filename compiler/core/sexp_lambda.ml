@@ -92,17 +92,20 @@ let mutable_flag_sexp = function
   | Immutable -> Sexp.atom "Immutable"
 
 (* Semantic variant runtime information. *)
-let variant_instance instance =
-  Sexp.atom (Variant_runtime.Instance.to_string instance)
+let variant_instance = function
+  | Variant_runtime.Instance.Array -> Sexp.atom "Array"
+  | Class {name; ancestors} ->
+    Sexp.list
+      [Sexp.atom "Class"; string name; Sexp.list (List.map string ancestors)]
 
 let variant_block_type = function
-  | Variant_runtime.IntType -> Sexp.atom "IntType"
+  | Variant_runtime.NumberType -> Sexp.atom "NumberType"
   | StringType -> Sexp.atom "StringType"
-  | FloatType -> Sexp.atom "FloatType"
   | BigintType -> Sexp.atom "BigintType"
   | BooleanType -> Sexp.atom "BooleanType"
   | InstanceType instance ->
     Sexp.list [Sexp.atom "InstanceType"; variant_instance instance]
+  | SymbolType -> Sexp.atom "SymbolType"
   | FunctionType -> Sexp.atom "FunctionType"
   | ObjectType -> Sexp.atom "ObjectType"
   | UnknownType -> Sexp.atom "UnknownType"
@@ -121,9 +124,7 @@ let variant_tag ({name; literal} : Variant_runtime.tag) =
     [
       Sexp.atom "tag";
       string name;
-      (match literal with
-      | None -> Sexp.atom "None"
-      | Some literal -> Sexp.list [Sexp.atom "Some"; variant_literal_tag literal]);
+      variant_literal_tag literal;
     ]
 
 let variant_tagged_block ({tag; tag_name} : Variant_runtime.tagged_block) =
@@ -149,14 +150,7 @@ let variant_constructor_case = function
   | Block block -> Sexp.list [Sexp.atom "Block"; variant_block block]
 
 let variant_matching_facts
-    ({
-       tag_name;
-       block_types;
-       literal_tags;
-       has_null;
-       has_undefined;
-       has_other_literal;
-     } : Variant_runtime.matching_facts) =
+    ({tag_name; block_types; literal_tags} : Variant_runtime.matching_facts) =
   Sexp.list
     [
       Sexp.atom "matching_facts";
@@ -165,9 +159,6 @@ let variant_matching_facts
       | Some name -> Sexp.list [Sexp.atom "Some"; string name]);
       Sexp.list (List.map variant_block_type block_types);
       Sexp.list (List.map variant_literal_tag literal_tags);
-      bool has_null;
-      bool has_undefined;
-      bool has_other_literal;
     ]
 
 (* Tag info *)
@@ -263,7 +254,7 @@ let rec constant (c : Lambda.structured_constant) =
   | Const_module_alias -> Sexp.atom "Const_module_alias"
 
 (* Primitive *)
-let primitive ~with_locs (prim : Lambda.primitive) =
+let primitive (prim : Lambda.primitive) =
   match prim with
   | Pcreate_extension s -> Sexp.list [Sexp.atom "Pcreate_extension"; string s]
   | Pinit_mod -> Sexp.atom "Pinit_mod"
@@ -301,13 +292,34 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Psetfield (n, info) ->
     Sexp.list [Sexp.atom "Psetfield"; int n; set_field_dbg_info info]
   | Pduprecord -> Sexp.atom "Pduprecord"
-  | Pjs_call {prim_name; arg_types = _; ffi = _; transformed_jsx} ->
-    Sexp.list [
-      Sexp.atom "Pjs_call";
-      string prim_name;
-      (* Skip arg_types and ffi for brevity *)
-      bool transformed_jsx;
-    ]
+  | Pjs_call {prim_name; arg_types = _; ffi = _} ->
+    (* Skip arg_types and ffi for brevity *)
+    Sexp.list [Sexp.atom "Pjs_call"; string prim_name]
+  | Pjsx
+      {
+        jsx_name;
+        jsx_ffi = _;
+        jsx_multi;
+        jsx_fragment;
+        jsx_spread;
+        jsx_props;
+        jsx_children;
+        jsx_key;
+      } ->
+    Sexp.list
+      [
+        Sexp.atom "Pjsx";
+        string jsx_name;
+        bool jsx_multi;
+        bool jsx_fragment;
+        bool jsx_spread;
+        Sexp.list
+          (List.map
+             (fun (name, optional) -> Sexp.list [string name; bool optional])
+             jsx_props);
+        opt int jsx_children;
+        bool jsx_key;
+      ]
   | Pjs_object_create _ -> Sexp.atom "Pjs_object_create"
   | Praise -> Sexp.atom "Praise"
   | Pobjcomp cmp -> Sexp.list [Sexp.atom "Pobjcomp"; comparison cmp]
@@ -385,11 +397,12 @@ let primitive ~with_locs (prim : Lambda.primitive) =
   | Pmakelist -> Sexp.atom "Pmakelist"
   | Pmakedict -> Sexp.atom "Pmakedict"
   | Pdict_has -> Sexp.atom "Pdict_has"
+  | Pdict_spread -> Sexp.atom "Pdict_spread"
+  | Parray_spread -> Sexp.atom "Parray_spread"
+  | Plist_spread -> Sexp.atom "Plist_spread"
   | Parrayrefu -> Sexp.atom "Parrayrefu"
   | Parraysetu -> Sexp.atom "Parraysetu"
   | Parrayrefs -> Sexp.atom "Parrayrefs"
-  | Parraysets -> Sexp.atom "Parraysets"
-  | Pisint -> Sexp.atom "Pisint"
   | Pis_poly_var_block -> Sexp.atom "Pis_poly_var_block"
   | Pawait -> Sexp.atom "Pawait"
   | Ptagged_template raw_sources ->
@@ -432,13 +445,12 @@ let rec lambda ~with_locs (lam : Lambda.t) =
   | Lglobal_module id -> Sexp.list [Sexp.atom "Lglobal_module"; ident id]
   | Lconst c ->
     Sexp.list [Sexp.atom "Lconst"; constant c]
-  | Lapply {ap_func; ap_args; ap_info; ap_transformed_jsx} ->
+  | Lapply {ap_func; ap_args; ap_loc} ->
     Sexp.list [
       Sexp.atom "Lapply";
       lambda ~with_locs ap_func;
       Sexp.list (List.map (lambda ~with_locs) ap_args);
-      ap_info_sexp ~with_locs ap_info;
-      bool ap_transformed_jsx;
+      ap_info_sexp ~with_locs ap_loc;
     ]
   | Lfunction {params; body; attr} ->
     Sexp.list [
@@ -467,7 +479,7 @@ let rec lambda ~with_locs (lam : Lambda.t) =
     let loc_sexp = if with_locs then [location ~with_locs loc] else [] in
     Sexp.list ([
       Sexp.atom "Lprim";
-      primitive ~with_locs prim;
+      primitive prim;
       Sexp.list (List.map (lambda ~with_locs) args);
     ] @ loc_sexp)
   | Lswitch (arg, sw) ->
@@ -505,6 +517,12 @@ let rec lambda ~with_locs (lam : Lambda.t) =
       lambda ~with_locs body;
       ident exn;
       lambda ~with_locs handler;
+    ]
+  | Ltryfinally (body, finally) ->
+    Sexp.list [
+      Sexp.atom "Ltryfinally";
+      lambda ~with_locs body;
+      lambda ~with_locs finally;
     ]
   | Lifthenelse (cond, then_, else_) ->
     Sexp.list [
@@ -545,12 +563,9 @@ let rec lambda ~with_locs (lam : Lambda.t) =
   | Lfor_of _ -> Sexp.list [Sexp.atom "Lfor_of"]
   | Lfor_await_of _ -> Sexp.list [Sexp.atom "Lfor_await_of"]
 
-and ap_info_sexp ~with_locs (info : Lambda.ap_info) =
-  let loc_sexp = if with_locs then [location ~with_locs info.ap_loc] else [] in
-  Sexp.list ([
-    Sexp.atom "ap_info";
-    inline_attribute info.ap_inlined;
-  ] @ loc_sexp)
+and ap_info_sexp ~with_locs ap_loc =
+  let loc_sexp = if with_locs then [location ~with_locs ap_loc] else [] in
+  Sexp.list (Sexp.atom "ap_info" :: loc_sexp)
 
 and switch_key_sexp = function
   | Lambda.Switch_int value -> Sexp.list [Sexp.atom "Switch_int"; int value]

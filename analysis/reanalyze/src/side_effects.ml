@@ -49,13 +49,23 @@ let rec expr_no_side_effects (expr : Typedtree.expression) =
     partial = Total && e |> expr_no_side_effects
     && cases |> List.for_all case_no_side_effects
   | Texp_letmodule _ -> false
-  | Texp_try (e, cases) ->
-    e |> expr_no_side_effects && cases |> List.for_all case_no_side_effects
+  | Texp_try (e, cases, finally) ->
+    e |> expr_no_side_effects
+    && cases |> List.for_all case_no_side_effects
+    && finally |> expr_opt_no_side_effects
   | Texp_tuple el -> el |> List.for_all expr_no_side_effects
   | Texp_variant (_lbl, eo) -> eo |> expr_opt_no_side_effects
   | Texp_field (e, _lid, _ld) -> e |> expr_no_side_effects
   | Texp_setfield _ -> false
   | Texp_array el -> el |> List.for_all expr_no_side_effects
+  | Texp_dict entries ->
+    entries
+    |> List.for_all (function
+      | Typedtree.Tdict_entry (_, e) -> e |> expr_no_side_effects
+      (* Spreading a dict reads its properties *)
+      | Tdict_spread _ -> false)
+  (* A call of the runtime's [spread] *)
+  | Texp_spread _ -> false
   | Texp_ifthenelse (e1, e2, eo) ->
     e1 |> expr_no_side_effects && e2 |> expr_no_side_effects
     && eo |> expr_opt_no_side_effects
@@ -72,19 +82,13 @@ let rec expr_no_side_effects (expr : Typedtree.expression) =
   | Texp_object_set _ -> false
   | Texp_letexception (_ec, e) -> e |> expr_no_side_effects
   | Texp_pack _ -> false
-  | Texp_extension_constructor _ when true -> true
-  | _ -> (* on ocaml 4.08: Texp_letop | Texp_open *) true
 
 and expr_opt_no_side_effects eo =
   match eo with
   | None -> true
   | Some e -> e |> expr_no_side_effects
 
-and field_no_side_effects
-    ((_ld, rld, _) : _ * Typedtree.record_label_definition * _) =
-  match rld with
-  | Kept _typeExpr -> true
-  | Overridden (_lid, e) -> e |> expr_no_side_effects
+and field_no_side_effects (_ld, _lid, e) = e |> expr_no_side_effects
 
 and case_no_side_effects : Typedtree.case -> _ =
  fun {c_guard; c_rhs} ->

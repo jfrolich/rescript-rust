@@ -23,29 +23,12 @@ type str = string loc
 type loc = Location.t
 type attrs = attribute list
 
+(** Default value for all optional location arguments. *)
 let default_loc = ref Location.none
-
-let with_default_loc l f =
-  let old = !default_loc in
-  default_loc := l;
-  try
-    let r = f () in
-    default_loc := old;
-    r
-  with exn ->
-    default_loc := old;
-    raise exn
 
 module Const = struct
   let integer ?suffix i = Pconst_integer (i, suffix)
   let int ?suffix i = integer ?suffix (string_of_int i)
-  let int32 ?(suffix = 'l') i = integer ~suffix (Int32.to_string i)
-  let int64 ?(suffix = 'L') i = integer ~suffix (Int64.to_string i)
-  let nativeint ?(suffix = 'n') i = integer ~suffix (Nativeint.to_string i)
-  let float ?suffix f = Pconst_float (f, suffix)
-  let char c =
-    let semantic = Char.code c in
-    Pconst_char {source = String_literal.encode_char_source semantic; semantic}
   let string semantic =
     Pconst_string (String_literal.string_from_semantic semantic)
 end
@@ -53,7 +36,6 @@ end
 module Typ = struct
   let mk ?(loc = !default_loc) ?(attrs = []) d =
     {ptyp_desc = d; ptyp_loc = loc; ptyp_attributes = attrs}
-  let attr d a = {d with ptyp_attributes = d.ptyp_attributes @ [a]}
 
   let any ?loc ?attrs () = mk ?loc ?attrs Ptyp_any
   let var ?loc ?attrs a = mk ?loc ?attrs (Ptyp_var a)
@@ -91,7 +73,10 @@ module Typ = struct
             {
               params =
                 List.map
-                  (fun (arg : Parsetree.arg) -> {arg with typ = loop arg.typ})
+                  (function
+                    | Parsetree.Parg_type arg ->
+                      Parsetree.Parg_type {arg with typ = loop arg.typ}
+                    | Parsetree.Parg_fixed _ as arg -> arg)
                   params;
               ret = loop ret;
             }
@@ -138,7 +123,6 @@ end
 module Pat = struct
   let mk ?(loc = !default_loc) ?(attrs = []) d =
     {ppat_desc = d; ppat_loc = loc; ppat_attributes = attrs}
-  let attr d a = {d with ppat_attributes = d.ppat_attributes @ [a]}
 
   let any ?loc ?attrs () = mk ?loc ?attrs Ppat_any
   let var ?loc ?attrs a = mk ?loc ?attrs (Ppat_var a)
@@ -149,10 +133,12 @@ module Pat = struct
   let construct ?loc ?attrs a b = mk ?loc ?attrs (Ppat_construct (a, b))
   let variant ?loc ?attrs a b = mk ?loc ?attrs (Ppat_variant (a, b))
   let record ?loc ?attrs ?rest a b = mk ?loc ?attrs (Ppat_record (a, b, rest))
+  let dict ?loc ?attrs a = mk ?loc ?attrs (Ppat_dict a)
   let array ?loc ?attrs a = mk ?loc ?attrs (Ppat_array a)
   let or_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_or (a, b))
   let constraint_ ?loc ?attrs a b = mk ?loc ?attrs (Ppat_constraint (a, b))
   let type_ ?loc ?attrs a = mk ?loc ?attrs (Ppat_type a)
+  let variant_spread ?loc ?attrs a = mk ?loc ?attrs (Ppat_variant_spread a)
   let unpack ?loc ?attrs a = mk ?loc ?attrs (Ppat_unpack a)
   let exception_ ?loc ?attrs a = mk ?loc ?attrs (Ppat_exception a)
   let extension ?loc ?attrs a = mk ?loc ?attrs (Ppat_extension a)
@@ -161,7 +147,6 @@ end
 module Exp = struct
   let mk ?(loc = !default_loc) ?(attrs = []) d =
     {pexp_desc = d; pexp_loc = loc; pexp_attributes = attrs}
-  let attr d a = {d with pexp_attributes = d.pexp_attributes @ [a]}
 
   let braces ?(attrs = []) ~braces_loc e =
     mk ~loc:e.pexp_loc ~attrs (Pexp_braces {expr = e; braces_loc})
@@ -178,7 +163,7 @@ module Exp = struct
       =
     mk ?loc ?attrs (Pexp_apply {funct; args; partial; transformed_jsx})
   let match_ ?loc ?attrs a b = mk ?loc ?attrs (Pexp_match (a, b))
-  let try_ ?loc ?attrs a b = mk ?loc ?attrs (Pexp_try (a, b))
+  let try_ ?loc ?attrs ?finally a b = mk ?loc ?attrs (Pexp_try (a, b, finally))
   let tuple ?loc ?attrs a = mk ?loc ?attrs (Pexp_tuple a)
   let construct ?loc ?attrs a b = mk ?loc ?attrs (Pexp_construct (a, b))
   let variant ?loc ?attrs a b = mk ?loc ?attrs (Pexp_variant (a, b))
@@ -186,6 +171,8 @@ module Exp = struct
   let field ?loc ?attrs a b = mk ?loc ?attrs (Pexp_field (a, b))
   let setfield ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_setfield (a, b, c))
   let array ?loc ?attrs a = mk ?loc ?attrs (Pexp_array a)
+  let dict ?loc ?attrs a = mk ?loc ?attrs (Pexp_dict a)
+  let spread ?loc ?attrs kind a = mk ?loc ?attrs (Pexp_spread (kind, a))
   let ifthenelse ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_ifthenelse (a, b, c))
   let ternary ?loc ?attrs condition consequent alternate =
     mk ?loc ?attrs (Pexp_ternary (condition, consequent, alternate))
@@ -198,7 +185,7 @@ module Exp = struct
   let for_await_of ?loc ?attrs a b c =
     mk ?loc ?attrs (Pexp_for_await_of (a, b, c))
   let constraint_ ?loc ?attrs a b = mk ?loc ?attrs (Pexp_constraint (a, b))
-  let coerce ?loc ?attrs a c = mk ?loc ?attrs (Pexp_coerce (a, (), c))
+  let coerce ?loc ?attrs a c = mk ?loc ?attrs (Pexp_coerce (a, c))
   let object_get ?loc ?attrs a b = mk ?loc ?attrs (Pexp_object_get (a, b))
   let object_set ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_object_set (a, b, c))
   let object_literal ?loc ?attrs a = mk ?loc ?attrs (Pexp_object_literal a)
@@ -208,6 +195,10 @@ module Exp = struct
   let pack ?loc ?attrs a = mk ?loc ?attrs (Pexp_pack a)
   let open_ ?loc ?attrs a b c = mk ?loc ?attrs (Pexp_open (a, b, c))
   let extension ?loc ?attrs a = mk ?loc ?attrs (Pexp_extension a)
+  let raw ?loc ?attrs ~name_loc kind source =
+    mk ?loc ?attrs (Pexp_raw {kind; name_loc; source})
+  let todo ?loc ?attrs ~name_loc message =
+    mk ?loc ?attrs (Pexp_todo {name_loc; message})
   let regexp ?loc ?attrs pattern flags =
     mk ?loc ?attrs (Pexp_regexp {pattern; flags})
   let template ?loc ?attrs source_segments values =
@@ -275,7 +266,6 @@ end
 module Mty = struct
   let mk ?(loc = !default_loc) ?(attrs = []) d =
     {pmty_desc = d; pmty_loc = loc; pmty_attributes = attrs}
-  let attr d a = {d with pmty_attributes = d.pmty_attributes @ [a]}
 
   let ident ?loc ?attrs a = mk ?loc ?attrs (Pmty_ident a)
   let alias ?loc ?attrs a = mk ?loc ?attrs (Pmty_alias a)
@@ -289,7 +279,6 @@ end
 module Mod = struct
   let mk ?(loc = !default_loc) ?(attrs = []) d =
     {pmod_desc = d; pmod_loc = loc; pmod_attributes = attrs}
-  let attr d a = {d with pmod_attributes = d.pmod_attributes @ [a]}
 
   let ident ?loc ?attrs x = mk ?loc ?attrs (Pmod_ident x)
   let structure ?loc ?attrs x = mk ?loc ?attrs (Pmod_structure x)
@@ -299,6 +288,7 @@ module Mod = struct
   let constraint_ ?loc ?attrs m mty = mk ?loc ?attrs (Pmod_constraint (m, mty))
   let unpack ?loc ?attrs e = mk ?loc ?attrs (Pmod_unpack e)
   let extension ?loc ?attrs a = mk ?loc ?attrs (Pmod_extension a)
+  let await ?loc ?attrs m = mk ?loc ?attrs (Pmod_await m)
 end
 
 module Sig = struct
@@ -333,18 +323,102 @@ module Str = struct
   let open_ ?loc a = mk ?loc (Pstr_open a)
   let include_ ?loc a = mk ?loc (Pstr_include a)
   let extension ?loc ?(attrs = []) a = mk ?loc (Pstr_extension (a, attrs))
+  let raw ?loc ?(attrs = []) ~name_loc source =
+    mk ?loc (Pstr_raw {name_loc; source; attrs})
   let attribute ?loc a = mk ?loc (Pstr_attribute a)
+end
+
+(* [@react.component] and its variants are taken out of the attributes when a
+   value binding or value description is built, so every producer - the
+   parser, a ppx, the frozen AST bridge - agrees on what is a component. *)
+module Jsx_component = struct
+  let of_attribute (({txt; loc}, payload) : attribute) =
+    let component pjc_kind pjc_namespace =
+      Some {pjc_kind; pjc_namespace; pjc_loc = loc}
+    in
+    match (txt, payload) with
+    | "react.component", PStr [] -> component (Pjc_labelled None) Pjc_react
+    | "react.component", PTyp typ ->
+      component (Pjc_labelled (Some typ)) Pjc_react
+    | "jsx.component", PStr [] -> component (Pjc_labelled None) Pjc_jsx
+    | "jsx.component", PTyp typ -> component (Pjc_labelled (Some typ)) Pjc_jsx
+    | "react.componentWithProps", PStr [] -> component Pjc_with_props Pjc_react
+    | "jsx.componentWithProps", PStr [] -> component Pjc_with_props Pjc_jsx
+    | _ -> None
+
+  let to_attribute {pjc_kind; pjc_namespace; pjc_loc} : attribute =
+    let namespace =
+      match pjc_namespace with
+      | Pjc_react -> "react"
+      | Pjc_jsx -> "jsx"
+    in
+    match pjc_kind with
+    | Pjc_labelled None ->
+      ({txt = namespace ^ ".component"; loc = pjc_loc}, PStr [])
+    | Pjc_labelled (Some typ) ->
+      ({txt = namespace ^ ".component"; loc = pjc_loc}, PTyp typ)
+    | Pjc_with_props ->
+      ({txt = namespace ^ ".componentWithProps"; loc = pjc_loc}, PStr [])
+
+  (* The first [@react.component], or failing that the first
+     [@react.componentWithProps]: the JSX transform has always given them
+     this precedence. A later one, or one whose payload is not understood, is
+     left in the attributes, so that formatting does not drop it: the JSX
+     transform takes a payload on a lone [@react.componentWithProps] with a
+     deprecation warning and rejects the others. *)
+  let take attrs =
+    let take_first is_kind =
+      let rec go seen = function
+        | [] -> (None, attrs)
+        | attr :: rest -> (
+          match of_attribute attr with
+          | Some component when is_kind component.pjc_kind ->
+            (Some component, List.rev_append seen rest)
+          | _ -> go (attr :: seen) rest)
+      in
+      go [] attrs
+    in
+    match
+      take_first (function
+        | Pjc_labelled _ -> true
+        | Pjc_with_props -> false)
+    with
+    | (Some _, _) as found -> found
+    | None, _ ->
+      take_first (function
+        | Pjc_with_props -> true
+        | Pjc_labelled _ -> false)
+
+  (* Inverse of [take], for printers and the frozen AST bridge. Attributes
+     print in source order, so the annotation goes back where it was written.
+     Ppx output has no source position, so all of it ties on [Location.none];
+     the annotation then goes first among the tied, where it is usually
+     written. *)
+  let put_back component attrs =
+    match component with
+    | None -> attrs
+    | Some component ->
+      let written_earlier (({loc}, _) : attribute) =
+        loc.loc_start.pos_cnum < component.pjc_loc.loc_start.pos_cnum
+      in
+      let earlier, later = List.partition written_earlier attrs in
+      earlier @ (to_attribute component :: later)
 end
 
 module Val = struct
   let mk ?(loc = !default_loc) ?(attrs = []) ?prim name typ =
+    let jsx_component, attrs = Jsx_component.take attrs in
     {
       pval_name = name;
       pval_type = typ;
+      pval_jsx_component = jsx_component;
       pval_attributes = attrs;
       pval_loc = loc;
       pval_prim = prim;
     }
+
+  let description_attributes vd =
+    Jsx_component.put_back vd.pval_jsx_component vd.pval_attributes
 end
 
 module Md = struct
@@ -379,13 +453,18 @@ end
 
 module Vb = struct
   let mk ?(loc = !default_loc) ?(attrs = []) ?constraint_ pat expr =
+    let jsx_component, attrs = Jsx_component.take attrs in
     {
       pvb_pat = pat;
       pvb_expr = expr;
       pvb_constraint = constraint_;
+      pvb_jsx_component = jsx_component;
       pvb_attributes = attrs;
       pvb_loc = loc;
     }
+
+  let binding_attributes vb =
+    Jsx_component.put_back vb.pvb_jsx_component vb.pvb_attributes
 end
 
 module Type = struct
@@ -566,23 +645,6 @@ module Te = struct
     {
       pext_name = name;
       pext_kind = kind;
-      pext_loc = loc;
-      pext_attributes = attrs;
-    }
-
-  let decl ?(loc = !default_loc) ?(attrs = []) ?(args = Pcstr_tuple []) ?res
-      name =
-    {
-      pext_name = name;
-      pext_kind = Pext_decl (args, res);
-      pext_loc = loc;
-      pext_attributes = attrs;
-    }
-
-  let rebind ?(loc = !default_loc) ?(attrs = []) name lid =
-    {
-      pext_name = name;
-      pext_kind = Pext_rebind lid;
       pext_loc = loc;
       pext_attributes = attrs;
     }

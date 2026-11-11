@@ -131,7 +131,7 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::Pmakelist | Primitive::Pmakedict | Primitive::PdictHas => true,
 
         // Type testing primitives
-        Primitive::Pisint | Primitive::PisPolyVarBlock => true,
+        Primitive::PisPolyVarBlock => true,
 
         // Offset and misc
         Primitive::Pstringadd
@@ -149,14 +149,20 @@ pub(crate) fn is_pure_primitive(prim: &Primitive, second_constant: Option<&Const
         Primitive::PtaggedTemplate(_)
         | Primitive::PjsApply
         | Primitive::PjsCall(_)
+        | Primitive::Pjsx(_)
         | Primitive::PinitMod
         | Primitive::PupdateMod
+        // A spread reads the source's properties, which may run getters or
+        // proxy traps.
+        | Primitive::PdictSpread
         | Primitive::PjsObjectGet(_)
         | Primitive::PjsObjectSet(_)
         | Primitive::Pdebugger
+        // Runtime calls, like the `Lapply` they were parsed into.
+        | Primitive::ParraySpread
+        | Primitive::PlistSpread
         | Primitive::PjsFnMethod
         | Primitive::Pawait
-        | Primitive::Parraysets
         | Primitive::Parraysetu
         | Primitive::Praise
         | Primitive::Psetfield(_, _)
@@ -173,42 +179,6 @@ pub const SMALL_INLINE_SIZE: i32 = 5;
 /// Exit inline size threshold (for static raise handlers).
 pub const EXIT_INLINE_SIZE: i32 = 7;
 
-/// Compute the size of a constant.
-pub(crate) fn size_constant(c: &Constant) -> i32 {
-    match c {
-        Constant::Int { .. }
-        | Constant::Constructor(_)
-        | Constant::NativeInt { .. }
-        | Constant::Char(_)
-        | Constant::Float(_)
-        | Constant::BigInt { .. }
-        | Constant::Pointer(_)
-        | Constant::JsNull
-        | Constant::JsUndefined { .. }
-        | Constant::ModuleAlias
-        | Constant::JsTrue
-        | Constant::JsFalse => 1,
-
-        Constant::String(_) => 1,
-        Constant::ImmString(_) => 1,
-
-        Constant::Some(inner) => size_constant(inner),
-
-        Constant::Block {
-            tag_info, elements, ..
-        } => {
-            let missing_fields = match &**tag_info {
-                TagInfo::Record(_) | TagInfo::RecordInlined(_) => tag_info
-                    .logical_field_count()
-                    .saturating_sub(elements.len()),
-                _ => 0,
-            };
-            missing_fields as i32 + elements.iter().map(size_constant).sum::<i32>()
-        }
-    }
-}
-
-/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
 /// Check if a constant is definitely not zero.
 /// Used in side effect analysis to determine safe division.
 fn not_zero_constant(c: &Constant) -> bool {
@@ -234,7 +204,9 @@ fn raw_js_is_pure(info: &crate::lambda::lam_primitive::JsRawInfo) -> bool {
     }
 }
 
-/// `Lam_analysis.lfunction_can_be_inlined` on a function's attributes.
+/// `Lambda.lfunction_can_be_inlined` (lambda.ml:1091-1092) on a function's
+/// attributes: an async function or one with a directive must stay a
+/// function, neither inlined nor replaced by the call it forwards.
 pub fn attr_can_be_inlined(attr: &crate::lambda::FunctionAttribute) -> bool {
     !attr.async_ && attr.directive.is_none()
 }
@@ -261,6 +233,9 @@ pub fn no_side_effects(a: &LamArena, lam: Lam) -> bool {
         Node::TryWith { body, handler, .. } => {
             no_side_effects(a, body) && no_side_effects(a, handler)
         }
+        Node::TryFinally { body, finally } => {
+            no_side_effects(a, body) && no_side_effects(a, finally)
+        }
         Node::If { cond, then_, else_ } => {
             no_side_effects(a, cond) && no_side_effects(a, then_) && no_side_effects(a, else_)
         }
@@ -275,102 +250,372 @@ pub fn no_side_effects(a: &LamArena, lam: Lam) -> bool {
         | Node::Break
         | Node::Continue
         | Node::Assign { .. } => false,
-        Node::Apply { func, args, .. } => {
-            // `Lazy.from_fun` application.
-            if let Some((Primitive::Pfield(_, FieldDbgInfo::Module { name }), _, _)) =
-                a.as_prim(func)
-                && name == "from_fun"
-                && let [arg] = a.list(args)
-            {
-                return no_side_effects(a, *arg);
-            }
-            false
+        // lam_analysis.ml:137: an application is not known to be pure (we
+        // need purity analysis).
+        Node::Apply { .. } => false,
+    }
+}
+
+/// `Lam_analysis.delay_safe` (lam_analysis.ml:141-193), the Lambda
+/// counterpart of the JS-level `lam_compile_arguments::delay_safe`: `lam` has
+/// no side effects and reads nothing other code can change, so evaluating it
+/// later gives the same value. Fields of records, which may be mutable,
+/// arrays, dictionaries and the variables in `assignable` can change.
+pub fn delay_safe(a: &LamArena, assignable: &ahash::AHashSet<Ident>, lam: Lam) -> bool {
+    match a.node(lam) {
+        Node::Const(_) | Node::Function { .. } | Node::GlobalModule(_) => true,
+        Node::Var(id) => !assignable.contains(&a.ident(id)),
+        Node::If { cond, then_, else_ } => {
+            delay_safe(a, assignable, cond)
+                && delay_safe(a, assignable, then_)
+                && delay_safe(a, assignable, else_)
         }
+        Node::Prim { args, info } => {
+            a.list(args).iter().all(|x| delay_safe(a, assignable, *x))
+                && match &a.prim_payload(info).primitive {
+                    // They raise unless an operand is a suitable constant.
+                    Primitive::Pdivint
+                    | Primitive::Pmodint
+                    | Primitive::Pdivbigint
+                    | Primitive::Pmodbigint
+                    | Primitive::Ppowbigint => no_side_effects(a, lam),
+                    primitive => primitive_is_delay_safe(primitive),
+                }
+        }
+        Node::Let { .. }
+        | Node::LetRec { .. }
+        | Node::Apply { .. }
+        | Node::Switch { .. }
+        | Node::StringSwitch { .. }
+        | Node::StaticRaise { .. }
+        | Node::StaticCatch { .. }
+        | Node::TryWith { .. }
+        | Node::TryFinally { .. }
+        | Node::Sequence(..)
+        | Node::While(..)
+        | Node::For { .. }
+        | Node::ForOf { .. }
+        | Node::ForAwaitOf { .. }
+        | Node::Assign { .. }
+        | Node::Break
+        | Node::Continue => false,
+    }
+}
+
+/// Whether a primitive other than a division is a value or builds a fresh
+/// block from its operands (lam_analysis.ml:157-193), rather than reading
+/// the heap or having side effects.
+fn primitive_is_delay_safe(primitive: &Primitive) -> bool {
+    match primitive {
+        Primitive::Pfield(_, field) => match field {
+            FieldDbgInfo::Module { .. }
+            | FieldDbgInfo::Tuple
+            | FieldDbgInfo::PolyVarTag
+            | FieldDbgInfo::PolyVarContent
+            | FieldDbgInfo::Extension
+            | FieldDbgInfo::Variant
+            // The tag of a variant block, which is immutable like its fields.
+            | FieldDbgInfo::VariantTag
+            | FieldDbgInfo::Cons => true,
+            FieldDbgInfo::Record { .. }
+            | FieldDbgInfo::RecordInline { .. }
+            | FieldDbgInfo::RecordExtension { .. } => false,
+        },
+        // `%identity` is its operand. A function's arity does not change.
+        Primitive::Pidentity
+        | Primitive::PfnArity
+        | Primitive::Ptypeof
+        | Primitive::Psome
+        | Primitive::PsomeNotNest
+        | Primitive::Pmakeblock(..)
+        | Primitive::PjsObjectCreate(_)
+        | Primitive::Pmakearray
+        | Primitive::Pmakelist
+        | Primitive::Pmakedict
+        | Primitive::Ptemplate(_)
+        | Primitive::Pstringadd
+        | Primitive::Pstringlength
+        | Primitive::Pstringcomp(_)
+        | Primitive::Pstringorder
+        | Primitive::Pstringmin
+        | Primitive::Pstringmax
+        | Primitive::Psequand
+        | Primitive::Psequor
+        | Primitive::Pnot
+        | Primitive::Pboolcomp(_)
+        | Primitive::Pboolorder
+        | Primitive::Pboolmin
+        | Primitive::Pboolmax
+        | Primitive::Pnegint
+        | Primitive::Paddint
+        | Primitive::Psubint
+        | Primitive::Pmulint
+        | Primitive::Ppowint
+        | Primitive::Pandint
+        | Primitive::Porint
+        | Primitive::Pxorint
+        | Primitive::Pnotint
+        | Primitive::Plslint
+        | Primitive::Plsrint
+        | Primitive::Pasrint
+        | Primitive::Pintcomp(_)
+        | Primitive::Pintorder
+        | Primitive::Pintmin
+        | Primitive::Pintmax
+        | Primitive::Pintoffloat
+        | Primitive::Pfloatofint
+        | Primitive::Pnegfloat
+        | Primitive::Pmodfloat
+        | Primitive::Paddfloat
+        | Primitive::Psubfloat
+        | Primitive::Pmulfloat
+        | Primitive::Pdivfloat
+        | Primitive::Ppowfloat
+        | Primitive::Pfloatcomp(_)
+        | Primitive::Pfloatorder
+        | Primitive::Pfloatmin
+        | Primitive::Pfloatmax
+        | Primitive::Pnegbigint
+        | Primitive::Paddbigint
+        | Primitive::Psubbigint
+        | Primitive::Pmulbigint
+        | Primitive::Pandbigint
+        | Primitive::Porbigint
+        | Primitive::Pxorbigint
+        | Primitive::Pnotbigint
+        | Primitive::Plslbigint
+        | Primitive::Pasrbigint
+        | Primitive::Pbigintcomp(_)
+        | Primitive::Pbigintorder
+        | Primitive::Pbigintmin
+        | Primitive::Pbigintmax
+        | Primitive::PhashMixint
+        | Primitive::PhashMixstring
+        | Primitive::PhashFinalmix
+        | Primitive::PisNullUndefined
+        | Primitive::Pjscomp(_)
+        | Primitive::PnullToOpt
+        | Primitive::PnullUndefinedToOpt
+        | Primitive::PisNull
+        | Primitive::PisUndefined
+        | Primitive::PisNotNone
+        | Primitive::PvalFromOption
+        | Primitive::PvalFromOptionNotNest
+        | Primitive::PisPolyVarBlock => true,
+        // Reads of the heap, and primitives with side effects. `%ignore`
+        // stands for OCaml's `Lsequence (arg, unit)`, and an extension slot
+        // test lowers to a read of the exception's id field.
+        Primitive::Pignore
+        | Primitive::PextensionSlotEq
+        | Primitive::PjsApply
+        | Primitive::Pdebugger
+        | Primitive::Psetfield(..)
+        | Primitive::Pduprecord
+        | Primitive::PrecordRest(_)
+        | Primitive::PjsCall(_)
+        | Primitive::Pjsx(_)
+        | Primitive::PjsObjectGet(_)
+        | Primitive::PjsObjectSet(_)
+        | Primitive::Praise
+        | Primitive::Pobjcomp(_)
+        | Primitive::Pobjorder
+        | Primitive::Pobjmin
+        | Primitive::Pobjmax
+        | Primitive::Pobjtag
+        | Primitive::Pobjsize
+        | Primitive::Pstringrefu
+        | Primitive::Pstringrefs
+        | Primitive::Parraylength
+        | Primitive::Parrayrefu
+        | Primitive::Parraysetu
+        | Primitive::Parrayrefs
+        | Primitive::PdictHas
+        | Primitive::Pawait
+        | Primitive::Pimport(_)
+        | Primitive::PinitMod
+        | Primitive::PupdateMod
+        | Primitive::Phash
+        | Primitive::PcreateExtension(_)
+        | Primitive::PrawJsCode(_)
+        | Primitive::PjsFnMethod
+        | Primitive::PtaggedTemplate(_)
+        | Primitive::PdictSpread
+        | Primitive::ParraySpread
+        | Primitive::PlistSpread => false,
+        Primitive::Pdivint
+        | Primitive::Pmodint
+        | Primitive::Pdivbigint
+        | Primitive::Pmodbigint
+        | Primitive::Ppowbigint => false,
     }
 }
 
 const TOO_BIG_TO_INLINE: i32 = 1000;
 
-/// `Lam_analysis.size`.
-pub fn size(a: &LamArena, lam: Lam) -> i32 {
-    size_inner(a, lam).unwrap_or(TOO_BIG_TO_INLINE)
+/// The size count reached the limit of `size_upto`.
+struct LimitReached;
+
+/// A running size count that stops at `limit`.
+struct SizeCounter<'a> {
+    arena: &'a LamArena,
+    total: i32,
+    limit: i32,
 }
 
-fn size_inner(a: &LamArena, lam: Lam) -> Option<i32> {
-    match a.node(lam) {
-        Node::Var(_) | Node::GlobalModule(_) => Some(1),
-        Node::Const(c) => Some(size_constant(a.constant(c))),
-        Node::Let { value, body, .. } => Some(1 + size_inner(a, value)? + size_inner(a, body)?),
-        Node::LetRec { .. } => None,
-        Node::Prim { args, info } => {
-            let args = a.list(args);
-            match &a.prim_payload(info).primitive {
-                Primitive::Pfield(_, FieldDbgInfo::Module { .. }) => {
-                    if let [x] = args
-                        && matches!(a.node(*x), Node::GlobalModule(_) | Node::Var(_))
-                    {
-                        return Some(1);
-                    }
-                }
-                Primitive::Praise | Primitive::PisNotNone => {
-                    if let [x] = args {
-                        return size_inner(a, *x);
-                    }
-                }
-                Primitive::Pmakeblock(
-                    tag_info @ (TagInfo::Record(_) | TagInfo::RecordInlined(_)),
-                    _,
-                ) => {
-                    let missing = tag_info.logical_field_count().saturating_sub(args.len());
-                    return size_lams(a, 1 + missing as i32, args);
-                }
-                Primitive::PjsObjectCreate(obj_params) => {
-                    let logical = obj_params
-                        .iter()
-                        .filter(|p| {
-                            !matches!(
-                                p.obj_arg_type,
-                                crate::types::external_ffi_types::Attr::ArgCst(_)
-                            )
-                        })
-                        .count();
-                    let missing = logical.saturating_sub(args.len());
-                    return size_lams(a, 1 + missing as i32, args);
-                }
-                Primitive::PrawJsCode(_) => return None,
-                _ => {}
+impl SizeCounter<'_> {
+    fn add(&mut self, n: i32) -> Result<(), LimitReached> {
+        self.total += n;
+        if self.total >= self.limit {
+            Err(LimitReached)
+        } else {
+            Ok(())
+        }
+    }
+
+    fn lams(&mut self, lams: &[Lam]) -> Result<(), LimitReached> {
+        lams.iter().try_for_each(|lam| self.lam(*lam))
+    }
+
+    /// Constants count their leaves, and stop at the limit too: a large
+    /// constant list or record should not be walked completely.
+    fn constant(&mut self, c: &Constant) -> Result<(), LimitReached> {
+        match c {
+            Constant::Int { .. }
+            | Constant::Constructor(_)
+            | Constant::NativeInt { .. }
+            | Constant::Char(_)
+            | Constant::Float(_)
+            | Constant::BigInt { .. }
+            | Constant::Pointer(_)
+            | Constant::JsNull
+            | Constant::JsUndefined { .. }
+            | Constant::ModuleAlias
+            | Constant::JsTrue
+            | Constant::JsFalse
+            | Constant::String(_)
+            | Constant::ImmString(_) => self.add(1),
+            Constant::Some(inner) => self.constant(inner),
+            Constant::Block {
+                tag_info, elements, ..
+            } => {
+                // A sparse record block stands for its omitted fields too.
+                let missing_fields = match &**tag_info {
+                    TagInfo::Record(_) | TagInfo::RecordInlined(_) => tag_info
+                        .logical_field_count()
+                        .saturating_sub(elements.len()),
+                    _ => 0,
+                };
+                self.add(missing_fields as i32)?;
+                elements.iter().try_for_each(|c| self.constant(c))
             }
-            size_lams(a, 1, args)
         }
-        Node::Apply { func, args, .. } => {
-            let f = size_inner(a, func)?;
-            size_lams(a, f, a.list(args))
+    }
+
+    fn lam(&mut self, lam: Lam) -> Result<(), LimitReached> {
+        let a = self.arena;
+        match a.node(lam) {
+            Node::Var(_) | Node::GlobalModule(_) | Node::Break | Node::Continue => self.add(1),
+            Node::Const(c) => self.constant(a.constant(c)),
+            Node::Let { value, body, .. } => {
+                self.add(1)?;
+                self.lam(value)?;
+                self.lam(body)
+            }
+            Node::Prim { args, info } => {
+                let args = a.list(args);
+                match &a.prim_payload(info).primitive {
+                    Primitive::Pfield(_, FieldDbgInfo::Module { .. })
+                        if matches!(
+                            args,
+                            [x] if matches!(a.node(*x), Node::GlobalModule(_) | Node::Var(_))
+                        ) =>
+                    {
+                        return self.add(1);
+                    }
+                    Primitive::Praise | Primitive::PisNotNone if args.len() == 1 => {
+                        return self.lam(args[0]);
+                    }
+                    // A sparse record block stands for its omitted fields too.
+                    Primitive::Pmakeblock(
+                        tag_info @ (TagInfo::Record(_) | TagInfo::RecordInlined(_)),
+                        _,
+                    ) => {
+                        let missing = tag_info.logical_field_count().saturating_sub(args.len());
+                        self.add(1 + missing as i32)?;
+                        return self.lams(args);
+                    }
+                    Primitive::PjsObjectCreate(obj_params) => {
+                        let logical = obj_params
+                            .iter()
+                            .filter(|p| {
+                                !matches!(
+                                    p.obj_arg_type,
+                                    crate::types::external_ffi_types::Attr::ArgCst(_)
+                                )
+                            })
+                            .count();
+                        let missing = logical.saturating_sub(args.len());
+                        self.add(1 + missing as i32)?;
+                        return self.lams(args);
+                    }
+                    Primitive::PrawJsCode(_) => return self.add(TOO_BIG_TO_INLINE),
+                    _ => {}
+                }
+                self.add(1)?;
+                self.lams(args)
+            }
+            Node::Apply { func, args, .. } => {
+                self.lam(func)?;
+                self.lams(a.list(args))
+            }
+            Node::Function { body, .. } => self.lam(body),
+            Node::LetRec { .. }
+            | Node::Switch { .. }
+            | Node::StringSwitch { .. }
+            | Node::StaticCatch { .. }
+            | Node::TryWith { .. }
+            | Node::TryFinally { .. }
+            | Node::While(..)
+            | Node::For { .. }
+            | Node::ForOf { .. }
+            | Node::ForAwaitOf { .. } => self.add(TOO_BIG_TO_INLINE),
+            Node::StaticRaise { args, .. } => {
+                self.add(1)?;
+                self.lams(a.list(args))
+            }
+            Node::If { cond, then_, else_ } => {
+                self.add(1)?;
+                self.lam(cond)?;
+                self.lam(then_)?;
+                self.lam(else_)
+            }
+            Node::Sequence(x, y) => {
+                self.lam(x)?;
+                self.lam(y)
+            }
+            Node::Assign { value, .. } => {
+                self.add(1)?;
+                self.lam(value)
+            }
         }
-        Node::Function { body, .. } => size_inner(a, body),
-        Node::Switch { .. }
-        | Node::StringSwitch { .. }
-        | Node::StaticCatch { .. }
-        | Node::TryWith { .. }
-        | Node::While(..)
-        | Node::For { .. }
-        | Node::ForOf { .. }
-        | Node::ForAwaitOf { .. } => None,
-        Node::Break | Node::Continue => Some(1),
-        Node::StaticRaise { args, .. } => size_lams(a, 1, a.list(args)),
-        Node::If { cond, then_, else_ } => {
-            Some(1 + size_inner(a, cond)? + size_inner(a, then_)? + size_inner(a, else_)?)
-        }
-        Node::Sequence(x, y) => Some(size_inner(a, x)? + size_inner(a, y)?),
-        Node::Assign { value, .. } => Some(1 + size_inner(a, value)?),
     }
 }
 
-fn size_lams(a: &LamArena, acc: i32, lams: &[Lam]) -> Option<i32> {
-    let mut total = acc;
-    for x in lams {
-        total += size_inner(a, *x)?;
+/// `Lam_analysis.size_upto ~limit lam`: the size of a lambda for inlining
+/// decisions if it is below `limit`, `limit` otherwise. Callers only compare
+/// it with small thresholds, so counting stops once `limit` is reached.
+/// `limit` must be at most 1000.
+pub fn size_upto(a: &LamArena, limit: i32, lam: Lam) -> i32 {
+    debug_assert!(limit <= TOO_BIG_TO_INLINE);
+    let mut counter = SizeCounter {
+        arena: a,
+        total: 0,
+        limit,
+    };
+    match counter.lam(lam) {
+        Ok(()) => counter.total,
+        Err(LimitReached) => limit,
     }
-    Some(total)
 }
 
 /// Whether every argument is a constant node.
@@ -378,7 +623,7 @@ pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
     args.iter().all(|x| a.is_const(*x))
 }
 
-/// `Lam_analysis.lfunction_can_be_inlined`.
+/// `Lambda.lfunction_can_be_inlined` (lambda.ml:1091-1092).
 pub fn lfunction_can_be_inlined(a: &LamArena, func: FuncId) -> bool {
     attr_can_be_inlined(&a.func_payload(func).attr)
 }
@@ -389,7 +634,7 @@ pub fn ok_to_inline_fun_when_app(a: &LamArena, func: FuncId, body: Lam, args: &[
         InlineAttribute::Always => true,
         InlineAttribute::Never => false,
         InlineAttribute::Default => {
-            let s = size(a, body);
+            let s = size_upto(a, 10, body);
             s < SMALL_INLINE_SIZE
                 || destruct_pattern(a, body, a.params(func), args)
                 || (args_all_const(a, args) && s < 10 && no_side_effects(a, body))
@@ -419,7 +664,7 @@ pub(crate) fn destruct_pattern(a: &LamArena, body: Lam, params: &[Ident], args: 
                 // `Lam.switch` on the constant picks an action; a switch
                 // that stays is too big to inline.
                 return match a.decide_switch(arg, actions, info) {
-                    Some(action) => size(a, action) < SMALL_INLINE_SIZE,
+                    Some(action) => size_upto(a, SMALL_INLINE_SIZE, action) < SMALL_INLINE_SIZE,
                     None => false,
                 };
             }
@@ -431,7 +676,7 @@ pub(crate) fn destruct_pattern(a: &LamArena, body: Lam, params: &[Ident], args: 
                 && let Some(c) = a.as_const(arg)
             {
                 let branch = if c.eval_as_bool() { then_ } else { else_ };
-                return size(a, branch) < SMALL_INLINE_SIZE;
+                return size_upto(a, SMALL_INLINE_SIZE, branch) < SMALL_INLINE_SIZE;
             }
             false
         }
@@ -513,4 +758,23 @@ pub fn free_variables(a: &LamArena, lam: Lam) -> ahash::AHashSet<Ident> {
     let mut fv = ahash::AHashSet::new();
     go(a, lam, &mut fv);
     fv
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn size_upto_stops_at_the_limit() {
+        let mut a = LamArena::new();
+        let block = Constant::Block {
+            tag_info: Box::new(TagInfo::Tuple),
+            elements: (0..50).map(Constant::int).collect(),
+        };
+        let block = a.const_(block);
+        let one = a.const_(Constant::int(1));
+        assert_eq!(size_upto(&a, 5, block), 5);
+        assert_eq!(size_upto(&a, TOO_BIG_TO_INLINE, block), 50);
+        assert_eq!(size_upto(&a, 5, one), 1);
+    }
 }

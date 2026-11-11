@@ -24,18 +24,13 @@
 
 module E = Js_exp_make
 
-(** return [val < 0] if not nested [Some (Some (Some None))]*)
-let rec is_some_none_aux (x : Lambda.structured_constant) acc =
-  match x with
-  | Const_some v -> is_some_none_aux v (acc + 1)
-  | Const_module_alias | Const_js_undefined _ -> acc
-  | _ -> -1
-
 let rec nested_some_none n none =
   if n = 0 then none else nested_some_none (n - 1) (E.optional_block none)
 
 let rec translate_some (x : Lambda.structured_constant) : J.expression =
-  let depth = is_some_none_aux x 0 in
+  (* Keep in sync with [Lambda.const_is_allocating]: a nested none is a new
+     optional block. *)
+  let depth = Lambda.const_some_none_depth x in
   if depth < 0 then E.optional_not_nest_block (translate x)
   else
     nested_some_none depth
@@ -50,11 +45,8 @@ and translate (x : Lambda.structured_constant) : J.expression =
   | Const_js_null -> E.nil
   | Const_js_undefined {is_unit = true} -> E.unit
   | Const_js_undefined {is_unit = false} -> E.undefined
-  | Const_constructor {name; literal = None} ->
-    (* The runtime representation of a constant constructor is its name,
-       except for the list constructor [] which is the number 0 *)
-    if name = "[]" then E.int 0l ~comment:"[]" else E.str name
-  | Const_constructor {literal = Some t} -> E.literal_tag t
+  | Const_constructor {name = "[]"} -> E.int 0l ~comment:"[]"
+  | Const_constructor {literal} -> E.literal_tag literal
   | Const_int i -> E.int i
   | Const_assertfalse -> E.int 0l ~comment:"assert_false"
   | Const_char i -> Js_of_lam_string.const_char i

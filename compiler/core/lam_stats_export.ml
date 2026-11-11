@@ -35,21 +35,22 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lambda.t Map_ident.t) :
         | Some (ImmutableBlock elems) ->
           (* FIXME: field name for dumping*)
           Submodule
-            (Ext_array.map elems (fun x ->
-                 match x with
-                 | NA -> Lam_arity.na
-                 | SimpleForm lam -> Lam_arity_analysis.get_arity meta lam))
+            (elems
+            |> Array.map (fun (x : Lam_id_kind.element) ->
+                match x with
+                | NA -> Lam_arity.na
+                | SimpleForm lam -> Lam_arity_analysis.get_arity meta lam))
         | Some _ | None -> (
-          match Map_ident.find_opt export_map x with
+          match Map_ident.find_opt x export_map with
           | Some (Lprim {primitive = Pmakeblock info; args})
             when Lambda.is_immutable_block info ->
             Submodule
-              (Ext_array.of_list_map args (fun lam ->
+              (Ext_list.map_to_array args (fun lam ->
                    Lam_arity_analysis.get_arity meta lam))
           | Some _ | None -> single_na)
       in
       let persistent_closed_lambda =
-        let optlam = Map_ident.find_opt export_map x in
+        let optlam = Map_ident.find_opt x export_map in
         match optlam with
         | Some
             (Lconst
@@ -58,7 +59,7 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lambda.t Map_ident.t) :
         | None ->
           optlam
         | Some lambda ->
-          if not !Js_config.cross_module_inline then None
+          if not !((Js_config.current ()).cross_module_inline) then None
           else if
             Lam_analysis.safe_to_inline lambda
             (* when inlning a non function, we have to be very careful,
@@ -76,7 +77,10 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lambda.t Map_ident.t) :
                 optlam
               else None
             | _ ->
-              let lam_size = Lam_analysis.size lambda in
+              let lam_size =
+                Lam_analysis.size_upto ~limit:Lam_analysis.small_inline_size
+                  lambda
+              in
               (* TODO:
                  1. global need re-assocate when do the beta reduction
                  2. [lambda_exports] is not precise
@@ -101,7 +105,7 @@ let values_of_export (meta : Lam_stats.t) (export_map : Lambda.t Map_ident.t) :
         let cmj_value : Js_cmj_format.cmj_value =
           {arity; persistent_closed_lambda}
         in
-        Map_string.add acc x.name cmj_value)
+        Map_string.add x.name cmj_value acc)
 
 (* ATTENTION: all runtime modules, if it is not hard required,
    it should be okay to not reference it
@@ -112,7 +116,7 @@ let get_dependent_module_effect (maybe_pure : string option)
     let non_pure_module =
       Ext_list.find_first_not external_ids Lam_compile_env.is_pure_module
     in
-    Ext_option.map non_pure_module (fun x -> Lam_module_ident.name x)
+    Option.map (fun x -> Lam_module_ident.name x) non_pure_module
   else maybe_pure
 
 (* Note that
@@ -126,11 +130,11 @@ let get_dependent_module_effect (maybe_pure : string option)
    ]}
    TODO: check that we don't do this in browser environment
 *)
-let export_to_cmj (meta : Lam_stats.t) effect_ export_map hoisted_exports case :
-    Js_cmj_format.t =
+let export_to_cmj (meta : Lam_stats.t) effect_ export_map case : Js_cmj_format.t
+    =
   let values = values_of_export meta export_map in
 
-  Js_cmj_format.make ~values ~hoisted_exports ~effect_
+  Js_cmj_format.make ~values ~effect_
     ~package_spec:(Js_packages_state.get_packages_info ())
     ~case
 (* FIXME: make sure [-o] would not change its case

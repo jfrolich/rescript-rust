@@ -26,7 +26,7 @@ let fmt_position f l =
       (l.pos_cnum - l.pos_bol)
 
 let fmt_location f loc =
-  if !Clflags.dump_location then (
+  if !((Clflags.current ()).dump_location) then (
     fprintf f "(%a..%a)" fmt_position loc.loc_start fmt_position loc.loc_end;
     if loc.loc_ghost then fprintf f " ghost")
 
@@ -127,7 +127,7 @@ let record_representation i ppf =
   let open Types in
   function
   | Record_regular -> line i ppf "Record_regular\n"
-  | Record_float_unused -> assert false
+  | Record_array -> line i ppf "Record_array\n"
   | Record_unboxed b -> line i ppf "Record_unboxed %b\n" b
   | Record_inlined {name} -> line i ppf "Record_inlined %s\n" name
   | Record_extension -> line i ppf "Record_extension\n"
@@ -221,6 +221,8 @@ and pattern i ppf x =
       line i ppf "Tpat_alias \"%a\"\n" fmt_ident s;
       pattern i ppf p
     | Tpat_constant c -> line i ppf "Tpat_constant %a\n" fmt_constant c
+    | Tpat_interval (c1, c2) ->
+      line i ppf "Tpat_interval %a .. %a\n" fmt_constant c1 fmt_constant c2
     | Tpat_tuple l ->
       line i ppf "Tpat_tuple\n";
       list i pattern ppf l
@@ -234,6 +236,9 @@ and pattern i ppf x =
       line i ppf "Tpat_record\n";
       list i longident_x_pattern ppf l;
       Option.iter (record_pat_rest i ppf) rest
+    | Tpat_dict l ->
+      line i ppf "Tpat_dict\n";
+      list i dict_pattern_entry ppf l
     | Tpat_array l ->
       line i ppf "Tpat_array\n";
       list i pattern ppf l
@@ -295,10 +300,11 @@ and expression i ppf x =
     expression i ppf e;
     list i case ppf l1;
     list i case ppf l2
-  | Texp_try (e, l) ->
+  | Texp_try (e, l, finally) ->
     line i ppf "Texp_try\n";
     expression i ppf e;
-    list i case ppf l
+    list i case ppf l;
+    option i expression ppf finally
   | Texp_tuple l ->
     line i ppf "Texp_tuple\n";
     list i expression ppf l
@@ -328,6 +334,15 @@ and expression i ppf x =
     expression i ppf e2
   | Texp_array l ->
     line i ppf "Texp_array\n";
+    list i expression ppf l
+  | Texp_dict l ->
+    line i ppf "Texp_dict\n";
+    list i dict_entry ppf l
+  | Texp_spread (kind, l) ->
+    line i ppf "Texp_spread %s\n"
+      (match kind with
+      | Spread_array -> "array"
+      | Spread_list -> "list");
     list i expression ppf l
   | Texp_ifthenelse (e1, e2, eo) ->
     line i ppf "Texp_ifthenelse\n";
@@ -403,8 +418,6 @@ and expression i ppf x =
   | Texp_pack me ->
     line i ppf "Texp_pack";
     module_expr i ppf me
-  | Texp_extension_constructor (li, _) ->
-    line i ppf "Texp_extension_constructor %a" fmt_longident li
 
 and value_description i ppf x =
   line i ppf "value_description %a %a\n" fmt_ident x.val_id fmt_location
@@ -698,6 +711,18 @@ and longident_x_pattern i ppf (li, _, p, opt) =
   line i ppf "%a%s\n" fmt_longident li (if opt then "?" else "");
   pattern (i + 1) ppf p
 
+and dict_pattern_entry i ppf {tdp_key; tdp_pattern; tdp_optional} =
+  line i ppf "%S%s\n" tdp_key.txt (if tdp_optional then "?" else "");
+  pattern (i + 1) ppf tdp_pattern
+
+and dict_entry i ppf = function
+  | Tdict_entry (key, e) ->
+    line i ppf "Tdict_entry %S\n" key.txt;
+    expression (i + 1) ppf e
+  | Tdict_spread e ->
+    line i ppf "Tdict_spread\n";
+    expression (i + 1) ppf e
+
 and case i ppf {c_lhs; c_guard; c_rhs} =
   line i ppf "<case>\n";
   pattern (i + 1) ppf c_lhs;
@@ -714,11 +739,9 @@ and value_binding i ppf x =
   pattern (i + 1) ppf x.vb_pat;
   expression (i + 1) ppf x.vb_expr
 
-and record_field i ppf = function
-  | _, Overridden (li, e), opt ->
-    line i ppf "%a%s\n" fmt_longident li (if opt then "?" else "");
-    expression (i + 1) ppf e
-  | _, Kept _, _ -> line i ppf "<kept>"
+and record_field i ppf (_, li, e) =
+  line i ppf "%a\n" fmt_longident li;
+  expression (i + 1) ppf e
 
 and label_x_expression i ppf (l, e) =
   line i ppf "<arg>\n";

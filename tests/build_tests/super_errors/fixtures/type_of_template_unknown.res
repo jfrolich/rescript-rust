@@ -1,0 +1,1 @@
+@typeOf(`str`) type s

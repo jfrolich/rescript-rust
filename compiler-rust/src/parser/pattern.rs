@@ -20,12 +20,6 @@ use crate::parse_arena::{LocIdx, Located, PatIdx, PosIdx};
 // Main Pattern Parsing (OCaml res_core.ml:1210-1830)
 // ============================================================================
 
-/// OCaml `make_pat_variant_spread_attr` (res_core.ml:278-279).
-fn make_pat_variant_spread_attr(p: &mut Parser<'_>) -> Attribute {
-    let name = p.arena_mut().intern("res.patVariantSpread");
-    (mknoloc(name), Payload::PStr(Box::default()))
-}
-
 fn pat(desc: PatternDesc, loc: LocIdx, attrs: Attributes) -> Pattern {
     Pattern {
         ppat_desc: desc,
@@ -132,7 +126,7 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             } else {
                 "false"
             };
-            construct_lident(p, name, loc, Attributes::new())
+            construct_lident(p, name, loc, attrs.clone())
         }
         Token::Int { .. }
         | Token::String(_)
@@ -148,25 +142,25 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 pat(
                     PatternDesc::Ppat_interval(Box::new((c, c2))),
                     loc,
-                    Attributes::new(),
+                    attrs.clone(),
                 )
             } else {
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                pat(PatternDesc::Ppat_constant(c), loc, Attributes::new())
+                pat(PatternDesc::Ppat_constant(c), loc, attrs.clone())
             }
         }
         Token::Backtick => {
             let start_pos = *p.arena().get_position(start_pos_idx);
             let constant = parse_template_constant(p, start_pos, None);
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-            pat(PatternDesc::Ppat_constant(constant), loc, Attributes::new())
+            pat(PatternDesc::Ppat_constant(constant), loc, attrs.clone())
         }
         Token::Lparen => {
             p.next();
             if p.token == Token::Rparen {
                 p.next();
                 let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-                construct_lident(p, "()", loc, Attributes::new())
+                construct_lident(p, "()", loc, attrs.clone())
             } else {
                 let inner = parse_constrained_pattern(p);
                 if p.token == Token::Comma {
@@ -237,12 +231,10 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
             let lid_unloc = super::core::build_longident(p.arena_mut(), &parts);
             let lid = p.push_longident(lid_unloc);
             let loc = p.mk_loc_idx_to_end_of(start_pos_idx, lid_loc);
-            let mut spread_attrs = vec![make_pat_variant_spread_attr(p)];
-            spread_attrs.extend(attrs.iter().cloned());
             pat(
-                PatternDesc::Ppat_type(with_loc(lid, lid_loc)),
+                PatternDesc::Ppat_variant_spread(with_loc(lid, lid_loc)),
                 loc,
-                Attributes::from_vec(spread_attrs),
+                attrs.clone(),
             )
         }
         Token::Hash => {
@@ -337,6 +329,16 @@ pub fn parse_alias_pattern(p: &mut Parser<'_>, pattern: Pattern, attrs: &[Attrib
     let (name, name_loc) = super::core::parse_lident(p);
     let name_idx = p.arena_mut().push_interned_string(&name);
     let loc = p.mk_loc_extend_to_prev_end(pattern.ppat_loc);
+    // res_core.ml `parse_alias_pattern`: `attrs` were written before the
+    // pattern; with `as`, they belong to the alias instead, and the pattern
+    // keeps only its own, e.g. `@b` in `@a (@b x) as z`. OCaml removes them
+    // with `List.memq`; they are the copied prefix of the pattern's
+    // attributes (same locations), so strip that prefix.
+    let mut pattern = pattern;
+    if !attrs.is_empty() && pattern.ppat_attributes.as_slice().starts_with(attrs) {
+        pattern.ppat_attributes =
+            Attributes::from_vec(pattern.ppat_attributes.as_slice()[attrs.len()..].to_vec());
+    }
     let pattern_idx = p.arena_mut().push_pat(pattern);
     pat(
         PatternDesc::Ppat_alias(pattern_idx, with_loc(name_idx, name_loc)),
@@ -514,7 +516,7 @@ fn parse_module_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
 }
 
-/// OCaml `parse_list_pattern ~start_pos ~attrs` (res_core.ml:1659-1681).
+/// OCaml `parse_list_pattern ~start_pos ~attrs` (res_core.ml:1647-1675).
 fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> Pattern {
     let mut list_patterns = super::core::parse_comma_delimited_reversed_list(
         p,
@@ -524,6 +526,13 @@ fn parse_list_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attribut
     );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // `list{...p}` is `p` itself and keeps the location of `p`, so the
+    // comments around the spread stay outside it (res_core.ml:1662-1666).
+    if matches!(list_patterns.as_slice(), [(true, _)]) {
+        let (_, mut pattern) = list_patterns.remove(0);
+        pattern.ppat_attributes = attrs;
+        return pattern;
+    }
     let spread = if matches!(list_patterns.first(), Some((true, _))) {
         Some(list_patterns.remove(0).1)
     } else {
@@ -859,51 +868,41 @@ fn parse_record_pattern(p: &mut Parser<'_>, attrs: Attributes) -> Pattern {
     }
 }
 
-/// OCaml `parse_dict_pattern_row` (compiler/syntax/src/res_core.ml:1683-1693).
-fn parse_dict_pattern_row(p: &mut Parser<'_>) -> Option<PatternRecordField> {
+/// OCaml `parse_dict_pattern_row` (compiler/syntax/src/res_core.ml).
+fn parse_dict_pattern_row(p: &mut Parser<'_>) -> Option<DictPatternEntry> {
     let Token::String(key) = &p.token else {
         return None;
     };
     let key = key.to_string();
     let loc = p.mk_loc_current();
     p.next();
-    let lid_idx = p.push_lident(&key);
+    let key_idx = p.arena_mut().intern(&key);
     p.expect(Token::Colon);
-    let opt = p.optional(&Token::Question);
+    let optional = p.optional(&Token::Question);
     let pat = parse_pattern(p);
     let pat_idx = p.arena_mut().push_pat(pat);
-    Some(PatternRecordField {
-        lid: with_loc(lid_idx, loc),
-        pat: pat_idx,
-        opt,
+    Some(DictPatternEntry {
+        pdp_key: with_loc(key_idx, loc),
+        pdp_pattern: pat_idx,
+        pdp_optional: optional,
     })
 }
 
-/// OCaml `parse_dict_pattern ~start_pos ~attrs`
-/// (compiler/syntax/src/res_core.ml:1695-1704). The `dict{` token is already
-/// consumed.
+/// OCaml `parse_dict_pattern ~start_pos ~attrs` (compiler/syntax/src/res_core.ml).
+/// The `dict{` token is already consumed.
 fn parse_dict_pattern(p: &mut Parser<'_>, start_pos_idx: PosIdx, attrs: Attributes) -> Pattern {
     let fields = super::core::parse_comma_delimited_region(
         p,
-        Grammar::DictRows,
+        Grammar::PatternDict,
         Token::Rbrace,
         parse_dict_pattern_row,
     );
     p.expect(Token::Rbrace);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
-    let dict_idx = p.arena_mut().intern("res.dictPattern");
     Pattern {
-        ppat_desc: PatternDesc::Ppat_record(Box::new((
-            p.arena_mut().push_pat_field_list(&fields),
-            ClosedFlag::Open,
-            None,
-        ))),
+        ppat_desc: PatternDesc::Ppat_dict(Box::new(fields)),
         ppat_loc: loc,
-        ppat_attributes: Attributes::from_vec(vec![(
-            mknoloc(dict_idx),
-            Payload::PStr(Box::default()),
-        )])
-        .concat(attrs),
+        ppat_attributes: attrs,
     }
 }
 

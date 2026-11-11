@@ -1,0 +1,21 @@
+We've found a bug for you!
+  /.../fixtures/Cross_module_type_of_error_size/Use.res:6:5-11:1
+
+   4 │     let x: int
+   5 │   }
+   6 │ } = {
+   7 │   module type T = {
+   . │ ...
+  10 │   }
+  11 │ }
+  12 │ 
+
+  Signature mismatch:
+  
+  In module type T:
+  
+  Actual declaration (/.../fixtures/Cross_module_type_of_error_size/Use.res:9:5-17):
+    let x: string
+  
+  Expected declaration (/.../fixtures/Cross_module_type_of_error_size/Use.res:4:5-14):
+    let x: int

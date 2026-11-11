@@ -23,10 +23,29 @@ enum CompileType {
     None,
 }
 
+fn compile_type_for_source_event(kind: EventKind, initialization_failed: bool) -> CompileType {
+    match kind {
+        EventKind::Remove(_)
+        | EventKind::Any
+        | EventKind::Create(_)
+        | EventKind::Modify(ModifyKind::Name(_)) => CompileType::Full,
+        EventKind::Modify(ModifyKind::Data(_) | ModifyKind::Any) => {
+            if initialization_failed {
+                CompileType::Full
+            } else {
+                CompileType::Incremental
+            }
+        }
+        EventKind::Access(_)
+        | EventKind::Other
+        | EventKind::Modify(ModifyKind::Metadata(_) | ModifyKind::Other) => CompileType::None,
+    }
+}
+
 type WatchPaths = Vec<(PathBuf, RecursiveMode)>;
 type StartupBuildResult = (
     BuildCommandState,
-    WatchPaths,
+    Vec<RegisteredWatch>,
     Option<(Instant, build::CompilationOutcome)>,
 );
 
@@ -150,26 +169,147 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
     watch_paths.into_iter().collect()
 }
 
-/// Registers all watch paths with the given watcher.
-fn register_watches(watcher: &mut RecommendedWatcher, watch_paths: &[(PathBuf, RecursiveMode)]) {
-    for (path, mode) in watch_paths {
+/// Identity of a watched directory, used to notice when it was replaced at the same path.
+type DirIdentity = (u64, u64);
+
+#[cfg(unix)]
+fn dir_identity(path: &Path) -> Option<DirIdentity> {
+    use std::os::unix::fs::MetadataExt;
+    path.metadata()
+        .ok()
+        .map(|metadata| (metadata.dev(), metadata.ino()))
+}
+
+// Stable file identities are not available on other platforms, so their watches are always
+// re-registered on full rebuilds.
+#[cfg(not(unix))]
+fn dir_identity(_path: &Path) -> Option<DirIdentity> {
+    None
+}
+
+/// A watch that was registered successfully.
+struct RegisteredWatch {
+    path: PathBuf,
+    mode: RecursiveMode,
+    /// The identity of the directory when the watch was registered. Watches can be tied to the
+    /// directory rather than its path (inotify drops the watch when the directory is deleted), so
+    /// a watch is only still valid while the path refers to the same directory.
+    identity: Option<DirIdentity>,
+}
+
+impl RegisteredWatch {
+    fn is_still_valid_for(&self, path: &Path, mode: RecursiveMode) -> bool {
+        self.path == path
+            && self.mode == mode
+            && self.identity.is_some()
+            && self.identity == dir_identity(path)
+    }
+}
+
+/// Registers the watch paths with the given watcher and returns the ones that were registered
+/// successfully. Failed paths are left out so that the next full rebuild retries them.
+fn register_watches(
+    watcher: &mut RecommendedWatcher,
+    watch_paths: &[(PathBuf, RecursiveMode)],
+) -> Vec<RegisteredWatch> {
+    let mut registered = Vec::with_capacity(watch_paths.len());
+    // Register non-recursive paths first. notify's inotify backend keeps one
+    // recursive flag per directory, set by the last registration that reaches
+    // it, and only watches a folder created later if its parent's flag is
+    // recursive. A non-recursive path inside a recursive one (an overlapping
+    // source folder) must not clear the flag that the recursive one set.
+    let mut ordered: Vec<&(PathBuf, RecursiveMode)> = watch_paths.iter().collect();
+    ordered.sort_by_key(|(_, mode)| *mode == RecursiveMode::Recursive);
+    for (path, mode) in ordered {
         let mode_str = if *mode == RecursiveMode::Recursive {
             "recursive"
         } else {
             "non-recursive"
         };
         log::debug!("  watching ({mode_str}): {}", path.display());
-        if let Err(e) = watcher.watch(path, *mode) {
-            log::error!("Could not watch {}: {}", path.display(), e);
+        // Read the identity before registering: if the directory is replaced in between, the
+        // recorded identity is stale and the next full rebuild registers the watch again.
+        let identity = dir_identity(path);
+        match watcher.watch(path, *mode) {
+            Ok(()) => registered.push(RegisteredWatch {
+                path: path.clone(),
+                mode: *mode,
+                identity,
+            }),
+            Err(e) => log::error!("Could not watch {}: {}", path.display(), e),
         }
     }
+    registered
 }
 
-/// Unregisters all watch paths from the given watcher.
-fn unregister_watches(watcher: &mut RecommendedWatcher, watch_paths: &[(PathBuf, RecursiveMode)]) {
-    for (path, _) in watch_paths {
-        let _ = watcher.unwatch(path);
+/// Whether `update_watches` registers only the new paths, leaving unchanged watches alone, rather
+/// than registering every path again (see `update_watches` for why this differs per platform).
+const REGISTER_ONLY_NEW_WATCHES: bool = cfg!(target_os = "macos");
+
+/// Brings the registered watches from `current` to `next`, which happens on every full rebuild:
+/// after a `rescript.json` change, but also when a source file is added, removed or renamed.
+///
+/// Stale watches are unwatched first: those whose path is no longer in `next`, and those whose
+/// directory was replaced since it was registered. What happens to the other watches depends on
+/// how the platform's watcher backend (from the `notify` crate) treats overlapping watches:
+///
+/// - **macOS (FSEvents):** every `watch`/`unwatch` call restarts the event stream, and events that
+///   happen during the restart are lost. Each registered path is watched independently, so
+///   unwatching one path never affects another. Only the new paths are registered, so a full
+///   rebuild that keeps the same paths doesn't restart the stream at all.
+///
+/// - **Linux (inotify) and other platforms:** notify keeps one watch per directory, shared by
+///   every registered path that reaches it: overlapping source folders, other spellings of a
+///   folder (`..`, symlinks) and directory symlinks inside a recursive folder. Unwatching a stale
+///   path can therefore also drop a watch that is still needed (#8825). So every path in `next` is
+///   registered again after the unwatches. Registering a directory that is already watched only
+///   updates its existing watch, so watches that weren't dropped keep reporting events without a
+///   gap, and those that were dropped are restored.
+///
+///   Windows takes this path too. It has no stable directory identity, so every watch counts as
+///   stale there and is unwatched and registered again on each full rebuild.
+///
+/// Returns the watches that are registered afterwards, which excludes paths that failed to register.
+fn update_watches(
+    watcher: &mut RecommendedWatcher,
+    current: Vec<RegisteredWatch>,
+    next: &[(PathBuf, RecursiveMode)],
+) -> Vec<RegisteredWatch> {
+    let (mut kept, stale): (Vec<_>, Vec<_>) = current.into_iter().partition(|watch| {
+        next.iter()
+            .any(|(path, mode)| watch.is_still_valid_for(path, *mode))
+    });
+    for watch in stale {
+        let _ = watcher.unwatch(&watch.path);
     }
+    if !REGISTER_ONLY_NEW_WATCHES {
+        return register_watches(watcher, next);
+    }
+    let added: WatchPaths = next
+        .iter()
+        .filter(|(path, mode)| {
+            !kept
+                .iter()
+                .any(|watch| watch.path == *path && watch.mode == *mode)
+        })
+        .cloned()
+        .collect();
+    kept.extend(register_watches(watcher, &added));
+    kept
+}
+
+fn watch_paths_after_initialization_error(current: &[RegisteredWatch], error: &anyhow::Error) -> WatchPaths {
+    let mut next: WatchPaths = current
+        .iter()
+        .map(|watch| (watch.path.clone(), watch.mode))
+        .collect();
+    if let Some(error) = error.downcast_ref::<build::packages::DependencyError>()
+        && let Some(package_path) = &error.package_path
+        && !next.iter().any(|(path, _)| path == package_path)
+    {
+        next.push((package_path.clone(), RecursiveMode::NonRecursive));
+    }
+    next
 }
 
 fn carry_forward_compile_state(previous: &BuildCommandState, next: &mut BuildCommandState) {
@@ -248,9 +388,19 @@ fn cleanup_before_watch_exit(
     });
 }
 
+// Removing lib/watch.lock asks the watcher to quit.
+fn exit_after_lockfile_removed(path: &Path, build_state: &BuildCommandState, show_progress: bool) {
+    cleanup_before_watch_exit(
+        path,
+        build_state,
+        show_progress,
+        "\nExiting... (lockfile removed)",
+    );
+}
+
 struct WatchArgs<'a> {
     watcher: &'a mut RecommendedWatcher,
-    current_watch_paths: Vec<(PathBuf, RecursiveMode)>,
+    current_watches: Vec<RegisteredWatch>,
     initial_build_state: BuildCommandState,
     events: Receiver<notify::Result<Event>>,
     ctrlc_pressed: Arc<AtomicBool>,
@@ -294,7 +444,7 @@ fn serve_tooling_requests(
 fn watch_loop(
     WatchArgs {
         watcher,
-        mut current_watch_paths,
+        mut current_watches,
         initial_build_state,
         events: event_receiver,
         ctrlc_pressed,
@@ -311,6 +461,7 @@ fn watch_loop(
 ) -> Result<()> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
+    let mut initialization_failed = false;
     loop {
         serve_tooling_requests(&build_state, tooling_requests.as_ref());
         if ctrlc_pressed.load(Ordering::SeqCst) {
@@ -338,12 +489,7 @@ fn watch_loop(
                 .any(|path| path.ends_with(LockKind::Watch.file_name()))
                 && let EventKind::Remove(_) = event.kind
             {
-                cleanup_before_watch_exit(
-                    path,
-                    &build_state,
-                    show_progress,
-                    "\nExiting... (lockfile removed)",
-                );
+                exit_after_lockfile_removed(path, &build_state, show_progress);
                 return Ok(());
             }
 
@@ -376,38 +522,37 @@ fn watch_loop(
                 .filter(|path| matches_filter(path, filter));
             for path in paths {
                 let path_buf = path.to_path_buf();
+                let source_compile_type = compile_type_for_source_event(event.kind, initialization_failed);
+                log::debug!(
+                    "received {:?} for {path:?} -> {source_compile_type:?} (pending: {needs_compile_type:?})",
+                    event.kind
+                );
 
-                match (needs_compile_type, event.kind) {
+                match (needs_compile_type, source_compile_type) {
                     (
                         CompileType::Incremental | CompileType::None,
-                        // when we have a name change, create or remove event we need to do a full compile
-                        EventKind::Remove(_)
-                        | EventKind::Any
-                        | EventKind::Create(_)
-                        | EventKind::Modify(ModifyKind::Name(_)),
+                        // Structural changes and edits after failed initialization need a full scan.
+                        CompileType::Full,
                     ) => {
                         // if we are going to do a full compile, we don't need to bother marking
                         // files dirty because we do a full scan anyway
-                        log::debug!("received {:?} while needs_compile_type was {needs_compile_type:?} -> full compile", event.kind);
                         needs_compile_type = CompileType::Full;
                     }
 
                     (
                         CompileType::None | CompileType::Incremental,
-                        // when we have a data change event, we can do an incremental compile
-                        EventKind::Modify(ModifyKind::Data(_)) |
-                        // windows sends ModifyKind::Any on file content changes
-                        EventKind::Modify(ModifyKind::Any),
+                        // Content edits can compile incrementally while initialization is valid.
+                        CompileType::Incremental,
                     ) => {
                         // if we are going to compile incrementally, we need to mark the exact files
                         // dirty
-                        log::debug!("received {:?} while needs_compile_type was {needs_compile_type:?} -> incremental compile", event.kind);
                         if let Ok(canonicalized_path_buf) = path_buf
                             .canonicalize()
                             .map(StrippedVerbatimPath::to_stripped_verbatim_path)
                         {
-                            let build::build_types::BuildState { modules, packages, .. } =
-                                &mut build_state.build_state;
+                            let build::build_types::BuildState {
+                                modules, packages, ..
+                            } = &mut build_state.build_state;
                             for module in modules.values_mut() {
                                 let package = packages.get(&module.package_name).expect("Package not found");
                                 let SourceType::SourceFile(ref mut source_file) = module.source_type else {
@@ -447,10 +592,7 @@ fn watch_loop(
                     (
                         CompileType::None | CompileType::Incremental,
                         // these are not relevant events for compilation
-                        EventKind::Access(_)
-                        | EventKind::Other
-                        | EventKind::Modify(ModifyKind::Metadata(_))
-                        | EventKind::Modify(ModifyKind::Other),
+                        CompileType::None,
                     ) => (),
                     // if we already need a full compile, we don't need to check for other events
                     (CompileType::Full, _) => (),
@@ -509,13 +651,14 @@ fn watch_loop(
                 let timing_total = Instant::now();
                 // Reinitialization runs cleanup for previous build artifacts, so full rebuilds need
                 // the same build lock boundary as regular `rescript build`.
-                let rebuild =
-                    build::with_build_lock(path, || -> anyhow::Result<build::CompilationOutcome> {
+                let rebuild = build::with_build_lock(
+                    path,
+                    || -> anyhow::Result<Result<build::CompilationOutcome, String>> {
                         // Reinitialization compares the sources and outputs on disk with the
                         // recorded build to remove what deleted sources and configuration
                         // changes left behind: record the builds this watcher made first.
                         clean::write_in_process_record(&build_state, build::CompilerInfoWrite::AfterBuild);
-                        let mut next_build_state = match build::initialize_build(
+                        let mut next_build_state = build::initialize_build(
                             None,
                             filter,
                             show_progress,
@@ -525,14 +668,9 @@ fn watch_loop(
                             prod,
                             features.clone(),
                             SourceMapCommand::Watch,
-                        ) {
-                            Ok(build_state) => build_state,
-                            Err(error) => {
-                                return Err(anyhow::anyhow!(
-                                    "Could not reinitialize build after config change: {error:#}"
-                                ));
-                            }
-                        };
+                        )
+                        .context("Could not initialize build")?;
+                        initialization_failed = false;
 
                         // Full rebuilds can be triggered by editor atomic saves that surface as rename events.
                         // Preserve warning state for unchanged modules so their warnings are re-emitted after the
@@ -541,9 +679,9 @@ fn watch_loop(
                         build_state = next_build_state;
 
                         // Re-register watches based on the new build state
-                        unregister_watches(watcher, &current_watch_paths);
-                        current_watch_paths = compute_watch_paths(&build_state, path);
-                        register_watches(watcher, &current_watch_paths);
+                        let next_watch_paths = compute_watch_paths(&build_state, path);
+                        current_watches =
+                            update_watches(watcher, std::mem::take(&mut current_watches), &next_watch_paths);
 
                         let result = build::incremental_build_without_lock(
                             &mut build_state,
@@ -555,10 +693,11 @@ fn watch_loop(
                             build::CompilerInfoWrite::AfterBuild,
                         );
                         clean::remove_obsolete_outputs_of_build(&build_state);
-                        result.map_err(|e| anyhow::anyhow!("{e}"))
-                    });
+                        Ok(result.map_err(|e| e.to_string()))
+                    },
+                );
                 match rebuild {
-                    Ok(result) => {
+                    Ok(Ok(result)) => {
                         finish_successful_watch_compile(
                             after_build.clone(),
                             timing_total,
@@ -569,14 +708,37 @@ fn watch_loop(
                             result,
                         );
                     }
+                    Ok(Err(error)) => {
+                        log::error!("{error}");
+                        if should_clear_screen(clear_screen, show_progress, plain_output) {
+                            print_build_failed_footer();
+                        }
+                    }
                     Err(error) => {
-                        log::error!("{error:#}");
+                        // Keep source edits on the full initialization path until the current
+                        // configuration can be loaded. Never compile against the stale state.
+                        initialization_failed = true;
+                        let recovery_watch_paths =
+                            watch_paths_after_initialization_error(&current_watches, &error);
+                        current_watches = update_watches(
+                            watcher,
+                            std::mem::take(&mut current_watches),
+                            &recovery_watch_paths,
+                        );
+                        eprintln!("{error:#}");
                         if should_clear_screen(clear_screen, show_progress, plain_output) {
                             print_build_failed_footer();
                         }
                     }
                 }
                 needs_compile_type = CompileType::None;
+
+                // The removal event of watch.lock can be lost while watches are re-registered
+                // (some backends restart their event stream), so check the file itself.
+                if !path.join("lib").join(LockKind::Watch.file_name()).exists() {
+                    exit_after_lockfile_removed(path, &build_state, show_progress);
+                    return Ok(());
+                }
             }
             CompileType::None => {
                 // We want to sleep for a little while so the CPU can schedule other work. That way we end
@@ -631,7 +793,7 @@ pub fn start(
 
     // Initialization can clean previous build artifacts, so it has to be serialized
     // with the initial compile too.
-    let (build_state, current_watch_paths, initial_compile_result): StartupBuildResult =
+    let (build_state, current_watches, initial_compile_result): StartupBuildResult =
         build::with_build_lock(path, || {
             let mut build_state = build::initialize_build(
                 None,
@@ -647,8 +809,7 @@ pub fn start(
             .with_context(|| "Could not initialize build")?;
 
             // Compute and register targeted watches based on source folders.
-            let current_watch_paths = compute_watch_paths(&build_state, path);
-            register_watches(&mut watcher, &current_watch_paths);
+            let current_watches = register_watches(&mut watcher, &compute_watch_paths(&build_state, path));
 
             let timing_total = Instant::now();
             let initial_compile_result = build::incremental_build_without_lock(
@@ -663,11 +824,7 @@ pub fn start(
             .ok()
             .map(|result| (timing_total, result));
 
-            Ok::<StartupBuildResult, anyhow::Error>((
-                build_state,
-                current_watch_paths,
-                initial_compile_result,
-            ))
+            Ok::<StartupBuildResult, anyhow::Error>((build_state, current_watches, initial_compile_result))
         })?;
 
     if ctrlc_pressed.load(Ordering::SeqCst) {
@@ -697,7 +854,7 @@ pub fn start(
     }
     watch_loop(WatchArgs {
         watcher: &mut watcher,
-        current_watch_paths,
+        current_watches,
         initial_build_state: build_state,
         events: event_receiver,
         ctrlc_pressed,
@@ -833,6 +990,72 @@ mod tests {
     }
 
     #[test]
+    fn source_edits_retry_failed_initialization() {
+        for kind in [
+            EventKind::Modify(ModifyKind::Data(notify::event::DataChange::Content)),
+            EventKind::Modify(ModifyKind::Any),
+        ] {
+            assert_eq!(
+                compile_type_for_source_event(kind, false),
+                CompileType::Incremental
+            );
+            assert_eq!(compile_type_for_source_event(kind, true), CompileType::Full);
+        }
+
+        let metadata = EventKind::Modify(ModifyKind::Metadata(notify::event::MetadataKind::Any));
+        assert_eq!(compile_type_for_source_event(metadata, true), CompileType::None);
+    }
+
+    #[test]
+    fn watches_new_dependency_after_config_read_fails() {
+        let temp = tempfile::TempDir::new().unwrap();
+        let root = temp.path().canonicalize().unwrap().to_stripped_verbatim_path();
+        let dependency = root.join("node_modules/parent/node_modules/new-dependency");
+        std::fs::create_dir_all(&dependency).unwrap();
+        std::fs::write(
+            root.join("rescript.json"),
+            r#"{"name":"root","dependencies":["parent"]}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("node_modules/parent/rescript.json"),
+            r#"{"name":"parent","dependencies":["new-dependency"]}"#,
+        )
+        .unwrap();
+        std::fs::write(dependency.join("rescript.json"), r#"{"name":"#).unwrap();
+
+        let context = ProjectContext::new(&root).unwrap();
+        let error = build::packages::make(&None, &context, false, false, None)
+            .unwrap_err()
+            .context("Could not initialize build");
+        assert!(format!("{error:#}").contains("Failed to parse rescript.json"));
+
+        let mut current = vec![RegisteredWatch {
+            path: root.clone(),
+            mode: RecursiveMode::NonRecursive,
+            identity: dir_identity(&root),
+        }];
+        let paths = watch_paths_after_initialization_error(&current, &error);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&(root, RecursiveMode::NonRecursive)));
+        assert!(paths.contains(&(dependency.clone(), RecursiveMode::NonRecursive)));
+
+        // A config error in an already watched source directory must retain its recursive mode.
+        current.push(RegisteredWatch {
+            path: dependency.clone(),
+            mode: RecursiveMode::Recursive,
+            identity: dir_identity(&dependency),
+        });
+        let paths = watch_paths_after_initialization_error(&current, &error);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&(dependency.clone(), RecursiveMode::Recursive)));
+
+        std::fs::write(dependency.join("rescript.json"), r#"{"name":"new-dependency"}"#).unwrap();
+        let recovered = build::packages::make(&None, &context, false, false, None).unwrap();
+        assert!(recovered.contains_key("new-dependency"));
+    }
+
+    #[test]
     fn clears_screen_only_for_interactive_rebuilds() {
         assert!(should_clear_screen(true, true, false));
         assert!(!should_clear_screen(true, true, true));
@@ -927,5 +1150,27 @@ mod tests {
             test_build_state("ModuleA", test_module("src/Other.res", None, None, None));
         carry_forward_compile_state(&previous, &mut different_source);
         assert!(!different_source.get_module("ModuleA").unwrap().compile_dirty);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn registered_watch_is_invalid_after_directory_is_replaced() {
+        let temp_dir = tempfile::TempDir::new().expect("temp dir should be created");
+        let dir = temp_dir.path().join("src");
+        std::fs::create_dir(&dir).expect("dir should be created");
+
+        let watch = RegisteredWatch {
+            path: dir.clone(),
+            mode: RecursiveMode::Recursive,
+            identity: dir_identity(&dir),
+        };
+        assert!(watch.is_still_valid_for(&dir, RecursiveMode::Recursive));
+        assert!(!watch.is_still_valid_for(&dir, RecursiveMode::NonRecursive));
+
+        // Move the old directory away instead of deleting it, so that its inode stays in use and
+        // cannot be reused for the new directory.
+        std::fs::rename(&dir, temp_dir.path().join("src-old")).expect("dir should be renamed");
+        std::fs::create_dir(&dir).expect("dir should be recreated");
+        assert!(!watch.is_still_valid_for(&dir, RecursiveMode::Recursive));
     }
 }

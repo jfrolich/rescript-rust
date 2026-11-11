@@ -57,6 +57,8 @@ pub struct ParserSnapshot<'src> {
     end_pos_idx: PosIdx,
     /// Arena index for prev end position (for identity-based sharing).
     prev_end_pos_idx: PosIdx,
+    token_line_break: Option<usize>,
+    line_break: Option<usize>,
     breadcrumbs: Vec<(Grammar, Position)>,
     regions: Regions,
     diagnostics_len: usize,
@@ -97,6 +99,12 @@ pub struct Parser<'src> {
     pub end_pos_idx: PosIdx,
     /// Arena index for end position of previous token.
     pub prev_end_pos_idx: PosIdx,
+    /// Byte offset of the first LF between the previous token and the
+    /// current one, outside comments (res_parser.ml `token_cache.line_break`).
+    token_line_break: Option<usize>,
+    /// Byte offset of the first LF before a consumed token, outside literals
+    /// and comments (res_parser.ml `line_break`); see `newline`.
+    line_break: Option<usize>,
     /// Stack of breadcrumbs for error recovery.
     breadcrumbs: Vec<(Grammar, Position)>,
     /// Inside `lookahead`: number of breadcrumbs, from the bottom, that are
@@ -111,6 +119,10 @@ pub struct Parser<'src> {
     warnings: Vec<ParserWarning>,
     /// Collected comments.
     comments: Vec<Comment>,
+    /// Ordinary comment tokens scanned so far, counted whether or not they
+    /// are collected: a location-free parse drops them from `comments`, but
+    /// the grammar still distinguishes `{/* c */}` from `{}`.
+    comment_tokens: usize,
     /// Stack of region statuses for error deduplication.
     regions: Regions,
     /// Arena for interned positions and locations.
@@ -170,12 +182,15 @@ impl<'src> Parser<'src> {
             start_pos_idx: default_pos_idx,
             end_pos_idx: default_pos_idx,
             prev_end_pos_idx: default_pos_idx,
+            token_line_break: None,
+            line_break: None,
             breadcrumbs: Vec::new(),
             lookahead_breadcrumb_floor: 0,
             lookahead_popped_breadcrumbs: Vec::new(),
             diagnostics: Vec::new(),
             warnings: Vec::new(),
             comments: Vec::new(),
+            comment_tokens: 0,
             regions: smallvec::smallvec![RegionStatus::Report],
             arena,
             in_external: false,
@@ -551,6 +566,10 @@ impl<'src> Parser<'src> {
         if self.token == Token::Eof {
             return;
         }
+        self.consume_line_break();
+        // res_parser.ml `read`: the scanner records the first LF from here
+        // on, across the comments before the next token.
+        self.scanner.take_line_break();
 
         // The new prev_end is the current token's end. In OCaml this is the
         // SAME position object, so we reuse the current end_pos_idx.
@@ -572,6 +591,7 @@ impl<'src> Parser<'src> {
 
             match result.token {
                 Token::Comment(mut comment) => {
+                    self.comment_tokens += 1;
                     // Ordinary comments are formatter metadata. A location-free
                     // compilation must not retain their spans in this separate
                     // collection after omitting the arena's location tables.
@@ -600,6 +620,7 @@ impl<'src> Parser<'src> {
                         self.arena.require_locations();
                     }
                     self.token = result.token;
+                    self.token_line_break = self.scanner.take_line_break();
                     self.prev_end_pos = prev_end;
                     self.start_pos = result.start_pos;
                     self.end_pos = result.end_pos;
@@ -622,8 +643,41 @@ impl<'src> Parser<'src> {
         }
     }
 
+    /// Record the line break before the current token as it is consumed
+    /// (res_parser.ml `next`): only consumed tokens count, since lookahead
+    /// can read the text after a backtick as code before it is rescanned as
+    /// template text.
+    fn consume_line_break(&mut self) {
+        if self.line_break.is_none() {
+            self.line_break = self.token_line_break;
+        }
+    }
+
+    /// The newline to format the source with: CRLF when its first line break
+    /// between tokens, outside literals and comments, is CRLF, LF otherwise
+    /// (res_parser.ml `newline`, with the break before `Eof` that `finish`
+    /// adds). Complete once the parse has reached `Eof`.
+    pub fn newline(&self) -> &'static str {
+        let line_break = match self.line_break {
+            None if self.token == Token::Eof => self.token_line_break,
+            line_break => line_break,
+        };
+        match line_break {
+            Some(index) if index > 0 && self.scanner.src().as_bytes()[index - 1] == b'\r' => "\r\n",
+            _ => "\n",
+        }
+    }
+
     /// Scan the next template literal token.
+    ///
+    /// res_parser.ml `next_template_literal_token`: the delimiter that is
+    /// the current token is consumed, and the template text has no line
+    /// break before it.
     pub fn next_template_literal_token(&mut self) {
+        if self.token != Token::Eof {
+            self.consume_line_break();
+        }
+        self.token_line_break = None;
         let result = self.scanner.scan_template_literal_token();
 
         // Propagate scanner diagnostics to parser
@@ -747,6 +801,8 @@ impl<'src> Parser<'src> {
         let start_pos_idx = self.start_pos_idx;
         let end_pos_idx = self.end_pos_idx;
         let prev_end_pos_idx = self.prev_end_pos_idx;
+        let token_line_break = self.token_line_break;
+        let line_break = self.line_break;
         // Breadcrumbs are restored from the untouched bottom of the stack
         // plus the entries popped from it (see `eat_breadcrumb`).
         let outer_breadcrumb_floor =
@@ -756,6 +812,7 @@ impl<'src> Parser<'src> {
         let regions = self.regions.clone();
         let warnings_len = self.warnings.len();
         let comments_len = self.comments.len();
+        let comment_tokens = self.comment_tokens;
         let in_external = self.in_external;
         let current_type_name_path = self.current_type_name_path.clone();
         let inline_types_found = self.inline_types_found.clone();
@@ -784,6 +841,8 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = start_pos_idx;
         self.end_pos_idx = end_pos_idx;
         self.prev_end_pos_idx = prev_end_pos_idx;
+        self.token_line_break = token_line_break;
+        self.line_break = line_break;
         self.breadcrumbs.truncate(self.lookahead_breadcrumb_floor);
         while self.lookahead_popped_breadcrumbs.len() > popped_breadcrumbs_len {
             let popped = self
@@ -799,6 +858,7 @@ impl<'src> Parser<'src> {
         self.diagnostics.truncate(diagnostics_len);
         self.warnings.truncate(warnings_len);
         self.comments.truncate(comments_len);
+        self.comment_tokens = comment_tokens;
         self.in_external = in_external;
         self.current_type_name_path = current_type_name_path;
         self.inline_types_found = inline_types_found;
@@ -824,6 +884,8 @@ impl<'src> Parser<'src> {
             start_pos_idx: self.start_pos_idx,
             end_pos_idx: self.end_pos_idx,
             prev_end_pos_idx: self.prev_end_pos_idx,
+            token_line_break: self.token_line_break,
+            line_break: self.line_break,
             breadcrumbs: self.breadcrumbs.clone(),
             regions: self.regions.clone(),
             diagnostics_len: self.diagnostics.len(),
@@ -853,6 +915,8 @@ impl<'src> Parser<'src> {
         self.start_pos_idx = snapshot.start_pos_idx;
         self.end_pos_idx = snapshot.end_pos_idx;
         self.prev_end_pos_idx = snapshot.prev_end_pos_idx;
+        self.token_line_break = snapshot.token_line_break;
+        self.line_break = snapshot.line_break;
         self.breadcrumbs = snapshot.breadcrumbs;
         // res_parser.ml `with_checkpoint`: immutable region states also roll
         // back error suppression.
@@ -881,6 +945,28 @@ impl<'src> Parser<'src> {
     /// Get collected parser warnings.
     pub fn warnings(&self) -> &[ParserWarning] {
         &self.warnings
+    }
+
+    /// The number of collected comments.
+    pub fn comments_len(&self) -> usize {
+        self.comments.len()
+    }
+
+    /// The number of ordinary comment tokens scanned, collected or not.
+    pub fn comment_tokens(&self) -> usize {
+        self.comment_tokens
+    }
+
+    /// Mark the collected comments in `range` as inside the comment-only JSX
+    /// container at `loc`.
+    pub fn set_jsx_container(
+        &mut self,
+        range: std::ops::Range<usize>,
+        loc: crate::location::Location,
+    ) {
+        for comment in &mut self.comments[range] {
+            comment.jsx_container = Some(loc);
+        }
     }
 
     /// Get collected comments.
@@ -975,6 +1061,8 @@ mod tests {
             "let x = <div className=\"test\">{React.string(\"hello\")}</div>",
             "type t = (. int => int) => int",
             "let x = `hello ${name}`",
+            "let x = <div>{/* comment only */}<span /></div>",
+            "let x = <>{/* comment only */}</>",
         ];
         for source in sources {
             let source = source.to_string();
@@ -1048,7 +1136,9 @@ mod tests {
             .join()
             .unwrap()
         };
-        assert!(!flagged("let x = 1\nlet f = y => y + x\nlet loc = \"__LOC__\""));
+        assert!(!flagged(
+            "let x = 1\nlet f = y => y + x\nlet loc = \"__LOC__\""
+        ));
         assert!(flagged("let here = __LOC__"));
         assert!(flagged("let line = __LINE__"));
         assert!(flagged("let pos = __POS__"));

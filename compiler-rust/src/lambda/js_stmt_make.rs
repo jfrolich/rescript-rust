@@ -5,6 +5,7 @@
 
 use crate::js_ir::arena::{Expr, JsArena, Stmt, StmtKind};
 
+#[cfg(test)]
 pub(crate) fn block_terminates(a: &JsArena, block: &[Stmt]) -> bool {
     block.last().is_some_and(|s| statement_terminates(a, *s))
 }
@@ -24,20 +25,24 @@ pub(crate) fn strict_single_return_expr(a: &JsArena, block: &[Stmt]) -> Option<E
     }
 }
 
+#[cfg(test)]
 pub(crate) fn block_finishes_output(a: &JsArena, block: &[Stmt]) -> bool {
     block
         .last()
         .is_some_and(|s| statement_finishes_output(a, *s))
 }
 
+#[cfg(test)]
 pub(crate) fn statement_terminates(a: &JsArena, stmt: Stmt) -> bool {
     statement_ends_control(a, stmt, true)
 }
 
+#[cfg(test)]
 pub(crate) fn statement_finishes_output(a: &JsArena, stmt: Stmt) -> bool {
     statement_ends_control(a, stmt, false)
 }
 
+#[cfg(test)]
 /// Shared walker for `statement_terminates` (which also accepts `break` and
 /// `continue`) and `statement_finishes_output` (only `return`/`throw`).
 fn statement_ends_control(a: &JsArena, stmt: Stmt, allow_jumps: bool) -> bool {

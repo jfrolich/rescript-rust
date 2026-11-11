@@ -136,7 +136,6 @@ pub(crate) fn walk_expression(visitor: &mut impl Visitor, a: &JsArena, expressio
         | ExprKind::Seq(left, right)
         | ExprKind::Bin(_, left, right)
         | ExprKind::FlatCall(left, right)
-        | ExprKind::StringIndex(left, right)
         | ExprKind::ArrayIndex(left, right) => {
             walk_expression(visitor, a, left);
             walk_expression(visitor, a, right);
@@ -171,12 +170,14 @@ pub(crate) fn walk_expression(visitor: &mut impl Visitor, a: &JsArena, expressio
                 walk_expression(visitor, a, *item);
             }
         }
-        ExprKind::Object(proto, props) => {
-            if let Some(proto) = proto {
-                walk_expression(visitor, a, proto);
-            }
+        ExprKind::Object(props) => {
             for (_, value) in a.props(props) {
                 walk_expression(visitor, a, *value);
+            }
+        }
+        ExprKind::Jsx(jsx) => {
+            for value in a.jsx(jsx).expressions(a) {
+                walk_expression(visitor, a, value);
             }
         }
     }
@@ -298,10 +299,6 @@ pub(crate) fn map_expression_children<M: Mapper + ?Sized>(
             let f = m.expression(j, f);
             ExprKind::Call(f, map_expr_list(m, j, args), info)
         }
-        ExprKind::StringIndex(l, r) => {
-            let l = m.expression(j, l);
-            ExprKind::StringIndex(l, m.expression(j, r))
-        }
         ExprKind::ArrayIndex(l, r) => {
             let l = m.expression(j, l);
             ExprKind::ArrayIndex(l, m.expression(j, r))
@@ -336,8 +333,7 @@ pub(crate) fn map_expression_children<M: Mapper + ?Sized>(
             ExprKind::CamlBlock(map_expr_list(m, j, items), flag, tag)
         }
         ExprKind::CamlBlockTag(inner, tag) => ExprKind::CamlBlockTag(m.expression(j, inner), tag),
-        ExprKind::Object(dup, props) => {
-            let dup = dup.map(|d| m.expression(j, d));
+        ExprKind::Object(props) => {
             let items = j.props(props).to_vec();
             let mut changed = false;
             let mapped: Vec<(PropName, Expr)> = items
@@ -349,7 +345,38 @@ pub(crate) fn map_expression_children<M: Mapper + ?Sized>(
                 })
                 .collect();
             let props = if changed { j.prop_list(&mapped) } else { props };
-            ExprKind::Object(dup, props)
+            ExprKind::Object(props)
+        }
+        ExprKind::Jsx(id) => {
+            let jsx = j.jsx(id);
+            let callee = m.expression(j, jsx.callee);
+            let tag = m.expression(j, jsx.tag);
+            let spread = jsx.spread.map(|e| m.expression(j, e));
+            let items = j.props(jsx.props).to_vec();
+            let mapped: Vec<(PropName, Expr)> = items
+                .iter()
+                .map(|&(name, value)| (name, m.expression(j, value)))
+                .collect();
+            let children = jsx.children.map(|c| map_expr_list(m, j, c));
+            let key = jsx.key.map(|e| m.expression(j, e));
+            let props = if mapped == items {
+                jsx.props
+            } else {
+                j.prop_list(&mapped)
+            };
+            let mapped = super::arena::JsxInfo {
+                callee,
+                tag,
+                spread,
+                props,
+                children,
+                key,
+                ..jsx
+            };
+            if mapped == jsx {
+                return e;
+            }
+            ExprKind::Jsx(j.jsx_id(mapped))
         }
         ExprKind::Await(inner) => ExprKind::Await(m.expression(j, inner)),
         ExprKind::Spread(inner) => ExprKind::Spread(m.expression(j, inner)),
@@ -525,7 +552,6 @@ pub(crate) fn any_child(a: &JsArena, e: Expr, mut f: impl FnMut(Expr) -> bool) -
         | ExprKind::Seq(l, r)
         | ExprKind::Bin(_, l, r)
         | ExprKind::FlatCall(l, r)
-        | ExprKind::StringIndex(l, r)
         | ExprKind::ArrayIndex(l, r) => f(l) || f(r),
         ExprKind::Cond(t, c, x) => f(t) || f(c) || f(x),
         ExprKind::Call(func, args, _) | ExprKind::TaggedTemplate(func, _, args) => {
@@ -538,9 +564,8 @@ pub(crate) fn any_child(a: &JsArena, e: Expr, mut f: impl FnMut(Expr) -> bool) -
         ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             a.exprs(items).iter().any(|e| f(*e))
         }
-        ExprKind::Object(dup, props) => {
-            dup.is_some_and(&mut f) || a.props(props).iter().any(|(_, v)| f(*v))
-        }
+        ExprKind::Object(props) => a.props(props).iter().any(|(_, v)| f(*v)),
+        ExprKind::Jsx(jsx) => a.jsx(jsx).expressions(a).any(f),
         ExprKind::Fun(_)
         | ExprKind::Var(_)
         | ExprKind::Qualified(_)

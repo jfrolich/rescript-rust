@@ -1,71 +1,64 @@
 (* The runtime representation of variants: plain data describing how each
    constructor is laid out in JavaScript and how a whole variant is
    dispatched on. This module sits below [Types] so the canonical layout can
-   be stored on type declarations; [Ast_untagged_variants] re-exports these
-   definitions and derives them from declarations. *)
+   be stored on type declarations; [Variant_layout] derives the layout of
+   each declaration. *)
 
 module Instance = struct
-  type t =
-    | Array
-    | ArrayBuffer
-    | BigInt64Array
-    | BigUint64Array
-    | Blob
-    | DataView
-    | Date
-    | File
-    | Float32Array
-    | Float64Array
-    | Int16Array
-    | Int32Array
-    | Int8Array
-    | Promise
-    | RegExp
-    | Uint16Array
-    | Uint32Array
-    | Uint8Array
-    | Uint8ClampedArray
-    | Set
-    | Map
-    | WeakSet
-    | WeakMap
+  type t = Array | Class of {name: string; ancestors: string list}
+
   let to_string = function
     | Array -> "Array"
-    | ArrayBuffer -> "ArrayBuffer"
-    | BigInt64Array -> "BigInt64Array"
-    | BigUint64Array -> "BigUint64Array"
-    | Blob -> "Blob"
-    | DataView -> "DataView"
-    | Date -> "Date"
-    | File -> "File"
-    | Float32Array -> "Float32Array"
-    | Float64Array -> "Float64Array"
-    | Int16Array -> "Int16Array"
-    | Int32Array -> "Int32Array"
-    | Int8Array -> "Int8Array"
-    | Promise -> "Promise"
-    | RegExp -> "RegExp"
-    | Uint16Array -> "Uint16Array"
-    | Uint32Array -> "Uint32Array"
-    | Uint8Array -> "Uint8Array"
-    | Uint8ClampedArray -> "Uint8ClampedArray"
-    | Set -> "Set"
-    | Map -> "Map"
-    | WeakSet -> "WeakSet"
-    | WeakMap -> "WeakMap"
+    | Class {name} -> name
+
+  let is_subclass t ~of_ =
+    match (t, of_) with
+    | Class {ancestors}, Class {name} -> List.mem name ancestors
+    | (Array | Class _), _ -> false
 end
 
 (* Type of the runtime representation of an untagged block (case with payload) *)
 type block_type =
-  | IntType
+  | NumberType  (** [int] and [float] alike *)
   | StringType
-  | FloatType
   | BigintType
   | BooleanType
   | InstanceType of Instance.t
+  | SymbolType
   | FunctionType
   | ObjectType
   | UnknownType
+
+(* The payload kinds recognized by [typeof], with the name it returns *)
+let typeof_kinds =
+  [
+    (StringType, "string");
+    (NumberType, "number");
+    (BigintType, "bigint");
+    (BooleanType, "boolean");
+    (SymbolType, "symbol");
+    (FunctionType, "function");
+    (ObjectType, "object");
+  ]
+
+let typeof_name block_type = List.assoc_opt block_type typeof_kinds
+
+let block_type_of_typeof name =
+  List.find_map
+    (fun (block_type, kind) -> if kind = name then Some block_type else None)
+    typeof_kinds
+
+(** What a type declaration states about its values at run time, through
+    [@notUndefined], [@instanceOf] or [@typeOf]. Each level implies the one
+    before: a value recognized as a class instance or [typeof] kind is never
+    [undefined]. *)
+type value_shape =
+  | Unstated
+      (** Nothing: an abbreviation has the shape of the type it abbreviates *)
+  | Never_undefined  (** [@notUndefined] *)
+  | Recognized_as of block_type
+      (** [@instanceOf] or [@typeOf]: a payload of this kind, with the class's
+          declared superclasses *)
 
 (* The literal value a constructor is represented by: what [@as] states, or
    the constructor's own name when it states nothing. Unlike [tag_type], this
@@ -79,17 +72,33 @@ type literal_tag =
   | Null
   | Undefined
 
+(* [-0.] and [0.] are equal for [===]; [%h] is exact for every other number *)
+let number_key x = "number:" ^ if x = 0. then "0" else Printf.sprintf "%h" x
+
+let literal_value_key = function
+  | Int i -> number_key (Int32.to_float (Int32.of_int i))
+  | Float f -> (
+    match float_of_string_opt f with
+    | Some x -> number_key x
+    | None -> "number:" ^ f)
+  | BigInt i ->
+    let positive, digits = Bigint_utils.parse_bigint i in
+    "bigint:" ^ Bigint_utils.to_string (positive || digits = "0") digits
+  | Bool b -> if b then "true" else "false"
+  | Null -> "null"
+  | Undefined -> "undefined"
+  | String s -> "string:" ^ s
+
+let same_literal_value a b = literal_value_key a = literal_value_key b
+
 (** Information used to recognize a constructor during matching. A literal
     identifies a constant or an object's tag; a payload shape identifies a
     value represented directly by its payload. *)
 type tag_type = Literal of literal_tag | Payload_shape of block_type
 
-type tag = {name: string; literal: literal_tag option}
-(** A constructor's name and optional explicitly declared runtime literal. *)
-
-type matchable_tag = {name: string; tag_type: tag_type option}
-(** A constructor tag widened for matching, where an untagged payload shape
-    can participate alongside declared literals. *)
+type tag = {name: string; literal: literal_tag}
+(** A constructor's name and its runtime literal: what [@as] states, or the
+    name itself *)
 
 type tagged_block = {tag: tag; tag_name: string option}
 
@@ -98,11 +107,6 @@ type tagged_block = {tag: tag; tag_name: string option}
 type block =
   | Tagged of tagged_block
   | Untagged of {tag: tag; block_type: block_type}
-
-(* Matching compares against a wider notion of tag than a declaration can
-   state, so a stored tag widens on its way into a check. *)
-let to_matchable_tag ({name; literal} : tag) : matchable_tag =
-  {name; tag_type = Option.map (fun literal -> Literal literal) literal}
 
 type constructor_case = Constant of tag | Block of block
 
@@ -114,12 +118,15 @@ type matching_facts = {
           standard [TAG] field. *)
   block_types: block_type list;
       (** Runtime shapes of constructors represented directly by their
-          payload. Tagged object constructors do not appear here. *)
+          payload, in declaration order. Tagged object constructors do not
+          appear here. *)
   literal_tags: literal_tag list;
-      (** Runtime values of all nullary constructors. *)
-  has_null: bool;
-  has_undefined: bool;
-  has_other_literal: bool;
+      (** Runtime values of all nullary constructors. In an untagged variant
+          these may overlap the values of a payload constructor, as in
+          [@as("a") A | S(string)]. Literals are always tested first, so the
+          payload constructor only receives values that are not literals, and
+          [S("a")] matches as [A]: constructor identity is not observable at
+          runtime for such values. *)
 }
 (** Declaration-level facts needed when lowering a constructor match. This is
     not an occurrence-specific matching plan: it contains no arms, actions,
@@ -185,35 +192,17 @@ let compute_matching_facts ~tag_name (constructors : constructor_case array) :
     matching_facts =
   let block_types = ref [] in
   let literal_tags = ref [] in
-  let has_null = ref false in
-  let has_undefined = ref false in
-  let has_other_literal = ref false in
   Array.iter
     (function
-      | Constant {name; literal} -> (
-        (* Without an [@as], a nullary constructor is its own name. *)
-        let literal =
-          match literal with
-          | Some literal -> literal
-          | None -> String name
-        in
-        literal_tags := literal :: !literal_tags;
-        match literal with
-        | Null -> has_null := true
-        | Undefined -> has_undefined := true
-        | String _ | Int _ | Float _ | BigInt _ | Bool _ ->
-          has_other_literal := true)
+      | Constant {literal} -> literal_tags := literal :: !literal_tags
       | Block (Untagged {block_type}) ->
         block_types := block_type :: !block_types
       | Block (Tagged _) -> ())
     constructors;
   {
     tag_name;
-    block_types = !block_types;
-    literal_tags = !literal_tags;
-    has_null = !has_null;
-    has_undefined = !has_undefined;
-    has_other_literal = !has_other_literal;
+    block_types = List.rev !block_types;
+    literal_tags = List.rev !literal_tags;
   }
 
 let make_layout ~(configuration : configuration) constructors =
@@ -242,9 +231,10 @@ let complete_layout layout_ref layout =
    predefined types, whose declarations are built by hand *)
 let plain_layout (cases : (string * bool (* has payload *)) list) : layout_ref =
   let case (name, has_payload) =
-    if has_payload then
-      Block (Tagged {tag = {name; literal = None}; tag_name = None})
-    else Constant {name; literal = None}
+    (* The empty list is the number 0 *)
+    let literal = if name = "[]" then Int 0 else String name in
+    if has_payload then Block (Tagged {tag = {name; literal}; tag_name = None})
+    else Constant {name; literal}
   in
   ref
     (Complete

@@ -215,9 +215,9 @@ pub fn marshal_inline_const(w: &mut MarshalWriter<'_>, c: &InlineConst) {
             w.write_block_header(2, 1);
             w.write_custom_int32(*i);
         }
-        InlineConst::ConstBigint { negative, digits } => {
+        InlineConst::ConstBigint { positive, digits } => {
             w.write_block_header(3, 2);
-            bool_(w, *negative);
+            bool_(w, *positive);
             w.write_str(digits);
         }
         InlineConst::ConstFloat(f) => {

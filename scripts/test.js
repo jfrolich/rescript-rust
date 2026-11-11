@@ -1,7 +1,6 @@
 // @ts-check
 
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import {
   buildTestDir,
@@ -64,13 +63,9 @@ if (formatTest) {
 }
 
 if (ounitTest) {
-  if (process.platform === "win32") {
-    console.log("Skipping OUnit tests on Windows");
-  } else {
-    await execBin(ounitTestBin, [], {
-      stdio: "inherit",
-    });
-  }
+  await execBin(ounitTestBin, [], {
+    stdio: "inherit",
+  });
 }
 
 if (mochaTest) {
@@ -104,6 +99,7 @@ if (mochaTest) {
       "10000",
       "tests/tests/src/**/*_test.mjs",
       "tests/belt_tests/src/**/*_test.mjs",
+      "tests/cli_tests/*_test.mjs",
       // jsx_preserve_test.mjs contains JSX, which Node cannot load; the
       // file exists to pin the preserved-JSX output.
       "--ignore",
@@ -124,6 +120,19 @@ if (mochaTest) {
     cwd: projectDir,
     stdio: "inherit",
   });
+
+  // Not part of Stdlib_TestSuite, which the installation tests also run on
+  // Node.js 22.
+  if ("Temporal" in globalThis) {
+    await node("tests/tests/src/stdlib/Stdlib_TemporalTests.mjs", [], {
+      cwd: projectDir,
+      stdio: "inherit",
+    });
+  } else {
+    console.warn(
+      `Ignoring Stdlib_TemporalTests. Not supported by Node ${process.versions.node}`,
+    );
+  }
 
   // CommonJS tests
   await execClean([], {
@@ -174,56 +183,49 @@ if (buildTest) {
 }
 
 if (runtimeDocstrings) {
-  if (process.platform === "win32") {
-    console.log(`Skipping docstrings tests on ${process.platform}`);
-  } else if (process.platform === "darwin" && os.release().startsWith("22")) {
-    // Workaround for intermittent hangs in CI
-    console.log("Skipping docstrings tests on macOS 13");
-  } else {
-    console.log("Running runtime docstrings tests");
+  console.log("Running runtime docstrings tests");
 
-    const generated_mocha_test_res = path.join(
-      docstringTestDir,
-      "generated_mocha_test.res",
-    );
+  const generated_mocha_test_res = path.join(
+    docstringTestDir,
+    "generated_mocha_test.res",
+  );
 
-    // This generated source file is checked during the initial build below, so
-    // a stale copy from an earlier run can fail before we regenerate it.
-    await fs.promises.rm(generated_mocha_test_res, { force: true });
+  // This generated source file is checked during the initial build below, so
+  // a stale copy from an earlier run can fail before we regenerate it.
+  await fs.promises.rm(generated_mocha_test_res, { force: true });
 
-    await execClean([], {
-      cwd: docstringTestDir,
-      stdio: "inherit",
-    });
+  await execClean([], {
+    cwd: docstringTestDir,
+    stdio: "inherit",
+  });
 
-    await execBuild([], {
-      cwd: docstringTestDir,
-      stdio: "inherit",
-    });
+  await execBuild([], {
+    cwd: docstringTestDir,
+    stdio: "inherit",
+  });
 
-    // Generate rescript file with all tests `generated_mocha_test.res`
-    await node(path.join(docstringTestDir, "DocTest.res.js"), [], {
-      cwd: projectDir,
-      stdio: "inherit",
-    });
+  // Generate rescript file with all tests `generated_mocha_test.res`
+  await node(path.join(docstringTestDir, "DocTest.res.js"), [], {
+    cwd: projectDir,
+    stdio: "inherit",
+  });
 
-    // Build again to check if generated_mocha_test.res has syntax or type erros
-    await execBuild([], {
-      cwd: docstringTestDir,
-      stdio: "inherit",
-    });
+  // Build again to check if generated_mocha_test.res has syntax or type erros
+  await execBuild([], {
+    cwd: docstringTestDir,
+    stdio: "inherit",
+  });
 
-    // Format generated_mocha_test.res
-    console.log("Formatting generated_mocha_test.res");
-    await rescript("format", [generated_mocha_test_res], {
-      cwd: projectDir,
-      stdio: "inherit",
-    });
+  // Format generated_mocha_test.res
+  console.log("Formatting generated_mocha_test.res");
+  await rescript("format", [generated_mocha_test_res], {
+    cwd: projectDir,
+    stdio: "inherit",
+  });
 
-    console.log("Run mocha test");
-    await mocha([path.join(docstringTestDir, "generated_mocha_test.res.js")], {
-      cwd: projectDir,
-      stdio: "inherit",
-    });
-  }
+  console.log("Run mocha test");
+  await mocha([path.join(docstringTestDir, "generated_mocha_test.res.js")], {
+    cwd: projectDir,
+    stdio: "inherit",
+  });
 }

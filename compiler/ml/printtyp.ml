@@ -38,15 +38,17 @@ let rec longident ppf = function
 
 (* Print an identifier *)
 
-let unique_names = ref Ident.empty
+let unique_names_key = Request_local.new_key (fun () -> ref Ident.empty)
+let unique_names () = Domain.DLS.get unique_names_key
 
 let ident_name id =
-  try Ident.find_same id !unique_names with Not_found -> Ident.name id
+  try Ident.find_same id !(unique_names ()) with Not_found -> Ident.name id
 
 let add_unique id =
-  try ignore (Ident.find_same id !unique_names)
+  try ignore (Ident.find_same id !(unique_names ()))
   with Not_found ->
-    unique_names := Ident.add id (Ident.unique_toplevel_name id) !unique_names
+    unique_names () :=
+      Ident.add id (Ident.unique_toplevel_name id) !(unique_names ())
 
 let ident ppf id = pp_print_string ppf (ident_name id)
 
@@ -54,12 +56,13 @@ let ident ppf id = pp_print_string ppf (ident_name id)
 
 let ident_pervasives = Ident.create_persistent "Pervasives"
 let ident_stdlib = Ident.create_persistent "Stdlib"
-let printing_env = ref Env.empty
+let printing_env_key = Request_local.new_key (fun () -> ref Env.empty)
+let printing_env () = Domain.DLS.get printing_env_key
 let non_shadowed_pervasive_or_stdlib = function
   | Pdot (Pident id, s, _pos) as path -> (
     (Ident.same id ident_pervasives || Ident.same id ident_stdlib)
     &&
-      try Path.same path (Env.lookup_type (Lident s) !printing_env)
+      try Path.same path (Env.lookup_type (Lident s) !(printing_env ()))
       with Not_found -> true)
   | _ -> false
 
@@ -102,6 +105,11 @@ let tree_of_rec = function
   | Trec_first -> Orec_first
   | Trec_next -> Orec_next
 
+let string_of_label = function
+  | Nolabel -> ""
+  | Labelled {txt} -> txt
+  | Optional {txt} -> "?" ^ txt
+
 (* Print a raw type expression, with sharing *)
 
 let raw_list pr ppf = function
@@ -123,17 +131,13 @@ let print_name ppf = function
   | None -> fprintf ppf "None"
   | Some name -> fprintf ppf "\"%s\"" name
 
-let string_of_label = function
-  | Nolabel -> ""
-  | Labelled {txt} -> txt
-  | Optional {txt} -> "?" ^ txt
-
-let visited = ref []
+let visited_key = Request_local.new_key (fun () -> ref [])
+let visited () = Domain.DLS.get visited_key
 let rec raw_type ppf ty =
   let ty = safe_repr [] ty in
-  if List.memq ty !visited then fprintf ppf "{id=%d}" ty.id
+  if List.memq ty !(visited ()) then fprintf ppf "{id=%d}" ty.id
   else (
-    visited := ty :: !visited;
+    visited () := ty :: !(visited ());
     fprintf ppf "@[<1>{id=%d;level=%d;desc=@,%a}@]" ty.id ty.level raw_type_desc
       ty.desc)
 
@@ -190,11 +194,9 @@ and raw_field ppf = function
   | Rabsent -> fprintf ppf "Rabsent"
 
 let raw_type_expr ppf t =
-  visited := [];
+  visited () := [];
   raw_type ppf t;
-  visited := []
-
-let () = Btype.print_raw := raw_type_expr
+  visited () := []
 
 (* Normalize paths *)
 
@@ -220,12 +222,18 @@ let apply_subst s1 tyl =
 
 type best_path = Paths of Path.t list | Best of Path.t
 
-let printing_depth = ref 0
-let printing_cont = ref ([] : Env.iter_cont list)
-let printing_old = ref Env.empty
-let printing_pers = ref Concr.empty
+let printing_depth_key = Request_local.new_key (fun () -> ref 0)
+let printing_depth () = Domain.DLS.get printing_depth_key
+let printing_cont_key =
+  Request_local.new_key (fun () -> ref ([] : Env.iter_cont list))
+let printing_cont () = Domain.DLS.get printing_cont_key
+let printing_old_key = Request_local.new_key (fun () -> ref Env.empty)
+let printing_old () = Domain.DLS.get printing_old_key
+let printing_pers_key = Request_local.new_key (fun () -> ref Concr.empty)
+let printing_pers () = Domain.DLS.get printing_pers_key
 module Path_map = Map.Make (Path)
-let printing_map = ref Path_map.empty
+let printing_map_key = Request_local.new_key (fun () -> ref Path_map.empty)
+let printing_map () = Domain.DLS.get printing_map_key
 
 let same_type t t' = repr t == repr t'
 
@@ -277,18 +285,22 @@ let rec path_size = function
 
 let same_printing_env env =
   let used_pers = Env.used_persistent () in
-  Env.same_types !printing_old env && Concr.equal !printing_pers used_pers
+  Env.same_types !(printing_old ()) env
+  && Concr.equal !(printing_pers ()) used_pers
 
 let set_printing_env env =
-  printing_env := env;
-  if !Clflags.real_paths || !printing_env == Env.empty || same_printing_env env
+  printing_env () := env;
+  if
+    !((Clflags.current ()).real_paths)
+    || !(printing_env ()) == Env.empty
+    || same_printing_env env
   then ()
   else (
     (* printf "Reset printing_map@."; *)
-    printing_old := env;
-    printing_pers := Env.used_persistent ();
-    printing_map := Path_map.empty;
-    printing_depth := 0;
+    printing_old () := env;
+    printing_pers () := Env.used_persistent ();
+    printing_map () := Path_map.empty;
+    printing_depth () := 0;
     (* printf "Recompute printing_map.@."; *)
     let cont =
       Env.iter_types
@@ -297,16 +309,17 @@ let set_printing_env env =
           (* Format.eprintf "%a -> %a = %a@." path p path p' path p1 *)
           if s1 = Id then
             try
-              let r = Path_map.find p1 !printing_map in
+              let r = Path_map.find p1 !(printing_map ()) in
               match !r with
               | Paths l -> r := Paths (p :: l)
               | Best p' -> r := Paths [p; p']
               (* assert false *)
             with Not_found ->
-              printing_map := Path_map.add p1 (ref (Paths [p])) !printing_map)
+              printing_map () :=
+                Path_map.add p1 (ref (Paths [p])) !(printing_map ()))
         env
     in
-    printing_cont := [cont])
+    printing_cont () := [cont])
 
 let wrap_printing_env env f =
   set_printing_env env;
@@ -343,24 +356,25 @@ let rec get_best_path r =
         (* Format.eprintf "evaluating %a@." path p; *)
         match !r with
         | Best p' when path_size p >= path_size p' -> ()
-        | _ -> if is_unambiguous p !printing_env then r := Best p)
+        | _ -> if is_unambiguous p !(printing_env ()) then r := Best p)
         (* else Format.eprintf "%a ignored as ambiguous@." path p *)
       l;
     get_best_path r
 
 let best_type_path p =
-  if !Clflags.real_paths || !printing_env == Env.empty then (p, Id)
+  if !((Clflags.current ()).real_paths) || !(printing_env ()) == Env.empty then
+    (p, Id)
   else
-    let p', s = normalize_type_path !printing_env p in
-    let get_path () = get_best_path (Path_map.find p' !printing_map) in
+    let p', s = normalize_type_path !(printing_env ()) p in
+    let get_path () = get_best_path (Path_map.find p' !(printing_map ())) in
     while
-      !printing_cont <> []
+      !(printing_cont ()) <> []
       &&
-        try fst (path_size (get_path ())) > !printing_depth
+        try fst (path_size (get_path ())) > !(printing_depth ())
         with Not_found -> true
     do
-      printing_cont := List.map snd (Env.run_iter_cont !printing_cont);
-      incr printing_depth
+      printing_cont () := List.map snd (Env.run_iter_cont !(printing_cont ()));
+      incr (printing_depth ())
     done;
     let p'' = try get_path () with Not_found -> p' in
     (* Format.eprintf "%a = %a -> %a@." path p path p' path p''; *)
@@ -368,54 +382,63 @@ let best_type_path p =
 
 (* Print a type expression *)
 
-let names = ref ([] : (type_expr * string) list)
-let name_counter = ref 0
-let named_vars = ref ([] : string list)
+let names_key =
+  Request_local.new_key (fun () -> ref ([] : (type_expr * string) list))
+let names () = Domain.DLS.get names_key
+let name_counter_key = Request_local.new_key (fun () -> ref 0)
+let name_counter () = Domain.DLS.get name_counter_key
+let named_vars_key = Request_local.new_key (fun () -> ref ([] : string list))
+let named_vars () = Domain.DLS.get named_vars_key
 
-let weak_counter = ref 1
-let weak_var_map = ref Type_map.empty
-let named_weak_vars = ref String_set.empty
+let weak_counter_key = Request_local.new_key (fun () -> ref 1)
+let weak_counter () = Domain.DLS.get weak_counter_key
+let weak_var_map_key = Request_local.new_key (fun () -> ref Type_map.empty)
+let weak_var_map () = Domain.DLS.get weak_var_map_key
+let named_weak_vars_key = Request_local.new_key (fun () -> ref String_set.empty)
+let named_weak_vars () = Domain.DLS.get named_weak_vars_key
 
 let reset_names () =
-  names := [];
-  name_counter := 0;
-  named_vars := []
+  names () := [];
+  name_counter () := 0;
+  named_vars () := []
 let add_named_var ty =
   match ty.desc with
   | Tvar (Some name) | Tunivar (Some name) ->
-    if List.mem name !named_vars then () else named_vars := name :: !named_vars
+    if List.mem name !(named_vars ()) then ()
+    else named_vars () := name :: !(named_vars ())
   | _ -> ()
 
 let name_is_already_used name =
-  List.mem name !named_vars
-  || List.exists (fun (_, name') -> name = name') !names
-  || String_set.mem name !named_weak_vars
+  List.mem name !(named_vars ())
+  || List.exists (fun (_, name') -> name = name') !(names ())
+  || String_set.mem name !(named_weak_vars ())
 
 let rec new_name () =
   let name =
-    if !name_counter < 26 then String.make 1 (Char.chr (97 + !name_counter))
+    if !(name_counter ()) < 26 then
+      String.make 1 (Char.chr (97 + !(name_counter ())))
     else
-      String.make 1 (Char.chr (97 + (!name_counter mod 26)))
-      ^ string_of_int (!name_counter / 26)
+      String.make 1 (Char.chr (97 + (!(name_counter ()) mod 26)))
+      ^ string_of_int (!(name_counter ()) / 26)
   in
-  incr name_counter;
+  incr (name_counter ());
   if name_is_already_used name then new_name () else name
 
 let rec new_weak_name ty () =
-  let name = "weak" ^ string_of_int !weak_counter in
-  incr weak_counter;
+  let name = "weak" ^ string_of_int !(weak_counter ()) in
+  incr (weak_counter ());
   if name_is_already_used name then new_weak_name ty ()
   else (
-    named_weak_vars := String_set.add name !named_weak_vars;
-    weak_var_map := Type_map.add ty name !weak_var_map;
+    named_weak_vars () := String_set.add name !(named_weak_vars ());
+    weak_var_map () := Type_map.add ty name !(weak_var_map ());
     name)
 
 let name_of_type name_generator t =
   (* We've already been through repr at this stage, so t is our representative
      of the union-find class. *)
-  try List.assq t !names
+  try List.assq t !(names ())
   with Not_found -> (
-    try Type_map.find t !weak_var_map
+    try Type_map.find t !(weak_var_map ())
     with Not_found ->
       let name =
         match t.desc with
@@ -425,7 +448,9 @@ let name_of_type name_generator t =
            * adding a number until we find a name that's not taken. *)
           let current_name = ref name in
           let i = ref 0 in
-          while List.exists (fun (_, name') -> !current_name = name') !names do
+          while
+            List.exists (fun (_, name') -> !current_name = name') !(names ())
+          do
             current_name := name ^ string_of_int !i;
             i := !i + 1
           done;
@@ -435,26 +460,32 @@ let name_of_type name_generator t =
           name_generator ()
       in
       (* Exception for type declarations *)
-      if name <> "_" then names := (t, name) :: !names;
+      if name <> "_" then names () := (t, name) :: !(names ());
       name)
 
 let check_name_of_type t = ignore (name_of_type new_name t)
 
 let remove_names tyl =
   let tyl = List.map repr tyl in
-  names := Ext_list.filter !names (fun (ty, _) -> not (List.memq ty tyl))
+  names () :=
+    Ext_list.filter !(names ()) (fun (ty, _) -> not (List.memq ty tyl))
 
-let visited_objects = ref ([] : type_expr list)
-let aliased = ref ([] : type_expr list)
-let delayed = ref ([] : type_expr list)
+let visited_objects_key =
+  Request_local.new_key (fun () -> ref ([] : type_expr list))
+let visited_objects () = Domain.DLS.get visited_objects_key
+let aliased_key = Request_local.new_key (fun () -> ref ([] : type_expr list))
+let aliased () = Domain.DLS.get aliased_key
+let delayed_key = Request_local.new_key (fun () -> ref ([] : type_expr list))
+let delayed () = Domain.DLS.get delayed_key
 
-let add_delayed t = if not (List.memq t !delayed) then delayed := t :: !delayed
+let add_delayed t =
+  if not (List.memq t !(delayed ())) then delayed () := t :: !(delayed ())
 
-let is_aliased ty = List.memq (proxy ty) !aliased
+let is_aliased ty = List.memq (proxy ty) !(aliased ())
 let add_alias ty =
   let px = proxy ty in
   if not (is_aliased px) then (
-    aliased := px :: !aliased;
+    aliased () := px :: !(aliased ());
     add_named_var px)
 
 let aliasable ty =
@@ -490,19 +521,20 @@ let rec mark_loops_rec visited ty =
       List.iter (mark_loops_rec visited) (apply_subst s tyl)
     | Tpackage (_, _, tyl) -> List.iter (mark_loops_rec visited) tyl
     | Tvariant row -> (
-      if List.memq px !visited_objects then add_alias px
+      if List.memq px !(visited_objects ()) then add_alias px
       else
         let row = row_repr row in
-        if not (static_row row) then visited_objects := px :: !visited_objects;
+        if not (static_row row) then
+          visited_objects () := px :: !(visited_objects ());
         match row.row_name with
         | Some (_p, tyl) when namable_row row ->
           List.iter (mark_loops_rec visited) tyl
         | _ -> iter_row (mark_loops_rec visited) row)
     | Tobject fi ->
-      if List.memq px !visited_objects then add_alias px
+      if List.memq px !(visited_objects ()) then add_alias px
       else (
         if object_row_is_structurally_open ty then
-          visited_objects := px :: !visited_objects;
+          visited_objects () := px :: !(visited_objects ());
         let fields, _ = flatten_fields fi in
         List.iter (fun {Ctype.f_typ} -> mark_loops_rec visited f_typ) fields)
     | Tfield {typ = ty1; rest = ty2} ->
@@ -521,12 +553,12 @@ let mark_loops ty =
   mark_loops_rec [] ty
 
 let reset_loop_marks () =
-  visited_objects := [];
-  aliased := [];
-  delayed := []
+  visited_objects () := [];
+  aliased () := [];
+  delayed () := []
 
 let reset () =
-  unique_names := Ident.empty;
+  unique_names () := Ident.empty;
   reset_names ();
   reset_loop_marks ()
 
@@ -567,7 +599,7 @@ let find_inlined_type name (printing_context : printing_context option) =
 let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
   let ty = repr ty in
   let px = proxy ty in
-  if List.mem_assq px !names && not (List.memq px !delayed) then
+  if List.mem_assq px !(names ()) && not (List.memq px !(delayed ())) then
     let mark = is_non_gen sch ty in
     let name = name_of_type (if mark then new_weak_name ty else new_name) px in
     Otyp_var (mark, name)
@@ -666,12 +698,12 @@ let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
       | Tpoly (ty, []) -> tree_of_typexp ?printing_context sch ty
       | Tpoly (ty, tyl) ->
         (*let print_names () =
-          List.iter (fun (_, name) -> prerr_string (name ^ " ")) !names;
+          List.iter (fun (_, name) -> prerr_string (name ^ " ")) !(names ());
           prerr_string "; " in *)
         let tyl = List.map repr tyl in
         if tyl = [] then tree_of_typexp ?printing_context sch ty
         else
-          let old_delayed = !delayed in
+          let old_delayed = !(delayed ()) in
           (* Make the names delayed, so that the real type is
              printed once when used as proxy *)
           List.iter add_delayed tyl;
@@ -679,7 +711,7 @@ let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
           let tr = Otyp_poly (tl, tree_of_typexp ?printing_context sch ty) in
           (* Forget names when we leave scope *)
           remove_names tyl;
-          delayed := old_delayed;
+          delayed () := old_delayed;
           tr
       | Tunivar _ -> Otyp_var (false, name_of_type new_name ty)
       | Tpackage (p, n, tyl) ->
@@ -688,8 +720,8 @@ let rec tree_of_typexp ?(printing_context : printing_context option) sch ty =
         in
         Otyp_module (Path.name p, n, tree_of_typlist ?printing_context sch tyl)
     in
-    if List.memq px !delayed then
-      delayed := Ext_list.filter !delayed (( != ) px);
+    if List.memq px !(delayed ()) then
+      delayed () := Ext_list.filter !(delayed ()) (( != ) px);
     if is_aliased px && aliasable ty then (
       check_name_of_type px;
       Otyp_alias (pr_typ (), name_of_type new_name px))
@@ -860,14 +892,35 @@ and tree_of_type_decl id decl =
         decl.type_private,
         decl.type_representation = Unboxed )
   in
-  let immediate = Builtin_attributes.immediate decl.type_attributes in
+  let attributes =
+    let flag set attribute = if set then [attribute] else [] in
+    (* A malformed annotation was reported when the declaration was typed *)
+    let stated process =
+      try process decl.type_attributes
+      with Ast_untagged_variants.Error _ -> None
+    in
+    List.concat
+      [
+        flag (Builtin_attributes.immediate decl.type_attributes) "@immediate";
+        flag unboxed "@unboxed";
+        (match stated Ast_untagged_variants.process_tag_name with
+        | Some name ->
+          [Printf.sprintf "@tag(\"%s\")" (String_literal.encode_js_string name)]
+        | None -> []);
+        (match
+           stated (Ast_untagged_variants.process_runtime_annotation ?loc:None)
+         with
+        | Some annotation ->
+          [Ast_untagged_variants.runtime_annotation_to_string annotation]
+        | None -> []);
+      ]
+  in
   {
     otype_name = name;
     otype_params = args;
     otype_type = ty;
     otype_private = priv;
-    otype_immediate = immediate;
-    otype_unboxed = unboxed;
+    otype_attributes = attributes;
     otype_cstrs = constraints;
   }
 
@@ -877,32 +930,39 @@ and tree_of_constructor_arguments ?printing_context = function
 
 and tree_of_constructor ?printing_context ~layout ~position cd =
   let name = Ident.name cd.cd_id in
-  let nullary = Ast_untagged_variants.is_nullary_variant cd.cd_args in
+  (* The [@as] of a nullary case or of a tagged case with a payload sets its
+     runtime tag; an untagged case is its payload *)
+  let tagged =
+    Ast_untagged_variants.is_nullary_variant cd.cd_args
+    ||
+    match Variant_runtime.constructor_at layout position with
+    | Block (Tagged _) -> true
+    | Block (Untagged _) | Constant _ -> false
+  in
   let repr =
-    if not nullary then None
+    if not tagged then None
     else
       let as_annotation = function
         | Variant_runtime.Null -> "@as(null)"
         | Undefined -> "@as(undefined)"
-        | String s -> Printf.sprintf "@as(%S)" s
+        | String s ->
+          Printf.sprintf "@as(\"%s\")" (String_literal.encode_js_string s)
         | Int i -> Printf.sprintf "@as(%d)" i
         | Float f -> Printf.sprintf "@as(%s)" f
         | Bool b -> Printf.sprintf "@as(%b)" b
         | BigInt s -> Printf.sprintf "@as(%sn)" s
       in
-      match Variant_runtime.constructor_tag layout position with
-      | Some d -> Some (as_annotation d)
-      | None -> None
+      Option.map as_annotation cd.cd_runtime_tag
   in
   let arg () = tree_of_constructor_arguments ?printing_context cd.cd_args in
   match cd.cd_res with
   | None -> (name, arg (), None, repr)
   | Some res ->
-    let nm = !names in
-    names := [];
+    let nm = !(names ()) in
+    names () := [];
     let ret = tree_of_typexp ?printing_context false res in
     let args = arg () in
-    names := nm;
+    names () := nm;
     (name, args, Some ret, repr)
 
 and tree_of_label ?printing_context l =
@@ -913,6 +973,7 @@ and tree_of_label ?printing_context l =
     | _ -> l.ld_type
   in
   ( Ident.name l.ld_id,
+    l.ld_runtime_name,
     l.ld_mutable = Mutable,
     opt,
     tree_of_typexp ?printing_context false typ )
@@ -931,8 +992,6 @@ let typexp ?printing_context sch ppf ty =
   !Oprint.out_type ppf (tree_of_typexp ?printing_context sch ty)
 
 let type_expr ppf ty = typexp false ppf ty
-
-and type_sch ppf ty = typexp true ppf ty
 
 and type_scheme ppf ty =
   reset_and_mark_loops ty;
@@ -978,11 +1037,11 @@ let tree_of_extension_constructor id ext es =
     match ext.ext_ret_type with
     | None -> (tree_of_constructor_arguments ext.ext_args, None)
     | Some res ->
-      let nm = !names in
-      names := [];
+      let nm = !(names ()) in
+      names () := [];
       let ret = tree_of_typexp false res in
       let args = tree_of_constructor_arguments ext.ext_args in
-      names := nm;
+      names () := nm;
       (args, Some ret)
   in
   let ext =
@@ -1010,7 +1069,6 @@ let extension_constructor id ppf ext =
 (* Print a value declaration *)
 
 let tree_of_value_description id decl =
-  (* Format.eprintf "@[%a@]@." raw_type_expr decl.val_type; *)
   let id = Ident.name id in
   let ty = tree_of_type_scheme decl.val_type in
   let vd =
@@ -1029,7 +1087,7 @@ let value_description id ppf decl =
 (* Print a module type *)
 
 let wrap_env fenv ftree arg =
-  let env = !printing_env in
+  let env = !(printing_env ()) in
   set_printing_env (fenv env);
   let tree = ftree arg in
   set_printing_env env;
@@ -1050,12 +1108,13 @@ let dummy =
     type_attributes = [];
     type_immediate = false;
     type_representation = Boxed;
+    type_shape = Unstated;
     type_inlined_types = [];
   }
 
 let hide_rec_items = function
   | Sig_type (id, _decl, rs) :: rem
-    when rs = Trec_first && not !Clflags.real_paths ->
+    when rs = Trec_first && not !((Clflags.current ()).real_paths) ->
     let rec get_ids = function
       | Sig_type (id, _, Trec_next) :: rem -> id :: get_ids rem
       | _ -> []
@@ -1064,7 +1123,8 @@ let hide_rec_items = function
     set_printing_env
       (List.fold_right
          (fun id -> Env.add_type ~check:false (Ident.rename id) dummy)
-         ids !printing_env)
+         ids
+         !(printing_env ()))
   | _ -> ()
 
 let rec tree_of_modtype ?(ellipsis = false) = function
@@ -1086,7 +1146,7 @@ let rec tree_of_modtype ?(ellipsis = false) = function
   | Mty_alias (_, p) -> Omty_alias (tree_of_path p)
 
 and tree_of_signature sg =
-  wrap_env (fun env -> env) (tree_of_signature_rec !printing_env false) sg
+  wrap_env (fun env -> env) (tree_of_signature_rec !(printing_env ()) false) sg
 
 and tree_of_signature_rec env' in_type_group = function
   | [] -> []
@@ -1138,33 +1198,6 @@ let modtype ppf mty = !Oprint.out_module_type ppf (tree_of_modtype mty)
 let modtype_declaration id ppf decl =
   !Oprint.out_sig_item ppf (tree_of_modtype_declaration id decl)
 
-(* For the toplevel: merge with tree_of_signature? *)
-
-(* Refresh weak variable map in the toplevel *)
-let refresh_weak () =
-  let refresh t name (m, s) =
-    if is_non_gen true (repr t) then
-      (Type_map.add t name m, String_set.add name s)
-    else (m, s)
-  in
-  let m, s =
-    Type_map.fold refresh !weak_var_map (Type_map.empty, String_set.empty)
-  in
-  named_weak_vars := s;
-  weak_var_map := m
-
-let print_items showval env x =
-  refresh_weak ();
-  let rec print showval env = function
-    | [] -> []
-    | item :: rem as items ->
-      let _sg, rem = filter_rem_sig item rem in
-      hide_rec_items items;
-      let trees = trees_of_sigitem item in
-      List.map (fun d -> (d, showval env item)) trees @ print showval env rem
-  in
-  print showval env x
-
 (* Print a signature body (used by -i when compiling a .ml) *)
 
 let print_signature ppf tree =
@@ -1183,7 +1216,12 @@ let same_path t t' =
     let p1, s1 = best_type_path p and p2, s2 = best_type_path p' in
     match (s1, s2) with
     | Nth n1, Nth n2 when n1 = n2 -> true
-    | (Id | Map _), (Id | Map _) when Path.same p1 p2 ->
+    | (Id | Map _), (Id | Map _)
+      when let env = !(printing_env ()) in
+           (* A module alias names the same type as its target. *)
+           Path.same
+             (Env.normalize_path None env p1)
+             (Env.normalize_path None env p2) ->
       let tl = apply_subst s1 tl and tl' = apply_subst s2 tl' in
       List.length tl = List.length tl' && List.for_all2 same_type tl tl'
     | _ -> false)
@@ -1284,16 +1322,31 @@ let rec mismatch = function
   | [] -> None
   | _ -> assert false
 
+let escape_explanation ppf p =
+  match p with
+  | Pident id -> (
+    match Ctype.existential_constructor id with
+    | Some constructor ->
+      fprintf ppf
+        "@,\
+         @[%s is an existential type bound by the constructor %s.@ It is only \
+         known in the scope of the pattern that matches %s.@]"
+        (Ident.name id) constructor constructor
+    | None ->
+      fprintf ppf "@,@[The type constructor@;<1 2>%a@ would escape its scope@]"
+        path p)
+  | _ ->
+    fprintf ppf "@,@[The type constructor@;<1 2>%a@ would escape its scope@]"
+      path p
+
 let explanation unif t3 t4 ppf =
   match (t3.desc, t4.desc) with
   | Ttuple [], Tvar _ | Tvar _, Ttuple [] ->
     fprintf ppf "@,Self type cannot escape its class"
   | Tconstr (p, _, _), Tvar _ when unif && t4.level < Path.binding_time p ->
-    fprintf ppf "@,@[The type constructor@;<1 2>%a@ would escape its scope@]"
-      path p
+    escape_explanation ppf p
   | Tvar _, Tconstr (p, _, _) when unif && t3.level < Path.binding_time p ->
-    fprintf ppf "@,@[The type constructor@;<1 2>%a@ would escape its scope@]"
-      path p
+    escape_explanation ppf p
   | Tvar _, Tunivar _ | Tunivar _, Tvar _ ->
     fprintf ppf "@,The universal variable %a would escape its scope" type_expr
       (if is_Tunivar t3 then t3 else t4)
@@ -1593,7 +1646,7 @@ let print_variant_configuration_issue ppf
     let print_unboxed_status ppf unboxed name =
       fprintf ppf "@ - Variant @{<info>%s@} is @{<error>%s@}unboxed."
         (Path.name name)
-        (if unboxed then "not " else "")
+        (if unboxed then "" else "not ")
     in
     print_unboxed_status ppf left_unboxed left_variant_name;
     print_unboxed_status ppf right_unboxed right_variant_name;
@@ -1676,8 +1729,8 @@ let print_record_field_subtype_violation ppf
         " is configured to be @{<info>\"%s\"@} (via the @as attribute)" as_name
     | None -> fprintf ppf " is @{<info>\"%s\"@}" label);
     fprintf ppf " in record @{<info>%s@}, but in record @{<info>%s@}"
-      (Path.name right_record_name)
-      (Path.name left_record_name);
+      (Path.name left_record_name)
+      (Path.name right_record_name);
     (match right_as with
     | Some as_name ->
       fprintf ppf
@@ -1689,6 +1742,13 @@ let print_record_field_subtype_violation ppf
     fprintf ppf
       "The field @{<info>%s@} is missing in record @{<info>%s@}, but present \
        in record @{<info>%s@}"
+      label
+      (Path.name left_record_name)
+      (Path.name right_record_name)
+  | Mutable_mismatch {label} ->
+    fprintf ppf
+      "The field @{<info>%s@} is mutable in record @{<info>%s@}, but not in \
+       record @{<info>%s@}. A coercion can't make a field writable."
       label
       (Path.name right_record_name)
       (Path.name left_record_name)
@@ -1766,7 +1826,20 @@ let report_subtyping_error ppf env tr1 txt1 tr2 ctx =
               fprintf ppf "@ - ";
               print_record_field_subtype_violation ppf issue ~left_record_name
                 ~right_record_name)
-            issues)
+            issues
+        | Coercion_into_private_type {typename} ->
+          fprintf ppf
+            "@ @{<info>%s@} is private: its values can only be built in the \
+             module that defines it, so another type cannot be coerced to it."
+            (Path.name typename)
+        | Record_array_mismatch {array_record_name; object_record_name} ->
+          fprintf ppf
+            "@ The record @{<info>%s@} is represented as a JavaScript array \
+             (its fields have the runtime names \"0\", \"1\", ...) and \
+             @{<info>%s@} as an object, so neither can be coerced to the \
+             other."
+            (Path.name array_record_name)
+            (Path.name object_record_name))
       | None -> ())
 
 let report_ambiguous_type_error ppf env (tp0, tp0') tpl txt1 txt2 txt3 =

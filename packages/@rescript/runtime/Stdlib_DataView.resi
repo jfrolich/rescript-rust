@@ -13,7 +13,7 @@ See [`DataView`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Referen
 /**
 Type representing a DataView.
 */
-@notUndefined
+@instanceOf("DataView")
 type t
 
 /**
@@ -30,45 +30,6 @@ DataView.fromBuffer(ArrayBuffer.make(16), ~byteOffset=4, ~length=8)
 ```
 */
 @new external fromBuffer: (Stdlib_ArrayBuffer.t, ~byteOffset: int=?, ~length: int=?) => t =
-  "DataView"
-
-/**
-`fromBufferToEnd(buffer, ~byteOffset)` creates a DataView starting at a given byte offset. See [`DataView`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView) on MDN.
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-
-## Examples
-
-```rescript
-DataView.fromBufferToEnd(buffer, ~byteOffset=4)
-```
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: DataView.fromBuffer(~byteOffset=%insert.labelledArgument("byteOffset")),
-})
-@new
-external fromBufferToEnd: (Stdlib_ArrayBuffer.t, ~byteOffset: int) => t = "DataView"
-
-/**
-`fromBufferWithRange(buffer, ~byteOffset, ~length)` creates a DataView for a specific byte range.
-
-See [`DataView`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/DataView) on MDN.
-
-**Note:** This is a potentially unsafe operation. Ensure the buffer is large enough and only accessed within its bounds.
-
-## Examples
-
-```rescript
-DataView.fromBufferWithRange(ArrayBuffer.make(16), ~byteOffset=2, ~length=8)
-```
-*/
-@deprecated({
-  reason: "Use `fromBuffer` instead",
-  migrate: DataView.fromBuffer(),
-})
-@new
-external fromBufferWithRange: (Stdlib_ArrayBuffer.t, ~byteOffset: int, ~length: int) => t =
   "DataView"
 
 /**

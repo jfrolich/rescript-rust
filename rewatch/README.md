@@ -61,12 +61,15 @@ Run commands from the repository root:
 
 ```sh
 make rewatch
-make test-rewatch
+make test-rewatch-rust
 cargo test --manifest-path rewatch/Cargo.toml
 cargo clippy --manifest-path rewatch/Cargo.toml --all-targets --all-features
 cargo fmt --check --manifest-path rewatch/Cargo.toml
 ```
 
+`make test-rewatch-rust` builds this implementation and runs the integration
+suite against it; in this repository `make test-rewatch` runs the same suite
+against the same Rust `rescript` binary.
 `make rewatch-pgo` makes a profile-guided release build
 ([`scripts/build_rewatch_pgo.sh`](../scripts/build_rewatch_pgo.sh)): it builds
 an instrumented binary, has it compile a copy of `tests/tests`, and builds

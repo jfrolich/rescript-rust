@@ -5,8 +5,6 @@ use std::cmp::Ordering;
 /// A module name.
 pub type T = String;
 
-/// The `Curry` runtime module.
-pub const CURRY: &str = "Curry";
 /// The module gentype imports ReScript's `list` type from.
 pub const RESCRIPT_PERVASIVES: &str = "RescriptPervasives";
 

@@ -64,14 +64,6 @@ let split_directive_attrs ~async attrs =
   if async then List.partition (fun ({txt}, _) -> txt <> "directive") attrs
   else (attrs, [])
 
-(* Helper method to filter out any attribute that isn't [@react.component] *)
-let other_attrs_pure (loc, _) =
-  match loc.txt with
-  | "react.component" | "jsx.component" | "react.componentWithProps"
-  | "jsx.componentWithProps" ->
-    false
-  | _ -> true
-
 (* Finds the name of the variable the binding is assigned to, otherwise raises Invalid_argument *)
 let rec get_fn_name binding =
   match binding with
@@ -85,7 +77,7 @@ let rec get_fn_name binding =
 let filename_from_loc (pstr_loc : Location.t) =
   let file_name =
     match pstr_loc.loc_start.pos_fname with
-    | "" -> !Location.input_name
+    | "" -> Location.get_input_name ()
     | file_name -> file_name
   in
   let file_name =
@@ -580,16 +572,20 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
       {expr with pexp_desc = Pexp_sequence (first, constrain_jsx_return second)}
     | _ -> jsx_element_constraint expr
   in
-  if Jsx_common.has_attr_on_binding Jsx_common.has_attr binding then (
+  let pvb_jsx_component, pvb_attributes =
+    Jsx_common.take_component_with_props_payload binding.pvb_jsx_component
+      binding.pvb_attributes
+  in
+  let binding = {binding with pvb_jsx_component; pvb_attributes} in
+  Jsx_common.reject_leftover_component_attrs binding.pvb_attributes;
+  match binding.pvb_jsx_component with
+  | Some {pjc_kind = Pjc_labelled core_type_of_attr} ->
     check_multiple_components ~config ~loc:pstr_loc;
     let binding_newtypes, binding_core_type =
       match binding.pvb_constraint with
       | None -> ([], None)
       | Some {pvc_newtypes; pvc_type} ->
         (List.rev_map (fun name -> (name, [])) pvc_newtypes, Some pvc_type)
-    in
-    let core_type_of_attr =
-      Jsx_common.core_type_of_attrs binding.pvb_attributes
     in
     let typ_vars_of_core_type =
       core_type_of_attr
@@ -604,7 +600,7 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
         pvb_pat = {binding.pvb_pat with ppat_loc = empty_loc};
         pvb_constraint = None;
         pvb_loc = empty_loc;
-        pvb_attributes = binding.pvb_attributes |> List.filter other_attrs_pure;
+        pvb_jsx_component = None;
       }
     in
     let fn_name = get_fn_name binding.pvb_pat in
@@ -830,15 +826,9 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
       }
     in
     let new_binding = Some (binding_wrapper full_expression) in
-    (Some props_record_type, binding, new_binding))
-  else if Jsx_common.has_attr_on_binding Jsx_common.has_attr_with_props binding
-  then
-    let modified_binding =
-      {
-        binding with
-        pvb_attributes = binding.pvb_attributes |> List.filter other_attrs_pure;
-      }
-    in
+    (Some props_record_type, binding, new_binding)
+  | Some {pjc_kind = Pjc_with_props} ->
+    let modified_binding = {binding with pvb_jsx_component = None} in
     let fn_name = get_fn_name modified_binding.pvb_pat in
     let full_module_name =
       make_module_name file_name config.nested_modules fn_name
@@ -940,11 +930,11 @@ let map_binding ~config ~empty_loc ~pstr_loc ~file_name binding =
     ( None,
       {
         binding with
-        pvb_attributes = binding.pvb_attributes |> List.filter other_attrs_pure;
+        pvb_jsx_component = None;
         pvb_expr = binding_expr |> constrain_jsx_return;
       },
       new_binding )
-  else (None, binding, None)
+  | None -> (None, binding, None)
 
 let rec collect_prop_types types {ptyp_desc} =
   match ptyp_desc with
@@ -956,7 +946,7 @@ let rec collect_prop_types types {ptyp_desc} =
     in
     let rec go types = function
       | [] -> if ret_is_arrow then collect_prop_types types ret else types
-      | ({lbl; attrs; typ} : Parsetree.arg) :: rest
+      | Parsetree.Parg_type {lbl; attrs; typ} :: rest
         when is_labelled lbl || is_optional lbl ->
         let loc =
           match (rest, ret_is_arrow) with
@@ -964,7 +954,8 @@ let rec collect_prop_types types {ptyp_desc} =
           | _ -> typ.ptyp_loc
         in
         go ((lbl, attrs, loc, typ) :: types) rest
-      | _ :: rest -> go types rest
+      | (Parsetree.Parg_type _ | Parsetree.Parg_fixed _) :: rest ->
+        go types rest
     in
     go types params
   | _ -> types
@@ -977,12 +968,14 @@ let transform_structure_item ~config item =
       pstr_desc =
         Pstr_primitive ({pval_attributes; pval_type} as value_description);
     } as pstr -> (
-    match
-      ( List.filter Jsx_common.has_attr pval_attributes,
-        List.filter Jsx_common.has_attr_with_props pval_attributes )
-    with
-    | [], [] -> [item]
-    | _, [_] ->
+    let pval_jsx_component, pval_attributes =
+      Jsx_common.take_component_with_props_payload
+        value_description.pval_jsx_component pval_attributes
+    in
+    Jsx_common.reject_leftover_component_attrs pval_attributes;
+    match pval_jsx_component with
+    | None -> [item]
+    | Some {pjc_kind = Pjc_with_props} ->
       Jsx_common.raise_error ~loc:pstr_loc
         "Components cannot be defined as externals when using \
          @react.componentWithProps.\n\n\
@@ -991,11 +984,10 @@ let transform_structure_item ~config item =
          use the type React.component<props> instead.\n\
          Alternatively, use @react.component for an external definition with \
          labeled arguments."
-    | [_], [] ->
+    | Some {pjc_kind = Pjc_labelled core_type_of_attr} ->
       check_multiple_components ~config ~loc:pstr_loc;
       check_string_int_attribute_iter.structure_item
         check_string_int_attribute_iter item;
-      let core_type_of_attr = Jsx_common.core_type_of_attrs pval_attributes in
       let typ_vars_of_core_type =
         core_type_of_attr
         |> Option.map Jsx_common.typ_vars_of_core_type
@@ -1032,14 +1024,11 @@ let transform_structure_item ~config item =
               {
                 value_description with
                 pval_type = {pval_type with ptyp_desc = new_external_type};
-                pval_attributes = List.filter other_attrs_pure pval_attributes;
+                pval_jsx_component = None;
               };
         }
       in
-      [props_record_type; new_structure]
-    | _ ->
-      Jsx_common.raise_error ~loc:pstr_loc
-        "Only one JSX component call can exist on a component at one time")
+      [props_record_type; new_structure])
   (* let component = ... *)
   | {pstr_loc; pstr_desc = Pstr_value (rec_flag, value_bindings)} -> (
     let file_name = filename_from_loc pstr_loc in
@@ -1083,13 +1072,19 @@ let transform_signature_item ~config item =
       psig_loc;
       psig_desc = Psig_value ({pval_attributes; pval_type} as psig_desc);
     } as psig -> (
-    match List.filter Jsx_common.has_attr pval_attributes with
-    | [] -> [item]
-    | [_] ->
+    let pval_jsx_component, pval_attributes =
+      Jsx_common.take_component_with_props_payload psig_desc.pval_jsx_component
+        pval_attributes
+    in
+    Jsx_common.reject_leftover_component_attrs pval_attributes;
+    match pval_jsx_component with
+    (* [@react.componentWithProps] on a signature item has always been left
+       alone. *)
+    | None | Some {pjc_kind = Pjc_with_props} -> [item]
+    | Some {pjc_kind = Pjc_labelled core_type_of_attr} ->
       check_multiple_components ~config ~loc:psig_loc;
       check_string_int_attribute_iter.signature_item
         check_string_int_attribute_iter item;
-      let core_type_of_attr = Jsx_common.core_type_of_attrs pval_attributes in
       let typ_vars_of_core_type =
         core_type_of_attr
         |> Option.map Jsx_common.typ_vars_of_core_type
@@ -1126,14 +1121,11 @@ let transform_signature_item ~config item =
               {
                 psig_desc with
                 pval_type = {pval_type with ptyp_desc = new_external_type};
-                pval_attributes = List.filter other_attrs_pure pval_attributes;
+                pval_jsx_component = None;
               };
         }
       in
-      [props_record_type; new_structure]
-    | _ ->
-      Jsx_common.raise_error ~loc:psig_loc
-        "Only one JSX component call can exist on a component at one time")
+      [props_record_type; new_structure])
   | _ -> [item]
 
 (* There appear to be slightly different rules of transformation whether the component is upper-, lowercase or a fragment *)

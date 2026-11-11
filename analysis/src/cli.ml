@@ -176,7 +176,7 @@ let create_interface ~path ~cmi_file =
     match Files.read_file path with
     | None -> ""
     | Some source -> (
-      match Create_interface.command ~source ~cmi_file with
+      match Create_interface.command ~path ~source ~cmi_file with
       | Ok content -> content
       | Error _ -> "")
   in
@@ -198,7 +198,7 @@ let dump_cmt ~state ~rescript_json ~cmt_path =
     match Cmt.full_for_cmt ~module_name ~package ~uri cmt_path with
     | None -> print_null ()
     | Some full ->
-      let content = Cmt_viewer.dump ~full ~filter_for_position:None in
+      let content = Cmt_viewer.dump ~full in
       Printf.printf "%s" content)
 
 let test ~state ~path =
@@ -209,8 +209,11 @@ let test ~state ~path =
     let lines = text |> String.split_on_char '\n' in
     let process_line i line =
       let create_current_file () =
+        (* Binary mode keeps the copy's LF line endings on Windows, so dumped
+           source text matches the original file. *)
         let current_file, cout =
-          Filename.open_temp_file "def" ("txt." ^ Filename.extension path)
+          Filename.open_temp_file ~mode:[Open_binary] "def"
+            ("txt." ^ Filename.extension path)
         in
         let remove_line_comment l =
           let len = String.length l in

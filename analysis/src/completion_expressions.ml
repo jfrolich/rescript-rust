@@ -47,6 +47,64 @@ let rec traverse_expr (exp : Parsetree.expression) ~expr_path ~pos
            `[None, <com>, None]`) *)
         Some ("", next_expr_path)
       | _ -> None)
+  | Pexp_spread (Spread_array, elements) -> (
+    (* Complete an item like an element of an array literal, and a spread
+       operand like the whole literal, whose type it has. *)
+    let next_expr_path = [Completable.NArray] @ expr_path in
+    let item_with_cursor =
+      elements
+      |> List.find_map (function
+        | Parsetree.Pspread_item e ->
+          e
+          |> traverse_expr ~expr_path:next_expr_path
+               ~first_char_before_cursor_no_white ~pos
+        | Pspread e ->
+          e |> traverse_expr ~expr_path ~first_char_before_cursor_no_white ~pos)
+    in
+    match item_with_cursor with
+    | Some _ -> item_with_cursor
+    | None
+      when loc_has_cursor exp.pexp_loc
+           && (first_char_before_cursor_no_white = Some ','
+              || first_char_before_cursor_no_white = Some '[')
+           && not
+                (elements
+                |> List.exists (function
+                    | Parsetree.Pspread e | Pspread_item e ->
+                    loc_has_cursor e.pexp_loc)) ->
+      (* A new item at the start or after a comma, e.g. `[...xs, <com>]` *)
+      Some ("", next_expr_path)
+    | None -> None)
+  | Pexp_spread (Spread_list, _) ->
+    (* Like a list literal without a spread, a chain of [::], which gets no
+       typed completion either: the element type of a list is not extracted. *)
+    None
+  | Pexp_dict entries -> (
+    (* Complete inside the value of the entry with the cursor, or for the type
+       of the values at an expression hole, e.g. `dict{"a": <com>}` *)
+    let next_expr_path =
+      [Completable.NDictValue {optional = false}] @ expr_path
+    in
+    let values =
+      entries
+      |> List.filter_map (function
+        | Parsetree.Pdict_entry (_, value) -> Some value
+        | Pdict_spread _ -> None)
+    in
+    match
+      values
+      |> List.find_opt (fun value ->
+          value.Parsetree.pexp_loc
+          |> Cursor_position.classify_loc ~pos
+          = HasCursor)
+    with
+    | Some value ->
+      value
+      |> traverse_expr ~expr_path:next_expr_path
+           ~first_char_before_cursor_no_white ~pos
+    | None when List.exists is_expr_hole values ->
+      some_if_has_cursor ("", next_expr_path)
+    | None -> None)
   | Pexp_tuple tuple_items when loc_has_cursor exp.pexp_loc ->
     tuple_items
     |> traverse_expr_tuple_items ~first_char_before_cursor_no_white ~pos

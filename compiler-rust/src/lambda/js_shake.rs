@@ -791,7 +791,7 @@ fn shake_program(program: &mut Program) {
     // (`compiler/core/js_shake.ml:62-104`).
     let a = &program.arena;
     let block = flatten_toplevel_block(a, &program.block);
-    let required = fixed_point_required_idents(a, &block, &program.export_set);
+    let required = live_idents(a, &block, &program.export_set);
 
     program.block = block
         .into_iter()
@@ -833,85 +833,53 @@ fn flatten_toplevel_block_into(a: &JsArena, block: &[Stmt], flattened: &mut Vec<
     }
 }
 
-/// Per-statement facts used by the required-ident fixed point. They do not
-/// depend on the required set, so they are computed once instead of on every
-/// iteration.
-enum RequiredIdentsEntry {
-    Variable {
-        ident: Ident,
-        /// `(has_side_effects, free_variables)` of the initializer.
-        value: Option<(bool, HashSet<Ident>)>,
-    },
-    /// Free variables of a non-declaration statement with side effects.
-    Effect(Option<HashSet<Ident>>),
-}
-
-fn fixed_point_required_idents(
-    a: &JsArena,
-    block: &[Stmt],
-    export_set: &HashSet<Ident>,
-) -> HashSet<Ident> {
-    let entries: Vec<RequiredIdentsEntry> = block
-        .iter()
-        .map(|stmt| match a.sk(*stmt) {
+/// `live_idents export_set block` (js_shake.ml): the identifiers the
+/// toplevel `block` needs: the exports, everything a statement with side
+/// effects refers to, and transitively the free variables of the initializers
+/// of needed declarations. Each initializer's free variables are computed
+/// once, and a worklist follows the dependencies.
+fn live_idents(a: &JsArena, block: &[Stmt], export_set: &HashSet<Ident>) -> HashSet<Ident> {
+    // Free variables of the initializer of each toplevel declaration.
+    let mut deps: ahash::AHashMap<Ident, HashSet<Ident>> = ahash::AHashMap::default();
+    let mut live: HashSet<Ident> = HashSet::default();
+    let mut worklist: Vec<Ident> = Vec::new();
+    let mark = |id: Ident, live: &mut HashSet<Ident>, worklist: &mut Vec<Ident>| {
+        if live.insert(id) {
+            worklist.push(id);
+        }
+    };
+    for stmt in block {
+        match a.sk(*stmt) {
             StmtKind::Variable(v) => {
                 let decl = a.var(v);
-                RequiredIdentsEntry::Variable {
-                    ident: decl.ident,
-                    value: decl.value.map(|value| {
-                        (
-                            !js_expr_no_side_effects(a, value),
-                            free_variables_of_expression(a, value),
-                        )
-                    }),
-                }
-            }
-            _ => RequiredIdentsEntry::Effect(
-                (!js_statement_no_side_effects(a, *stmt))
-                    .then(|| free_variables_of_statement(a, *stmt)),
-            ),
-        })
-        .collect();
-    let mut required = required_idents(&entries, export_set, true);
-    loop {
-        // `required_idents` only adds to its input, so equal sizes mean the
-        // set is unchanged.
-        let next = required_idents(&entries, &required, false);
-        if next.len() == required.len() {
-            return required;
-        }
-        required = next;
-    }
-}
-
-fn required_idents(
-    entries: &[RequiredIdentsEntry],
-    initial: &HashSet<Ident>,
-    count_effect_statements: bool,
-) -> HashSet<Ident> {
-    let mut required = initial.clone();
-
-    for entry in entries {
-        match entry {
-            RequiredIdentsEntry::Variable { ident, value } => {
-                if required.contains(ident) {
-                    if let Some((_, free)) = value {
-                        required.extend(free.iter().copied());
+                if let Some(value) = decl.value {
+                    let free = free_variables_of_expression(a, value);
+                    deps.entry(decl.ident).or_default().extend(free);
+                    if !js_expr_no_side_effects(a, value) {
+                        mark(decl.ident, &mut live, &mut worklist);
                     }
-                } else if let Some((true, free)) = value {
-                    required.insert(*ident);
-                    required.extend(free.iter().copied());
                 }
             }
-            RequiredIdentsEntry::Effect(free) => {
-                if count_effect_statements && let Some(free) = free {
-                    required.extend(free.iter().copied());
+            _ => {
+                if !js_statement_no_side_effects(a, *stmt) {
+                    for id in free_variables_of_statement(a, *stmt) {
+                        mark(id, &mut live, &mut worklist);
+                    }
                 }
             }
         }
     }
-
-    required
+    for id in export_set {
+        mark(*id, &mut live, &mut worklist);
+    }
+    while let Some(id) = worklist.pop() {
+        if let Some(free) = deps.get(&id) {
+            for id in free {
+                mark(*id, &mut live, &mut worklist);
+            }
+        }
+    }
+    live
 }
 
 #[derive(Default)]

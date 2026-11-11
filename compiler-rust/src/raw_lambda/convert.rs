@@ -3,9 +3,9 @@
 //! This stage ports the OCaml raw-lambda structure shape first and then
 //! incrementally ports expression lowering from `translcore.ml`.
 
+mod jsx;
+
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
-use crate::types::path::PathView;
-use std::borrow::Cow;
 use std::path::Path as StdPath;
 
 use crate::context::IdGenerator;
@@ -26,7 +26,7 @@ use crate::lambda::{
     SetFieldDbgInfo,
 };
 use crate::location::Location;
-use crate::parse_arena::{LidentIdx, LocIdx, Located, ParseArena};
+use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
 use crate::parser::ast::MutableFlag as ParserMutableFlag;
 use crate::raw_lambda::matching as full_matching;
 use crate::raw_lambda::typeopt::{
@@ -35,6 +35,7 @@ use crate::raw_lambda::typeopt::{
     type_cannot_contain_undefined_no_env,
 };
 use crate::raw_lambda::{RawArena, RawLambda};
+use crate::types::path::PathView;
 use crate::types::SignatureItem;
 use crate::types::asttypes::MutableFlag as TypeMutableFlag;
 use crate::types::context::TypeContext;
@@ -44,8 +45,7 @@ use crate::types::typecore::TypeCoreWarning;
 use crate::types::typedtree::{
     ApplyArg, Case, Constant as TConstant, Expression, ExpressionDesc, FunctionParam,
     ModuleCoercion, ModuleExpr, ModuleExprDesc, Partial, Pattern, PatternDesc, RecordField,
-    RecordLabelDefinition, Structure, StructureItem, StructureItemDesc, TExprIdx, TPatIdx,
-    TypedArena, ValueBinding,
+    Structure, StructureItem, StructureItemDesc, ValueBinding, TypedArena, TPatIdx,
 };
 
 // Keep these aligned with compiler/ml/predef.ml's allocation order. The
@@ -68,7 +68,7 @@ fn predef_exception_ident(name: &str, stamp: i32) -> Ident {
 fn recmodule_function_shape_constant() -> Constant {
     Constant::Constructor(crate::types::VariantTag {
         name: crate::name::Name::new("Function"),
-        literal: None,
+        literal: crate::types::VariantLiteralTag::String("Function".to_string()),
     })
 }
 
@@ -184,12 +184,16 @@ where
                 iter_bound_pattern_idents(ta, ta.pattern(*pat), f);
             }
         }
-        PatternDesc::Tpat_variant(_, Some(inner), _) => {
-            iter_bound_pattern_idents(ta, ta.pattern(*inner), f)
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                iter_bound_pattern_idents(ta, ta.pattern(entry.tdp_pattern), f);
+            }
         }
+        PatternDesc::Tpat_variant(_, Some(inner), _) => iter_bound_pattern_idents(ta, ta.pattern(*inner), f),
         PatternDesc::Tpat_or(left, _, _) => iter_bound_pattern_idents(ta, ta.pattern(*left), f),
         PatternDesc::Tpat_any
         | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..)
         | PatternDesc::Tpat_variant(_, None, _) => {}
     }
 }
@@ -228,9 +232,9 @@ fn label_runtime_name(lbl: &LabelDescription) -> String {
 }
 
 fn constructor_runtime_tag(
-    tag: &Option<crate::types::VariantLiteralTag>,
+    tag: &crate::types::VariantLiteralTag,
 ) -> Option<ConstructorRuntimeTag> {
-    tag.as_ref().map(|tag| match tag {
+    Some(match tag {
         crate::types::VariantLiteralTag::Int(value) => {
             ConstructorRuntimeTag::Int(i64::from(*value as i32))
         }
@@ -316,11 +320,12 @@ fn raw_polyvariant_const(rb: &RawArena, tag: &str) -> RawLambda {
     })
 }
 
-fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)> {
+fn raw_record_field_access(lbl: &LabelDescription) -> (i32, FieldDbgInfo) {
     let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => FieldDbgInfo::Record { name },
-        RecordRepresentation::RecordFloatUnused => return None,
+        RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+            FieldDbgInfo::Record { name }
+        }
         RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline { name },
         RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension { name },
@@ -329,16 +334,16 @@ fn raw_record_field_access(lbl: &LabelDescription) -> Option<(i32, FieldDbgInfo)
         RecordRepresentation::RecordExtension => lbl.lbl_pos + 1,
         _ => lbl.lbl_pos,
     };
-    Some((pos, info))
+    (pos, info)
 }
 
 fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
     let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(name),
-        RecordRepresentation::RecordFloatUnused | RecordRepresentation::RecordUnboxed(_) => {
-            return None;
+        RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+            SetFieldDbgInfo::RecordSet(name)
         }
+        RecordRepresentation::RecordUnboxed(_) => return None,
         RecordRepresentation::RecordInlined { .. } => SetFieldDbgInfo::RecordInlineSet(name),
         RecordRepresentation::RecordExtension => SetFieldDbgInfo::RecordExtensionSet(name),
     };
@@ -349,32 +354,27 @@ fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDb
     Some((pos, info))
 }
 
-fn raw_record_mutable_flag(fields: &[RecordField]) -> ParserMutableFlag {
-    fields
+/// `mut` of `transl_record` (compiler/ml/translcore.ml:1811-1813): mutable
+/// when any label of the record is.
+fn raw_record_mutable_flag(labels: &[LabelDescription]) -> ParserMutableFlag {
+    if labels
         .iter()
-        .find(|(_, lbl, _, _)| lbl.lbl_mut == TypeMutableFlag::Mutable)
-        .map(|_| ParserMutableFlag::Mutable)
-        .unwrap_or(ParserMutableFlag::Immutable)
+        .any(|lbl| lbl.lbl_mut == TypeMutableFlag::Mutable)
+    {
+        ParserMutableFlag::Mutable
+    } else {
+        ParserMutableFlag::Immutable
+    }
 }
 
-fn record_field_is_static_optional_none(
-    ta: &TypedArena,
-    lbl: &LabelDescription,
-    def: &RecordLabelDefinition,
-) -> bool {
-    if !lbl.lbl_optional {
-        return false;
-    }
-
-    match def {
-        RecordLabelDefinition::OmittedOptionalNone(_, _) => true,
-        RecordLabelDefinition::Overridden(_, expr) => matches!(
+/// A written optional field whose value is statically `None`.
+fn record_field_is_static_optional_none(ta: &TypedArena, (lbl, _, expr): &RecordField) -> bool {
+    lbl.lbl_optional
+        && matches!(
             &ta.expr(*expr).exp_desc,
             ExpressionDesc::Texp_construct(_, cstr, args)
                 if args.is_empty() && cstr.cstr_name == "None" && constructor_has_optional_shape(cstr)
-        ),
-        RecordLabelDefinition::Kept(_) => false,
-    }
+        )
 }
 
 fn inlined_record_representation(
@@ -466,14 +466,10 @@ pub struct RawLambdaConverter<'a> {
     diagnostic: Option<RawLambdaDiagnostic>,
     warnings: Vec<TypeCoreWarning>,
     warning_config: WarningConfig,
-    /// Address of the applied function or functor whose `[@inlined]`
-    /// attribute its application consumed. OCaml strips the attribute from
-    /// that one node (translattribute.ml:100-129), so only it skips the
-    /// misplaced-attribute check; its subexpressions are still checked.
-    inlined_consumed_by: Option<usize>,
     preserve_expanded_sparse_records: bool,
-    hoisted_functions: Vec<crate::lambda::HoistedFunction>,
-    hoisted_exports: Vec<crate::lambda::HoistedExport>,
+    /// `Translmod.implementation.flat_make_paths`, set by the driver from the
+    /// final signature.
+    flat_make_paths: Vec<crate::lambda::FlatMakePath>,
     /// Location handles attached to the nodes this conversion builds.
     lam_locs: crate::raw_lambda::loc::LamLocBuilder,
     /// The arena the conversion builds raw Lambda into.
@@ -505,10 +501,8 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
             b,
         }
@@ -539,10 +533,8 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
             b,
         }
@@ -574,10 +566,8 @@ impl<'a> RawLambdaConverter<'a> {
             diagnostic: None,
             warnings: Vec::new(),
             warning_config: WarningConfig::new(),
-            inlined_consumed_by: None,
             preserve_expanded_sparse_records: false,
-            hoisted_functions: Vec::new(),
-            hoisted_exports: Vec::new(),
+            flat_make_paths: Vec::new(),
             lam_locs: crate::raw_lambda::loc::LamLocBuilder::new(arena),
             b,
         }
@@ -632,14 +622,22 @@ impl<'a> RawLambdaConverter<'a> {
         std::mem::take(&mut self.warnings)
     }
 
-    /// Takes the `@res.hoistedFunction` bindings collected during conversion.
-    pub fn take_hoisted_functions(&mut self) -> Vec<crate::lambda::HoistedFunction> {
-        std::mem::take(&mut self.hoisted_functions)
+    /// `Translmod.flat_make_paths final_env signature`, computed by the
+    /// caller from the unit's final signature once translation is done (as
+    /// `Translmod.transl_implementation` does), and checked against the
+    /// export list of the translated `lam`.
+    pub fn set_flat_make_paths(
+        &mut self,
+        lam: &RawLambda,
+        paths: Vec<crate::lambda::FlatMakePath>,
+    ) {
+        self.flat_make_paths = paths;
+        self.check_flat_make_exports(lam);
     }
 
-    /// Takes the flat exports collected during conversion.
-    pub fn take_hoisted_exports(&mut self) -> Vec<crate::lambda::HoistedExport> {
-        std::mem::take(&mut self.hoisted_exports)
+    /// Takes the flat `make` export paths set by [`Self::set_flat_make_paths`].
+    pub fn take_flat_make_paths(&mut self) -> Vec<crate::lambda::FlatMakePath> {
+        std::mem::take(&mut self.flat_make_paths)
     }
 
     fn report_unknown_builtin_primitive(&mut self, loc: SrcLoc, prim_name: &str) {
@@ -752,6 +750,8 @@ impl<'a> RawLambdaConverter<'a> {
         partial: Partial,
     ) -> RawLambda {
         self.sync_matching_stamps();
+        // The callers inline `Matching.for_function`, which lowers the dict
+        // patterns of the cases.
         let arena = crate::raw_lambda::loc::LocArena::new(self.arena, &self.lam_locs, self.b);
         let env = full_matching::MatchEnv {
             ctx_ref: self.type_ctx,
@@ -877,18 +877,8 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
-    /// The node handle of a hoisted-function location, resolved back to its
-    /// arena index for warnings (`LocIdx::none` without coordinates).
-    fn loc_idx_for_lam_loc(&self, loc: LamLoc) -> LocIdx {
-        match self.lam_locs.get(loc) {
-            Some(loc) => self.loc_idx_for_location(&loc),
-            None => self.arena.none_loc(),
-        }
-    }
-
-    /// The table resolving every location handle in the converted Lambda
-    /// (and the hoisted functions). Location-free arenas give an opaque
-    /// table without coordinate rows.
+    /// The table resolving every location handle in the converted Lambda.
+    /// Location-free arenas give an opaque table without coordinate rows.
     pub fn take_lam_locs(&self) -> crate::lambda::LamLocTable {
         self.lam_locs.take_table(self.arena)
     }
@@ -950,51 +940,30 @@ impl<'a> RawLambdaConverter<'a> {
             .unwrap_or_else(|| self.fresh_ident(default))
     }
 
-    /// Look up all label declarations for a record type.
-    /// OCaml's make_record_matching uses lbl_all to iterate over ALL fields.
-    /// Since Rust's lbl_all is a placeholder, we resolve via the type context cache.
-    fn resolve_all_record_labels(&self, record_ty: TypeExprRef) -> Option<Vec<RecordLabelInfo>> {
-        let ty = self.type_ctx.repr(record_ty);
-        let desc = self.type_ctx.get_desc(ty);
-        match &*desc {
-            TypeDesc::Tconstr { path, .. } => {
-                if path.same(&crate::types::predef::path_dict()) {
-                    let labels = self.type_ctx.get_dict_pattern_labels();
-                    if !labels.is_empty() {
-                        return Some(labels);
-                    }
-                }
-                // Try the record labels cache (populated during type checking),
-                // keyed by the exact type path (including stamps)
-                if let Some(labels) = self.type_ctx.get_record_labels(path) {
-                    return Some(labels);
-                }
-                // Try env lookup
-                if let Ok(decl) = self.env.lookup_type(path) {
-                    if let crate::types::TypeKind::TypeRecord(ref labels, ref repr) = decl.type_kind
-                    {
-                        return Some(
-                            labels
-                                .iter()
-                                .enumerate()
-                                .map(|(pos, ld)| {
-                                    let name = ld.declaration_name().to_string();
-                                    (
-                                        name,
-                                        pos as i32,
-                                        ld.ld_mutable,
-                                        repr.clone(),
-                                        ld.ld_attributes.clone(),
-                                    )
-                                })
-                                .collect(),
-                        );
-                    }
-                }
-                None
-            }
-            _ => None,
-        }
+    /// The labels of `lbl.lbl_all`: OCaml's make_record_matching iterates
+    /// over every field of the record.
+    fn resolve_all_record_labels(&self, lbl: &LabelDescription) -> Option<Vec<RecordLabelInfo>> {
+        // `lbl.lbl_all`: every pattern label carries its record's array.
+        let labels = self.type_ctx.label_all(lbl.lbl_all).unwrap_or_else(|| {
+            panic!(
+                "record pattern label `{}` carries no lbl_all array ({:?})",
+                lbl.lbl_name, lbl.lbl_all
+            )
+        });
+        Some(
+            labels
+                .into_iter()
+                .map(|label| {
+                    (
+                        label.lbl_runtime_name.to_string(),
+                        label.lbl_pos,
+                        label.lbl_mut,
+                        label.lbl_repres,
+                        label.lbl_attributes,
+                    )
+                })
+                .collect(),
+        )
     }
 
     fn global_path(&self) -> Option<crate::types::Path> {
@@ -1014,113 +983,6 @@ impl<'a> RawLambdaConverter<'a> {
         rootpath
             .as_ref()
             .map(|path| crate::types::Path::pdot(*path, field.name().to_string()))
-    }
-
-    fn loc_idx_for_location(&self, loc: &Location) -> LocIdx {
-        (0..self.arena.location_count())
-            .map(|index| LocIdx(index as u32))
-            .find(|index| self.arena.to_location(*index) == *loc)
-            .unwrap_or_else(|| self.arena.none_loc())
-    }
-
-    /// Mirrors `Translcore.mark_js_hoisted_pattern` and
-    /// `Translmod.js_hoist_handler` from upstream 8bf91cb18.
-    fn mark_js_hoisted_pattern(
-        &mut self,
-        rootpath: &Option<crate::types::Path>,
-        attrs: &crate::parser::ast::Attributes,
-        pat: &Pattern,
-        lam: &RawLambda,
-        target_loc: LocIdx,
-    ) {
-        // `Translattribute.find_attribute` (translattribute.ml:28-38): a
-        // repeated attribute reports warning 54 at the second one and counts
-        // as absent.
-        let mut matching = attrs
-            .iter()
-            .filter(|(name, _)| self.arena.get_string(name.txt) == "res.hoistedFunction");
-        let Some((attr_name, payload)) = matching.next() else {
-            return;
-        };
-        if let Some((second, _)) = matching.next() {
-            self.report_warning(
-                second.loc,
-                Warning::DuplicatedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        }
-        let warning_loc = attr_name.loc;
-        if !matches!(payload, crate::parser::ast::Payload::PStr(items) if items.is_empty()) {
-            self.report_warning(
-                warning_loc,
-                Warning::AttributePayload {
-                    attr: "res.hoistedFunction".to_string(),
-                    message: "This attribute does not accept a payload".to_string(),
-                },
-            );
-            return;
-        }
-        let is_function = matches!(self.b.node(*lam), Node::Function { .. });
-        let binding = match &pat.pat_desc {
-            PatternDesc::Tpat_var(id, _) if is_function => *id,
-            PatternDesc::Tpat_alias(inner, id, _)
-                if is_function
-                    && matches!(self.ta.pattern(*inner).pat_desc, PatternDesc::Tpat_any) =>
-            {
-                *id
-            }
-            _ => {
-                self.report_warning(
-                    warning_loc,
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                return;
-            }
-        };
-        let Some(path) = rootpath.as_ref() else {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        };
-        let Ok((_head, segments)) = path.flatten() else {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        };
-        if segments.is_empty() {
-            self.report_warning(
-                warning_loc,
-                Warning::MisplacedAttribute {
-                    name: "res.hoistedFunction".to_string(),
-                },
-            );
-            return;
-        }
-        let mut segments = segments.into_iter().map(str::to_string).collect::<Vec<_>>();
-        segments.push(binding.name().to_string());
-        // Structure translation visits the continuation first. Prepending keeps
-        // the same source order as OCaml's `js_hoisted := item :: !js_hoisted`.
-        self.hoisted_functions.insert(
-            0,
-            crate::lambda::HoistedFunction {
-                binding,
-                path: segments,
-                loc: self.lam_loc(attr_name.loc),
-                target_loc: self.lam_loc(target_loc),
-            },
-        );
     }
 
     /// Find an inline-style attribute, matching OCaml's
@@ -1216,28 +1078,6 @@ impl<'a> RawLambdaConverter<'a> {
         self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
     }
 
-    fn get_inlined_attribute_from(
-        &mut self,
-        attrs: &crate::parser::ast::Attributes,
-    ) -> InlineAttribute {
-        let idx = self.find_inline_attribute_index(attrs, "inlined");
-        self.parse_inline_attribute(idx.map(|idx| &attrs.as_slice()[idx]))
-    }
-
-    /// Convert the applied `node` with its `[@inlined]` attribute consumed.
-    fn with_inlined_consumed_by<N, T>(&mut self, node: &N, f: impl FnOnce(&mut Self) -> T) -> T {
-        let previous = self
-            .inlined_consumed_by
-            .replace(std::ptr::from_ref(node).addr());
-        let result = f(self);
-        self.inlined_consumed_by = previous;
-        result
-    }
-
-    fn inlined_consumed<N>(&self, node: &N) -> bool {
-        self.inlined_consumed_by == Some(std::ptr::from_ref(node).addr())
-    }
-
     /// Mirrors `Translattribute.check_attribute` for expression attributes.
     fn check_expr_attribute(&mut self, expr: &Expression) {
         for (located_name, _) in self.ta.exp_attributes(expr).iter() {
@@ -1253,10 +1093,8 @@ impl<'a> RawLambdaConverter<'a> {
                         );
                     }
                 }
+                // Call-site inlining hints are not supported.
                 "inlined" => {
-                    if self.inlined_consumed(expr) {
-                        continue;
-                    }
                     self.report_warning(
                         located_name.loc,
                         Warning::MisplacedAttribute {
@@ -1284,10 +1122,8 @@ impl<'a> RawLambdaConverter<'a> {
                         );
                     }
                 }
+                // Call-site inlining hints are not supported.
                 "inlined" => {
-                    if self.inlined_consumed(module_expr) {
-                        continue;
-                    }
                     self.report_warning(
                         located_name.loc,
                         Warning::MisplacedAttribute {
@@ -1303,24 +1139,33 @@ impl<'a> RawLambdaConverter<'a> {
     /// Extract `@directive("...")` from function expression attributes,
     /// matching OCaml's `extract_directive_for_fn`.
     fn get_directive_attribute_from(
+        &mut self,
         attrs: &crate::parser::ast::Attributes,
-        arena: &ParseArena,
     ) -> Option<String> {
-        // translcore.ml `extract_directive_for_fn`: the first `directive`
-        // attribute whose payload is a string, read by
-        // `Ast_payload.semantic_string_of_payload`.
+        // translcore.ml:946-950 `extract_directive_for_fn`: the first
+        // `directive` attribute whose payload is a string, read by
+        // `Ast_payload.semantic_string_of_payload`, which raises on an
+        // invalid template.
         for (located_name, payload) in attrs.iter() {
-            if arena.get_string(located_name.txt) != "directive" {
+            if self.arena.get_string(located_name.txt) != "directive" {
                 continue;
             }
-            if let Some(directive) = crate::ast_payload::semantic_string_of_payload(arena, payload)
-                .ok()
-                .flatten()
-            {
-                return Some(directive);
+            match crate::ast_payload::semantic_string_of_payload(self.arena, payload) {
+                Ok(Some(directive)) => return Some(directive),
+                Ok(None) => {}
+                Err(error) => {
+                    self.report_payload_error(error);
+                    return None;
+                }
             }
         }
         None
+    }
+
+    /// Raises an `Ast_payload` reader's error (`Location.raise_errorf`).
+    fn report_payload_error(&mut self, error: crate::ast_payload::PayloadError) {
+        let loc = self.loc(error.loc);
+        self.report_diagnostic(loc, error.message.to_string());
     }
 
     /// Apply an inline attribute to a raw function, matching OCaml's
@@ -1861,10 +1706,7 @@ impl<'a> RawLambdaConverter<'a> {
         ty: TypeExprRef,
         env: &crate::types::env::Env,
     ) -> Primitive {
-        if self.is_base_type_with_env(ty, "int", env)
-            || self.is_base_type_with_env(ty, "char", env)
-            || self.is_immediate_type_with_env(ty, env)
-        {
+        if self.is_base_type_with_env(ty, "int", env) || self.is_immediate_type_with_env(ty, env) {
             table.intcomp
         } else if self.is_base_type_with_env(ty, "float", env) {
             table.floatcomp
@@ -1940,7 +1782,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%unsafe_to_method" => Some(Primitive::PjsFnMethod),
             "%obj_tag" => Some(Primitive::Pobjtag),
             "%obj_size" => Some(Primitive::Pobjsize),
-            "%obj_dup" => Some(Primitive::Pduprecord),
             "%obj_get_field" => Some(Primitive::Parrayrefu),
             "%obj_set_field" => Some(Primitive::Parraysetu),
             // Type-specialized int primitives (from OCaml's prim_table)
@@ -2004,7 +1845,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%stringmin" => Some(Primitive::Pstringmin),
             "%stringmax" => Some(Primitive::Pstringmax),
             // Other specialized primitives
-            "%obj_is_int" => Some(Primitive::Pisint),
             "%boolnot" => Some(Primitive::Pnot),
             "%sequand" => Some(Primitive::Psequand),
             "%sequor" => Some(Primitive::Psequor),
@@ -2015,7 +1855,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%string_concat" => Some(Primitive::Pstringadd),
             "%array_length" => Some(Primitive::Parraylength),
             "%array_safe_get" => Some(Primitive::Parrayrefs),
-            "%array_safe_set" => Some(Primitive::Parraysets),
             "%array_unsafe_get" => Some(Primitive::Parrayrefu),
             "%array_unsafe_set" => Some(Primitive::Parraysetu),
             "%makedict" => Some(Primitive::Pmakedict),
@@ -2036,8 +1875,6 @@ impl<'a> RawLambdaConverter<'a> {
             "%unsafe_gt" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Gt)),
             "%unsafe_ge" => Some(Primitive::Pjscomp(crate::lambda::Comparison::Ge)),
             "%is_nullable" => Some(Primitive::PisNullUndefined),
-            "%null_to_opt" => Some(Primitive::PnullToOpt),
-            "%nullable_to_opt" => Some(Primitive::PnullUndefinedToOpt),
             "%powint" => Some(Primitive::Ppowint),
             // OCaml translcore.ml:377-387 maps these runtime externals to
             // dedicated primitives before lambda conversion.
@@ -2178,10 +2015,9 @@ impl<'a> RawLambdaConverter<'a> {
                 i: *i,
                 comment: None,
             },
-            // The `negative` field holds `Bigint_utils.parse_bigint`'s sign
-            // flag, true for a positive literal (ast_external_mk.ml).
-            InlineConst::ConstBigint { negative, digits } => Constant::BigInt {
-                negative: !*negative,
+            // translcore.ml: `Const_bigint {positive; digits}`.
+            InlineConst::ConstBigint { positive, digits } => Constant::BigInt {
+                negative: !*positive,
                 value: digits.clone(),
             },
             InlineConst::ConstFloat(f) => Constant::Float(f.clone()),
@@ -2237,7 +2073,6 @@ impl<'a> RawLambdaConverter<'a> {
         prim: &crate::types::PrimitiveDescription,
         val_type: TypeExprRef,
         argl: Vec<RawLambda>,
-        transformed_jsx: bool,
     ) -> RawLambda {
         let rb = self.b;
         use crate::types::decl::PrimKind;
@@ -2257,7 +2092,6 @@ impl<'a> RawLambdaConverter<'a> {
                             prim_name: prim.prim_name.clone(),
                             arg_types: arg_types.clone(),
                             ffi: decl.clone(),
-                            transformed_jsx,
                         })),
                         &argl,
                         self.lam_loc(loc),
@@ -2480,7 +2314,6 @@ impl<'a> RawLambdaConverter<'a> {
                         variadic,
                         effective_arity: arg_types.len() as i64 + 1,
                     },
-                    transformed_jsx: false,
                 })),
                 &send_args,
                 node_loc,
@@ -2546,7 +2379,6 @@ impl<'a> RawLambdaConverter<'a> {
                     variadic: false,
                     effective_arity: 2,
                 },
-                transformed_jsx: false,
             })),
             &[
                 rb.prim(
@@ -2712,33 +2544,9 @@ impl<'a> RawLambdaConverter<'a> {
                     } => self.convert_record_raw(
                         SrcLoc::from(arg.exp_loc),
                         self.ta.record_fields(*fields),
-                        *extended_expression,
+                        extended_expression.map(|e| self.ta.expr(e)),
                         inlined_record_representation(cstr),
-                        None,
                     ),
-                    ExpressionDesc::Texp_record_sparse {
-                        fields,
-                        all_labels,
-                        omitted_loc,
-                        ..
-                    } => {
-                        // Debug/captured lambda keeps OCaml's full `lbl_all`
-                        // stream; normal JS lowering can compact static
-                        // omitted optional None before raw-lambda conversion.
-                        let (record_fields, logical_field_count) = self
-                            .sparse_record_fields_for_lambda(
-                                all_labels,
-                                self.ta.record_fields(*fields),
-                                *omitted_loc,
-                            );
-                        self.convert_record_raw(
-                            SrcLoc::from(arg.exp_loc),
-                            &record_fields,
-                            None,
-                            inlined_record_representation(cstr),
-                            logical_field_count,
-                        )
-                    }
                     _ => self.convert_expr_raw(arg),
                 },
                 [] => rb.const_(raw_constructor_constant(self.type_ctx, cstr, 0)),
@@ -2811,75 +2619,89 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// `transl_record` (compiler/ml/translcore.ml:1770-1923). `fields` are
+    /// the written fields in position order; the record's labels are their
+    /// `lbl_all` (`all_labels fields`, none for `{}`).
     fn convert_record_raw(
         &mut self,
         loc: SrcLoc,
         fields: &[RecordField],
-        base: Option<TExprIdx>,
+        base: Option<&Expression>,
         empty_repres: Option<RecordRepresentation>,
-        logical_field_count: Option<usize>,
     ) -> RawLambda {
         let rb = self.b;
-        let first_lbl = fields.first().map(|(_, first_lbl, _, _)| first_lbl);
+        let all_labels =
+            crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
+        let all_labels = all_labels.as_slice();
+        let first_lbl = fields.first().map(|(first_lbl, _, _)| first_lbl);
         let repres = first_lbl
             .map(|lbl| lbl.lbl_repres.clone())
             .or(empty_repres)
             .unwrap_or(RecordRepresentation::RecordRegular);
-        let mutable_flag = raw_record_mutable_flag(fields);
-        let base_lam = base.map(|expr| self.convert_expr_raw(self.ta.expr(expr)));
-        let has_optional = fields.iter().any(|(_, lbl, _, _)| lbl.lbl_optional);
-        // OCaml uses field-by-field construction when:
-        // - no base expression, OR
-        // - all fields are overridden (no Kept), OR
-        // - size < 20 AND no optional fields (OCaml's transl_record line 1130)
+        let mutable_flag = raw_record_mutable_flag(all_labels);
+        let base_lam = base.map(|expr| self.convert_expr_raw(expr));
+
+        // `record_copies_fields` (translcore.ml:1037-1050): with no `init`, or
+        // a small record with no optional field, copy the fields one by one.
+        // A shallow copy is an object spread, so an array record always
+        // copies its fields.
         let build_direct = base.is_none()
-            || fields.iter().all(|(_, _, def, _)| {
-                matches!(
-                    def,
-                    RecordLabelDefinition::Overridden(_, _)
-                        | RecordLabelDefinition::OmittedOptionalNone(_, _)
-                )
-            })
-            || (fields.len() < 20 && !has_optional);
+            || repres == RecordRepresentation::RecordArray
+            || (all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional));
 
         if build_direct {
             // OCaml allocates init_id before inspecting opt_init_expr, even
-            // for a record literal with no base (translcore.ml:1087-1114).
+            // for a record literal with no base (translcore.ml:1787-1789).
             // The binder is emitted only when a base exists, but its allocation
             // still orders later Translcore/Translmod identifiers.
             let init_id = self.fresh_ident("init");
             let init_var = base_lam.as_ref().map(|_| rb.var(init_id));
 
-            let mut elems = Vec::with_capacity(fields.len());
-            let mut fields_info = Vec::with_capacity(fields.len());
-            for (lid, lbl, def, _) in fields {
-                // OCaml compiler/ml/translcore.ml:1139-1191 maps every record
-                // field in `fields`, including omitted optional fields that
-                // typecore.ml:2833-2842 materialized as `option_none`. Keep the
-                // full Lambda block shape here; JS output can still erase
-                // optional `undefined` fields during JS lowering.
-                let value = match def {
-                    RecordLabelDefinition::Overridden(_, expr) => {
-                        self.convert_expr_raw(self.ta.expr(*expr))
+            // Intentional Rust performance representation: JS lowering leaves
+            // out an optional field of a regular record that is statically
+            // `None`, so for a large literal without a spread (JSX DOM props)
+            // the block holds only the written fields that are not `None`,
+            // with `logical_field_count` keeping the record's arity. Debug and
+            // captured Lambda keep OCaml's block over every label.
+            let compact = !self.preserve_expanded_sparse_records
+                && init_var.is_none()
+                && all_labels.len() >= 20
+                && repres == RecordRepresentation::RecordRegular
+                && all_labels
+                    .iter()
+                    .all(|lbl| lbl.lbl_repres == RecordRepresentation::RecordRegular);
+            let logical_field_count = compact.then_some(all_labels.len());
+
+            let by_position = crate::types::typedtree::record_fields_by_position(fields, all_labels);
+            // The block keeps these vectors: a compact block holds at most the
+            // written fields, so do not reserve a slot per label.
+            let slots = if compact { fields.len() } else { by_position.len() };
+            let mut elems = Vec::with_capacity(slots);
+            let mut fields_info = Vec::with_capacity(slots);
+            for (lbl, field) in by_position {
+                let (lbl, value) = match (field, &init_var) {
+                    (Some(field), _) if compact && record_field_is_static_optional_none(self.ta, field) => {
+                        continue;
                     }
-                    RecordLabelDefinition::OmittedOptionalNone(_, _) => raw_optional_none(rb),
-                    RecordLabelDefinition::Kept(_) => {
-                        let Some(base_var) = &init_var else {
-                            elems.push(rb.unit());
-                            fields_info.push((label_runtime_name(lbl), lbl.lbl_optional));
-                            continue;
-                        };
-                        if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
-                            *base_var
-                        } else if let Some((pos, info)) = raw_record_field_access(lbl) {
-                            rb.prim(
-                                Primitive::Pfield(pos, info),
-                                &[*base_var],
-                                self.lam_loc(lid.loc),
-                            )
+                    (Some((written_lbl, _, expr)), _) => {
+                        (written_lbl.as_ref(), self.convert_expr_raw(self.ta.expr(*expr)))
+                    }
+                    (None, None) if compact => continue,
+                    // An optional field the literal leaves out.
+                    (None, None) => (lbl, raw_optional_none(rb)),
+                    (None, Some(base_var)) => {
+                        let value = if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_))
+                        {
+                            base_var.clone()
                         } else {
-                            rb.unit()
-                        }
+                            let (pos, info) = raw_record_field_access(lbl);
+                            rb.prim(
+                                Primitive::Pfield(pos, info), &
+                                vec![base_var.clone()],
+                                self.lam_loc(loc),
+                            )
+                        };
+                        (lbl, value)
                     }
                 };
                 elems.push(value);
@@ -2887,7 +2709,8 @@ impl<'a> RawLambdaConverter<'a> {
             }
 
             let result = match repres {
-                RecordRepresentation::RecordRegular => {
+                RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+                    let array = repres == RecordRepresentation::RecordArray;
                     // OCaml: if mut = Mutable then raise Not_constant
                     // Mutable records never become constant blocks
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -2897,6 +2720,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     fields: fields_info,
                                     logical_field_count,
                                     mutable_flag,
+                                    array,
                                 })),
                                 Mutable::Mutable,
                             ),
@@ -2910,13 +2734,13 @@ impl<'a> RawLambdaConverter<'a> {
                                 fields: fields_info,
                                 logical_field_count,
                                 mutable_flag,
+                                array,
                             })),
                             elems,
                             loc,
                         )
                     }
                 }
-                RecordRepresentation::RecordFloatUnused => rb.unit(),
                 RecordRepresentation::RecordUnboxed(_) => match elems.as_slice() {
                     [value] => *value,
                     _ => rb.unit(),
@@ -2953,7 +2777,8 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 RecordRepresentation::RecordExtension => {
-                    let Some(first_lbl) = first_lbl else {
+                    // translcore.ml:1870-1876 reads the path of `lbl_all.(0)`.
+                    let Some(first_lbl) = first_lbl.map(|lbl| lbl.as_ref()).or(all_labels.first()) else {
                         return rb.unit();
                     };
                     let path = match self.type_desc(first_lbl.lbl_res) {
@@ -2966,10 +2791,7 @@ impl<'a> RawLambdaConverter<'a> {
                     rb.prim(
                         Primitive::Pmakeblock(
                             TagInfo::RecordExt {
-                                fields: fields
-                                    .iter()
-                                    .map(|(_, lbl, _, _)| label_runtime_name(lbl))
-                                    .collect(),
+                                fields: all_labels.iter().map(label_runtime_name).collect(),
                                 mutable_flag,
                             },
                             if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -2994,19 +2816,13 @@ impl<'a> RawLambdaConverter<'a> {
             return rb.unit();
         };
 
+        // Take a shallow copy of the init record, then set the written
+        // fields of the copy (translcore.ml:1886-1923). OCaml folds left over
+        // the fields, each Lsequence(upd, cont) wrapping the continuation, so
+        // the LAST field ends up outermost in the sequence chain.
         let copy_id = self.fresh_ident("newrecord");
         let mut body = rb.var(copy_id);
-        // OCaml uses Array.fold_left which processes fields left-to-right.
-        // Each Lsequence(upd, cont) wraps the update around the continuation,
-        // so the LAST field ends up outermost in the sequence chain.
-        for (_, lbl, def, _) in fields.iter() {
-            let expr = match def {
-                RecordLabelDefinition::Overridden(_, expr) => expr,
-                RecordLabelDefinition::Kept(_)
-                | RecordLabelDefinition::OmittedOptionalNone(_, _) => {
-                    continue;
-                }
-            };
+        for (lbl, _, expr) in fields.iter() {
             let Some((pos, info)) = raw_record_setfield_access(lbl) else {
                 continue;
             };
@@ -3024,143 +2840,6 @@ impl<'a> RawLambdaConverter<'a> {
             rb.prim(Primitive::Pduprecord, &[init_expr], self.lam_loc(loc)),
             body,
         )
-    }
-
-    fn expand_sparse_record_fields(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &[RecordField],
-        omitted_loc: LocIdx,
-    ) -> Vec<RecordField> {
-        // OCaml compiler/ml/typecore.ml:2833-2842 stores one definition per
-        // `lbl_all` entry, then compiler/ml/translcore.ml:1139-1191 lowers
-        // that whole array into the Lambda block. Rust's sparse typedtree node
-        // is an internal storage optimization, so expand it before Lambda.
-        let placeholder_lid = fields
-            .first()
-            .map(|(lid, _, _, _)| *lid)
-            .unwrap_or_else(|| self.arena.placeholder_located(omitted_loc));
-        let mut explicit_by_pos: HashMap<usize, &RecordField> =
-            HashMap::with_capacity(fields.len());
-        for field in fields.iter() {
-            let pos = field.1.lbl_pos;
-            if pos >= 0 {
-                explicit_by_pos.insert(pos as usize, field);
-            }
-        }
-
-        let mut expanded = Vec::with_capacity(all_labels.len());
-        for (idx, label) in all_labels.iter().enumerate() {
-            let pos = if label.lbl_pos >= 0 {
-                label.lbl_pos as usize
-            } else {
-                idx
-            };
-            if let Some(field) = explicit_by_pos.get(&pos) {
-                expanded.push((*field).clone());
-            } else if label.lbl_optional {
-                // Intentional Rust performance representation: reconstruct
-                // the omitted optional `None` node that OCaml
-                // compiler/ml/typecore.ml:2833-2842 stores eagerly in the
-                // typedtree field list.
-                let label_lid = Located {
-                    txt: placeholder_lid.txt,
-                    loc: omitted_loc,
-                };
-                expanded.push((
-                    label_lid,
-                    std::sync::Arc::new(label.clone()),
-                    RecordLabelDefinition::OmittedOptionalNone(label_lid, label.lbl_arg),
-                    false,
-                ));
-            } else {
-                // Sparse records are only created after typecore has verified
-                // all mandatory labels are present. If a malformed node reaches
-                // lambda lowering, keep a unit placeholder rather than changing
-                // field order; this mirrors the fallback value OCaml would have
-                // placed in the full record array before translcore.ml:1145-1162
-                // mapped every slot.
-                let label_lid = Located {
-                    txt: placeholder_lid.txt,
-                    loc: omitted_loc,
-                };
-                expanded.push((
-                    label_lid,
-                    std::sync::Arc::new(label.clone()),
-                    RecordLabelDefinition::Kept(label.lbl_arg),
-                    false,
-                ));
-            }
-        }
-        expanded
-    }
-
-    fn compact_sparse_record_fields_for_output<'b>(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &'b [RecordField],
-    ) -> Cow<'b, [RecordField]> {
-        // If every selected label has a materialized slot, sorting by `lbl_pos`
-        // preserves OCaml `lbl_all` field order without walking omitted fields.
-        if fields.iter().all(|field| field.1.lbl_pos >= 0) {
-            let already_ordered = fields
-                .windows(2)
-                .all(|pair| pair[0].1.lbl_pos <= pair[1].1.lbl_pos);
-            let has_static_optional_none = fields
-                .iter()
-                .any(|field| record_field_is_static_optional_none(self.ta, &field.1, &field.2));
-            if already_ordered && !has_static_optional_none {
-                return Cow::Borrowed(fields);
-            }
-            let mut compact = fields
-                .iter()
-                .filter(|field| !record_field_is_static_optional_none(self.ta, &field.1, &field.2))
-                .cloned()
-                .collect::<Vec<_>>();
-            if !already_ordered {
-                compact.sort_by_key(|field| field.1.lbl_pos);
-            }
-            return Cow::Owned(compact);
-        }
-
-        let mut compact = Vec::with_capacity(fields.len());
-        for (idx, label) in all_labels.iter().enumerate() {
-            let label_pos = if label.lbl_pos >= 0 {
-                label.lbl_pos as usize
-            } else {
-                idx
-            };
-            let Some(field) = fields.iter().find(|field| {
-                usize::try_from(field.1.lbl_pos).ok() == Some(label_pos)
-                    || field.1.lbl_name == label.lbl_name
-            }) else {
-                continue;
-            };
-            if record_field_is_static_optional_none(self.ta, &field.1, &field.2) {
-                continue;
-            }
-            compact.push((*field).clone());
-        }
-        Cow::Owned(compact)
-    }
-
-    fn sparse_record_fields_for_lambda<'b>(
-        &self,
-        all_labels: &std::sync::Arc<Vec<LabelDescription>>,
-        fields: &'b [RecordField],
-        omitted_loc: LocIdx,
-    ) -> (Cow<'b, [RecordField]>, Option<usize>) {
-        if self.preserve_expanded_sparse_records {
-            (
-                Cow::Owned(self.expand_sparse_record_fields(all_labels, fields, omitted_loc)),
-                None,
-            )
-        } else {
-            (
-                self.compact_sparse_record_fields_for_output(all_labels, fields),
-                Some(all_labels.len()),
-            )
-        }
     }
 
     fn include_bound_idents(sig: &[SignatureItem]) -> Vec<(Ident, usize)> {
@@ -3194,179 +2873,59 @@ impl<'a> RawLambdaConverter<'a> {
         })
     }
 
-    fn materialize_hoisted_exports(&mut self, lam: RawLambda) -> RawLambda {
-        fn collect_groups(a: &LamArena, lam: RawLambda, groups: &mut HashMap<Ident, RawLambda>) {
-            match a.view(lam) {
-                View::Let(_, id, value, body) => {
-                    groups.insert(id, value);
-                    collect_groups(a, value, groups);
-                    collect_groups(a, body, groups);
-                }
-                View::LetRec(ids, values, body) => {
-                    groups.extend(ids.iter().copied().zip(values.iter().copied()));
-                    for value in values {
-                        collect_groups(a, *value, groups);
-                    }
-                    collect_groups(a, body, groups);
-                }
-                View::Sequence(left, body) => {
-                    collect_groups(a, left, groups);
-                    collect_groups(a, body, groups);
-                }
-                _ => {}
-            }
-        }
-        fn terminal_exports(a: &LamArena, lam: RawLambda) -> Vec<Ident> {
+    /// The export-name check of `Lam_compile_main.flat_make_aliases`: a flat
+    /// `A$B$make` export must not take a name the unit already exports (the
+    /// printer renames other bindings), and every path starts at an exported
+    /// module. It depends only on the export list and the paths, so it runs
+    /// as soon as both are known; a translation error is reported first.
+    fn check_flat_make_exports(&mut self, lam: &RawLambda) {
+        fn terminal_exports(a: &LamArena, lam: RawLambda) -> Option<&[Ident]> {
             match a.view(lam) {
                 View::Let(_, _, _, body) | View::LetRec(_, _, body) | View::Sequence(_, body) => {
                     terminal_exports(a, body)
                 }
-                View::Prim(Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _), _, _) => {
-                    ids.clone()
-                }
-                _ => Vec::new(),
+                View::Prim(Primitive::Pmakeblock(TagInfo::ModuleExport(ids), _), _, _) => Some(ids),
+                _ => None,
             }
         }
-        fn resolve_binding(
-            a: &LamArena,
-            lam: RawLambda,
-            groups: &HashMap<Ident, RawLambda>,
-            seen: &mut HashSet<Ident>,
-        ) -> (RawLambda, Option<Ident>) {
-            match a.view(lam) {
-                View::Var(id) => {
-                    if !seen.insert(id) {
-                        return (lam, Some(id));
-                    }
-                    match groups.get(&id) {
-                        Some(alias) if matches!(a.view(*alias), View::Var(_) | View::Prim(..)) => {
-                            resolve_binding(a, *alias, groups, seen)
-                        }
-                        Some(resolved) => (*resolved, Some(id)),
-                        None => (lam, Some(id)),
-                    }
-                }
-                View::Prim(Primitive::Pfield(pos, _), [arg], _) => {
-                    let (base, _) = resolve_binding(a, *arg, groups, seen);
-                    if let View::Prim(Primitive::Pmakeblock(TagInfo::Module(_), _), args, _) =
-                        a.view(base)
-                        && let Some(field) =
-                            usize::try_from(*pos).ok().and_then(|pos| args.get(pos))
-                    {
-                        return resolve_binding(a, *field, groups, seen);
-                    }
-                    (lam, None)
-                }
-                _ => (lam, None),
-            }
+        if self.flat_make_paths.is_empty() {
+            return;
         }
-        fn find_path(
-            a: &LamArena,
-            lam: RawLambda,
-            fields: &[String],
-            groups: &HashMap<Ident, RawLambda>,
-            positions: &mut Vec<(i32, String)>,
-        ) -> Option<(Option<Ident>, RawLambda)> {
-            if fields.is_empty() {
-                let (target, id) = resolve_binding(a, lam, groups, &mut HashSet::new());
-                return Some((id, target));
-            }
-            let (mut resolved, _) = resolve_binding(a, lam, groups, &mut HashSet::new());
-            resolved = loop {
-                match a.view(resolved) {
-                    View::Let(_, _, _, body)
-                    | View::LetRec(_, _, body)
-                    | View::Sequence(_, body) => resolved = body,
-                    _ => break resolved,
-                }
-            };
-            let View::Prim(Primitive::Pmakeblock(TagInfo::Module(names), _), args, _) =
-                a.view(resolved)
-            else {
-                return None;
-            };
-            let pos = names.iter().position(|name| name == &fields[0])?;
-            let arg = *args.get(pos)?;
-            positions.push((pos as i32, fields[0].clone()));
-            find_path(a, arg, &fields[1..], groups, positions)
-        }
-        fn unwrap_exotic(name: &str) -> &str {
-            if name.len() >= 3 && name.starts_with("\\\"") && name.ends_with('"') {
-                &name[2..name.len() - 1]
-            } else {
-                name
-            }
-        }
-        if self.hoisted_functions.is_empty() {
-            return lam;
-        }
-        let a = self.b.get();
-        let mut groups = HashMap::new();
-        collect_groups(&a, lam, &mut groups);
-        let exported_modules = terminal_exports(&a, lam)
-            .into_iter()
-            .map(|id| (id.name().to_string(), id))
-            .collect::<HashMap<_, _>>();
-        let mut occupied = groups
-            .keys()
+        let exports = terminal_exports(&self.b.get(), *lam)
+            .unwrap_or_default()
+            .to_vec();
+        let mut occupied = exports
+            .iter()
             .map(|id| crate::js_ir::printer::convert_ident_name(id.name()))
             .collect::<HashSet<_>>();
-        let mut validated = Vec::new();
-        let hoisted_functions = self.hoisted_functions.clone();
-        for hoisted in hoisted_functions {
-            let Some((top, fields)) = hoisted.path.split_first() else {
-                continue;
-            };
-            let resolved = exported_modules.get(top).and_then(|top_id| {
-                let module = groups.get(top_id)?;
-                let mut positions = Vec::new();
-                let (target_id, _target) = find_path(&a, *module, fields, &groups, &mut positions)?;
-                Some((*top_id, positions, target_id))
-            });
-            let Some((_top_id, _positions, Some(target_id))) = resolved else {
-                self.report_warning(
-                    self.loc_idx_for_lam_loc(hoisted.loc),
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                continue;
-            };
-            if !hoisted.binding.same(&target_id) {
-                self.report_warning(
-                    self.loc_idx_for_lam_loc(hoisted.loc),
-                    Warning::MisplacedAttribute {
-                        name: "res.hoistedFunction".to_string(),
-                    },
-                );
-                continue;
-            }
-            let export_name = hoisted
-                .path
+        // `Location.in_file (Location.get_input_name ())`.
+        let loc = Location::in_file(Default::default());
+        for path in &self.flat_make_paths {
+            let names = path
                 .iter()
-                .map(|part| unwrap_exotic(part))
-                .collect::<Vec<_>>()
-                .join("$");
-            let js_name = crate::js_ir::printer::convert_ident_name(&export_name);
+                .map(|step| step.name.as_str())
+                .collect::<Vec<_>>();
+            let name = crate::lambda::flat_export_name(&names);
+            let js_name = crate::js_ir::printer::convert_ident_name(&name);
             if occupied.contains(&js_name) {
-                self.report_diagnostic(
-                    self.lam_locs.get(hoisted.target_loc).unwrap_or_else(Location::none),
-                    format!(
-                        "Cannot hoist this function as `{export_name}` because that name is already used by a top-level binding."
-                    ),
+                let message = format!(
+                    "Cannot export `{}` as `{name}` because that name is already exported.",
+                    names.join(".")
                 );
-                continue;
+                self.report_diagnostic(loc, message);
+                return;
+            }
+            let top = names[0];
+            if !exports.iter().any(|id| id.name() == top) {
+                let message = format!(
+                    "Internal error: no export for module `{top}` of `{}`.",
+                    names.join(".")
+                );
+                self.report_diagnostic(loc, message);
+                return;
             }
             occupied.insert(js_name);
-            self.hoisted_exports.push(crate::lambda::HoistedExport {
-                path: hoisted.path.clone(),
-                export_name,
-            });
-            validated.push(hoisted);
         }
-        drop(a);
-        self.hoisted_functions = validated;
-        lam
     }
 
     /// Convert a structure into raw lambda.
@@ -3397,7 +2956,7 @@ impl<'a> RawLambdaConverter<'a> {
             SrcLoc::Decl(Location::none()),
         );
         self.type_ctx.set_typeopt_cache(false);
-        self.materialize_hoisted_exports(result)
+        result
     }
 
     fn pure_module(ta: &TypedArena, module_expr: &ModuleExpr) -> LetKind {
@@ -3544,7 +3103,8 @@ impl<'a> RawLambdaConverter<'a> {
                             }
                             _ => None,
                         }),
-                    ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                    other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
+                        let alias_path = other.ident_or_alias_path().unwrap().clone();
                         if alias_path.same(module_path) {
                             return None;
                         }
@@ -3605,7 +3165,8 @@ impl<'a> RawLambdaConverter<'a> {
 
             match mty {
                 ModuleType::MtySignature(sig) => runtime_field_position(&sig, field_name),
-                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                other @ (ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_)) => {
+                    let alias_path = other.ident_or_alias_path().unwrap().clone();
                     if alias_path.same(module_path) {
                         return None;
                     }
@@ -4226,10 +3787,8 @@ impl<'a> RawLambdaConverter<'a> {
                     &[arg],
                     ApInfo {
                         loc: this.lam_loc(loc),
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
-                    false,
                 ),
             );
             rb.function_(
@@ -4478,15 +4037,27 @@ impl<'a> RawLambdaConverter<'a> {
         }
     }
 
+    /// `Translmod.transl_module`: check the attributes and translate in
+    /// their warning scope, like `convert_expr_raw` does for expressions.
     fn convert_module_expr_raw_with_coercion(
         &mut self,
         module_expr: &ModuleExpr,
         rootpath: &Option<crate::types::Path>,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        let rb = self.b;
-        self.check_module_attribute(module_expr);
+        self.with_warning_scope(&module_expr.mod_attributes, |this| {
+            this.check_module_attribute(module_expr);
+            this.convert_module_expr_raw0(module_expr, rootpath, cc)
+        })
+    }
 
+    fn convert_module_expr_raw0(
+        &mut self,
+        module_expr: &ModuleExpr,
+        rootpath: &Option<crate::types::Path>,
+        cc: &ModuleCoercion,
+    ) -> RawLambda {
+        let rb = self.b;
         if matches!(
             module_expr.mod_type,
             crate::types::decl::ModuleType::MtyAlias(_, _)
@@ -4583,16 +4154,11 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ModuleExprDesc::Tmod_apply(funct, arg, ccarg) => {
                 let loc = module_expr.mod_loc;
-                let inlined =
-                    self.get_inlined_attribute_from(&self.ta.module_expr(*funct).mod_attributes);
-                let funct_expr = self.ta.module_expr(*funct);
-                let funct_lam = self.with_inlined_consumed_by(funct_expr, |this| {
-                    this.convert_module_expr_raw_with_coercion(
-                        funct_expr,
-                        &None,
-                        &ModuleCoercion::Tcoerce_none,
-                    )
-                });
+                let funct_lam = self.convert_module_expr_raw_with_coercion(
+                    self.ta.module_expr(*funct),
+                    &None,
+                    &ModuleCoercion::Tcoerce_none,
+                );
                 let apply = rb.apply(
                     funct_lam,
                     &[self.convert_module_expr_raw_with_coercion(
@@ -4602,10 +4168,8 @@ impl<'a> RawLambdaConverter<'a> {
                     )],
                     ApInfo {
                         loc: self.lam_loc(loc),
-                        inlined,
                         status: ApplyStatus::Na,
                     },
-                    false,
                 );
                 self.apply_coercion_raw(loc, LetKind::Strict, cc, apply)
             }
@@ -4889,7 +4453,7 @@ impl<'a> RawLambdaConverter<'a> {
                     }
                 }
                 DeclSigItem::SigType(id, tdecl, _) => {
-                    env.add_type(*id, tdecl.clone());
+                    env.store_type(self.type_ctx, *id, tdecl.clone());
                 }
                 DeclSigItem::SigTypext(_, _, _) => {
                     return None; // type extensions can't be initialized
@@ -5249,12 +4813,7 @@ impl<'a> RawLambdaConverter<'a> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw_at_root(
-                    *rec_flag,
-                    self.ta.value_bindings(*bindings),
-                    body,
-                    rootpath,
-                )
+                self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body)
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -5356,25 +4915,25 @@ impl<'a> RawLambdaConverter<'a> {
     fn warning_attribute_spec(
         &self,
         attr: &crate::parser::ast::Attribute,
-    ) -> Option<(bool, String)> {
+    ) -> Result<Option<(bool, String)>, crate::ast_payload::PayloadError> {
         let name = self.arena.get_string(attr.0.txt);
-        let is_error = matches!(name, "warnerror" | "ocaml.warnerror");
-        if !is_error && !matches!(name, "warning" | "ocaml.warning") {
-            return None;
+        let is_error = name == "warnerror";
+        if !is_error && name != "warning" {
+            return Ok(None);
         }
         let crate::parser::ast::Payload::PStr(items) = &attr.1 else {
-            return None;
+            return Ok(None);
         };
         let [item] = items.as_slice() else {
-            return None;
+            return Ok(None);
         };
         let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
-            return None;
+            return Ok(None);
         };
         let expr = self.arena.get_expr(eval.0);
         // builtin_attributes.ml `string_of_payload`.
-        let spec = crate::ast_payload::semantic_string_of_expression(self.arena, expr).ok()??;
-        Some((is_error, spec))
+        let spec = crate::ast_payload::semantic_string_of_expression(self.arena, expr)?;
+        Ok(spec.map(|spec| (is_error, spec)))
     }
 
     fn with_warning_scope<T>(
@@ -5386,17 +4945,23 @@ impl<'a> RawLambdaConverter<'a> {
             return f(self);
         }
         let previous = self.warning_config.clone();
-        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:180-212):
-        // an unusable payload is reported, a usable one updates the state.
+        // `Builtin_attributes.warning_attribute` (builtin_attributes.ml:141-160):
+        // an unusable payload is reported, a usable one updates the state, and
+        // an invalid template raises (`string_of_payload`); the typing scopes
+        // of the same attributes raised first.
         for attr in attrs.iter().rev() {
             let name = self.arena.get_string(attr.0.txt);
-            if !matches!(
-                name,
-                "warning" | "ocaml.warning" | "warnerror" | "ocaml.warnerror"
-            ) {
+            if !matches!(name, "warning" | "warnerror") {
                 continue;
             }
-            let Some((is_error, spec)) = self.warning_attribute_spec(attr) else {
+            let spec = match self.warning_attribute_spec(attr) {
+                Ok(spec) => spec,
+                Err(error) => {
+                    self.report_payload_error(error);
+                    continue;
+                }
+            };
+            let Some((is_error, spec)) = spec else {
                 self.report_warning(
                     attr.0.loc,
                     Warning::AttributePayload {
@@ -5495,8 +5060,7 @@ impl<'a> RawLambdaConverter<'a> {
                 body,
                 async_,
             } => {
-                let directive =
-                    Self::get_directive_attribute_from(self.ta.exp_attributes(expr), self.arena);
+                let directive = self.get_directive_attribute_from(self.ta.exp_attributes(expr));
                 let inline = self.get_inline_attribute_from(self.ta.exp_attributes(expr));
                 self.convert_nary_function_raw(
                     expr,
@@ -5547,14 +5111,18 @@ impl<'a> RawLambdaConverter<'a> {
                 args,
                 partial,
                 transformed_jsx,
-            } => self.convert_apply_raw(
-                expr.exp_loc,
-                expr.exp_loc,
-                self.ta.expr(*funct),
-                self.ta.apply_args(*args),
-                *partial,
-                *transformed_jsx,
-            ),
+            } => {
+                let funct = self.ta.expr(*funct);
+                let args = self.ta.apply_args(*args);
+                if *transformed_jsx && let Some(call) = self.jsx_call(expr, funct, args) {
+                    self.with_warning_scope(self.ta.exp_attributes(funct), |this| {
+                        this.check_expr_attribute(funct)
+                    });
+                    self.transl_jsx_element(self.lam_loc(expr.exp_loc), call)
+                } else {
+                    self.convert_apply_raw(expr.exp_loc, expr.exp_loc, funct, args, *partial)
+                }
+            }
             ExpressionDesc::Texp_match(scrut, cases, exn_cases, partial) => {
                 // OCaml transl_match allocates the exception binder before it
                 // translates either case list, even when exn_pat_expr_list is
@@ -5609,13 +5177,26 @@ impl<'a> RawLambdaConverter<'a> {
                     )
                 }
             }
-            ExpressionDesc::Texp_try(body, cases) => {
-                let _loc = expr.exp_loc;
-                let exn_id = self.name_pattern_ident("exn", self.ta.cases(*cases));
-                let handler = self.compile_trywith_handler_raw(&exn_id, self.ta.cases(*cases));
-                let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
+            // translcore.ml `Texp_try (body, pat_expr_list, finally)`: the
+            // body first, then the catch handler when there are cases, then
+            // the finally block around both.
+            ExpressionDesc::Texp_try(body, cases, finally) => {
                 let body_lam = self.convert_expr_raw(self.ta.expr(*body));
-                rb.try_with(body_lam, exn_id, handler)
+                let body_lam = if cases.is_empty() {
+                    body_lam
+                } else {
+                    let exn_id = self.name_pattern_ident("exn", self.ta.cases(*cases));
+                    let handler = self.compile_trywith_handler_raw(&exn_id, self.ta.cases(*cases));
+                    let (exn_id, handler) = self.pack_trywith_exn(exn_id, handler);
+                    rb.try_with(body_lam, exn_id, handler)
+                };
+                match finally {
+                    None => body_lam,
+                    Some(finally) => {
+                        let finally_lam = self.convert_expr_raw(self.ta.expr(*finally));
+                        rb.try_finally(body_lam, finally_lam)
+                    }
+                }
             }
             ExpressionDesc::Texp_tuple(items) => {
                 let elems = self
@@ -5657,45 +5238,24 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ExpressionDesc::Texp_record {
                 fields,
+                empty_representation,
                 extended_expression,
-                ..
             } => self.convert_record_raw(
                 SrcLoc::from(expr.exp_loc),
                 self.ta.record_fields(*fields),
-                *extended_expression,
-                None,
-                None,
+                extended_expression.map(|e| self.ta.expr(e)),
+                empty_representation.as_deref().cloned(),
             ),
-            ExpressionDesc::Texp_record_sparse {
-                fields,
-                all_labels,
-                omitted_loc,
-                ..
-            } => {
-                let (record_fields, logical_field_count) = self.sparse_record_fields_for_lambda(
-                    all_labels,
-                    self.ta.record_fields(*fields),
-                    *omitted_loc,
-                );
-                self.convert_record_raw(
-                    SrcLoc::from(expr.exp_loc),
-                    &record_fields,
-                    None,
-                    None,
-                    logical_field_count,
-                )
-            }
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
                     self.convert_expr_raw(self.ta.expr(*record))
-                } else if let Some((pos, info)) = raw_record_field_access(lbl) {
+                } else {
+                    let (pos, info) = raw_record_field_access(lbl);
                     rb.prim(
                         Primitive::Pfield(pos, info),
                         &[self.convert_expr_raw(self.ta.expr(*record))],
                         self.lam_loc(expr.exp_loc),
                     )
-                } else {
-                    rb.unit()
                 }
             }
             ExpressionDesc::Texp_setfield(record, _, lbl, value) => {
@@ -5720,6 +5280,25 @@ impl<'a> RawLambdaConverter<'a> {
                     .map(|item| self.convert_expr_raw(self.ta.expr(*item)))
                     .collect::<Vec<_>>();
                 rb.prim(Primitive::Pmakearray, &elems, self.lam_loc(expr.exp_loc))
+            }
+            ExpressionDesc::Texp_dict(entries) => self.convert_dict_raw(expr, self.ta.dict_entries(*entries)),
+            // translcore.ml `Texp_spread`: `Parray_spread` or `Plist_spread` of
+            // a `Pmakearray` of the parts, which compiles to the runtime's
+            // `Primitive_array.spread` or `Primitive_list.spread`.
+            ExpressionDesc::Texp_spread(kind, parts) => {
+                let primitive = match kind {
+                    crate::parser::ast::SpreadKind::Spread_array => Primitive::ParraySpread,
+                    crate::parser::ast::SpreadKind::Spread_list => Primitive::PlistSpread,
+                };
+                let parts = self.ta.exprs(*parts)
+                    .map(|part| self.convert_expr_raw(part))
+                    .collect::<Vec<_>>();
+                let loc = self.lam_loc(expr.exp_loc);
+                rb.prim(
+                    primitive,
+                    &vec![rb.prim(Primitive::Pmakearray, &parts, loc.clone())],
+                    loc,
+                )
             }
             ExpressionDesc::Texp_sequence(a, b) => {
                 // OCaml builds `Lsequence (transl_exp a, transl_exp b)`, and the
@@ -5809,12 +5388,7 @@ impl<'a> RawLambdaConverter<'a> {
                 self.transl_extension_constructor_raw(None, self.ta.extension_constructor(*ext)),
                 self.convert_expr_raw(self.ta.expr(*body)),
             ),
-            ExpressionDesc::Texp_extension_constructor(_, path) => {
-                self.translate_extension_path_raw(path, SrcLoc::from(expr.exp_loc))
-            }
-            ExpressionDesc::Texp_pack(modl) => {
-                self.convert_module_expr_for_pack_raw(self.ta.module_expr(*modl))
-            }
+            ExpressionDesc::Texp_pack(modl) => self.convert_module_expr_for_pack_raw(self.ta.module_expr(*modl)),
             ExpressionDesc::Texp_assert(inner_expr) => {
                 if matches!(
                     self.ta.expr(*inner_expr).exp_desc,
@@ -6017,6 +5591,67 @@ impl<'a> RawLambdaConverter<'a> {
         self.for_trywith_with_synced_stamps(rb.var(*exn_id), pat_act_list)
     }
 
+    /// translcore.ml `Texp_dict`: `%makedict` of the rows
+    /// (`Primitive_dict.make`), and `Pdict_spread` of a dict of the rows
+    /// before the first spread, the spreads and the dicts of the rows between
+    /// them, which compiles to an object literal with spreads.
+    fn convert_dict_raw(
+        &mut self,
+        expr: &Expression,
+        entries: &[crate::types::typedtree::DictEntry],
+    ) -> RawLambda {
+        let rb = self.b;
+        use crate::binary_ast::ast_dict::{self, Entry, Part, TargetAndSources};
+        use crate::types::typedtree::DictEntry;
+        let src_loc = expr.exp_loc;
+        let loc = self.lam_loc(src_loc);
+        let make =
+            |this: &mut Self, rows: &[(&crate::types::typedtree::Loc<String>, &Expression)]| {
+                let rows = rows
+                    .iter()
+                    .map(|(key, value)| {
+                        let ll = vec![
+                            rb.const_(Constant::String(key.txt.clone().into())),
+                            this.convert_expr_raw(value),
+                        ];
+                        this.raw_block_or_prim(0, TagInfo::Tuple, ll, src_loc)
+                    })
+                    .collect::<Vec<_>>();
+                rb.prim(
+                    Primitive::Pmakedict,
+                    &vec![rb.prim(Primitive::Pmakearray, &rows, loc.clone())],
+                    loc.clone(),
+                )
+            };
+        let parts = ast_dict::group(
+            entries
+                .iter()
+                .map(|entry| match entry {
+                    DictEntry::Tdict_entry(key, value) => Entry::Row((key, self.ta.expr(*value))),
+                    DictEntry::Tdict_spread(spread) => Entry::Spread(self.ta.expr(*spread)),
+                })
+                .collect(),
+        );
+        match ast_dict::target_and_sources(parts) {
+            TargetAndSources::Rows(rows) => make(self, &rows),
+            TargetAndSources::Spread(target, sources) => {
+                // `make target :: List.map ... sources`: OCaml evaluates the
+                // tail of the cons first.
+                let sources: Vec<RawLambda> = sources
+                    .iter()
+                    .map(|source| match source {
+                        Part::Rows(rows) => make(self, rows),
+                        Part::Spread(spread) => self.convert_expr_raw(spread),
+                    })
+                    .collect();
+                let mut args = Vec::with_capacity(sources.len() + 1);
+                args.push(make(self, &target));
+                args.extend(sources);
+                rb.prim(Primitive::PdictSpread, &args, loc)
+            }
+        }
+    }
+
     fn compile_irrefutable_match_raw(
         &mut self,
         scrut: &Expression,
@@ -6214,7 +5849,11 @@ impl<'a> RawLambdaConverter<'a> {
                 self.is_irrefutable_pattern(self.ta.pattern(*inner))
             }
             PatternDesc::Tpat_variant(_, None, _) => false,
-            PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_or(_, _, _) => false,
+            // Matched through the full compiler, which lowers dict patterns.
+            PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
+            | PatternDesc::Tpat_or(_, _, _)
+            | PatternDesc::Tpat_dict(_) => false,
         }
     }
 
@@ -6328,8 +5967,7 @@ impl<'a> RawLambdaConverter<'a> {
 
                 // Try to resolve all labels for this record type
                 let first_lbl = fields.first().map(|(_, lbl, _, _)| lbl);
-                let all_labels =
-                    first_lbl.and_then(|lbl| self.resolve_all_record_labels(lbl.lbl_res));
+                let all_labels = first_lbl.and_then(|lbl| self.resolve_all_record_labels(lbl));
                 let pat_loc_idx = pat.pat_loc;
 
                 if let Some(all_labels) = all_labels {
@@ -6358,10 +5996,7 @@ impl<'a> RawLambdaConverter<'a> {
                         // them past existing Alias Llets. StrictOpt (mutable) fields stay
                         // at the outermost position. We simulate this reordering here.
                         let mut field_indices: Vec<(usize, LetKind)> = Vec::new();
-                        for (idx, (_, _, mutflag, repr, _)) in all_labels.iter().enumerate() {
-                            if matches!(repr, RecordRepresentation::RecordFloatUnused) {
-                                continue;
-                            }
+                        for (idx, (_, _, mutflag, _, _)) in all_labels.iter().enumerate() {
                             let kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
                                 LetKind::StrictOpt
                             } else {
@@ -6399,10 +6034,10 @@ impl<'a> RawLambdaConverter<'a> {
                                 _ => *pos,
                             };
                             let info = match repr {
-                                RecordRepresentation::RecordRegular => {
+                                RecordRepresentation::RecordRegular
+                                | RecordRepresentation::RecordArray => {
                                     FieldDbgInfo::Record { name: crate::name::Name::new(name) }
                                 }
-                                RecordRepresentation::RecordFloatUnused => continue,
                                 RecordRepresentation::RecordInlined { .. } => {
                                     FieldDbgInfo::RecordInline { name: crate::name::Name::new(name) }
                                 }
@@ -6450,9 +6085,7 @@ impl<'a> RawLambdaConverter<'a> {
                         let field = match &lbl.lbl_repres {
                             RecordRepresentation::RecordUnboxed(_) => rb.var(tmp),
                             _ => {
-                                let Some((pos, info)) = raw_record_field_access(lbl) else {
-                                    continue;
-                                };
+                                let (pos, info) = raw_record_field_access(lbl);
                                 rb.prim(
                                     Primitive::Pfield(pos, info),
                                     &[rb.var(tmp)],
@@ -6560,16 +6193,6 @@ impl<'a> RawLambdaConverter<'a> {
         bindings: &[ValueBinding],
         body: RawLambda,
     ) -> RawLambda {
-        self.convert_let_with_body_raw_at_root(rec_flag, bindings, body, &None)
-    }
-
-    fn convert_let_with_body_raw_at_root(
-        &mut self,
-        rec_flag: crate::parser::ast::RecFlag,
-        bindings: &[ValueBinding],
-        body: RawLambda,
-        rootpath: &Option<crate::types::Path>,
-    ) -> RawLambda {
         let rb = self.b;
         match rec_flag {
             crate::parser::ast::RecFlag::Nonrecursive => {
@@ -6589,13 +6212,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                            self.mark_js_hoisted_pattern(
-                                rootpath,
-                                &binding.vb_attributes,
-                                self.ta.pattern(binding.vb_pat),
-                                &value,
-                                self.ta.expr(binding.vb_expr).exp_loc,
-                            );
                             (binding, value)
                         })
                         .collect::<Vec<_>>();
@@ -6674,13 +6290,6 @@ impl<'a> RawLambdaConverter<'a> {
                         // OCaml's transl_let applies inline attributes from vb_attributes
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                        self.mark_js_hoisted_pattern(
-                            rootpath,
-                            &binding.vb_attributes,
-                            self.ta.pattern(binding.vb_pat),
-                            &value,
-                            self.ta.expr(binding.vb_expr).exp_loc,
-                        );
                         (binding, value)
                     })
                     .collect::<Vec<_>>();
@@ -6729,13 +6338,6 @@ impl<'a> RawLambdaConverter<'a> {
                                 self.get_inline_attribute_from(&binding.vb_attributes);
                             value =
                                 self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                            self.mark_js_hoisted_pattern(
-                                rootpath,
-                                &binding.vb_attributes,
-                                self.ta.pattern(binding.vb_pat),
-                                &value,
-                                self.ta.expr(binding.vb_expr).exp_loc,
-                            );
                             (
                                 simple_let_binding_id(self.ta, binding).expect("checked above"),
                                 value,
@@ -6751,13 +6353,6 @@ impl<'a> RawLambdaConverter<'a> {
                         });
                         let inline_attr = self.get_inline_attribute_from(&binding.vb_attributes);
                         value = self.apply_inline_attribute_raw(value, binding.vb_loc, inline_attr);
-                        self.mark_js_hoisted_pattern(
-                            rootpath,
-                            &binding.vb_attributes,
-                            self.ta.pattern(binding.vb_pat),
-                            &value,
-                            self.ta.expr(binding.vb_expr).exp_loc,
-                        );
                         self.for_let_with_synced_stamps(
                             self.ta.pattern(binding.vb_pat).pat_loc,
                             value,
@@ -6826,8 +6421,12 @@ impl<'a> RawLambdaConverter<'a> {
             lambda_body = match &self.ta.pattern(*pat).pat_desc {
                 PatternDesc::Tpat_any => lambda_body,
                 PatternDesc::Tpat_var(bound, _) if bound.same(id) => lambda_body,
+                // `Matching.for_function loc` with the function's own
+                // `e.exp_loc` for every parameter (translcore.ml:1175,
+                // 1627-1641): a refutable parameter's `Match_failure` names
+                // where the function starts, not the parameter.
                 _ => self.for_function_with_synced_stamps(
-                    self.ta.pattern(*pat).pat_loc,
+                    loc,
                     rb.var(*id),
                     vec![(self.ta.pattern(*pat), lambda_body.into())],
                     param.fp_partial,
@@ -6896,7 +6495,6 @@ impl<'a> RawLambdaConverter<'a> {
         funct: &Expression,
         args: &[ApplyArg],
         partial: bool,
-        transformed_jsx: bool,
     ) -> RawLambda {
         let rb = self.b;
         if let ExpressionDesc::Texp_ident(_, _, desc) = &funct.exp_desc {
@@ -6909,6 +6507,12 @@ impl<'a> RawLambdaConverter<'a> {
                         .take(prim_arity)
                         .all(|arg| arg.expression.is_some())
                 {
+                    // `funct` is not translated with `convert_expr_raw`, so
+                    // check its attributes here, in the warning scope it
+                    // would use (translcore.ml `Texp_apply` primitive case).
+                    self.with_warning_scope(self.ta.exp_attributes(funct), |this| {
+                        this.check_expr_attribute(funct)
+                    });
                     let (applied, rest) = args.split_at(prim_arity);
                     let applied_exprs = applied
                         .iter()
@@ -6933,9 +6537,7 @@ impl<'a> RawLambdaConverter<'a> {
                         return if rest.is_empty() {
                             base
                         } else {
-                            let inlined =
-                                self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
-                            self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
+                            self.transl_apply_raw(base, rest, loc, None)
                         };
                     }
                     let base = if matches!(raw_name, "%import" | "#import")
@@ -6982,7 +6584,6 @@ impl<'a> RawLambdaConverter<'a> {
                                         prim,
                                         desc.val_type,
                                         arg_lams,
-                                        transformed_jsx,
                                     )
                                 }
                             },
@@ -6997,16 +6598,13 @@ impl<'a> RawLambdaConverter<'a> {
                     return if rest.is_empty() {
                         base
                     } else {
-                        let inlined =
-                            self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
-                        self.transl_apply_raw(base, rest, loc, transformed_jsx, None, inlined)
+                        self.transl_apply_raw(base, rest, loc, None)
                     };
                 }
             }
         }
 
-        let inlined = self.get_inlined_attribute_from(self.ta.exp_attributes(funct));
-        let funct_lam = self.with_inlined_consumed_by(funct, |this| this.convert_expr_raw(funct));
+        let funct_lam = self.convert_expr_raw(funct);
         let uncurried_partial_application = if partial {
             self.env_for_expr(funct).and_then(|env| {
                 self.get_function_arity_from_type(env.as_ref(), funct.exp_type)
@@ -7019,14 +6617,7 @@ impl<'a> RawLambdaConverter<'a> {
         } else {
             None
         };
-        self.transl_apply_raw(
-            funct_lam,
-            args,
-            loc,
-            transformed_jsx,
-            uncurried_partial_application,
-            inlined,
-        )
+        self.transl_apply_raw(funct_lam, args, loc, uncurried_partial_application)
     }
 
     fn transl_apply_raw(
@@ -7034,33 +6625,71 @@ impl<'a> RawLambdaConverter<'a> {
         lam: RawLambda,
         sargs: &[ApplyArg],
         loc: LocIdx,
-        transformed_jsx: bool,
         uncurried_partial_application: Option<i32>,
-        inlined: InlineAttribute,
     ) -> RawLambda {
         let rb = self.b;
-        fn lapply(
-            rb: &RawArena,
-            loc: LamLoc,
-            func: RawLambda,
-            args: Vec<RawLambda>,
-            transformed_jsx: bool,
-            inlined: InlineAttribute,
-        ) -> RawLambda {
+        fn lapply(rb: &RawArena, loc: LamLoc, func: RawLambda, args: Vec<RawLambda>) -> RawLambda {
             rb.apply(
                 func,
                 &args,
                 ApInfo {
                     loc,
-                    inlined,
                     status: ApplyStatus::Na,
                 },
-                transformed_jsx,
             )
         }
 
-        fn is_simple(rb: &RawArena, lam: &RawLambda) -> bool {
-            matches!(rb.node(*lam), Node::Var(_) | Node::Const(_))
+        // translcore.ml `transl_apply`: a partial application creates a
+        // function. Its callee and arguments are bound outside that function,
+        // so they are evaluated once, where the application is, and an await
+        // in them stays in the enclosing function.
+        fn is_module_path(a: &LamArena, lam: RawLambda) -> bool {
+            match a.view(lam) {
+                View::Var(_) | View::GlobalModule(_) => true,
+                View::Prim(Primitive::Pfield(_, FieldDbgInfo::Module { .. }), [m], _) => {
+                    is_module_path(a, *m)
+                }
+                _ => false,
+            }
+        }
+
+        // A variable, a module's value or a constant that allocates nothing
+        // reads the same on each call, so it stays in place and keeps the
+        // function a known one that can be inlined. A closure, a constant
+        // block or an external value does not.
+        fn is_simple(rb: &RawArena, lam: RawLambda) -> bool {
+            let a = rb.get();
+            match a.view(lam) {
+                View::Const(c) => !c.is_allocating(),
+                _ => is_module_path(&a, lam),
+            }
+        }
+
+        fn protect(
+            conv: &mut RawLambdaConverter<'_>,
+            name: &str,
+            lam: RawLambda,
+            defs: &mut Vec<(Ident, RawLambda)>,
+        ) -> RawLambda {
+            if is_simple(conv.b, lam) {
+                lam
+            } else {
+                let id = conv.fresh_ident(name);
+                defs.push((id, lam));
+                conv.b.var(id)
+            }
+        }
+
+        // OCaml prepends each def to a list and folds it from the head, so
+        // the first protected term (the callee) is the outermost binding.
+        fn bind_protected(
+            rb: &RawArena,
+            defs: Vec<(Ident, RawLambda)>,
+            body: RawLambda,
+        ) -> RawLambda {
+            defs.into_iter().rev().fold(body, |body, (id, lam)| {
+                rb.let_(LetKind::Strict, id, lam, body)
+            })
         }
 
         fn build_apply(
@@ -7069,26 +6698,11 @@ impl<'a> RawLambdaConverter<'a> {
             mut args_rev: Vec<(RawLambda, bool)>,
             mut pending: std::collections::VecDeque<(Option<RawLambda>, bool)>,
             loc: LamLoc,
-            transformed_jsx: bool,
-            inlined: InlineAttribute,
         ) -> RawLambda {
             let rb = conv.b;
             match pending.pop_front() {
                 Some((None, optional)) => {
                     let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
-                    let protect =
-                        |conv: &mut RawLambdaConverter<'_>,
-                         name: &str,
-                         lam: RawLambda,
-                         defs: &mut Vec<(Ident, RawLambda)>| {
-                            if is_simple(rb, &lam) {
-                                lam
-                            } else {
-                                let id = conv.fresh_ident(name);
-                                defs.push((id, lam));
-                                rb.var(id)
-                            }
-                        };
 
                     let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
                     let remaining_args = if all_optional {
@@ -7104,8 +6718,6 @@ impl<'a> RawLambdaConverter<'a> {
                             loc,
                             lam,
                             args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
-                            transformed_jsx,
-                            InlineAttribute::Default,
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
@@ -7122,40 +6734,26 @@ impl<'a> RawLambdaConverter<'a> {
                     let mut next_args_rev = Vec::with_capacity(1 + remaining_args.len());
                     next_args_rev.push((rb.var(id_arg), optional));
                     next_args_rev.extend(remaining_args);
-                    let inner = build_apply(
-                        conv,
-                        handle,
-                        next_args_rev,
-                        protected_tail,
-                        loc,
-                        transformed_jsx,
-                        inlined,
-                    );
-                    let body = match rb.function_parts(inner) {
-                        Some((arity, params, body, attr, floc)) => {
-                            let params: Vec<Ident> =
-                                std::iter::once(id_arg).chain(params).collect();
-                            rb.function_(arity + 1, &params, body, attr, floc)
-                        }
-                        None => {
-                            rb.function_(1, &[id_arg], inner, FunctionAttribute::default(), loc)
-                        }
+                    let applied = build_apply(conv, handle, next_args_rev, protected_tail, loc);
+                    let body = if let Some((arity, params, body, attr, loc)) =
+                        rb.function_parts(applied)
+                    {
+                        let params = std::iter::once(id_arg).chain(params).collect::<Vec<_>>();
+                        rb.function_(arity + 1, &params, body, attr, loc)
+                    } else {
+                        rb.function_(1, &[id_arg], applied, FunctionAttribute::default(), loc)
                     };
-                    defs.into_iter().fold(body, |body, (id, lam)| {
-                        rb.let_(LetKind::Strict, id, lam, body)
-                    })
+                    bind_protected(rb, defs, body)
                 }
                 Some((Some(arg), optional)) => {
                     args_rev.insert(0, (arg, optional));
-                    build_apply(conv, lam, args_rev, pending, loc, transformed_jsx, inlined)
+                    build_apply(conv, lam, args_rev, pending, loc)
                 }
                 None => lapply(
                     rb,
                     loc,
                     lam,
                     args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
-                    transformed_jsx,
-                    inlined,
                 ),
             }
         }
@@ -7164,10 +6762,15 @@ impl<'a> RawLambdaConverter<'a> {
             Some(arity) => {
                 let extra_arity = arity - sargs.len() as i32;
                 let mut none_ids = Vec::new();
+                let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
+                let lam = protect(self, "func", lam, &mut defs);
                 let args = sargs
                     .iter()
                     .map(|arg| match &arg.expression {
-                        Some(expr) => self.convert_expr_raw(self.ta.expr(*expr)),
+                        Some(expr) => {
+                            let arg = self.convert_expr_raw(self.ta.expr(*expr));
+                            protect(self, "arg", arg, &mut defs)
+                        }
                         None => {
                             let id = self.fresh_ident("none");
                             none_ids.push(id);
@@ -7180,20 +6783,17 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect::<Vec<_>>();
                 let mut ap_args = args;
                 ap_args.extend(extra_ids.iter().cloned().map(|id| rb.var(id)));
-                let body = lapply(
+                let body = lapply(rb, self.lam_loc(loc), lam, ap_args);
+                bind_protected(
                     rb,
-                    self.lam_loc(loc),
-                    lam,
-                    ap_args,
-                    transformed_jsx,
-                    inlined,
-                );
-                rb.function_(
-                    (none_ids.len() + extra_ids.len()) as i32,
-                    &none_ids.into_iter().chain(extra_ids).collect::<Vec<_>>(),
-                    body,
-                    FunctionAttribute::default(),
-                    self.lam_loc(loc),
+                    defs,
+                    rb.function_(
+                        (none_ids.len() + extra_ids.len()) as i32,
+                        &none_ids.into_iter().chain(extra_ids).collect::<Vec<_>>(),
+                        body,
+                        FunctionAttribute::default(),
+                        self.lam_loc(loc),
+                    ),
                 )
             }
             None => {
@@ -7208,15 +6808,7 @@ impl<'a> RawLambdaConverter<'a> {
                         )
                     })
                     .collect::<Vec<_>>();
-                build_apply(
-                    self,
-                    lam,
-                    Vec::new(),
-                    pending.into(),
-                    self.lam_loc(loc),
-                    transformed_jsx,
-                    inlined,
-                )
+                build_apply(self, lam, Vec::new(), pending.into(), self.lam_loc(loc))
             }
         }
     }
@@ -7279,7 +6871,7 @@ impl<'a> RawLambdaConverter<'a> {
             }
             // an external: expand its FFI spec, eta-expanded to its arity
             if prim.prim_from_constructor || prim.prim_arity == 0 {
-                return self.transl_external_application(loc, env, prim, val_type, vec![], false);
+                return self.transl_external_application(loc, env, prim, val_type, vec![]);
             }
             let params: Vec<Ident> = if prim.prim_arity == 1 {
                 vec![self.fresh_ident("prim")]
@@ -7289,10 +6881,10 @@ impl<'a> RawLambdaConverter<'a> {
                     .collect()
             };
             let args = params.iter().cloned().map(|id| rb.var(id)).collect();
-            let body = self.transl_external_application(loc, env, prim, val_type, args, false);
+            let body = self.transl_external_application(loc, env, prim, val_type, args);
             return rb.function_(
                 prim.prim_arity,
-                &params,
+                &&params,
                 body,
                 FunctionAttribute::default(),
                 self.lam_loc(loc),
@@ -7368,6 +6960,8 @@ mod tests {
 
     use super::*;
     use crate::lambda::Lambda;
+    use crate::types::typedtree::TExprIdx;
+    use crate::parse_arena::Located;
     use crate::types::typedtree::EnvRef;
 
     use crate::context::IdGenerator;
@@ -7434,9 +7028,9 @@ mod tests {
 
         let arg = Expression::new(
             ExpressionDesc::Texp_record {
-                fields: crate::types::typedtree::TFieldList::EMPTY,
-                extended_expression: None,
+                fields: Default::default(),
                 empty_representation: None,
+                extended_expression: None,
             },
             LocIdx::none(),
             crate::types::TypeExprRef(0),
@@ -7471,6 +7065,7 @@ mod tests {
                 type_attributes: vec![],
                 type_immediate: false,
                 type_representation: crate::types::TypeRepresentation::Boxed,
+                type_shape: crate::types::ValueShape::Unstated,
                 type_inlined_types: vec![],
                 type_path: None,
             })),
@@ -7557,7 +7152,7 @@ mod tests {
         ));
         let cases = ta.push_cases([case]);
         ta.push_expr(Expression::new(
-            ExpressionDesc::Texp_try(body, cases),
+            ExpressionDesc::Texp_try(body, cases, None),
             LocIdx::none(),
             crate::types::TypeExprRef(0),
             EnvRef(0),
@@ -7852,6 +7447,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         }
@@ -7924,7 +7520,7 @@ mod tests {
                     crate::types::decl::ModuleDeclaration {
                         md_type: crate::types::decl::ModuleType::MtyAlias(
                             crate::types::decl::AliasPresence::MtaPresent,
-                            crate::types::Path::pident(local_n),
+                            std::sync::Arc::new(crate::types::Path::pident(local_n)),
                         ),
                         md_attributes: Vec::new(),
                         md_loc: crate::types::DeclLoc::none(),
@@ -8107,7 +7703,7 @@ mod tests {
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaAbsent,
-                crate::types::Path::pident(side_effect),
+                std::sync::Arc::new(crate::types::Path::pident(side_effect)),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8143,7 +7739,7 @@ mod tests {
             mod_loc: crate::parse_arena::LocIdx::default(),
             mod_type: crate::types::decl::ModuleType::MtyAlias(
                 crate::types::decl::AliasPresence::MtaPresent,
-                crate::types::Path::pident(side_effect),
+                std::sync::Arc::new(crate::types::Path::pident(side_effect)),
             ),
             mod_env: EnvRef(0),
             mod_attributes: Attributes::new(),
@@ -8338,7 +7934,7 @@ mod tests {
                                             crate::types::decl::ModuleDeclaration {
                                                 md_type: crate::types::decl::ModuleType::MtyAlias(
                                                     crate::types::decl::AliasPresence::MtaPresent,
-                                                    main_path,
+                                                    std::sync::Arc::new(main_path.clone()),
                                                 ),
                                                 md_attributes: Vec::new(),
                                                 md_loc: crate::types::DeclLoc::none(),
@@ -8541,8 +8137,8 @@ mod tests {
             init_v,
             Constant::Constructor(crate::types::VariantTag {
                 name,
-                literal: None,
-            }) if name == "Function"
+                literal: crate::types::VariantLiteralTag::String(literal),
+            }) if name == "Function" && literal == "Function"
         ));
     }
 }

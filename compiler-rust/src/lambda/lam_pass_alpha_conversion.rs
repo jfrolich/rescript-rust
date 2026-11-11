@@ -47,7 +47,6 @@ impl Alpha<'_, '_> {
     fn populate_apply_info(
         &mut self,
         a: &mut LamArena,
-        jsx: bool,
         args_arity: &[i32],
         func: Lam,
         args: LamList,
@@ -63,13 +62,13 @@ impl Alpha<'_, '_> {
             None | Some(0) => {
                 let f = self.simpl(a, func);
                 let xs = self.simpl_list(a, &args);
-                a.apply(f, &xs, ap_info, jsx)
+                a.apply(f, &xs, ap_info)
             }
             // lam_pass_alpha_conversion.ml:33-36
             Some(x) if x == len => {
                 let f = self.simpl(a, func);
                 let xs = self.simpl_list(a, &args);
-                a.apply(f, &xs, infer_full(), jsx)
+                a.apply(f, &xs, infer_full())
             }
             // lam_pass_alpha_conversion.ml:37-42
             Some(x) if x > len => {
@@ -84,8 +83,8 @@ impl Alpha<'_, '_> {
                 let first = self.simpl_list(a, &args[..split]);
                 let rest = self.simpl_list(a, &args[split..]);
                 let f = self.simpl(a, func);
-                let inner = a.apply(f, &first, infer_full(), false);
-                a.apply(inner, &rest, ap_info, jsx)
+                let inner = a.apply(f, &first, infer_full());
+                a.apply(inner, &rest, ap_info)
             }
         }
     }
@@ -97,7 +96,7 @@ impl Alpha<'_, '_> {
             Node::Apply { func, args, info } => {
                 let args_arity = self.arity(a, func).extract_arity();
                 let p = a.apply_payload(info).clone();
-                self.populate_apply_info(a, p.transformed_jsx, &args_arity, func, args, p.info)
+                self.populate_apply_info(a, &args_arity, func, args, p.info)
             }
             Node::Let {
                 kind,
@@ -198,7 +197,7 @@ pub fn transform_under_supply(
         let v = a.var(*id);
         all_args.push(v);
     }
-    let body = a.apply(f, &all_args, ap_info.clone(), false);
+    let body = a.apply(f, &all_args, ap_info.clone());
     let mut result = a.function_(
         n,
         &extra_args,

@@ -1,0 +1,1 @@
+- A build system rewritten in OCaml is available as `rescript-ocaml`; `rescript` keeps running the Rust build system. https://github.com/rescript-lang/rescript/pull/8780

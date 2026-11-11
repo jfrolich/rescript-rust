@@ -102,8 +102,10 @@ fn pattern_is_simple(pat: &Pattern, arena: &ParseArena) -> bool {
         PatternDesc::Ppat_any => true,
         PatternDesc::Ppat_var(_) => true,
         PatternDesc::Ppat_array(_) => true,
+        PatternDesc::Ppat_dict(_) => true,
         PatternDesc::Ppat_unpack(_) => true,
         PatternDesc::Ppat_type(_) => true,
+        PatternDesc::Ppat_variant_spread(_) => true,
         PatternDesc::Ppat_record(_) => true,
         PatternDesc::Ppat_tuple(_) => true,
         PatternDesc::Ppat_constant(_) => true,
@@ -176,7 +178,25 @@ fn is_prefix_operator(name: &str) -> bool {
 /// Check if an identifier needs parens when printed as a value
 /// (OCaml wraps operators in parens when used as values)
 fn ident_needs_parens(name: &str) -> bool {
-    is_infix_operator(name) || is_prefix_operator(name)
+    is_infix_operator(name) || is_prefix_operator(name) || name.starts_with('.')
+}
+
+/// pprintast.ml `protect_ident`: binders that are infix or prefix operators
+/// are parenthesized, with spaces around a `*` to avoid comment syntax.
+fn protect_ident<W: Write>(f: &mut Formatter<W>, name: &str) {
+    if !ident_needs_parens(name) {
+        f.string(name);
+    } else if name.starts_with('*') || name.ends_with('*') {
+        f.string("(");
+        f.space();
+        f.string(name);
+        f.space();
+        f.string(")");
+    } else {
+        f.string("(");
+        f.string(name);
+        f.string(")");
+    }
 }
 
 /// Get operator name if expression is an identifier that is an operator
@@ -235,6 +255,8 @@ fn is_simple_expression_with_arena(expr: &Expression, arena: &ParseArena) -> boo
             | ExpressionDesc::Pexp_constant(_)
             | ExpressionDesc::Pexp_tuple(_)
             | ExpressionDesc::Pexp_array(_)
+            | ExpressionDesc::Pexp_dict(_)
+            | ExpressionDesc::Pexp_spread(..)
             | ExpressionDesc::Pexp_record(_)
             | ExpressionDesc::Pexp_constraint(_)
             | ExpressionDesc::Pexp_coerce(_)
@@ -444,7 +466,11 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are OUTSIDE the box in OCaml
-                print_item_attributes(f, arena, &binding.pvb_attributes);
+                print_item_attributes(
+                    f,
+                    arena,
+                    &crate::ast_jsx_component::binding_attributes(arena, binding),
+                );
             }
         }
         StructureItemDesc::Pstr_primitive(vd) => {
@@ -452,7 +478,7 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             f.open_box(BoxKind::HOV, 2);
             f.string("external");
             f.space();
-            f.string(arena.get_string(vd.pval_name.txt));
+            protect_ident(f, arena.get_string(vd.pval_name.txt));
             f.space();
             f.string(":");
             f.space();
@@ -463,7 +489,11 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
-            print_item_attributes(f, arena, &vd.pval_attributes);
+            print_item_attributes(
+                f,
+                arena,
+                &crate::ast_jsx_component::description_attributes(arena, vd),
+            );
         }
         StructureItemDesc::Pstr_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;
@@ -684,8 +714,18 @@ fn print_structure_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             }
             f.string("]");
         }
-        StructureItemDesc::Pstr_extension(inner) => {
-            let (ref ext, ref attrs) = **inner;
+        StructureItemDesc::Pstr_extension(_) | StructureItemDesc::Pstr_raw(_) => {
+            // pprintast.ml: `Pstr_raw` prints as `Ast_raw.to_extension`.
+            let raw_extension;
+            let (ext, attrs) = match &item.pstr_desc {
+                StructureItemDesc::Pstr_extension(inner) => (&inner.0, &inner.1),
+                StructureItemDesc::Pstr_raw(raw) => {
+                    raw_extension =
+                        crate::ast_raw::to_extension(arena, "raw", raw.name_loc, &raw.source);
+                    (&raw_extension, &raw.attrs)
+                }
+                _ => unreachable!(),
+            };
             let (ref name, ref payload) = *ext;
             f.open_box(BoxKind::H, 2);
             f.string("[%%");
@@ -1413,15 +1453,6 @@ fn print_expression_inner<W: Write>(
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_ident(lid) => {
             // OCaml wraps operators in parens when used as values
-            if let Longident::Lident(name_idx) = arena.get_longident(lid.txt) {
-                let name = arena.get_string(*name_idx);
-                if ident_needs_parens(name) {
-                    f.string("(");
-                    f.string(name);
-                    f.string(")");
-                    return;
-                }
-            }
             print_longident_idx(f, arena, lid.txt);
         }
         ExpressionDesc::Pexp_constant(c) => {
@@ -1472,7 +1503,11 @@ fn print_expression_inner<W: Write>(
                 print_value_binding(f, arena, binding.pvb_pat, arena.get_expr(binding.pvb_expr));
                 f.close_box();
                 // Item attributes are outside the binding box in OCaml
-                print_item_attributes(f, arena, &binding.pvb_attributes);
+                print_item_attributes(
+                    f,
+                    arena,
+                    &crate::ast_jsx_component::binding_attributes(arena, binding),
+                );
             }
             f.string(" in");
             f.break_(1, -2); // @;<1 -2> - space or newline with -2 indent offset
@@ -1709,21 +1744,25 @@ fn print_expression_inner<W: Write>(
             }
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = *inner;
+            let (ref body, ref cases, ref finally) = *inner;
             if use_parens {
                 f.string("(");
             }
-            // OCaml: @[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]@]
+            // OCaml: @[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]%a@], or without
+            // cases @[<0>@[<hv2>try@ %a@]%a@], the last %a printing the
+            // finally block as @ @[<hv2>finally@ %a@].
             f.open_box(BoxKind::Box, 0);
             f.open_box(BoxKind::HV, 2);
             f.string("try");
             f.space(); // @ break between try and body
             print_expression(f, arena, arena.get_expr(*body));
             f.close_box();
+            let cases = arena.case_list(*cases);
+            if !cases.is_empty() {
             f.space(); // @ break between try-box and with-box
             f.open_box(BoxKind::Box, 0);
             f.string("with");
-            for case in arena.case_list(*cases) {
+            for case in cases {
                 f.space();
                 f.string("| ");
                 f.open_box(BoxKind::Box, 2);
@@ -1740,6 +1779,15 @@ fn print_expression_inner<W: Write>(
                 f.close_box();
             }
             f.close_box();
+            }
+            if let Some(finally) = finally {
+                f.space();
+                f.open_box(BoxKind::HV, 2);
+                f.string("finally");
+                f.space();
+                print_expression(f, arena, arena.get_expr(*finally));
+                f.close_box();
+            }
             f.close_box();
             if use_parens {
                 f.string(")");
@@ -1903,6 +1951,65 @@ fn print_expression_inner<W: Write>(
             print_longident_idx(f, arena, field.txt);
             f.string(" <- ");
             print_expression_simple_ctx(f, arena, arena.get_expr(*value), ctx);
+        }
+        ExpressionDesc::Pexp_dict(entries) => {
+            // OCaml: pp f "@[<hv2>dict{%a}@]" (list dict_entry ~sep:",@;"),
+            // where an entry is "@[<hov2>%S:@;%a@]" and a spread "...%a",
+            // both with `simple_expr ctxt`.
+            f.open_box(BoxKind::HV, 2);
+            f.string("dict{");
+            for (i, entry) in entries.iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                match entry {
+                    DictEntry::Pdict_entry(key, e) => {
+                        f.open_box(BoxKind::HOV, 2);
+                        f.string("\"");
+                        f.string(&crate::string_literal::ocaml_escaped(
+                            arena.get_string(key.txt),
+                        ));
+                        f.string("\":");
+                        f.space();
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                        f.close_box();
+                    }
+                    DictEntry::Pdict_spread(e) => {
+                        f.string("...");
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                }
+            }
+            f.string("}");
+            f.close_box();
+        }
+        ExpressionDesc::Pexp_spread(kind, elements) => {
+            // OCaml: pp f "@[<hv2>%s%a%s@]" opening (list element ~sep:",@;"),
+            // where an item is `simple_expr ctxt` and a spread "...%a".
+            let (opening, closing) = match kind {
+                SpreadKind::Spread_array => ("[", "]"),
+                SpreadKind::Spread_list => ("list{", "}"),
+            };
+            f.open_box(BoxKind::HV, 2);
+            f.string(opening);
+            for (i, element) in arena.spread_element_list(*elements).iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                match element {
+                    SpreadElement::Pspread_item(e) => {
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                    SpreadElement::Pspread(e) => {
+                        f.string("...");
+                        print_expression_simple_ctx(f, arena, arena.get_expr(*e), ctx);
+                    }
+                }
+            }
+            f.string(closing);
+            f.close_box();
         }
         ExpressionDesc::Pexp_array(elems) => {
             // OCaml: @[<0>@[<2>[|%a|]@]@] with (list (simple_expr (under_semi ctxt)) ~sep:";")
@@ -2285,8 +2392,31 @@ fn print_expression_inner<W: Write>(
                 f.string(")");
             }
         }
-        ExpressionDesc::Pexp_extension(ext_inner) => {
-            let (ref name, ref payload) = **ext_inner;
+        ExpressionDesc::Pexp_extension(_)
+        | ExpressionDesc::Pexp_raw(_)
+        | ExpressionDesc::Pexp_todo(_) => {
+            // pprintast.ml: `Pexp_raw` prints as `Ast_raw.to_extension`,
+            // `Pexp_todo` as `Ast_todo.to_extension`.
+            let raw_extension;
+            let ext = match &expr.pexp_desc {
+                ExpressionDesc::Pexp_extension(inner) => &**inner,
+                ExpressionDesc::Pexp_raw(raw) => {
+                    raw_extension = crate::ast_raw::to_extension(
+                        arena,
+                        crate::ast_raw::extension_name(raw.kind),
+                        raw.name_loc,
+                        &raw.source,
+                    );
+                    &raw_extension
+                }
+                ExpressionDesc::Pexp_todo(todo) => {
+                    raw_extension =
+                        crate::ast_todo::to_extension(arena, todo.name_loc, todo.message);
+                    &raw_extension
+                }
+                _ => unreachable!(),
+            };
+            let (ref name, ref payload) = *ext;
             // OCaml: @[<2>[%%%s@ %a]@] — structural box with indent 2
             f.open_box(BoxKind::Box, 2);
             f.string("[%");
@@ -2489,9 +2619,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         PatternDesc::Ppat_any => {
             f.string("_");
         }
-        PatternDesc::Ppat_var(name) => {
-            f.string(arena.get_string(name.txt));
-        }
+        PatternDesc::Ppat_var(name) => protect_ident(f, arena.get_string(name.txt)),
         PatternDesc::Ppat_alias(p, name) => {
             // OCaml: @[<2>%a@;as@;%a@]
             f.open_box(BoxKind::Box, 2);
@@ -2499,7 +2627,7 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             f.space(); // @; before as
             f.string("as");
             f.space(); // @; after as
-            f.string(arena.get_string(name.txt));
+            protect_ident(f, arena.get_string(name.txt));
             f.close_box();
         }
         PatternDesc::Ppat_constant(c) => {
@@ -2685,6 +2813,43 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
             }
             f.close_box();
         }
+        PatternDesc::Ppat_dict(entries) => {
+            // OCaml: pp f "@[<2>dict{%a}@]" (list entry ~sep:",@;"), where
+            // entry is "@[<2>%S:@;%s%a@]" with `pattern1` for the pattern.
+            f.open_box(BoxKind::Box, 2);
+            f.string("dict{");
+            for (i, entry) in entries.iter().enumerate() {
+                if i > 0 {
+                    f.string(",");
+                    f.space();
+                }
+                f.open_box(BoxKind::Box, 2);
+                f.string("\"");
+                f.string(&crate::string_literal::ocaml_escaped(
+                    arena.get_string(entry.pdp_key.txt),
+                ));
+                f.string("\":");
+                f.space();
+                if entry.pdp_optional {
+                    f.string("?");
+                }
+                let entry_pat = arena.get_pat(entry.pdp_pattern);
+                let needs_parens = matches!(
+                    &entry_pat.ppat_desc,
+                    PatternDesc::Ppat_alias(..) | PatternDesc::Ppat_or(..)
+                );
+                if needs_parens {
+                    f.string("(");
+                }
+                print_pattern(f, arena, entry_pat);
+                if needs_parens {
+                    f.string(")");
+                }
+                f.close_box();
+            }
+            f.string("}");
+            f.close_box();
+        }
         PatternDesc::Ppat_array(pats) => {
             // OCaml: pp f "@[<2>[|%a|]@]" with sep ";"
             f.open_box(BoxKind::Box, 2);
@@ -2731,6 +2896,10 @@ fn print_pattern_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, pat: 
         }
         PatternDesc::Ppat_type(lid) => {
             f.string("#");
+            print_longident_idx(f, arena, lid.txt);
+        }
+        PatternDesc::Ppat_variant_spread(lid) => {
+            f.string("...");
             print_longident_idx(f, arena, lid.txt);
         }
         PatternDesc::Ppat_unpack(name) => {
@@ -3238,16 +3407,6 @@ fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant, arena: &ParseAre
             f.string(payload.source(arena));
             f.string("|js}");
         }
-        Constant::Json(source) => {
-            f.string("{json|");
-            f.string(arena.get_string(*source));
-            f.string("|json}");
-        }
-        Constant::RawSource(source) => {
-            f.string("{js|");
-            f.string(arena.get_string(*source));
-            f.string("|js}");
-        }
         Constant::Float(s, suffix) => {
             f.string(arena.get_string(*s));
             if let Some(c) = suffix {
@@ -3263,15 +3422,11 @@ fn print_constant<W: Write>(f: &mut Formatter<W>, c: &Constant, arena: &ParseAre
 
 fn print_longident<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, lid: &Longident) {
     match lid {
-        Longident::Lident(name_idx) => {
-            let name = arena.get_string(*name_idx);
-            f.string(name);
-        }
+        Longident::Lident(name_idx) => protect_ident(f, arena.get_string(*name_idx)),
         Longident::Ldot(prefix, name_idx) => {
             print_longident(f, arena, prefix);
             f.string(".");
-            let name = arena.get_string(*name_idx);
-            f.string(name);
+            protect_ident(f, arena.get_string(*name_idx));
         }
         Longident::Lapply(m1, m2) => {
             print_longident(f, arena, m1);
@@ -3740,6 +3895,12 @@ fn print_module_expr_inner<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, m
             f.string("]");
             f.close_box();
         }
+        ModuleExprDesc::Pmod_await(m) => {
+            // OCaml: await@ %a
+            f.string("await");
+            f.space();
+            print_module_expr(f, arena, arena.get_mod_expr(*m));
+        }
     }
 }
 
@@ -4024,7 +4185,7 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
                 f.string("external");
             }
             f.space();
-            f.string(arena.get_string(vd.pval_name.txt));
+            protect_ident(f, arena.get_string(vd.pval_name.txt));
             f.space();
             f.string(":");
             f.space();
@@ -4034,7 +4195,11 @@ fn print_signature_item<W: Write>(f: &mut Formatter<W>, arena: &ParseArena, item
             print_value_description_prim(f, arena, &vd.pval_prim);
             f.close_box();
             f.close_box();
-            print_item_attributes(f, arena, &vd.pval_attributes);
+            print_item_attributes(
+                f,
+                arena,
+                &crate::ast_jsx_component::description_attributes(arena, vd),
+            );
         }
         SignatureItemDesc::Psig_type(inner) => {
             let (ref rec_flag, ref decls) = **inner;

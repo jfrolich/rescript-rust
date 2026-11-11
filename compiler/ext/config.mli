@@ -16,7 +16,8 @@
 (* System configuration *)
 
 (* Directories in the search path for .cmi and .cmo files *)
-val load_path : string list ref
+val get_load_path : unit -> string list
+val set_load_path : string list -> unit
 
 val cmi_magic_number : string
 (* Magic number for compiled interface files *)
@@ -38,4 +39,4 @@ val ast0_impl_magic_number : string
    tree, as used on the external-PPX wire *)
 
 val cmt_magic_number : string
-(* Magic number for compiled interface files *)
+(* Magic number for typed-tree files (.cmt, .cmti) *)

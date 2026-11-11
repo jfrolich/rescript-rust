@@ -46,6 +46,11 @@ pub struct Comment {
     /// Whether the token before the comment is `?`, e.g. the end of the
     /// `=?` of an optional parameter (res_comment.ml `prev_tok_is_question`).
     pub prev_tok_is_question: bool,
+    /// The enclosing comment-only JSX child container `{/* ... */}`,
+    /// including its braces (res_comment.ml `jsx_container`). Parser
+    /// checkpoints truncate the comment list, so a speculative JSX parse marks
+    /// the comments again when it is reparsed.
+    pub jsx_container: Option<Location>,
 }
 
 impl Comment {
@@ -79,6 +84,25 @@ impl Comment {
         self.prev_tok_is_question = b;
     }
 
+    /// The enclosing comment-only JSX container, including its braces.
+    pub fn jsx_container(&self) -> Option<&Location> {
+        self.jsx_container.as_ref()
+    }
+
+    /// res_comment.ml `to_block_if_safe`: a line comment without block
+    /// delimiters as a block comment.
+    pub fn to_block_if_safe(&self) -> Comment {
+        let bytes = self.txt.as_bytes();
+        let contains_delimiter = bytes
+            .windows(2)
+            .any(|w| (w[0] == b'/' && w[1] == b'*') || (w[0] == b'*' && w[1] == b'/'));
+        let mut comment = self.clone();
+        if self.style == CommentStyle::SingleLine && !contains_delimiter {
+            comment.style = CommentStyle::MultiLine;
+        }
+        comment
+    }
+
     /// Check if this is a single-line comment.
     pub fn is_single_line(&self) -> bool {
         self.style == CommentStyle::SingleLine
@@ -102,6 +126,7 @@ impl Comment {
             style: CommentStyle::SingleLine,
             prev_tok_end_pos: Position::default(),
             prev_tok_is_question: false,
+            jsx_container: None,
         }
     }
 
@@ -132,6 +157,7 @@ impl Comment {
             style,
             prev_tok_end_pos: Position::default(),
             prev_tok_is_question: false,
+            jsx_container: None,
         }
     }
 

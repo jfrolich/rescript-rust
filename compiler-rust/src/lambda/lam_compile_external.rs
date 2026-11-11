@@ -4,13 +4,13 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, js_seq,
-    poly_var_tag_access, poly_var_value_access, runtime_member_for_eta_wrapped_primitive,
-    string_switch_iife,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr,
+    js_expr_no_side_effects, js_seq, poly_var_tag_access, poly_var_value_access,
+    runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
 use crate::ident::Ident;
-use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, VarDecl};
+use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
 use crate::js_ir::op::{IdentInfo, ImportAttributes as JsImportAttributes, Kind, PropertyName};
 use crate::js_ir::printer::js_export_name;
@@ -20,9 +20,60 @@ use crate::lambda::TagInfo;
 use crate::lambda::arena::{FuncId, Lam, LamArena, View};
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_primitive::{
-    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, Label, LabelNoname,
+    Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsxElement, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
+
+/// The literal tag and payload of a poly-variant block
+/// `{NAME: "tag", VAL: value}`.
+fn literal_polyvar_block(j: &JsArena, arg: Expr) -> Option<(crate::js_ir::arena::StrId, Expr)> {
+    let ExprKind::CamlBlock(items, _, tag) = j.ek(arg) else {
+        return None;
+    };
+    if !matches!(j.tag(tag), TagInfo::PolyVar(_)) {
+        return None;
+    }
+    match j.exprs(items) {
+        [key, value] => match j.ek(*key) {
+            ExprKind::Str(txt) => Some((txt, *value)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// js_of_lam_variant.ml `eval_in_place`: the `@string` and `@int`
+/// dispatches read an argument other than a literal once, inside the
+/// function that switches on it. That is the same as reading it in place
+/// when the read has no effect and cannot await.
+pub(crate) fn polyvar_dispatch_in_place(j: &JsArena, arg: Expr) -> bool {
+    js_expr_no_side_effects(j, arg)
+}
+
+/// js_of_lam_variant.ml `eval_as_event_in_place`: an event-style argument
+/// other than a literal is read twice, for the tag and for the payload. That
+/// is the same as reading it once for constants, variables, and fields,
+/// array elements and conditionals of them. A JS global (`@val`) or a
+/// property read, as from a `@get` external, may run a getter each time.
+pub(crate) fn polyvar_event_in_place(j: &JsArena, arg: Expr) -> bool {
+    fn duplicable(j: &JsArena, e: Expr) -> bool {
+        match j.ek(e) {
+            ExprKind::Undefined { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::TemplateLiteral(_)
+            | ExprKind::Qualified(_) => true,
+            // `Ext_ident.is_js`; Rust creates JS globals as persistent idents.
+            ExprKind::Var(id) => !super::js_pass_external_shadow::is_js_global(&j.ident(id)),
+            ExprKind::StaticIndex(e, _, pos) => pos.get().is_some() && duplicable(j, e),
+            ExprKind::ArrayIndex(a, b) => duplicable(j, a) && duplicable(j, b),
+            ExprKind::Cond(a, b, c) => duplicable(j, a) && duplicable(j, b) && duplicable(j, c),
+            _ => false,
+        }
+    }
+    literal_polyvar_block(j, arg).is_some() || duplicable(j, arg)
+}
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,
@@ -140,6 +191,104 @@ impl LambdaCompiler {
         }
     }
 
+    /// lam_compile_external_call.ml `hold_arg`: the translation of a
+    /// poly-variant argument other than a literal reads it twice, as
+    /// `e.NAME` and `e.VAL`, or inside the function a dispatch on its tag
+    /// builds, where an `await` is a syntax error. So unless it can read the
+    /// argument in place, the argument is bound to a temporary after its
+    /// statements, which keeps it in its place among the arguments (see
+    /// `sequence_arguments`). Of an optional argument known to be present,
+    /// only the payload is bound, so the translation still sees `Some`.
+    pub(crate) fn hold_external_arg(
+        &mut self,
+        arg_label: LabelNoname,
+        arg_type: &Attr,
+        (mut block, arg): (Block, Expr),
+    ) -> (Block, Expr) {
+        let needs_temporary = |j: &JsArena, e: Expr| match arg_type {
+            Attr::PolyVar { .. } => !polyvar_event_in_place(j, e),
+            Attr::PolyVarString { .. } | Attr::Int(_) => !polyvar_dispatch_in_place(j, e),
+            Attr::ArgCst(_) | Attr::ExternUnit | Attr::Nothing | Attr::Ignore | Attr::Unwrap => {
+                false
+            }
+        };
+        let target = match (arg_label, self.j.ek(arg)) {
+            (LabelNoname::ArgOptional, ExprKind::OptionalBlock(x, _)) => x,
+            _ => arg,
+        };
+        if !needs_temporary(&self.j, target) {
+            return (block, arg);
+        }
+        let tmp = self.fresh_tmp_ident();
+        block.push(super::lam_compile_arguments::define_strict_variable(
+            tmp,
+            target,
+            &mut self.j,
+        ));
+        let var = JE::var(tmp, &mut self.j);
+        let value = match self.j.ek(arg) {
+            ExprKind::OptionalBlock(_, identity) if target != arg => {
+                let cold = self.j.expr_cold(arg);
+                self.j
+                    .expr_with(ExprKind::OptionalBlock(var, identity), cold)
+            }
+            _ => var,
+        };
+        (block, value)
+    }
+
+    /// lam_compile_external_call.ml `hold_args`: `hold_external_arg` for
+    /// the compiled arguments of a call, paired with the specs as in
+    /// `assemble_external_args_no_splice`.
+    pub(crate) fn hold_external_args(
+        &mut self,
+        arg_types: &[Param],
+        args: Vec<(Block, Expr)>,
+    ) -> Vec<(Block, Expr)> {
+        let mut args = args.into_iter();
+        let mut held = Vec::with_capacity(args.len());
+        for spec in arg_types {
+            if matches!(spec.arg_type, Attr::ArgCst(_)) {
+                continue;
+            }
+            let Some(arg) = args.next() else { break };
+            held.push(self.hold_external_arg(spec.arg_label, &spec.arg_type, arg));
+        }
+        held.extend(args);
+        held
+    }
+
+    /// lam_compile_external_obj.ml `hold_obj_args`: `hold_external_arg` for
+    /// the compiled arguments of an object-creating external, paired with
+    /// the labels as in `compile_js_object_create`.
+    pub(crate) fn hold_external_obj_args(
+        &mut self,
+        obj_params: &[ObjParam],
+        args: Vec<(Block, Expr)>,
+    ) -> Vec<(Block, Expr)> {
+        let mut args = args.into_iter();
+        let mut held = Vec::with_capacity(args.len());
+        for param in obj_params {
+            let arg_label = match &param.obj_arg_label {
+                Label::ObjLabel { .. } | Label::ObjEmpty
+                    if matches!(param.obj_arg_type, Attr::ArgCst(_)) =>
+                {
+                    continue;
+                }
+                Label::ObjEmpty => None,
+                Label::ObjLabel { .. } => Some(LabelNoname::ArgLabel),
+                Label::ObjOptional { .. } => Some(LabelNoname::ArgOptional),
+            };
+            let Some(arg) = args.next() else { break };
+            held.push(match arg_label {
+                Some(label) => self.hold_external_arg(label, &param.obj_arg_type, arg),
+                None => arg,
+            });
+        }
+        held.extend(args);
+        held
+    }
+
     pub(crate) fn external_polyvar_string_expr(
         &mut self,
         arg: Expr,
@@ -164,24 +313,10 @@ impl LambdaCompiler {
         }
     }
 
-    /// The literal tag and duplicable payload of a poly-variant block
-    /// `{NAME: "tag", VAL: value}`.
+    /// The literal tag and payload of a poly-variant block
+    /// `{NAME: "tag", VAL: value}`, which pass in place.
     fn literal_polyvar_block(&self, arg: Expr) -> Option<(crate::js_ir::arena::StrId, Expr)> {
-        let ExprKind::CamlBlock(items, _, tag) = self.j.ek(arg) else {
-            return None;
-        };
-        if !matches!(self.j.tag(tag), TagInfo::PolyVar(_)) {
-            return None;
-        }
-        match self.j.exprs(items) {
-            [key, value] => match self.j.ek(*key) {
-                ExprKind::Str(txt) if expression_has_no_side_effects(&self.j, *value) => {
-                    Some((txt, *value))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        literal_polyvar_block(&self.j, arg)
     }
 
     pub(crate) fn external_polyvar_event_exprs(
@@ -448,8 +583,12 @@ impl LambdaCompiler {
                     )
                 }
                 Some((first_scope, rest_scopes)) => {
+                    // A leading "default" scope is the module's default
+                    // export: import it as such, like
+                    // `external x: t = "default"`.
+                    let default = first_scope == "default";
                     let mut expr = JE::qualified(
-                        self.external_module_id(module_name, false, false),
+                        self.external_module_id(module_name, default, false),
                         Some(first_scope.clone()),
                         &mut self.j,
                     );
@@ -519,7 +658,7 @@ impl LambdaCompiler {
         let identity = matches!(
             self.j.ek(value),
             ExprKind::Null
-                | ExprKind::Object(_, _)
+                | ExprKind::Object(_)
                 | ExprKind::Number(_)
                 | ExprKind::CamlBlock(_, _, _)
                 | ExprKind::Array(_, _)
@@ -877,7 +1016,7 @@ impl LambdaCompiler {
             .map(|(name, value)| (self.prop_name(name), value))
             .collect();
         let props = self.j.prop_list(&props);
-        let object = JE::new(ExprKind::Object(None, props), &mut self.j);
+        let object = JE::new(ExprKind::Object(props), &mut self.j);
         let object = self.add_external_effect(effect, object);
 
         if optional_assignments.is_empty() {
@@ -955,19 +1094,76 @@ impl LambdaCompiler {
         )
     }
 
+    /// `Lam_compile_external_call.jsx_callee`: the function a JSX external
+    /// refers to. Translcore only builds `Pjsx` for `Decl_val` externals that
+    /// aren't the module itself.
+    pub(crate) fn jsx_callee(&mut self, decl: &ExternalDecl) -> Expr {
+        match (&decl.kind, &decl.module_) {
+            (DeclKind::DeclVal { name }, None) => {
+                self.translate_scoped_module_value(None, name, &decl.scopes)
+            }
+            (DeclKind::DeclVal { name }, Some(ModuleSource::ModuleNamed(emn))) => {
+                self.translate_scoped_module_value(Some(emn), name, &decl.scopes)
+            }
+            _ => unreachable!("Pjsx of an external that isn't a Decl_val"),
+        }
+    }
+
+    /// `Pjsx` (lam_compile_primitive.ml): the arguments are the tag, the
+    /// spread, the props, the children and the key. Optional props that are
+    /// statically `undefined` are left out.
+    pub(crate) fn compile_jsx(&mut self, jsx: &JsxElement, args: Vec<Expr>) -> Expr {
+        let mut args = args.into_iter();
+        let tag = args.next().expect("Pjsx without a tag");
+        let spread = jsx
+            .jsx_spread
+            .then(|| args.next().expect("Pjsx without its spread"));
+        let props = jsx
+            .jsx_props
+            .iter()
+            .zip(args.by_ref())
+            .filter(|((_, optional), value)| {
+                !(*optional && matches!(self.j.ek(*value), ExprKind::Undefined { .. }))
+            })
+            .map(|((name, _), value)| (name.clone(), value))
+            .collect::<Vec<_>>();
+        let children = jsx
+            .jsx_children
+            .map(|n| args.by_ref().take(n).collect::<Vec<_>>());
+        let key = match (jsx.jsx_key, args.next(), args.next()) {
+            (true, Some(key), None) => Some(self.external_optional_to_undefined_expr(key)),
+            (false, None, None) => None,
+            _ => unreachable!("Pjsx with a wrong number of arguments"),
+        };
+        let callee = self.jsx_callee(&jsx.jsx_ffi);
+        let props: Vec<_> = props
+            .into_iter()
+            .map(|(name, value)| (PropName::Lit(self.j.str(&name)), value))
+            .collect();
+        let props = self.j.prop_list(&props);
+        let children = children.map(|children| self.j.expr_list(&children));
+        let info = self.j.jsx_id(JsxInfo {
+            callee,
+            tag,
+            spread,
+            props,
+            children,
+            key,
+            multi: jsx.jsx_multi,
+            fragment: jsx.jsx_fragment,
+        });
+        self.j.expr(ExprKind::Jsx(info))
+    }
+
     /// `Lam_compile_external_call.translate_ffi`.
     pub(crate) fn compile_js_call(
         &mut self,
         prim_name: &str,
         arg_types: &[Param],
         decl: &ExternalDecl,
-        transformed_jsx: bool,
         args: Vec<Expr>,
     ) -> Expr {
-        let call_info = CallInfo {
-            call_transformed_jsx: transformed_jsx,
-            ..CallInfo::default()
-        };
+        let call_info = CallInfo::default();
         let splice = decl.variadic;
         let scopes = &decl.scopes;
         // a bare `@module` binds the module itself under the primitive name
@@ -1150,15 +1346,9 @@ impl LambdaCompiler {
                     [] => import,
                     [name] => self.wrap_then_path(import, &[js_export_name(name)]),
                     _ => {
-                        // a nested path is importable when the target is a
-                        // hoisted root-level export; the cmj knows
-                        let hoisted = self.module_path_resolver.as_ref().and_then(|resolver| {
-                            resolver.module_cmj_hoisted_export(module_.name(), path)
-                        });
-                        match hoisted {
-                            Some(hoisted_name) => {
-                                self.wrap_then_path(import, &[js_export_name(&hoisted_name)])
-                            }
+                        // Nested `make` values are importable through their flat export.
+                        match crate::lambda::flat_make_name(path) {
+                            Some(name) => self.wrap_then_path(import, &[js_export_name(&name)]),
                             None => {
                                 self.report_diagnostic(loc, invalid);
                                 JE::undefined(false, &mut self.j)

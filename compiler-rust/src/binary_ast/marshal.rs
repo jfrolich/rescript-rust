@@ -49,6 +49,7 @@ const CODE_SHARED32: u8 = 0x06;
 const CODE_BLOCK32: u8 = 0x08;
 const CODE_STRING8: u8 = 0x09;
 const CODE_STRING32: u8 = 0x0A;
+const CODE_DOUBLE_BIG: u8 = 0x0B;
 const CODE_DOUBLE_LITTLE: u8 = 0x0C;
 #[allow(dead_code)]
 const CODE_BLOCK64: u8 = 0x13;
@@ -306,8 +307,8 @@ pub struct MarshalWriter<'a> {
     /// and the `else raw_exp` branch; Rust clones that node, so we restore sharing
     /// here using the extension location as identity.
     /// Only consulted inside one `%external` expression and cleared when it
-    /// ends, so unrelated raw expansions at the same location (jsConverter's
-    /// `_map` and `_revMap`) are never merged.
+    /// ends, so unrelated raw expansions at the same location are never
+    /// merged.
     raw_expansion_expr_table: HashMap<LocIdx, u32>,
 
     /// Shared object index for the canonical `internal.expansive` attribute tuple.

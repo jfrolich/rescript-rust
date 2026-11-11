@@ -46,6 +46,17 @@ function exp {
   echo "$(dirname $1)/expected/$(basename $1).txt"
 }
 
+# Lists the .res and .resi files under the given directories in the array
+# files. The list is read before any test runs in the background: under MSYS
+# on Windows, starting background jobs while a loop reads the list from a file
+# corrupts what the loop reads.
+function listFiles {
+  files=()
+  while IFS= read -r file; do
+    files+=("$file")
+  done < <(find "$@" -name "*.res" -o -name "*.resi")
+}
+
 taskCount=0
 function maybeWait {
   let taskCount+=1
@@ -87,32 +98,32 @@ else
 fi
 
 # parsing
-find syntax_tests/data/parsing/{errors,infiniteLoops,recovery} -name "*.res" -o -name "*.resi" >temp/files.txt
-while read file; do
+listFiles syntax_tests/data/parsing/{errors,infiniteLoops,recovery}
+for file in "${files[@]}"; do
   $RES_PARSER -recover -print ml $file &> $(out $file) & maybeWait
-done <temp/files.txt
-find syntax_tests/data/parsing/{grammar,other} -name "*.res" -o -name "*.resi" >temp/files.txt
-while read file; do
+done
+listFiles syntax_tests/data/parsing/{grammar,other}
+for file in "${files[@]}"; do
   $RES_PARSER -print ml $file &> $(out $file) & maybeWait
-done <temp/files.txt
+done
 
 # printing
-find syntax_tests/data/{printer,conversion} -name "*.res" -o -name "*.resi" >temp/files.txt
-while read file; do
+listFiles syntax_tests/data/{printer,conversion}
+for file in "${files[@]}"; do
   $RES_PARSER $file &> $(out $file) & maybeWait
-done <temp/files.txt
+done
 
 # printing with ast conversion
-find syntax_tests/data/ast-mapping -name "*.res" -o -name "*.resi" >temp/files.txt
-while read file; do
+listFiles syntax_tests/data/ast-mapping
+for file in "${files[@]}"; do
   $RES_PARSER -test-ast-conversion -jsx-version 4 $file &> $(out $file) & maybeWait
-done <temp/files.txt
+done
 
 # printing with ppx
-find syntax_tests/data/ppx/react -name "*.res" -o -name "*.resi" >temp/files.txt
-while read file; do
+listFiles syntax_tests/data/ppx/react
+for file in "${files[@]}"; do
   $RES_PARSER -jsx-version 4 $file &> $(out $file) & maybeWait
-done <temp/files.txt
+done
 
 wait
 
@@ -237,18 +248,19 @@ if [[ $ROUNDTRIP_TEST = 1 ]]; then
   roundtripTestsResult="temp/result.txt"
   touch $roundtripTestsResult
 
-  find syntax_tests/data/{idempotency,printer} -name "*.res" -o -name "*.resi" >temp/files.txt
+  listFiles syntax_tests/data/printer
   if [[ -d "$TELLA_DIR" ]]; then
     echo "Including external roundtrip corpus: $TELLA_DIR"
-    find "$TELLA_DIR" \
+    while IFS= read -r file; do
+      files+=("$file")
+    done < <(find "$TELLA_DIR" \
       -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
-      -o -type f \( -name "*.res" -o -name "*.resi" \) -print >>temp/files.txt
+      -o -type f \( -name "*.res" -o -name "*.resi" \) -print)
   fi
-  sort -u temp/files.txt -o temp/files.txt
-  roundtripFileCount=$(wc -l < temp/files.txt | tr -d ' ')
+  roundtripFileCount=${#files[@]}
   echo "Roundtrip files: $roundtripFileCount"
 
-  while read file; do {
+  for file in "${files[@]}"; do {
     mkdir -p temp/$(dirname $file)
     sexpAst1=temp/$file.sexp
     sexpAst2=temp/$file.2.sexp
@@ -279,7 +291,7 @@ if [[ $ROUNDTRIP_TEST = 1 ]]; then
     diff --unified $rescript1 $rescript2
     [[ "$?" = 1 ]] && echo 1 > $roundtripTestsResult
   } & maybeWait
-  done <temp/files.txt
+  done
 
   wait
 

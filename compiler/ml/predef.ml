@@ -59,8 +59,6 @@ and ident_bigint = ident_create "bigint"
 
 and ident_string = ident_create "string"
 
-and ident_extension_constructor = ident_create "extension_constructor"
-
 and ident_unknown = ident_create "unknown"
 
 and ident_promise = ident_create "promise"
@@ -110,43 +108,72 @@ and path_string = Pident ident_string
 
 and path_unkonwn = Pident ident_unknown
 
-and path_extension_constructor = Pident ident_extension_constructor
-
 and path_promise = Pident ident_promise
 
 and path_tagged_template = Pident ident_tagged_template
 
-let type_int = newgenty (Tconstr (path_int, [], ref Mnil))
+(* Instantiation temporarily marks source type nodes while copying them. Keep
+   predefined nodes private to each domain so those marks cannot cross
+   concurrent compiler requests. *)
+let predefined_type path =
+  Domain.DLS.new_key (fun () -> newgenty (Tconstr (path, [], ref Mnil)))
 
-and type_char = newgenty (Tconstr (path_char, [], ref Mnil))
+let type_int_key = predefined_type path_int
+let type_int () = Domain.DLS.get type_int_key
+let type_char_key = predefined_type path_char
+let type_char () = Domain.DLS.get type_char_key
+let type_float_key = predefined_type path_float
+let type_float () = Domain.DLS.get type_float_key
+let type_bool_key = predefined_type path_bool
+let type_bool () = Domain.DLS.get type_bool_key
+let type_unit_key = predefined_type path_unit
+let type_unit () = Domain.DLS.get type_unit_key
+let type_exn_key = predefined_type path_exn
+let type_exn () = Domain.DLS.get type_exn_key
 
-and type_float = newgenty (Tconstr (path_float, [], ref Mnil))
+let type_array t = newgenty (Tconstr (path_array, [t], ref Mnil))
 
-and type_bool = newgenty (Tconstr (path_bool, [], ref Mnil))
+let type_iterable t = newgenty (Tconstr (path_iterable, [t], ref Mnil))
 
-and type_unit = newgenty (Tconstr (path_unit, [], ref Mnil))
-
-and type_exn = newgenty (Tconstr (path_exn, [], ref Mnil))
-
-and type_array t = newgenty (Tconstr (path_array, [t], ref Mnil))
-
-and type_iterable t = newgenty (Tconstr (path_iterable, [t], ref Mnil))
-
-and type_async_iterable t =
+let type_async_iterable t =
   newgenty (Tconstr (path_async_iterable, [t], ref Mnil))
 
-and type_list t = newgenty (Tconstr (path_list, [t], ref Mnil))
+let type_list t = newgenty (Tconstr (path_list, [t], ref Mnil))
 
-and type_option t = newgenty (Tconstr (path_option, [t], ref Mnil))
+let type_bigint_key = predefined_type path_bigint
+let type_bigint () = Domain.DLS.get type_bigint_key
 
-and type_bigint = newgenty (Tconstr (path_bigint, [], ref Mnil))
+let type_string_key = predefined_type path_string
+let type_string () = Domain.DLS.get type_string_key
 
-and type_string = newgenty (Tconstr (path_string, [], ref Mnil))
+let type_unknown_key = predefined_type path_unkonwn
+let type_unknown () = Domain.DLS.get type_unknown_key
 
-and type_unknown = newgenty (Tconstr (path_unkonwn, [], ref Mnil))
+let predefined_types =
+  [
+    (type_int_key, path_int);
+    (type_char_key, path_char);
+    (type_float_key, path_float);
+    (type_bool_key, path_bool);
+    (type_unit_key, path_unit);
+    (type_exn_key, path_exn);
+    (type_bigint_key, path_bigint);
+    (type_string_key, path_string);
+    (type_unknown_key, path_unkonwn);
+  ]
 
-and type_extension_constructor =
-  newgenty (Tconstr (path_extension_constructor, [], ref Mnil))
+let reset_for_request () =
+  List.iter
+    (fun (key, path) ->
+      Domain.DLS.set key (newgenty (Tconstr (path, [], ref Mnil))))
+    predefined_types
+
+let with_fresh action =
+  let previous =
+    List.map (fun (key, _) -> (key, Domain.DLS.get key)) predefined_types
+  in
+  Fun.protect action ~finally:(fun () ->
+      List.iter (fun (key, value) -> Domain.DLS.set key value) previous)
 
 let ident_match_failure = ident_create_predef_exn "Match_failure"
 
@@ -157,9 +184,6 @@ and ident_failure = ident_create_predef_exn "Failure"
 and ident_ok = ident_create_predef_exn "Ok"
 
 and ident_error = ident_create_predef_exn "Error"
-
-and ident_dict_magic_field_name =
-  ident_create Dict_type_helpers.dict_magic_field_name
 
 and ident_js_exn = ident_create_predef_exn "JsExn"
 
@@ -191,6 +215,7 @@ let decl_abstr =
     type_attributes = [];
     type_immediate = false;
     type_representation = Boxed;
+    type_shape = Unstated;
     type_inlined_types = [];
   }
 
@@ -233,11 +258,17 @@ let plain_variant (cstrs : Types.constructor_declaration list) =
            cstrs) )
 
 let common_initial_env add_type add_extension empty_env =
+  (* What [typeof] or [instanceof] recognizes a builtin type's values by,
+     as an annotation states it for a declared type *)
+  let recognized_as block_type decl =
+    {decl with type_shape = Recognized_as block_type}
+  in
   let decl_bool =
     {
       decl_abstr with
       type_kind = plain_variant [cstr ident_false []; cstr ident_true []];
       type_immediate = true;
+      type_shape = Recognized_as BooleanType;
     }
   and decl_unit =
     {
@@ -253,6 +284,7 @@ let common_initial_env add_type add_extension empty_env =
       type_params = [tvar];
       type_arity = 1;
       type_variance = [Variance.full];
+      type_shape = Recognized_as (InstanceType Array);
     }
   and decl_iterable =
     let tvar = newgenvar () in
@@ -302,38 +334,13 @@ let common_initial_env add_type add_extension empty_env =
     }
   and decl_dict =
     let tvar = newgenvar () in
-    (* Dicts are implemented as a single "magic" field record. This magic field
-       is the medium through which we can piggy back on the existing record pattern
-       matching mechanism. We do this by letting the compiler route any label lookup
-       for the dict record type to the magic field, which has the type of the values
-       of the dict.
-
-       So, this definition is important for the dict pattern matching functionality,
-       but not something intended to be exposed to the user. *)
     {
       decl_abstr with
-      type_attributes =
-        [
-          Dict_type_helpers.dict_attr;
-          (Location.mknoloc "live", Parsetree.PStr []);
-        ];
+      type_attributes = [(Location.mknoloc "live", Parsetree.PStr [])];
       type_params = [tvar];
       type_arity = 1;
       type_variance = [Variance.full];
-      type_kind =
-        Type_record
-          ( [
-              {
-                ld_id = ident_dict_magic_field_name;
-                ld_attributes = [Dict_type_helpers.dict_magic_field_attr];
-                ld_loc = Location.none;
-                ld_runtime_name = None;
-                ld_mutable = Immutable;
-                ld_optional = true;
-                ld_type = newgenty (Tconstr (path_option, [tvar], ref Mnil));
-              };
-            ],
-            Record_regular );
+      type_shape = Recognized_as ObjectType;
     }
   and decl_unknown =
     let tvar = newgenvar () in
@@ -348,12 +355,13 @@ let common_initial_env add_type add_extension empty_env =
               cd_id = ident_ctor_unknown;
               cd_runtime_tag = None;
               cd_args = Cstr_tuple [tvar];
-              cd_res = Some type_unknown;
+              cd_res = Some (type_unknown ());
               cd_loc = Location.none;
               cd_attributes = [];
             };
           ];
       type_representation = Types.Unboxed;
+      type_shape = Unstated;
     }
   and decl_promise =
     let tvar = newgenvar () in
@@ -362,6 +370,8 @@ let common_initial_env add_type add_extension empty_env =
       type_params = [tvar];
       type_arity = 1;
       type_variance = [Variance.covariant];
+      type_shape =
+        Recognized_as (InstanceType (Class {name = "Promise"; ancestors = []}));
     }
   and decl_tagged_template =
     let tvar1, tvar2 = (newgenvar (), newgenvar ()) in
@@ -369,7 +379,8 @@ let common_initial_env add_type add_extension empty_env =
       decl_abstr with
       type_params = [tvar1; tvar2];
       type_arity = 2;
-      type_variance = [Variance.full; Variance.full];
+      type_variance =
+        [Variance.conjugate Variance.covariant; Variance.covariant];
     }
   in
 
@@ -384,10 +395,7 @@ let common_initial_env add_type add_extension empty_env =
         ext_loc = Location.none;
         ext_attributes =
           [
-            ( {
-                Asttypes.txt = "ocaml.warn_on_literal_pattern";
-                loc = Location.none;
-              },
+            ( {Asttypes.txt = "warn_on_literal_pattern"; loc = Location.none},
               Parsetree.PStr [] );
           ];
         ext_is_exception = true;
@@ -395,12 +403,11 @@ let common_initial_env add_type add_extension empty_env =
   in
   empty_env
   |> add_type ident_bool decl_bool
-  |> add_type ident_int decl_abstr_imm
-  |> add_type ident_float decl_abstr
-  |> add_type ident_bigint decl_abstr
-  |> add_type ident_string decl_abstr
+  |> add_type ident_int (recognized_as NumberType decl_abstr_imm)
+  |> add_type ident_float (recognized_as NumberType decl_abstr)
+  |> add_type ident_bigint (recognized_as BigintType decl_abstr)
+  |> add_type ident_string (recognized_as StringType decl_abstr)
   |> add_type ident_unit decl_unit
-  |> add_type ident_extension_constructor decl_abstr
   |> add_type ident_exn decl_exn
   |> add_type ident_option decl_option
   |> add_type ident_result decl_result
@@ -413,23 +420,22 @@ let common_initial_env add_type add_extension empty_env =
   |> add_type ident_dict decl_dict
   |> add_type ident_unknown decl_unknown
   |> add_exception ident_undefined_recursive_module
-       [newgenty (Ttuple [type_string; type_int; type_int])]
+       [newgenty (Ttuple [type_string (); type_int (); type_int ()])]
   |> add_exception ident_assert_failure
-       [newgenty (Ttuple [type_string; type_int; type_int])]
+       [newgenty (Ttuple [type_string (); type_int (); type_int ()])]
   |> add_exception ident_division_by_zero []
   |> add_exception ident_end_of_file []
   |> add_exception ident_not_found []
-  |> add_exception ident_failure [type_string]
-  |> add_exception ident_js_exn [type_unknown]
-  |> add_exception ident_invalid_argument [type_string]
+  |> add_exception ident_failure [type_string ()]
+  |> add_exception ident_js_exn [type_unknown ()]
+  |> add_exception ident_invalid_argument [type_string ()]
   |> add_exception ident_match_failure
-       [newgenty (Ttuple [type_string; type_int; type_int])]
+       [newgenty (Ttuple [type_string (); type_int (); type_int ()])]
 
 let build_initial_env add_type add_exception empty_env =
   let common = common_initial_env add_type add_exception empty_env in
-  let decl_type_char =
-    {decl_abstr with type_manifest = Some type_int; type_private = Private}
-  in
+  (* [char] is an alias of [int]: a char literal is its code point. *)
+  let decl_type_char = {decl_abstr with type_manifest = Some (type_int ())} in
   add_type ident_char decl_type_char common
 
 let () =

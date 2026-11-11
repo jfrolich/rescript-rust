@@ -1,0 +1,20 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_arrow_label_shared_by_instances.res[0m:[2m4:5-10:1[0m
+
+   2 [2m│[0m module M: {
+   3 [2m│[0m   let v: string
+   [1;31m4[0m [2m│[0m } = [1;31m{[0m
+   [1;31m5[0m [2m│[0m [1;31m  let f: (~l0: int) => int = %raw(`0`)[0m
+   [2m.[0m [2m│[0m [2m...[0m
+   [1;31m9[0m [2m│[0m [1;31m  let v = 1[0m
+  [1;31m10[0m [2m│[0m [1;31m}[0m
+  11 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/module_types_arrow_label_shared_by_instances.res[0m:[2m9:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_arrow_label_shared_by_instances.res[0m:[2m3:3-15[0m):
+    let v: string

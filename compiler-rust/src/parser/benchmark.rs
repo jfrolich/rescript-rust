@@ -762,6 +762,7 @@ mod tests {
                     &sig,
                     comments,
                     crate::parser::printer::DEFAULT_PRINT_WIDTH,
+                    "\n",
                     parser.arena_mut(),
                 )
             } else {
@@ -772,6 +773,7 @@ mod tests {
                     &structure,
                     comments,
                     crate::parser::printer::DEFAULT_PRINT_WIDTH,
+                    "\n",
                     parser.arena_mut(),
                 )
             };

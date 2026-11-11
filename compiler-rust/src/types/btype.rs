@@ -27,13 +27,13 @@ use std::borrow::Cow;
 /// Check if a type is a type variable (Tvar).
 pub fn is_tvar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tvar(..))
 }
 
 /// Check if a type is a universal type variable (Tunivar).
 pub fn is_tunivar(ctx: &TypeContext, t: TypeExprRef) -> bool {
     let t = ctx.repr(t);
-    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(_))
+    matches!(*ctx.borrow_desc(t), TypeDesc::Tunivar(..))
 }
 
 /// Check if a type is a type constructor (Tconstr).
@@ -300,7 +300,7 @@ where
     let children = {
         let desc = ctx.borrow_desc(ty);
         match &*desc {
-            TypeDesc::Tvar(_) => Children::None,
+            TypeDesc::Tvar(..) => Children::None,
             // compiler/ml/btype.ml:258-260 visits every n-ary parameter, then the return.
             TypeDesc::Tarrow { args, ret } => {
                 let mut children = ctx
@@ -512,7 +512,7 @@ fn proxy_obj(ctx: &TypeContext, ty: TypeExprRef, original: TypeExprRef) -> TypeE
             let t = *t;
             proxy_obj(ctx, t, original)
         }
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => ty,
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. } => ty,
         TypeDesc::Tnil => original,
         _ => original,
     }

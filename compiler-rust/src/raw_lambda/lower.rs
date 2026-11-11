@@ -123,6 +123,11 @@ impl Lowering<'_> {
                 let handler = self.lower(handler);
                 self.a.try_with(body, id, handler)
             }
+            Node::TryFinally { body, finally } => {
+                let body = self.lower(body);
+                let finally = self.lower(finally);
+                self.a.try_finally(body, finally)
+            }
             Node::If { cond, then_, else_ } => {
                 let else_ = self.lower(else_);
                 let then_ = self.lower(then_);
@@ -171,11 +176,9 @@ impl Lowering<'_> {
         let payload = self.a.apply_payload(info);
         let ap_info = ApInfo {
             loc: payload.info.loc,
-            inlined: payload.info.inlined,
             status: ApplyStatus::Uncurry,
         };
-        let transformed_jsx = payload.transformed_jsx;
-        make_apply(self.a, func, &args, ap_info, transformed_jsx)
+        make_apply(self.a, func, &args, ap_info)
     }
 
     fn lower_primitive(&mut self, info: PrimId, raw_args: LamList) -> Lam {
@@ -252,22 +255,9 @@ impl Lowering<'_> {
     fn lower_switch(&mut self, scrut: RawLambda, actions: LamList, info: SwitchId) -> Lam {
         // `convert_switch` builds the switch record before passing the
         // scrutinee to `Lam.switch` (OCaml evaluates right to left).
-        let payload = self.a.switch_payload(info);
-        let const_only_switch = !payload.has_fail && payload.n_blocks() == 0 && payload.blocks_full;
         let lowered = self.lower_list(actions);
         let scrutinee = self.lower(scrut);
         let a = &mut *self.a;
-
-        if const_only_switch && let Some(diff) = happens_to_be_diff(a, info, &lowered) {
-            if diff == 0 {
-                return scrutinee;
-            }
-            let diff = a.const_(Constant::Int {
-                i: diff,
-                comment: None,
-            });
-            return a.prim(Primitive::Paddint, &[scrutinee, diff], LamLoc::NONE);
-        }
 
         let actions = a.add_list(&lowered);
         a.switch_raw(scrutinee, actions, info)
@@ -313,10 +303,8 @@ pub(crate) fn wrap_exn_raw(b: &RawArena, loc: LamLoc, arg: RawLambda) -> RawLamb
         &[arg],
         ApInfo {
             loc,
-            inlined: crate::lambda::InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
-        false,
     )
 }
 
@@ -340,10 +328,8 @@ pub(crate) fn wrap_exn(loc: LamLoc, arg: Lambda) -> Lambda {
         vec![arg],
         ApInfo {
             loc,
-            inlined: crate::lambda::InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
-        false,
     )
 }
 
@@ -360,8 +346,10 @@ fn collect_exported_idents(a: &LamArena, raw: RawLambda, exports: &mut HashSet<I
 pub(crate) fn lower_constant(constant: Constant) -> Constant {
     match constant {
         Constant::Constructor(tag) if tag.name == "()" => Constant::JsUndefined { is_unit: true },
+        // lambda.ml `const_constructor`: the empty list stays a constructor,
+        // printed as `0 /* [] */`.
         Constant::Constructor(tag) => match tag.literal {
-            Some(crate::types::VariantLiteralTag::Int(value)) => Constant::Int {
+            crate::types::VariantLiteralTag::Int(value) if tag.name != "[]" => Constant::Int {
                 i: value as i32,
                 comment: None,
             },
@@ -477,20 +465,18 @@ fn is_valid_hash_number(value: &str) -> bool {
 }
 
 /// `Lambda.apply` (lambda.ml): eta-reduce an applied primitive wrapper and
-/// push the application under `let`s that bind a function.
-fn make_apply(
-    a: &mut LamArena,
-    func: Lam,
-    args: &[Lam],
-    ap_info: ApInfo,
-    ap_transformed_jsx: bool,
-) -> Lam {
+/// push the application under `let`s that bind a function. An async function
+/// or one with a directive stays a function (lambda.ml:1096-1097,
+/// `lfunction_can_be_inlined`).
+fn make_apply(a: &mut LamArena, func: Lam, args: &[Lam], ap_info: ApInfo) -> Lam {
     match a.node(func) {
         Node::Function { body, info } => {
-            if let Some(reduced) = eta_reduce_function_apply(a, info, body, args, &ap_info) {
+            if crate::lambda::lam_analysis::lfunction_can_be_inlined(a, info)
+                && let Some(reduced) = eta_reduce_function_apply(a, info, body, args, &ap_info)
+            {
                 return reduced;
             }
-            a.apply_raw(func, args, ap_info, ap_transformed_jsx)
+            a.apply_raw(func, args, ap_info)
         }
         Node::Let {
             kind,
@@ -498,10 +484,10 @@ fn make_apply(
             value,
             body,
         } if matches!(a.node(body), Node::Function { .. }) => {
-            let body = make_apply(a, body, args, ap_info, ap_transformed_jsx);
+            let body = make_apply(a, body, args, ap_info);
             a.let_with(kind, id, value, body)
         }
-        _ => a.apply_raw(func, args, ap_info, ap_transformed_jsx),
+        _ => a.apply_raw(func, args, ap_info),
     }
 }
 
@@ -526,7 +512,7 @@ fn eta_reduce_function_apply(
             let wrap = wrap.clone();
             let (inner, inner_args, _) = a.as_prim(*inner_call)?;
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             // lambda.ml `apply` builds the result through the folding `prim`.
             let inner = a.prim(inner, &eta_args, ap_info.loc);
             Some(a.prim(wrap, &[inner], ap_info.loc))
@@ -542,7 +528,7 @@ fn eta_reduce_function_apply(
         )) => None,
         Some((inner, inner_args, _)) => {
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             Some(a.prim(inner, &eta_args, ap_info.loc))
         }
         None => {
@@ -554,19 +540,26 @@ fn eta_reduce_function_apply(
                 return None;
             }
             let inner = inner.clone();
-            let eta_args = eta_conversion_args(a, &params, inner_args, args)?;
+            let eta_args = eta_conversion_args(a, &inner, &params, inner_args, args)?;
             let call = a.prim(inner, &eta_args, ap_info.loc);
             Some(a.seq(call, second))
         }
     }
 }
 
+/// `Lambda.is_eta_conversion_exn` behind `evaluates_args_as_call`
+/// (lambda.ml:760-771): `&&` and `||` may skip their right operand, so the
+/// call's argument for it must be one whose evaluation does nothing.
 fn eta_conversion_args(
     a: &LamArena,
+    primitive: &Primitive,
     params: &[Ident],
     inner_args: &[Lam],
     outer_args: &[Lam],
 ) -> Option<Vec<Lam>> {
+    if !a.evaluates_args_as_call(primitive, outer_args) {
+        return None;
+    }
     if params.len() != inner_args.len() || params.len() != outer_args.len() {
         return None;
     }
@@ -743,38 +736,6 @@ fn lower_primitive_default(a: &mut LamArena, info: PrimId, args: &[Lam]) -> Lam 
     a.prim_with_id(info, args)
 }
 
-fn int_constant_value(a: &LamArena, lam: Lam) -> Option<i32> {
-    match a.as_const(lam)? {
-        Constant::Int { i, comment: None } => Some(*i),
-        Constant::NativeInt { i, comment: None } => i32::try_from(*i).ok(),
-        _ => None,
-    }
-}
-
-fn happens_to_be_diff(a: &LamArena, info: SwitchId, actions: &[Lam]) -> Option<i32> {
-    if !matches!(
-        a.switch_payload(info).dispatch,
-        crate::lambda::SwitchDispatch::Direct
-    ) {
-        return None;
-    }
-    let keys = a.switch_const_keys(info);
-    if keys.len() < 2 {
-        return None;
-    }
-    let mut diff = None;
-    for (key, lam) in keys.iter().zip(actions) {
-        let crate::lambda::SwitchKey::Int(value) = key else {
-            return None;
-        };
-        let d = int_constant_value(a, *lam)?.checked_sub(*value)?;
-        if *diff.get_or_insert(d) != d {
-            return None;
-        }
-    }
-    diff
-}
-
 /// A module block whose fields are, in order, all fields of one module:
 /// that module (lambda.ml `Lambda.prim`, `Blk_module`).
 fn collapse_module_alias(a: &LamArena, fields: &[String], args: &[Lam]) -> Option<Lam> {
@@ -896,7 +857,6 @@ pub fn lower_to_lambda(arena: LamArena, raw: RawLambda) -> Lambda {
 mod tests {
     use super::*;
 
-    use crate::lambda::InlineAttribute;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::{ConstructorRuntimeTag, ConstructorTag};
     use crate::lambda::lam_primitive::{JsRawInfo, Mutable};
@@ -931,10 +891,8 @@ mod tests {
             &[b.var(arg)],
             ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
-            false,
         );
 
         let lowered = lower_to_lambda(b.into_inner(), raw);
@@ -966,10 +924,8 @@ mod tests {
             &[b.var(lhs), b.var(rhs)],
             ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
-            false,
         );
 
         let lowered = lower_to_lambda(b.into_inner(), raw);
@@ -1343,7 +1299,9 @@ mod tests {
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: crate::name::Name::new("A"),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "A".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -1359,9 +1317,6 @@ mod tests {
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "A".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 },
@@ -1419,7 +1374,9 @@ mod tests {
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
                                         name: crate::name::Name::new("A"),
-                                        literal: None,
+                                        literal: crate::types::VariantLiteralTag::String(
+                                            "A".to_string(),
+                                        ),
                                     },
                                 ),
                             ),
@@ -1430,7 +1387,9 @@ mod tests {
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
                                         name: crate::name::Name::new("B"),
-                                        literal: None,
+                                        literal: crate::types::VariantLiteralTag::String(
+                                            "B".to_string(),
+                                        ),
                                     },
                                 ),
                             ),
@@ -1448,9 +1407,6 @@ mod tests {
                                 crate::types::VariantLiteralTag::String("B".to_string().clone()),
                                 crate::types::VariantLiteralTag::String("A".to_string().clone()),
                             ],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 },

@@ -17,7 +17,7 @@ else ifeq ($(UNAME_S),Darwin)
 	ifeq ($(UNAME_M),arm64)
 		RESCRIPT_PLATFORM := darwin-arm64
 	else
-		RESCRIPT_PLATFORM := darwin-x64
+		$(error Intel Macs are not supported anymore, use ReScript 12)
 	endif
 else ifeq ($(UNAME_S),Linux)
 	ifeq ($(UNAME_M),aarch64)
@@ -80,6 +80,7 @@ $(YARN_INSTALL_STAMP): $(YARN_INSTALL_SOURCES)
 REWATCH_SOURCES = $(shell find rewatch/src rewatch/cli -name '*.rs') rewatch/Cargo.toml rewatch/cli/Cargo.toml rewatch/Cargo.lock \
 	$(wildcard packages/@rescript/runtime/*.res packages/@rescript/runtime/*.resi) packages/@rescript/runtime/rescript.json
 RESCRIPT_EXE = $(BIN_DIR)/rescript.exe
+RESCRIPT_OCAML_EXE := $(BIN_DIR)/rescript-ocaml.exe
 ifdef CI
 	REWATCH_PROFILE := release
 	REWATCH_CARGO_FLAGS := --release
@@ -108,9 +109,9 @@ clean-rewatch:
 
 # Compiler
 
-COMPILER_SOURCE_DIRS := compiler tests analysis tools
-COMPILER_SOURCES = $(shell find $(COMPILER_SOURCE_DIRS) -type f \( -name '*.ml' -o -name '*.mli' -o -name '*.dune' -o -name dune -o -name dune-project \))
-COMPILER_BIN_NAMES := bsc rescript-editor-analysis rescript-tools
+COMPILER_SOURCE_DIRS := compiler tests analysis tools rewatch-ocaml
+COMPILER_SOURCES = $(shell find $(COMPILER_SOURCE_DIRS) -type f \( -name '*.ml' -o -name '*.mli' -o -name '*.c' -o -name '*.h' -o -name '*.dune' -o -name dune -o -name dune-project \))
+COMPILER_BIN_NAMES := bsc rescript-editor-analysis rescript-tools rescript-ocaml
 COMPILER_EXES := $(addsuffix .exe,$(addprefix $(BIN_DIR)/,$(COMPILER_BIN_NAMES)))
 
 compiler: $(COMPILER_EXES)
@@ -220,6 +221,9 @@ test-gentype: lib
 test-rewatch: lib
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
 
+test-rewatch-rust: lib rewatch
+	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+
 test-all: test test-gentype test-analysis test-tools test-rewatch
 
 # Playground
@@ -270,6 +274,17 @@ format: | $(YARN_INSTALL_STAMP)
 checkformat: | $(YARN_INSTALL_STAMP)
 	./scripts/format_check.sh
 
+# Semantic diff: renders the commit records of SEMANTIC_DIFF_BASE..HEAD
+# (scripts/commitRecords.js) to _build/semantic-diff.html and opens it
+
+SEMANTIC_DIFF_BASE ?= master
+
+semantic-diff:
+	mkdir -p _build
+	node scripts/commitRecords.js --out _build/semantic-diff.html --title "$$(git branch --show-current)" $(SEMANTIC_DIFF_BASE)..HEAD
+	@if command -v open >/dev/null; then open _build/semantic-diff.html; \
+	elif command -v xdg-open >/dev/null; then xdg-open _build/semantic-diff.html; fi
+
 # Coverage (bisect_ppx)
 #
 # Requires the pending `bisect_ppx` OCaml 5.5 compatibility patch in your switch:
@@ -313,9 +328,13 @@ COVERAGE_TEST_ENV := BISECT_FILE=$(COVERAGE_BISECT_PREFIX) BISECT_SILENT=YES
 .PHONY: coverage-build
 coverage-build: | $(YARN_INSTALL_STAMP)
 	dune build --instrument-with bisect_ppx
-	@$(foreach bin,$(COMPILER_BIN_NAMES), \
+	@$(foreach bin,$(filter-out rescript-ocaml,$(COMPILER_BIN_NAMES)), \
 		cp $(DUNE_BIN_DIR)/$(bin)$(PLATFORM_EXE_EXT) $(BIN_DIR)/$(bin).exe && \
 		chmod 755 $(BIN_DIR)/$(bin).exe;)
+ifneq ($(OS),Windows_NT)
+	cp _build/default/rewatch-ocaml/rescript_ocaml.exe $(RESCRIPT_OCAML_EXE)
+	chmod 755 $(RESCRIPT_OCAML_EXE)
+endif
 
 .PHONY: coverage-prepare
 coverage-prepare: clean-coverage coverage-build
@@ -399,4 +418,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser rust-test-ast clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean

@@ -124,11 +124,13 @@ let pat sub {pat_extra; pat_desc; pat_env; _} =
   match pat_desc with
   | Tpat_any -> ()
   | Tpat_var _ -> ()
-  | Tpat_constant _ -> ()
+  | Tpat_constant _ | Tpat_interval _ -> ()
   | Tpat_tuple l -> List.iter (sub.pat sub) l
   | Tpat_construct (_, _, l) -> List.iter (sub.pat sub) l
   | Tpat_variant (_, po, _) -> Option.iter (sub.pat sub) po
   | Tpat_record (l, _, _rest) -> List.iter (fun (_, _, i, _) -> sub.pat sub i) l
+  | Tpat_dict entries ->
+    List.iter (fun {tdp_pattern} -> sub.pat sub tdp_pattern) entries
   | Tpat_array l -> List.iter (sub.pat sub) l
   | Tpat_or (p1, p2, _) ->
     sub.pat sub p1;
@@ -159,24 +161,27 @@ let expr sub {exp_extra; exp_desc; exp_env; _} =
     sub.expr sub exp;
     sub.cases sub list1;
     sub.cases sub list2
-  | Texp_try (exp, cases) ->
+  | Texp_try (exp, cases, finally) ->
     sub.expr sub exp;
-    sub.cases sub cases
+    sub.cases sub cases;
+    Option.iter (sub.expr sub) finally
   | Texp_tuple list -> List.iter (sub.expr sub) list
   | Texp_construct (_, _, args) -> List.iter (sub.expr sub) args
   | Texp_variant (_, expo) -> Option.iter (sub.expr sub) expo
   | Texp_record {fields; extended_expression; _} ->
-    Array.iter
-      (function
-        | _, Kept _, _ -> ()
-        | _, Overridden (_, exp), _ -> sub.expr sub exp)
-      fields;
+    Array.iter (fun (_, _, exp) -> sub.expr sub exp) fields;
     Option.iter (sub.expr sub) extended_expression
   | Texp_field (exp, _, _) -> sub.expr sub exp
   | Texp_setfield (exp1, _, _, exp2) ->
     sub.expr sub exp1;
     sub.expr sub exp2
   | Texp_array list -> List.iter (sub.expr sub) list
+  | Texp_dict entries ->
+    List.iter
+      (function
+        | Tdict_entry (_, exp) | Tdict_spread exp -> sub.expr sub exp)
+      entries
+  | Texp_spread (_, parts) -> List.iter (sub.expr sub) parts
   | Texp_ifthenelse (exp1, exp2, expo) ->
     sub.expr sub exp1;
     sub.expr sub exp2;
@@ -216,7 +221,6 @@ let expr sub {exp_extra; exp_desc; exp_env; _} =
     sub.expr sub exp
   | Texp_assert exp -> sub.expr sub exp
   | Texp_pack mexpr -> sub.module_expr sub mexpr
-  | Texp_extension_constructor _ -> ()
 
 let package_type sub {pack_fields; _} =
   List.iter (fun (_, p) -> sub.typ sub p) pack_fields

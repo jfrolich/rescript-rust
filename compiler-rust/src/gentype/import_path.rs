@@ -5,14 +5,6 @@ use std::path::Path;
 /// An import path: a directory and a file name within it.
 pub type T = (String, String);
 
-/// The path of the runtime's `curry.js`.
-pub fn bs_curry_path(config: &crate::gentype::config::T) -> T {
-    (
-        String::new(),
-        crate::gentype::config::get_bs_curry_path(config),
-    )
-}
-
 /// The path of module `module_name` in `dir`, with `import_extension`.
 pub fn from_module(
     dir: &str,

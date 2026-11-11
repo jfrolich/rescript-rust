@@ -17,6 +17,8 @@ use super::ast::*;
 use super::longident::Longident;
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena, StrIdx};
 
+mod mapper;
+
 /// Component description type - mirrors OCaml's componentDescription
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ComponentDescription {
@@ -38,14 +40,56 @@ pub struct JsxConfig {
     pub has_component: bool,
     /// File name (without extension, capitalized) for module naming
     pub file_name: String,
-    /// First fatal PPX diagnostic found while transforming.
-    pub fatal_error: Option<JsxPreprocessorError>,
-    /// Per expression index: whether `transform_expression` may change its
-    /// subtree, or `None` when not computed yet.
-    unchanged_memo: Vec<Option<bool>>,
+    /// Per expression index: 0 unknown, 1 the mapper leaves its subtree
+    /// unchanged, 2 it may change (see `mapper::subtree_may_change`).
+    unchanged_memo: Vec<u8>,
+    /// Warnings in the order the mapper raises them (`Location.prerr_warning`
+    /// prints each one when it is raised). An error ends the mapping, so the
+    /// warnings collected then are the ones OCaml printed before raising it.
+    warnings: Vec<JsxPreprocessorWarning>,
     /// OCaml `empty_loc = Location.in_file file_name` (jsx_v4.ml:1021-1022):
     /// the location of the nodes `map_binding` generates for a component.
     pub empty_loc: Location,
+}
+
+/// The part of [`JsxConfig`] that `@@jsxConfig` and component definitions
+/// change inside one structure or signature, and that the mapper restores when
+/// the structure or signature ends (jsx_ppx.ml:93-104 `save_config` /
+/// `restore_config`).
+struct JsxConfigScope {
+    version: i32,
+    module_name: String,
+    has_component: bool,
+}
+
+impl JsxConfig {
+    /// The result of a run of the mapper with the warnings it raised: those
+    /// before its error when it failed, since the error ended the mapping.
+    fn finish<T>(
+        &mut self,
+        result: JsxPreprocessorResult<T>,
+    ) -> (JsxPreprocessorResult<T>, Vec<JsxPreprocessorWarning>) {
+        (result, std::mem::take(&mut self.warnings))
+    }
+
+    /// jsx_ppx.ml:106-107, 122-123: save the scope and reset `has_component`
+    /// on entering a structure or signature.
+    fn enter_scope(&mut self) -> JsxConfigScope {
+        let scope = JsxConfigScope {
+            version: self.version,
+            module_name: self.module_name.clone(),
+            has_component: self.has_component,
+        };
+        self.has_component = false;
+        scope
+    }
+
+    /// jsx_ppx.ml:117, 133: restore the scope saved on entry.
+    fn exit_scope(&mut self, scope: JsxConfigScope) {
+        self.version = scope.version;
+        self.module_name = scope.module_name;
+        self.has_component = scope.has_component;
+    }
 }
 
 impl Default for JsxConfig {
@@ -56,8 +100,8 @@ impl Default for JsxConfig {
             nested_modules: vec![],
             has_component: false,
             file_name: String::new(),
-            fatal_error: None,
             unchanged_memo: Vec::new(),
+            warnings: Vec::new(),
             empty_loc: Location::none(),
         }
     }
@@ -120,6 +164,8 @@ pub struct JsxPreprocessorWarning {
     pub end_pos: crate::location::Position,
     /// The warning text.
     pub message: String,
+    /// Reported as warning 3 (`Location.deprecated`) instead of 22.
+    pub deprecated: bool,
 }
 
 /// Fatal JSX PPX diagnostic.
@@ -153,8 +199,6 @@ impl std::error::Error for JsxPreprocessorError {}
 /// Result of a JSX PPX transformation.
 pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
 
-const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
-    "Only one JSX component call can exist on a component at one time";
 const REACT_COMPONENT_DESTRUCTURE_MSG: &str = "JSX component calls cannot be destructured.";
 const MULTIPLE_COMPONENT_DEFINITIONS_MSG: &str = "Only one component definition is allowed for each module. Move to a submodule or other file if necessary.";
 const COMPONENT_WITH_PROPS_EXTERNAL_MSG: &str = "Components cannot be defined as externals when using @react.componentWithProps.\n\nIf you intended to define an external for a React component using a props type,\nuse the type React.component<props> instead.\nAlternatively, use @react.component for an external definition with labeled arguments.";
@@ -162,6 +206,9 @@ const COMPONENT_WITH_PROPS_FORWARD_REF_MSG: &str = "Components using React.forwa
 const COMPONENT_KEY_PROP_MSG: &str = "Key cannot be accessed inside of a component. Don't worry - you can always key a component from its parent!";
 const COMPONENT_DUPLICATE_PROP_MSG_PREFIX: &str = "The prop `";
 const COMPONENT_DUPLICATE_PROP_MSG_SUFFIX: &str = "` is defined several times in this component.";
+/// jsx_ppx.ml:69-70.
+const UNSUPPORTED_JSX_VERSION_MSG: &str =
+    "Unsupported JSX version. Only `version: 4` is supported.";
 const COMPONENT_PROPS_NEED_LABELLED_MSG: &str = "React: props need to be labelled arguments.\nIf you are working with refs be sure to wrap with React.forwardRef.\nIf your component doesn't have any props use () or _ instead of a name.";
 const COMPONENT_CALL_NEEDS_FUNCTION_MSG: &str = "JSX component calls can only be on function definitions or component wrappers (forwardRef, memo).";
 const STRING_INT_ATTR_UNSUPPORTED_MSG: &str = "@string and @int attributes not supported. See https://github.com/rescript-lang/rescript-compiler/issues/5724";
@@ -181,30 +228,13 @@ pub fn transform_structure_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Structure> {
-    let (structure, _) = transform_structure_with_warnings_result(
-        structure,
-        initial_version,
-        initial_module,
-        arena,
-    )?;
-    Ok(structure)
+    transform_structure_collecting_warnings(structure, initial_version, initial_module, arena).0
 }
 
-/// Transform a structure and collect JSX preprocessor warnings.
-pub fn transform_structure_with_warnings_result(
-    structure: Structure,
-    initial_version: i32,
-    initial_module: &str,
-    arena: &mut ParseArena,
-) -> JsxPreprocessorResult<(Structure, Vec<JsxPreprocessorWarning>)> {
-    let (result, warnings) =
-        transform_structure_collecting_warnings(structure, initial_version, initial_module, arena);
-    result.map(|structure| (structure, warnings))
-}
-
-/// Like [`transform_structure_with_warnings_result`], but also returns the
-/// warnings reported before a fatal error: OCaml prints each warning as it is
-/// raised (`Location.prerr_warning`), before the error escapes.
+/// Transform a structure and collect the JSX preprocessor warnings, including
+/// those raised before an error: OCaml prints each warning as it is raised
+/// (`Location.prerr_warning`), before the error escapes, so a caller prints
+/// them whatever the result.
 pub fn transform_structure_collecting_warnings(
     structure: Structure,
     initial_version: i32,
@@ -234,16 +264,9 @@ pub fn transform_structure_collecting_warnings(
         ..Default::default()
     };
 
-    let mut warnings = vec![];
-    let mut result = vec![];
-    for item in structure {
-        let items = transform_structure_item_multi(item, &mut config, arena, &mut warnings);
-        if let Some(error) = config.fatal_error.take() {
-            return (Err(error), warnings);
-        }
-        result.extend(items);
-    }
-    (Ok(result), warnings)
+    // `mapper.structure mapper code` (jsx_ppx.ml:149-160).
+    let result = mapper::structure(structure, &mut config, arena);
+    config.finish(result)
 }
 
 /// Transform a signature, applying JSX PPX transformations.
@@ -253,22 +276,21 @@ pub fn transform_signature_result(
     initial_module: &str,
     arena: &mut ParseArena,
 ) -> JsxPreprocessorResult<Signature> {
-    let (signature, _) = transform_signature_with_warnings_result(
-        signature,
-        initial_version,
-        initial_module,
-        arena,
-    )?;
-    Ok(signature)
+    transform_signature_collecting_warnings(signature, initial_version, initial_module, arena).0
 }
 
-/// Transform a signature and collect JSX preprocessor warnings.
-pub fn transform_signature_with_warnings_result(
+/// Transform a signature and collect the JSX preprocessor warnings, including
+/// those raised before an error (see
+/// [`transform_structure_collecting_warnings`]).
+pub fn transform_signature_collecting_warnings(
     signature: Signature,
     initial_version: i32,
     initial_module: &str,
     arena: &mut ParseArena,
-) -> JsxPreprocessorResult<(Signature, Vec<JsxPreprocessorWarning>)> {
+) -> (
+    JsxPreprocessorResult<Signature>,
+    Vec<JsxPreprocessorWarning>,
+) {
     // Extract file name from first item's location
     let file_name = signature
         .first()
@@ -289,75 +311,53 @@ pub fn transform_signature_with_warnings_result(
         ..Default::default()
     };
 
-    let mut result = vec![];
-    let mut warnings = vec![];
-    for item in signature {
-        let items = transform_signature_item_multi(item, &mut config, arena, &mut warnings);
-        if let Some(error) = config.fatal_error.take() {
-            return Err(error);
-        }
-        result.extend(items);
-    }
-    Ok((result, warnings))
+    // `mapper.signature mapper code` (jsx_ppx.ml:162-173).
+    let result = mapper::signature(signature, &mut config, arena);
+    config.finish(result)
 }
 
 // ============================================================================
 // Structure Item Transformation
 // ============================================================================
 
-/// Transform a structure item, potentially returning multiple items
-/// (e.g., props type + transformed function)
-fn transform_structure_item_multi(
+/// `Jsx_v4.transform_structure_item` (jsx_v4.ml:948-1052): the component
+/// transform of an item the mapper has already mapped, at version 4. Only
+/// externals and value bindings change.
+fn transform_structure_item4(
     item: StructureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Vec<StructureItem> {
-    // Check for @@jsxConfig attribute
-    if let StructureItemDesc::Pstr_attribute(attr) = &item.pstr_desc {
-        if arena.get_string(attr.0.txt) == "jsxConfig" {
-            update_config_from_attribute(arena, attr, config);
-        }
-        return vec![item];
-    }
-
-    // Only transform if version is 4
-    if config.version != 4 {
-        return vec![item];
-    }
-
+) -> JsxPreprocessorResult<Vec<StructureItem>> {
     // Handle Pstr_value with potential @react.component
     if let StructureItemDesc::Pstr_value(val_inner) = item.pstr_desc {
         let (rec_flag, bindings) = val_inner;
         let bindings = arena.vb_list(bindings).to_vec();
-        return transform_value_bindings(
-            rec_flag,
-            bindings,
-            &item.pstr_loc,
-            config,
-            arena,
-            warnings,
-        );
+        return transform_value_bindings(rec_flag, bindings, &item.pstr_loc, config, arena);
     }
 
     // Handle Pstr_primitive (external) with potential @react.component
     if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
-        let component_attr_count = count_react_component_attrs(arena, &vd.pval_attributes);
-        let component_with_props_attr_count =
-            count_react_component_with_props_attrs(arena, &vd.pval_attributes);
-
-        match (component_attr_count, component_with_props_attr_count) {
-            (0, 0) => {}
-            (_, 1) => {
-                set_fatal_error_with_style(
-                    config,
+        let taken = take_component_with_props_payload(
+            arena,
+            vd.pval_jsx_component.as_deref(),
+            &vd.pval_attributes,
+            &mut config.warnings,
+        );
+        let (pval_jsx_component, pval_attributes) = match &taken {
+            Some((component, attrs)) => (Some(component), attrs),
+            None => (vd.pval_jsx_component.as_deref(), &vd.pval_attributes),
+        };
+        reject_leftover_component_attrs(arena, pval_attributes)?;
+        match pval_jsx_component.map(|c| &c.pjc_kind) {
+            None => {}
+            Some(JsxComponentKind::WithProps) => {
+                return Err(jsx_error_with_style(
                     item.pstr_loc,
                     COMPONENT_WITH_PROPS_EXTERNAL_MSG,
                     JsxPreprocessorMessageStyle::FirstLineOnlyPrefix,
-                );
-                return vec![item];
+                ));
             }
-            (1, 0) => {
+            Some(JsxComponentKind::Labelled(_)) => {
                 return transform_react_component_external(
                     (**vd).clone(),
                     &item.pstr_loc,
@@ -365,67 +365,48 @@ fn transform_structure_item_multi(
                     arena,
                 );
             }
-            _ => {
-                set_fatal_error(config, item.pstr_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
-                return vec![item];
-            }
         }
     }
 
-    // Handle module definitions (for nested module tracking)
-    if let StructureItemDesc::Pstr_module(mb) = item.pstr_desc {
-        let transformed = transform_module_binding_with_tracking(*mb, config, arena, warnings);
-        return vec![StructureItem {
-            pstr_desc: StructureItemDesc::Pstr_module(Box::new(transformed)),
-            pstr_loc: item.pstr_loc,
-        }];
-    }
-
-    // Default: just transform expressions within
-    vec![StructureItem {
-        pstr_desc: transform_structure_item_desc(item.pstr_desc, config, arena, warnings),
-        pstr_loc: item.pstr_loc,
-    }]
+    Ok(vec![item])
 }
 
-fn transform_module_binding_with_tracking(
-    mb: ModuleBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleBinding {
-    // Track nested module name
-    let module_name = arena.get_string(mb.pmb_name.txt).to_string();
-    // jsx_v4.ml:1374-1382 only tracks the name; `has_component` is saved and
-    // reset by the structure/signature mapper (jsx_ppx.ml:101-123).
-    config.nested_modules.push(module_name);
-
-    let transformed = transform_module_binding(mb, config, arena, warnings);
-
-    // Pop the module name
-    config.nested_modules.pop();
-
-    transformed
-}
-
-/// Transform value bindings, handling @react.component
+/// The value-binding case of `Jsx_v4.transform_structure_item`
+/// (jsx_v4.ml:1015-1052): `List.fold_right process_binding`, so `map_binding`
+/// runs on the last binding first; the results keep the source order.
 fn transform_value_bindings(
     rec_flag: RecFlag,
     bindings: Vec<ValueBinding>,
     loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Vec<StructureItem> {
+) -> JsxPreprocessorResult<Vec<StructureItem>> {
     let mut props_types = vec![];
     let mut transformed_bindings = vec![];
     let mut new_bindings = vec![];
 
-    for binding in bindings {
-        if has_react_component_attr(arena, &binding.pvb_attributes) {
+    for mut binding in bindings.into_iter().rev() {
+        // jsx_v4.ml map_binding: take a `@react.componentWithProps` payload,
+        // reject leftover annotations, then dispatch on the binding's
+        // component node.
+        if let Some((component, attrs)) = take_component_with_props_payload(
+            arena,
+            binding.pvb_jsx_component.as_deref(),
+            &binding.pvb_attributes,
+            &mut config.warnings,
+        ) {
+            binding.pvb_jsx_component = Some(Box::new(component));
+            binding.pvb_attributes = attrs;
+        }
+        reject_leftover_component_attrs(arena, &binding.pvb_attributes)?;
+        let kind = binding
+            .pvb_jsx_component
+            .as_deref()
+            .map(|c| c.pjc_kind.clone());
+        if let Some(JsxComponentKind::Labelled(_)) = kind {
             // Transform @react.component binding
             let (props_type, transformed, new_binding) =
-                transform_react_component_binding(binding, rec_flag, loc, config, arena, warnings);
+                transform_react_component_binding(binding, rec_flag, loc, config, arena)?;
 
             if let Some(pt) = props_type {
                 props_types.push(pt);
@@ -434,10 +415,11 @@ fn transform_value_bindings(
             if let Some(nb) = new_binding {
                 new_bindings.push(nb);
             }
-        } else if has_react_component_with_props_attr(arena, &binding.pvb_attributes) {
+        } else if let Some(JsxComponentKind::WithProps) = kind {
             // Transform @react.componentWithProps binding
-            let (transformed, new_binding) =
-                transform_react_component_with_props_binding(binding, rec_flag, loc, config, arena);
+            let (transformed, new_binding) = transform_react_component_with_props_binding(
+                binding, rec_flag, loc, config, arena,
+            )?;
 
             transformed_bindings.push(transformed);
             if let Some(nb) = new_binding {
@@ -445,10 +427,13 @@ fn transform_value_bindings(
             }
         } else {
             // Just transform expressions within
-            transformed_bindings.push(transform_value_binding(binding, config, arena));
+            transformed_bindings.push(binding);
         }
     }
 
+    props_types.reverse();
+    transformed_bindings.reverse();
+    new_bindings.reverse();
     let mut result = props_types;
     result.push(StructureItem {
         pstr_desc: StructureItemDesc::Pstr_value((
@@ -469,7 +454,7 @@ fn transform_value_bindings(
         });
     }
 
-    result
+    Ok(result)
 }
 
 /// Detect component wrappers and extract the inner function expression.
@@ -548,27 +533,26 @@ fn transform_react_component_binding(
     pstr_loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> (Option<StructureItem>, ValueBinding, Option<ValueBinding>) {
-    check_multiple_components(config, *pstr_loc);
+) -> JsxPreprocessorResult<(Option<StructureItem>, ValueBinding, Option<ValueBinding>)> {
+    check_multiple_components(config, *pstr_loc)?;
 
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat).clone();
-    let fn_name = get_fn_name(arena, config, &binding_pat, config.empty_loc);
+    let fn_name = get_fn_name(arena, config, &binding_pat, config.empty_loc)?;
     let fn_name_loc = get_fn_name_loc(&binding_pat);
     let original_binding_loc = binding.pvb_loc;
 
     // jsx_v4.ml:586-592: `modified_binding` (props must be labelled), then
     // `recursively_transform_named_args_for_make (modified_binding_old binding)`.
     if let Some(loc) = component_props_need_labelled_error_loc(arena, binding.pvb_expr, false) {
-        set_fatal_error(config, loc, COMPONENT_PROPS_NEED_LABELLED_MSG);
+        return Err(jsx_error(loc, COMPONENT_PROPS_NEED_LABELLED_MSG));
     } else if let Some(loc) = component_call_needs_function_error_loc(arena, binding.pvb_expr) {
-        set_fatal_error(config, loc, COMPONENT_CALL_NEEDS_FUNCTION_MSG);
+        return Err(jsx_error(loc, COMPONENT_CALL_NEEDS_FUNCTION_MSG));
     }
     let named_args_expr = modified_binding_old_expr(arena, binding.pvb_expr);
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &binding.pvb_attributes);
+    let core_type_of_attr = core_type_of_component(arena, binding.pvb_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -588,12 +572,7 @@ fn transform_react_component_binding(
     );
 
     // Filter out @react.component attribute
-    let filtered_attrs: Attributes = binding
-        .pvb_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = binding.pvb_attributes.clone();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
     let NamedArgs {
@@ -612,9 +591,9 @@ fn transform_react_component_binding(
         constrained_newtypes.append(&mut newtypes);
         newtypes = constrained_newtypes;
     }
-    warnings.extend(jsx_warnings);
+    config.warnings.extend(jsx_warnings);
     if let Some((loc, message)) = named_args_error {
-        set_fatal_error(config, loc, message);
+        return Err(jsx_error(loc, message));
     }
 
     // Build named type list for props
@@ -627,14 +606,7 @@ fn transform_react_component_binding(
     let props_type = if let Some(manifest) = &core_type_of_attr {
         make_props_abstract_type(arena, "props", pstr_loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type(
-            arena,
-            config,
-            "props",
-            pstr_loc,
-            &named_type_list,
-            has_forward_ref,
-        )
+        make_props_record_type(arena, "props", pstr_loc, &named_type_list, has_forward_ref)?
     };
 
     // Build the internal expression pattern (use inner expression to handle forwardRef)
@@ -841,6 +813,7 @@ fn transform_react_component_binding(
             binding_expr_attrs,
         );
         let inner_binding = ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(Pattern {
                 ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: binding_name_idx,
@@ -909,6 +882,7 @@ fn transform_react_component_binding(
     // function while the following binding shadows it with the component value.
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let transformed_binding = ValueBinding {
+        pvb_jsx_component: None,
         pvb_pat: arena.push_pat(Pattern {
             ppat_desc: PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
@@ -925,6 +899,7 @@ fn transform_react_component_binding(
     let new_binding = if !full_module_name.is_empty() {
         let fn_name_idx = arena.push_interned_string(&fn_name);
         Some(ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(Pattern {
                 ppat_desc: PatternDesc::Ppat_var(Loc {
                     txt: fn_name_idx,
@@ -943,7 +918,7 @@ fn transform_react_component_binding(
         None
     };
 
-    (Some(props_type), transformed_binding, new_binding)
+    Ok((Some(props_type), transformed_binding, new_binding))
 }
 
 /// Transform a @react.componentWithProps binding
@@ -955,16 +930,16 @@ fn transform_react_component_with_props_binding(
     _pstr_loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-) -> (ValueBinding, Option<ValueBinding>) {
+) -> JsxPreprocessorResult<(ValueBinding, Option<ValueBinding>)> {
     // Get function name and location from pattern
     let binding_pat = arena.get_pat(binding.pvb_pat);
-    let fn_name = get_fn_name(arena, config, binding_pat, binding_pat.ppat_loc);
+    let fn_name = get_fn_name(arena, config, binding_pat, binding_pat.ppat_loc)?;
     let _fn_name_loc = get_fn_name_loc(arena.get_pat(binding.pvb_pat));
     let internal_fn_name = format!("{}$Internal", fn_name);
     let full_module_name = make_module_name(config, &fn_name);
 
     if let Some(loc) = component_with_props_forward_ref_error_loc(arena, binding.pvb_expr) {
-        set_fatal_error(config, loc, COMPONENT_WITH_PROPS_FORWARD_REF_MSG);
+        return Err(jsx_error(loc, COMPONENT_WITH_PROPS_FORWARD_REF_MSG));
     }
 
     // Check if async
@@ -976,12 +951,7 @@ fn transform_react_component_with_props_binding(
     );
 
     // Filter out @react.componentWithProps attribute
-    let filtered_attrs: Attributes = binding
-        .pvb_attributes
-        .iter()
-        .filter(|attr| !is_react_component_with_props_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = binding.pvb_attributes.clone();
 
     // Create props pattern based on the original function's pattern
     let binding_expr = arena.get_expr(binding.pvb_expr).clone();
@@ -1062,6 +1032,7 @@ fn transform_react_component_with_props_binding(
             RecFlag::Nonrecursive,
             {
                 let items = [ValueBinding {
+                    pvb_jsx_component: None,
                     pvb_pat: arena.push_pat(Pattern {
                         ppat_desc: PatternDesc::Ppat_var(Loc {
                             txt: full_module_name_idx,
@@ -1100,6 +1071,7 @@ fn transform_react_component_with_props_binding(
     // (jsx_v4.ml:872-874) gives only the name the `empty_loc` location.
     let fn_name_idx = arena.push_interned_string(&fn_name);
     let new_binding = ValueBinding {
+        pvb_jsx_component: None,
         pvb_pat: arena.push_pat(Pattern {
             ppat_desc: PatternDesc::Ppat_var(Loc {
                 txt: fn_name_idx,
@@ -1119,8 +1091,10 @@ fn transform_react_component_with_props_binding(
             // For recursive: modify original binding to be internal, add new binding
             let internal_fn_name_idx = arena.push_string(internal_fn_name);
             let original_expr = arena.get_expr(binding.pvb_expr).clone();
-            let transformed_original = transform_expression(original_expr, config, arena);
+            // The binding was mapped before the component transform.
+            let transformed_original = original_expr;
             let modified_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: PatternDesc::Ppat_var(Loc {
                         txt: internal_fn_name_idx,
@@ -1133,12 +1107,12 @@ fn transform_react_component_with_props_binding(
                 pvb_attributes: filtered_attrs,
                 pvb_loc: binding.pvb_loc,
             };
-            (modified_binding, Some(new_binding))
+            Ok((modified_binding, Some(new_binding)))
         }
         RecFlag::Nonrecursive => {
             // For non-recursive: wrap the function body with React.element constraint
-            let transformed_expr =
-                transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
+            // The binding was mapped before the component transform.
+            let transformed_expr = arena.get_expr(binding.pvb_expr).clone();
             let constrained_expr =
                 wrap_function_body_with_constraint(arena, transformed_expr, config);
             // jsx_v4.ml: the attributes moved to wrapper_expr, but for an async
@@ -1148,12 +1122,13 @@ fn transform_react_component_with_props_binding(
                 ..constrained_expr
             };
             let modified_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: binding.pvb_pat,
                 pvb_expr: arena.push_expr(constrained_expr),
                 pvb_attributes: filtered_attrs,
                 pvb_loc: binding.pvb_loc,
             };
-            (modified_binding, Some(new_binding))
+            Ok((modified_binding, Some(new_binding)))
         }
     }
 }
@@ -1644,7 +1619,8 @@ fn build_props_pattern_and_body(
         });
     }
 
-    let transformed_body = transform_expression(body, config, arena);
+    // The binding was mapped before the component transform.
+    let transformed_body = body;
 
     // Constrain return type to React.element
     let constrained_body = constrain_jsx_return(arena, transformed_body, config);
@@ -1755,6 +1731,7 @@ fn add_default_value_matches(
             // Outer binding: let __<label>_value = match __<label> { ... }
             let resolved_str_idx = arena.push_string(resolved_name.clone());
             let value_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(Pattern {
                     ppat_desc: PatternDesc::Ppat_var(Loc {
                         txt: resolved_str_idx,
@@ -1780,6 +1757,7 @@ fn add_default_value_matches(
                 pexp_attributes: Attributes::new(),
             });
             let inner_binding = ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(arg.pattern.clone()),
                 pvb_expr: resolved_ident_idx,
                 pvb_attributes: Attributes::new(),
@@ -1815,48 +1793,34 @@ fn add_default_value_matches(
 // Signature Item Transformation
 // ============================================================================
 
-fn transform_signature_item_multi(
+/// `Jsx_v4.transform_signature_item` (jsx_v4.ml:1054-1109): the component
+/// transform of a signature item the mapper has already mapped, at version 4.
+fn transform_signature_item4(
     item: SignatureItem,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Vec<SignatureItem> {
-    // Check for @@jsxConfig attribute
-    if let SignatureItemDesc::Psig_attribute(attr) = &item.psig_desc {
-        if arena.get_string(attr.0.txt) == "jsxConfig" {
-            update_config_from_attribute(arena, attr, config);
-        }
-        return vec![item];
-    }
-
-    // Only transform if version is 4
-    if config.version != 4 {
-        return vec![item];
-    }
-
+) -> JsxPreprocessorResult<Vec<SignatureItem>> {
     // Handle Psig_value with potential @react.component
     if let SignatureItemDesc::Psig_value(vd) = &item.psig_desc {
-        match count_react_component_attrs(arena, &vd.pval_attributes) {
-            0 => {}
-            1 => {
-                return transform_react_component_sig(
-                    (**vd).clone(),
-                    &item.psig_loc,
-                    config,
-                    arena,
-                );
-            }
-            _ => {
-                set_fatal_error(config, item.psig_loc, DUPLICATE_REACT_COMPONENT_ATTR_MSG);
-                return vec![item];
-            }
+        let taken = take_component_with_props_payload(
+            arena,
+            vd.pval_jsx_component.as_deref(),
+            &vd.pval_attributes,
+            &mut config.warnings,
+        );
+        let (pval_jsx_component, pval_attributes) = match &taken {
+            Some((component, attrs)) => (Some(component), attrs),
+            None => (vd.pval_jsx_component.as_deref(), &vd.pval_attributes),
+        };
+        reject_leftover_component_attrs(arena, pval_attributes)?;
+        // `@react.componentWithProps` on a signature item has always been
+        // left alone.
+        if let Some(JsxComponentKind::Labelled(_)) = pval_jsx_component.map(|c| &c.pjc_kind) {
+            return transform_react_component_sig((**vd).clone(), &item.psig_loc, config, arena);
         }
     }
 
-    vec![SignatureItem {
-        psig_desc: transform_signature_item_desc(item.psig_desc, config, arena, warnings),
-        psig_loc: item.psig_loc,
-    }]
+    Ok(vec![item])
 }
 
 fn transform_react_component_sig(
@@ -1864,14 +1828,14 @@ fn transform_react_component_sig(
     loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-) -> Vec<SignatureItem> {
-    check_multiple_components(config, *loc);
+) -> JsxPreprocessorResult<Vec<SignatureItem>> {
+    check_multiple_components(config, *loc)?;
     if let Some(loc) = string_int_attribute_loc_in_core_type(arena, &vd.pval_type) {
-        set_fatal_error(config, loc, STRING_INT_ATTR_UNSUPPORTED_MSG);
+        return Err(jsx_error(loc, STRING_INT_ATTR_UNSUPPORTED_MSG));
     }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
+    let core_type_of_attr = core_type_of_component(arena, vd.pval_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -1903,16 +1867,11 @@ fn transform_react_component_sig(
         // sharedProps signature: no extra attributes
         make_props_abstract_type_sig(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
-        make_props_record_type_sig(arena, config, "props", loc, &named_type_list)
+        make_props_record_type_sig(arena, "props", loc, &named_type_list)?
     };
 
     // Filter attributes
-    let filtered_attrs: Attributes = vd
-        .pval_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = vd.pval_attributes.clone();
 
     // Create props type ref with appropriate type params
     // For sharedProps without type variables: no type args
@@ -1983,6 +1942,7 @@ fn transform_react_component_sig(
     };
 
     let new_vd = ValueDescription {
+        pval_jsx_component: None,
         pval_name: vd.pval_name,
         pval_type: arena.push_core_type(component_type),
         pval_prim: vd.pval_prim,
@@ -1990,13 +1950,13 @@ fn transform_react_component_sig(
         pval_loc: vd.pval_loc,
     };
 
-    vec![
+    Ok(vec![
         props_type,
         SignatureItem {
             psig_desc: SignatureItemDesc::Psig_value(Box::new(new_vd)),
             psig_loc: *loc,
         },
-    ]
+    ])
 }
 
 /// Transform @react.component on external declaration
@@ -2005,14 +1965,14 @@ fn transform_react_component_external(
     loc: &Location,
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-) -> Vec<StructureItem> {
-    check_multiple_components(config, *loc);
+) -> JsxPreprocessorResult<Vec<StructureItem>> {
+    check_multiple_components(config, *loc)?;
     if let Some(loc) = string_int_attribute_loc_in_core_type(arena, &vd.pval_type) {
-        set_fatal_error(config, loc, STRING_INT_ATTR_UNSUPPORTED_MSG);
+        return Err(jsx_error(loc, STRING_INT_ATTR_UNSUPPORTED_MSG));
     }
 
     // Check for sharedProps: @react.component(:sharedProps<T>)
-    let core_type_of_attr = core_type_of_attrs(arena, &vd.pval_attributes);
+    let core_type_of_attr = core_type_of_component(arena, vd.pval_jsx_component.as_deref());
     let typ_vars_of_core_type: Vec<CoreType> = core_type_of_attr
         .as_ref()
         .map(|typ| typ_vars_of_core_type(arena, typ))
@@ -2045,16 +2005,11 @@ fn transform_react_component_external(
         make_props_abstract_type(arena, "props", loc, manifest, &typ_vars_of_core_type)
     } else {
         // regular external: add live attribute
-        make_props_record_type_with_live(arena, config, "props", loc, &named_type_list)
+        make_props_record_type_with_live(arena, "props", loc, &named_type_list)?
     };
 
     // Filter attributes (remove @react.component)
-    let filtered_attrs: Attributes = vd
-        .pval_attributes
-        .iter()
-        .filter(|attr| !is_react_component_attr(arena, attr))
-        .cloned()
-        .collect();
+    let filtered_attrs: Attributes = vd.pval_attributes.clone();
 
     // Create props type ref with appropriate type params
     // For sharedProps without type variables: no type args
@@ -2119,6 +2074,7 @@ fn transform_react_component_external(
     };
 
     let new_vd = ValueDescription {
+        pval_jsx_component: None,
         pval_name: vd.pval_name,
         pval_type: arena.push_core_type(component_type),
         pval_prim: vd.pval_prim,
@@ -2126,24 +2082,23 @@ fn transform_react_component_external(
         pval_loc: vd.pval_loc,
     };
 
-    vec![
+    Ok(vec![
         props_type,
         StructureItem {
             pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(new_vd)),
             pstr_loc: *loc,
         },
-    ]
+    ])
 }
 
 /// Create props record type with @live attribute (for externals)
 fn make_props_record_type_with_live(
     arena: &mut ParseArena,
-    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
-) -> StructureItem {
-    set_duplicate_label_error(config, named_types);
+) -> JsxPreprocessorResult<StructureItem> {
+    check_duplicate_label(named_types)?;
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
@@ -2214,7 +2169,7 @@ fn make_props_record_type_with_live(
 
     // OCaml uses ghost location for the generated props type structure_item
     let name_idx = arena.intern(name);
-    StructureItem {
+    Ok(StructureItem {
         pstr_desc: StructureItemDesc::Pstr_type(Box::new((
             RecFlag::Nonrecursive,
             vec![TypeDeclaration {
@@ -2233,7 +2188,7 @@ fn make_props_record_type_with_live(
             }],
         ))),
         pstr_loc: empty_loc(),
-    }
+    })
 }
 
 /// Collect prop types from a function type
@@ -2258,7 +2213,8 @@ fn collect_prop_types_rec(
         let args = arena.nary_arrow_args(first_arg, *arity);
         let last = args.len().saturating_sub(1);
         for (index, arg) in args.iter().enumerate() {
-            if is_labelled(&arg.lbl) || is_optional(&arg.lbl) {
+            // jsx_v4.ml skips fixed arguments (`Parg_fixed`).
+            if arg.fixed.is_none() && (is_labelled(&arg.lbl) || is_optional(&arg.lbl)) {
                 // jsx_v4.ml uses the final return location only for the last
                 // argument of the final arrow group; all other arguments keep
                 // their own type location.
@@ -2279,12 +2235,6 @@ fn collect_prop_types_rec(
 // ============================================================================
 // Helper Functions
 // ============================================================================
-
-fn has_react_component_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| is_react_component_attr(arena, attr))
-}
 
 /// `split_directive_attrs` (jsx_v4.ml): an async component's directive
 /// (`'use cache'`) stays on its inner async `make`; the wrapper keeps the rest.
@@ -2308,80 +2258,128 @@ fn split_directive_attrs(
     )
 }
 
-fn is_react_component_attr(arena: &ParseArena, attr: &Attribute) -> bool {
-    let name = arena.get_string(attr.0.txt);
-    matches!(name, "react.component" | "jsx.component")
-}
-
-fn has_react_component_with_props_attr(arena: &ParseArena, attrs: &Attributes) -> bool {
-    attrs
-        .iter()
-        .any(|attr| is_react_component_with_props_attr(arena, attr))
-}
-
-fn is_react_component_with_props_attr(arena: &ParseArena, attr: &Attribute) -> bool {
-    let name = arena.get_string(attr.0.txt);
-    matches!(name, "react.componentWithProps" | "jsx.componentWithProps")
-}
-
-fn count_react_component_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
-    attrs
-        .iter()
-        .filter(|attr| is_react_component_attr(arena, attr))
-        .count()
-}
-
-fn count_react_component_with_props_attrs(arena: &ParseArena, attrs: &Attributes) -> usize {
-    attrs
-        .iter()
-        .filter(|attr| is_react_component_with_props_attr(arena, attr))
-        .count()
-}
-
-fn check_multiple_components(config: &mut JsxConfig, loc: Location) {
-    if config.has_component {
-        set_fatal_error(config, loc, MULTIPLE_COMPONENT_DEFINITIONS_MSG);
-    } else {
-        config.has_component = true;
+/// jsx_common.ml `take_component_with_props_payload`: the JSX transform used
+/// to ignore a payload on `@react.componentWithProps`, so code may carry one,
+/// such as `(: props)` copied from `@react.component`. The node cannot hold
+/// it, so the attribute stays for formatting to keep; take it here as the
+/// component, with a deprecation warning, unless the definition already has
+/// one. Returns the taken component and the remaining attributes, or `None`
+/// when the definition stays as it is.
+fn take_component_with_props_payload(
+    arena: &ParseArena,
+    jsx_component: Option<&JsxComponent>,
+    attrs: &Attributes,
+    warnings: &mut Vec<JsxPreprocessorWarning>,
+) -> Option<(JsxComponent, Attributes)> {
+    if jsx_component.is_some() {
+        return None;
     }
+    for (index, attr) in attrs.iter().enumerate() {
+        let name = arena.get_string(attr.0.txt);
+        let pjc_namespace = match name {
+            "react.componentWithProps" => JsxComponentNamespace::React,
+            "jsx.componentWithProps" => JsxComponentNamespace::Jsx,
+            _ => continue,
+        };
+        if crate::ast_jsx_component::of_attribute(arena, attr).is_some() {
+            continue;
+        }
+        let loc = attr.0.loc;
+        warnings.push(JsxPreprocessorWarning {
+            start_pos: *arena.loc_start(loc),
+            end_pos: *arena.loc_end(loc),
+            message: format!("@{name} takes no payload. The payload has no effect; remove it."),
+            deprecated: true,
+        });
+        let rest = attrs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != index)
+            .map(|(_, attr)| attr.clone())
+            .collect();
+        return Some((
+            JsxComponent {
+                pjc_kind: JsxComponentKind::WithProps,
+                pjc_namespace,
+                pjc_loc: loc,
+            },
+            Attributes::from_vec(rest),
+        ));
+    }
+    None
 }
 
-fn set_fatal_error(config: &mut JsxConfig, loc: Location, message: &str) {
-    set_fatal_error_with_style(
-        config,
-        loc,
-        message,
-        JsxPreprocessorMessageStyle::PrefixedLines,
-    );
+/// jsx_common.ml `reject_leftover_component_attrs`: `Ast_helper` takes the
+/// first `@react.component`, or failing that the first
+/// `@react.componentWithProps`, into the binding's or description's
+/// component node. One still among the attributes is a second annotation, or
+/// one with a payload the node cannot hold; it stays an attribute so that
+/// formatting keeps it, and the JSX transform rejects it here. Returns
+/// whether it raised.
+fn reject_leftover_component_attrs(
+    arena: &ParseArena,
+    attrs: &Attributes,
+) -> JsxPreprocessorResult<()> {
+    for attr in attrs.iter() {
+        let name = arena.get_string(attr.0.txt);
+        if !matches!(
+            name,
+            "react.component"
+                | "jsx.component"
+                | "react.componentWithProps"
+                | "jsx.componentWithProps"
+        ) {
+            continue;
+        }
+        // `take_component_with_props_payload` has taken a lone
+        // `@react.componentWithProps` whatever its payload.
+        let message = if matches!(name, "react.component" | "jsx.component")
+            && crate::ast_jsx_component::of_attribute(arena, attr).is_none()
+        {
+            format!("@{name} takes no payload, or the props type to share, as in @{name}(: props).")
+        } else {
+            "A definition can have only one JSX component annotation.".to_string()
+        };
+        return Err(jsx_error(attr.0.loc, &message));
+    }
+    Ok(())
 }
 
-fn set_fatal_error_with_style(
-    config: &mut JsxConfig,
+fn check_multiple_components(config: &mut JsxConfig, loc: Location) -> JsxPreprocessorResult<()> {
+    if config.has_component {
+        return Err(jsx_error(loc, MULTIPLE_COMPONENT_DEFINITIONS_MSG));
+    }
+    config.has_component = true;
+    Ok(())
+}
+
+/// A JSX PPX error (`Jsx_common.raise_error`, `Location.raise_errorf`): the
+/// caller returns it, which ends the mapping as OCaml's raise does.
+fn jsx_error(loc: Location, message: &str) -> JsxPreprocessorError {
+    jsx_error_with_style(loc, message, JsxPreprocessorMessageStyle::PrefixedLines)
+}
+
+fn jsx_error_with_style(
     loc: Location,
     message: &str,
     message_style: JsxPreprocessorMessageStyle,
-) {
-    if config.fatal_error.is_none() {
-        config.fatal_error = Some(JsxPreprocessorError {
-            loc,
-            message: message.to_string(),
-            message_style,
-        });
+) -> JsxPreprocessorError {
+    JsxPreprocessorError {
+        loc,
+        message: message.to_string(),
+        message_style,
     }
 }
 
-/// Extract core type from @react.component(:sharedProps<T>) attribute
-/// Returns Some(CoreType) if the attribute has a type payload
-fn core_type_of_attrs(arena: &ParseArena, attrs: &Attributes) -> Option<CoreType> {
-    attrs.iter().find_map(|(loc, payload)| {
-        let name = arena.get_string(loc.txt);
-        match (name, payload) {
-            ("react.component" | "jsx.component", Payload::PTyp(core_type_idx)) => {
-                Some(arena.get_core_type(*core_type_idx).clone())
-            }
-            _ => None,
-        }
-    })
+/// The props type shared by `@react.component(: sharedProps<T>)`.
+fn core_type_of_component(
+    arena: &ParseArena,
+    component: Option<&JsxComponent>,
+) -> Option<CoreType> {
+    match component?.pjc_kind {
+        JsxComponentKind::Labelled(Some(typ)) => Some(arena.get_core_type(typ).clone()),
+        JsxComponentKind::Labelled(None) | JsxComponentKind::WithProps => None,
+    }
 }
 
 /// Extract type variables from a core type (for sharedProps<'a, 'b>)
@@ -2648,19 +2646,16 @@ fn get_fn_name(
     config: &mut JsxConfig,
     pat: &Pattern,
     pat_loc: Location,
-) -> String {
+) -> JsxPreprocessorResult<String> {
     match &pat.ppat_desc {
-        PatternDesc::Ppat_var(loc) => arena.get_string(loc.txt).to_string(),
+        PatternDesc::Ppat_var(loc) => Ok(arena.get_string(loc.txt).to_string()),
         PatternDesc::Ppat_constraint(inner) => {
             let (ref inner_idx, _) = **inner;
             let inner_pat = arena.get_pat(*inner_idx);
             let inner_loc = inner_pat.ppat_loc;
             get_fn_name(arena, config, inner_pat, inner_loc)
         }
-        _ => {
-            set_fatal_error(config, pat_loc, REACT_COMPONENT_DESTRUCTURE_MSG);
-            "make".to_string()
-        }
+        _ => Err(jsx_error(pat_loc, REACT_COMPONENT_DESTRUCTURE_MSG)),
     }
 }
 
@@ -3108,6 +3103,7 @@ fn extract_args_rec(
                             start_pos: *arena.loc_start(loc),
                             end_pos: *arena.loc_end(loc),
                             message,
+                            deprecated: false,
                         });
                     }
                     args.push(ExtractedArg {
@@ -3287,24 +3283,24 @@ fn duplicated_label(named_types: &[NamedType]) -> Option<(Location, &str)> {
     None
 }
 
-fn set_duplicate_label_error(config: &mut JsxConfig, named_types: &[NamedType]) {
+fn check_duplicate_label(named_types: &[NamedType]) -> JsxPreprocessorResult<()> {
     if let Some((loc, label)) = duplicated_label(named_types) {
         let message = format!(
             "{COMPONENT_DUPLICATE_PROP_MSG_PREFIX}{label}{COMPONENT_DUPLICATE_PROP_MSG_SUFFIX}"
         );
-        set_fatal_error(config, loc, &message);
+        return Err(jsx_error(loc, &message));
     }
+    Ok(())
 }
 
 fn make_props_record_type(
     arena: &mut ParseArena,
-    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
     has_forward_ref: bool,
-) -> StructureItem {
-    set_duplicate_label_error(config, named_types);
+) -> JsxPreprocessorResult<StructureItem> {
+    check_duplicate_label(named_types)?;
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
@@ -3381,22 +3377,21 @@ fn make_props_record_type(
         ptype_loc: *loc,
     };
 
-    StructureItem {
+    Ok(StructureItem {
         pstr_desc: StructureItemDesc::Pstr_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml's Str.type_ without ~loc uses Location.none
         pstr_loc: empty_loc(),
-    }
+    })
 }
 
 /// Create props record type declaration for signatures
 fn make_props_record_type_sig(
     arena: &mut ParseArena,
-    config: &mut JsxConfig,
     name: &str,
     loc: &Location,
     named_types: &[NamedType],
-) -> SignatureItem {
-    set_duplicate_label_error(config, named_types);
+) -> JsxPreprocessorResult<SignatureItem> {
+    check_duplicate_label(named_types)?;
 
     let label_decls: Vec<LabelDeclaration> = named_types
         .iter()
@@ -3472,11 +3467,11 @@ fn make_props_record_type_sig(
         ptype_loc: *loc,
     };
 
-    SignatureItem {
+    Ok(SignatureItem {
         psig_desc: SignatureItemDesc::Psig_type(Box::new((RecFlag::Nonrecursive, vec![type_decl]))),
         // OCaml: Sig.type_ without ~loc uses Location.none
         psig_loc: empty_loc(),
-    }
+    })
 }
 
 /// Create abstract props type with manifest (for sharedProps)
@@ -3556,868 +3551,101 @@ fn make_props_abstract_type_sig(
 // Config Update
 // ============================================================================
 
-fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &mut JsxConfig) {
-    // Parse @@jsxConfig({version: 4, module_: "React"})
-    // Matches OCaml's update_config behavior
-    if let Payload::PStr(items) = &attr.1 {
-        for item in items.iter() {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &item.pstr_desc {
-                let (ref expr, _) = **eval_inner;
-                // jsx_ppx.ml `get_payload_fields`: `Ast_payload.unwrap_payload_expression`.
-                let expr = if items.len() == 1 {
-                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
-                } else {
-                    arena.get_expr(*expr)
-                };
-                if let ExpressionDesc::Pexp_record(rec_inner) = &expr.pexp_desc {
-                    let (ref fields, _) = *rec_inner;
-                    let mut module_raw: Option<String> = None;
-                    let mut version_raw: Option<i32> = None;
+/// `Jsx_ppx.update_config` (compiler/syntax/src/jsx_ppx.ml:53-74) on the
+/// payload of a `@@jsxConfig` attribute.
+fn update_config_from_attribute(
+    arena: &ParseArena,
+    attr: &Attribute,
+    config: &mut JsxConfig,
+) -> JsxPreprocessorResult<()> {
+    // jsx_ppx.ml:6-15 `get_payload_fields`: the record of the first item of
+    // `Ast_payload.unwrap_payload_expression payload`, without a spread.
+    let Payload::PStr(items) = &attr.1 else {
+        return Ok(());
+    };
+    let Some(first) = items.first() else {
+        return Ok(());
+    };
+    let StructureItemDesc::Pstr_eval(eval_inner) = &first.pstr_desc else {
+        return Ok(());
+    };
+    let expr = if items.len() == 1 {
+        crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0))
+    } else {
+        arena.get_expr(eval_inner.0)
+    };
+    let ExpressionDesc::Pexp_record((fields, None)) = &expr.pexp_desc else {
+        return Ok(());
+    };
+    let fields = arena.expr_field_list(*fields);
+    // The fields named exactly `key` (`{txt = Lident k} when k = key`).
+    let fields_named = |key: &'static str| {
+        fields.iter().filter(move |field| {
+            matches!(
+                arena.get_longident(field.lid.txt),
+                Longident::Lident(name) if arena.get_string(*name) == key
+            )
+        })
+    };
 
-                    for field in arena.expr_field_list(*fields) {
-                        let last_idx = arena.get_longident(field.lid.txt).last_idx();
-                        let last_str = arena.get_string(last_idx);
-                        match last_str {
-                            "version" => {
-                                if let ExpressionDesc::Pexp_constant(Constant::Integer(s, _)) =
-                                    &crate::ast_payload::unwrap_braces(
-                                        arena,
-                                        arena.get_expr(field.expr),
-                                    )
-                                    .pexp_desc
-                                {
-                                    if let Ok(v) = arena.get_string(*s).parse::<i32>() {
-                                        version_raw = Some(v);
-                                    }
-                                }
-                            }
-                            "module_" => {
-                                match crate::ast_payload::semantic_string_of_expression(
-                                    arena,
-                                    arena.get_expr(field.expr),
-                                ) {
-                                    Ok(value) => {
-                                        if let Some(value) = value {
-                                            module_raw = Some(value);
-                                        }
-                                    }
-                                    Err(error) => {
-                                        set_fatal_error(config, error.loc, error.message);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // OCaml behavior: if module is not "react" (case-insensitive), it's "generic"
-                    // and version is always set to 4. Otherwise use explicit version.
-                    let is_generic = match &module_raw {
-                        Some(m) if m.to_lowercase() == "react" => false,
-                        Some(_) => true,
-                        None => false,
-                    };
-
-                    match (is_generic, version_raw) {
-                        (true, _) => config.version = 4,
-                        (false, Some(v)) => config.version = v,
-                        (false, None) => {}
-                    }
-
-                    if let Some(m) = module_raw {
-                        config.module_name = m;
-                    }
+    // jsx_ppx.ml:19-36, 51 `get_string ~key:"module_"`: the first field whose
+    // value has a semantic string; reading each value may raise.
+    let mut module_raw: Option<String> = None;
+    for field in fields_named("module_") {
+        match crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(field.expr)) {
+            Ok(value) => {
+                if module_raw.is_none() {
+                    module_raw = value;
                 }
+            }
+            Err(error) => {
+                return Err(jsx_error(error.loc, error.message));
             }
         }
     }
+    let is_generic = match &module_raw {
+        Some(m) => m.to_lowercase() != "react",
+        None => false,
+    };
+
+    // jsx_ppx.ml:61-71: only JSX v4 exists, so any other `version` is an
+    // error at the version value. `get_version_expr` is the first `version`
+    // field; `get_int` the first one holding an unsuffixed integer literal
+    // that `int_of_string` accepts.
+    if let Some(version_field) = fields_named("version").next() {
+        let version = fields_named("version").find_map(|field| {
+            match &crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr)).pexp_desc {
+                ExpressionDesc::Pexp_constant(c) => match c {
+                    Constant::Integer(value, None) => Some(arena.get_string(*value)),
+                    _ => None,
+                },
+                _ => None,
+            }
+        });
+        match version.and_then(crate::types::decl::parse_ocaml_int_literal) {
+            Some(4) => config.version = 4,
+            _ => {
+                let loc = arena.get_expr(version_field.expr).pexp_loc;
+                return Err(jsx_error(loc, UNSUPPORTED_JSX_VERSION_MSG));
+            }
+        }
+    }
+    if is_generic {
+        config.version = 4;
+    }
+    if let Some(m) = module_raw {
+        config.module_name = m;
+    }
+    Ok(())
 }
 
 // ============================================================================
 // Structure/Signature Item Desc Transformation (for non-component items)
 // ============================================================================
 
-fn transform_structure_item_desc(
-    desc: StructureItemDesc,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> StructureItemDesc {
-    match desc {
-        StructureItemDesc::Pstr_value(inner) => StructureItemDesc::Pstr_value(inner),
-        StructureItemDesc::Pstr_eval(inner) => {
-            let (expr_idx, attrs) = *inner;
-            let expr = arena.get_expr(expr_idx).clone();
-            let transformed = transform_expression(expr, config, arena);
-            StructureItemDesc::Pstr_eval(Box::new((arena.push_expr(transformed), attrs)))
-        }
-        StructureItemDesc::Pstr_module(mb) => StructureItemDesc::Pstr_module(Box::new(
-            transform_module_binding(*mb, config, arena, warnings),
-        )),
-        StructureItemDesc::Pstr_recmodule(mbs) => {
-            let mut result = vec![];
-            for mb in *mbs {
-                result.push(transform_module_binding(mb, config, arena, warnings));
-            }
-            StructureItemDesc::Pstr_recmodule(Box::new(result))
-        }
-        StructureItemDesc::Pstr_modtype(mt) => StructureItemDesc::Pstr_modtype(Box::new(
-            transform_module_type_declaration(*mt, config, arena, warnings),
-        )),
-        StructureItemDesc::Pstr_include(incl) => {
-            let mod_expr = arena.get_mod_expr(incl.pincl_mod).clone();
-            let transformed = transform_module_expr(mod_expr, config, arena, warnings);
-            StructureItemDesc::Pstr_include(Box::new(IncludeDeclaration {
-                pincl_mod: arena.push_mod_expr(transformed),
-                pincl_loc: incl.pincl_loc,
-                pincl_attributes: incl.pincl_attributes,
-            }))
-        }
-        StructureItemDesc::Pstr_extension(inner) => {
-            let ((name, payload), attrs) = *inner;
-            let payload = transform_payload(payload, config, arena, warnings);
-            StructureItemDesc::Pstr_extension(Box::new(((name, payload), attrs)))
-        }
-        other => other,
-    }
-}
-
-fn transform_module_type_declaration(
-    mt: ModuleTypeDeclaration,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleTypeDeclaration {
-    ModuleTypeDeclaration {
-        pmtd_name: mt.pmtd_name,
-        pmtd_type: mt
-            .pmtd_type
-            .map(|mty| transform_module_type_idx(mty, config, arena, warnings)),
-        pmtd_attributes: mt.pmtd_attributes,
-        pmtd_loc: mt.pmtd_loc,
-    }
-}
-
-fn transform_module_type_idx(
-    mty: crate::parse_arena::ModTypeIdx,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> crate::parse_arena::ModTypeIdx {
-    let mty_val = arena.get_mod_type(mty).clone();
-    let transformed = transform_module_type(mty_val, config, arena, warnings);
-    arena.push_mod_type(transformed)
-}
-
-/// `default_mapper.module_type` with the JSX `signature` override
-/// (compiler/syntax/src/jsx_ppx.ml:101-120): every nested module type and
-/// module expression is visited.
-fn transform_module_type(
-    mty: ModuleType,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleType {
-    ModuleType {
-        pmty_desc: match mty.pmty_desc {
-            ModuleTypeDesc::Pmty_signature(sig_items) => {
-                // Save and reset has_component (OCaml: config.has_component <- false)
-                let old_has_component = config.has_component;
-                config.has_component = false;
-                // Transform signature items
-                let mut result = vec![];
-                for item in *sig_items {
-                    let items = transform_signature_item_multi(item, config, arena, warnings);
-                    result.extend(items);
-                }
-                // Restore has_component
-                config.has_component = old_has_component;
-                ModuleTypeDesc::Pmty_signature(Box::new(result))
-            }
-            ModuleTypeDesc::Pmty_functor(inner) => {
-                let (name, arg, body) = *inner;
-                // OCaml evaluates constructor arguments right to left.
-                let body = transform_module_type_idx(body, config, arena, warnings);
-                let arg = arg.map(|arg| transform_module_type_idx(arg, config, arena, warnings));
-                ModuleTypeDesc::Pmty_functor(Box::new((name, arg, body)))
-            }
-            ModuleTypeDesc::Pmty_with(inner) => {
-                let (body, constraints) = *inner;
-                let body = transform_module_type_idx(body, config, arena, warnings);
-                ModuleTypeDesc::Pmty_with(Box::new((body, constraints)))
-            }
-            ModuleTypeDesc::Pmty_typeof(mexpr) => {
-                let mexpr_val = arena.get_mod_expr(mexpr).clone();
-                let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
-                ModuleTypeDesc::Pmty_typeof(arena.push_mod_expr(transformed))
-            }
-            other => other,
-        },
-        pmty_loc: mty.pmty_loc,
-        pmty_attributes: mty.pmty_attributes,
-    }
-}
-
-fn transform_signature_item_desc(
-    desc: SignatureItemDesc,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> SignatureItemDesc {
-    match desc {
-        SignatureItemDesc::Psig_module(md) => {
-            // Transform module declaration - recurse into the module type
-            let pmd_type = transform_module_type_idx(md.pmd_type, config, arena, warnings);
-            SignatureItemDesc::Psig_module(Box::new(ModuleDeclaration {
-                pmd_name: md.pmd_name,
-                pmd_type,
-                pmd_attributes: md.pmd_attributes,
-                pmd_loc: md.pmd_loc,
-            }))
-        }
-        SignatureItemDesc::Psig_recmodule(mds) => {
-            // Transform recursive module declarations
-            SignatureItemDesc::Psig_recmodule(Box::new(
-                mds.into_iter()
-                    .map(|md| ModuleDeclaration {
-                        pmd_name: md.pmd_name,
-                        pmd_type: transform_module_type_idx(md.pmd_type, config, arena, warnings),
-                        pmd_attributes: md.pmd_attributes,
-                        pmd_loc: md.pmd_loc,
-                    })
-                    .collect(),
-            ))
-        }
-        SignatureItemDesc::Psig_modtype(mtd) => {
-            // Transform module type declaration
-            SignatureItemDesc::Psig_modtype(Box::new(transform_module_type_declaration(
-                *mtd, config, arena, warnings,
-            )))
-        }
-        SignatureItemDesc::Psig_include(incl) => {
-            let incl = *incl;
-            SignatureItemDesc::Psig_include(Box::new(IncludeDescription {
-                pincl_mod: transform_module_type_idx(incl.pincl_mod, config, arena, warnings),
-                ..incl
-            }))
-        }
-        SignatureItemDesc::Psig_extension(inner) => {
-            let ((name, payload), attrs) = *inner;
-            let payload = transform_payload(payload, config, arena, warnings);
-            SignatureItemDesc::Psig_extension(Box::new(((name, payload), attrs)))
-        }
-        other => other,
-    }
-}
-
-/// `default_mapper.payload` (compiler/ml/ast_mapper.ml): a structure or
-/// signature payload goes back through the JSX `structure`/`signature`
-/// mappers (compiler/syntax/src/jsx_ppx.ml:97-128), a pattern guard through
-/// `expr`.
-fn transform_payload(
-    payload: Payload,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Payload {
-    match payload {
-        Payload::PStr(items) => Payload::PStr(Box::new(transform_structure_with_config(
-            *items, config, arena, warnings,
-        ))),
-        Payload::PSig(items) => {
-            let old_has_component = config.has_component;
-            config.has_component = false;
-            let mut result = vec![];
-            for item in *items {
-                result.extend(transform_signature_item_multi(
-                    item, config, arena, warnings,
-                ));
-            }
-            config.has_component = old_has_component;
-            Payload::PSig(Box::new(result))
-        }
-        Payload::PPat(inner) => {
-            let (pat, guard) = *inner;
-            let guard = guard.map(|guard| {
-                let guard_expr = arena.get_expr(guard).clone();
-                let transformed = transform_expression(guard_expr, config, arena);
-                arena.push_expr(transformed)
-            });
-            Payload::PPat(Box::new((pat, guard)))
-        }
-        other => other,
-    }
-}
-
-fn transform_module_binding(
-    mb: ModuleBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleBinding {
-    let pmb_expr = {
-        let mexpr_val = arena.get_mod_expr(mb.pmb_expr).clone();
-        let transformed = transform_module_expr(mexpr_val, config, arena, warnings);
-        arena.push_mod_expr(transformed)
-    };
-    ModuleBinding {
-        pmb_name: mb.pmb_name,
-        pmb_expr,
-        pmb_attributes: mb.pmb_attributes,
-        pmb_loc: mb.pmb_loc,
-    }
-}
-
-/// Transform a structure with an existing config (preserves file_name and nested_modules)
-fn transform_structure_with_config(
-    structure: Structure,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> Structure {
-    // Save and reset has_component (OCaml: config.has_component <- false)
-    let old_has_component = config.has_component;
-    config.has_component = false;
-
-    let mut result = vec![];
-    for item in structure {
-        let items = transform_structure_item_multi(item, config, arena, warnings);
-        result.extend(items);
-    }
-
-    // Restore has_component
-    config.has_component = old_has_component;
-    result
-}
-
-fn transform_module_expr(
-    mexpr: ModuleExpr,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-    warnings: &mut Vec<JsxPreprocessorWarning>,
-) -> ModuleExpr {
-    ModuleExpr {
-        pmod_desc: match mexpr.pmod_desc {
-            ModuleExprDesc::Pmod_structure(items) => {
-                // Transform structure with current config (preserving file_name and nested_modules)
-                ModuleExprDesc::Pmod_structure(Box::new(transform_structure_with_config(
-                    *items, config, arena, warnings,
-                )))
-            }
-            ModuleExprDesc::Pmod_functor(inner) => {
-                let (arg, arg_ty, body) = *inner;
-                let body_expr = arena.get_mod_expr(body).clone();
-                let transformed_body = transform_module_expr(body_expr, config, arena, warnings);
-                let arg_ty =
-                    arg_ty.map(|arg_ty| transform_module_type_idx(arg_ty, config, arena, warnings));
-                ModuleExprDesc::Pmod_functor(Box::new((
-                    arg,
-                    arg_ty,
-                    arena.push_mod_expr(transformed_body),
-                )))
-            }
-            ModuleExprDesc::Pmod_apply(m1, m2) => {
-                let m1_expr = arena.get_mod_expr(m1).clone();
-                let m2_expr = arena.get_mod_expr(m2).clone();
-                let m1_transformed = transform_module_expr(m1_expr, config, arena, warnings);
-                let m2_transformed = transform_module_expr(m2_expr, config, arena, warnings);
-                ModuleExprDesc::Pmod_apply(
-                    arena.push_mod_expr(m1_transformed),
-                    arena.push_mod_expr(m2_transformed),
-                )
-            }
-            ModuleExprDesc::Pmod_constraint(m, mt) => {
-                // OCaml evaluates constructor arguments right to left, so the
-                // module type is mapped before the module expression.
-                let mt = transform_module_type_idx(mt, config, arena, warnings);
-                let m_expr = arena.get_mod_expr(m).clone();
-                let m_transformed = transform_module_expr(m_expr, config, arena, warnings);
-                ModuleExprDesc::Pmod_constraint(arena.push_mod_expr(m_transformed), mt)
-            }
-            ModuleExprDesc::Pmod_unpack(expr) => {
-                let expr_val = arena.get_expr(expr).clone();
-                let transformed = transform_expression(expr_val, config, arena);
-                ModuleExprDesc::Pmod_unpack(arena.push_expr(transformed))
-            }
-            other => other,
-        },
-        pmod_loc: mexpr.pmod_loc,
-        pmod_attributes: mexpr.pmod_attributes,
-    }
-}
-
-fn transform_value_binding(
-    binding: ValueBinding,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-) -> ValueBinding {
-    let pvb_expr = transform_expression(arena.get_expr(binding.pvb_expr).clone(), config, arena);
-    ValueBinding {
-        pvb_pat: binding.pvb_pat,
-        pvb_expr: arena.push_expr(pvb_expr),
-        pvb_attributes: binding.pvb_attributes,
-        pvb_loc: binding.pvb_loc,
-    }
-}
-
 // ============================================================================
 // Expression Transformation
 // ============================================================================
-
-fn transform_expression(
-    expr: Expression,
-    config: &mut JsxConfig,
-    arena: &mut ParseArena,
-) -> Expression {
-    // Every arm below only rebuilds its node around transformed children,
-    // except JSX elements and module expressions. A subtree without either
-    // comes back unchanged, so return it without rebuilding.
-    if !expression_may_change(&expr, arena, &mut config.unchanged_memo) {
-        return expr;
-    }
-    let new_desc = match expr.pexp_desc {
-        ExpressionDesc::Pexp_jsx_element(jsx) => {
-            transform_jsx_element(*jsx, config, &expr.pexp_loc, arena)
-        }
-        ExpressionDesc::Pexp_let(inner) => {
-            let (rec_flag, bindings, body) = inner;
-            let transformed_bindings: Vec<_> = arena
-                .vb_list(bindings)
-                .to_vec()
-                .into_iter()
-                .map(|binding| transform_value_binding(binding, config, arena))
-                .collect();
-            let transformed_bindings = arena.push_vb_list(&transformed_bindings);
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_let((
-                rec_flag,
-                transformed_bindings,
-                arena.push_expr(transformed_body),
-            ))
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            let PexpFun {
-                arg_label,
-                default,
-                lhs,
-                rhs,
-                is_async,
-                arity,
-            } = *inner;
-            let rhs_expr = arena.get_expr(rhs).clone();
-            let transformed_rhs = transform_expression(rhs_expr, config, arena);
-            let transformed_default = default.map(|d| {
-                let d_expr = arena.get_expr(d).clone();
-                let rw = transform_expression(d_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            ExpressionDesc::Pexp_fun(Box::new(PexpFun {
-                arg_label,
-                default: transformed_default,
-                lhs,
-                rhs: arena.push_expr(transformed_rhs),
-                is_async,
-                arity,
-            }))
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                funct,
-                args,
-                partial,
-                transformed_jsx,
-            } = inner;
-            let funct_expr = arena.get_expr(funct).clone();
-            let transformed_funct = transform_expression(funct_expr, config, arena);
-            let funct = arena.push_expr(transformed_funct);
-            let args: Vec<_> = arena
-                .apply_args(args)
-                .to_vec()
-                .into_iter()
-                .map(|(lbl, e)| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    (lbl, arena.push_expr(transformed))
-                })
-                .collect();
-            ExpressionDesc::Pexp_apply(PexpApply {
-                funct,
-                args: arena.push_apply_args(&args),
-                partial,
-                transformed_jsx,
-            })
-        }
-        ExpressionDesc::Pexp_match(inner) => {
-            let (scrutinee, cases) = inner;
-            let scrutinee_expr = arena.get_expr(scrutinee).clone();
-            let transformed_scrutinee = transform_expression(scrutinee_expr, config, arena);
-            let transformed_cases = arena
-                .case_list(cases)
-                .to_vec()
-                .into_iter()
-                .map(|case| transform_case(case, config, arena))
-                .collect::<Vec<_>>();
-            ExpressionDesc::Pexp_match((
-                arena.push_expr(transformed_scrutinee),
-                arena.push_case_list(&transformed_cases),
-            ))
-        }
-        ExpressionDesc::Pexp_try(inner) => {
-            let (body, cases) = inner;
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            let transformed_cases = arena
-                .case_list(cases)
-                .to_vec()
-                .into_iter()
-                .map(|case| transform_case(case, config, arena))
-                .collect::<Vec<_>>();
-            ExpressionDesc::Pexp_try((
-                arena.push_expr(transformed_body),
-                arena.push_case_list(&transformed_cases),
-            ))
-        }
-        ExpressionDesc::Pexp_tuple(exprs) => ExpressionDesc::Pexp_tuple({
-            let items = arena
-                .expr_list(exprs)
-                .to_vec()
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect::<Vec<_>>();
-            arena.push_expr_list(&items)
-        }),
-        ExpressionDesc::Pexp_construct(lid, mut args) => {
-            // The rewritten node gets its own list; the original keeps its own.
-            let mut new_items = arena.expr_list(args.txt).to_vec();
-            for e in new_items.iter_mut() {
-                let e_expr = arena.get_expr(*e).clone();
-                let rw = transform_expression(e_expr, config, arena);
-                *e = arena.push_expr(rw);
-            }
-            args.txt = arena.push_expr_list(&new_items);
-            ExpressionDesc::Pexp_construct(lid, args)
-        }
-        ExpressionDesc::Pexp_variant(inner) => {
-            let (label, mut args) = *inner;
-            // The rewritten node gets its own list; the original keeps its own.
-            let mut new_items = arena.expr_list(args.txt).to_vec();
-            for e in new_items.iter_mut() {
-                let e_expr = arena.get_expr(*e).clone();
-                let transformed = transform_expression(e_expr, config, arena);
-                *e = arena.push_expr(transformed);
-            }
-            args.txt = arena.push_expr_list(&new_items);
-            ExpressionDesc::Pexp_variant(Box::new((label, args)))
-        }
-        ExpressionDesc::Pexp_record(inner) => {
-            let (fields, base) = inner;
-            let transformed_base = base.map(|e| {
-                let e_expr = arena.get_expr(e).clone();
-                let rw = transform_expression(e_expr, config, arena);
-                arena.push_expr(rw)
-            });
-            let fields: Vec<_> = arena
-                .expr_field_list(fields)
-                .to_vec()
-                .into_iter()
-                .map(|f| ExpressionRecordField {
-                    lid: f.lid,
-                    expr: {
-                        let expr = arena.get_expr(f.expr).clone();
-                        let transformed = transform_expression(expr, config, arena);
-                        arena.push_expr(transformed)
-                    },
-                    opt: f.opt,
-                })
-                .collect();
-            ExpressionDesc::Pexp_record((arena.push_expr_field_list(&fields), transformed_base))
-        }
-        ExpressionDesc::Pexp_field(obj, field) => {
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_field(arena.push_expr(transformed_obj), field)
-        }
-        ExpressionDesc::Pexp_setfield(inner) => {
-            let (obj, field, value) = *inner;
-            let obj_expr = arena.get_expr(obj).clone();
-            let value_expr = arena.get_expr(value).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            let transformed_value = transform_expression(value_expr, config, arena);
-            ExpressionDesc::Pexp_setfield(Box::new((
-                arena.push_expr(transformed_obj),
-                field,
-                arena.push_expr(transformed_value),
-            )))
-        }
-        ExpressionDesc::Pexp_object_get(inner) => {
-            let (obj, name) = *inner;
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_object_get(Box::new((arena.push_expr(transformed_obj), name)))
-        }
-        ExpressionDesc::Pexp_object_set(inner) => {
-            let (obj, name, value) = *inner;
-            let value_expr = arena.get_expr(value).clone();
-            let transformed_value = transform_expression(value_expr, config, arena);
-            let value = arena.push_expr(transformed_value);
-            let obj_expr = arena.get_expr(obj).clone();
-            let transformed_obj = transform_expression(obj_expr, config, arena);
-            ExpressionDesc::Pexp_object_set(Box::new((
-                arena.push_expr(transformed_obj),
-                name,
-                value,
-            )))
-        }
-        ExpressionDesc::Pexp_object_literal(fields) => {
-            ExpressionDesc::Pexp_object_literal(Box::new(
-                fields
-                    .into_iter()
-                    .map(|(name, e)| {
-                        let e_expr = arena.get_expr(e).clone();
-                        let transformed = transform_expression(e_expr, config, arena);
-                        (name, arena.push_expr(transformed))
-                    })
-                    .collect(),
-            ))
-        }
-        ExpressionDesc::Pexp_array(elems) => ExpressionDesc::Pexp_array({
-            let items = arena
-                .expr_list(elems)
-                .to_vec()
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect::<Vec<_>>();
-            arena.push_expr_list(&items)
-        }),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = *inner;
-            let cond_expr = arena.get_expr(cond).clone();
-            let then_expr_val = arena.get_expr(then_expr).clone();
-            let transformed_cond = transform_expression(cond_expr, config, arena);
-            let transformed_then = transform_expression(then_expr_val, config, arena);
-            let transformed_else = else_expr.map(|e| {
-                let else_expr_val = arena.get_expr(e).clone();
-                let transformed = transform_expression(else_expr_val, config, arena);
-                arena.push_expr(transformed)
-            });
-            ExpressionDesc::Pexp_ifthenelse(Box::new((
-                arena.push_expr(transformed_cond),
-                arena.push_expr(transformed_then),
-                transformed_else,
-            )))
-        }
-        ExpressionDesc::Pexp_ternary(inner) => {
-            let (cond, consequent, alternate) = *inner;
-            let cond = arena.get_expr(cond).clone();
-            let consequent = arena.get_expr(consequent).clone();
-            let alternate = arena.get_expr(alternate).clone();
-            let cond = transform_expression(cond, config, arena);
-            let consequent = transform_expression(consequent, config, arena);
-            let alternate = transform_expression(alternate, config, arena);
-            ExpressionDesc::Pexp_ternary(Box::new((
-                arena.push_expr(cond),
-                arena.push_expr(consequent),
-                arena.push_expr(alternate),
-            )))
-        }
-        ExpressionDesc::Pexp_braces(braces) => {
-            let inner = arena.get_expr(braces.expr).clone();
-            let inner = transform_expression(inner, config, arena);
-            ExpressionDesc::Pexp_braces(crate::parser::ast::PexpBraces {
-                expr: arena.push_expr(inner),
-                braces_loc: braces.braces_loc,
-            })
-        }
-        ExpressionDesc::Pexp_sequence(e1, e2) => {
-            let e1_expr = arena.get_expr(e1).clone();
-            let e2_expr = arena.get_expr(e2).clone();
-            let t1 = transform_expression(e1_expr, config, arena);
-            let t2 = transform_expression(e2_expr, config, arena);
-            ExpressionDesc::Pexp_sequence(arena.push_expr(t1), arena.push_expr(t2))
-        }
-        ExpressionDesc::Pexp_while(cond, body) => {
-            let cond_expr = arena.get_expr(cond).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let tc = transform_expression(cond_expr, config, arena);
-            let tb = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_while(arena.push_expr(tc), arena.push_expr(tb))
-        }
-        ExpressionDesc::Pexp_for(inner) => {
-            let (pat, start, end_, dir, body) = *inner;
-            let start_expr = arena.get_expr(start).clone();
-            let end_expr = arena.get_expr(end_).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_start = transform_expression(start_expr, config, arena);
-            let transformed_end = transform_expression(end_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for(Box::new((
-                pat,
-                arena.push_expr(transformed_start),
-                arena.push_expr(transformed_end),
-                dir,
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_for_of(inner) => {
-            let (pat, iterable, body) = *inner;
-            let iterable_expr = arena.get_expr(iterable).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_iterable = transform_expression(iterable_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for_of(Box::new((
-                pat,
-                arena.push_expr(transformed_iterable),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_for_await_of(inner) => {
-            let (pat, iterable, body) = *inner;
-            let iterable_expr = arena.get_expr(iterable).clone();
-            let body_expr = arena.get_expr(body).clone();
-            let transformed_iterable = transform_expression(iterable_expr, config, arena);
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_for_await_of(Box::new((
-                pat,
-                arena.push_expr(transformed_iterable),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_constraint(inner) => {
-            let (inner_expr_idx, typ) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_constraint(Box::new((arena.push_expr(transformed), typ)))
-        }
-        ExpressionDesc::Pexp_coerce(inner) => {
-            let (inner_expr_idx, from_typ, to_typ) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_coerce(Box::new((arena.push_expr(transformed), from_typ, to_typ)))
-        }
-        ExpressionDesc::Pexp_extension(inner) => {
-            let (name, payload) = *inner;
-            let mut ignored_warnings = vec![];
-            let payload = transform_payload(payload, config, arena, &mut ignored_warnings);
-            ExpressionDesc::Pexp_extension(Box::new((name, payload)))
-        }
-        ExpressionDesc::Pexp_letmodule(inner) => {
-            let (name, module_idx, body_idx) = *inner;
-            let mut ignored_warnings = vec![];
-            let module_expr = arena.get_mod_expr(module_idx).clone();
-            let transformed_module =
-                transform_module_expr(module_expr, config, arena, &mut ignored_warnings);
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_letmodule(Box::new((
-                name,
-                arena.push_mod_expr(transformed_module),
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_letexception(inner) => {
-            let (extension, body_idx) = *inner;
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_letexception(Box::new((
-                extension,
-                arena.push_expr(transformed_body),
-            )))
-        }
-        ExpressionDesc::Pexp_assert(e) => {
-            let e_expr = arena.get_expr(e).clone();
-            let transformed = transform_expression(e_expr, config, arena);
-            ExpressionDesc::Pexp_assert(arena.push_expr(transformed))
-        }
-        ExpressionDesc::Pexp_newtype(inner) => {
-            let (name, body_idx) = *inner;
-            let body_expr = arena.get_expr(body_idx).clone();
-            let transformed_body = transform_expression(body_expr, config, arena);
-            ExpressionDesc::Pexp_newtype(Box::new((name, arena.push_expr(transformed_body))))
-        }
-        ExpressionDesc::Pexp_pack(mexpr) => {
-            let mut ignored_warnings = vec![];
-            let mexpr_val = arena.get_mod_expr(mexpr).clone();
-            let transformed =
-                transform_module_expr(mexpr_val, config, arena, &mut ignored_warnings);
-            ExpressionDesc::Pexp_pack(arena.push_mod_expr(transformed))
-        }
-        ExpressionDesc::Pexp_open(inner) => {
-            let (override_flag, lid, inner_expr_idx) = *inner;
-            let inner_expr = arena.get_expr(inner_expr_idx).clone();
-            let transformed = transform_expression(inner_expr, config, arena);
-            ExpressionDesc::Pexp_open(Box::new((override_flag, lid, arena.push_expr(transformed))))
-        }
-        ExpressionDesc::Pexp_await(e) => {
-            let e_expr = arena.get_expr(e).clone();
-            let transformed = transform_expression(e_expr, config, arena);
-            ExpressionDesc::Pexp_await(arena.push_expr(transformed))
-        }
-        // Ast_mapper: `Pexp_template` maps its values; `Pexp_tagged_template`
-        // maps the tag, then the values.
-        ExpressionDesc::Pexp_template(mut template) => {
-            template.values = template
-                .values
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect();
-            ExpressionDesc::Pexp_template(template)
-        }
-        ExpressionDesc::Pexp_tagged_template(mut template) => {
-            let tag_expr = arena.get_expr(template.tag).clone();
-            let tag = transform_expression(tag_expr, config, arena);
-            template.tag = arena.push_expr(tag);
-            template.values = template
-                .values
-                .into_iter()
-                .map(|e| {
-                    let e_expr = arena.get_expr(e).clone();
-                    let transformed = transform_expression(e_expr, config, arena);
-                    arena.push_expr(transformed)
-                })
-                .collect();
-            ExpressionDesc::Pexp_tagged_template(template)
-        }
-        other => other,
-    };
-
-    Expression {
-        pexp_desc: new_desc,
-        pexp_loc: expr.pexp_loc,
-        pexp_attributes: expr.pexp_attributes,
-    }
-}
-
-fn transform_case(case: Case, config: &mut JsxConfig, arena: &mut ParseArena) -> Case {
-    let transformed_guard = case.pc_guard.map(|e| {
-        let e_expr = arena.get_expr(e).clone();
-        let transformed = transform_expression(e_expr, config, arena);
-        arena.push_expr(transformed)
-    });
-    let transformed_rhs = {
-        let rhs_expr = arena.get_expr(case.pc_rhs).clone();
-        let transformed = transform_expression(rhs_expr, config, arena);
-        arena.push_expr(transformed)
-    };
-    Case {
-        pc_bar: case.pc_bar,
-        pc_lhs: case.pc_lhs,
-        pc_guard: transformed_guard,
-        pc_rhs: transformed_rhs,
-    }
-}
 
 // ============================================================================
 // JSX Element Transformation
@@ -4428,7 +3656,7 @@ fn transform_jsx_element(
     config: &mut JsxConfig,
     loc: &Location,
     arena: &mut ParseArena,
-) -> ExpressionDesc {
+) -> JsxPreprocessorResult<ExpressionDesc> {
     match jsx {
         JsxElement::Fragment(fragment) => transform_jsx_fragment(fragment, config, loc, arena),
         JsxElement::Unary(unary) => transform_jsx_unary(unary, config, loc, arena),
@@ -4445,7 +3673,7 @@ fn mk_react_jsx(
     props: Vec<JsxProp>,
     children: Vec<ExprIdx>,
     arena: &mut ParseArena,
-) -> ExpressionDesc {
+) -> JsxPreprocessorResult<ExpressionDesc> {
     let more_than_one_children = children.len() > 1;
 
     // Append children prop
@@ -4455,10 +3683,10 @@ fn mk_react_jsx(
         props,
         children.clone(),
         arena,
-    );
+    )?;
 
     // Create the props record (filtering out key)
-    let props_record = mk_record_from_props(loc, &props_with_children, config, arena);
+    let props_record = mk_record_from_props(loc, &props_with_children, config, arena)?;
 
     // Determine jsx function and key handling
     let key_prop = try_find_key_prop(arena, &props_with_children);
@@ -4529,12 +3757,12 @@ fn mk_react_jsx(
     // Note: jsx_expr uses empty_loc() for ghost locations - don't overwrite it
     // The attributes go on the outer Pexp_apply, not on the jsx function ident
     let jsx_expr_idx = arena.push_expr(jsx_expr);
-    ExpressionDesc::Pexp_apply(PexpApply {
+    Ok(ExpressionDesc::Pexp_apply(PexpApply {
         funct: jsx_expr_idx,
         args: arena.push_apply_args(&args),
         partial: false,
         transformed_jsx: true,
-    })
+    }))
 }
 
 /// Append children prop to props list - matches OCaml's append_children_prop
@@ -4544,15 +3772,15 @@ fn append_children_prop(
     mut props: Vec<JsxProp>,
     children: Vec<ExprIdx>,
     arena: &mut ParseArena,
-) -> Vec<JsxProp> {
+) -> JsxPreprocessorResult<Vec<JsxProp>> {
     if children.is_empty() {
-        return props;
+        return Ok(props);
     }
 
     if children.len() == 1 {
         let child = children.into_iter().next().unwrap();
         let child_expr = arena.get_expr(child).clone();
-        let transformed_child = transform_expression(child_expr, config, arena);
+        let transformed_child = mapper::expr(child_expr, config, arena)?;
 
         // For lowercase components, wrap in ReactDOM.someElement
         let expr = match component_description {
@@ -4636,10 +3864,10 @@ fn append_children_prop(
                     .into_iter()
                     .map(|c| {
                         let c_expr = arena.get_expr(c).clone();
-                        let transformed = transform_expression(c_expr, config, arena);
-                        arena.push_expr(transformed)
+                        let transformed = mapper::expr(c_expr, config, arena)?;
+                        Ok(arena.push_expr(transformed))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<JsxPreprocessorResult<Vec<_>>>()?;
                 arena.push_expr_list(&items)
             }),
             pexp_loc: empty_loc(), // Ghost location for the array
@@ -4672,7 +3900,7 @@ fn append_children_prop(
         });
     }
 
-    props
+    Ok(props)
 }
 
 /// Get location from a JSX prop
@@ -4695,7 +3923,7 @@ fn mk_record_from_props(
     props: &[JsxProp],
     config: &mut JsxConfig,
     arena: &mut ParseArena,
-) -> Expression {
+) -> JsxPreprocessorResult<Expression> {
     // Calculate location from ALL props (including key) - OCaml does this before filtering
     let loc = if props.is_empty() {
         *jsx_expr_loc
@@ -4723,7 +3951,7 @@ fn mk_record_from_props(
     let (regular_props, spread_base) = {
         let mut props_iter = props.into_iter().peekable();
         let spread_base = if let Some(JsxProp::Spreading { expr, .. }) = props_iter.peek() {
-            let spread = transform_expression(arena.get_expr(*expr).clone(), config, arena);
+            let spread = mapper::expr(arena.get_expr(*expr).clone(), config, arena)?;
             props_iter.next(); // consume the spread
             Some(arena.push_expr(spread))
         } else {
@@ -4735,15 +3963,16 @@ fn mk_record_from_props(
     };
 
     // Build record fields
+    // `List.map` over the fields: a spread after a field raises when reached.
     let record_fields: Vec<ExpressionRecordField> = regular_props
         .into_iter()
-        .filter_map(|prop| {
+        .map(|prop| {
             match prop {
                 JsxProp::Punning { optional, name } => {
                     // name.txt is already a StrIdx, use it directly
                     let name_str_idx = name.txt;
                     let name_lid = arena.push_longident(Longident::Lident(name_str_idx));
-                    Some(ExpressionRecordField {
+                    Ok(ExpressionRecordField {
                         lid: Loc {
                             txt: name_lid,
                             loc: name.loc,
@@ -4766,29 +3995,26 @@ fn mk_record_from_props(
                 } => {
                     // name.txt is already a StrIdx, use it directly
                     let name_str_idx = name.txt;
-                    Some(ExpressionRecordField {
+                    Ok(ExpressionRecordField {
                         lid: Loc {
                             txt: arena.push_longident(Longident::Lident(name_str_idx)),
                             loc: name.loc,
                         },
                         expr: {
                             let value = arena.get_expr(*value).clone();
-                            let transformed = transform_expression(value, config, arena);
+                            let transformed = mapper::expr(value, config, arena)?;
                             arena.push_expr(transformed)
                         },
                         opt: *optional,
                     })
                 }
-                JsxProp::Spreading { loc, .. } => {
-                    set_fatal_error(config, *loc, JSX_SPREAD_AFTER_PROP_MSG);
-                    None
-                }
+                JsxProp::Spreading { loc, .. } => Err(jsx_error(*loc, JSX_SPREAD_AFTER_PROP_MSG)),
             }
         })
-        .collect();
+        .collect::<JsxPreprocessorResult<_>>()?;
 
     // Handle empty record with spread
-    match (&record_fields[..], &spread_base) {
+    Ok(match (&record_fields[..], &spread_base) {
         ([], Some(spread_idx)) => {
             let spread_expr = arena.get_expr(*spread_idx).clone();
             Expression {
@@ -4805,7 +4031,7 @@ fn mk_record_from_props(
             pexp_loc: loc,
             pexp_attributes: Attributes::new(),
         },
-    }
+    })
 }
 
 fn transform_jsx_fragment(
@@ -4813,7 +4039,7 @@ fn transform_jsx_fragment(
     config: &mut JsxConfig,
     loc: &Location,
     arena: &mut ParseArena,
-) -> ExpressionDesc {
+) -> JsxPreprocessorResult<ExpressionDesc> {
     let children = fragment.children;
 
     // Fragment expression: React.jsxFragment (or Module.jsxFragment)
@@ -4843,7 +4069,7 @@ fn transform_jsx_unary(
     config: &mut JsxConfig,
     loc: &Location,
     arena: &mut ParseArena,
-) -> ExpressionDesc {
+) -> JsxPreprocessorResult<ExpressionDesc> {
     let tag_loc = &unary.tag_name.loc;
     match &unary.tag_name.txt {
         JsxTagName::Lower(name) => {
@@ -4911,17 +4137,10 @@ fn transform_jsx_unary(
                 arena,
             )
         }
-        JsxTagName::Invalid(name) => {
-            set_fatal_error(
-                config,
-                *loc,
-                &format!(
-                    "JSX: element name is neither upper- or lowercase, got \"{}\"",
-                    name
-                ),
-            );
-            ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Unary(unary)))
-        }
+        JsxTagName::Invalid(name) => Err(jsx_error(
+            *loc,
+            &format!("JSX: element name is neither upper- or lowercase, got \"{name}\""),
+        )),
     }
 }
 
@@ -4930,7 +4149,7 @@ fn transform_jsx_container(
     config: &mut JsxConfig,
     loc: &Location,
     arena: &mut ParseArena,
-) -> ExpressionDesc {
+) -> JsxPreprocessorResult<ExpressionDesc> {
     let tag_loc = &container.tag_name_start.loc;
     match &container.tag_name_start.txt {
         JsxTagName::Lower(name) => {
@@ -4998,139 +4217,300 @@ fn transform_jsx_container(
                 arena,
             )
         }
-        JsxTagName::Invalid(name) => {
-            set_fatal_error(
-                config,
-                *loc,
-                &format!(
-                    "JSX: element name is neither upper- or lowercase, got \"{}\"",
-                    name
-                ),
-            );
-            ExpressionDesc::Pexp_jsx_element(Box::new(JsxElement::Container(container)))
-        }
+        JsxTagName::Invalid(name) => Err(jsx_error(
+            *loc,
+            &format!("JSX: element name is neither upper- or lowercase, got \"{name}\""),
+        )),
     }
-}
-
-/// Whether `transform_expression` may rewrite `expr` or its subtree: it
-/// contains a JSX element, a module expression (whose structure items get the
-/// component transform), or a construct this check does not inspect.
-fn expression_may_change(
-    expr: &Expression,
-    arena: &ParseArena,
-    memo: &mut Vec<Option<bool>>,
-) -> bool {
-    let child = |idx: ExprIdx, memo: &mut Vec<Option<bool>>| subtree_may_change(idx, arena, memo);
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_ident(_)
-        | ExpressionDesc::Pexp_constant(_)
-        | ExpressionDesc::Pexp_break
-        | ExpressionDesc::Pexp_continue => false,
-        ExpressionDesc::Pexp_let(inner) => {
-            arena
-                .vb_list(inner.1)
-                .iter()
-                .any(|binding| child(binding.pvb_expr, memo))
-                || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_fun(inner) => {
-            inner.default.is_some_and(|default| child(default, memo)) || child(inner.rhs, memo)
-        }
-        ExpressionDesc::Pexp_apply(inner) => {
-            child(inner.funct, memo)
-                || arena
-                    .apply_args(inner.args)
-                    .iter()
-                    .any(|(_, arg)| child(*arg, memo))
-        }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            child(inner.0, memo)
-                || arena.case_list(inner.1).iter().any(|case| {
-                    case.pc_guard.is_some_and(|guard| child(guard, memo))
-                        || child(case.pc_rhs, memo)
-                })
-        }
-        ExpressionDesc::Pexp_template(template) => {
-            template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tagged_template(template) => {
-            child(template.tag, memo) || template.values.iter().any(|item| child(*item, memo))
-        }
-        ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => arena
-            .expr_list(*items)
-            .to_vec()
-            .iter()
-            .any(|item| child(*item, memo)),
-        ExpressionDesc::Pexp_construct(_, args) => arena
-            .expr_list(args.txt)
-            .iter()
-            .any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_variant(inner) => arena
-            .expr_list(inner.1.txt)
-            .iter()
-            .any(|arg| child(*arg, memo)),
-        ExpressionDesc::Pexp_record(inner) => {
-            arena
-                .expr_field_list(inner.0)
-                .iter()
-                .any(|field| child(field.expr, memo))
-                || inner.1.is_some_and(|spread| child(spread, memo))
-        }
-        ExpressionDesc::Pexp_field(target, _) => child(*target, memo),
-        ExpressionDesc::Pexp_setfield(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_get(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_object_set(inner) => child(inner.0, memo) || child(inner.2, memo),
-        ExpressionDesc::Pexp_object_literal(fields) => fields.iter().any(|(_, e)| child(*e, memo)),
-        ExpressionDesc::Pexp_ifthenelse(inner) => {
-            child(inner.0, memo)
-                || child(inner.1, memo)
-                || inner.2.is_some_and(|else_| child(else_, memo))
-        }
-        ExpressionDesc::Pexp_ternary(inner) => {
-            child(inner.0, memo) || child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_braces(braces) => child(braces.expr, memo),
-        ExpressionDesc::Pexp_regexp(_) => false,
-        ExpressionDesc::Pexp_sequence(first, second)
-        | ExpressionDesc::Pexp_while(first, second) => child(*first, memo) || child(*second, memo),
-        ExpressionDesc::Pexp_for(inner) => {
-            child(inner.1, memo) || child(inner.2, memo) || child(inner.4, memo)
-        }
-        ExpressionDesc::Pexp_for_of(inner) | ExpressionDesc::Pexp_for_await_of(inner) => {
-            child(inner.1, memo) || child(inner.2, memo)
-        }
-        ExpressionDesc::Pexp_constraint(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_coerce(inner) => child(inner.0, memo),
-        ExpressionDesc::Pexp_letexception(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_assert(inner) | ExpressionDesc::Pexp_await(inner) => {
-            child(*inner, memo)
-        }
-        ExpressionDesc::Pexp_newtype(inner) => child(inner.1, memo),
-        ExpressionDesc::Pexp_open(inner) => child(inner.2, memo),
-        ExpressionDesc::Pexp_jsx_element(_)
-        | ExpressionDesc::Pexp_letmodule(_)
-        | ExpressionDesc::Pexp_pack(_)
-        | ExpressionDesc::Pexp_extension(_) => true,
-    }
-}
-
-fn subtree_may_change(idx: ExprIdx, arena: &ParseArena, memo: &mut Vec<Option<bool>>) -> bool {
-    let slot = idx.0 as usize;
-    if let Some(&Some(may_change)) = memo.get(slot) {
-        return may_change;
-    }
-    let may_change = expression_may_change(arena.get_expr(idx), arena, memo);
-    if slot >= memo.len() {
-        memo.resize(slot + 1, None);
-    }
-    memo[slot] = Some(may_change);
-    may_change
 }
 
 #[cfg(test)]
 mod tests {
     use super::{JsxConfig, module_access_name, transform_structure_result};
     use crate::parser::{ExpressionDesc, Longident, Parser, StructureItemDesc, module, sexp_locs};
+
+    /// jsx_ppx.ml:61-71: a `version` other than 4 is an error at the
+    /// version value, also for a generic `module_`.
+    #[test]
+    fn jsx_config_rejects_versions_other_than_4() {
+        let error_at = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            transform_structure_result(structure, 4, "react", arena)
+                .err()
+                .map(|error| {
+                    let start = arena.loc_start(error.loc);
+                    (error.message, start.line, start.cnum - start.bol)
+                })
+        };
+        let unsupported =
+            |line, column| Some((super::UNSUPPORTED_JSX_VERSION_MSG.to_string(), line, column));
+        assert_eq!(
+            error_at("@@jsxConfig({version: 3})\nlet x = <div />\n"),
+            unsupported(1, 22)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({version: \"4\"})\n"),
+            unsupported(1, 22)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({module_: \"Preact\", version: 3})\n"),
+            unsupported(1, 41)
+        );
+        assert_eq!(
+            error_at("@@jsxConfig({version: 0x4})\nlet x = <div />\n"),
+            None
+        );
+        assert_eq!(error_at("@@jsxConfig({module_: \"Preact\"})\n"), None);
+    }
+
+    /// jsx_ppx.ml:93-133: with the transform off the mapper still visits
+    /// nested structures, where `@@jsxConfig` applies until the structure ends.
+    #[test]
+    fn jsx_config_applies_in_nested_structures_at_any_version() {
+        let transform = |source: &str, version: i32| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            match transform_structure_result(structure, version, "react", arena) {
+                Ok(structure) => {
+                    let mut out = Vec::new();
+                    sexp_locs::print_structure(&structure, arena, &mut out);
+                    Ok(String::from_utf8(out).unwrap())
+                }
+                Err(error) => {
+                    let start = arena.loc_start(error.loc);
+                    Err((error.message, start.line, start.cnum - start.bol))
+                }
+            }
+        };
+        let unsupported =
+            |line, column| Err((super::UNSUPPORTED_JSX_VERSION_MSG.to_string(), line, column));
+        for version in [-1, 4] {
+            assert_eq!(
+                transform("module M = {\n  @@jsxConfig({version: 5})\n}\n", version),
+                unsupported(2, 24)
+            );
+            assert_eq!(
+                transform(
+                    "let f = () => {\n  module M = {\n    @@jsxConfig({version: 5})\n  }\n  <div> {module N = {@@jsxConfig({version: 6})}\n  1} </div>\n}\n",
+                    version
+                ),
+                // `letmodule ~loc ~attrs s (module_expr me) (expr e)` maps the
+                // body, which holds `N`, before the module `M`.
+                unsupported(5, 43)
+            );
+        }
+        // Children are mapped before props, as OCaml evaluates the arguments of
+        // `Exp.jsx_container_element` right to left.
+        assert_eq!(
+            transform(
+                "let x = <div a={module A = {@@jsxConfig({version: 7})}\n 1}> {module B = {@@jsxConfig({version: 8})}\n 1} </div>\n",
+                -1
+            ),
+            unsupported(2, 40)
+        );
+        // A nested `@@jsxConfig({version: 4})` turns the transform on for that
+        // structure only.
+        let nested_on = transform(
+            "module M = {\n  @@jsxConfig({version: 4})\n  let a = <div />\n}\nlet b = <div />\n",
+            -1,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_on.matches("Pexp_jsx_unary_element").count(),
+            1,
+            "{nested_on}"
+        );
+        // A nested `module_` ends with its structure.
+        let nested_module = transform(
+            "module M = {\n  @@jsxConfig({module_: \"Preact\"})\n  let a = <div />\n}\nlet b = <div />\n",
+            4,
+        )
+        .unwrap();
+        assert_eq!(
+            nested_module.matches("(Lident \"Preact\")").count(),
+            1,
+            "{nested_module}"
+        );
+        assert_eq!(
+            nested_module.matches("(Lident \"ReactDOM\")").count(),
+            1,
+            "{nested_module}"
+        );
+    }
+
+    /// The mapper follows OCaml's evaluation order (ast_mapper.ml:317-471):
+    /// the first `@@jsxConfig` error is the one OCaml raises first.
+    #[test]
+    fn jsx_mapper_raises_errors_in_ocaml_evaluation_order() {
+        let first_error_line = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            let error = transform_structure_result(structure, 4, "react", arena)
+                .expect_err("two invalid versions");
+            arena.loc_start(error.loc).line
+        };
+        let bad = |n: i32| format!("{{module M{n} = {{@@jsxConfig({{version: {n}}})}}\n 1}}");
+        // (source, line of the first error), from OCaml bsc -bs-jsx 4.
+        let cases = [
+            // let: the body, then the bindings
+            (
+                format!("let f = () => {{\n  let a = {}\n  {}\n}}\n", bad(5), bad(6)),
+                4,
+            ),
+            // apply: the arguments, then the function
+            (format!("let x = {}({})\n", bad(5), bad(6)), 2),
+            // switch: the cases, then the scrutinee
+            (
+                format!("let x = switch {} {{\n| _ => {}\n}}\n", bad(5), bad(6)),
+                3,
+            ),
+            // try: the cases, then the body
+            (
+                format!("let x = try {} catch {{\n| _ => {}\n}}\n", bad(5), bad(6)),
+                3,
+            ),
+            // an expression's attributes come first
+            (format!("let x = @foo({}) {}\n", bad(5), bad(6)), 1),
+            // a value binding: the pattern, the expression, then the attributes
+            (format!("@foo({})\nlet x = {}\n", bad(5), bad(6)), 3),
+            // parameter defaults are mapped, after the body
+            (
+                format!("let f = (~a={}, ~b={}) => {}\n", bad(5), bad(6), bad(7)),
+                3,
+            ),
+        ];
+        for (source, line) in cases {
+            assert_eq!(first_error_line(&source), line, "{source}");
+        }
+        // Module application maps the argument first.
+        let modapply = "module R = F({@@jsxConfig({version: 5})})({@@jsxConfig({version: 6})})\n";
+        let mut parser = Parser::new("test.res".to_string(), modapply);
+        let structure = module::parse_structure(&mut parser);
+        let arena = parser.arena_mut();
+        let error = transform_structure_result(structure, 4, "react", arena).unwrap_err();
+        let start = arena.loc_start(error.loc);
+        assert_eq!(start.cnum - start.bol, 65);
+    }
+
+    /// Warnings from structures nested in expressions are reported, and none
+    /// raised after the first error (OCaml stops at the raise).
+    #[test]
+    fn jsx_mapper_reports_nested_warnings_until_the_first_error() {
+        let warnings = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            let (result, warnings) =
+                super::transform_structure_collecting_warnings(structure, 4, "react", arena);
+            (result.is_ok(), warnings.len())
+        };
+        let component =
+            "module W = {\n  @react.componentWithProps(x)\n  let make = props => <div />\n}";
+        let bad = "{module M = {@@jsxConfig({version: 5})}\n 1}";
+        assert_eq!(
+            warnings(&format!("let f = () => {{\n{component}\n1\n}}\n")),
+            (true, 1)
+        );
+        assert_eq!(
+            warnings(&format!("let x = %foo(\n{component}\n)\n")),
+            (true, 1)
+        );
+        // The body (the warning) is mapped before the binding (the error).
+        assert_eq!(
+            warnings(&format!(
+                "let f = () => {{\nlet y = {bad}\n{component}\n1\n}}\n"
+            )),
+            (false, 1)
+        );
+        // The error comes first, so the warning is never raised.
+        assert_eq!(
+            warnings(&format!(
+                "let f = () => {{\n{component}\nlet y = {bad}\n1\n}}\n"
+            )),
+            (false, 0)
+        );
+    }
+
+    /// An error ends the mapping where OCaml raises it: nothing after it is
+    /// visited or rebuilt, and no later warning is collected.
+    #[test]
+    fn jsx_mapper_stops_at_the_first_error() {
+        let large: String = (0..200)
+            .map(|i| format!("let a{i} = <div> <span /> {{<b> <i /> </b>}} </div>\n"))
+            .collect();
+        let warning =
+            "module W = {\n  @react.componentWithProps(x)\n  let make = props => <div />\n}\n";
+        let bad = "@@jsxConfig({version: 5})\n";
+        // Expressions pushed to the arena while mapping, and the outcome.
+        let run = |source: &str| {
+            let mut parser = Parser::new("test.res".to_string(), source);
+            let structure = module::parse_structure(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let arena = parser.arena_mut();
+            let probe = arena.get_expr(crate::parse_arena::ExprIdx(0)).clone();
+            let before = arena.push_expr(probe.clone()).0;
+            let (result, warnings) =
+                super::transform_structure_collecting_warnings(structure, 4, "react", arena);
+            let after = arena.push_expr(probe).0;
+            (after - before - 1, result.is_ok(), warnings.len())
+        };
+        // The error comes first: the elements and the component after it are
+        // never mapped.
+        assert_eq!(run(&format!("{bad}{large}{warning}")), (0, false, 0));
+        // The same subtree before the error is mapped, with its warning.
+        let (pushed, ok, warnings) = run(&format!("{large}{warning}{bad}"));
+        assert!(pushed > 1000, "{pushed}");
+        assert_eq!((ok, warnings), (false, 1));
+    }
+
+    /// A signature keeps the warnings raised before its error, and none after.
+    #[test]
+    fn jsx_signature_reports_warnings_until_the_first_error() {
+        let warning = "@react.componentWithProps(x)\nlet make: props => int\n";
+        let bad = "@@jsxConfig({version: 5})\n";
+        let run = |source: &str| {
+            let mut parser = Parser::new("test.resi".to_string(), source);
+            let signature = module::parse_signature(&mut parser);
+            assert!(!parser.has_errors(), "{source}");
+            let (result, warnings) = super::transform_signature_collecting_warnings(
+                signature,
+                4,
+                "react",
+                parser.arena_mut(),
+            );
+            (result.is_ok(), warnings.len())
+        };
+        assert_eq!(run(&format!("{warning}{bad}")), (false, 1));
+        assert_eq!(run(&format!("{bad}{warning}")), (false, 0));
+        assert_eq!(run(warning), (true, 1));
+    }
+
+    /// JSX in parameter defaults is transformed (`p_default` is mapped).
+    #[test]
+    fn jsx_mapper_transforms_parameter_defaults() {
+        let source = "let f = (~a=<div />, ~b=<span />, ()) => a\n";
+        let mut parser = Parser::new("test.res".to_string(), source);
+        let structure = module::parse_structure(&mut parser);
+        let arena = parser.arena_mut();
+        let structure = transform_structure_result(structure, 4, "react", arena).unwrap();
+        let mut out = Vec::new();
+        sexp_locs::print_structure(&structure, arena, &mut out);
+        let out = String::from_utf8(out).unwrap();
+        assert!(!out.contains("Pexp_jsx_unary_element"), "{out}");
+        assert_eq!(
+            out.matches("(Ldot (Lident \"ReactDOM\") \"jsx\")").count(),
+            2,
+            "{out}"
+        );
+    }
 
     #[test]
     fn parses_dotted_custom_jsx_module_paths() {

@@ -28,36 +28,33 @@ const STAMP_RESULT: i32 = 12;
 const STAMP_DICT: i32 = 13;
 const STAMP_BIGINT: i32 = 14;
 const STAMP_STRING: i32 = 15;
-const STAMP_EXTENSION_CONSTRUCTOR: i32 = 16;
-const STAMP_UNKNOWN: i32 = 17;
-const STAMP_PROMISE: i32 = 18;
+const STAMP_UNKNOWN: i32 = 16;
+const STAMP_PROMISE: i32 = 17;
 // Upstream compiler/ml/predef.ml:68 allocates taggedTemplate immediately after promise.
-const STAMP_TAGGED_TEMPLATE: i32 = 19;
+const STAMP_TAGGED_TEMPLATE: i32 = 18;
 
 // Predef exceptions (Ident.create_predef_exn) — same counter, with PREDEF_EXN flag
-const STAMP_MATCH_FAILURE: i32 = 20;
-const STAMP_INVALID_ARGUMENT: i32 = 21;
-const STAMP_FAILURE: i32 = 22;
-const STAMP_OK: i32 = 23;
-const STAMP_ERROR: i32 = 24;
-// dict_magic_field_name uses regular ident_create (no predef_exn flag)
-const STAMP_DICT_MAGIC_FIELD: i32 = 25;
-const STAMP_JS_EXN: i32 = 26;
-const STAMP_NOT_FOUND: i32 = 27;
-const STAMP_END_OF_FILE: i32 = 28;
-const STAMP_DIVISION_BY_ZERO: i32 = 29;
-const STAMP_ASSERT_FAILURE: i32 = 30;
-const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 31;
+const STAMP_MATCH_FAILURE: i32 = 19;
+const STAMP_INVALID_ARGUMENT: i32 = 20;
+const STAMP_FAILURE: i32 = 21;
+const STAMP_OK: i32 = 22;
+const STAMP_ERROR: i32 = 23;
+const STAMP_JS_EXN: i32 = 24;
+const STAMP_NOT_FOUND: i32 = 25;
+const STAMP_END_OF_FILE: i32 = 26;
+const STAMP_DIVISION_BY_ZERO: i32 = 27;
+const STAMP_ASSERT_FAILURE: i32 = 28;
+const STAMP_UNDEFINED_RECURSIVE_MODULE: i32 = 29;
 
 // Constructor idents (regular Ident.create, in common_initial_env)
-const STAMP_FALSE: i32 = 32;
-const STAMP_TRUE: i32 = 33;
-const STAMP_VOID: i32 = 34; // "()"
-const STAMP_NIL: i32 = 35; // "[]"
-const STAMP_CONS: i32 = 36; // "::"
-const STAMP_NONE: i32 = 37;
-const STAMP_SOME: i32 = 38;
-const STAMP_CTOR_UNKNOWN: i32 = 39;
+const STAMP_FALSE: i32 = 30;
+const STAMP_TRUE: i32 = 31;
+const STAMP_VOID: i32 = 32; // "()"
+const STAMP_NIL: i32 = 33; // "[]"
+const STAMP_CONS: i32 = 34; // "::"
+const STAMP_NONE: i32 = 35;
+const STAMP_SOME: i32 = 36;
+const STAMP_CTOR_UNKNOWN: i32 = 37;
 
 /// The stamp counter value after all predefs are allocated.
 /// OCaml sets `Ident.set_current_time 999` at the end of predef.ml.
@@ -88,7 +85,6 @@ pub fn is_predef_type_ident(id: &Ident) -> bool {
         STAMP_DICT => "dict",
         STAMP_BIGINT => "bigint",
         STAMP_STRING => "string",
-        STAMP_EXTENSION_CONSTRUCTOR => "extension_constructor",
         STAMP_UNKNOWN => "unknown",
         STAMP_PROMISE => "promise",
         STAMP_TAGGED_TEMPLATE => "taggedTemplate",
@@ -165,10 +161,6 @@ pub fn ident_bigint() -> Ident {
 pub fn ident_string() -> Ident {
     make_ident("string", STAMP_STRING)
 }
-/// The identifier of the predefined type `extension_constructor`.
-pub fn ident_extension_constructor() -> Ident {
-    make_ident("extension_constructor", STAMP_EXTENSION_CONSTRUCTOR)
-}
 /// The identifier of the predefined type `unknown`.
 pub fn ident_unknown() -> Ident {
     make_ident("unknown", STAMP_UNKNOWN)
@@ -205,10 +197,6 @@ pub fn ident_ok() -> Ident {
 /// The identifier of the `result` constructor `Error`.
 pub fn ident_error() -> Ident {
     make_predef_exn_ident("Error", STAMP_ERROR)
-}
-/// The identifier of `dict`'s magic record field `dictValuesType`, which carries the type of its values.
-pub fn ident_dict_magic_field() -> Ident {
-    make_ident("dictValuesType", STAMP_DICT_MAGIC_FIELD)
 }
 /// The identifier of the predefined exception `JsExn`.
 pub fn ident_js_exn() -> Ident {
@@ -339,10 +327,6 @@ pub fn path_bigint() -> Path {
 pub fn path_string() -> Path {
     Path::pident(ident_string())
 }
-/// The path of the identifier [`ident_extension_constructor`].
-pub fn path_extension_constructor() -> Path {
-    Path::pident(ident_extension_constructor())
-}
 /// The path of the identifier [`ident_unknown`].
 pub fn path_unknown() -> Path {
     Path::pident(ident_unknown())
@@ -403,7 +387,6 @@ pub fn find_predef_ident(name: &str) -> Option<Ident> {
         "dict" => Some(ident_dict()),
         "bigint" => Some(ident_bigint()),
         "string" => Some(ident_string()),
-        "extension_constructor" => Some(ident_extension_constructor()),
         "unknown" => Some(ident_unknown()),
         "promise" => Some(ident_promise()),
         "taggedTemplate" => Some(ident_tagged_template()),

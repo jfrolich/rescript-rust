@@ -1,2 +1,2 @@
-// error-output-parity: Ast_exp_handle_external %debugger rejects payloads.
+// error-output-parity: res_core rejects the removed %debugger extension, with a payload.
 let _ = %debugger(1)

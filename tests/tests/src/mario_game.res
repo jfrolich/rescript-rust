@@ -151,6 +151,7 @@ module Actors: {
     | SItem(item_typ)
     | SBlock(block_typ)
 }
+
 module Dom_html = {
   type imageElement
   type canvasRenderingContext2D
@@ -162,11 +163,14 @@ module Dom_html = {
   /* external createImg: (_ [@as "img"]) -> document -> imageElement = "createElement" [@@send] */
   @send external createImg: (Dom.document, @as("img") _) => imageElement = "createElement"
   @val external requestAnimationFrame: (float => unit) => unit = "requestAnimationFrame"
+
   @return(null_to_opt) @send
   external getElementById: (Dom.document, string) => option<Dom.element> = "getElementById"
+
   @send
   external addEventListener: (Dom.document, string, Dom.event_like<'a> => bool, bool) => unit =
     "addEventListener"
+
   @send
   external addEventListenerImg: (imageElement, string, Dom.event_like<'a> => bool, bool) => unit =
     "addEventListener"
@@ -179,6 +183,7 @@ module Dom_html = {
   external elementToCanvasElement: Dom.element => canvasElement = "%identity"
   external windowToJsObj: Dom.window => {..} = "%identity"
 }
+
 module Sprite: {
   open Actors
 
@@ -635,6 +640,7 @@ module Sprite: {
     }
   }
 }
+
 module Particle: {
   open Actors
   open Sprite
@@ -784,6 +790,7 @@ module Particle: {
     update_pos(part)
   }
 }
+
 module Object: {
   open Sprite
   open Actors
@@ -801,6 +808,7 @@ module Object: {
     has_gravity: bool,
     speed: float,
   }
+
   type obj = {
     params: obj_params,
     pos: xy,
@@ -1378,6 +1386,7 @@ module Object: {
     | _ => list{}
     }
 }
+
 module Draw: {
   let render: (Sprite.sprite, (float, float)) => unit
 
@@ -1486,7 +1495,7 @@ module Draw: {
     ctx["fillStyle"] = "white"
     ctx["font"] = "20px 'Press Start 2P'"
     ctx["fillText"]("You win!", 180., 128.)
-    failwith("Game over.")
+    throw(Failure("Game over."))
   }
 
   /* gave_loss displays a black screen stating a loss to finish that level play. */
@@ -1498,11 +1507,12 @@ module Draw: {
     ctx["fillStyle"] = "white"
     ctx["font"] = "20px 'Press Start 2P'"
     ctx["fillText"]("GAME OVER. You lose!", 60., 128.)
-    failwith("Game over.")
+    throw(Failure("Game over."))
   }
 
-  let draw_background_color = canvas => failwith("todo")
+  let draw_background_color = canvas => throw(Failure("todo"))
 }
+
 module Viewport: {
   open Actors
 
@@ -1585,6 +1595,7 @@ module Viewport: {
     {...vpt, pos}
   }
 }
+
 module Director: {
   let update_loop: (
     Dom_html.canvasElement,
@@ -2138,6 +2149,7 @@ module Director: {
     true
   }
 }
+
 module Procedural_generator: {
   open Object
   open Actors
@@ -2190,7 +2202,7 @@ module Procedural_generator: {
     | 0 => RKoopa
     | 1 => GKoopa
     | 2 => Goomba
-    | _ => failwith("Shouldn't reach here")
+    | _ => throw(Failure("Shouldn't reach here"))
     }
 
   /* Chooses what type of block should be instantiated given typ number */
@@ -2201,7 +2213,7 @@ module Procedural_generator: {
     | 2 => Cloud
     | 3 => QBlock(Mushroom)
     | 4 => Ground
-    | _ => failwith("Shouldn't reach here")
+    | _ => throw(Failure("Shouldn't reach here"))
     }
 
   /* Optimizes lst such that there are no two items in the list that have the same
@@ -2371,7 +2383,7 @@ module Procedural_generator: {
           }
         }
       | 5 => list{(3, (cbx, cby))}
-      | _ => failwith("Shouldn't reach here")
+      | _ => throw(Failure("Shouldn't reach here"))
       }
       obj_coord
     }
@@ -2574,6 +2586,7 @@ module Procedural_generator: {
   /* Makes sure level map is uniquely generated at each call. */
   let init = () => Random.self_init()
 }
+
 module Main = {
   open Actors
   open Sprite
@@ -2595,7 +2608,7 @@ module Main = {
     let canvas = switch Dom_html.getElementById(Dom_html.document, canvas_id) {
     | None =>
       Console.log("cant find canvas " ++ canvas_id ++ "")
-      failwith("fail")
+      throw(Failure("fail"))
     | Some(el) => Dom_html.elementToCanvasElement(el)
     }
 

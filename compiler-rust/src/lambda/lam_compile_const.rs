@@ -17,12 +17,10 @@ use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_constant::{Constant, ConstructorRuntimeTag, PointerInfo};
 
 impl LambdaCompiler {
+    /// Keep in sync with `Constant::is_allocating`: a nested none is a new
+    /// optional block.
     pub(crate) fn some_none_depth(cst: &Constant) -> Option<usize> {
-        match cst {
-            Constant::Some(inner) => Self::some_none_depth(inner).map(|depth| depth + 1),
-            Constant::ModuleAlias | Constant::JsUndefined { .. } => Some(0),
-            _ => None,
-        }
+        cst.some_none_depth()
     }
 
     pub(crate) fn nested_some_none(depth: usize, none: Expr, j: &mut JsArena) -> Expr {
@@ -95,25 +93,27 @@ impl LambdaCompiler {
                     None => E::number(Number::int(*i), j),
                 }
             }
+            // lam_compile_const.ml: Const_constructor {name = "[]"}.
+            Constant::Constructor(tag) if tag.name == "[]" => {
+                Self::commented_number(Number::int(0), &tag.name, j)
+            }
             Constant::Constructor(tag) => match &tag.literal {
-                Some(crate::types::VariantLiteralTag::Int(value)) => {
+                crate::types::VariantLiteralTag::Int(value) => {
                     E::number(Number::int(*value as i32), j)
                 }
                 // lam_compile_const.ml `E.tag_type t`: `String s -> str s`.
-                Some(crate::types::VariantLiteralTag::String(value)) => E::string(value, j),
-                Some(crate::types::VariantLiteralTag::Float(value)) => {
+                crate::types::VariantLiteralTag::String(value) => E::string(value, j),
+                crate::types::VariantLiteralTag::Float(value) => {
                     E::number(Number::float(value.clone()), j)
                 }
                 // js_exp_make.ml `literal_tag`: `Bigint_utils.parse_bigint`.
-                Some(crate::types::VariantLiteralTag::BigInt(value)) => {
+                crate::types::VariantLiteralTag::BigInt(value) => {
                     let (positive, digits) = crate::types::typecore::parse_bigint_literal(value);
                     E::number(Number::bigint(positive, digits), j)
                 }
-                Some(crate::types::VariantLiteralTag::Bool(value)) => E::bool(*value, j),
-                Some(crate::types::VariantLiteralTag::Null) => E::null(j),
-                Some(crate::types::VariantLiteralTag::Undefined) => E::undefined(false, j),
-                None if tag.name == "[]" => Self::commented_number(Number::int(0), &tag.name, j),
-                None => E::string(&tag.name, j),
+                crate::types::VariantLiteralTag::Bool(value) => E::bool(*value, j),
+                crate::types::VariantLiteralTag::Null => E::null(j),
+                crate::types::VariantLiteralTag::Undefined => E::undefined(false, j),
             },
             Constant::NativeInt { i, comment } => {
                 match pointer_info_comment_text(comment.as_ref().map(|v| &**v)) {

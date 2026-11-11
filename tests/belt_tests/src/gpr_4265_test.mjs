@@ -2,7 +2,7 @@
 
 import * as Mocha from "mocha";
 import * as Test_utils from "./test_utils.mjs";
-import * as Belt_MutableMapInt from "@rescript/belt/lib/es6/src/Belt_MutableMapInt.mjs";
+import * as Belt_MutableMapInt from "@rescript/belt/src/Belt_MutableMapInt.mjs";
 
 let mockMap = Belt_MutableMapInt.make();
 
@@ -26,7 +26,7 @@ Belt_MutableMapInt.remove(mockMap, 1726);
 let n1 = Belt_MutableMapInt.getExn(mockMap, 6667);
 
 Mocha.describe("Gpr_4265_test", () => {
-  Mocha.test("mutable map operations", () => Test_utils.eq("File \"gpr_4265_test.res\", line 18, characters 42-49", n, n1));
+  Mocha.test("mutable map operations", () => Test_utils.eq("File \"gpr_4265_test.res\", line 20, characters 42-49", n, n1));
 });
 
 export {

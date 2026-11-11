@@ -78,16 +78,7 @@ Test.run([
   1,
   2,
   3
-], /* [] */0, Stdlib_List.add), eq, {
-  hd: 3,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 1,
-      tl: /* [] */0
-    }
-  }
-});
+], /* [] */0, Stdlib_List.add), eq, {hd: 3, tl: {hd: 2, tl: {hd: 1, tl: /* [] */0}}});
 
 Test.run([
   [
@@ -111,37 +102,22 @@ Test.run([
   1,
   2,
   3
-], /* [] */0, (acc, v, i) => ({
-  hd: v + i | 0,
-  tl: acc
-})), eq, {
-  hd: 5,
-  tl: {
-    hd: 3,
-    tl: {
-      hd: 1,
-      tl: /* [] */0
-    }
-  }
-});
+], /* [] */0, (acc, v, i) => ({hd: v + i | 0, tl: acc})), eq, {hd: 5, tl: {hd: 3, tl: {hd: 1, tl: /* [] */0}}});
 
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    25,
+    26,
     13,
     38
   ],
   "reduceWithIndex - empty"
-], Stdlib_Array.reduceWithIndex([], /* [] */0, (acc, v, i) => ({
-  hd: v + i | 0,
-  tl: acc
-})), eq, /* [] */0);
+], Stdlib_Array.reduceWithIndex([], /* [] */0, (acc, v, i) => ({hd: v + i | 0, tl: acc})), eq, /* [] */0);
 
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    32,
+    33,
     13,
     26
   ],
@@ -150,21 +126,12 @@ Test.run([
   1,
   2,
   3
-], /* [] */0, Stdlib_List.add), eq, {
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-});
+], /* [] */0, Stdlib_List.add), eq, {hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}});
 
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    37,
+    39,
     20,
     41
   ],
@@ -174,7 +141,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    40,
+    42,
     13,
     35
   ],
@@ -183,37 +150,22 @@ Test.run([
   1,
   2,
   3
-], /* [] */0, (acc, v, i) => ({
-  hd: v + i | 0,
-  tl: acc
-})), eq, {
-  hd: 1,
-  tl: {
-    hd: 3,
-    tl: {
-      hd: 5,
-      tl: /* [] */0
-    }
-  }
-});
+], /* [] */0, (acc, v, i) => ({hd: v + i | 0, tl: acc})), eq, {hd: 1, tl: {hd: 3, tl: {hd: 5, tl: /* [] */0}}});
 
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    46,
+    49,
     13,
     38
   ],
   "reduceWithIndex - empty"
-], Stdlib_Array.reduceRightWithIndex([], /* [] */0, (acc, v, i) => ({
-  hd: v + i | 0,
-  tl: acc
-})), eq, /* [] */0);
+], Stdlib_Array.reduceRightWithIndex([], /* [] */0, (acc, v, i) => ({hd: v + i | 0, tl: acc})), eq, /* [] */0);
 
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    52,
+    55,
     20,
     41
   ],
@@ -233,7 +185,7 @@ let arr = [
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    55,
+    58,
     13,
     31
   ],
@@ -243,7 +195,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    66,
+    69,
     13,
     24
   ],
@@ -268,7 +220,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    71,
+    75,
     20,
     42
   ],
@@ -285,7 +237,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    73,
+    78,
     13,
     32
   ],
@@ -299,7 +251,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    79,
+    84,
     20,
     30
   ],
@@ -316,7 +268,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    81,
+    87,
     13,
     34
   ],
@@ -334,7 +286,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    86,
+    93,
     20,
     41
   ],
@@ -348,7 +300,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    87,
+    94,
     20,
     38
   ],
@@ -358,7 +310,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    90,
+    97,
     13,
     22
   ],
@@ -379,7 +331,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    95,
+    103,
     20,
     40
   ],
@@ -396,7 +348,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    97,
+    106,
     13,
     30
   ],
@@ -410,7 +362,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    104,
+    113,
     13,
     27
   ],
@@ -432,7 +384,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    111,
+    120,
     13,
     27
   ],
@@ -460,7 +412,7 @@ let result = Stdlib_Array.concatAll(arrays);
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    121,
+    130,
     22,
     53
   ],
@@ -476,7 +428,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    123,
+    132,
     15,
     57
   ],
@@ -496,7 +448,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    130,
+    139,
     20,
     39
   ],
@@ -506,7 +458,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    133,
+    142,
     13,
     31
   ],
@@ -525,7 +477,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    140,
+    149,
     13,
     31
   ],
@@ -539,7 +491,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    147,
+    156,
     13,
     29
   ],
@@ -567,7 +519,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    154,
+    163,
     13,
     29
   ],
@@ -584,7 +536,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    160,
+    169,
     20,
     39
   ],
@@ -598,7 +550,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    161,
+    170,
     20,
     34
   ],
@@ -612,7 +564,7 @@ array.splice(1, 0, "foo");
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    166,
+    175,
     22,
     49
   ],
@@ -627,7 +579,7 @@ let array$1 = [
 Test.run([
   [
     "Stdlib_ArrayTests.res",
-    172,
+    181,
     15,
     43
   ],

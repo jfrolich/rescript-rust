@@ -401,6 +401,7 @@ pub fn walk_module_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx:
         }
         ModuleExprDesc::Pmod_unpack(e) => v.expr(arena, *e),
         ModuleExprDesc::Pmod_extension(ext) => v.extension(arena, ext),
+        ModuleExprDesc::Pmod_await(m) => v.module_expr(arena, *m),
     }
 }
 
@@ -446,6 +447,7 @@ pub fn walk_structure_item<V: AstIter + ?Sized>(
             v.extension(arena, ext);
             v.attributes(arena, attrs.as_slice());
         }
+        StructureItemDesc::Pstr_raw(raw) => v.attributes(arena, raw.attrs.as_slice()),
         StructureItemDesc::Pstr_attribute(attr) => v.attribute(arena, attr),
     }
 }
@@ -502,16 +504,38 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
                 v.expr(arena, *arg);
             }
         }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (scrutinee, cases) = inner;
+        ExpressionDesc::Pexp_match((scrutinee, cases)) => {
             v.expr(arena, *scrutinee);
             for (index, case) in arena.case_list(*cases).iter().enumerate() {
                 v.case(arena, idx, index, case);
             }
         }
+        // ast_iterator.ml: `sub.expr sub e; sub.cases sub pel; iter_opt (sub.expr sub) finally`.
+        ExpressionDesc::Pexp_try((body, cases, finally)) => {
+            v.expr(arena, *body);
+            for (index, case) in arena.case_list(*cases).iter().enumerate() {
+                v.case(arena, idx, index, case);
+            }
+            if let Some(finally) = finally {
+                v.expr(arena, *finally);
+            }
+        }
         ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
             for e in arena.expr_list(*items).iter() {
                 v.expr(arena, *e);
+            }
+        }
+        ExpressionDesc::Pexp_dict(entries) => {
+            for entry in entries.iter() {
+                match entry {
+                    DictEntry::Pdict_entry(_, e) | DictEntry::Pdict_spread(e) => v.expr(arena, *e),
+                }
+            }
+        }
+        // compiler/ml/ast_iterator.ml Pexp_spread: items and spreads in order.
+        ExpressionDesc::Pexp_spread(_, elements) => {
+            for element in arena.spread_element_list(*elements) {
+                v.expr(arena, element.expr());
             }
         }
         ExpressionDesc::Pexp_construct(_, args) => {
@@ -606,6 +630,13 @@ pub fn walk_expr<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: ExprId
         ExpressionDesc::Pexp_pack(me) => v.module_expr(arena, *me),
         ExpressionDesc::Pexp_open(inner) => v.expr(arena, inner.2),
         ExpressionDesc::Pexp_extension(ext) => v.extension(arena, ext),
+        ExpressionDesc::Pexp_raw(_) => {}
+        // ast_iterator.ml `Pexp_todo`: the message, if any.
+        ExpressionDesc::Pexp_todo(todo) => {
+            if let Some(message) = todo.message {
+                v.expr(arena, message);
+            }
+        }
         ExpressionDesc::Pexp_jsx_element(jsx) => match &**jsx {
             JsxElement::Fragment(fragment) => {
                 for child in &fragment.children {
@@ -648,11 +679,17 @@ pub fn walk_pat<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, idx: PatIdx)
         | PatternDesc::Ppat_constant(_)
         | PatternDesc::Ppat_interval(_)
         | PatternDesc::Ppat_type(_)
+        | PatternDesc::Ppat_variant_spread(_)
         | PatternDesc::Ppat_unpack(_) => {}
         PatternDesc::Ppat_alias(p, _) | PatternDesc::Ppat_exception(p) => v.pat(arena, *p),
         PatternDesc::Ppat_tuple(pats) | PatternDesc::Ppat_array(pats) => {
             for p in arena.pat_list(*pats).iter() {
                 v.pat(arena, *p);
+            }
+        }
+        PatternDesc::Ppat_dict(entries) => {
+            for entry in entries.iter() {
+                v.pat(arena, entry.pdp_pattern);
             }
         }
         PatternDesc::Ppat_construct(_, args) => {
@@ -694,7 +731,12 @@ pub fn walk_value_binding<V: AstIter + ?Sized>(v: &mut V, arena: &ParseArena, vb
         v.typ(arena, constraint.pvc_type);
     }
     v.expr(arena, vb.pvb_expr);
-    v.attributes(arena, vb.pvb_attributes.as_slice());
+    // An iterator sees the component annotation as the attribute it was
+    // written as.
+    v.attributes(
+        arena,
+        crate::ast_jsx_component::binding_attributes(arena, vb).as_slice(),
+    );
 }
 
 /// Visit the children of a value description (`let` in a signature or `external`).
@@ -704,7 +746,10 @@ pub fn walk_value_description<V: AstIter + ?Sized>(
     vd: &ValueDescription,
 ) {
     v.typ(arena, vd.pval_type);
-    v.attributes(arena, vd.pval_attributes.as_slice());
+    v.attributes(
+        arena,
+        crate::ast_jsx_component::description_attributes(arena, vd).as_slice(),
+    );
 }
 
 /// Visit the children of a module binding.

@@ -50,7 +50,6 @@ val transl_with_constraint :
   Parsetree.type_declaration ->
   Typedtree.type_declaration
 
-val abstract_type_decl : int -> type_declaration
 val approx_type_decl :
   Parsetree.type_declaration list -> (Ident.t * type_declaration) list
 val check_recmod_typedecl :
@@ -61,8 +60,6 @@ val check_coherence : Env.t -> Location.t -> Ident.t -> type_declaration -> unit
 val is_fixed_type : Parsetree.type_declaration -> bool
 
 (* for typeopt.ml *)
-val get_unboxed_type_representation : Env.t -> type_expr -> type_expr option
-val is_not_undefined_attr : Parsetree.attribute -> bool
 
 type error
 

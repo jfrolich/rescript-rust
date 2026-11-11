@@ -25,6 +25,9 @@ open Printf
 
 let dbg = false
 
+let int32_low = Int32.to_int Int32.min_int
+let int32_high = Int32.to_int Int32.max_int
+
 (* See Peyton-Jones, ``The Implementation of functional programming
    languages'', chapter 5. *)
 (*
@@ -55,9 +58,7 @@ and may_compats = Parmatch.Compat.compats ~equal_cd
      - Jump summaries: mapping from exit numbers to contexts
 *)
 
-let string_of_lam lam =
-  Printlambda.lambda Format.str_formatter lam;
-  Format.flush_str_formatter ()
+let string_of_lam lam = Format.asprintf "%a" Printlambda.lambda lam
 
 type matrix = pattern list list
 
@@ -101,6 +102,15 @@ let rshift {left; right} =
   | _ -> assert false
 
 let ctx_rshift ctx = List.map rshift ctx
+
+(* Forget what the contexts know about the first column *)
+let ctx_erase_first_col ctx =
+  List.map
+    (fun {left; right} ->
+      match right with
+      | _ :: right -> {left; right = omega :: right}
+      | [] -> fatal_error "Matching.ctx_erase_first_col")
+    ctx
 
 let rec nchars n ps =
   if n <= 0 then ([], ps)
@@ -176,10 +186,20 @@ let ctx_matcher p =
     fun q rem ->
       match q.pat_desc with
       | Tpat_construct (_, cstr', args)
-      (* NB:  may_constr_equal considers (potential) constructor rebinding *)
+      (* NB:  may_equal_constr considers (potential) constructor rebinding *)
         when Types.may_equal_constr cstr cstr' ->
         (p, args @ rem)
       | Tpat_any -> (p, omegas @ rem)
+      | _ -> raise NoMatch)
+  | (Tpat_constant _ | Tpat_interval _) when Parmatch.int_range p <> None -> (
+    fun (* [p] is a piece of a split column; values matched by a context range
+       that overlaps it may reach it. *)
+          q
+      rem
+    ->
+      match q.pat_desc with
+      | (Tpat_constant _ | Tpat_interval _) when may_compat p q -> (p, rem)
+      | Tpat_any -> (p, rem)
       | _ -> raise NoMatch)
   | Tpat_constant cst -> (
     fun q rem ->
@@ -395,7 +415,7 @@ let action_free_variables {binds; guard; body} =
     (fun (_, id, e) acc ->
       Set_ident.union
         (Lambda_traverse.free_variables e)
-        (Set_ident.remove acc id))
+        (Set_ident.remove id acc))
     binds inner
 
 type pattern_matching = {
@@ -431,9 +451,8 @@ let pretty_cases cases =
     (fun (ps, _l) ->
       List.iter
         (fun p ->
-          Parmatch.top_pretty Format.str_formatter p;
           prerr_string " ";
-          prerr_string (Format.flush_str_formatter ()))
+          prerr_string (Format.asprintf "%a" Parmatch.top_pretty p))
         ps;
       (*
       prerr_string " -> " ;
@@ -647,19 +666,22 @@ let default_compat p def =
 (* Or-pattern expansion, variables are a complication w.r.t. the article *)
 let rec extract_vars r p =
   match p.pat_desc with
-  | Tpat_var (id, _) -> Set_ident.add r id
-  | Tpat_alias (p, id, _) -> extract_vars (Set_ident.add r id) p
+  | Tpat_var (id, _) -> Set_ident.add id r
+  | Tpat_alias (p, id, _) -> extract_vars (Set_ident.add id r) p
   | Tpat_tuple pats -> List.fold_left extract_vars r pats
   | Tpat_record (lpats, _, rest) -> (
     let r = List.fold_left (fun r (_, _, p, _) -> extract_vars r p) r lpats in
     match rest with
     | None -> r
-    | Some rest -> Set_ident.add r rest.rest_ident)
+    | Some rest -> Set_ident.add rest.rest_ident r)
+  | Tpat_dict entries ->
+    List.fold_left (fun r {tdp_pattern} -> extract_vars r tdp_pattern) r entries
   | Tpat_construct (_, _, pats) -> List.fold_left extract_vars r pats
   | Tpat_array pats -> List.fold_left extract_vars r pats
   | Tpat_variant (_, Some p, _) -> extract_vars r p
   | Tpat_or (p, _, _) -> extract_vars r p
-  | Tpat_constant _ | Tpat_any | Tpat_variant (_, None, _) -> r
+  | Tpat_constant _ | Tpat_interval _ | Tpat_any | Tpat_variant (_, None, _) ->
+    r
 
 exception Cannot_flatten
 
@@ -699,7 +721,7 @@ let pat_as_constr = function
   | _ -> fatal_error "Matching.pat_as_constr"
 
 let group_constant = function
-  | {pat_desc = Tpat_constant _} -> true
+  | {pat_desc = Tpat_constant _ | Tpat_interval _} -> true
   | _ -> false
 
 and group_constructor = function
@@ -729,7 +751,7 @@ and group_array = function
 let get_group p =
   match p.pat_desc with
   | Tpat_any -> group_var
-  | Tpat_constant _ -> group_constant
+  | Tpat_constant _ | Tpat_interval _ -> group_constant
   | Tpat_construct _ -> group_constructor
   | Tpat_tuple _ -> group_tuple
   | Tpat_record _ -> group_record
@@ -737,9 +759,19 @@ let get_group p =
   | Tpat_variant (_, _, _) -> group_variant
   | _ -> fatal_error "Matching.get_group"
 
-let is_or p =
+(* A row starting with an or-pattern. An interval is precompiled like an
+   or-pattern of its values when the rest of its row tests something: that is
+   then compiled once, in a handler, instead of once per piece of the column. *)
+let is_or p ps =
   match p.pat_desc with
   | Tpat_or _ -> true
+  | Tpat_interval _ ->
+    List.exists
+      (fun q ->
+        match q.pat_desc with
+        | Tpat_any | Tpat_var _ -> false
+        | _ -> true)
+      ps
   | _ -> false
 
 (* Conditions for appending to the Or matrix *)
@@ -750,7 +782,7 @@ and condb (act : action) ps qs = act.guard = None && Parmatch.le_pats qs ps
 let or_ok p ps l =
   List.for_all
     (function
-      | ({pat_desc = Tpat_or _} as q) :: qs, act -> conda p q || condb act ps qs
+      | q :: qs, act when is_or q qs -> conda p q || condb act ps qs
       | _ -> true)
     l
 
@@ -770,7 +802,7 @@ let rec get_equiv p l =
 let insert_or_append p ps act ors no =
   let rec attempt seen = function
     | ((q :: qs, act_q) as cl) :: rem ->
-      if is_or q then
+      if is_or q qs then
         if may_compat p q then
           if
             Set_ident.is_empty (extract_vars Set_ident.empty p)
@@ -856,7 +888,7 @@ let rec split_or argo cls args def =
     | [] -> cons_next (List.rev before) (List.rev ors) (List.rev no)
     | ((p :: ps, act) as cl) :: rem ->
       if up_ok cl no then
-        if is_or p then
+        if is_or p ps then
           let ors, no = insert_or_append p ps act ors no in
           do_split before ors no rem
         else if up_ok cl ors then do_split (cl :: before) ors no rem
@@ -1065,7 +1097,7 @@ and precompile_or argo cls ors args def k =
   | [] -> split_constr cls args def k
   | _ ->
     let rec do_cases = function
-      | (({pat_desc = Tpat_or _} as orp) :: patl, action) :: rem ->
+      | (orp :: patl, action) :: rem when is_or orp patl ->
         let others, rem = get_equiv orp rem in
         let orpm =
           {
@@ -1183,16 +1215,32 @@ let divide_line make_ctx make get_args pat ctx pm =
    new  ``pattern_matching'' records.
 *)
 
-let rec matcher_const cst p rem =
+(* The key of a constant column is a range of constants: [(c, c)] for a
+   constant [c], and the bounds of a piece of a split interval column. *)
+let int_key = function
+  | ( (Asttypes.Const_int lo | Const_char lo),
+      (Asttypes.Const_int hi | Const_char hi) ) ->
+    Some (lo, hi)
+  | _ -> None
+
+let rec matcher_const ((c1, c2) as key) p rem =
   match p.pat_desc with
   | Tpat_or (p1, p2, _) -> (
-    try matcher_const cst p1 rem with NoMatch -> matcher_const cst p2 rem)
-  | Tpat_constant c1 when const_compare c1 cst = 0 -> rem
+    try matcher_const key p1 rem with NoMatch -> matcher_const key p2 rem)
+  | (Tpat_constant _ | Tpat_interval _) when Parmatch.int_range p <> None -> (
+    match (int_key key, Parmatch.int_range p) with
+    | Some (lo, hi), Some (a, b) ->
+      if a <= lo && hi <= b then rem
+      else if b < lo || hi < a then raise NoMatch
+      else fatal_error "Matching.matcher_const: range across a piece"
+    | _ -> raise NoMatch)
+  | Tpat_constant c when const_compare c c1 = 0 && const_compare c c2 = 0 -> rem
   | Tpat_any -> rem
   | _ -> raise NoMatch
 
 let get_key_constant caller = function
-  | {pat_desc = Tpat_constant cst} -> cst
+  | {pat_desc = Tpat_constant cst} -> (cst, cst)
+  | {pat_desc = Tpat_interval (lo, hi)} -> (lo, hi)
   | p ->
     prerr_endline ("BAD: " ^ caller);
     pretty_pat p;
@@ -1207,11 +1255,89 @@ let make_constant_matching p def ctx = function
     and ctx = filter_ctx p ctx in
     {pm = {cases = []; args = argl; default = def}; ctx; pat = normalize_pat p}
 
+(* The int and char ranges of the first column of the cases and of the default
+   matrices, when one of them is an interval. *)
+let column_int_ranges m =
+  let has_interval = ref false in
+  let rec heads p acc =
+    match p.pat_desc with
+    | Tpat_alias (p, _, _) -> heads p acc
+    | Tpat_or (p1, p2, _) -> heads p1 (heads p2 acc)
+    | _ -> (
+      (match p.pat_desc with
+      | Tpat_interval _ -> has_interval := true
+      | _ -> ());
+      match Parmatch.int_range p with
+      | Some r -> r :: acc
+      | None -> acc)
+  in
+  let rows acc pss =
+    List.fold_left
+      (fun acc -> function
+        | p :: _ -> heads p acc
+        | [] -> acc)
+      acc pss
+  in
+  let ranges = rows [] (List.map fst m.cases) in
+  let ranges =
+    List.fold_left (fun acc (pss, _) -> rows acc pss) ranges m.default
+  in
+  if !has_interval then Some ranges else None
+
+(* Divides a column with intervals into pieces cut at the bounds of all its
+   ranges, so that each range covers whole pieces. A case goes to every piece
+   its head covers; the number of pieces depends on the number of patterns,
+   not on the width of the ranges. *)
+let divide_constant_ranges ranges ctx m =
+  let cuts =
+    List.fold_left (fun acc (lo, hi) -> lo :: (hi + 1) :: acc) [] ranges
+    |> List.sort_uniq compare |> Array.of_list
+  in
+  let n = Array.length cuts - 1 in
+  let index x =
+    (* position of [x] in [cuts] *)
+    let rec search lo hi =
+      let mid = (lo + hi) / 2 in
+      if cuts.(mid) = x then mid
+      else if cuts.(mid) < x then search (mid + 1) hi
+      else search lo (mid - 1)
+    in
+    search 0 n
+  in
+  let rows = Array.make n [] and heads = Array.make n None in
+  List.iter
+    (fun (patl, action) ->
+      match patl with
+      | p :: patl -> (
+        match Parmatch.int_range p with
+        | Some (lo, hi) ->
+          for i = index lo to index (hi + 1) - 1 do
+            rows.(i) <- (get_args_constant p patl, action) :: rows.(i);
+            if heads.(i) = None then heads.(i) <- Some p
+          done
+        | None -> ignore (get_key_constant "divide" p))
+      | [] -> fatal_error "Matching.divide_constant_ranges")
+    m.cases;
+  let cells = ref [] in
+  for i = n - 1 downto 0 do
+    match heads.(i) with
+    | Some p ->
+      let p = Parmatch.make_int_range p cuts.(i) (cuts.(i + 1) - 1) in
+      let cell = make_constant_matching p m.default ctx m.args in
+      cell.pm.cases <- List.rev rows.(i);
+      cells := (get_key_constant "divide" p, cell) :: !cells
+    | None -> ()
+  done;
+  !cells
+
 let divide_constant ctx m =
-  divide make_constant_matching
-    (fun c d -> const_compare c d = 0)
-    (get_key_constant "divide")
-    get_args_constant ctx m
+  match column_int_ranges m with
+  | Some ranges -> divide_constant_ranges ranges ctx m
+  | None ->
+    divide make_constant_matching
+      (fun (c, _) (d, _) -> const_compare c d = 0)
+      (get_key_constant "divide")
+      get_args_constant ctx m
 
 (* Matching against a constructor *)
 
@@ -1324,9 +1450,53 @@ let make_constr_matching p def ctx = function
       pat = normalize_pat p;
     }
 
+(* Whether the payload pattern [p] of [Some] can't match the object that
+   represents [Some] of a value like [None] or undefined (see
+   [Primitive_option.some]): it doesn't bind the payload itself, and tests it
+   with a literal comparison or with a type test that an object fails. An
+   untagged case binds its argument only once its type test has passed. *)
+let rec rejects_nested_some p =
+  match p.pat_desc with
+  | Tpat_any | Tpat_constant _ | Tpat_interval _ -> true
+  | Tpat_or (p1, p2, _) -> rejects_nested_some p1 && rejects_nested_some p2
+  | Tpat_construct (_, cstr, _) -> (
+    match cstr.cstr_kind with
+    | Ordinary_constructor representation
+      when not (Datarepr.constructor_has_optional_shape cstr) -> (
+      match Variant_runtime.representation representation with
+      | Constant {literal} -> literal <> Variant_runtime.Undefined
+      | Block (Untagged {block_type = ObjectType | UnknownType}) -> false
+      | Block (Untagged _) -> true
+      | Block (Tagged _) -> false)
+    | Ordinary_constructor _ | Extension_constructor _ -> false)
+  | _ -> false
+
+(* A [Some] payload whose patterns all reject the representation of a nested
+   [Some] is matched as it is, without checking for that representation *)
+let skip_nested_some_check (cell : cell) =
+  match cell.pm.args with
+  | (Lprim {primitive = Pval_from_option; args = [arg]; loc}, str) :: argl
+    when List.for_all
+           (function
+             | p :: _, _ -> rejects_nested_some p
+             | [], _ -> false)
+           cell.pm.cases ->
+    {
+      cell with
+      pm =
+        {
+          cell.pm with
+          args =
+            (prim ~primitive:Pval_from_option_not_nest ~args:[arg] loc, str)
+            :: argl;
+        };
+    }
+  | _ -> cell
+
 let divide_constructor ctx pm =
   divide make_constr_matching Types.same_constructor get_key_constr
     get_args_constr ctx pm
+  |> List.map (fun (cstr, cell) -> (cstr, skip_nested_some_check cell))
 
 (* Matching against a variant *)
 
@@ -1486,8 +1656,7 @@ let make_record_matching loc all_labels def = function
         let lbl = all_labels.(pos) in
         let access =
           match lbl.lbl_repres with
-          | Record_float_unused -> assert false
-          | Record_regular ->
+          | Record_regular | Record_array ->
             prim
               ~primitive:
                 (Pfield (lbl.lbl_pos, Lambda.fld_record lbl.lbl_runtime_name))
@@ -1749,19 +1918,22 @@ open Switch
 
 let rec last def = function
   | [] -> def
-  | [(x, _)] -> x
+  | [(_, x, _)] -> x
   | _ :: rem -> last def rem
 
 let get_edges low high l =
   match l with
   | [] -> (low, high)
-  | (x, _) :: _ -> (x, last high l)
+  | (x, _, _) :: _ -> (x, last high l)
 
 let as_interval_canfail fail low high l =
   let store = Store_exp.mk_store () in
 
-  let do_store _tag act =
-    let i = store.act_store act in
+  (* The action of a range [i .. j] is used for each of its values. Storing it
+     as shared emits it once, as an expanded range sharing the action of each
+     value used to; copies would declare its variables twice. *)
+  let do_store _tag i j act =
+    let i = if i < j then store.act_store_shared act else store.act_store act in
     (*
     eprintf "STORE [%s] %i %s\n" tag i (string_of_lam act) ;
 *)
@@ -1772,37 +1944,37 @@ let as_interval_canfail fail low high l =
     | [] ->
       if cur_high = high then [(cur_low, cur_high, cur_act)]
       else [(cur_low, cur_high, cur_act); (cur_high + 1, high, 0)]
-    | (i, act_i) :: rem as all ->
-      let act_index = do_store "NO" act_i in
+    | (i, j, act_i) :: rem as all ->
+      let act_index = do_store "NO" i j act_i in
       if cur_high + 1 = i then
-        if act_index = cur_act then nofail_rec cur_low i cur_act rem
-        else if act_index = 0 then (cur_low, i - 1, cur_act) :: fail_rec i i rem
-        else (cur_low, i - 1, cur_act) :: nofail_rec i i act_index rem
+        if act_index = cur_act then nofail_rec cur_low j cur_act rem
+        else if act_index = 0 then (cur_low, i - 1, cur_act) :: fail_rec i j rem
+        else (cur_low, i - 1, cur_act) :: nofail_rec i j act_index rem
       else if act_index = 0 then
         (cur_low, cur_high, cur_act)
         :: fail_rec (cur_high + 1) (cur_high + 1) all
       else
         (cur_low, cur_high, cur_act)
         :: (cur_high + 1, i - 1, 0)
-        :: nofail_rec i i act_index rem
+        :: nofail_rec i j act_index rem
   and fail_rec cur_low cur_high = function
     | [] -> [(cur_low, cur_high, 0)]
-    | (i, act_i) :: rem ->
-      let index = do_store "YES" act_i in
-      if index = 0 then fail_rec cur_low i rem
-      else (cur_low, i - 1, 0) :: nofail_rec i i index rem
+    | (i, j, act_i) :: rem ->
+      let index = do_store "YES" i j act_i in
+      if index = 0 then fail_rec cur_low j rem
+      else (cur_low, i - 1, 0) :: nofail_rec i j index rem
   in
 
   let init_rec = function
     | [] -> [(low, high, 0)]
-    | (i, act_i) :: rem ->
-      let index = do_store "INIT" act_i in
-      if index = 0 then fail_rec low i rem
-      else if low < i then (low, i - 1, 0) :: nofail_rec i i index rem
-      else nofail_rec i i index rem
+    | (i, j, act_i) :: rem ->
+      let index = do_store "INIT" i j act_i in
+      if index = 0 then fail_rec low j rem
+      else if low < i then (low, i - 1, 0) :: nofail_rec i j index rem
+      else nofail_rec i j index rem
   in
 
-  assert (do_store "FAIL" fail = 0);
+  assert (do_store "FAIL" 0 0 fail = 0);
   (* fail has action index 0 *)
   let r = init_rec l in
   (Array.of_list r, store)
@@ -1811,28 +1983,30 @@ let as_interval_nofail l =
   let store = Store_exp.mk_store () in
   let rec some_hole = function
     | [] | [_] -> false
-    | (i, _) :: ((j, _) :: _ as rem) -> j > i + 1 || some_hole rem
+    | (_, i, _) :: ((j, _, _) :: _ as rem) -> j > i + 1 || some_hole rem
   in
   let rec i_rec cur_low cur_high cur_act = function
     | [] -> [(cur_low, cur_high, cur_act)]
-    | (i, act) :: rem ->
-      let act_index = store.act_store act in
-      if act_index = cur_act then i_rec cur_low i cur_act rem
-      else (cur_low, cur_high, cur_act) :: i_rec i i act_index rem
+    | (i, j, act) :: rem ->
+      let act_index =
+        if i < j then store.act_store_shared act else store.act_store act
+      in
+      if act_index = cur_act then i_rec cur_low j cur_act rem
+      else (cur_low, cur_high, cur_act) :: i_rec i j act_index rem
   in
   let inters =
     match l with
-    | (i, act) :: rem ->
+    | (i, j, act) :: rem ->
       let act_index =
         (* In case there is some hole and that a switch is emitted,
            action 0 will be used as the action of unreachable
            cases (cf. switch.ml, make_switch).
            Hence, this action will be shared *)
-        if some_hole rem then store.act_store_shared act
+        if some_hole rem || i < j then store.act_store_shared act
         else store.act_store act
       in
       assert (act_index = 0);
-      i_rec i i act_index rem
+      i_rec i j act_index rem
     | _ -> assert false
   in
 
@@ -1843,16 +2017,26 @@ let sort_int_lambda_list l =
     (fun (i1, _) (i2, _) -> if i1 < i2 then -1 else if i2 < i1 then 1 else 0)
     l
 
-let as_interval fail low high l =
-  let l = sort_int_lambda_list l in
+(* [l] maps disjoint ranges [lo .. hi] to actions *)
+let as_interval_ranges fail low high l =
+  let l = List.sort (fun (i1, _, _) (i2, _, _) -> compare i1 i2) l in
   ( get_edges low high l,
     match fail with
     | None -> as_interval_nofail l
     | Some act -> as_interval_canfail act low high l )
 
-let call_switcher fail arg low high int_lambda_list =
-  let edges, (cases, actions) = as_interval fail low high int_lambda_list in
+let as_interval fail low high l =
+  as_interval_ranges fail low high (List.map (fun (i, act) -> (i, i, act)) l)
+
+let call_switcher_ranges fail arg low high range_lambda_list =
+  let edges, (cases, actions) =
+    as_interval_ranges fail low high range_lambda_list
+  in
   Switch.zyva edges arg cases actions
+
+let call_switcher fail arg low high int_lambda_list =
+  call_switcher_ranges fail arg low high
+    (List.map (fun (i, act) -> (i, i, act)) int_lambda_list)
 
 let rec list_as_pat = function
   | [] -> fatal_error "Matching.list_as_pat"
@@ -1935,30 +2119,30 @@ let combine_constant loc arg cst partial ctx def
   let fail, local_jumps = mk_failaction_neg partial ctx def in
   let lambda1 =
     match (cst : Asttypes.constant) with
-    | Const_int _ ->
-      let int_lambda_list =
+    | Const_int _ | Const_char _ ->
+      (* [char] is an alias of [int], so a column can mix both. Its keys are
+         ranges. *)
+      let range_lambda_list =
         List.map
-          (function
-            | Asttypes.Const_int n, l -> (n, l)
-            | _ -> assert false)
+          (fun (key, l) ->
+            match int_key key with
+            | Some (lo, hi) -> (lo, hi, l)
+            | None -> assert false)
           const_lambda_list
       in
-      call_switcher fail arg min_int max_int int_lambda_list
-    | Const_char _ ->
-      let int_lambda_list =
-        List.map
-          (function
-            | Asttypes.Const_char c, l -> (c, l)
-            | _ -> assert false)
-          const_lambda_list
-      in
-      call_switcher fail arg 0 max_int int_lambda_list
+      (* Match intervals must use ReScript's int32 bounds, not the host's.
+         Otherwise the upper fail interval starts at 2147483648, which wraps
+         when converted to a Lambda integer constant. *)
+      call_switcher_ranges fail arg int32_low int32_high range_lambda_list
     | Const_string _ ->
       (* Note as the bytecode compiler may resort to dichotomic search,
          the clauses of stringswitch  are sorted with duplicates removed.
          This partly applies to the native code compiler, which requires
          no duplicates *)
-      let const_lambda_list = sort_lambda_list const_lambda_list in
+      let const_lambda_list =
+        sort_lambda_list
+          (List.map (fun ((c, _), l) -> (c, l)) const_lambda_list)
+      in
       let sw =
         List.map
           (fun (c, act) ->
@@ -1971,10 +2155,10 @@ let combine_constant loc arg cst partial ctx def
       hs (stringswitch arg sw fail)
     | Const_float _ ->
       make_test_sequence loc fail (Pfloatcomp Cneq) (Pfloatcomp Clt) arg
-        const_lambda_list
+        (List.map (fun ((c, _), l) -> (c, l)) const_lambda_list)
     | Const_bigint _ ->
       make_test_sequence loc fail (Pbigintcomp Cneq) (Pbigintcomp Clt) arg
-        const_lambda_list
+        (List.map (fun ((c, _), l) -> (c, l)) const_lambda_list)
   in
   (lambda1, jumps_union local_jumps total)
 
@@ -2047,8 +2231,87 @@ type constructor_matching_plan =
   | Switch_on_constructors of Lambda.lambda_switch
       (** General nominal and untagged variant matching. *)
 
+(* Whether [present], the action for a value of the option [arg], starts with a
+   test of that value that takes [absent] for undefined. The presence test of
+   [arg] is then redundant: undefined reaches [absent] either way. *)
+let rec value_test_defaults_on_undefined ~arg ~absent present =
+  let is_value = function
+    | Lprim {primitive = Pval_from_option_not_nest; args = [value]} ->
+      Lambda.eq_approx arg value
+    | e -> Lambda.eq_approx arg e
+  in
+  let is_equality = function
+    | Pboolcomp c
+    | Pintcomp c
+    | Pfloatcomp c
+    | Pbigintcomp c
+    | Pstringcomp c
+    | Pjscomp c ->
+      Some c
+    | _ -> None
+  in
+  (* A constant that undefined is unequal to, even loosely *)
+  let is_defined_constant = function
+    | Lconst
+        ( Const_int _ | Const_char _ | Const_string _ | Const_float _
+        | Const_bigint _ | Const_js_false | Const_js_true ) ->
+      true
+    | _ -> false
+  in
+  let compares_value = function
+    | [a; b] ->
+      (is_value a && is_defined_constant b)
+      || (is_defined_constant a && is_value b)
+    | _ -> false
+  in
+  match present with
+  | Llet
+      ( Alias,
+        id,
+        (Lprim {primitive = Pval_from_option_not_nest; args = [value]} as def),
+        body )
+    when Lambda.eq_approx arg value ->
+    (* The value bound to a name *)
+    value_test_defaults_on_undefined ~arg:(Lambda.var id) ~absent body
+    || value_test_defaults_on_undefined ~arg:def ~absent body
+  | Lswitch (scrutinee, ({sw_failaction = Some fail} as sw)) ->
+    is_value scrutinee
+    && Lambda.eq_approx fail absent
+    && switch_defaults_on_undefined sw
+  | Lstringswitch (scrutinee, _, Some fail) ->
+    is_value scrutinee && Lambda.eq_approx fail absent
+  (* undefined is unequal to every constant *)
+  | Lifthenelse (Lprim {primitive; args}, if_true, if_false)
+    when compares_value args -> (
+    match is_equality primitive with
+    | Some Cneq -> Lambda.eq_approx if_true absent
+    | Some Ceq -> Lambda.eq_approx if_false absent
+    | Some (Clt | Cgt | Cle | Cge) | None -> false)
+  | _ -> false
+
+(* Whether the switch [sw] on an untagged variant takes its default action for
+   undefined: no case matches undefined, and each side of the switch that
+   undefined can reach has the default action *)
+and switch_defaults_on_undefined (sw : lambda_switch) =
+  match sw.sw_dispatch with
+  | Switch_variant {block_types} ->
+    block_types <> []
+    && (not (List.mem Variant_runtime.UnknownType block_types))
+    && (not sw.sw_blocks_full)
+    && (not (sw.sw_consts_full && sw.sw_consts <> []))
+    && List.for_all
+         (function
+           | Switch_constructor (Constant {literal}), _ ->
+             literal <> Variant_runtime.Undefined
+           | _ -> true)
+         sw.sw_consts
+  | Switch_direct -> false
+
 let lower_constructor_matching_plan ~loc ~arg = function
   | Use_constructor_action action -> action
+  | Test_payload_presence {test = Is_present_option; absent; present}
+    when value_test_defaults_on_undefined ~arg ~absent present ->
+    present
   | Test_payload_presence {test; absent; present} ->
     let condition =
       match test with
@@ -2179,20 +2442,20 @@ let combine_constructor loc arg ex_pat cstr partial ctx def
 
 let make_test_sequence_variant_constant fail arg int_lambda_list =
   let _, (cases, actions) =
-    as_interval fail min_int max_int
+    as_interval fail int32_low int32_high
       (List.map (fun (a, (_, c)) -> (a, c)) int_lambda_list)
   in
   Switch.test_sequence arg cases actions
 
 let call_switcher_variant_constant fail arg int_lambda_list =
-  call_switcher fail arg min_int max_int
+  call_switcher fail arg int32_low int32_high
     (List.map (fun (a, (_, c)) -> (a, c)) int_lambda_list)
 
 let call_switcher_variant_constr loc fail arg int_lambda_list =
   let v = Ident.create "variant" in
   let_ Alias v
     (prim ~primitive:(Pfield (0, Fld_poly_var_tag)) ~args:[arg] loc)
-    (call_switcher fail (var v) min_int max_int
+    (call_switcher fail (var v) int32_low int32_high
        (List.map (fun (a, (_, c)) -> (a, c)) int_lambda_list))
 
 let call_switcher_variant_constant :
@@ -2338,13 +2601,31 @@ let as_exit_call lam =
   in
   go Ident.empty lam
 
+(* Adds the static exits [lam] jumps to to [raised]. Exits cannot leave a
+   function, so function bodies are skipped. *)
+let rec add_raised_exits raised lam =
+  match lam with
+  | Lfunction _ -> ()
+  | Lstaticraise (i, _) ->
+    Hashtbl.replace raised i ();
+    Lambda_traverse.iter (add_raised_exits raised) lam
+  | _ -> Lambda_traverse.iter (add_raised_exits raised) lam
+
 let compile_orhandlers compile_fun lambda1 total1 ctx to_catch =
+  (* The exits of the match and of the handlers compiled so far *)
+  let raised = Hashtbl.create 16 in
+  add_raised_exits raised lambda1;
   let rec do_rec r total_r = function
     | [] -> (r, total_r)
+    | (_, i, _, _) :: rem when not (Hashtbl.mem raised i) ->
+      (* The or-pattern is unreachable, e.g. after a wildcard. Its handler is
+         not compiled: with a guard and no default, its failure has no exit. *)
+      do_rec r total_r rem
     | (mat, i, vars, pm) :: rem -> (
       try
         let ctx = select_columns mat ctx in
         let handler_i, total_i = compile_fun ctx pm in
+        add_raised_exits raised handler_i;
         match as_exit_call r with
         | Some (j, args) ->
           if i = j then
@@ -2458,9 +2739,20 @@ let rec comp_match_handlers comp_fun partial ctx arg first_match next_matchs =
 
 (* To find reasonable names for variables *)
 
+(* A name for the value [pat] matches, also found under an option's [Some] *)
+let id_of_pattern pat =
+  match Typecore.id_of_pattern pat with
+  | Some id -> Some id
+  | None -> (
+    match pat.pat_desc with
+    | Tpat_construct (_, cstr, [payload])
+      when Datarepr.constructor_has_optional_shape cstr ->
+      Typecore.id_of_pattern payload
+    | _ -> None)
+
 let rec name_pattern default = function
   | (pat :: _, _) :: rem -> (
-    match Typecore.id_of_pattern pat with
+    match id_of_pattern pat with
     | Some id -> id
     | None -> name_pattern default rem)
   | _ -> Ident.create default
@@ -2505,6 +2797,15 @@ let rec compile_match repr partial ctx m =
         ((if dbg then do_compile_matching_pr else do_compile_matching) repr)
         partial ctx newarg first_match rem
     in
+    (* A mutable field or array element is read once into [v] here. The code
+       that the exits jump to reads it again and may see another value, as a
+       guard may have changed it, so what the tests on [v] found doesn't hold
+       there. *)
+    let total =
+      match str with
+      | StrictOpt -> jumps_map ctx_erase_first_col total
+      | Strict | Alias | Variable -> total
+    in
     (bind_check str v arg lam, total)
   | _ -> assert false
 
@@ -2539,7 +2840,7 @@ and do_compile_matching repr partial ctx arg pmh =
       compile_no_test
         (divide_record lbl.lbl_all (normalize_pat pat))
         ctx_combine repr partial ctx pm
-    | Tpat_constant cst ->
+    | Tpat_constant cst | Tpat_interval (cst, _) ->
       compile_test
         (compile_match repr partial)
         partial divide_constant
@@ -2608,8 +2909,11 @@ let find_in_pat pred =
       List.exists find_rec ps
     | Tpat_record (lpats, _, _rest) ->
       List.exists (fun (_, _, p, _) -> find_rec p) lpats
+    | Tpat_dict entries ->
+      List.exists (fun {tdp_pattern} -> find_rec tdp_pattern) entries
     | Tpat_or (p, q, _) -> find_rec p || find_rec q
-    | Tpat_constant _ | Tpat_var _ | Tpat_any | Tpat_variant (_, None, _) ->
+    | Tpat_constant _ | Tpat_interval _ | Tpat_var _ | Tpat_any
+    | Tpat_variant (_, None, _) ->
       false
   in
   find_rec
@@ -2624,15 +2928,18 @@ let have_mutable_field p =
         | Immutable -> false)
       lps
   | Tpat_alias _ | Tpat_variant _ | Tpat_tuple _ | Tpat_construct _
-  | Tpat_array _ | Tpat_or _ | Tpat_constant _ | Tpat_var _ | Tpat_any ->
+  | Tpat_dict _ | Tpat_array _ | Tpat_or _ | Tpat_constant _ | Tpat_interval _
+  | Tpat_var _ | Tpat_any ->
     false
 
 let is_mutable p = find_in_pat have_mutable_field p
 
-(* Downgrade Total when
-   1. Matching accesses some mutable fields;
-   2. And there are  guards or lazy patterns.
-*)
+(* Downgrade Total when the matching reads some mutable field and has a guard.
+   The guard may change the field, and the cases after it read it again: the
+   value they see may match none of them. The guarded case need not read the
+   field, e.g. [{c: None} => 0 | {d: true} if f() => 1 | {c: Some(x)} => x].
+   Array elements are mutable too, but a Total matching on arrays has a case
+   that matches any array, and the cases after a guard fall through to it. *)
 
 let check_partial is_mutable pat_act_list = function
   | Partial -> Partial
@@ -2641,9 +2948,8 @@ let check_partial is_mutable pat_act_list = function
       pat_act_list = []
       ||
       (* allow empty case list *)
-      List.exists
-        (fun (pats, (act : action)) -> is_mutable pats && act.guard <> None)
-        pat_act_list
+      List.exists (fun (_, (act : action)) -> act.guard <> None) pat_act_list
+      && List.exists (fun (pats, _) -> is_mutable pats) pat_act_list
     then Partial
     else Total
 
@@ -2705,18 +3011,24 @@ let partial_function loc () =
       ]
     loc
 
+let lower_dict_patterns pat_act_list =
+  let lower = Dict_pattern.lowering (List.map fst pat_act_list) in
+  List.map (fun (pat, act) -> (lower pat, act)) pat_act_list
+
 let for_function loc repr param pat_act_list partial =
+  let pat_act_list = lower_dict_patterns pat_act_list in
   compile_matching repr (partial_function loc) param pat_act_list partial
 
 (* In the following two cases, exhaustiveness info is not available! *)
 let for_trywith param pat_act_list =
+  let pat_act_list = lower_dict_patterns pat_act_list in
   compile_matching None
     (fun () -> prim ~primitive:Praise ~args:[param] Location.none)
     param pat_act_list Partial
 
 let simple_for_let loc param pat body =
   compile_matching None (partial_function loc) param
-    [(pat, unguarded body)]
+    (lower_dict_patterns [(pat, unguarded body)])
     Partial
 
 (* Optimize binding of immediate tuples
@@ -2803,7 +3115,7 @@ let flatten_cases size cases =
     (fun (ps, action) ->
       match ps with
       | [p] -> (flatten_pattern size p, action)
-      | _ -> fatal_error "Matching.flatten_case")
+      | _ -> fatal_error "Matching.flatten_cases")
     cases
 
 let flatten_matrix size pss =
@@ -2840,7 +3152,7 @@ let flatten_precompiled size args pmh =
   | PmVar _ -> assert false
 
 (*
-   compiled_flattened is a ``comp_fun'' argument to comp_match_handlers.
+   compile_flattened is a ``comp_fun'' argument to comp_match_handlers.
    Hence it needs a fourth argument, which it ignores
 *)
 
@@ -2923,6 +3235,7 @@ let bind_opt (v, eo) k =
   | Some e -> Lambda.bind Strict v e k
 
 let for_multiple_match loc paraml pat_act_list partial =
+  let pat_act_list = lower_dict_patterns pat_act_list in
   let v_paraml = List.map param_to_var paraml in
   let paraml = List.map (fun (v, _) -> var v) v_paraml in
   List.fold_right bind_opt v_paraml

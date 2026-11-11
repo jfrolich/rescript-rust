@@ -17,8 +17,6 @@
 
 open Asttypes
 
-type hoisted_function = {binding: Ident.t; path: string list; loc: Location.t}
-
 type tag_info =
   | Blk_constructor of {
       name: string;
@@ -39,6 +37,9 @@ type tag_info =
   | Blk_record of {
       fields: (string * bool (* optional *)) array;
       mutable_flag: mutable_flag;
+      array: bool;
+          (* [Record_array]: the fields are the elements of a JavaScript
+             array *)
     }
   | Blk_module of string list
   | Blk_module_export of Ident.t list
@@ -56,7 +57,7 @@ type tag_info =
 
 val tag_label_of_tag_info : tag_info -> string
 val mutable_flag_of_tag_info : tag_info -> mutable_flag
-val blk_record : (string * bool) array -> mutable_flag -> tag_info
+val blk_record : (string * bool) array -> mutable_flag -> array:bool -> tag_info
 
 val blk_record_ext : string array -> mutable_flag -> tag_info
 
@@ -87,8 +88,6 @@ val fld_record : string -> field_dbg_info
 val fld_record_inline : string -> field_dbg_info
 
 val fld_record_extension : string -> field_dbg_info
-
-val ref_field_info : field_dbg_info
 
 type set_field_dbg_info =
   | Fld_record_set of string
@@ -124,6 +123,21 @@ type import_source =
    rather than primitives. See [builtin]. *)
 type eliminated = Identity | Ignore
 
+(* A JSX element in JSX preserve mode, built by [Translcore] from a call the
+   JSX PPX produced. The arguments of [Pjsx] are, in evaluation order: the tag,
+   the spread props (if [jsx_spread]), one value per [jsx_props] entry, the
+   children ([jsx_children] of them) and the key (if [jsx_key]). *)
+type jsx_element = {
+  jsx_name: string; (* name of the external, only printed by [Printlambda] *)
+  jsx_ffi: External_ffi_types.external_decl;
+  jsx_multi: bool; (* [jsxs]: each child is a separate argument *)
+  jsx_fragment: bool; (* the tag is the JSX module's [jsxFragment] *)
+  jsx_spread: bool;
+  jsx_props: (string * bool) list; (* runtime name, optional *)
+  jsx_children: int option; (* [None]: no children prop *)
+  jsx_key: bool;
+}
+
 type primitive =
   | Pdebugger
   | Ptypeof
@@ -142,8 +156,8 @@ type primitive =
       prim_name: string;
       arg_types: External_arg_spec.params;
       ffi: External_ffi_types.external_decl;
-      transformed_jsx: bool;
     }
+  | Pjsx of jsx_element
   | Pjs_object_create of External_arg_spec.obj_params
   | Pjs_object_get of string
   | Pjs_object_set of string
@@ -230,7 +244,6 @@ type primitive =
   | Parrayrefu
   | Parraysetu
   | Parrayrefs
-  | Parraysets
   (* List primitives *)
   | Pmakelist
   (* dict primitives *)
@@ -247,8 +260,6 @@ type primitive =
   | Phash_mixint
   | Phash_mixstring
   | Phash_finalmix
-  (* Test if the argument is a block or an immediate integer *)
-  | Pisint
   (* Test if the (integer) argument is outside an interval *)
   (* Test if the argument is null or undefined *)
   | Pis_null_undefined
@@ -279,6 +290,12 @@ type primitive =
      and the primitive arguments contain [value]. The source forms are retained
      for JavaScript output; semantic forms are used by optimizations. *)
   | Ptemplate of template_segment list
+  (* {...target, ...sources} *)
+  | Pdict_spread
+  (* [Primitive_array.spread(parts)] and [Primitive_list.spread(parts)], the
+     concatenation of an array of arrays or lists *)
+  | Parray_spread
+  | Plist_spread
 
 and comparison = Ceq | Cneq | Clt | Cgt | Cle | Cge
 
@@ -361,6 +378,11 @@ type t = private
   | Lstaticraise of int * t list
   | Lstaticcatch of t * (int * Ident.t list) * t
   | Ltrywith of t * Ident.t * t
+  | Ltryfinally of t * t
+      (** [Ltryfinally (body, finally)] evaluates [body], then [finally] however
+          [body] is left (normally, by an exception, or by break/continue/return),
+          and has the value of [body]. A try with both catch and finally is an
+          [Ltryfinally] around an [Ltrywith]. *)
   | Lifthenelse of t * t * t
   | Lsequence of t * t
   | Lbreak
@@ -380,17 +402,7 @@ and lfunction = {
 
 and prim_info = private {primitive: primitive; args: t list; loc: Location.t}
 
-and ap_info = {
-  ap_loc: Location.t;
-  ap_inlined: inline_attribute; (* specified with the [@inlined] attribute *)
-}
-
-and lambda_apply = private {
-  ap_func: t;
-  ap_args: t list;
-  ap_info: ap_info;
-  ap_transformed_jsx: bool;
-}
+and lambda_apply = private {ap_func: t; ap_args: t list; ap_loc: Location.t}
 
 and switch_key =
   | Switch_int of int
@@ -410,18 +422,6 @@ and 'a switch = {
 }
 
 and lambda_switch = t switch
-
-(* Lambda code for the middle-end.
-   * In the closure case the code is a sequence of assignments to a
-     preallocated block of size [main_module_block_size] using
-     (Setfield(Getglobal(module_ident))). The size is used to preallocate
-     the block.
-   * In the flambda case the code is an expression returning a block
-     value of size [main_module_block_size]. The size is used to build
-     the module root as an initialize_symbol
-     Initialize_symbol(module_name, 0,
-       [getfield 0; ...; getfield (main_module_block_size - 1)])
-*)
 
 (* Sharing key *)
 
@@ -445,7 +445,15 @@ val str_of_field_info : field_dbg_info -> string option
 
 val is_immutable_block : tag_info -> bool
 
+val const_some_none_depth : structured_constant -> int
+
 val const_is_allocating : structured_constant -> bool
+
+val lfunction_can_be_inlined : lfunction -> bool
+(** Whether the function may give way to the code it runs: its body replacing
+    a call to it, or the call it forwards to replacing the function itself. An
+    async function may not, since a call to it returns a promise, and neither
+    may a function with a directive, which applies only to its own body. *)
 
 (* Constructors. [t] is private, so every term outside this module is
    built through one of these.
@@ -458,14 +466,13 @@ val const_is_allocating : structured_constant -> bool
      collapses a module record rebuilt field-by-field from another module
      back to that module.
    - [if_] resolves a constant condition, collapses a branch that asserts
-     false, turns boolean branches into the condition or its negation, and
-     recognizes a few [Pisint] shapes.
+     false, turns boolean branches into the condition or its negation.
    - [switch] and [stringswitch] pick the matching case when the scrutinee
      is constant.
    - [not_] rewrites a negated inequality into an equality.
    - [seq] drops a first operand that only allocates.
    - [apply] eta-reduces a function whose body is a single primitive call on
-     its own parameters.
+     its own parameters, if [lfunction_can_be_inlined] allows it.
 
    These fire when a term is rebuilt with new children, which in practice
    means during the optimizer's passes rather than at production: the
@@ -477,7 +484,12 @@ val global_module : Ident.t -> t
 
 val const : structured_constant -> t
 
-val apply : ?ap_transformed_jsx:bool -> t -> t list -> ap_info -> t
+val may_skip_operands : primitive -> bool
+(** Whether the primitive evaluates its operands after the first one only
+    depending on its value, as [&&] and [||] do. Others evaluate all of them,
+    left to right. *)
+
+val apply : t -> t list -> Location.t -> t
 
 val function_ :
   loc:Location.t ->
@@ -492,6 +504,10 @@ val letrec : (Ident.t * t) list -> t -> t
 
 val prim : primitive:primitive -> args:t list -> Location.t -> t
 
+val untagged_plan : lambda_switch -> t Untagged_dispatch.tree option
+(** The dispatch of a switch on an untagged variant, which the code generator
+    prints and constant folding evaluates *)
+
 val switch : t -> lambda_switch -> t
 
 val stringswitch : t -> (string * t) list -> t option -> t
@@ -501,6 +517,8 @@ val staticraise : int -> t list -> t
 val staticcatch : t -> int * Ident.t list -> t -> t
 
 val try_ : t -> Ident.t -> t -> t
+
+val try_finally : t -> t -> t
 
 val if_ : t -> t -> t -> t
 
@@ -525,10 +543,6 @@ val not_ : Location.t -> t -> t
 val sequor : t -> t -> t
 
 val sequand : t -> t -> t
-
-val lambda_true : t
-
-val lambda_false : t
 
 val eq_approx : t -> t -> bool
 

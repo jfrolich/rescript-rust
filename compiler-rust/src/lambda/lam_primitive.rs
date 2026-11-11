@@ -21,6 +21,31 @@ pub use crate::types::external_ffi_types::{
     ModuleBindName, ModuleSource, ObjParam, Param,
 };
 
+/// `Lambda.jsx_element`: a JSX element in JSX preserve mode, built by
+/// translcore from a call the JSX PPX produced. The arguments of `Pjsx` are,
+/// in evaluation order: the tag, the spread props (if `jsx_spread`), one
+/// value per `jsx_props` entry, the children (`jsx_children` of them) and the
+/// key (if `jsx_key`).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct JsxElement {
+    /// Name of the external, for the fallback call.
+    pub jsx_name: String,
+    /// The external's FFI declaration, for the fallback call.
+    pub jsx_ffi: ExternalDecl,
+    /// `jsxs`: each child is a separate argument.
+    pub jsx_multi: bool,
+    /// The tag is the JSX module's `jsxFragment`.
+    pub jsx_fragment: bool,
+    /// Whether a spread-props argument follows the tag.
+    pub jsx_spread: bool,
+    /// Runtime name, optional.
+    pub jsx_props: Vec<(String, bool)>,
+    /// `None`: no children prop.
+    pub jsx_children: Option<usize>,
+    /// Whether a key argument comes last.
+    pub jsx_key: bool,
+}
+
 /// `Lambda.import_source`: the target of a dynamic `import`, resolved at
 /// translation. The argument of the import primitive is a module reference,
 /// never an expression.
@@ -76,8 +101,6 @@ pub struct JsCall {
     pub arg_types: Vec<Param>,
     /// The external's FFI declaration.
     pub ffi: ExternalDecl,
-    /// Whether the call is a JSX call produced by the JSX transform.
-    pub transformed_jsx: bool,
 }
 
 /// Primitive operations
@@ -117,6 +140,9 @@ pub enum Primitive {
     /// the other primitives.
     PjsCall(Box<JsCall>),
 
+    /// A JSX element in JSX preserve mode (`Lambda.Pjsx`).
+    Pjsx(Box<JsxElement>),
+
     /// Create a JavaScript object
     PjsObjectCreate(Vec<ObjParam>),
 
@@ -155,8 +181,6 @@ pub enum Primitive {
     Pboolmax,
 
     // ==================== Integer Primitives ====================
-    /// Is integer (vs block)
-    Pisint,
     /// Integer negation
     Pnegint,
     /// Integer addition
@@ -287,8 +311,6 @@ pub enum Primitive {
     Parraysetu,
     /// Array get (safe)
     Parrayrefs,
-    /// Array set (safe)
-    Parraysets,
 
     // ==================== List Primitives ====================
     /// Make list
@@ -297,6 +319,16 @@ pub enum Primitive {
     // ==================== Dict Primitives ====================
     /// Make dict
     Pmakedict,
+    /// `{...target, ...sources}`
+    PdictSpread,
+
+    // ==================== Spread Primitives ====================
+    /// `Primitive_array.spread(parts)`: the concatenation of an array of
+    /// arrays (lambda.ml `Parray_spread`).
+    ParraySpread,
+    /// `Primitive_list.spread(parts)`: the concatenation of an array of lists
+    /// (lambda.ml `Plist_spread`).
+    PlistSpread,
     /// Dict has key
     PdictHas,
 
@@ -379,6 +411,12 @@ pub enum Mutable {
 }
 
 impl Primitive {
+    /// `Lambda.may_skip_operands` (lambda.ml:730-756): `&&` and `||` may
+    /// leave their right operand unevaluated.
+    pub fn may_skip_operands(&self) -> bool {
+        matches!(self, Primitive::Psequand | Primitive::Psequor)
+    }
+
     /// Check if two primitives are approximately equal (for optimization).
     ///
     /// 1:1 port of `Lam_primitive.eq_primitive_approx`
@@ -405,7 +443,6 @@ impl Primitive {
             | Pboolorder
             | Pboolmin
             | Pboolmax
-            | Pisint
             | Pnegint
             | Paddint
             | Psubint
@@ -460,7 +497,10 @@ impl Primitive {
             | Pstringmax
             | Pmakelist
             | Pmakedict
+            | PdictSpread
             | PdictHas
+            | ParraySpread
+            | PlistSpread
             | Pawait
             | PjsApply
             | PvalFromOption
@@ -488,7 +528,6 @@ impl Primitive {
             | Parrayrefu
             | Parraysetu
             | Parrayrefs
-            | Parraysets
             | PjsFnMethod
             | Phash
             | PhashMixstring
@@ -523,8 +562,7 @@ impl Primitive {
                 Pmakeblock(info1, flag1) => flag0 == flag1 && info0 == info1,
                 _ => false,
             },
-            // lam_primitive.ml:250-254: Pjs_call only checks
-            // prim_name + arg_types + ffi (NOT transformed_jsx).
+            // lambda.ml `eq_primitive_approx`
             PjsCall(call) => match other {
                 PjsCall(other) => {
                     call.prim_name == other.prim_name
@@ -533,6 +571,7 @@ impl Primitive {
                 }
                 _ => false,
             },
+            Pjsx(jsx) => matches!(other, Pjsx(other) if jsx == other),
             // lam_primitive.ml:255-258
             Pimport(src) => matches!(other, Pimport(src2) if src == src2),
             // lam_primitive.ml:261-264

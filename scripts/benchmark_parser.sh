@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Performance benchmark comparing Rust and OCaml parsers
-# Uses roundtrip test files from tests/syntax_tests/data/{idempotency,printer}
+# Uses roundtrip test files from tests/syntax_tests/data/printer
 # and, when present, ~/dev/tella-fusion (by reference, no file copying).
 
 set -e
@@ -66,7 +66,7 @@ echo ""
 
 # Find all benchmark files
 cd "$PROJECT_ROOT/tests"
-find syntax_tests/data/idempotency syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+find syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 
 # Include external corpus by reference.
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"

@@ -40,11 +40,11 @@ switch count {
 }
 
 switch route {
-| A => <div> // div tag stays after >
+| A => <div> // comment after the opening tag
     <div> {React.string("First A div")} </div>
     <div> {React.string("Second A div")} </div>
   </div>
-| B => <> // fragment tag stays after <>
+| B => <> // comment after the fragment opener
     <div> {React.string("First B div")} </div>
     <div> {React.string("Second B div")} </div>
   </>
@@ -71,4 +71,15 @@ switch value {
     foo()
     {bar()}
   }
+}
+
+let x = switch (selectable: Selectable.t) {
+| Level(_) => 1
+}
+
+let a = switch x {
+| A => [1, 2]
+| B => (1, 2)
+| C => {"a": 1}
+| D => {a: 1}
 }

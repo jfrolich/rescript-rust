@@ -28,7 +28,7 @@ type idents_stats = {
 }
 
 let add_defined_idents (x : idents_stats) ident =
-  x.defined_idents <- Set_ident.add x.defined_idents ident
+  x.defined_idents <- Set_ident.add ident x.defined_idents
 
 let add_record_rest_field_idents stats fields =
   List.iter
@@ -61,8 +61,8 @@ let free_variables (stats : idents_stats) =
         | Some v -> self.expression self v);
     ident =
       (fun _ id ->
-        if not (Set_ident.mem stats.defined_idents id) then
-          stats.used_idents <- Set_ident.add stats.used_idents id);
+        if not (Set_ident.mem id stats.defined_idents) then
+          stats.used_idents <- Set_ident.add id stats.used_idents);
     expression =
       (fun self exp ->
         match exp.expression_desc with
@@ -76,23 +76,20 @@ let free_variables (stats : idents_stats) =
         | _ -> super.expression self exp);
   }
 
-let init = {used_idents = Set_ident.empty; defined_idents = Set_ident.empty}
-
-let obj = free_variables init
-
-let clean_up init =
-  init.used_idents <- Set_ident.empty;
-  init.defined_idents <- Set_ident.empty
+(* Each call gets its own accumulator: compiler requests run concurrently on
+   several domains, and a shared one would mix their identifiers. *)
+let free_variables_with walk =
+  let stats =
+    {used_idents = Set_ident.empty; defined_idents = Set_ident.empty}
+  in
+  walk (free_variables stats);
+  Set_ident.diff stats.used_idents stats.defined_idents
 
 let free_variables_of_statement st =
-  clean_up init;
-  obj.statement obj st;
-  Set_ident.diff init.used_idents init.defined_idents
+  free_variables_with (fun obj -> obj.statement obj st)
 
 let free_variables_of_expression st =
-  clean_up init;
-  obj.expression obj st;
-  Set_ident.diff init.used_idents init.defined_idents
+  free_variables_with (fun obj -> obj.expression obj st)
 
 let is_array_function (e : J.expression) =
   match e.expression_desc with
@@ -110,8 +107,7 @@ let rec no_side_effect_expression_desc (x : J.expression_desc) =
   | Json_literal _ -> true
   | Static_index (obj, (_name : string), (_pos : int32 option)) ->
     no_side_effect obj
-  | String_index (a, b) | Array_index (a, b) ->
-    no_side_effect a && no_side_effect b
+  | Array_index (a, b) -> no_side_effect a && no_side_effect b
   | Is_null_or_undefined b -> no_side_effect b
   | Str _ | Template_literal _ -> true
   | Interpolated_template {values} -> Ext_list.for_all values no_side_effect
@@ -123,11 +119,12 @@ let rec no_side_effect_expression_desc (x : J.expression_desc) =
     *)
     Ext_list.for_all xs no_side_effect
   | Optional_block (x, _) -> no_side_effect x
-  | Object (dup, kvs) ->
-    (match dup with
-      | Some e -> no_side_effect e
-      | None -> true)
-    && Ext_list.for_all_snd kvs no_side_effect
+  | Object entries ->
+    Ext_list.for_all entries (function
+      | Object_property (_, e) | Record_spread e -> no_side_effect e
+      (* A spread reads the source's properties, which may run getters or
+         proxy traps *)
+      | Object_spread _ -> false)
   | String_append (a, b) | Seq (a, b) -> no_side_effect a && no_side_effect b
   | Length e | Caml_block_tag (e, _) | Typeof e -> no_side_effect e
   | Bin (Eq, _, _) -> false
@@ -151,7 +148,7 @@ let rec no_side_effect_expression_desc (x : J.expression_desc) =
   | In (prop, obj) -> no_side_effect prop && no_side_effect obj
   | Cond (a, b, c) -> no_side_effect a && no_side_effect b && no_side_effect c
   | Call (fn, [e], _) when is_array_function fn -> no_side_effect e
-  | Call _ | New _ | Raw_js_code _ (* actually true? *) -> false
+  | Call _ | Jsx _ | New _ | Raw_js_code _ (* actually true? *) -> false
   | Await _ -> false
   | Spread _ -> false
   | Record_rest _ -> false
@@ -187,6 +184,35 @@ let no_side_effect_statement st =
     true
   with _ -> false
 
+(* The value of a number literal as JavaScript sees it, so that [1] and
+   [1.0] are the same number. [None] for a bigint, which is never [===] to
+   a number. *)
+let number_value (n : J.number) : float option =
+  match n with
+  | Int {i} -> Some (Int32.to_float i)
+  | Float {f} -> float_of_string_opt f
+  | BigInt _ -> None
+
+let eq_literal (x : J.expression_desc) (y : J.expression_desc) : bool option =
+  match (x, y) with
+  | ( Number (BigInt {positive = p0; value = v0}),
+      Number (BigInt {positive = p1; value = v1}) ) ->
+    Some (p0 = p1 && v0 = v1)
+  | Number (BigInt _), Number _ | Number _, Number (BigInt _) -> Some false
+  | Number n0, Number n1 -> (
+    match (number_value n0, number_value n1) with
+    (* Float [=] is IEEE equality like [===]: NaN differs from itself, and
+       [0.] equals [-0.] *)
+    | Some f0, Some f1 -> Some (f0 = f1)
+    | _ -> None)
+  | Bool b0, Bool b1 -> Some (b0 = b1)
+  | Str s0, Str s1 -> Some (s0 = s1)
+  | Null, Null | Undefined _, Undefined _ -> Some true
+  | ( (Bool _ | Number _ | Str _ | Null | Undefined _),
+      (Bool _ | Number _ | Str _ | Null | Undefined _) ) ->
+    Some false
+  | _ -> None
+
 (* TODO: generate [fold2]
    This make sense, for example:
    {[
@@ -217,10 +243,6 @@ let rec eq_expression ({expression_desc = x0} : J.expression)
       false (* conservative *)
      | _ -> false
      end *)
-  | String_index (a0, a1) -> (
-    match y0 with
-    | String_index (b0, b1) -> eq_expression a0 b0 && eq_expression a1 b1
-    | _ -> false)
   | Array_index (a0, a1) -> (
     match y0 with
     | Array_index (b0, b1) -> eq_expression a0 b0 && eq_expression a1 b1
@@ -271,7 +293,7 @@ let rec eq_expression ({expression_desc = x0} : J.expression)
     | _ -> false)
   | Length _ | Is_null_or_undefined _ | String_append _ | Typeof _ | Js_not _
   | Js_bnot _ | In _ | Cond _ | New _ | Fun _ | Json_literal _ | Raw_js_code _
-  | Array _ | Caml_block_tag _ | Object _ | Tagged_template _
+  | Array _ | Caml_block_tag _ | Object _ | Tagged_template _ | Jsx _
   | Interpolated_template _ | Await _ | Record_rest _ ->
     false
   | Spread _ -> false

@@ -1,8 +1,10 @@
-type t<'yield, 'return, 'next> = Stdlib_Iterable.t<'yield>
+type t<+'yield, +'return, -'next> = Stdlib_Iterable.t<'yield>
 
 external asIterator: t<'yield, 'return, 'next> => Stdlib_Iterator.t<'yield, 'return, 'next> =
   "%identity"
+
 external asIterable: t<'yield, 'return, 'next> => Stdlib_Iterable.t<'yield> = "%identity"
+
 external asIteratorObject: t<'yield, 'return, 'next> => Stdlib_IteratorObject.t<
   'yield,
   'return,

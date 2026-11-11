@@ -368,13 +368,16 @@ fn basename(path: &str) -> String {
 }
 
 fn path_to_list(path: &str) -> Vec<String> {
-    // Mirrors compiler/gentype/ModuleResolver.ml:134-140.
+    // Mirrors compiler/gentype/module_resolver.ml `path_to_list`. On Windows,
+    // the basename of a drive root omits the drive prefix, so a path whose
+    // parent is itself is a root too.
     let base = basename(path);
-    if base == path {
+    let parent = dirname(path);
+    if base == path || parent == path {
         vec![path.to_string()]
     } else {
         let mut out = vec![base];
-        out.extend(path_to_list(&dirname(path)));
+        out.extend(path_to_list(&parent));
         out
     }
 }

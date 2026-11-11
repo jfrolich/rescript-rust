@@ -16,7 +16,7 @@
 (** Abstract syntax tree after typing *)
 
 (** By comparison with {!Parsetree}:
-    - Every {!Longindent.t} is accompanied by a resolved {!Path.t}.
+    - Every {!Longident.t} is accompanied by a resolved {!Path.t}.
 
 *)
 
@@ -72,6 +72,10 @@ and pattern_desc =
   | Tpat_var of Ident.t * string loc  (** x *)
   | Tpat_alias of pattern * Ident.t * string loc  (** P as a *)
   | Tpat_constant of constant  (** 1, 'a', "true", 1.0, 1l, 1L, 1n *)
+  | Tpat_interval of constant * constant
+      (** 'a' .. 'z'
+
+          Both bounds are int or char constants, the first one lower. *)
   | Tpat_tuple of pattern list
       (** (P1, ..., Pn)
 
@@ -97,6 +101,10 @@ and pattern_desc =
 
             Invariant: n > 0 unless this is a rest-only record pattern
          *)
+  | Tpat_dict of dict_pattern_entry list
+      (** dict{"k1": P1, ..., "kn": ?Pn}
+
+            Entries are in source order, and their keys are distinct. *)
   | Tpat_array of pattern list  (** [| P1; ...; Pn |] *)
   | Tpat_or of pattern * pattern * row_desc option
       (** P1 | P2
@@ -104,6 +112,14 @@ and pattern_desc =
             [row_desc] = [Some _] when translating [Ppat_type _],
                          [None] otherwise.
          *)
+
+and dict_pattern_entry = {
+  tdp_key: string loc;
+  tdp_pattern: pattern;
+      (** Matches the key's value as an option, [None] when the key is absent:
+          [Some(P)] for ["k": P], and [P] itself for ["k": ?P] *)
+  tdp_optional: bool;  (** Whether the entry is written ["k": ?P] *)
+}
 
 and expression = {
   exp_desc: expression_desc;
@@ -188,8 +204,11 @@ and expression_desc =
 
             [Texp_match (E0, [(P1, E1); (P2, E2)], [(P3, E3)], _)]
          *)
-  | Texp_try of expression * case list
-      (** try E with P1 -> E1 | ... | PN -> EN *)
+  | Texp_try of expression * case list * expression option
+      (** try E catch { | P1 => E1 | ... | PN => EN } finally E_fin
+
+          The case list is empty when there is no catch, and then there is
+          always a finally expression. *)
   | Texp_tuple of expression list  (** (E1, ..., EN) *)
   | Texp_construct of
       Longident.t loc * constructor_description * expression list
@@ -199,29 +218,32 @@ and expression_desc =
          *)
   | Texp_variant of label * expression option
   | Texp_record of {
-      fields:
-        (Types.label_description
-        * record_label_definition
-        * bool (* optional *))
-        array;
+      fields: (Types.label_description * Longident.t loc * expression) array;
       representation: Types.record_representation;
       extended_expression: expression option;
     }
       (** { l1=P1; ...; ln=Pn }           (extended_expression = None)
             { E0 with l1=P1; ...; ln=Pn }   (extended_expression = Some E0)
 
-            Invariant: n > 0
+            [fields] holds only the fields the literal writes, ordered by
+            [lbl_pos]. A field it leaves out is taken from E0 when there is
+            one, and is otherwise an optional field set to [None]. The
+            record's other labels are in [lbl_all] of any written label.
 
             If the type is { l1: t1; l2: t2 }, the expression
             { E0 with t2=P2 } is represented as
             Texp_record
-              { fields = [| l1, Kept t1; l2 Override P2 |]; representation;
+              { fields = [| (l2, lid2, P2) |]; representation;
                 extended_expression = Some E0 }
         *)
   | Texp_field of expression * Longident.t loc * label_description
   | Texp_setfield of
       expression * Longident.t loc * label_description * expression
   | Texp_array of expression list
+  | Texp_dict of dict_entry list
+  | Texp_spread of Parsetree.spread_kind * expression list
+    (* An array or list literal with spreads: the arrays or lists it
+       concatenates, see [Ast_spread] *)
   | Texp_ifthenelse of expression * expression * expression option
   | Texp_sequence of expression * expression
   | Texp_break
@@ -241,7 +263,6 @@ and expression_desc =
   | Texp_letexception of extension_constructor * expression
   | Texp_assert of expression
   | Texp_pack of module_expr
-  | Texp_extension_constructor of Longident.t loc * Path.t
   (* Keep new expression constructors at the end. CMT files are marshalled by
      runtime constructor tag, so inserting constructors before existing ones
      breaks analysis when it reads CMTs produced by older compiler versions. *)
@@ -267,6 +288,10 @@ and expression_desc =
 
 and case = {c_lhs: pattern; c_guard: expression option; c_rhs: expression}
 
+and dict_entry =
+  | Tdict_entry of string loc * expression
+  | Tdict_spread of expression
+
 and function_param = {
   fp_lbl: arg_label;
   fp_param: Ident.t; (* the name the compiled parameter binds to *)
@@ -278,10 +303,6 @@ and function_param = {
          the label -- and the user's pattern is bound by a let at the head
          of the body. *)
 }
-
-and record_label_definition =
-  | Kept of Types.type_expr
-  | Overridden of Longident.t loc * expression
 
 (* Value expressions for the module language *)
 and module_expr = {

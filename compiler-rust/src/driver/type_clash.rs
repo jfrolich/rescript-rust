@@ -256,6 +256,53 @@ fn extract_text_at_loc(arena: &ParseArena, source: &str, loc: LocIdx) -> String 
         .to_string()
 }
 
+/// `!Parser.parse_source text`, as rescript_compiler_driver.ml:24-35 sets
+/// it: the structure and comments of `text`, or nothing when `text` does
+/// not parse cleanly. Hints rewrite source text extracted at a location, and
+/// text that does not parse (e.g. a location that leaves out the parentheses
+/// around an operand) must not be turned into a suggestion. The parser's
+/// warnings are reported either way.
+fn parse_source(
+    ctx: &TypeContext,
+    text: &str,
+) -> (
+    Vec<crate::parser::ast::StructureItem>,
+    Vec<crate::parser::comment::Comment>,
+    ParseArena,
+) {
+    let mut parser = crate::parser::Parser::new("<none>", text);
+    let structure = crate::parser::module::parse_structure(&mut parser);
+    ctx.push_reparse_warnings(parser.warnings());
+    if parser.has_errors() {
+        return (Vec::new(), Vec::new(), parser.into_arena());
+    }
+    let comments = parser.take_comments();
+    (structure, comments, parser.into_arena())
+}
+
+/// `Parser.parse_expr_at_loc`: the expression the source at `loc` parses to,
+/// with its comments and arena, when it is a single expression.
+fn parse_expr_at_loc(
+    ctx: &TypeContext,
+    arena: &ParseArena,
+    source: &str,
+    loc: LocIdx,
+) -> Option<(
+    crate::parse_arena::ExprIdx,
+    Vec<crate::parser::comment::Comment>,
+    ParseArena,
+)> {
+    let text = extract_text_at_loc(arena, source, loc);
+    let (structure, comments, sub_arena) = parse_source(ctx, &text);
+    let [item] = structure.as_slice() else {
+        return None;
+    };
+    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
+        return None;
+    };
+    Some((eval.0, comments, sub_arena))
+}
+
 /// `!Parser.parse_source` then `!Parser.reprint_source`, applied to the
 /// expression at `loc` after `mapper` (`Parser.reprint_expr_at_loc`).
 fn reprint_expr_at_loc(
@@ -268,19 +315,8 @@ fn reprint_expr_at_loc(
         crate::parser::ast::Expression,
     ) -> Option<crate::parser::ast::Expression>,
 ) -> Option<String> {
-    let text = extract_text_at_loc(arena, source, loc);
-    let mut parser = crate::parser::Parser::new("<none>", &text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let comments = parser.take_comments();
-    let mut sub_arena = parser.into_arena();
-    let [item] = structure.as_slice() else {
-        return None;
-    };
-    let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
-        return None;
-    };
-    let exp = sub_arena.get_expr(eval.0).clone();
+    let (exp_idx, comments, mut sub_arena) = parse_expr_at_loc(ctx, arena, source, loc)?;
+    let exp = sub_arena.get_expr(exp_idx).clone();
     let exp = mapper(&mut sub_arena, exp)?;
     let exp_idx = sub_arena.push_expr(exp);
     let wrapped = crate::parser::ast::StructureItem {
@@ -290,35 +326,34 @@ fn reprint_expr_at_loc(
         ))),
         pstr_loc: LocIdx::none(),
     };
-    let printed =
-        crate::parser::printer::print_implementation(&[wrapped], comments, 80, &mut sub_arena);
+    let printed = crate::parser::printer::print_implementation(
+        &[wrapped],
+        comments,
+        80,
+        "\n",
+        &mut sub_arena,
+    );
     Some(printed.trim().to_string())
 }
 
 /// `!Parser.parse_source text` followed by `!Parser.reprint_source`.
 fn parse_and_reprint(ctx: &TypeContext, text: &str) -> Option<String> {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
+    let (structure, comments, mut sub_arena) = parse_source(ctx, text);
     if structure.is_empty() {
         return None;
     }
-    let comments = parser.take_comments();
-    let mut sub_arena = parser.into_arena();
     Some(crate::parser::printer::print_implementation(
         &structure,
         comments,
         80,
+        "\n",
         &mut sub_arena,
     ))
 }
 
 /// Whether `text` parses to a single constant expression.
 fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let arena = parser.into_arena();
+    let (structure, _, arena) = parse_source(ctx, text);
     match structure.as_slice() {
         [item] => match &item.pstr_desc {
             crate::parser::ast::StructureItemDesc::Pstr_eval(eval) => matches!(
@@ -333,10 +368,7 @@ fn text_is_constant(ctx: &TypeContext, text: &str) -> bool {
 
 /// `extract_string_constant`.
 fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
-    let mut parser = crate::parser::Parser::new("<none>", text);
-    let structure = crate::parser::module::parse_structure(&mut parser);
-    ctx.push_reparse_warnings(parser.warnings());
-    let arena = parser.into_arena();
+    let (structure, _, arena) = parse_source(ctx, text);
     let [item] = structure.as_slice() else {
         return None;
     };
@@ -1119,10 +1151,9 @@ fn print_extra_type_clash_help_by_types(
             let layout = ctx.with_variant_layout(*layout, |l| l.clone());
             let matching = constructors.iter().enumerate().find_map(|(position, cd)| {
                 let constructor_name = cd.cd_id.name().to_string();
-                let runtime_repr = match constructor_tag(&layout, position) {
-                    Some(crate::types::variant_runtime::LiteralTag::String(s)) => Some(s),
-                    Some(_) => None,
-                    None => Some(constructor_name.clone()),
+                let runtime_repr = match layout.constructor_tag(position) {
+                    crate::types::variant_runtime::LiteralTag::String(s) => Some(s.clone()),
+                    _ => None,
                 };
                 (runtime_repr.as_deref() == Some(string_value.as_str())).then_some(constructor_name)
             });
@@ -1178,15 +1209,27 @@ fn print_extra_type_clash_help_by_types(
         }
         None => false,
     };
+    // error_message_utils.ml:775-780: the coercion targets the whole
+    // expected type, named as the message shows it, not its expansion.
+    let target_type = match trace {
+        [_, (t2_top, _), ..] => *t2_top,
+        _ => b2,
+    };
     let target_type_string = {
-        printer.reset_and_mark_loops(b2);
-        printer.type_expr(b2)
+        printer.reset_and_mark_loops(target_type);
+        printer.type_expr(target_type)
     };
     let target_expr_text = extract_text_at_loc(arena, source, loc);
-    let suggested_rewrite = parse_and_reprint(
-        ctx,
-        &format!("({target_expr_text} :> {target_type_string})"),
-    );
+    // error_message_utils.ml:783-796: the location of an expression leaves
+    // out the parentheses around its first or last operand, so the text alone
+    // may not be an expression, even when the wrapped text happens to parse.
+    let suggested_rewrite = match parse_expr_at_loc(ctx, arena, source, loc) {
+        None => None,
+        Some(_) => parse_and_reprint(
+            ctx,
+            &format!("({target_expr_text} :> {target_type_string})"),
+        ),
+    };
     let is_constant = text_is_constant(ctx, &target_expr_text);
     if can_show_coercion_message && !is_constant {
         ppf.cut();
@@ -1206,17 +1249,6 @@ fn print_extra_type_clash_help_by_types(
                 ppf.cut();
             }
         }
-    }
-}
-
-/// `Variant_runtime.constructor_tag layout position`.
-fn constructor_tag(
-    layout: &crate::types::variant_runtime::Layout,
-    position: usize,
-) -> Option<crate::types::variant_runtime::LiteralTag> {
-    match layout.constructors.get(position)? {
-        crate::types::variant_runtime::ConstructorCase::Constant(tag) => tag.literal.clone(),
-        crate::types::variant_runtime::ConstructorCase::Block(block) => block.tag().literal.clone(),
     }
 }
 
@@ -1549,10 +1581,7 @@ fn print_contextual_unification_error(
 
 fn printer_with_env<'c>(ctx: &'c TypeContext, env: &Env) -> Printtyp<'c> {
     let mut printer = Printtyp::new(ctx);
-    let lookup_env = env.clone();
-    printer.set_printing_env(Box::new(move |name| {
-        lookup_env.find_type_with_path(name).ok().map(|(p, _)| p)
-    }));
+    printer.set_printing_env(env);
     printer
 }
 
@@ -1576,6 +1605,34 @@ pub(super) fn print_pattern_type_clash(
         &mut |ppf| ppf.str("This pattern matches values of type"),
         &mut |ppf| ppf.str("but a pattern was expected which matches values of type"),
         Some(&mut extra),
+    );
+}
+
+/// `Typecore.report_error`'s `Label_mismatch (lid, trace)`
+/// (typecore.ml:5250-5256): `super_report_unification_error` under the
+/// error's env.
+pub(super) fn print_label_mismatch(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    lid: &str,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    printer.super_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| {
+            // `The record field %a@ belongs to the type`
+            ppf.str("The record field ");
+            ppf.str(lid);
+            ppf.space();
+            ppf.str("belongs to the type");
+        },
+        &mut |ppf| ppf.str("but is mixed here with fields of type"),
+        None,
     );
 }
 
@@ -1751,6 +1808,23 @@ pub(super) fn print_field_not_optional(
 }
 
 /// `Typecore.report_error`'s `Tagged_template_non_tag typ` (typecore.ml:5237-5250).
+/// typecore.ml `report_error`, `Jsx_unboxed_props`.
+pub(super) fn print_jsx_unboxed_props(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
+    let mut printer = Printtyp::new(ctx);
+    ppf.open_box(BoxKind::V, 0);
+    ppf.str("The props of this JSX element have type ");
+    typecore_type_expr(ppf, &mut printer, typ);
+    ppf.str(", which is an ");
+    tagged(ppf, TAG_INFO, "@unboxed");
+    ppf.str(" record.");
+    ppf.cut();
+    ppf.cut();
+    ppf.str(
+        "JSX props must be an object, but an @unboxed record is represented by the value of its only field. Remove @unboxed from the props type.",
+    );
+    ppf.close_box();
+}
+
 pub(super) fn print_tagged_template_non_tag(
     ppf: &mut Ppf<'_>,
     ctx: &TypeContext,
@@ -1798,7 +1872,36 @@ pub(super) fn print_report_unification_error(
 ) {
     let tr = expand_trace(ctx, raw_trace);
     let mut printer = Printtyp::new(ctx);
-    printer.report_unification_error(ppf, true, &tr, txt1, txt2);
+    printer.report_unification_error(ppf, true, &tr, &mut |ppf| ppf.str(txt1), &mut |ppf| {
+        ppf.str(txt2)
+    });
+}
+
+/// `Typedecl.report_error`'s `Rebind_wrong_type (lid, env, trace)`
+/// (typedecl.ml:2273-2278): `Printtyp.report_unification_error` under the
+/// error's env.
+pub(super) fn print_rebind_wrong_type(
+    ppf: &mut Ppf<'_>,
+    ctx: &TypeContext,
+    env: &Env,
+    lid: &str,
+    raw_trace: &[(TypeExprRef, TypeExprRef)],
+) {
+    let tr = expand_trace(ctx, raw_trace);
+    let mut printer = printer_with_env(ctx, env);
+    printer.report_unification_error(
+        ppf,
+        true,
+        &tr,
+        &mut |ppf| {
+            // `The constructor %a@ has type`
+            ppf.str("The constructor ");
+            ppf.str(lid);
+            ppf.space();
+            ppf.str("has type");
+        },
+        &mut |ppf| ppf.str("but was expected to be of type"),
+    );
 }
 
 /// `Typecore.report_error`'s `Name_type_mismatch (kind, lid, tp, tpl)`
@@ -2113,13 +2216,13 @@ pub(super) fn print_object_field_not_mutable(
 }
 
 /// `Typedecl.report_error`'s `Definition_mismatch (ty, errs)`
-/// (typedecl.ml:2153-2159); `detail` is the rendered
-/// `Includecore.report_type_mismatch` sentence, if any.
+/// (typedecl.ml): `@[<v>@[<hov>%s@ %s@;<1 2>%a@]%a@]`, the reasons by
+/// `Includecore.report_type_mismatch "the original" "this" "definition"`.
 pub(super) fn print_definition_mismatch(
     ppf: &mut Ppf<'_>,
     ctx: &TypeContext,
     ty: TypeExprRef,
-    detail: Option<&str>,
+    errs: &[crate::types::includecore::TypeMismatch],
 ) {
     let mut printer = Printtyp::new(ctx);
     ppf.open_box(BoxKind::V, 0);
@@ -2130,15 +2233,14 @@ pub(super) fn print_definition_mismatch(
     ppf.break_(1, 2);
     typecore_type_expr(ppf, &mut printer, ty);
     ppf.close_box();
-    if let Some(detail) = detail.filter(|detail| !detail.is_empty()) {
-        // `report_type_mismatch` prints each error as "@ %a.".
-        // Breaks inside an error ("Their internal representations differ:@ ...")
-        // are hints of the enclosing vertical box.
-        for line in detail.split('\n') {
-            ppf.space();
-            ppf.str(line);
-        }
-    }
+    crate::types::includecore::report_type_mismatch(
+        ppf,
+        false,
+        "the original",
+        "this",
+        "definition",
+        errs,
+    );
     ppf.close_box();
 }
 

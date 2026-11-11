@@ -22,18 +22,49 @@
  * along with this program; if not, write to the Free Software
  * Foundation, Inc., 59 Temple Place - Suite 330, Boston, MA 02111-1307, USA. *)
 
-(*
-    Principle: since in ocaml, the apply order is not specified
-    rules:
-    1. each argument it is only used once, (avoid eval duplication)
-    2. it's actually used, if not (Lsequence)
-    3. no nested  compuation,
-       other wise the evaluation order is tricky (make sure eval order is correct)
-*)
+(* The fast path of beta reduction, for a body that is a single primitive or
+   call on parameters and constants: each argument is substituted for its
+   parameter, and an unused argument is sequenced before the body.
 
-type value = {mutable used: bool; lambda: Lambda.t}
+   {[ (fun a b -> g b a) e0 e1 ]} becomes {[ g e1 e0 ]}
 
-let param_hash : _ Hash_ident.t = Hash_ident.create 20
+   The arguments then run in the order the body names the parameters, after
+   the unused ones, while the call runs them left to right. The reduction is
+   kept only when that changes nothing:
+   1. each parameter is used at most once (avoid eval duplication)
+   2. two arguments that both have side effects, or where one has side effects
+      and the other reads state that they can change, keep their order; the
+      variables the body reads count as arguments after the last one
+   3. an argument with side effects is not put in an operand that may not be
+      evaluated, the right one of [&&] and [||] *)
+
+(* How the evaluation of an argument may move with respect to other code *)
+type motion =
+  | Anywhere  (** no side effects, and depends on no state that may change *)
+  | Reads  (** no side effects, but reads state that may change *)
+  | Effects
+
+let motion ~assignable lam : motion =
+  if Lam_analysis.delay_safe ~assignable lam then Anywhere
+  else if Lam_analysis.no_side_effects lam then Reads
+  else Effects
+
+(* Whether code of motions [a] and [b] can give other results when it runs in
+   the other order *)
+let conflict (a : motion) (b : motion) =
+  match (a, b) with
+  | Anywhere, _ | _, Anywhere | Reads, Reads -> false
+  | Effects, (Reads | Effects) | Reads, Effects -> true
+
+type value = {mutable used: bool; lambda: Lambda.t; rank: int; motion: motion}
+
+(* Sequence the unused arguments before [body], in parameter order *)
+let seq_unused param_hash params body =
+  List.fold_right
+    (fun param acc ->
+      let {lambda; used} = Hash_ident.find param_hash param in
+      if not used then Lambda.seq lambda acc else acc)
+    params body
 
 (* optimize cases like
    (fun f (a,b){ g (a,b,1)} (e0, e1))
@@ -49,79 +80,113 @@ let param_hash : _ Hash_ident.t = Hash_ident.create 20
             | _ -> false ) params args'
    ]}
 *)
-let simple_beta_reduce params body args =
+let simple_beta_reduce ~assignable params body args =
+  (* Substitutions and their [used] bits belong to this reduction: compiler
+     requests run concurrently on several domains. *)
+  let param_hash : value Hash_ident.t = Hash_ident.create 20 in
   let exception Not_simple_apply in
-  let find_param_exn v opt =
+  (* The rank of a variable the body reads: after every argument *)
+  let body_rank = List.length params in
+  (* The code the reduced body evaluates, latest first, with its rank in the
+     call *)
+  let evaluated = ref [] in
+  let evaluate ~conditional rank (motion : motion) =
+    match motion with
+    | Effects when conditional -> raise_notrace Not_simple_apply
+    | Anywhere | Reads | Effects -> evaluated := (rank, motion) :: !evaluated
+  in
+  let find_param_exn ~conditional v opt =
     match Hash_ident.find_opt param_hash v with
     | Some exp ->
       if exp.used then raise_notrace Not_simple_apply else exp.used <- true;
+      evaluate ~conditional exp.rank exp.motion;
       exp.lambda
-    | None -> opt
+    | None ->
+      evaluate ~conditional body_rank (motion ~assignable opt);
+      opt
   in
-  let rec aux_exn acc (us : Lambda.t list) =
+  (* Substitutes in the operands from left to right. The operands from
+     position [conditional_from] on may not be evaluated. *)
+  let rec aux_exn ~conditional_from i (us : Lambda.t list) =
     match us with
-    | [] -> List.rev acc
-    | (Lvar x as a) :: rest -> aux_exn (find_param_exn x a :: acc) rest
-    | (Lconst _ as u) :: rest -> aux_exn (u :: acc) rest
-    | _ :: _ -> raise_notrace Not_simple_apply
+    | [] -> []
+    | u :: rest ->
+      let u =
+        match u with
+        | Lvar x -> find_param_exn ~conditional:(i >= conditional_from) x u
+        | Lconst _ -> u
+        | _ -> raise_notrace Not_simple_apply
+      in
+      u :: aux_exn ~conditional_from (i + 1) rest
+  in
+  (* The reduced term runs the unused arguments first, then what the body
+     evaluates *)
+  let check_order_exn () =
+    let unused =
+      Ext_list.filter_map params (fun p ->
+          let {used; rank; motion} = Hash_ident.find param_hash p in
+          if used then None else Some (rank, motion))
+    in
+    let rec in_order = function
+      | [] -> true
+      | (rank, motion) :: later ->
+        Ext_list.for_all later (fun (rank', motion') ->
+            rank <= rank' || not (conflict motion motion'))
+        && in_order later
+    in
+    if not (in_order (unused @ List.rev !evaluated)) then
+      raise_notrace Not_simple_apply
+  in
+  let add_params () =
+    List.iteri
+      (fun rank (p, a) ->
+        Hash_ident.add param_hash p
+          {lambda = a; used = false; rank; motion = motion ~assignable a})
+      (List.combine params args)
   in
   match (body : Lambda.t) with
   | Lprim {primitive; args = ap_args; loc = ap_loc}
   (* There is no lambda in primitive *) -> (
     (* catch a special case of primitives *)
-    let () =
-      List.iter2
-        (fun p a -> Hash_ident.add param_hash p {lambda = a; used = false})
-        params args
+    add_params ();
+    let conditional_from =
+      if Lambda.may_skip_operands primitive then 1 else max_int
     in
     try
-      let new_args = aux_exn [] ap_args in
+      let new_args = aux_exn ~conditional_from 0 ap_args in
+      check_order_exn ();
       let result =
-        Hash_ident.fold param_hash
+        seq_unused param_hash params
           (Lambda.prim ~primitive ~args:new_args ap_loc)
-          (fun _param stats acc ->
-            let {lambda; used} = stats in
-            if not used then Lambda.seq lambda acc else acc)
       in
-      Hash_ident.clear param_hash;
       Some result
-    with Not_simple_apply ->
-      Hash_ident.clear param_hash;
-      None)
+    with Not_simple_apply -> None)
   | Lapply
       {
         ap_func =
           (Lvar _ | Lprim {primitive = Pfield _; args = [Lglobal_module _]}) as
           f;
         ap_args;
-        ap_info;
+        ap_loc;
       } -> (
-    let () =
-      List.iter2
-        (fun p a -> Hash_ident.add param_hash p {lambda = a; used = false})
-        params args
-    in
+    add_params ();
     (*since we adde each param only once,
       iff it is removed once, no exception,
       if it is removed twice there will be exception.
       if it is never removed, we have it as rest keys
     *)
     try
-      let new_args = aux_exn [] ap_args in
+      (* the function is evaluated before the arguments *)
       let f =
         match f with
-        | Lvar fn_name -> find_param_exn fn_name f
+        | Lvar fn_name -> find_param_exn ~conditional:false fn_name f
         | _ -> f
       in
+      let new_args = aux_exn ~conditional_from:max_int 0 ap_args in
+      check_order_exn ();
       let result =
-        Hash_ident.fold param_hash (Lambda.apply f new_args ap_info)
-          (fun _param stat acc ->
-            let {lambda; used} = stat in
-            if not used then Lambda.seq lambda acc else acc)
+        seq_unused param_hash params (Lambda.apply f new_args ap_loc)
       in
-      Hash_ident.clear param_hash;
       Some result
-    with Not_simple_apply ->
-      Hash_ident.clear param_hash;
-      None)
+    with Not_simple_apply -> None)
   | _ -> None

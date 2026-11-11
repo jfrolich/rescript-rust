@@ -174,6 +174,7 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
             write!(f, "record_rest({})", excluded.join(", "))
         }
         Primitive::PjsCall(call) => write!(f, "{}[js]", call.prim_name),
+        Primitive::Pjsx(jsx) => write!(f, "{}[jsx]", jsx.jsx_name),
         Primitive::PjsObjectCreate(_) => write!(f, "[js.obj]"),
         Primitive::Praise => write!(f, "raise"),
         Primitive::Pobjcomp(cmp) => write!(f, "{}", format_comparison(*cmp)),
@@ -250,12 +251,13 @@ pub fn format_primitive(p: &Primitive, f: &mut fmt::Formatter<'_>) -> fmt::Resul
         Primitive::Pmakearray => write!(f, "makearray"),
         Primitive::Pmakelist => write!(f, "makelist"),
         Primitive::Pmakedict => write!(f, "makedict"),
+        Primitive::PdictSpread => write!(f, "dict.spread"),
+        Primitive::ParraySpread => write!(f, "array.spread"),
+        Primitive::PlistSpread => write!(f, "list.spread"),
         Primitive::PdictHas => write!(f, "dict.has"),
         Primitive::Parrayrefu => write!(f, "array.unsafe_get"),
         Primitive::Parraysetu => write!(f, "array.unsafe_set"),
         Primitive::Parrayrefs => write!(f, "array.get"),
-        Primitive::Parraysets => write!(f, "array.set"),
-        Primitive::Pisint => write!(f, "isint"),
         Primitive::PisPolyVarBlock => write!(f, "#is_poly_var_block"),
         Primitive::Pawait => write!(f, "await"),
         Primitive::Phash => write!(f, "hash"),
@@ -294,12 +296,6 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 
         Lambda::Lapply(apply) => {
             write!(f, "(apply")?;
-            if matches!(
-                apply.ap_info.inlined,
-                crate::lambda::InlineAttribute::Always
-            ) {
-                write!(f, "%inlined")?;
-            }
             write!(f, " ")?;
             format_lambda(&apply.ap_func, f)?;
             for arg in &apply.ap_args {
@@ -416,6 +412,14 @@ fn format_lambda(lam: &Lambda, f: &mut fmt::Formatter<'_>) -> fmt::Result {
             }
             write!(f, ") ")?;
             format_lambda(handler, f)?;
+            write!(f, ")")
+        }
+
+        Lambda::LtryFinally(body, finally) => {
+            write!(f, "(try ")?;
+            format_lambda(body, f)?;
+            write!(f, " finally ")?;
+            format_lambda(finally, f)?;
             write!(f, ")")
         }
 

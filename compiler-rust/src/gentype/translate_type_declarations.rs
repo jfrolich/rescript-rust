@@ -114,13 +114,13 @@ pub fn create_case(
     label: &str,
     attributes: &Attributes,
     poly: bool,
-) -> VariantCase {
+) -> crate::gentype::annotation::Read<VariantCase> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:23-37.
     let label_js = match crate::gentype::annotation::get_attribute_payload(
         arena,
         crate::gentype::annotation::tag_is_as,
         attributes,
-    ) {
+    )? {
         Some((_, crate::gentype::annotation::AttributePayload::IdentPayload(lid)))
             if longident_is_lident(arena, &lid, "null") =>
         {
@@ -148,64 +148,62 @@ pub fn create_case(
         }
         _ => LabelJs::StringLabel(label.to_string()),
     };
-    VariantCase { label_js }
+    Ok(VariantCase { label_js })
 }
 
-fn create_variant_case(label: &str, tag: &Option<crate::types::VariantLiteralTag>) -> VariantCase {
+/// translate_type_declarations.ml `create_variant_case`: the case's runtime
+/// literal, which is its name when it has no `@as`.
+fn create_variant_case(tag: &crate::types::VariantLiteralTag) -> VariantCase {
     let label_js = match tag {
-        Some(crate::types::VariantLiteralTag::String(value)) => {
+        crate::types::VariantLiteralTag::String(value) => {
             LabelJs::StringLabel(crate::gentype::emit_text::escape_string_contents(value))
         }
-        Some(crate::types::VariantLiteralTag::Int(value)) => LabelJs::IntLabel(value.to_string()),
-        Some(crate::types::VariantLiteralTag::Float(value)) => LabelJs::FloatLabel(value.clone()),
-        Some(crate::types::VariantLiteralTag::BigInt(value)) => LabelJs::IntLabel(value.clone()),
-        Some(crate::types::VariantLiteralTag::Bool(value)) => LabelJs::BoolLabel(*value),
-        Some(crate::types::VariantLiteralTag::Null) => LabelJs::NullLabel,
-        Some(crate::types::VariantLiteralTag::Undefined) => LabelJs::UndefinedLabel,
-        None => LabelJs::StringLabel(label.to_string()),
+        crate::types::VariantLiteralTag::Int(value) => LabelJs::IntLabel(value.to_string()),
+        crate::types::VariantLiteralTag::Float(value) => LabelJs::FloatLabel(value.clone()),
+        crate::types::VariantLiteralTag::BigInt(value) => LabelJs::IntLabel(value.clone()),
+        crate::types::VariantLiteralTag::Bool(value) => LabelJs::BoolLabel(*value),
+        crate::types::VariantLiteralTag::Null => LabelJs::NullLabel,
+        crate::types::VariantLiteralTag::Undefined => LabelJs::UndefinedLabel,
     };
     VariantCase { label_js }
 }
 
 /// The JavaScript name of a record field: its `@as` name, or else its own.
-pub fn rename_record_field(arena: &ParseArena, attributes: &Attributes, name: &str) -> String {
+pub fn rename_record_field(
+    arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
+    attributes: &Attributes,
+    name: &str,
+) -> crate::gentype::annotation::Read<String> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:39-53.
-    crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, attributes);
-    match crate::gentype::annotation::get_as_string(arena, attributes) {
-        Some(s) => string_escaped_like_ocaml(&s),
-        None => unwrap_uppercase_exotic(name).to_string(),
-    }
+    crate::gentype::annotation::check_unsupported_gentype_as_renaming(arena, notes, attributes)?;
+    Ok(
+        match crate::gentype::annotation::get_as_string(arena, attributes)? {
+            Some(s) => crate::string_literal::ocaml_escaped(&s),
+            None => unwrap_uppercase_exotic(name).to_string(),
+        },
+    )
 }
 
 /// OCaml `Translate_type_declarations.declared_field_name`: a declared field
 /// carries its runtime name; only the renaming that reaches gentype through
 /// an expression's attributes still has to be read off one.
-pub fn declared_field_name(locs: &dyn crate::types::DeclLocs, ld: &LabelDeclaration) -> String {
-    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(locs, &ld.ld_attributes);
-    match &ld.ld_runtime_name {
-        Some(s) => string_escaped_like_ocaml(s),
+pub fn declared_field_name(
+    ctx: &crate::types::context::TypeContext,
+    arena: &ParseArena,
+    notes: &crate::gentype::log_::Notes,
+    ld: &LabelDeclaration,
+) -> crate::gentype::annotation::Read<String> {
+    crate::gentype::annotation::check_unsupported_decl_gentype_as_renaming(
+        ctx,
+        arena,
+        notes,
+        &ld.ld_attributes,
+    )?;
+    Ok(match &ld.ld_runtime_name {
+        Some(s) => crate::string_literal::ocaml_escaped(s),
         None => unwrap_uppercase_exotic(ld.ld_id.name()).to_string(),
-    }
-}
-
-fn string_escaped_like_ocaml(s: &str) -> String {
-    // OCaml TranslateTypeDeclarations.ml:51 uses String.escaped for @as
-    // payloads. Mirror that byte-oriented escaping instead of Rust's
-    // escape_default, which also escapes apostrophes.
-    let mut out = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\t' => out.push_str("\\t"),
-            b'\r' => out.push_str("\\r"),
-            8 => out.push_str("\\b"),
-            32..=126 => out.push(byte as char),
-            _ => out.push_str(&format!("\\{byte:03}")),
-        }
-    }
-    out
+    })
 }
 
 /// `TranslateTypeDeclarations.traslateDeclarationKind`: translate a type
@@ -218,18 +216,23 @@ pub fn traslate_declaration_kind(
     loc_idx: LocIdx,
     type_attributes: &Attributes,
     declaration: Declaration<'_>,
-) -> Vec<code_item::TypeDeclaration> {
+) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:54-321.
     let Input { arena, .. } = input;
-    let doc_string = crate::gentype::annotation::doc_string_from_attrs(arena, type_attributes);
-    let annotation =
-        crate::gentype::annotation::from_attributes(arena, config, loc_idx, type_attributes);
+    let doc_string = crate::gentype::annotation::doc_string_from_attrs(arena, type_attributes)?;
+    let annotation = crate::gentype::annotation::from_attributes(
+        arena,
+        config,
+        &crate::gentype::type_env::notes(type_env),
+        loc_idx,
+        type_attributes,
+    )?;
     let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
         true => Some(true),
         false => None,
     };
     let (import_string_opt, name_as) =
-        crate::gentype::annotation::get_attribute_import_renaming(arena, type_attributes);
+        crate::gentype::annotation::get_attribute_import_renaming(arena, type_attributes)?;
     let attribute_info = DeclarationAttributeInfo {
         doc_string,
         annotation,
@@ -253,23 +256,29 @@ pub fn traslate_declaration_kind_from_decl_attributes(
     input: Input<'_>,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
+    loc_file: &dyn Fn() -> String,
     type_attributes: &[DeclAttribute],
     declaration: Declaration<'_>,
-) -> Vec<code_item::TypeDeclaration> {
+) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // OCaml TranslateSignatureFromTypes.ml:3-29 passes
     // Types.type_declaration.type_attributes through to
     // TranslateTypeDeclarations.ml:54-321. Rust decl attributes have already
     // been converted out of parser payloads, so compute the same annotation
     // facts from decl::Attribute instead of using an empty parser attribute set.
-    let doc_string = crate::gentype::annotation::doc_string_from_decl_attrs(type_attributes);
-    let annotation =
-        crate::gentype::annotation::from_decl_attributes(config, &declaration.loc, type_attributes);
+    let doc_string = crate::gentype::annotation::doc_string_from_decl_attrs(type_attributes)?;
+    let annotation = crate::gentype::annotation::from_decl_attributes(
+        config,
+        &crate::gentype::type_env::notes(type_env),
+        loc_file,
+        &declaration.loc,
+        type_attributes,
+    )?;
     let opaque = match annotation == crate::gentype::annotation::T::GenTypeOpaque {
         true => Some(true),
         false => None,
     };
     let (import_string_opt, name_as) =
-        crate::gentype::annotation::get_decl_attribute_import_renaming(type_attributes);
+        crate::gentype::annotation::get_decl_attribute_import_renaming(type_attributes)?;
     let attribute_info = DeclarationAttributeInfo {
         doc_string,
         annotation,
@@ -292,14 +301,13 @@ fn traslate_declaration_kind_with_attribute_info(
     type_env: &crate::gentype::type_env::T,
     attribute_info: DeclarationAttributeInfo,
     declaration: Declaration<'_>,
-) -> Vec<code_item::TypeDeclaration> {
+) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     let Input {
         ta,
         ctx,
         arena,
         output_file_relative,
         resolver,
-        ..
     } = input;
     let DeclarationAttributeInfo {
         doc_string,
@@ -351,7 +359,7 @@ fn traslate_declaration_kind_with_attribute_info(
             }
         };
 
-    match (declaration_kind, import_string_opt) {
+    Ok(match (declaration_kind, import_string_opt) {
         (_, Some(import_string)) => {
             let type_name_original = header.type_name.to_string();
             let name_with_module_path = crate::gentype::resolved_name::to_string(
@@ -416,7 +424,7 @@ fn traslate_declaration_kind_with_attribute_info(
             let core_type = ta.core_type(core_type);
             let translation = crate::gentype::translate_core_type::translate_core_type(
                 ta, ctx, arena, config, type_env, core_type,
-            );
+            )?;
             let type_ = match (&core_type.ctyp_desc, translation.type_.clone()) {
                 (
                     crate::types::typedtree::TypedCoreTypeDesc::Ttyp_variant(row_fields, _, _),
@@ -428,17 +436,17 @@ fn traslate_declaration_kind_with_attribute_info(
                         .no_payloads
                         .iter()
                         .map(|(label, attributes)| create_case(arena, label, attributes, true))
-                        .collect();
+                        .collect::<crate::gentype::annotation::Read<_>>()?;
                     if variant.payloads.len() == row_fields_variants.payloads.len() {
                         variant.payloads = variant
                             .payloads
                             .into_iter()
                             .zip(row_fields_variants.payloads.iter())
                             .map(|(mut payload, (label, attributes, _))| {
-                                payload.case = create_case(arena, label, attributes, true);
-                                payload
+                                payload.case = create_case(arena, label, attributes, true)?;
+                                Ok(payload)
                             })
-                            .collect();
+                            .collect::<crate::gentype::annotation::Read<_>>()?;
                     }
                     Type::Variant(variant)
                 }
@@ -461,7 +469,7 @@ fn traslate_declaration_kind_with_attribute_info(
                 false,
                 unboxed,
                 &label_declarations,
-            );
+            )?;
             let import_types = crate::gentype::translation::translate_dependencies(
                 config,
                 output_file_relative,
@@ -501,7 +509,6 @@ fn traslate_declaration_kind_with_attribute_info(
                         }
                     };
                     let tag = tag.clone();
-                    let name = constructor_declaration.cd_id.name().to_string();
                     let args_translation = match &constructor_declaration.cd_args {
                         ConstructorArguments::CstrTuple(type_exprs) => {
                             crate::gentype::translate_type_expr_from_types::translate_type_exprs_from_types(
@@ -520,7 +527,7 @@ fn traslate_declaration_kind_with_attribute_info(
                                 true,
                                 type_representation == TypeRepresentation::Unboxed,
                                 label_declarations,
-                            ),
+                            )?,
                         ],
                     };
                     let arg_types = args_translation
@@ -536,25 +543,25 @@ fn traslate_declaration_kind_with_attribute_info(
                             .flat_map(|translation| translation.dependencies.clone())
                             .collect::<Vec<_>>(),
                     );
-                    (name, tag, arg_types, import_types)
+                    Ok((tag, arg_types, import_types))
                 })
-                .collect::<Vec<_>>();
+                .collect::<crate::gentype::annotation::Read<Vec<_>>>()?;
 
             let no_payloads = variants
                 .iter()
-                .filter(|(_, _, arg_types, _)| arg_types.is_empty())
-                .map(|(name, tag, _, _)| create_variant_case(name, tag))
+                .filter(|(_, arg_types, _)| arg_types.is_empty())
+                .map(|(tag, _, _)| create_variant_case(tag))
                 .collect::<Vec<_>>();
             let payloads = variants
                 .iter()
-                .filter(|(_, _, arg_types, _)| !arg_types.is_empty())
-                .map(|(name, tag, arg_types, _)| {
+                .filter(|(_, arg_types, _)| !arg_types.is_empty())
+                .map(|(tag, arg_types, _)| {
                     let type_ = match arg_types.as_slice() {
                         [type_] => type_.clone(),
                         _ => Type::Tuple(arg_types.clone()),
                     };
                     Payload {
-                        case: create_variant_case(name, tag),
+                        case: create_variant_case(tag),
                         t: type_,
                     }
                 })
@@ -586,7 +593,7 @@ fn traslate_declaration_kind_with_attribute_info(
             };
             let import_types = variants
                 .into_iter()
-                .flat_map(|(_, _, _, import_types)| import_types)
+                .flat_map(|(_, _, import_types)| import_types)
                 .collect();
             return_type_declaration(code_item::TypeDeclaration {
                 export_from_type_declaration,
@@ -594,7 +601,7 @@ fn traslate_declaration_kind_with_attribute_info(
             })
         }
         (DeclarationKind::NoDeclaration, None) => vec![],
-    }
+    })
 }
 
 /// Whether a constructor has its own result type, making the type a GADT.
@@ -611,7 +618,7 @@ pub fn translate_type_declaration(
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
     type_declaration: &TypedTypeDeclaration,
-) -> Vec<code_item::TypeDeclaration> {
+) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:328-351.
     let Input { ta, ctx, arena, .. } = input;
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
@@ -679,45 +686,45 @@ pub fn translate_type_declarations(
     recursive: bool,
     type_env: &crate::gentype::type_env::T,
     type_declarations: &[TypedTypeDeclaration],
-) -> Vec<code_item::TypeDeclaration> {
+) -> crate::gentype::annotation::Read<Vec<code_item::TypeDeclaration>> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:357-373.
     if recursive {
         for type_declaration in type_declarations {
             add_type_declaration_id_to_type_env(type_env, type_declaration);
         }
     }
-    type_declarations
-        .iter()
-        .flat_map(|type_declaration| {
-            let res = translate_type_declaration(input, config, type_env, type_declaration);
-            if !recursive {
-                add_type_declaration_id_to_type_env(type_env, type_declaration);
-            }
-            res
-        })
-        .collect()
+    let mut translations = Vec::new();
+    for type_declaration in type_declarations {
+        let res = translate_type_declaration(input, config, type_env, type_declaration)?;
+        if !recursive {
+            add_type_declaration_id_to_type_env(type_env, type_declaration);
+        }
+        translations.extend(res);
+    }
+    Ok(translations)
 }
 
 fn translate_label_declarations(
     ctx: &crate::types::context::TypeContext,
-    _arena: &ParseArena,
+    arena: &ParseArena,
     config: &crate::gentype::config::T,
     type_env: &crate::gentype::type_env::T,
     inline: bool,
     unboxed_annotation: bool,
     label_declarations: &[LabelDeclaration],
-) -> crate::gentype::translate_type_expr_from_types::Translation {
+) -> crate::gentype::annotation::Read<crate::gentype::translate_type_expr_from_types::Translation> {
     // Mirrors compiler/gentype/TranslateTypeDeclarations.ml:91-143.
+    let notes = crate::gentype::type_env::notes(type_env);
     let field_translations = label_declarations
         .iter()
         .map(|label_declaration| {
             let attributes = &label_declaration.ld_attributes;
-            let name = declared_field_name(ctx, label_declaration);
+            let name = declared_field_name(ctx, arena, &notes, label_declaration)?;
             let mutable_ = match label_declaration.ld_mutable {
                 MutableFlag::Mutable => Mutable::Mutable,
                 MutableFlag::Immutable => Mutable::Immutable,
             };
-            (
+            Ok((
                 name,
                 mutable_,
                 label_declaration.ld_optional,
@@ -727,10 +734,10 @@ fn translate_label_declarations(
                     type_env,
                     &label_declaration.ld_type,
                 ),
-                crate::gentype::annotation::doc_string_from_decl_attrs(attributes),
-            )
+                crate::gentype::annotation::doc_string_from_decl_attrs(attributes)?,
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<crate::gentype::annotation::Read<Vec<_>>>()?;
 
     let dependencies = field_translations
         .iter()
@@ -762,10 +769,12 @@ fn translate_label_declarations(
             fields,
         ),
     };
-    crate::gentype::translate_type_expr_from_types::Translation {
-        dependencies,
-        type_,
-    }
+    Ok(
+        crate::gentype::translate_type_expr_from_types::Translation {
+            dependencies,
+            type_,
+        },
+    )
 }
 
 fn longident_is_lident(arena: &ParseArena, longident: &Longident, expected: &str) -> bool {

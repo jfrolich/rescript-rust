@@ -259,26 +259,20 @@ pub enum NamespaceConfig {
 
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 #[serde(rename_all = "camelCase")]
-pub enum JsxMode {
-    Classic,
-    Automatic,
-}
-
-#[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
-#[serde(rename_all = "camelCase")]
 #[serde(untagged)]
 pub enum JsxModule {
     React,
     Other(String),
 }
 
+/// Config fields that no longer have any effect. They are dropped silently instead of being
+/// reported as unknown, so that existing configs keep building without warnings.
+const OBSOLETE_FIELDS: &[&str] = &["jsx.mode", "jsx.v3-dependencies"];
+
 #[derive(Deserialize, Debug, Clone, Eq, PartialEq)]
 pub struct JsxSpecs {
     pub version: Option<i32>,
     pub module: Option<JsxModule>,
-    pub mode: Option<JsxMode>,
-    #[serde(rename = "v3-dependencies")]
-    pub v3_dependencies: Option<Vec<String>>,
     pub preserve: Option<bool>,
 }
 
@@ -716,6 +710,16 @@ fn namespace_from_package_name(package_name: &str) -> String {
     buf
 }
 
+/// A module name as the ReScript scanner reads an upper-case identifier
+/// (compiler/syntax/src/res_scanner.ml): an ASCII capital, then letters,
+/// digits, '_', '\'' and '$'.
+fn is_module_name(name: &str) -> bool {
+    name.starts_with(|c: char| c.is_ascii_uppercase())
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '\'' | '$'))
+}
+
 impl Config {
     /// Try to convert a config from a certain path to a config struct
     pub fn new(path: &Path) -> Result<Self> {
@@ -723,7 +727,34 @@ impl Config {
             fs::read_to_string(path).map_err(|e| anyhow!("Could not read '{}': {}", path.display(), e))?;
         let mut config = Config::new_from_json_string(&read)?;
         config.set_path(path.to_path_buf())?;
+        config.validate_namespace()?;
         Ok(config)
+    }
+
+    /// The namespace becomes a module, so a name the scanner cannot read as one
+    /// is rejected here instead of producing unusable compiler arguments.
+    fn validate_namespace(&self) -> Result<()> {
+        let namespace = match self.get_namespace() {
+            packages::Namespace::NoNamespace => return Ok(()),
+            packages::Namespace::Namespace(namespace)
+            | packages::Namespace::NamespaceWithEntry { namespace, .. } => namespace,
+        };
+        if is_module_name(&namespace) {
+            return Ok(());
+        }
+        let (source, fix) = match &self.namespace {
+            Some(NamespaceConfig::String(value)) if value != "true" => {
+                (format!("\"namespace\" value \"{value}\""), "")
+            }
+            _ => (
+                format!("package name \"{}\"", self.name),
+                " or rename the package",
+            ),
+        };
+        Err(anyhow!(
+            "{}: namespace \"{namespace}\" derived from {source} is not a valid module name; set \"namespace\" to a valid module name{fix}",
+            self.path.display()
+        ))
     }
 
     /// Try to convert a config from a string to a config struct
@@ -737,16 +768,26 @@ impl Config {
         let mut tracker = serde_path_to_error::Track::new();
         let path_deserializer = serde_path_to_error::Deserializer::new(&mut deserializer, &mut tracker);
         let mut unknown_fields = Vec::new();
-        let mut config: Config =
-            serde_ignored::deserialize(path_deserializer, |path| unknown_fields.push(path.to_string()))
-                .map_err(|err: serde_json::Error| {
-                    let path = tracker.path().to_string();
-                    if path.is_empty() {
-                        anyhow!("Failed to parse rescript.json: {err}")
-                    } else {
-                        anyhow!("Failed to parse rescript.json at {path}: {err}")
-                    }
-                })?;
+        let mut config: Config = serde_ignored::deserialize(path_deserializer, |path| {
+            let path = path.to_string();
+            // Paths contain a `?` segment for each `Option`, e.g. `jsx.?.mode`.
+            let field = path
+                .split('.')
+                .filter(|segment| *segment != "?")
+                .collect::<Vec<_>>()
+                .join(".");
+            if !OBSOLETE_FIELDS.contains(&field.as_str()) {
+                unknown_fields.push(path)
+            }
+        })
+        .map_err(|err: serde_json::Error| {
+            let path = tracker.path().to_string();
+            if path.is_empty() {
+                anyhow!("Failed to parse rescript.json: {err}")
+            } else {
+                anyhow!("Failed to parse rescript.json at {path}: {err}")
+            }
+        })?;
 
         if let Some(value) = raw_value.as_ref().and_then(|v| v.as_object()) {
             for (raw_key, warning) in [
@@ -773,6 +814,14 @@ impl Config {
 
         config.handle_deprecations()?;
         config.unknown_fields = unknown_fields;
+
+        if let Some(version) = config.jsx.as_ref().and_then(|jsx| jsx.version)
+            && version != 4
+        {
+            return Err(anyhow!(
+                "JSX version {version} is unsupported; jsx.version must be 4"
+            ));
+        }
 
         Ok(config)
     }
@@ -824,29 +873,12 @@ impl Config {
     pub fn get_jsx_args(&self) -> Vec<String> {
         match &self.jsx {
             Some(jsx) => match &jsx.version {
-                Some(version) if *version == 4 => {
+                Some(version) => {
                     vec!["-bs-jsx".to_string(), version.to_string()]
                 }
-                Some(version) => panic!("JSX version {version} is unsupported"),
                 None => vec![],
             },
             None => vec![],
-        }
-    }
-
-    pub fn get_jsx_mode_args(&self) -> Vec<String> {
-        match &self.jsx {
-            Some(jsx) => match &jsx.mode {
-                Some(JsxMode::Classic) => {
-                    vec!["-bs-jsx-mode".to_string(), "classic".to_string()]
-                }
-                Some(JsxMode::Automatic) => {
-                    vec!["-bs-jsx-mode".to_string(), "automatic".to_string()]
-                }
-
-                None => vec![],
-            },
-            _ => vec![],
         }
     }
 
@@ -1027,20 +1059,6 @@ impl Config {
             args.push(root.to_string_lossy().to_string());
         }
         args
-    }
-
-    /// Directory containing the `rescript.json` this config was parsed from.
-    fn get_package_root(&self) -> &Path {
-        self.path
-            .parent()
-            .expect("rescript.json path should always have a parent directory")
-    }
-
-    pub fn get_project_root_args(&self) -> Vec<String> {
-        vec![
-            "-bs-project-root".to_string(),
-            self.get_package_root().to_string_lossy().to_string(),
-        ]
     }
 
     pub fn get_warning_args(&self, is_local_dep: bool, warn_error_override: Option<String>) -> Vec<String> {
@@ -1670,6 +1688,12 @@ pub mod tests {
     }
 
     #[test]
+    fn test_unsupported_jsx_version_is_a_config_error() {
+        let error = Config::new_from_json_string(r#"{"name":"test","jsx":{"version":3}}"#).unwrap_err();
+        assert!(error.to_string().contains("JSX version 3 is unsupported"));
+    }
+
+    #[test]
     fn test_other_jsx_module() {
         let json = r#"
         {
@@ -1691,8 +1715,6 @@ pub mod tests {
             JsxSpecs {
                 version: None,
                 module: Some(JsxModule::Other(String::from("Voby.JSX"))),
-                mode: None,
-                v3_dependencies: None,
                 preserve: None,
             },
         );
@@ -1718,8 +1740,6 @@ pub mod tests {
             JsxSpecs {
                 version: Some(4),
                 module: None,
-                mode: None,
-                v3_dependencies: None,
                 preserve: Some(true),
             },
         );
@@ -2122,6 +2142,28 @@ pub mod tests {
     }
 
     #[test]
+    fn test_obsolete_fields_are_ignored() {
+        let json = r#"
+        {
+            "name": "testrepo",
+            "sources": {
+                "dir": "src",
+                "subdirs": true
+            },
+            "jsx": {
+                "version": 4,
+                "mode": "automatic",
+                "v3-dependencies": ["some-dep"]
+            }
+        }
+        "#;
+
+        let config = Config::new_from_json_string(json).expect("a valid json string");
+        assert!(config.get_unknown_fields().is_empty());
+        assert!(config.get_unsupported_fields().is_empty());
+    }
+
+    #[test]
     fn test_unsupported_fields_are_collected() {
         let json = r#"
         {
@@ -2450,6 +2492,22 @@ pub mod tests {
     }
 
     #[test]
+    fn test_invalid_namespace_module_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("rescript.json");
+        std::fs::write(&path, r#"{ "name": "_", "namespace": true }"#).expect("write");
+
+        let error = Config::new(&path).unwrap_err().to_string();
+        assert_eq!(
+            error,
+            format!(
+                "{}: namespace \"_\" derived from package name \"_\" is not a valid module name; set \"namespace\" to a valid module name or rename the package",
+                path.display()
+            )
+        );
+    }
+
+    #[test]
     fn test_bsconfig_json_filename_deprecation() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("bsconfig.json");
@@ -2678,5 +2736,82 @@ pub mod tests {
         });
         assert_eq!(qualified.name(), "@a/b");
         assert_eq!(qualified.features().cloned(), Some(vec!["x".to_string()]));
+    }
+
+    /// The keys a struct deriving `Deserialize` accepts, as serde's derive lists them: renamed,
+    /// without aliases and skipped fields.
+    fn struct_keys<'de, T: Deserialize<'de>>() -> &'static [&'static str] {
+        struct Keys(Option<&'static [&'static str]>);
+
+        impl<'de> serde::Deserializer<'de> for &mut Keys {
+            type Error = serde::de::value::Error;
+
+            fn deserialize_any<V: serde::de::Visitor<'de>>(self, _: V) -> Result<V::Value, Self::Error> {
+                Err(serde::de::Error::custom("not a struct"))
+            }
+
+            fn deserialize_struct<V: serde::de::Visitor<'de>>(
+                self,
+                _: &'static str,
+                fields: &'static [&'static str],
+                _: V,
+            ) -> Result<V::Value, Self::Error> {
+                self.0 = Some(fields);
+                Err(serde::de::Error::custom("keys recorded"))
+            }
+
+            serde::forward_to_deserialize_any! {
+                bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string bytes byte_buf
+                option unit unit_struct newtype_struct seq tuple tuple_struct map enum identifier
+                ignored_any
+            }
+        }
+
+        let mut keys = Keys(None);
+        let _ = T::deserialize(&mut keys);
+        keys.0.expect("a struct")
+    }
+
+    fn build_schema() -> serde_json::Value {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("../docs/docson/build-schema.json");
+        serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+    }
+
+    fn assert_schema_has_keys(properties: &serde_json::Value, keys: &[&str], what: &str) {
+        for key in keys {
+            assert!(
+                properties.get(key).is_some(),
+                "{what} key `{key}` is missing from docs/docson/build-schema.json"
+            );
+        }
+    }
+
+    #[test]
+    fn test_build_schema_lists_config_keys() {
+        let schema = build_schema();
+        // `path` is where the config was read from, set after parsing. The deprecated aliases,
+        // which parsing warns about, are left out of the schema.
+        let not_in_schema = ["path", "bs-dependencies", "bs-dev-dependencies", "bsc-flags"];
+        let config_keys: Vec<&str> = struct_keys::<Config>()
+            .iter()
+            .copied()
+            .filter(|key| !not_in_schema.contains(key))
+            .collect();
+        assert_schema_has_keys(&schema["properties"], &config_keys, "rescript.json");
+        assert_schema_has_keys(
+            &schema["definitions"]["sourceItem"]["oneOf"][0]["properties"],
+            struct_keys::<PackageSource>(),
+            "Source",
+        );
+        assert_schema_has_keys(
+            &schema["definitions"]["bs-dependency"]["oneOf"][1]["properties"],
+            struct_keys::<QualifiedDependency>(),
+            "Dependency",
+        );
+
+        let properties = &schema["properties"];
+        assert_eq!(properties["namespace-entry"]["type"], "string");
+        assert_eq!(properties["allowed-dependents"]["type"], "array");
+        assert_eq!(properties["allowed-dependents"]["items"]["type"], "string");
     }
 }

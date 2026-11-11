@@ -93,6 +93,8 @@ pub struct RecordTag {
     pub logical_field_count: Option<usize>,
     /// Whether the block may be mutated.
     pub mutable_flag: MutableFlag,
+    /// `RecordArray`: the fields are the elements of a JavaScript array.
+    pub array: bool,
 }
 
 impl TagInfo {
@@ -128,6 +130,7 @@ impl TagInfo {
             fields: vec![("contents".to_string(), false)],
             logical_field_count: None,
             mutable_flag: MutableFlag::Mutable,
+            array: false,
         }))
     }
 
@@ -136,9 +139,11 @@ impl TagInfo {
         let name = name.into();
         TagInfo::Constructor(Box::new(ConstructorTag {
             runtime: Box::new(crate::types::TaggedBlock {
+                // ast_untagged_variants.ml `generated_tag`: a constructor
+                // the compiler generates is represented by its name.
                 tag: crate::types::VariantTag {
                     name: crate::name::Name::new(&name),
-                    literal: None,
+                    literal: crate::types::VariantLiteralTag::String(name.clone()),
                 },
                 tag_name: None,
             }),
@@ -163,6 +168,7 @@ impl TagInfo {
             fields,
             logical_field_count: None,
             mutable_flag,
+            array: false,
         }))
     }
 

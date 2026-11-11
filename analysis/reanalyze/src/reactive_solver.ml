@@ -13,7 +13,6 @@
     - incorrect_dead_decls = live decls with @dead annotation (reactive join)
     - dead_module_issues = dead_modules joined with modules_with_reported (reactive join)
     - is_pos_live uses reactive live collection
-    - should_report callback replaces report field mutation (no mutation needed)
     - is_inside_reported_value is per-file only, so files are independent
     - has_ref_below uses on-demand search: O(total_refs) per dead decl (cross-file refs count as "below")
     
@@ -27,7 +26,6 @@ type t = {
   live: (Lexing.position, unit) Reactive.t;
   dead_decls: (Lexing.position, Decl.t) Reactive.t;
   live_decls: (Lexing.position, Decl.t) Reactive.t;
-  annotations: (Lexing.position, File_annotations.annotated_as) Reactive.t;
   value_refs_from: (Lexing.position, Pos_set.t) Reactive.t option;
   dead_modules: (Name.t, Location.t * string) Reactive.t;
       (** Modules where all declarations are dead. Value is (loc, file_name). Reactive anti-join. *)
@@ -41,7 +39,6 @@ type t = {
       (** Live declarations with @dead annotation. Reactive join of live_decls + annotations. *)
   dead_module_issues: (Name.t, Issue.t) Reactive.t;
       (** Dead module issues. Reactive join of dead_modules + modules_with_reported. *)
-  config: Dce_config.t;
 }
 
 (** Extract module name from a declaration *)
@@ -241,14 +238,12 @@ let create ~(decls : (Lexing.position, Decl.t) Reactive.t)
     live;
     dead_decls;
     live_decls;
-    annotations;
     value_refs_from;
     dead_modules;
     dead_decls_by_file;
     issues_by_file;
     incorrect_dead_decls;
     dead_module_issues;
-    config;
   }
 
 (** Check if a module is dead using reactive collection. Returns issue if dead.
@@ -277,10 +272,7 @@ let check_module_dead ~(dead_modules : (Name.t, Location.t * string) Reactive.t)
 (** Collect issues from reactive issues_by_file.
     Only iterates the pre-computed reactive issues collection.
     Deduplicates module issues across files. *)
-let collect_issues ~(t : t) ~(config : Dce_config.t)
-    ~(ann_store : Annotation_store.t) : Issue.t list =
-  ignore (config, ann_store);
-  (* config is stored in t, ann_store used via reactive annotations *)
+let collect_issues ~(t : t) : Issue.t list =
   let t0 = Unix.gettimeofday () in
   (* Track reported modules to avoid duplicates across files *)
   let reported_modules = Hashtbl.create 64 in

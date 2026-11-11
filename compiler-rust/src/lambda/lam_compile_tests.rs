@@ -31,8 +31,7 @@ pub(super) use crate::lambda::lam_primitive::{
     LabelNoname, ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
 pub(super) use crate::lambda::{
-    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, InlineAttribute,
-    Lambda,
+    ApInfo, Apply, ApplyStatus, Comparison, FieldDbgInfo, FunctionAttribute, Lambda,
 };
 use std::fs;
 pub(super) use std::path::PathBuf;
@@ -147,7 +146,7 @@ pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
 fn test_apply_info() -> ApInfo {
     ApInfo {
         loc: LamLoc::NONE,
-        inlined: InlineAttribute::Default,
+
         status: ApplyStatus::Na,
     }
 }
@@ -163,125 +162,11 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
                 ap_func: Box::new(Lambda::var(*target)),
                 ap_args: vec![],
                 ap_info: test_apply_info(),
-                ap_transformed_jsx: false,
             })),
             FunctionAttribute::default(),
             LamLoc::NONE,
         ),
     )
-}
-
-fn test_apply(target: &Ident) -> Lambda {
-    Lambda::Lapply(Box::new(Apply {
-        ap_func: Box::new(Lambda::var(*target)),
-        ap_args: vec![],
-        ap_info: test_apply_info(),
-        ap_transformed_jsx: false,
-    }))
-}
-
-fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Ident, Lambda) {
-    let param = Ident::create_local("param");
-    (
-        ident,
-        Lambda::function_(
-            1,
-            vec![param],
-            Lambda::seq(test_apply(first), test_apply(second)),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        ),
-    )
-}
-
-fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
-    let param = Ident::create_local("param");
-    (
-        ident,
-        Lambda::function_(
-            1,
-            vec![param],
-            Lambda::const_(Constant::JsUndefined { is_unit: true }),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        ),
-    )
-}
-
-fn recursive_group_names(bindings: &[(Ident, Lambda)]) -> Vec<Vec<String>> {
-    recursive_binding_groups_tree(bindings)
-        .into_iter()
-        .map(|group| {
-            group
-                .into_iter()
-                .map(|index| bindings[index].0.name().to_string())
-                .collect()
-        })
-        .collect()
-}
-
-#[test]
-fn recursive_binding_groups_keep_earlier_caller_before_later_self_recursive_helper() {
-    let copy_buckets = Ident::create_local("copyBuckets");
-    let copy_bucket = Ident::create_local("copyBucket");
-    let copy_aux = Ident::create_local("copyAuxCont");
-    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
-    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
-    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux, &copy_aux);
-
-    let bindings = vec![
-        (copy_buckets, copy_buckets_lam),
-        (copy_bucket, copy_bucket_lam),
-        (copy_aux, copy_aux_lam),
-    ];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![
-            vec!["copyBucket".to_string(), "copyAuxCont".to_string()],
-            vec!["copyBuckets".to_string()],
-        ]
-    );
-}
-
-#[test]
-fn recursive_binding_groups_keep_earlier_self_recursive_helper_before_later_caller() {
-    let copy_buckets = Ident::create_local("copyBuckets");
-    let copy_bucket = Ident::create_local("copyBucket");
-    let copy_aux = Ident::create_local("copyAuxCont");
-    let (copy_aux, copy_aux_lam) = test_function_calling(copy_aux, &copy_aux);
-    let (copy_buckets, copy_buckets_lam) = test_function_calling(copy_buckets, &copy_bucket);
-    let (copy_bucket, copy_bucket_lam) = test_function_calling(copy_bucket, &copy_aux);
-
-    let bindings = vec![
-        (copy_aux, copy_aux_lam),
-        (copy_buckets, copy_buckets_lam),
-        (copy_bucket, copy_bucket_lam),
-    ];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![
-            vec!["copyAuxCont".to_string(), "copyBucket".to_string()],
-            vec!["copyBuckets".to_string()],
-        ]
-    );
-}
-
-#[test]
-fn recursive_binding_groups_share_dependency_vector_like_ocaml() {
-    let timer_expired = Ident::create_local("timerExpired");
-    let call = Ident::create_local("call");
-    let (timer_expired, timer_expired_lam) =
-        test_function_calling_two(timer_expired, &call, &timer_expired);
-    let (call, call_lam) = test_unit_function(call);
-
-    let bindings = vec![(timer_expired, timer_expired_lam), (call, call_lam)];
-
-    assert_eq!(
-        recursive_group_names(&bindings),
-        vec![vec!["timerExpired".to_string(), "call".to_string()]]
-    );
 }
 
 pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
@@ -786,25 +671,6 @@ fn compile_arraysetu_sequences_assignment_to_unit() {
 }
 
 #[test]
-fn compile_arraysets_uses_primitive_array_set() {
-    let mut compiler = LambdaCompiler::new();
-    let array = Ident::create_local("arr");
-    let index = Ident::create_local("i");
-    let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr_lam(&Lambda::prim(
-        Primitive::Parraysets,
-        vec![Lambda::var(array), Lambda::var(index), Lambda::var(value)],
-        LamLoc::NONE,
-    ));
-
-    assert!(compiled.prelude.is_empty());
-    assert_eq!(
-        print_expr(&compiler.j, compiled.expr),
-        "Primitive_array.set(arr, i, value)"
-    );
-}
-
-#[test]
 fn compile_string_refs_use_primitive_string_get_char() {
     let mut compiler = LambdaCompiler::new();
     let string = Ident::create_local("str");
@@ -972,10 +838,9 @@ fn compile_expr_keeps_forwarded_module_call_params_like_ocaml() {
             ap_args: vec![Lambda::var(none), Lambda::var(icmp)],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Uncurry,
             },
-            ap_transformed_jsx: false,
         })),
         Default::default(),
         LamLoc::NONE,
@@ -1025,10 +890,9 @@ fn compile_expr_keeps_forwarded_nested_wrapper_params_like_ocaml() {
                 ap_args: vec![Lambda::var(a), Lambda::var(b), Lambda::var(extra)],
                 ap_info: ApInfo {
                     loc: LamLoc::NONE,
-                    inlined: InlineAttribute::Default,
+
                     status: ApplyStatus::Uncurry,
                 },
-                ap_transformed_jsx: false,
             })),
             Default::default(),
             LamLoc::NONE,
@@ -1100,18 +964,14 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             ap_args: vec![starj_empty.clone()],
             ap_info: ApInfo {
                 loc,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Uncurry,
             },
-            ap_transformed_jsx: false,
         }))),
         ap_args: vec![starj_empty],
         ap_info: ApInfo {
             loc,
-            inlined: InlineAttribute::Default,
             status: ApplyStatus::Uncurry,
         },
-        ap_transformed_jsx: false,
     }));
     let program = compiler.compile_program(&Lambda::let_(
         LetKind::Strict,
@@ -1528,10 +1388,9 @@ fn compile_deps_program_keeps_exported_call_result_before_rebound_constant_block
                     ap_args: vec![Lambda::var(v)],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Uncurry,
                     },
-                    ap_transformed_jsx: false,
                 })),
                 export_block,
             ),
@@ -1867,10 +1726,9 @@ fn compile_return_block_lowers_trywith_in_return_position() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
         exn,
         Box::new(Lambda::const_(Constant::int(0))),
@@ -1917,10 +1775,9 @@ fn direct_recursive_trywith_self_calls_do_not_lower_to_loops_like_ocaml() {
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
                             loc: LamLoc::NONE,
-                            inlined: InlineAttribute::Default,
+
                             status: ApplyStatus::Na,
                         },
-                        ap_transformed_jsx: false,
                     }))),
                     exn,
                     Box::new(Lambda::const_(Constant::int(0))),
@@ -1963,10 +1820,9 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
         ap_args: vec![Lambda::var(acc)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -1980,10 +1836,9 @@ fn recursive_trywith_handler_self_calls_lower_to_loops_like_ocaml() {
                         ap_args: vec![Lambda::var(acc)],
                         ap_info: ApInfo {
                             loc: LamLoc::NONE,
-                            inlined: InlineAttribute::Default,
+
                             status: ApplyStatus::Na,
                         },
-                        ap_transformed_jsx: false,
                     }))),
                     exn,
                     Box::new(tailcall),
@@ -2057,10 +1912,9 @@ fn lowers_expression_sequences_to_js_comma_expressions() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
         Box::new(Lambda::const_(Constant::none())),
     );
@@ -2086,10 +1940,9 @@ fn nested_effect_sequences_drop_intermediate_pignore_suffixes_when_appended_to_v
         ap_args: vec![],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let sequence = Lambda::Lsequence(
         Box::new(Lambda::Lsequence(
@@ -2326,12 +2179,12 @@ fn compile_deps_program_keeps_gpr_1438_fallthrough_return_outside_switch() {
     let exports = if let Some(mut exports) =
         extract_toplevel_exports(&mut compiler.j, compiled.expr, &mut block)
     {
-        if block_terminates(&compiler.j, &block) {
+        if compiled.finished == OutputFinished::True {
             for value in &mut exports.values {
                 *value = JE::undefined(false, &mut compiler.j);
             }
         }
-        compiler.coerce_toplevel_exports_lam(&mut block, exports)
+        compiler.coerce_toplevel_exports_lam(&mut block, exports, compiled.finished)
     } else {
         vec![]
     };
@@ -2442,10 +2295,9 @@ fn unit_return_function_with_trivial_if_branches_keeps_condition_effect_only() {
             vec![],
             ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            false,
         )),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
         Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
@@ -2722,7 +2574,7 @@ fn let_bindings_lower_effectful_short_circuits_without_a_result_alias_temp() {
 
     expect_dump!(
         dump::block(&compiler.j, &compiled.prelude),
-        "let[Strict] result = false; If(cond) {let[Strict] branch = 1; Exp(Eq(result, branch))} else {}"
+        "let[Variable] result = false; If(cond) {let[Strict] branch = 1; Exp(Eq(result, branch))} else {}"
     );
     assert!(
         !print_stmts(&compiler.j, &compiled.prelude).contains("tmp"),
@@ -2839,10 +2691,9 @@ fn effect_blocks_keep_allocating_branches_inside_conditional_expressions_like_oc
                 vec![],
                 ApInfo {
                     loc: LamLoc::NONE,
-                    inlined: InlineAttribute::Default,
+
                     status: ApplyStatus::Na,
                 },
-                false,
             )),
             Box::new(allocating_block.clone()),
         )),
@@ -3008,7 +2859,7 @@ pub(super) fn single_complete_array_block_switch(
             crate::lambda::SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                 crate::types::VariantTag {
                     name: crate::name::Name::new("Empty"),
-                    literal: Some(crate::types::VariantLiteralTag::Undefined),
+                    literal: crate::types::VariantLiteralTag::Undefined,
                 },
             )),
             undefined_body,
@@ -3019,10 +2870,10 @@ pub(super) fn single_complete_array_block_switch(
                 crate::types::VariantBlock::Untagged {
                     tag: crate::types::VariantTag {
                         name: crate::name::Name::new("Cons"),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("Cons".to_string()),
                     },
                     block_type: crate::types::VariantBlockType::Instance(
-                        crate::types::VariantInstance::Array,
+                        crate::types::VariantInstance::Array(crate::types::ShapeAllocation::fresh()),
                     ),
                 },
             )),
@@ -3032,12 +2883,9 @@ pub(super) fn single_complete_array_block_switch(
         sw_dispatch: crate::lambda::SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
             tag_name: None,
             block_types: vec![crate::types::VariantBlockType::Instance(
-                crate::types::VariantInstance::Array,
+                crate::types::VariantInstance::Array(crate::types::ShapeAllocation::fresh()),
             )],
             literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
-            has_null: false,
-            has_undefined: true,
-            has_other_literal: false,
         }),
     }
 }
@@ -3055,7 +2903,7 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantBlock::Untagged {
                     tag: crate::types::VariantTag {
                         name: crate::name::Name::new("B"),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("B".to_string()),
                     },
                     block_type: crate::types::VariantBlockType::Boolean,
                 },
@@ -3066,7 +2914,7 @@ pub(super) fn default_only_untagged_boolean_switch(
         sw_dispatch: crate::lambda::SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
             tag_name: None,
             block_types: vec![
-                crate::types::VariantBlockType::Int,
+                crate::types::VariantBlockType::Number,
                 crate::types::VariantBlockType::String,
                 crate::types::VariantBlockType::Boolean,
             ],
@@ -3074,9 +2922,6 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantLiteralTag::Undefined,
                 crate::types::VariantLiteralTag::Null,
             ],
-            has_null: true,
-            has_undefined: true,
-            has_other_literal: false,
         }),
     }
 }
@@ -3103,10 +2948,9 @@ fn flattens_value_sequences_back_to_effect_statements_at_toplevel() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
         Box::new(Lambda::const_(Constant::none())),
     );
@@ -3134,10 +2978,9 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(then_fn)),
             )),
@@ -3147,10 +2990,9 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(else_fn)),
             )),
@@ -3158,10 +3000,9 @@ fn effect_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
 
     let program = compiler.compile_program(&lam);
@@ -3185,10 +3026,9 @@ fn value_context_direct_calls_stay_as_call_expressions() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     })));
 
     assert!(
@@ -3251,18 +3091,14 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                     ],
                     ap_info: ApInfo {
                         loc,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 ap_args: vec![Lambda::const_(Constant::int(6))],
                 ap_info: ApInfo {
                     loc,
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Na,
                 },
-                ap_transformed_jsx: false,
             })),
             Lambda::var(result),
         ),
@@ -3350,18 +3186,14 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                         ],
                         ap_info: ApInfo {
                             loc,
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
-                        ap_transformed_jsx: false,
                     }))),
                     ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra)],
                     ap_info: ApInfo {
                         loc,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 })),
                 crate::lambda::FunctionAttribute::default(),
                 LamLoc::NONE,
@@ -3397,10 +3229,9 @@ fn let_bound_direct_calls_skip_intermediate_call_aliases() {
             ap_args: vec![Lambda::const_(Constant::int(1))],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
         Box::new(Lambda::var(x)),
     ));
@@ -3428,10 +3259,9 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(then_fn)),
             )),
@@ -3441,10 +3271,9 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(else_fn)),
             )),
@@ -3452,10 +3281,9 @@ fn return_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
 
     let block = compiler.compile_return_block_lam(&lam);
@@ -3491,10 +3319,9 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(then_fn)),
             )),
@@ -3504,10 +3331,9 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
+
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))),
                 Box::new(Lambda::var(else_fn)),
             )),
@@ -3515,10 +3341,9 @@ fn assignment_context_calls_with_arg_preludes_skip_intermediate_call_temps() {
         ap_args: vec![Lambda::const_(Constant::int(1))],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
 
     let block = compiler.compile_assign_to_target_block_lam(&result, &lam);
@@ -3548,10 +3373,9 @@ fn function_bodies_drop_pure_undefined_sequence_suffixes() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))
     };
     let body = Lambda::Lsequence(
@@ -3594,10 +3418,9 @@ fn top_level_if_effects_drop_trailing_pure_undefined_branch_suffixes() {
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))
     };
     let lam = Lambda::LifThenElse(
@@ -3995,11 +3818,11 @@ fn js_tailcall_inline_preserves_shadowed_block_bindings() {
     });
     let rendered = print_stmts(&deps.program.arena, &deps.program.block);
     assert!(
-        rendered.contains("let value$1 = 1;"),
+        rendered.contains("let value = 1;"),
         "expected the shadowing binding to stay intact after inlining, got:\n{rendered}"
     );
     assert!(
-        rendered.contains("return value$1;"),
+        rendered.contains("return value;"),
         "expected the shadowing binding to stay visible after inlining, got:\n{rendered}"
     );
     assert!(
@@ -4273,13 +4096,10 @@ fn js_flatten_and_mark_dead_keeps_direct_object_property_reads_materialized_like
                         value: Some(JE::new(
                             ExprKind::StaticIndex(
                                 JE::new(
-                                    ExprKind::Object(
-                                        None,
-                                        test_props(
-                                            vec![(PropertyName::lit("d"), JE::var(value, &mut j))],
-                                            &mut j,
-                                        ),
-                                    ),
+                                    ExprKind::Object(test_props(
+                                        vec![(PropertyName::lit("d"), JE::var(value, &mut j))],
+                                        &mut j,
+                                    )),
                                     &mut j,
                                 ),
                                 JE::str_id("d", &mut j),
@@ -4366,7 +4186,7 @@ fn js_flatten_and_mark_dead_keeps_single_field_module_reads_materialized_like_oc
 }
 
 #[test]
-fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
+fn js_flatten_and_mark_dead_keeps_jsx_component_tag_projection() {
     let mut j = JsArena::new();
     let module = Ident::create_local("Foo");
     let component = Ident::create_local("Async_jsx$Foo");
@@ -4392,8 +4212,8 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                             &mut j,
                         ),
                         JS::exp(
-                            JE::call(
-                                JE::qualified(
+                            {
+                                let callee = JE::qualified(
                                     ModuleId {
                                         id: Ident::create_persistent("JsxRuntime"),
                                         kind: Kind::External {
@@ -4405,34 +4225,28 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
                                     },
                                     Some("jsx".to_string()),
                                     &mut j,
-                                ),
-                                &[
-                                    JE::new(
-                                        ExprKind::StaticIndex(
-                                            JE::var(module, &mut j),
-                                            JE::str_id("make", &mut j),
-                                            crate::js_ir::arena::FieldPos::new(Some(0)),
-                                        ),
-                                        &mut j,
+                                );
+                                let tag = JE::new(
+                                    ExprKind::StaticIndex(
+                                        JE::var(module, &mut j),
+                                        JE::str_id("make", &mut j),
+                                        crate::js_ir::arena::FieldPos::new(Some(0)),
                                     ),
-                                    JE::new(
-                                        ExprKind::CamlBlock(
-                                            j.empty_exprs(),
-                                            MutableFlag::Immutable,
-                                            j.tag_id(TagInfo::record(
-                                                vec![],
-                                                crate::parser::ast::MutableFlag::Immutable,
-                                            )),
-                                        ),
-                                        &mut j,
-                                    ),
-                                ],
-                                CallInfo {
-                                    call_transformed_jsx: true,
-                                    ..CallInfo::default()
-                                },
-                                &mut j,
-                            ),
+                                    &mut j,
+                                );
+                                let props = j.prop_list(&[]);
+                                let id = j.jsx_id(crate::js_ir::arena::JsxInfo {
+                                    callee,
+                                    tag,
+                                    spread: None,
+                                    props,
+                                    children: None,
+                                    key: None,
+                                    multi: false,
+                                    fragment: false,
+                                });
+                                JE::new(ExprKind::Jsx(id), &mut j)
+                            },
                             &mut j,
                         ),
                     ],
@@ -4452,11 +4266,11 @@ fn js_flatten_and_mark_dead_preserves_transformed_jsx_component_make_reads() {
 
     assert!(
         rendered.contains("<Foo.make />"),
-        "expected transformed JSX preserve mode to keep Foo.make visible:\n{rendered}"
+        "expected JSX preserve mode to keep Foo.make visible:\n{rendered}"
     );
     assert!(
         !rendered.contains("<Async_jsx$Foo />"),
-        "transformed JSX tag regressed to the component function value:\n{rendered}"
+        "JSX tag regressed to the component function value:\n{rendered}"
     );
 }
 
@@ -4671,6 +4485,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("id".to_string(), true),
                                             ("name".to_string(), true),
@@ -4702,7 +4517,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable })](undefined, x_name, undefined, undefined, x_x, undefined)}"
+        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](undefined, x_name, undefined, undefined, x_x, undefined)}"
     );
 }
 
@@ -4738,6 +4553,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("pk".to_string(), false),
                                             ("exportStatus".to_string(), true),
@@ -4766,7 +4582,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
+        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
     );
 }
 
@@ -4788,6 +4604,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     JE::number(Number::int(3), &mut j),
                                 ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("xx".to_string(), false),
                                             ("yy".to_string(), false),
@@ -4798,6 +4615,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                 )))), &mut j),
                         ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                             crate::lambda::lam_tag_info::RecordTag {
+                                array: false,
                                 fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                                 logical_field_count: None,
                                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
@@ -4814,7 +4632,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable })](2, 3))"
+        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](2, 3))"
     );
 }
 
@@ -4889,6 +4707,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                 Lambda::prim(
                     Primitive::Pmakeblock(
                         TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                            array: false,
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
@@ -4979,7 +4798,7 @@ x: {
 }
 
 #[test]
-fn source_json_template_with_interpolation_is_a_syntax_error_like_ocaml() {
+fn source_json_template_with_interpolation_is_a_plain_tagged_template_like_ocaml() {
     let source = r#"
 let x = json`some random ${"string"}`
 "#;
@@ -4988,9 +4807,12 @@ let x = json`some random ${"string"}`
         .unwrap_err()
         .to_string();
 
+    // Upstream #8875: `json` is no longer a literal, so an interpolated
+    // `json` template is an ordinary tagged template call
+    // (super_errors/expected/syntaxErrors_json_interpolation.res.expected).
     assert!(
-        error.contains("`json` literals do not support interpolation"),
-        "expected json interpolation syntax error, got:\n{error}"
+        error.contains("The value json can't be found"),
+        "expected an unbound `json` tag, got:\n{error}"
     );
 }
 
@@ -5087,27 +4909,6 @@ fn lowers_pis_poly_var_block_to_typeof_object_check() {
     );
 }
 
-#[test]
-fn lowers_pisint_to_typeof_number_check() {
-    let mut compiler = LambdaCompiler::new();
-    let value = Ident::create_local("value");
-    let compiled = compiler.compile_expr_lam(&Lambda::prim(
-        Primitive::Pisint,
-        vec![Lambda::var(value)],
-        LamLoc::NONE,
-    ));
-
-    assert!(
-        compiled.prelude.is_empty(),
-        "unexpected prelude:\n{}",
-        print_stmts(&compiler.j, &compiled.prelude)
-    );
-    assert!(
-        print_expr(&compiler.j, compiled.expr) == "typeof value === \"number\"",
-        "rendered expression was:\n{}",
-        print_expr(&compiler.j, compiled.expr)
-    );
-}
 
 #[test]
 fn typeof_folding_matches_ocaml_js_exp_make_for_supported_literals() {
@@ -5379,6 +5180,7 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
                 MutableFlag::Immutable,
                 compiler.j.tag_id(TagInfo::Record(Box::new(
                     crate::lambda::lam_tag_info::RecordTag {
+                        array: false,
                         fields: vec![("d".to_string(), false)],
                         logical_field_count: None,
                         mutable_flag: crate::parser::ast::MutableFlag::Immutable,
@@ -5419,7 +5221,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                         runtime: Box::new(crate::types::TaggedBlock {
                             tag: crate::types::VariantTag {
                                 name: crate::name::Name::new("::"),
-                                literal: None,
+                                literal: crate::types::VariantLiteralTag::String("::".to_string()),
                             },
                             tag_name: None,
                         }),
@@ -5450,7 +5252,7 @@ fn lowers_cons_pfield_from_pure_caml_block_directly_like_ocaml() {
                         runtime: Box::new(crate::types::TaggedBlock {
                             tag: crate::types::VariantTag {
                                 name: crate::name::Name::new("::"),
-                                literal: None,
+                                literal: crate::types::VariantLiteralTag::String("::".to_string()),
                             },
                             tag_name: None,
                         }),
@@ -5618,7 +5420,7 @@ fn lowers_qualified_ml_module_closed_undefined_constant_from_cmj() {
 }
 
 #[test]
-fn external_shadow_pass_rewrites_only_shadowed_initializer_reads() {
+fn external_shadow_pass_reads_global_through_global_this_where_binding_is_in_scope() {
     let mut j = JsArena::new();
     let process = Ident::create_local("process");
     let proc = Ident::create_local("proc");
@@ -5655,8 +5457,34 @@ fn external_shadow_pass_rewrites_only_shadowed_initializer_reads() {
     let rewritten = apply_external_shadow_pass(deps);
     expect_dump!(
         dump::block(&rewritten.program.arena, &rewritten.program.block),
-        "let[Strict] process = globalThis.process; let[Strict] proc = process#1"
+        "let[Strict] process = globalThis.process; let[Strict] proc = globalThis.process"
     );
+}
+
+#[test]
+fn external_shadow_pass_enters_nested_block_scope() {
+    let mut j = JsArena::new();
+    let local = Ident::create_local("process");
+    let global = Ident::create_persistent("process");
+    let value = JE::var(global, &mut j);
+    let declaration = JS::variable(
+        VarDecl {
+            ident: local,
+            value: Some(value),
+            property: LetKind::Strict,
+            ident_info: IdentInfo::default(),
+        },
+        &mut j,
+    );
+    let block = JS::block(&[declaration], &mut j);
+    let deps = DepsProgram {
+        program: Program::new_in(vec![block], vec![], j),
+        modules: vec![],
+        side_effect: None,
+    };
+    let rewritten = apply_external_shadow_pass(deps);
+    let rendered = dump::block(&rewritten.program.arena, &rewritten.program.block);
+    assert!(rendered.contains("globalThis.process"), "{rendered}");
 }
 
 #[test]
@@ -5842,10 +5670,9 @@ fn recursive_singleton_nested_let_function_bindings_avoid_placeholder_assignment
                                 vec![Lambda::var(props)],
                                 ApInfo {
                                     loc: LamLoc::NONE,
-                                    inlined: InlineAttribute::Default,
+
                                     status: ApplyStatus::Na,
                                 },
-                                false,
                             ),
                             FunctionAttribute::default(),
                             LamLoc::NONE,
@@ -5977,10 +5804,9 @@ fn recursive_self_tailcalls_lower_to_looping_while_bodies() {
         ],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -6024,10 +5850,9 @@ fn recursive_int_switch_fallthrough_handler_breaks_before_tail_loop_continue() {
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let body = Lambda::LstaticCatch(
         Box::new(Lambda::Lswitch(
@@ -6089,10 +5914,9 @@ fn recursive_string_switch_fallthrough_handler_breaks_before_tail_loop_continue(
         ap_args: vec![Lambda::var(next), Lambda::var(next)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let body = Lambda::LstaticCatch(
         Box::new(Lambda::LstringSwitch(
@@ -6141,10 +5965,9 @@ fn recursive_self_tailcalls_lower_sequands_to_looping_while_bodies() {
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -6191,10 +6014,9 @@ fn recursive_self_tailcalls_lower_sequors_to_looping_while_bodies() {
         ap_args: vec![Lambda::const_(Constant::JsFalse)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -6249,10 +6071,9 @@ fn recursive_self_tailcalls_rename_params_before_loop_assignments() {
         ],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -6315,10 +6136,9 @@ fn recursive_self_tailcalls_preserve_ocaml_loop_ordering() {
             ],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
+
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         })),
         Lambda::var(acc),
     );
@@ -6387,10 +6207,9 @@ fn recursive_function_bindings_lower_to_looping_while_bodies() {
         ],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let lam = Lambda::letrec(
         vec![(
@@ -6438,10 +6257,9 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
         ap_args: vec![Lambda::var(value)],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Na,
         },
-        ap_transformed_jsx: false,
     }));
     let body = Lambda::Lswitch(
         Box::new(Lambda::var(value)),
@@ -6451,7 +6269,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                 crate::lambda::SwitchKey::Constructor(
                     crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                         name: crate::name::Name::new("Empty"),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("Empty".to_string()),
                     }),
                 ),
                 Lambda::const_(Constant::int(0)),
@@ -6462,7 +6280,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                         tag: crate::types::VariantTag {
                             name: crate::name::Name::new("Node"),
-                            literal: None,
+                            literal: crate::types::VariantLiteralTag::String("Node".to_string()),
                         },
                         tag_name: None,
                     }),
@@ -6477,9 +6295,6 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                     literal_tags: vec![crate::types::VariantLiteralTag::String(
                         "Empty".to_string().clone(),
                     )],
-                    has_null: false,
-                    has_undefined: false,
-                    has_other_literal: true,
                 },
             ),
         }),
@@ -6520,3 +6335,495 @@ mod lam_compile_external_tests;
 mod lam_compile_integration_tests;
 mod lam_compile_staticcatch_tests;
 mod lam_compile_switch_tests;
+
+fn raise_boom() -> Lambda {
+    Lambda::prim(
+        Primitive::Praise,
+        vec![Lambda::const_(Constant::string("boom"))],
+        LamLoc::NONE,
+    )
+}
+
+/// A static catch, which allocates an `exit` identifier when compiled.
+fn allocating_catch() -> Lambda {
+    Lambda::LstaticCatch(
+        Box::new(Lambda::LstaticRaise(7, vec![])),
+        (7, vec![]),
+        Box::new(Lambda::const_(Constant::int(1))),
+    )
+}
+
+/// The stamp the next fresh identifier gets after compiling `compile`.
+fn next_stamp_after(compile: impl FnOnce(&mut LambdaCompiler)) -> i32 {
+    let mut compiler = LambdaCompiler::new();
+    compile(&mut compiler);
+    compiler.fresh_ident("probe").stamp()
+}
+
+/// js_output.ml:118-138 `append_output`, through lam_compile.ml:1867-1877
+/// (`Llet`) and 1905-1910 (`Lsequence`): a raise finishes the output in an
+/// `Assign`, `Declare` or `EffectCall` continuation, and what follows is
+/// dropped from the JavaScript but still compiled, so it allocates the
+/// identifiers it would have allocated.
+#[test]
+fn finished_output_drops_but_compiles_what_follows() {
+    let result = Ident::create_local("result");
+    let bound = Ident::create_local("bound");
+    let seq = Lambda::seq(raise_boom(), allocating_catch());
+    let let_ = Lambda::let_(LetKind::Strict, bound, raise_boom(), allocating_catch());
+
+    for lam in [&seq, &let_] {
+        let mut compiler = LambdaCompiler::new();
+        let assign = compiler.compile_assign_to_target_output_tree(&result, lam);
+        assert_eq!(assign.finished, OutputFinished::True);
+        let [stmt] = assign.block.as_slice() else {
+            panic!("expected only the throw, got {:?}", assign.block);
+        };
+        assert!(matches!(compiler.j.sk(*stmt), StmtKind::Throw(_)));
+
+        let mut compiler = LambdaCompiler::new();
+        let effect = compiler.compile_effect_block_output_tree(lam);
+        assert_eq!(effect.finished, OutputFinished::True);
+        assert_eq!(effect.block.len(), 1);
+
+        let mut compiler = LambdaCompiler::new();
+        let declare = compiler.compile_let_binding_output_tree(LetKind::Strict, &result, lam);
+        assert_eq!(declare.finished, OutputFinished::True);
+        assert_eq!(declare.block.len(), 1);
+
+        let mut compiler = LambdaCompiler::new();
+        let compiled = compiler.compile_expr_lam(lam);
+        assert_eq!(compiled.finished, OutputFinished::True);
+    }
+
+    // The dropped catch still allocated its `exit` identifier.
+    let raise_only = next_stamp_after(|c| {
+        c.compile_assign_to_target_output_tree(&result, &raise_boom());
+    });
+    let raise_then_catch = next_stamp_after(|c| {
+        c.compile_assign_to_target_output_tree(&result, &seq);
+    });
+    assert!(raise_then_catch > raise_only);
+}
+
+/// lam_compile.ml:1063-1101: a static catch is `append_output (make
+/// declares) (append_output lbody (make cases))`, so a body that raises
+/// finishes the catch, and its handler is compiled and dropped.
+#[test]
+fn static_catch_carries_its_body_finished_flag() {
+    let result = Ident::create_local("result");
+    let catch = Lambda::LstaticCatch(
+        Box::new(raise_boom()),
+        (3, vec![]),
+        Box::new(allocating_catch()),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_assign_to_target_output_tree(&result, &catch);
+    assert_eq!(output.finished, OutputFinished::True);
+    assert!(
+        !output
+            .block
+            .iter()
+            .any(|stmt| matches!(compiler.j.sk(*stmt), StmtKind::If(..))),
+        "the handler dispatch is dropped: {:?}",
+        output.block
+    );
+    let without_handler_allocation = next_stamp_after(|c| {
+        c.compile_assign_to_target_output_tree(
+            &result,
+            &Lambda::LstaticCatch(
+                Box::new(raise_boom()),
+                (3, vec![]),
+                Box::new(Lambda::const_(Constant::int(1))),
+            ),
+        );
+    });
+    let with_handler_allocation = next_stamp_after(|c| {
+        c.compile_assign_to_target_output_tree(&result, &catch);
+    });
+    assert!(with_handler_allocation > without_handler_allocation);
+}
+
+/// Only `Praise`, `Lbreak` and `Lcontinue` finish an output outside a return
+/// (lam_compile.ml:1682, 1934, 1949): an `if` whose branches both raise is
+/// a plain `make`, so what follows it is kept.
+#[test]
+fn conditional_of_raises_is_not_finished() {
+    let result = Ident::create_local("result");
+    let cond = Ident::create_local("cond");
+    let lam = Lambda::seq(
+        Lambda::if_(Lambda::var(cond), raise_boom(), raise_boom()),
+        Lambda::const_(Constant::int(2)),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_assign_to_target_output_tree(&result, &lam);
+    assert_eq!(output.finished, OutputFinished::False);
+    assert!(
+        output.block.len() >= 2,
+        "the assignment is kept: {:?}",
+        output.block
+    );
+}
+
+fn declared_exit_stamps(j: &JsArena, block: &Block) -> Vec<i32> {
+    let mut stamps = vec![];
+    for stmt in block {
+        if let StmtKind::Variable(v) = j.sk(*stmt) {
+            let declaration = j.var(v);
+            if declaration.ident.name() == "exit" {
+                stamps.push(declaration.ident.stamp());
+            }
+        }
+    }
+    stamps
+}
+
+/// lam_compile.ml:521-539 `compile_recursive_lets_aux` folds the bindings
+/// with `Ext_list.fold_right`, so the last binding is compiled first, and
+/// joins the outputs with `append_output`.
+#[test]
+fn recursive_lets_compile_last_binding_first() {
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let lam = Lambda::Lletrec(
+        vec![(first, allocating_catch()), (second, allocating_catch())],
+        Box::new(Lambda::const_(Constant::int(0))),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_effect_block_output_tree(&lam);
+    let stamps = declared_exit_stamps(&compiler.j, &output.block);
+    let [first_exit, second_exit] = stamps.as_slice() else {
+        panic!("expected two exit declarations, got {:?}", output.block);
+    };
+    assert!(
+        first_exit > second_exit,
+        "the second binding allocates first: {stamps:?}"
+    );
+}
+
+/// A recursive binding whose value raises finishes the group's output, and
+/// `append_output` drops the bindings after it and the body, all of which
+/// are still compiled.
+#[test]
+fn recursive_lets_carry_a_raising_binding_flag() {
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let lam = Lambda::Lletrec(
+        vec![(first, raise_boom()), (second, allocating_catch())],
+        Box::new(allocating_catch()),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_effect_block_output_tree(&lam);
+    assert_eq!(output.finished, OutputFinished::True);
+    let [stmt] = output.block.as_slice() else {
+        panic!("expected only the throw, got {:?}", output.block);
+    };
+    assert!(matches!(compiler.j.sk(*stmt), StmtKind::Throw(_)));
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr_lam(&lam);
+    assert_eq!(compiled.finished, OutputFinished::True);
+    let raise_only = next_stamp_after(|c| {
+        c.compile_effect_block_output_tree(&Lambda::Lletrec(
+            vec![(first, raise_boom())],
+            Box::new(Lambda::const_(Constant::int(0))),
+        ));
+    });
+    let with_dropped = next_stamp_after(|c| {
+        c.compile_effect_block_output_tree(&lam);
+    });
+    assert!(with_dropped > raise_only);
+}
+
+fn call_of(callee: Ident) -> Lambda {
+    Lambda::apply(Lambda::var(callee), vec![], test_apply_info())
+}
+
+/// lam_compile.ml:1533-1537: in a return continuation, an `if` whose
+/// branches are plain values is `return e ? a : b`, which is finished; the
+/// `S.if_` fallback is a `Js_output.make`, which is not, even when every
+/// branch returns.
+#[test]
+fn return_if_is_finished_only_as_a_conditional_return() {
+    let cond = Ident::create_local("cond");
+    let callee = Ident::create_local("callee");
+    let values = Lambda::if_(
+        Lambda::var(cond),
+        Lambda::const_(Constant::int(1)),
+        Lambda::const_(Constant::int(2)),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_return_output_tree(&values);
+    assert_eq!(output.finished, OutputFinished::True);
+
+    // A static catch needs statements under `NeedValue`.
+    let statements = Lambda::if_(
+        Lambda::var(cond),
+        allocating_catch(),
+        Lambda::seq(call_of(callee), allocating_catch()),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_return_output_tree(&statements);
+    assert_eq!(output.finished, OutputFinished::False);
+}
+
+/// A `return` finishes the output (js_output.ml:57-59), so a static catch
+/// whose body returns drops its handler dispatch after compiling it
+/// (lam_compile.ml:1063-1101).
+#[test]
+fn return_static_catch_drops_the_handler_of_a_returning_body() {
+    let callee = Ident::create_local("callee");
+    let catch = |handler: Lambda| {
+        Lambda::LstaticCatch(
+            Box::new(Lambda::seq(
+                Lambda::if_(
+                    Lambda::var(callee),
+                    Lambda::LstaticRaise(5, vec![]),
+                    Lambda::const_(Constant::int(0)),
+                ),
+                call_of(callee),
+            )),
+            (5, vec![]),
+            Box::new(handler),
+        )
+    };
+    let lam = catch(allocating_catch());
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_return_output_tree(&lam);
+    assert_eq!(output.finished, OutputFinished::True);
+    assert!(
+        matches!(
+            output.block.last().map(|stmt| compiler.j.sk(*stmt)),
+            Some(StmtKind::Return(_))
+        ),
+        "the body's return ends the output: {:?}",
+        output.block
+    );
+    let plain = next_stamp_after(|c| {
+        c.compile_return_output_tree(&catch(Lambda::const_(Constant::int(1))));
+    });
+    let allocating = next_stamp_after(|c| {
+        c.compile_return_output_tree(&lam);
+    });
+    assert!(allocating > plain, "the dropped handler is compiled");
+}
+
+/// lam_compile.ml:1320-1334 `compile_assign` appends the assignment to the
+/// value's block without asking whether it ends in a `throw`; its output is
+/// a plain `make`, so it does not finish what follows.
+#[test]
+fn assign_of_a_raise_keeps_its_assignment() {
+    let target = Ident::create_local("target");
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr_lam(&Lambda::Lassign(target, Box::new(raise_boom())));
+    assert_eq!(compiled.finished, OutputFinished::False);
+    let [throw, assign] = compiled.prelude.as_slice() else {
+        panic!(
+            "expected the throw and the assignment, got {:?}",
+            compiled.prelude
+        );
+    };
+    assert!(matches!(compiler.j.sk(*throw), StmtKind::Throw(_)));
+    assert!(matches!(compiler.j.sk(*assign), StmtKind::Exp(_)));
+}
+
+/// lam_compile.ml:222-238, 535-539: a `let rec` group is compiled as
+/// `Lambda_scc.bind_rec` left it, with functions before values, and is not
+/// split again.
+#[test]
+fn recursive_lets_put_functions_before_values_without_resplitting() {
+    let value = Ident::create_local("value");
+    let first = Ident::create_local("first");
+    let second = Ident::create_local("second");
+    let (first, first_lam) = test_function_calling(first, &first);
+    let (second, second_lam) = test_function_calling(second, &second);
+    let lam = Lambda::Lletrec(
+        vec![
+            (value, Lambda::const_(Constant::int(3))),
+            (second, second_lam),
+            (first, first_lam),
+        ],
+        Box::new(Lambda::const_(Constant::int(0))),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_effect_block_output_tree(&lam);
+    let names: Vec<_> = output
+        .block
+        .iter()
+        .filter_map(|stmt| match compiler.j.sk(*stmt) {
+            StmtKind::Variable(v) => Some(compiler.j.var(v).ident.name().to_string()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(names, ["second", "first", "value"]);
+}
+
+/// lam_compile.ml:1232: compile_for builds the tuple `(compile_lambda
+/// new_cxt start, compile_lambda new_cxt finish)`, which OCaml evaluates
+/// right to left, so the finish bound allocates first; the emitted block
+/// still puts the start bound's statements first (lines 1256-1270).
+#[test]
+fn for_loop_compiles_its_finish_bound_before_its_start_bound() {
+    let index = Ident::create_local("i");
+    let lam = Lambda::Lfor(
+        index,
+        Box::new(allocating_catch()),
+        Box::new(allocating_catch()),
+        crate::lambda::DirectionFlag::Upto,
+        Box::new(Lambda::const_(Constant::JsUndefined { is_unit: true })),
+    );
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr_lam(&lam);
+    let stamps = declared_exit_stamps(&compiler.j, &compiled.prelude);
+    let [start_exit, finish_exit] = stamps.as_slice() else {
+        panic!("expected two exit declarations, got {:?}", compiled.prelude);
+    };
+    assert!(
+        start_exit > finish_exit,
+        "the finish bound allocates first: {stamps:?}"
+    );
+}
+
+/// lam_compile.ml:375-388 and 1581-1587: a recursive function's body is
+/// compiled with `ret.id` set to the function itself, and only a call with
+/// `Ident.same ret.id fn_id` becomes the loop; a call through an alias in
+/// the same group stays a call.
+#[test]
+fn recursive_function_loops_only_on_calls_to_itself() {
+    let compile = |callee_is_alias: bool| {
+        let function = Ident::create_local("f");
+        let alias = Ident::create_local("g");
+        let target = if callee_is_alias { alias } else { function };
+        let (function, function_lam) = test_function_calling(function, &target);
+        let lam = Lambda::Lletrec(
+            vec![(function, function_lam), (alias, Lambda::var(function))],
+            Box::new(Lambda::const_(Constant::int(0))),
+        );
+        let mut compiler = LambdaCompiler::new();
+        let output = compiler.compile_effect_block_output_tree(&lam);
+        print_stmts(&compiler.j, &output.block)
+    };
+    assert!(compile(false).contains("while"), "{}", compile(false));
+    let through_alias = compile(true);
+    assert!(!through_alias.contains("while"), "{through_alias}");
+}
+
+/// compile_sequand / compile_sequor in a `Declare (_kind, v)` continuation
+/// declare the target with `~kind:Variable` when the right side needs
+/// statements (lam_compile.ml:1128-1135, 1168-1175).
+#[test]
+fn short_circuit_declaration_with_statements_is_a_variable() {
+    let flag = Ident::create_local("flag");
+    let target = Ident::create_local("target");
+    let mut compiler = LambdaCompiler::new();
+    let output = compiler.compile_let_binding_output_tree(
+        LetKind::Strict,
+        &target,
+        &Lambda::prim(
+            Primitive::Psequand,
+            vec![Lambda::var(flag), allocating_catch()],
+            LamLoc::NONE,
+        ),
+    );
+    let declaration = output
+        .block
+        .iter()
+        .find_map(|stmt| match compiler.j.sk(*stmt) {
+            StmtKind::Variable(v) if compiler.j.var(v).ident.same(&target) => {
+                Some(compiler.j.var(v))
+            }
+            _ => None,
+        })
+        .expect("the target is declared");
+    assert_eq!(declaration.property, LetKind::Variable);
+}
+
+/// lam_compile.ml:1689-1704: the arguments of `Pdebugger` are compiled in
+/// `EffectCall Not_tail` before the statement (a literal unit compiles to
+/// nothing), and the primitive's value is unit in every continuation.
+#[test]
+fn debugger_compiles_its_arguments_for_effect_before_the_statement() {
+    let log = Ident::create_local("log");
+    let effect = || {
+        Lambda::apply(
+            Lambda::var(log),
+            vec![Lambda::const_(Constant::string("before"))],
+            test_apply_info(),
+        )
+    };
+    let debugger = |args| Lambda::prim(Primitive::Pdebugger, args, LamLoc::NONE);
+    // One printed statement per element, so the layout between statements
+    // (the JS printer's business) does not matter here.
+    let statements = |j: &JsArena, block: &Block| -> Vec<String> {
+        block
+            .iter()
+            .map(|statement| print_stmts(j, &[*statement]).trim().to_string())
+            .collect()
+    };
+
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block_lam(&debugger(vec![Lambda::unit()]));
+    assert_eq!(statements(&compiler.j, &block), ["debugger;"]);
+
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block_lam(&debugger(vec![effect()]));
+    assert_eq!(
+        statements(&compiler.j, &block),
+        ["log(\"before\");", "debugger;"]
+    );
+
+    // NeedValue: the argument and the statement form the prelude, the value
+    // is unit.
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.compile_expr_lam(&debugger(vec![effect()]));
+    assert_eq!(
+        statements(&compiler.j, &compiled.prelude),
+        ["log(\"before\");", "debugger;"]
+    );
+    assert!(matches!(
+        compiler.j.ek(compiled.expr),
+        ExprKind::Undefined { is_unit: true }
+    ));
+    assert_eq!(compiled.finished, OutputFinished::False);
+
+    // A control-flow argument is compiled exactly as it is for effect on its
+    // own (`EffectCall Not_tail`), not as a value, then the statement follows.
+    let cond = Ident::create_local("cond");
+    let conditional = || Lambda::if_(Lambda::var(cond), effect(), Lambda::unit());
+    let mut compiler = LambdaCompiler::new();
+    let expected_block = compiler.compile_effect_block_lam(&conditional());
+    let mut expected = statements(&compiler.j, &expected_block);
+    expected.push("debugger;".to_string());
+    let mut compiler = LambdaCompiler::new();
+    let block = compiler.compile_effect_block_lam(&debugger(vec![conditional()]));
+    assert_eq!(statements(&compiler.j, &block), expected);
+}
+
+#[test]
+fn group_effect_reason_is_captured_before_flat_aliases() {
+    for (name, effectful) in [("pure", false), ("effectful", true)] {
+        let id = Ident::create_local(name);
+        let value = if effectful {
+            crate::lambda::Lambda::prim(Primitive::Pdebugger, vec![], LamLoc::NONE)
+        } else {
+            crate::lambda::Lambda::unit()
+        };
+        let input = crate::lambda::Lambda::prim(
+            Primitive::Pmakeblock(
+                TagInfo::ModuleExport(vec![id]),
+                crate::lambda::lam_primitive::Mutable::Immutable,
+            ),
+            vec![value],
+            LamLoc::NONE,
+        );
+        let result = crate::lambda::lam_compile_main::simplify_for_js_backend(
+            &input,
+            false,
+            &mut |_, _| None,
+            &mut |_, _| None,
+        );
+        assert_eq!(
+            module_side_effect_reason(&result.arena, result.lam).as_deref(),
+            effectful.then_some("effectful")
+        );
+    }
+}

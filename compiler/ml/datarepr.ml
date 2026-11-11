@@ -45,6 +45,11 @@ let free_vars ?(param = false) ty =
 
 let newgenconstr path tyl = newgenty (Tconstr (path, tyl, ref Mnil))
 
+(** Takes [cd_args] and [cd_res] from a [constructor_declaration] and
+    returns:
+    - the types of the constructor's arguments
+    - the existential variables introduced by the constructor
+ *)
 let constructor_existentials cd_args cd_res =
   let tyl =
     match cd_args with
@@ -86,6 +91,7 @@ let constructor_args priv cd_args cd_res path rep =
         type_attributes = [];
         type_immediate = false;
         type_representation;
+        type_shape = Unstated;
         type_inlined_types = [];
       }
     in

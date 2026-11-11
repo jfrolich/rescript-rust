@@ -5,6 +5,7 @@ type ('ast, 'diagnostics) parse_result = {
   diagnostics: 'diagnostics;
   invalid: bool;
   comments: Res_comment.t list;
+  newline: string;
 }
 
 type 'diagnostics parsing_engine = {
@@ -60,6 +61,7 @@ let parsing_engine =
           diagnostics;
           invalid;
           comments = List.rev engine.comments;
+          newline = Res_parser.newline engine;
         });
     parse_implementation_from_source =
       (fun ~source ->
@@ -77,6 +79,7 @@ let parsing_engine =
           diagnostics;
           invalid;
           comments = List.rev engine.comments;
+          newline = Res_parser.newline engine;
         });
     parse_interface =
       (fun ~filename ->
@@ -94,6 +97,7 @@ let parsing_engine =
           diagnostics;
           invalid;
           comments = List.rev engine.comments;
+          newline = Res_parser.newline engine;
         });
     parse_interface_from_source =
       (fun ~source ->
@@ -111,6 +115,7 @@ let parsing_engine =
           diagnostics;
           invalid;
           comments = List.rev engine.comments;
+          newline = Res_parser.newline engine;
         });
     string_of_diagnostics =
       (fun ~source ~filename:_ diagnostics ->
@@ -132,6 +137,7 @@ let parse_implementation_from_source ~display_filename ~source =
     diagnostics;
     invalid;
     comments = List.rev engine.comments;
+    newline = Res_parser.newline engine;
   }
 
 let parse_interface_from_source ~display_filename ~source =
@@ -149,40 +155,44 @@ let parse_interface_from_source ~display_filename ~source =
     diagnostics;
     invalid;
     comments = List.rev engine.comments;
+    newline = Res_parser.newline engine;
   }
 
-let print_engine =
+let print_engine ~newline =
   {
     print_implementation =
       (fun ~width ~filename:_ ~comments structure ->
-        print_string
-          (Res_printer.print_implementation ~width structure ~comments));
+        Compiler_request_output.write_stdout_binary
+          (Res_printer.print_implementation ~width ~newline structure ~comments));
     print_interface =
       (fun ~width ~filename:_ ~comments signature ->
-        print_string (Res_printer.print_interface ~width signature ~comments));
+        Compiler_request_output.write_stdout_binary
+          (Res_printer.print_interface ~width ~newline signature ~comments));
   }
 
+exception Already_reported
+
 let parse_implementation ?(ignore_parse_errors = false) sourcefile =
-  Location.input_name := sourcefile;
+  Location.set_input_name sourcefile;
   let parse_result = parsing_engine.parse_implementation ~filename:sourcefile in
   if parse_result.invalid then (
     Res_diagnostics.print_report parse_result.diagnostics parse_result.source;
-    if not ignore_parse_errors then exit 1);
+    if not ignore_parse_errors then raise_notrace Already_reported);
   parse_result.parsetree
-[@@raises exit]
+[@@raises Already_reported]
 
 let parse_interface ?(ignore_parse_errors = false) sourcefile =
-  Location.input_name := sourcefile;
+  Location.set_input_name sourcefile;
   let parse_result = parsing_engine.parse_interface ~filename:sourcefile in
   if parse_result.invalid then (
     Res_diagnostics.print_report parse_result.diagnostics parse_result.source;
-    if not ignore_parse_errors then exit 1);
+    if not ignore_parse_errors then raise_notrace Already_reported);
   parse_result.parsetree
-[@@raises exit]
+[@@raises Already_reported]
 
 (* suppress unused optional arg *)
 let _ =
  fun s ->
   ( parse_implementation ~ignore_parse_errors:false s,
     parse_interface ~ignore_parse_errors:false s )
-[@@raises exit]
+[@@raises Already_reported]

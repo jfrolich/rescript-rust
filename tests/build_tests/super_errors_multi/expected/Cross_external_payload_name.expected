@@ -6,11 +6,9 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Cross_external_payload_name/Payload.res
   does not match the interface /.../fixtures/Cross_external_payload_name/Payload.resi:
-  Values do not match:
+  
+  Actual declaration (/.../fixtures/Cross_external_payload_name/Payload.res:1:1-39):
     @val("foo") external f: int => int = ""
-  is not included in
+  
+  Expected declaration (/.../fixtures/Cross_external_payload_name/Payload.resi:1:1-39):
     @val("bar") external f: int => int = ""
-  /.../fixtures/Cross_external_payload_name/Payload.resi:1:1-39:
-    Expected declaration
-  /.../fixtures/Cross_external_payload_name/Payload.res:1:1-39:
-    Actual declaration

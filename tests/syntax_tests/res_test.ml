@@ -24,7 +24,177 @@ let () =
 let x: int
 |})
 
+(* Formatting keeps a file's line endings, also inside comments, template
+   literals and raw JS, and formatting the result again changes nothing. The
+   line breaks inside literals are part of the program and keep their bytes,
+   whatever the file's line endings, and so do the ones inside comments. *)
+let () =
+  let to_crlf text = String.concat "\r\n" (String.split_on_char '\n' text) in
+  let lf =
+    "/* a\n\
+    \ multi-line comment */\n\
+     /* a comment\n\
+    \ * with stars\n\
+    \ */\n\
+     let s = `line 1\n\
+     line 2`\n\n\
+     let r = %raw(`\n\
+    \  function () {\n\
+    \    return 1\n\
+    \  }\n\
+     `)\n"
+  in
+  let format source =
+    let filename = Filename.temp_file "line_endings" ".res" in
+    Fun.protect
+      (fun () ->
+        let channel = open_out_bin filename in
+        output_string channel source;
+        close_out channel;
+        Res_multi_printer.print filename)
+      ~finally:(fun () -> Sys.remove filename)
+  in
+  List.iter
+    (fun source ->
+      let formatted = format source in
+      assert (formatted = source);
+      assert (format formatted = formatted))
+    [
+      lf;
+      to_crlf lf;
+      "let x = 1\r\n\r\nlet s = \"a\nb\"\r\n";
+      "let x = 1\n\nlet s = \"a\r\nb\"\n";
+      "let x = 1\r\n\
+       \r\n\
+       let t = `a\n\
+       b`\r\n\
+       \r\n\
+       let c = '\n\
+       '\r\n\
+       \r\n\
+       let p = #\"a\n\
+       b\"\r\n";
+      "let x = 1\n\nlet t = `a\r\nb`\n\nlet c = '\r'\n\nlet p = #\"a\r\nb\"\n";
+      "let x = 1\n/* a\r\r\nb\nc */\nlet y = 2\n";
+      "let x = 1\r\n/* a\nb\r\nc */\r\nlet y = 2\r\n";
+    ];
+  (* Formatting keeps a byte order mark, and a lone CR ends a line *)
+  let bom = "\xEF\xBB\xBF" in
+  List.iter
+    (fun source ->
+      let formatted = format source in
+      assert (formatted = source);
+      assert (format formatted = formatted))
+    [bom ^ "let x = 1\n"; bom ^ "// c\r\nlet x = 1\r\n"];
+  assert (format "let x = 1 // c\rlet y = 2\n" = "let x = 1 // c\nlet y = 2\n");
+  assert (format "let x = 1\rlet y = 2\r" = "let x = 1\nlet y = 2\n");
+  (* The printer writes the line breaks of a comment it reindents *)
+  let formatted = format "let x = 1\n/* a\r\r\n b */\nlet y = 2\n" in
+  assert (formatted = "let x = 1\n/* a\n b */\nlet y = 2\n");
+  assert (format (to_crlf formatted) = to_crlf formatted);
+  (* The first line break outside literals and comments gives the line
+     endings, also with no line break or no final one, and after a regex, a
+     JSX closing tag or a division that holds what would otherwise start a
+     literal. The printer writes the line breaks of comments it reindents. *)
+  List.iter
+    (fun (source, expected) ->
+      assert (format source = expected);
+      assert (format expected = expected))
+    [
+      ("let a = 1", "let a = 1\n");
+      ("let a = \"x\r\ny\"", "let a = \"x\r\ny\"\n");
+      ("let a = 1 // c\r", "let a = 1 // c\n");
+      ("let a = \"x\r\ny\"\nlet b = 1", "let a = \"x\r\ny\"\n\nlet b = 1\n");
+      ("let a = \"x\ny\"\r\nlet b = 1", "let a = \"x\ny\"\r\n\r\nlet b = 1\r\n");
+      ("/* a\r\nb */\nlet b = 1\n", "/* a\n b */\nlet b = 1\n");
+      ("/* a\nb */\r\nlet b = 1\r\n", "/* a\r\n b */\r\nlet b = 1\r\n");
+      ( "let a = 1 /* a\r\nb */\nlet b = 1\n",
+        "let a = 1 /* a\n b */\n\nlet b = 1\n" );
+      ( "let t = `${f({a: 1},\r\n 2)}`\nlet x = 1\n",
+        "let t = `${f({a: 1}, 2)}`\r\nlet x = 1\r\n" );
+    ];
+  List.iter
+    (fun source -> assert (format source = source))
+    [
+      "let a = \"x\r\ny\"\n\nlet b = 1\n";
+      "let a = \"x\ny\"\r\n\r\nlet b = 1\r\n";
+      "let c = '\"'\n\nlet s = \"a\r\nb\"\n";
+      "let t = `a${b}c\r\nd`\n\nlet x = 1\n";
+      "let t = `a${b}c\nd`\r\n\r\nlet x = 1\r\n";
+      "let t = `${f({\n    \"a\": `${x}\r\n`,\n  })}\r\n`\n\nlet x = 1\n";
+      "let t = `${switch x {\n  | _ => 1\n  }}\r\n`\n\nlet x = 1\n";
+      "let r = /\"/\n\nlet s = \"a\r\nb\"\n";
+      "let r = (1, /\"/)\n\nlet s = \"a\r\nb\"\n";
+      "let x = a / f(\"/\")\r\nlet y = 2\r\n";
+      "let x = a->f / g(\"/\")\r\nlet y = 2\r\n";
+      "let e = (<a></a>, \"/\")\r\n\r\nlet s = \"a\nb\"\r\n";
+      "let e = <a>{/\"/->f}</a>\r\n\r\nlet s = \"a\nb\"\r\n";
+      "let t = `${/\"/->f}\r\n`\n\nlet x = 1\n";
+      "/** a\r\nb */\nlet x = 1\n";
+      "let e = (\r\n\
+      \  <a />,\r\n\
+      \  <a></a>,\r\n\
+      \  \"x/y\n\
+       z\",\r\n\
+       )\r\n\
+       \r\n\
+       let y = 2\r\n";
+    ]
+
 let () = print_endline "✅ multi printer api tests"
+
+(* The scanner skips a UTF-8 byte order mark and ends a line at a CR without an
+   LF, and code frames show the lines the positions refer to *)
+let () =
+  let parse source =
+    let result =
+      Res_driver.parse_implementation_from_source ~display_filename:"bom.res"
+        ~source
+    in
+    assert (not result.invalid);
+    result.parsetree
+  in
+  let position_of_y source =
+    match parse source with
+    | _ :: {Parsetree.pstr_loc = {loc_start}} :: _ -> loc_start
+    | _ -> assert false
+  in
+  let line_and_column (pos : Lexing.position) =
+    (pos.pos_lnum, pos.pos_cnum - pos.pos_bol)
+  in
+  let bom = "\xEF\xBB\xBF" in
+  (match parse (bom ^ "let x = 1") with
+  | [{pstr_loc = {loc_start}}] -> assert (line_and_column loc_start = (1, 0))
+  | _ -> assert false);
+  List.iter
+    (fun (source, expected) ->
+      assert (line_and_column (position_of_y source) = expected))
+    [
+      ("let x = 1\rlet y = 2", (2, 0));
+      ("let x = 1 // c\rlet y = 2", (2, 0));
+      ("let x = 1 /* c */\r  let y = 2", (2, 2));
+      ("let x = 1\r\nlet y = 2", (2, 0));
+      ("let x = 1\r\rlet y = 2", (3, 0));
+      ("let x = 1\n\rlet y = 2", (3, 0));
+      (bom ^ "let x = 1; let y = 2", (1, 11));
+      (bom ^ "let x = 1\rlet y = 2", (2, 0));
+    ];
+  (* A regex literal ends at a line break *)
+  assert
+    (Res_driver.parse_implementation_from_source ~display_filename:"regex.res"
+       ~source:"let r = /a\rb/")
+      .invalid;
+  Code_frame.setup (Some Misc.Color.Never);
+  let frame source =
+    let start_pos = position_of_y source in
+    Code_frame.print ~is_warning:false ~src:source ~start_pos
+      ~end_pos:{start_pos with pos_cnum = start_pos.pos_cnum + 3}
+  in
+  assert (frame (bom ^ "let x = 1; let y = 2") = "  1 │ let x = 1; let y = 2\n");
+  assert (
+    frame "let x = 1\rlet y = 2\rlet z = 3"
+    = "  1 │ let x = 1\n  2 │ let y = 2\n  3 │ let z = 3\n");
+  print_endline "✅ byte order mark and lone CR"
 
 let () =
   let filename =
@@ -75,18 +245,428 @@ let () =
     [20; 40; 80; 100; 120];
   print_endline "✅ callback trailing comments are stable at multiple widths"
 
+let () =
+  let filename = Filename.concat data_dir "printer/regexpStatements.res" in
+  let source = Ext_io.load_file filename in
+  let parse source =
+    let result =
+      Res_driver.parse_implementation_from_source ~display_filename:filename
+        ~source
+    in
+    if result.invalid then
+      failwith ("Regexp statements failed to parse:\n" ^ source);
+    result
+  in
+  let original = parse source in
+  let comment_texts result =
+    List.map Res_comment.txt result.Res_driver.comments
+  in
+  List.iter
+    (fun width ->
+      let format result =
+        Res_printer.print_implementation ~width result.Res_driver.parsetree
+          ~comments:result.comments
+      in
+      let printed = format original in
+      let reparsed = parse printed in
+      assert (comment_texts original = comment_texts reparsed);
+      let reprinted = format reparsed in
+      if printed <> reprinted then
+        failwith
+          (Printf.sprintf
+             "Regexp formatting at width %d:\nFIRST:\n%s\nSECOND:\n%s" width
+             printed reprinted))
+    [20; 40; 80; 100; 120];
+  print_endline "✅ regexp statements round-trip at multiple widths"
+
+let () =
+  let without_locations tree =
+    let mapper =
+      {Ast_mapper.default_mapper with location = (fun _ _ -> Location.none)}
+    in
+    mapper.structure mapper tree
+  in
+  let parse source =
+    let result =
+      Res_driver.parse_implementation_from_source
+        ~display_filename:"statement-boundaries.res" ~source
+    in
+    assert (not result.invalid);
+    result
+  in
+  List.iter
+    (fun source ->
+      let original = parse source in
+      List.iter
+        (fun width ->
+          let printed =
+            Res_printer.print_implementation ~width original.parsetree
+              ~comments:original.comments
+          in
+          let reparsed = parse printed in
+          assert (
+            without_locations original.parsetree
+            = without_locations reparsed.parsetree))
+        [20; 40; 80; 100; 120])
+    [
+      "(@condition truth) ? (@yes first) : (@no second)";
+      "let result = (@condition truth) ? (@yes first) : (@no second)";
+      "let result = truth ? first : ((@condition other) ? (@yes second) : (@no \
+       third))";
+      "let f = () => {\nlet before = 0\nopen Foo\n(/a/->ignore)\n}";
+      "let f = () => {\nmodule M = Foo\n(/a/->ignore)\n(/b/->ignore)\n}";
+      "let f = () => {\nopen Foo\nignore()\n(/a/->ignore)\n}";
+      "let before = 0\n@foo (/a/->ignore)";
+    ];
+  print_endline "✅ statement boundary formatting preserves attribute scope"
+
+(* A template segment's location covers its text, without the delimiters, and
+   the template's location covers the whole literal. *)
+let () =
+  let check source =
+    let result =
+      Res_driver.parse_implementation_from_source
+        ~display_filename:"templates.res" ~source
+    in
+    assert (not result.invalid);
+    let slice (loc : Location.t) =
+      String.sub source loc.loc_start.pos_cnum
+        (loc.loc_end.pos_cnum - loc.loc_start.pos_cnum)
+    in
+    let check_segments segments =
+      List.iter
+        (fun ({txt; loc} : string Location.loc) ->
+          if slice loc <> txt then (
+            Printf.printf "segment %S has location text %S in %S\n" txt
+              (slice loc) source;
+            assert false))
+        segments
+    in
+    let found = ref 0 in
+    let iterator =
+      {
+        Ast_iterator.default_iterator with
+        expr =
+          (fun iterator e ->
+            (match e.pexp_desc with
+            | Pexp_template {source_segments} ->
+              incr found;
+              check_segments source_segments;
+              let literal = slice e.pexp_loc in
+              assert (literal.[0] = '`');
+              assert (literal.[String.length literal - 1] = '`')
+            | Pexp_tagged_template {raw_sources} ->
+              incr found;
+              check_segments raw_sources
+            | _ -> ());
+            Ast_iterator.default_iterator.expr iterator e);
+      }
+    in
+    iterator.structure iterator result.parsetree;
+    assert (!found > 0)
+  in
+  List.iter check
+    [
+      "let a = `template`";
+      "let a = ``";
+      "let a = `a${b}c`";
+      "let a = `${b}${c}`";
+      "let a = `a\\`b\\${c}`";
+      "let a = `first\nsecond ${b}\nthird`";
+      "let a = `outer ${`inner ${b}`} end`";
+      "let a = sql`select ${x} from t`";
+    ];
+  print_endline "✅ template segment locations cover their text"
+
+(* PPX-generated ## accesses print their receiver before the operator. *)
+let () =
+  let source = "let t = 0\n(/a/[\"member\"])" in
+  let parsed =
+    Res_driver.parse_implementation_from_source ~display_filename:"ppx.res"
+      ~source
+  in
+  assert (not parsed.invalid);
+  let structure =
+    List.map
+      (fun item ->
+        match item.Parsetree.pstr_desc with
+        | Pstr_eval
+            (({pexp_desc = Pexp_object_get (receiver, _)} as expr), attrs) ->
+          let funct =
+            Ast_helper.Exp.ident (Location.mknoloc (Longident.Lident "##"))
+          in
+          let member =
+            Ast_helper.Exp.ident (Location.mknoloc (Longident.Lident "member"))
+          in
+          {
+            item with
+            pstr_desc =
+              Pstr_eval
+                ( {
+                    expr with
+                    pexp_desc =
+                      (Ast_helper.Exp.apply funct
+                         [(Nolabel, receiver); (Nolabel, member)])
+                        .pexp_desc;
+                  },
+                  attrs );
+          }
+        | _ -> item)
+      parsed.parsetree
+  in
+  let printed =
+    Res_printer.print_implementation ~width:100 structure ~comments:[]
+  in
+  assert (printed = "let t = 0\n(/a/[\"member\"])\n");
+  let reparsed =
+    Res_driver.parse_implementation_from_source ~display_filename:"ppx.res"
+      ~source:printed
+  in
+  assert (not reparsed.invalid)
+
+let () =
+  let filename = Filename.concat data_dir "printer/expr/jsxChildren.res" in
+  let source =
+    Ext_io.load_file filename
+    ^ Ext_io.load_file
+        (Filename.concat data_dir "printer/expr/jsxChildrenComments.res")
+  in
+  let parse source =
+    let result =
+      Res_driver.parse_implementation_from_source ~display_filename:filename
+        ~source
+    in
+    assert (not result.invalid);
+    result
+  in
+  let format ~width result =
+    Res_printer.print_implementation ~width result.Res_driver.parsetree
+      ~comments:result.comments
+  in
+  let comment_texts result =
+    List.map
+      (fun comment ->
+        Res_comment.txt comment |> String.split_on_char '\n'
+        |> List.map String.trim |> String.concat "\n" |> String.trim)
+      result.Res_driver.comments
+  in
+  (* Compare the expression structure independently of formatting locations and
+     explicit braces introduced by the migration. Keep expression attributes. *)
+  let expression_structure result =
+    let mapper =
+      {
+        Ast_mapper.default_mapper with
+        expr =
+          (fun mapper expr ->
+            match expr.Parsetree.pexp_desc with
+            | Pexp_braces {expr = inner; braces_loc = _braces_loc} ->
+              mapper.expr mapper
+                {
+                  inner with
+                  pexp_attributes = expr.pexp_attributes @ inner.pexp_attributes;
+                }
+            | _ -> Ast_mapper.default_mapper.expr mapper expr);
+      }
+    in
+    let ast = mapper.structure mapper result.Res_driver.parsetree in
+    Format.asprintf "%a" Pprintast.structure ast
+  in
+  List.iter
+    (fun width ->
+      let original = parse source in
+      let printed = format ~width original in
+      let reparsed = parse printed in
+      if expression_structure original <> expression_structure reparsed then
+        failwith
+          (Printf.sprintf "JSX child migration changed expressions at width %d"
+             width);
+      if comment_texts original <> comment_texts reparsed then
+        failwith
+          (Printf.sprintf "JSX child migration changed comments at width %d"
+             width);
+      let reprinted = format ~width reparsed in
+      if printed <> reprinted then
+        failwith
+          (Printf.sprintf
+             "JSX child migration is unstable at width %d.\n\
+              First pass:\n\
+              %s\n\
+              Second pass:\n\
+              %s"
+             width printed reprinted))
+    [20; 40; 80; 100; 120];
+  assert (
+    format ~width:80 (parse "let x = <span> hello </span>")
+    = "let x = <span>{hello}</span>\n");
+  assert (
+    format ~width:80 (parse "let x = <> hello </>") = "let x = <>{hello}</>\n");
+  List.iter
+    (fun width ->
+      List.iter
+        (fun (opening, closing) ->
+          List.iter
+            (fun (comment, formatted_comment) ->
+              List.iter
+                (fun gap ->
+                  let source =
+                    "let x = " ^ opening ^ "<A /> " ^ comment ^ "\n" ^ gap
+                    ^ "<B />" ^ closing
+                  in
+                  let expected =
+                    "let x =\n  " ^ opening ^ "\n    <A />\n"
+                    ^ formatted_comment ^ "\n" ^ gap ^ "    <B />\n  " ^ closing
+                    ^ "\n"
+                  in
+                  let printed = format ~width (parse source) in
+                  assert (printed = expected);
+                  assert (format ~width (parse printed) = expected))
+                [""; "\n"])
+            [
+              ("// note", "    {/* note */}");
+              ("/* note */", "    {/* note */}");
+              ("/* a\n * b */", "    {\n      /* a\n       * b */\n    }");
+              ("{// note\n}", "    {/* note */}");
+              ("{\n// a\n// b\n}", "    {\n      /* a */\n      /* b */\n    }");
+              ("{// a\n}\n{// b\n}", "    {/* a */}\n    {/* b */}");
+            ])
+        [("<div>", "</div>"); ("<>", "</>")])
+    [20; 40; 80; 100; 120];
+  List.iter
+    (fun (source, expected) ->
+      let original = parse source in
+      let styles =
+        List.map Res_comment.is_single_line_comment original.comments
+      in
+      let printed = format ~width:80 original in
+      assert (printed = expected);
+      assert (
+        List.map Res_comment.is_single_line_comment original.comments = styles);
+      assert (format ~width:80 (parse printed) = expected))
+    [
+      ("let x = <>// empty\n</>", "let x = <>{/* empty */}</>\n");
+      ( "let x = <>/* a */ // b\n/* c */</>",
+        "let x =\n\
+        \  <>\n\
+        \    {\n\
+        \      /* a */\n\
+        \      /* b */\n\
+        \      /* c */\n\
+        \    }\n\
+        \  </>\n" );
+      ( "let x = <span> hello // note\n</span>",
+        "let x = <span>{hello /* note */}</span>\n" );
+      ("let x = <> hello // note\n</>", "let x = <>{hello /* note */}</>\n");
+      ( "let x = <span> hello /* block */ // note\n</span>",
+        "let x = <span>{hello /* block */ /* note */}</span>\n" );
+      ( "let x = <span>{hello // inside\n}</span>",
+        "let x = <span>{hello /* inside */}</span>\n" );
+      ( "let x = <div>{// note\n} {value}</div>",
+        "let x =\n  <div>\n    {/* note */}\n    {value}\n  </div>\n" );
+      ( "let x = <span> // before\nhello // contains */\n</span>",
+        "let x =\n\
+        \  <span>\n\
+        \    {\n\
+        \      /* before */\n\
+        \      hello // contains */\n\
+        \    }\n\
+        \  </span>\n" );
+      ("let x = y // outside", "let x = y // outside\n");
+    ];
+  List.iter
+    (fun width ->
+      List.iter
+        (fun (opening, closing) ->
+          List.iter
+            (fun text ->
+              let source =
+                "let x = " ^ opening ^ "{//" ^ text ^ "\n}" ^ closing
+              in
+              let expected =
+                "let x =\n  " ^ opening ^ "\n    {\n      //" ^ text
+                ^ "\n    }\n  " ^ closing ^ "\n"
+              in
+              let printed = format ~width (parse source) in
+              assert (printed = expected);
+              assert (format ~width (parse printed) = expected))
+            [" starts /*"; " closes */"; " /* nested */"; " */ before /*"])
+        [("<div>", "</div>"); ("<>", "</>")])
+    [20; 40; 80; 100; 120];
+  List.iter
+    (fun (opening, closing) ->
+      let source =
+        "let x = " ^ opening
+        ^ "{value ? <XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX /> \
+           : <YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY />}"
+        ^ closing
+      in
+      let expected =
+        "let x =\n  " ^ opening
+        ^ "\n\
+          \    {value\n\
+          \      ? <XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX />\n\
+          \      : <YYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYYY />}\n\
+          \  " ^ closing ^ "\n"
+      in
+      let printed = format ~width:80 (parse source) in
+      assert (printed = expected);
+      assert (format ~width:80 (parse printed) = expected))
+    [("<div>", "</div>"); ("<>", "</>")];
+  (* Comment containers must not alter the zero/one/many-child distinction,
+     including in the React and generic JSX transforms. *)
+  List.iter
+    (fun (source, without_comments) ->
+      let actual = parse source in
+      let expected = parse without_comments in
+      assert (expression_structure actual = expression_structure expected);
+      List.iter
+        (fun jsx_module ->
+          let rewrite result =
+            let parsetree =
+              Jsx_ppx.rewrite_implementation ~jsx_version:4 ~jsx_module
+                result.Res_driver.parsetree
+            in
+            expression_structure {result with parsetree}
+          in
+          assert (rewrite actual = rewrite expected))
+        ["React"; "CustomJsx"])
+    [
+      ("let x = <span>{/* empty */}</span>", "let x = <span></span>");
+      ("let x = <>{// empty\n}</>", "let x = <></>");
+      ("let x = <C>{/* empty */}</C>", "let x = <C></C>");
+      ("let x = <C>{/* before */}<A />{/* after */}</C>", "let x = <C><A /></C>");
+      ("let x = <><A />{/* between */}<B /></>", "let x = <><A /><B /></>");
+      ("let x = <span>{}</span>", "let x = <span>{{}}</span>");
+      ("let x = <span>/* before */{}</span>", "let x = <span>{{}}</span>");
+      ("let x = <span>{{/* record */}}</span>", "let x = <span>{{}}</span>");
+    ];
+  List.iter
+    (fun source ->
+      let result =
+        Res_driver.parse_implementation_from_source ~display_filename:filename
+          ~source
+      in
+      assert result.invalid)
+    ["let x = <div>{/* missing brace */</div>"; "let x = <div>{/* unterminated"];
+  assert (
+    format ~width:80 (parse "let x = <span>/* empty */</span>")
+    = "let x = <span>{/* empty */}</span>\n");
+  assert (
+    format ~width:80 (parse "let x = <>/* inside */</> // outside")
+    = "let x = <>{/* inside */}</> // outside\n");
+  print_endline "✅ JSX child migration preserves expressions and comments"
+
 module Outcome_printer_tests = struct
   let signature_to_outcome structure =
     Lazy.force Res_outcome_printer.setup;
 
-    Clflags.include_dirs :=
-      Filename.concat "lib" "ocaml" :: !Clflags.include_dirs;
+    (Clflags.current ()).include_dirs :=
+      Filename.concat "lib" "ocaml" :: !((Clflags.current ()).include_dirs);
     Res_compmisc.init_path ();
-    Clflags.nopervasives := true;
+    (Clflags.current ()).nopervasives := true;
     let env = Res_compmisc.initial_env () in
     try
       let _typedStructure, signature, _newenv =
-        Typemod.type_toplevel_phrase env structure
+        Typemod.type_structure env structure
       in
       signature |> Printtyp.tree_of_signature
       |> !Oprint.out_signature Format.str_formatter;
@@ -173,6 +753,138 @@ module Parser_api_test = struct
     windows_crlf ()
 end
 
+(* Res_doc.item_separator puts a blank line next to an item that prints on
+   several lines, measuring the documents on each side as to_string lays them
+   out. Res_doc.comment hides comments from the measurement. *)
+module Multiline_item_spacing_test = struct
+  module Doc = Res_doc
+
+  let check name ~expected actual =
+    if actual <> expected then
+      failwith
+        (Printf.sprintf "%s:\nexpected:\n%S\nactual:\n%S" name expected actual)
+
+  (* Module items are printed inside a broken group, like print_structure. *)
+  let print ?(width = 80) doc =
+    Doc.to_string ~width (Doc.breakable_group ~force_break:true doc)
+  let items prev next = Doc.concat [prev; Doc.item_separator ~prev ~next; next]
+  let a = Doc.text "let a = 1"
+  let b = Doc.text "let b = 2"
+
+  (* A function call that fits on one line at width 80 but not at width 10. *)
+  let call =
+    Doc.group
+      (Doc.concat
+         [
+           Doc.text "f(";
+           Doc.indent
+             (Doc.concat
+                [
+                  Doc.soft_line;
+                  Doc.text "x,";
+                  Doc.line;
+                  Doc.text "y";
+                  Doc.trailing_comma;
+                ]);
+           Doc.soft_line;
+           Doc.text ")";
+         ])
+
+  let measuring () =
+    check "one-line items stay together" ~expected:"let a = 1\nlet b = 2"
+      (print (items a b));
+    check "a hard line spans lines" ~expected:"x\ny\n\nlet b = 2"
+      (print (items (Doc.concat [Doc.text "x"; Doc.hard_line; Doc.text "y"]) b));
+    check "a literal line spans lines" ~expected:"`x\ny`\n\nlet b = 2"
+      (print
+         (items (Doc.concat [Doc.text "`x"; Doc.literal_line; Doc.text "y`"]) b));
+    check "a newline inside text spans lines" ~expected:"`x\ny`\n\nlet b = 2"
+      (print (items (Doc.text "`x\ny`") b));
+    check "an item list spans lines"
+      ~expected:"let a = 1\nlet b = 2\n\nlet c = 3"
+      (print (items (items a b) (Doc.text "let c = 3")));
+    check "a group that fits is one line" ~expected:"f(x, y)\nlet b = 2"
+      (print (items call b));
+    check "a group that breaks spans lines"
+      ~expected:"f(\n  x,\n  y,\n)\n\nlet b = 2"
+      (print ~width:5 (items call b));
+    check "a chosen custom layout is measured" ~expected:"let a = 1\nlet b = 2"
+      (print (items (Doc.custom_layout [a]) b));
+    check "break parents and line suffixes do not span lines"
+      ~expected:"let a = 1 // c\nlet b = 2"
+      (print
+         (items
+            (Doc.concat
+               [a; Doc.break_parent; Doc.line_suffix (Doc.text " // c")])
+            b));
+    check "a comment above an item does not count"
+      ~expected:"let a = 1\n// c\nlet b = 2"
+      (print
+         (items a
+            (Doc.concat
+               [Doc.comment (Doc.concat [Doc.text "// c"; Doc.hard_line]); b])));
+    let forced_if_breaks =
+      Doc.if_breaks (Doc.text "a") (Doc.concat [Doc.text "b"; Doc.hard_line])
+    in
+    check "an if-breaks broken by its flat branch takes the break branch"
+      ~expected:"xa\nlet b = 2"
+      (print (items (Doc.concat [Doc.text "x"; forced_if_breaks]) b));
+    check "an if-breaks in a broken group takes the break branch"
+      ~expected:"{\n}\n\nlet b = 2"
+      (print
+         (items
+            (Doc.breakable_group ~force_break:true
+               (Doc.concat
+                  [
+                    Doc.if_breaks (Doc.text "{") (Doc.text "(");
+                    Doc.line;
+                    Doc.text "}";
+                  ]))
+            b))
+
+  let trailing_comments () =
+    let block =
+      Doc.concat [Doc.text "let a = {"; Doc.hard_line; Doc.text "}"]
+    in
+    let after_block suffix =
+      items (Doc.concat [block; Doc.line_suffix suffix]) b
+    in
+    check "a same-line trailing comment stays on its line"
+      ~expected:"let a = {\n} // c\n\nlet b = 2"
+      (print (after_block (Doc.text " // c")));
+    check "an own-line trailing comment moves below the blank line"
+      ~expected:"let a = {\n}\n\n// c\nlet b = 2"
+      (print (after_block (Doc.concat [Doc.hard_line; Doc.text "// c"])));
+    check "an empty own-line trailing comment prints an empty line"
+      ~expected:"let a = {\n}\n\n\nlet b = 2"
+      (print (after_block Doc.hard_line));
+    let own_line txt =
+      Doc.line_suffix (Doc.concat [Doc.hard_line; Doc.text txt])
+    in
+    check "later own-line trailing comments keep their line break"
+      ~expected:"let a = {\n}\n\n// c\n// d\nlet b = 2"
+      (print (items (Doc.concat [block; own_line "// c"; own_line "// d"]) b))
+
+  let predicates () =
+    let separator = Doc.item_separator ~prev:a ~next:b in
+    assert (Doc.will_break separator);
+    assert (not (Doc.is_nil separator));
+    (* A separator breaks its group, which flushes a pending line suffix. *)
+    assert (
+      not
+        (Doc.has_pending_line_suffix
+           (Doc.group (Doc.concat [Doc.line_suffix a; separator]))));
+    check "an empty custom layout prints nothing" ~expected:""
+      (print (Doc.custom_layout []))
+
+  let run () =
+    measuring ();
+    trailing_comments ();
+    predicates ();
+    print_endline "✅ multi-line item spacing"
+end
+
 let () = Outcome_printer_tests.run ()
 let () = Parser_api_test.run ()
 let () = Res_utf8_test.run ()
+let () = Multiline_item_spacing_test.run ()

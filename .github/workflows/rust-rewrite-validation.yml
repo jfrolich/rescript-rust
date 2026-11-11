@@ -46,6 +46,9 @@ jobs:
         run: |
           python3 scripts/test_js_output_fixture_reporting.py
           python3 scripts/test_typedtree_parity_exit.py
+          python3 scripts/test_parser_ast0_parity_exit.py
+          python3 scripts/test_parser_ast_parity_exit.py
+          python3 scripts/test_error_output_parity_exit.py
 
       # rust-toolchain.toml pins the toolchain of every Rust build here.
       - name: Install the pinned Rust toolchain
@@ -77,9 +80,11 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           ./scripts/rust_compiler_shims.sh release
 
+      # The same OCaml as ci.yml: diagnostics are laid out by OCaml's Format,
+      # whose break sizing changed in 5.5, and the Rust formatter follows it.
       - uses: ./.github/actions/setup-ocaml
         with:
-          compiler: "5.3.0"
+          compiler: "5.5.2"
           os: ubuntu-24.04
           cache-prefix: opam-rewrite-validation-v1
 

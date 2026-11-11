@@ -210,6 +210,13 @@ pub enum Node {
         /// The code run when the body raises.
         handler: Lam,
     },
+    /// `try body finally finally`.
+    TryFinally {
+        /// The protected body.
+        body: Lam,
+        /// The code run after the body, whether or not it raises.
+        finally: Lam,
+    },
     /// `LifThenElse`.
     If {
         /// The condition.
@@ -277,8 +284,6 @@ pub struct PrimPayload {
 pub struct ApplyPayload {
     /// Location, inline and uncurry information.
     pub info: ApInfo,
-    /// Whether the application is a JSX call produced by the JSX transform.
-    pub transformed_jsx: bool,
 }
 
 /// Side-table payload of a [`Node::Function`].
@@ -391,8 +396,6 @@ pub enum View<'a> {
         args: &'a [Lam],
         /// Location, inline and uncurry information.
         info: &'a ApInfo,
-        /// Whether the application is a JSX call produced by the JSX transform.
-        transformed_jsx: bool,
     },
     /// See [`Node::Function`].
     Function {
@@ -419,6 +422,8 @@ pub enum View<'a> {
     StaticCatch(Lam, i32, &'a [Ident], Lam),
     /// See [`Node::TryWith`]: body, exception binder, handler.
     TryWith(Lam, Ident, Lam),
+    /// See [`Node::TryFinally`]: body and finalizer.
+    TryFinally(Lam, Lam),
     /// See [`Node::If`]: condition, then branch, else branch.
     If(Lam, Lam, Lam),
     /// See [`Node::Sequence`].
@@ -519,6 +524,10 @@ pub struct LamArena {
     str_keys: Vec<(u32, u32)>,
     text: String,
     catches: Vec<CatchPayload>,
+    /// Whether an assignment node was ever added. Most programs have none,
+    /// and the passes that ask which variables a term assigns then need no
+    /// walk (see `lambda_traverse::arena_assigned_variables`).
+    has_assign: bool,
 }
 
 /// A program: an arena and the root of its term.
@@ -572,7 +581,14 @@ impl LamArena {
             str_keys: Vec::new(),
             text: String::new(),
             catches: Vec::new(),
+            has_assign: false,
         }
+    }
+
+    /// False when no term of this arena can contain an assignment.
+    #[inline]
+    pub fn may_assign(&self) -> bool {
+        self.has_assign
     }
 
     /// Number of nodes pushed so far, reachable or not.
@@ -738,7 +754,6 @@ impl LamArena {
                     func,
                     args: self.list(args),
                     info: &p.info,
-                    transformed_jsx: p.transformed_jsx,
                 }
             }
             Node::Function { body, info } => View::Function {
@@ -801,6 +816,7 @@ impl LamArena {
                 View::StaticCatch(body, p.label, self.idents(p.params), handler)
             }
             Node::TryWith { body, id, handler } => View::TryWith(body, self.ident(id), handler),
+            Node::TryFinally { body, finally } => View::TryFinally(body, finally),
             Node::If { cond, then_, else_ } => View::If(cond, then_, else_),
             Node::Sequence(a, b) => View::Sequence(a, b),
             Node::Break => View::Break,
@@ -875,6 +891,7 @@ impl LamArena {
     #[inline]
     pub fn push(&mut self, node: Node) -> Lam {
         let id = Lam(checked_u32(self.nodes.len()));
+        self.has_assign |= matches!(node, Node::Assign { .. });
         self.nodes.push(node);
         id
     }
@@ -953,12 +970,9 @@ impl LamArena {
     }
 
     /// Appends an application payload.
-    pub fn add_apply(&mut self, info: ApInfo, transformed_jsx: bool) -> ApplyId {
+    pub fn add_apply(&mut self, info: ApInfo) -> ApplyId {
         let i = ApplyId(checked_u32(self.applies.len()));
-        self.applies.push(ApplyPayload {
-            info,
-            transformed_jsx,
-        });
+        self.applies.push(ApplyPayload { info });
         i
     }
 
@@ -1170,8 +1184,8 @@ impl LamArena {
     }
 
     /// `Lapply` without the simplifications of [`Self::apply`].
-    pub fn apply_raw(&mut self, func: Lam, args: &[Lam], info: ApInfo, jsx: bool) -> Lam {
-        let info = self.add_apply(info, jsx);
+    pub fn apply_raw(&mut self, func: Lam, args: &[Lam], info: ApInfo) -> Lam {
+        let info = self.add_apply(info);
         let args = self.add_list(args);
         self.push(Node::Apply { func, args, info })
     }
@@ -1239,6 +1253,11 @@ impl LamArena {
     /// A `try` whose exception binder is already in the identifier table.
     pub fn try_with(&mut self, body: Lam, id: IdentId, handler: Lam) -> Lam {
         self.push(Node::TryWith { body, id, handler })
+    }
+
+    /// `Lam.try_finally`.
+    pub fn try_finally(&mut self, body: Lam, finally: Lam) -> Lam {
+        self.push(Node::TryFinally { body, finally })
     }
 
     /// An `if` without the simplifications of [`Self::if_`].
@@ -1586,18 +1605,47 @@ impl LamArena {
         let acts = self.switch_actions(info, actions);
         let const_keys = self.switch_const_keys(info);
         let block_keys = self.switch_block_keys(info);
-        // lambda.ml `switch`: an untagged variant is dispatched on the value.
+        // lambda.ml `switch`: an untagged variant is dispatched on the value,
+        // so a constant scrutinee takes the arm the generated code takes for
+        // its JavaScript value, not the arm of the constructor it was written
+        // with.
         if let SwitchDispatch::Variant(facts) = &payload.dispatch
             && !facts.block_types.is_empty()
         {
-            return match crate::lambda::untagged_action_index(facts, cst, const_keys, block_keys) {
-                crate::lambda::UntaggedChoice::Const(i) => Some(acts.consts[i]),
-                crate::lambda::UntaggedChoice::Block(i) => Some(acts.blocks[i]),
-                crate::lambda::UntaggedChoice::NoCase => acts.fail,
-                crate::lambda::UntaggedChoice::Undecided => None,
+            let consts: Vec<(SwitchKey, Lam)> = const_keys
+                .iter()
+                .cloned()
+                .zip(acts.consts.iter().copied())
+                .collect();
+            let blocks: Vec<(SwitchKey, Lam)> = block_keys
+                .iter()
+                .cloned()
+                .zip(acts.blocks.iter().copied())
+                .collect();
+            let plan = crate::lambda::untagged_plan_with(
+                payload.consts_full,
+                &consts,
+                payload.blocks_full,
+                &blocks,
+                acts.fail,
+                &payload.dispatch,
+                |a: &Lam, b: &Lam| self.eq_approx(*a, *b),
+            );
+            return match (plan, crate::lambda::untagged_value(cst)) {
+                (Some(plan), Some(value)) => {
+                    match crate::lambda::untagged_dispatch::select(&plan, &value, &mut |_| ()) {
+                        crate::lambda::untagged_dispatch::Outcome::Arm(action) => Some(action),
+                        // lambda.ml `action_or_switch None`.
+                        crate::lambda::untagged_dispatch::Outcome::Default => acts.fail,
+                        crate::lambda::untagged_dispatch::Outcome::Nothing => None,
+                    }
+                }
+                _ => None,
             };
         }
+        let literal_denotes_same = crate::lambda::literal_denotes_same;
         match cst {
+            // By runtime value: a coercion accepts `@as(1.)` for `@as(1.0)`.
             Constant::Constructor(tag) => const_keys
                 .iter()
                 .position(|key| {
@@ -1605,16 +1653,26 @@ impl LamArena {
                         key,
                         SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
                             candidate
-                        )) if candidate == tag
+                        )) if literal_denotes_same(&tag.literal, &candidate.literal)
                     )
                 })
                 .map(|i| acts.consts[i])
                 .or(acts.fail),
-            Constant::Int { i, .. } => const_keys
-                .iter()
-                .position(|key| matches!(key, SwitchKey::Int(value) if value == i))
-                .map(|i| acts.consts[i])
-                .or(acts.fail),
+            Constant::Int { i, .. } => {
+                let literal = crate::types::VariantLiteralTag::Int(i64::from(*i));
+                const_keys
+                    .iter()
+                    .position(|key| match key {
+                        SwitchKey::Int(value) => value == i,
+                        // A constant represented as a number, compared by value.
+                        SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(
+                            tag,
+                        )) => literal_denotes_same(&literal, &tag.literal),
+                        SwitchKey::Constructor(_) => false,
+                    })
+                    .map(|i| acts.consts[i])
+                    .or(acts.fail)
+            }
             Constant::Block { tag_info, .. } => {
                 let runtime = match &**tag_info {
                     TagInfo::Constructor(c) => {
@@ -1631,7 +1689,7 @@ impl LamArena {
                             (
                                 SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(candidate)),
                                 Some(runtime)
-                            ) if candidate == runtime
+                            ) if crate::lambda::same_block_runtime(runtime, candidate)
                         )
                     })
                     .map(|i| acts.blocks[i])
@@ -1660,14 +1718,17 @@ impl LamArena {
         }
     }
 
-    /// `Lam.apply`.
-    pub fn apply(&mut self, func: Lam, args: &[Lam], info: ApInfo, jsx: bool) -> Lam {
+    /// `Lam.apply`. An async function or one with a directive stays a
+    /// function (lambda.ml:1096-1097, `lfunction_can_be_inlined`).
+    pub fn apply(&mut self, func: Lam, args: &[Lam], info: ApInfo) -> Lam {
         match self.node(func) {
             Node::Function { body, info: f } => {
-                if let Some(reduced) = self.eta_reduce_function_apply(f, body, args, &info) {
+                if crate::lambda::lam_analysis::lfunction_can_be_inlined(self, f)
+                    && let Some(reduced) = self.eta_reduce_function_apply(f, body, args, &info)
+                {
                     return reduced;
                 }
-                self.apply_raw(func, args, info, jsx)
+                self.apply_raw(func, args, info)
             }
             Node::Let {
                 kind,
@@ -1675,10 +1736,10 @@ impl LamArena {
                 value,
                 body,
             } if matches!(self.node(body), Node::Function { .. }) => {
-                let inner = self.apply(body, args, info, jsx);
+                let inner = self.apply(body, args, info);
                 self.let_with(kind, id, value, inner)
             }
-            _ => self.apply_raw(func, args, info, jsx),
+            _ => self.apply_raw(func, args, info),
         }
     }
 
@@ -1686,12 +1747,9 @@ impl LamArena {
     pub fn apply_with(&mut self, func: Lam, args: LamList, info: ApplyId) -> Lam {
         match self.node(func) {
             Node::Function { .. } | Node::Let { .. } => {
-                let ApplyPayload {
-                    info: ap_info,
-                    transformed_jsx,
-                } = self.applies[info.index()].clone();
+                let ap_info = self.applies[info.index()].info.clone();
                 let args = self.list_vec(args);
-                self.apply(func, &args, ap_info, transformed_jsx)
+                self.apply(func, &args, ap_info)
             }
             _ => self.apply_raw_with(func, args, info),
         }
@@ -1729,9 +1787,9 @@ impl LamArena {
                 else {
                     return None;
                 };
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
-                let wrap_prim = self.prims[wrap.index()].primitive.clone();
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
+                let wrap_prim = self.prims[wrap.index()].primitive.clone();
                 let inner = self.prim(inner_prim, &eta_args, ap_info.loc);
                 Some(self.prim(wrap_prim, &[inner], ap_info.loc))
             }
@@ -1739,8 +1797,8 @@ impl LamArena {
                 args: inner_args,
                 info: inner_info,
             } => {
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
                 Some(self.prim(inner_prim, &eta_args, ap_info.loc))
             }
             Node::Sequence(first, second) => {
@@ -1754,8 +1812,8 @@ impl LamArena {
                 if !self.is_const(second) {
                     return None;
                 }
-                let eta_args = self.eta_conversion_args(params, inner_args, args)?;
                 let inner_prim = self.prims[inner_info.index()].primitive.clone();
+                let eta_args = self.eta_conversion_args(&inner_prim, params, inner_args, args)?;
                 let inner = self.prim(inner_prim, &eta_args, ap_info.loc);
                 Some(self.seq(inner, second))
             }
@@ -1763,12 +1821,19 @@ impl LamArena {
         }
     }
 
+    /// `Lambda.is_eta_conversion_exn` behind `evaluates_args_as_call`
+    /// (lambda.ml:760-771): `&&` and `||` may skip their right operand, so the
+    /// call's argument for it must be one whose evaluation does nothing.
     fn eta_conversion_args(
         &self,
+        primitive: &Primitive,
         params: IdentSpan,
         inner_args: LamList,
         outer_args: &[Lam],
     ) -> Option<smallvec::SmallVec<[Lam; 8]>> {
+        if !self.evaluates_args_as_call(primitive, outer_args) {
+            return None;
+        }
         let params = self.idents(params);
         let inner_args = self.list(inner_args);
         if params.len() != inner_args.len() || params.len() != outer_args.len() {
@@ -1785,6 +1850,17 @@ impl LamArena {
                 },
             )
             .collect()
+    }
+
+    /// `Lambda.evaluates_args_as_call` (lambda.ml:760-771): whether
+    /// `primitive` on `args`, the arguments of a call, evaluates them as the
+    /// call does.
+    pub(crate) fn evaluates_args_as_call(&self, primitive: &Primitive, args: &[Lam]) -> bool {
+        !primitive.may_skip_operands()
+            || args
+                .iter()
+                .skip(1)
+                .all(|arg| matches!(self.node(*arg), Node::Const(_) | Node::Var(_)))
     }
 
     /// `Lam.seq`.
@@ -1854,12 +1930,6 @@ impl LamArena {
         self.prim(Primitive::Pnot, &[lam], loc)
     }
 
-    /// `[Lvar j; Lconst _]` with `j == i`: the comparison operands of the
-    /// `Pisint` rewrites in `Lam.if_`.
-    fn is_var_const_cmp(&self, args: &[Lam], i: &Ident) -> bool {
-        matches!(args, [v, c] if self.is_const(*c) && self.as_var(*v).is_some_and(|j| i.same(&j)))
-    }
-
     /// `Lam.if_`.
     pub fn if_(&mut self, cond: Lam, then_: Lam, else_: Lam) -> Lam {
         if let Some(constant) = self.as_const(cond) {
@@ -1896,90 +1966,10 @@ impl LamArena {
                 None => self.if_raw(cond, then_, else_),
             };
         }
-        if let Some((Primitive::Pisint, pargs, _)) = self.as_prim(cond)
-            && let [v] = pargs
-            && let Some(i) = self.as_var(*v)
-        {
-            if let Some(r) = self.if_pisint(&i, then_, else_) {
-                return r;
-            }
-        }
+        // `if a then raise e else c` -> `(if a then raise e else ()); c`
+        // is code motion, not normalization; it is the final
+        // `lam_pass_guard_raises` pass (compiler/ml/lambda.ml if_).
         self.if_raw(cond, then_, else_)
-    }
-
-    fn if_pisint(&mut self, i: &Ident, then_: Lam, else_: Lam) -> Option<Lam> {
-        // if (Pisint i) then (if (i == c) then _ else e) else e
-        if let Node::If {
-            cond: pred,
-            else_: branch_false,
-            ..
-        } = self.node(then_)
-            && let Some((Primitive::Pintcomp(Comparison::Eq), pred_args, _)) = self.as_prim(pred)
-            && self.is_var_const_cmp(pred_args, i)
-            && self.eq_approx(branch_false, else_)
-        {
-            return Some(then_);
-        }
-        // if (Pisint i) then (i == c) else false
-        if let Some((Primitive::Pintcomp(Comparison::Eq), pred_args, _)) = self.as_prim(then_)
-            && self.is_var_const_cmp(pred_args, i)
-            && matches!(self.as_const(else_), Some(Constant::JsFalse))
-        {
-            return Some(then_);
-        }
-        // if (Pisint i) then (if (i != c) then t else f) else t
-        if let Node::If {
-            cond: pred,
-            then_: branch_true,
-            else_: branch_false,
-        } = self.node(then_)
-            && let Node::Prim {
-                args: pred_args,
-                info,
-            } = self.node(pred)
-            && matches!(
-                self.prims[info.index()].primitive,
-                Primitive::Pintcomp(Comparison::Neq)
-            )
-            && self.is_var_const_cmp(self.list(pred_args), i)
-            && self.eq_approx(branch_true, else_)
-        {
-            let loc = self.prims[info.index()].loc;
-            let info = self.add_prim(Primitive::Pintcomp(Comparison::Eq), loc);
-            let cmp = self.prim_raw_with(info, pred_args);
-            return Some(self.if_raw(cmp, branch_false, branch_true));
-        }
-        match self.as_prim(then_) {
-            Some((Primitive::Pintcomp(Comparison::Neq), pred_args, _)) => {
-                if self.is_var_const_cmp(pred_args, i)
-                    && matches!(self.as_const(else_), Some(Constant::JsTrue))
-                {
-                    let Node::Prim { args, .. } = self.node(then_) else {
-                        unreachable!()
-                    };
-                    let (_, _, loc) = self.as_prim(then_).expect("checked primitive");
-                    let info = self.add_prim(Primitive::Pintcomp(Comparison::Neq), loc);
-                    return Some(self.prim_raw_with(info, args));
-                }
-            }
-            Some((Primitive::Pnot, [inner], _)) => {
-                let inner = *inner;
-                if let Node::Prim { args, info } = self.node(inner)
-                    && matches!(
-                        self.prims[info.index()].primitive,
-                        Primitive::Pintcomp(Comparison::Eq)
-                    )
-                    && self.is_var_const_cmp(self.list(args), i)
-                    && matches!(self.as_const(else_), Some(Constant::JsTrue))
-                {
-                    let loc = self.prims[info.index()].loc;
-                    let info = self.add_prim(Primitive::Pintcomp(Comparison::Neq), loc);
-                    return Some(self.prim_raw_with(info, args));
-                }
-            }
-            _ => {}
-        }
-        None
     }
 
     /// `Lam.eq_approx`.
@@ -2215,6 +2205,15 @@ impl LamArena {
                     self.try_with(nb, id, nh)
                 }
             }
+            Node::TryFinally { body, finally } => {
+                let nb = f(self, body);
+                let nf = f(self, finally);
+                if nb == body && nf == finally {
+                    lam
+                } else {
+                    self.try_finally(nb, nf)
+                }
+            }
             Node::If { cond, then_, else_ } => {
                 let nc = f(self, cond);
                 let nt = f(self, then_);
@@ -2354,7 +2353,12 @@ impl LamArena {
                 f(scrut);
                 self.list(actions).iter().copied().for_each(f);
             }
-            Node::StaticCatch { body, handler, .. } | Node::TryWith { body, handler, .. } => {
+            Node::StaticCatch { body, handler, .. }
+            | Node::TryWith { body, handler, .. }
+            | Node::TryFinally {
+                body,
+                finally: handler,
+            } => {
                 f(body);
                 f(handler);
             }
@@ -2388,7 +2392,7 @@ impl LamArena {
             Lambda::Lapply(ap) => {
                 let func = self.import(&ap.ap_func);
                 let args = self.import_list(&ap.ap_args);
-                let info = self.add_apply(ap.ap_info.clone(), ap.ap_transformed_jsx);
+                let info = self.add_apply(ap.ap_info.clone());
                 self.apply_raw_with(func, args, info)
             }
             Lambda::Lfunction(func) => {
@@ -2463,6 +2467,11 @@ impl LamArena {
                 let handler = self.import(handler);
                 self.try_(body, *id, handler)
             }
+            Lambda::LtryFinally(body, finally) => {
+                let body = self.import(body);
+                let finally = self.import(finally);
+                self.try_finally(body, finally)
+            }
             Lambda::LifThenElse(c, t, e) => {
                 let c = self.import(c);
                 let t = self.import(t);
@@ -2530,7 +2539,6 @@ impl LamArena {
                     ap_func: Box::new(self.export(func)),
                     ap_args: self.export_list(args),
                     ap_info: p.info.clone(),
-                    ap_transformed_jsx: p.transformed_jsx,
                 }))
             }
             Node::Function { body, info } => {
@@ -2636,6 +2644,9 @@ impl LamArena {
                 self.ident(id),
                 Box::new(self.export(handler)),
             ),
+            Node::TryFinally { body, finally } => {
+                Lambda::LtryFinally(Box::new(self.export(body)), Box::new(self.export(finally)))
+            }
             Node::If { cond, then_, else_ } => Lambda::LifThenElse(
                 Box::new(self.export(cond)),
                 Box::new(self.export(then_)),
@@ -2775,6 +2786,35 @@ mod tests {
             crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root),
             3,
         );
+    }
+
+    #[test]
+    fn an_arena_without_assignments_needs_no_walk_for_assigned_variables() {
+        use crate::lambda::lambda_traverse::arena_assigned_variables;
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let read = a.var(x);
+        let unit = a.unit();
+        let pure = a.seq(read, unit);
+        assert!(!a.may_assign());
+        assert!(arena_assigned_variables(&a, pure).is_empty());
+
+        // An assignment anywhere in the arena brings the walk back, for
+        // every term: one that contains it and one that does not.
+        let one = a.unit();
+        let assign = a.assign(y, one);
+        let assigning = a.seq(pure, assign);
+        assert!(a.may_assign());
+        let assigned = arena_assigned_variables(&a, assigning);
+        assert_eq!(assigned.len(), 1);
+        assert!(assigned.contains(&y));
+        assert!(arena_assigned_variables(&a, pure).is_empty());
+
+        // A copy of the arena keeps the answer.
+        let copy = a.clone();
+        assert!(copy.may_assign());
+        assert_eq!(arena_assigned_variables(&copy, assigning), assigned);
     }
 
     #[test]

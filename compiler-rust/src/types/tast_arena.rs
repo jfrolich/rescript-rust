@@ -18,7 +18,7 @@ use std::num::NonZeroU32;
 use crate::parse_arena::ArenaList;
 
 use super::typedtree::{
-    ApplyArg, Case, ExpExtra, Expression, ExtensionConstructor, FunctionParam, ModuleExpr,
+    ApplyArg, Case, DictEntry, ExpExtra, Expression, ExtensionConstructor, FunctionParam, ModuleExpr,
     ModuleType, PatExtra, Pattern, RecordField, StructureItem, TypedCoreType, TypedSignatureItem,
     TypedValueDescription, ValueBinding,
 };
@@ -219,13 +219,15 @@ pub type TArgList = ArenaList<ApplyArg>;
 pub type TParamList = ArenaList<FunctionParam>;
 /// The fields of a record expression.
 pub type TFieldList = ArenaList<RecordField>;
+/// The entries of a dict literal.
+pub type TDictList = ArenaList<DictEntry>;
 /// The items of a structure.
 pub type TStrItemList = ArenaList<StructureItem>;
 /// The items of a signature.
 pub type TSigItemList = ArenaList<TypedSignatureItem>;
 
 /// One pool of list items. A list is a contiguous range, pushed in one go.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct ListPool<T> {
     items: Vec<T>,
 }
@@ -281,6 +283,7 @@ pub struct TypedArena {
     apply_args: ListPool<ApplyArg>,
     function_params: ListPool<FunctionParam>,
     record_fields: ListPool<RecordField>,
+    dict_entries: ListPool<DictEntry>,
     structure_items: ListPool<StructureItem>,
     signature_items: ListPool<TypedSignatureItem>,
     exp_colds: Vec<ExpCold>,
@@ -292,6 +295,18 @@ pub struct TypedArena {
 /// stores a new one, which keeps OCaml's value semantics for
 /// `exp_extra`/`pat_extra` (`compiler/ml/typedtree.ml`).
 impl TypedArena {
+    /// A pattern-only scratch copy for lowering dictionary patterns while
+    /// the original typed arena is borrowed by translation. Preserve handles
+    /// and cold records; expression and module pools are not needed.
+    pub(crate) fn clone_pattern_storage(&self) -> Self {
+        Self {
+            patterns: self.patterns.clone(),
+            pattern_lists: self.pattern_lists.clone(),
+            pat_colds: self.pat_colds.clone(),
+            ..Self::default()
+        }
+    }
+
     /// `exp_extra`, outermost wrapper first.
     #[inline]
     pub fn exp_extra(&self, e: &Expression) -> &[ExpExtraItem] {
@@ -427,6 +442,7 @@ list_pool_accessors! {
     push_apply_args, apply_args, apply_args, ApplyArg;
     push_function_params, function_params, function_params, FunctionParam;
     push_record_fields, record_fields, record_fields, RecordField;
+    push_dict_entries, dict_entries, dict_entries, DictEntry;
     push_structure_items, structure_items, structure_items, StructureItem;
     push_signature_items, signature_items, signature_items, TypedSignatureItem;
 }

@@ -44,6 +44,7 @@
   },
   "bin": {
     "rescript": "cli/rescript.js",
+    "rescript-ocaml": "cli/rescript-ocaml.js",
     "rescript-tools": "cli/rescript-tools.js"
   },
   "scripts": {
@@ -55,7 +56,13 @@
     "check:all": "biome check .",
     "format": "biome check --no-errors-on-unmatched . --fix",
     "typecheck": "tsc",
-    "apidocs:generate": "yarn workspace @utils/scripts apidocs:generate"
+    "apidocs:generate": "yarn workspace @utils/scripts apidocs:generate",
+    "changelog:check": "node scripts/changelog.js check",
+    "changelog:preview": "node scripts/changelog.js preview",
+    "changelog:release": "node scripts/changelog.js release",
+    "changelog:open": "node scripts/changelog.js open",
+    "test-changelog": "node --test scripts/changelog.test.js scripts/magicNumbers.test.js",
+    "test-commit-records": "node --test scripts/commitRecords.test.js scripts/recordMarkdown.test.js"
   },
   "files": [
     "CHANGELOG.md",
@@ -66,8 +73,10 @@
     "cli"
   ],
   "exports": {
-    "./lib/es6/*": "./lib/es6/*",
-    "./lib/js/*": "./lib/js/*",
+    "./tools": {
+      "require": "./cli/common/tools.cjs",
+      "default": "./cli/common/tools.js"
+    },
     "./package.json": "./package.json"
   },
   "imports": {
@@ -79,18 +88,17 @@
   },
   "optionalDependencies": {
     "@rescript/darwin-arm64": "workspace:packages/@rescript/darwin-arm64",
-    "@rescript/darwin-x64": "workspace:packages/@rescript/darwin-x64",
     "@rescript/linux-arm64": "workspace:packages/@rescript/linux-arm64",
     "@rescript/linux-x64": "workspace:packages/@rescript/linux-x64",
     "@rescript/win32-x64": "workspace:packages/@rescript/win32-x64"
   },
   "devDependencies": {
-    "@biomejs/biome": "2.5.5",
+    "@biomejs/biome": "2.5.15",
     "@jfrolich/ppx-spice": "0.9.0",
     "@types/node": "^26.1.1",
     "@types/semver": "^7.7.0",
     "@yarnpkg/types": "^4.0.1",
-    "mocha": "11.7.6",
+    "mocha": "12.0.3",
     "semver": "^7.7.2",
     "typescript": "6.0.3"
   },
@@ -108,6 +116,6 @@
     "tests/commonjs_tests",
     "scripts/res"
   ],
-  "packageManager": "yarn@4.12.0",
+  "packageManager": "yarn@4.18.1",
   "preferUnplugged": true
 }

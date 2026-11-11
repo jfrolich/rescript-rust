@@ -28,7 +28,6 @@ fn lowers_js_var_without_args_to_a_value() {
                 variadic: false,
                 effective_arity: 0,
             },
-            transformed_jsx: false,
         })),
         vec![],
         LamLoc::NONE,
@@ -55,7 +54,6 @@ fn lowers_js_var_calls_with_runtime_args_even_without_external_arg_metadata() {
                 variadic: false,
                 effective_arity: 0,
             },
-            transformed_jsx: false,
         })),
         vec![Lambda::Lconst(Constant::Int {
             i: 10,
@@ -87,7 +85,6 @@ fn lowers_module_external_calls_to_namespace_imports() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![],
         LamLoc::NONE,
@@ -140,10 +137,9 @@ fn lowers_pjs_object_get_to_method_calls() {
         ],
         ap_info: ApInfo {
             loc: LamLoc::NONE,
-            inlined: InlineAttribute::Default,
+
             status: ApplyStatus::Uncurry,
         },
-        ap_transformed_jsx: false,
     }));
 
     let program = compiler.compile_program(&lam);
@@ -185,7 +181,6 @@ fn lowers_spliced_js_calls_by_flattening_literal_variadic_arrays() {
                 variadic: true,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![Lambda::prim(
             Primitive::Pmakearray,
@@ -243,7 +238,6 @@ fn lowers_js_send_omits_trailing_optional_undefined_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 2,
             },
-            transformed_jsx: false,
         })),
         vec![
             Lambda::const_(Constant::Float("42.".to_string())),
@@ -284,7 +278,6 @@ fn lowers_js_new_omits_trailing_optional_undefined_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![
             Lambda::const_(Constant::String("ab+c".to_string())),
@@ -335,7 +328,6 @@ fn lowers_external_polyvar_string_and_int_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![
             Lambda::const_(Constant::Pointer("in_".to_string())),
@@ -372,7 +364,6 @@ fn lowers_external_polyvar_payload_args_to_two_js_args_like_ocaml() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![Lambda::const_(Constant::Block {
             tag_info: Box::new(TagInfo::PolyVar("b".to_string())),
@@ -445,7 +436,6 @@ fn lowers_marshaled_constant_args_in_js_call() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![],
         LamLoc::NONE,
@@ -682,7 +672,6 @@ fn lowers_ignored_js_call_args_to_ocaml_sequence_effects() {
                 variadic: false,
                 effective_arity: 1,
             },
-            transformed_jsx: false,
         })),
         vec![
             Lambda::Lsequence(
@@ -780,7 +769,7 @@ fn js_pass_pipeline_preserves_dict_has_in_operator_through_typeof() {
                             VarDecl {
                                 ident: dict,
                                 value: Some(JE::new(
-                                    ExprKind::Object(None, test_props(vec![], &mut j)),
+                                    ExprKind::Object(test_props(vec![], &mut j)),
                                     &mut j,
                                 )),
                                 property: LetKind::Strict,
@@ -1086,8 +1075,8 @@ fn required_modules_match_ocaml_sort_across_same_name_import_pairs() {
             vscode,
             some_namespace,
             some_default,
-            ome_default,
             ome_namespace,
+            ome_default,
         ]
     );
 }
@@ -1313,4 +1302,141 @@ fn lowers_nullable_predicates_to_js_null_checks() {
     );
     assert!(nullable_compiled.prelude.is_empty());
     assert!(undefined_compiled.prelude.is_empty());
+}
+
+fn js_val_call(name: &str, arg_types: Vec<Param>, args: Vec<Lambda>) -> Lambda {
+    Lambda::prim(
+        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
+            prim_name: name.to_string(),
+            arg_types,
+            ffi: ExternalDecl {
+                kind: DeclKind::DeclVal {
+                    name: name.to_string(),
+                },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 1,
+            },
+        })),
+        args,
+        LamLoc::NONE,
+    )
+}
+
+fn polyvar_param(arg_type: Attr) -> Param {
+    Param {
+        arg_type,
+        arg_label: LabelNoname::ArgEmpty,
+    }
+}
+
+// lam_compile_external_call.ml `hold_arg` (#9217): an event-style argument
+// is read twice, so a call is bound to a temporary and runs once.
+#[test]
+fn event_style_polyvar_call_argument_runs_once() {
+    let mut compiler = LambdaCompiler::new();
+    let next = js_val_call(
+        "next",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(0))],
+    );
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![next],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(
+        print_stmts(&p.arena, &p.block),
+        "let tmp = next(0);\n\non(tmp.NAME, tmp.VAL);"
+    );
+}
+
+// The literal `#click(wrap(h))` passes its tag and payload in place, even
+// with an effectful payload.
+#[test]
+fn event_style_polyvar_literal_with_effectful_payload_passes_in_place() {
+    let mut compiler = LambdaCompiler::new();
+    let wrap = js_val_call(
+        "wrap",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(1))],
+    );
+    let literal = Lambda::prim(
+        Primitive::Pmakeblock(TagInfo::PolyVar("click".to_string()), Mutable::Immutable),
+        vec![Lambda::const_(Constant::Pointer("click".to_string())), wrap],
+        LamLoc::NONE,
+    );
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![literal],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(print_stmts(&p.arena, &p.block), "on(\"click\", wrap(1));");
+}
+
+// An `@int` dispatch switches on its argument in a function; an `await`
+// there would be a syntax error, so it is bound before the call.
+#[test]
+fn int_polyvar_await_argument_is_bound_outside_the_dispatch() {
+    let mut compiler = LambdaCompiler::new();
+    let p_ident = Ident::create_local("p");
+    let awaited = Lambda::prim(Primitive::Pawait, vec![Lambda::var(p_ident)], LamLoc::NONE);
+    let lam = js_val_call(
+        "setLevel",
+        vec![polyvar_param(Attr::Int(vec![
+            ("low".to_string(), 0),
+            ("high".to_string(), 10),
+        ]))],
+        vec![awaited],
+    );
+    let p = compiler.compile_program(&lam);
+    let printed = print_stmts(&p.arena, &p.block);
+    assert!(
+        printed.starts_with("let tmp = await p;"),
+        "await is bound first: {printed}"
+    );
+    assert!(printed.contains("switch (tmp)"), "{printed}");
+}
+
+// A variable is read in place, as is any argument an `@string` dispatch
+// reads once without effects.
+#[test]
+fn polyvar_variable_argument_needs_no_temporary() {
+    let mut compiler = LambdaCompiler::new();
+    let x = Ident::create_local("x");
+    let lam = js_val_call(
+        "on",
+        vec![polyvar_param(Attr::PolyVar { descr: None })],
+        vec![Lambda::var(x)],
+    );
+    let p = compiler.compile_program(&lam);
+    assert_eq!(print_stmts(&p.arena, &p.block), "on(x.NAME, x.VAL);");
+}
+
+// lam_compile_external_obj.ml `hold_obj_args`: an `@obj` field with an `@int`
+// dispatch binds an effectful argument too.
+#[test]
+fn obj_polyvar_int_field_call_argument_is_bound() {
+    let mut compiler = LambdaCompiler::new();
+    let next = js_val_call(
+        "next",
+        vec![polyvar_param(Attr::Nothing)],
+        vec![Lambda::const_(Constant::int(0))],
+    );
+    let compiled = compiler.compile_expr_lam(&Lambda::prim(
+        Primitive::PjsObjectCreate(vec![ObjParam {
+            obj_arg_type: Attr::Int(vec![("low".to_string(), 0), ("high".to_string(), 10)]),
+            obj_arg_label: Label::ObjLabel {
+                name: "level".to_string(),
+            },
+        }]),
+        vec![next],
+        LamLoc::NONE,
+    ));
+    assert_eq!(compiled.prelude.len(), 1, "the call is bound first");
+    let printed = print_expr(&compiler.j, compiled.expr);
+    assert!(printed.contains("switch (tmp)"), "{printed}");
 }

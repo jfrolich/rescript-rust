@@ -1,0 +1,8 @@
+
+  [1;31mSyntax error![0m
+  [36m/.../fixtures/instance_of_template_invalid_escape.res[0m:[2m1:14-18[0m
+
+  [1;31m1[0m [2m│[0m @instanceOf(`[1;31mFo\xo[0m`) type foo
+  2 [2m│[0m 
+
+  Invalid string escape sequence

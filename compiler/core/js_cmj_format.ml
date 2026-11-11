@@ -45,35 +45,24 @@ type keyed_cmj_value = {
 
 type keyed_cmj_values = keyed_cmj_value array
 
-type hoisted_export = {
-  path: string list;  (** Exact source-level module path segments. *)
-  export_name: string;
-      (** Flattened compiler name for the export, before JS identifier
-          conversion: the emitted export applies [Ext_ident.convert] to it
-          (a hoisted [Operator.\"+"] is stored as [Operator$+] and exported
-          as [Operator$$plus]), and so must any consumer that reconstructs
-          the JS export name. *)
-}
-
 type t = {
   values: keyed_cmj_values;
-  hoisted_exports: hoisted_export array;
   pure: bool;
   package_spec: Js_packages_info.t;
   case: Ext_js_file_kind.case;
 }
 
-let make ~(values : cmj_value Map_string.t) ~hoisted_exports ~effect_
-    ~package_spec ~case : t =
+let make ~(values : cmj_value Map_string.t) ~effect_ ~package_spec ~case : t =
   {
     values =
-      Map_string.to_sorted_array_with_f values (fun k v ->
+      Map_string.bindings values
+      |> List.map (fun (k, (v : cmj_value)) ->
           {
             name = k;
             arity = v.arity;
             persistent_closed_lambda = v.persistent_closed_lambda;
-          });
-    hoisted_exports = Array.of_list hoisted_exports;
+          })
+      |> Array.of_list;
     pure = effect_ = None;
     package_spec;
     case;
@@ -81,19 +70,14 @@ let make ~(values : cmj_value Map_string.t) ~hoisted_exports ~effect_
 
 (* Serialization .. *)
 let from_file name : t =
-  let ic = open_in_bin name in
-  let _digest = Digest.input ic in
-  let v : t = input_value ic in
-  close_in ic;
-  v
+  Ext_io.unmarshal (Ext_io.load_file name) Ext_digest.length
 
 let for_sure_not_changed (name : string) (header : string) =
-  if Sys.file_exists name then (
-    let ic = open_in_bin name in
-    let holder = really_input_string ic Ext_digest.length in
-    close_in ic;
-    holder = header)
-  else false
+  match Build_file_store.read (Compiler_request_state.resolve_path name) with
+  | Some contents ->
+    String.length contents >= Ext_digest.length
+    && String.sub contents 0 Ext_digest.length = header
+  | None -> false
 
 (* This may cause some build system always rebuild
    maybe should not be turned on by default
@@ -102,13 +86,12 @@ let to_file name ~check_exists (v : t) =
   let s = Marshal.to_string v [] in
   let cur_digest = Digest.string s in
   let header = cur_digest in
-  if not (check_exists && for_sure_not_changed name header) then (
-    let oc = open_out_bin name in
-    output_string oc header;
-    output_string oc s;
-    close_out oc)
+  if not (check_exists && for_sure_not_changed name header) then
+    Build_file_store.write
+      (Compiler_request_state.resolve_path name)
+      (header ^ s)
 
-let key_comp a b = Map_string.compare_key a b.name
+let key_comp a b = Ext_string.compare a b.name
 
 let not_found key =
   {name = key; arity = single_na; persistent_closed_lambda = None}
@@ -121,7 +104,7 @@ let get_result mid_val =
   | None ->
     mid_val
   | Some _ ->
-    if !Js_config.cross_module_inline then mid_val
+    if !((Js_config.current ()).cross_module_inline) then mid_val
     else {mid_val with persistent_closed_lambda = None}
 
 let rec binary_search_aux arr lo hi (key : string) =
@@ -161,13 +144,6 @@ let binary_search (sorted : keyed_cmj_values) (key : string) : keyed_cmj_value =
 let query_by_name (cmj_table : t) name : keyed_cmj_value =
   let values = cmj_table.values in
   binary_search values name
-
-let find_hoisted_export (cmj_table : t) path =
-  Array.find_map
-    (fun value ->
-      if List.equal Ext_string.equal value.path path then Some value.export_name
-      else None)
-    cmj_table.hoisted_exports
 
 type path = string
 

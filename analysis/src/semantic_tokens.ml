@@ -244,7 +244,7 @@ let command ~debug ~emitter ~source ~kind_file =
     | Ppat_construct (name, _) ->
       emitter |> emit_variant ~name ~debug;
       Ast_iterator.default_iterator.pat iterator p
-    | Ppat_type {txt = lid; loc} ->
+    | Ppat_type {txt = lid; loc} | Ppat_variant_spread {txt = lid; loc} ->
       emitter |> emit_type ~lid ~debug ~loc;
       Ast_iterator.default_iterator.pat iterator p
     | _ -> Ast_iterator.default_iterator.pat iterator p
@@ -257,17 +257,6 @@ let command ~debug ~emitter ~source ~kind_file =
           (* Don't emit semantic tokens for identifiers not present in source code *)
           let should_emit =
             match lid with
-            (* Collection spreads (`...`) are converted to primitive spread calls
-               with an `@res.spread` decorator. *)
-            | Ldot (Lident ("Primitive_array" | "Primitive_list"), "spread") ->
-              let has_spread_attr =
-                e.pexp_attributes
-                |> List.exists (fun ({Location.txt}, _) -> txt = "res.spread")
-              in
-              not has_spread_attr
-            (* Dict syntax (`dict{...}`) is converted to `Primitive_dict.make` *)
-            | Ldot (Lident "Primitive_dict", "make") -> false
-            | Lident "Primitive_dict" -> false
             (* Array access (`arr[index]`) is converted to `Array.get` *)
             | Ldot (Lident "Array", "get") -> false
             (* Array mutation (`arr[index]`) is converted to `Array.set` *)

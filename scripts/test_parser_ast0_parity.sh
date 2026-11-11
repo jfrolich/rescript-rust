@@ -19,7 +19,14 @@
 # - If a file in the baseline fails, it's flagged as a REGRESSION
 # - Regressions cause the test to fail, preventing parity from decreasing
 #
-# Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
+# STAGE FAILURES:
+# A parser command that exits non-zero or times out leaves its comparison
+# undone. Each one is reported with its file, stage, parser and reason, the
+# file counts as failing every baseline, and the script exits 2, so a failed
+# command can never shrink a difference list unnoticed. Exit 1 means every
+# comparison ran and some differ (or regressed); exit 0 means full parity.
+#
+# Uses test files from tests/syntax_tests/data/{printer,ppx,conversion,ast-mapping}
 # and ~/dev/tella-fusion when present (override with TELLA_DIR).
 #
 # USAGE:
@@ -153,9 +160,9 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust}"
 "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
-OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
+OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -232,11 +239,11 @@ if [[ -n "$FILE_ARG" ]]; then
     else
         PATTERN_MODE=true
         # Treat as a pattern and use find with -path
-        find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
     fi
 else
     # Find all test files
-    find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+    find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
 # Include external corpus by reference (no file copying).
@@ -288,10 +295,30 @@ mkdir -p "$TEMP_DIR/sexp0_locs_diffs"
 mkdir -p "$TEMP_DIR/roundtrip_parity_diffs"
 mkdir -p "$TEMP_DIR/roundtrip_locs_parity_diffs"
 mkdir -p "$TEMP_DIR/binary0_parity_diffs"
+mkdir -p "$TEMP_DIR/stage_failures"
 
 # Export variables for parallel execution
 INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
 export OCAML_PARSER RUST_PARSER TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE INSPECT_SCRIPT
+
+# Run one parser command of a stage, writing its stdout to $out. If the
+# command exits non-zero or times out, append "file<TAB>stage<TAB>parser<TAB>
+# reason" to the caller's $stage_fail_file and return 1, so the comparison is
+# counted as failed instead of being skipped.
+run_stage() {
+    local stage="$1" side="$2" out="$3"
+    shift 3
+    local status=0
+    timeout "$TIMEOUT_SECONDS" "$@" > "$out" 2> "$out.err" || status=$?
+    [[ $status -eq 0 ]] && return 0
+    local reason="exit $status"
+    [[ $status -eq 124 ]] && reason="timed out after ${TIMEOUT_SECONDS}s (exit 124)"
+    local detail
+    detail=$(head -1 "$out.err" | tr '\t' ' ' | cut -c1-200)
+    [[ -n "$detail" ]] && reason="$reason: $detail"
+    printf '%s\t%s\t%s\t%s\n' "$file" "$stage" "$side" "$reason" >> "$stage_fail_file"
+    return 1
+}
 
 # Function to test a single file - writes results to a file
 test_single_file() {
@@ -304,6 +331,7 @@ test_single_file() {
     local roundtrip_diff=0 roundtrip_locs_diff=0
     local binary0_diff=0
     local ocaml_fail=0 rust_fail=0
+    local stage_fail_file="$TEMP_DIR/stage_failures/$safe_name.tsv"
 
     # Determine if it's an interface file
     local intf_flag=""
@@ -319,26 +347,31 @@ test_single_file() {
 
     # First verify both parsers can handle the file
     local ocaml_success=false
-    if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp "$file" > "$file_temp/ocaml.sexp" 2>/dev/null; then
+    if run_stage parse ocaml "$file_temp/ocaml.sexp" "$OCAML_PARSER" $intf_flag -print sexp "$file"; then
         ocaml_success=true
     else
         ocaml_fail=1
     fi
 
     local rust_success=false
-    if timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp "$file" > "$file_temp/rust.sexp" 2>/dev/null; then
+    if run_stage parse rust "$file_temp/rust.sexp" "$RUST_PARSER" $intf_flag -print sexp "$file"; then
         rust_success=true
     else
         rust_fail=1
     fi
 
-    # Only run AST0 tests if both parsers succeed
+    # Only run AST0 tests if both parsers succeed. Each stage runs both
+    # parsers, and compares their outputs only when both commands succeeded;
+    # a failed command is recorded by run_stage.
     if $ocaml_success && $rust_success; then
         parse_pass=1
+        local ocaml_ok rust_ok
 
         # Test sexp0-locs
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp0-locs "$file" > "$file_temp/ocaml.sexp0-locs" 2>/dev/null && \
-           timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp0-locs "$file" > "$file_temp/rust.sexp0-locs" 2>/dev/null; then
+        ocaml_ok=true; rust_ok=true
+        run_stage sexp0-locs ocaml "$file_temp/ocaml.sexp0-locs" "$OCAML_PARSER" $intf_flag -print sexp0-locs "$file" || ocaml_ok=false
+        run_stage sexp0-locs rust "$file_temp/rust.sexp0-locs" "$RUST_PARSER" $intf_flag -print sexp0-locs "$file" || rust_ok=false
+        if $ocaml_ok && $rust_ok; then
             if ! diff -q "$file_temp/ocaml.sexp0-locs" "$file_temp/rust.sexp0-locs" > /dev/null 2>&1; then
                 sexp0_locs_diff=1
                 diff -u "$file_temp/ocaml.sexp0-locs" "$file_temp/rust.sexp0-locs" > "$TEMP_DIR/sexp0_locs_diffs/$safe_name.diff" 2>&1 || true
@@ -346,14 +379,10 @@ test_single_file() {
         fi
 
         # Test roundtrip parity
-        local ocaml_roundtrip_ok=false rust_roundtrip_ok=false
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -test-ast-conversion -print sexp "$file" > "$file_temp/ocaml.roundtrip.sexp" 2>/dev/null; then
-            ocaml_roundtrip_ok=true
-        fi
-        if timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -test-ast-conversion -print sexp "$file" > "$file_temp/rust.roundtrip.sexp" 2>/dev/null; then
-            rust_roundtrip_ok=true
-        fi
-        if $ocaml_roundtrip_ok && $rust_roundtrip_ok; then
+        ocaml_ok=true; rust_ok=true
+        run_stage roundtrip-structure ocaml "$file_temp/ocaml.roundtrip.sexp" "$OCAML_PARSER" $intf_flag -test-ast-conversion -print sexp "$file" || ocaml_ok=false
+        run_stage roundtrip-structure rust "$file_temp/rust.roundtrip.sexp" "$RUST_PARSER" $intf_flag -test-ast-conversion -print sexp "$file" || rust_ok=false
+        if $ocaml_ok && $rust_ok; then
             if ! diff -q "$file_temp/ocaml.roundtrip.sexp" "$file_temp/rust.roundtrip.sexp" > /dev/null 2>&1; then
                 roundtrip_diff=1
                 diff -u "$file_temp/ocaml.roundtrip.sexp" "$file_temp/rust.roundtrip.sexp" > "$TEMP_DIR/roundtrip_parity_diffs/$safe_name.diff" 2>&1 || true
@@ -361,8 +390,10 @@ test_single_file() {
         fi
 
         # Test roundtrip locations
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -test-ast-conversion -print sexp-locs "$file" > "$file_temp/ocaml.roundtrip.sexp-locs" 2>/dev/null && \
-           timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -test-ast-conversion -print sexp-locs "$file" > "$file_temp/rust.roundtrip.sexp-locs" 2>/dev/null; then
+        ocaml_ok=true; rust_ok=true
+        run_stage roundtrip-locs ocaml "$file_temp/ocaml.roundtrip.sexp-locs" "$OCAML_PARSER" $intf_flag -test-ast-conversion -print sexp-locs "$file" || ocaml_ok=false
+        run_stage roundtrip-locs rust "$file_temp/rust.roundtrip.sexp-locs" "$RUST_PARSER" $intf_flag -test-ast-conversion -print sexp-locs "$file" || rust_ok=false
+        if $ocaml_ok && $rust_ok; then
             if ! diff -q "$file_temp/ocaml.roundtrip.sexp-locs" "$file_temp/rust.roundtrip.sexp-locs" > /dev/null 2>&1; then
                 roundtrip_locs_diff=1
                 diff -u "$file_temp/ocaml.roundtrip.sexp-locs" "$file_temp/rust.roundtrip.sexp-locs" > "$TEMP_DIR/roundtrip_locs_parity_diffs/$safe_name.diff" 2>&1 || true
@@ -370,11 +401,17 @@ test_single_file() {
         fi
 
         # Test binary0 parity (parsetree0 format - PPX compatible)
-        if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print binary0 "$file" > "$file_temp/ocaml.binary0" 2>/dev/null && \
-           timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print binary0 "$file" > "$file_temp/rust.binary0" 2>/dev/null; then
+        ocaml_ok=true; rust_ok=true
+        run_stage binary0 ocaml "$file_temp/ocaml.binary0" "$OCAML_PARSER" $intf_flag -print binary0 "$file" || ocaml_ok=false
+        run_stage binary0 rust "$file_temp/rust.binary0" "$RUST_PARSER" $intf_flag -print binary0 "$file" || rust_ok=false
+        if $ocaml_ok && $rust_ok; then
             # Compare decoded values: the encoders may share repeated strings
             # differently, which a PPX reading the AST cannot observe.
-            if ! python3 "$INSPECT_SCRIPT" same-values "$file_temp/ocaml.binary0" "$file_temp/rust.binary0" > "$file_temp/binary0.values" 2>&1; then
+            # same-values exits 1 with its differences on stdout; any other
+            # status, or output on stderr, means the comparison itself failed.
+            local compare_status=0
+            python3 "$INSPECT_SCRIPT" same-values "$file_temp/ocaml.binary0" "$file_temp/rust.binary0" > "$file_temp/binary0.values" 2> "$file_temp/binary0.values.err" || compare_status=$?
+            if [[ $compare_status -eq 1 && ! -s "$file_temp/binary0.values.err" ]]; then
                 binary0_diff=1
                 {
                     cat "$file_temp/binary0.values"
@@ -385,18 +422,25 @@ test_single_file() {
                     echo "First differing bytes (hex dump):"
                     diff <(xxd "$file_temp/ocaml.binary0" | head -50) <(xxd "$file_temp/rust.binary0" | head -50) || true
                 } > "$TEMP_DIR/binary0_parity_diffs/$safe_name.diff" 2>&1
+            elif [[ $compare_status -ne 0 || -s "$file_temp/binary0.values.err" ]]; then
+                printf '%s\tbinary0-compare\tinspect_binary_ast.py\texit %s: %s\n' "$file" "$compare_status" \
+                    "$(tail -1 "$file_temp/binary0.values.err" | tr '\t' ' ' | cut -c1-200)" >> "$stage_fail_file"
             fi
         fi
     fi
 
+    local stage_failed=0
+    [[ -s "$stage_fail_file" ]] && stage_failed=1
+
     # Write results
-    echo "$file:$parse_pass:$sexp0_locs_diff:$roundtrip_diff:$roundtrip_locs_diff:$binary0_diff:$ocaml_fail:$rust_fail" > "$result_file"
+    echo "$file:$parse_pass:$sexp0_locs_diff:$roundtrip_diff:$roundtrip_locs_diff:$binary0_diff:$ocaml_fail:$rust_fail:$stage_failed" > "$result_file"
 
     # Clean up per-file temp
     cleanup_dir_tree "$file_temp"
 }
 
 export -f test_single_file
+export -f run_stage
 export -f cleanup_dir_tree
 export RESULTS_DIR
 
@@ -413,6 +457,7 @@ echo ""
 mkdir -p "$TEMP_DIR/work"
 
 # Run tests
+stopped_early=false
 if $QUICK_MODE; then
     # Sequential mode with early exit
     while read -r file; do
@@ -425,7 +470,16 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail <<< "$result"
+        IFS=':' read -r _ parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail stage_failed <<< "$result"
+
+        if [[ "$stage_failed" -eq 1 ]]; then
+            echo -e "${RED}FAIL:${RESET} $file (a parser command failed; not compared)"
+            cat "$TEMP_DIR/stage_failures/$safe_name.tsv"
+            echo ""
+            echo -e "${YELLOW}Quick mode: stopping on first failure${RESET}"
+            stopped_early=true
+            break
+        fi
 
         if [[ "$sexp0_diff" -eq 1 ]]; then
             echo -e "${RED}FAIL:${RESET} $file (sexp0-locs differs)"
@@ -434,6 +488,7 @@ if $QUICK_MODE; then
             head -30 "$TEMP_DIR/sexp0_locs_diffs/$safe_name.diff"
             echo ""
             echo -e "${YELLOW}Quick mode: stopping on first failure${RESET}"
+            stopped_early=true
             break
         fi
     done < "$TEMP_DIR/files.txt"
@@ -459,6 +514,17 @@ else
     fi
 fi
 
+# A file without a result never finished test_single_file; count it as a
+# failed comparison rather than leaving it out of every list.
+if ! $stopped_early; then
+    while read -r file; do
+        safe_name=$(echo "$file" | tr '/' '_')
+        if [[ ! -f "$RESULTS_DIR/$safe_name.result" ]]; then
+            printf '%s\tharness\t-\tno result written\n' "$file" >> "$TEMP_DIR/stage_failures/$safe_name.tsv"
+        fi
+    done < "$TEMP_DIR/files.txt"
+fi
+
 # Aggregate results
 parse_pass_count=0
 sexp0_locs_diff_count=0
@@ -478,7 +544,7 @@ rust_fail_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail stage_failed <<< "$result"
 
     parse_pass_count=$((parse_pass_count + parse_pass))
     sexp0_locs_diff_count=$((sexp0_locs_diff_count + sexp0_diff))
@@ -506,12 +572,13 @@ roundtrip_locs_pass_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file parse_pass sexp0_diff rt_diff rt_locs_diff bin0_diff ocaml_fail rust_fail stage_failed <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
 
-    # A file passes if it didn't fail and didn't have a diff
+    # A file passes if every parser command succeeded and it had no diff
+    [[ "$stage_failed" -eq 1 ]] && continue
     if [[ "$parse_pass" -eq 1 && "$sexp0_diff" -eq 0 ]]; then
         sexp0_locs_pass_files="$sexp0_locs_pass_files$file\n"
     fi
@@ -525,6 +592,15 @@ for result_file in "$RESULTS_DIR"/*.result; do
         roundtrip_locs_pass_files="$roundtrip_locs_pass_files$file\n"
     fi
 done
+
+# Every failed parser command, one "file<TAB>stage<TAB>parser<TAB>reason" line
+stage_failure_lines=$(cat "$TEMP_DIR/stage_failures/"*.tsv 2>/dev/null | LC_ALL=C sort || true)
+stage_failure_count=0
+stage_failure_file_count=0
+if [[ -n "$stage_failure_lines" ]]; then
+    stage_failure_count=$(echo "$stage_failure_lines" | wc -l | tr -d ' ')
+    stage_failure_file_count=$(echo "$stage_failure_lines" | cut -f1 | sort -u | wc -l | tr -d ' ')
+fi
 
 # Get sorted list of all tested files (filtered to test suite only)
 tested_files_sorted=$(echo -e "$all_tested_files" | grep -v "^$" | grep "^syntax_tests/data/" | sort -u)
@@ -645,6 +721,20 @@ echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
 echo "    Rust failures:            $rust_fail_count"
 echo ""
+echo "  ${BOLD}Failed comparisons (a parser command failed or timed out):${RESET}"
+echo "    Stage failures:           $stage_failure_count"
+echo "    Files affected:           $stage_failure_file_count"
+echo ""
+
+# Show every stage failure: these comparisons did not run
+if [[ $stage_failure_count -gt 0 ]]; then
+    echo -e "${BOLD}${RED}Stage failures ($stage_failure_count in $stage_failure_file_count files):${RESET}"
+    echo "  (file / stage / parser / reason; these files were not compared at that stage)"
+    echo "$stage_failure_lines" | while IFS=$'\t' read -r sf_file sf_stage sf_side sf_reason; do
+        echo "  $sf_file / $sf_stage / $sf_side / $sf_reason"
+    done
+    echo ""
+fi
 
 # Show sexp0-locs parity differences
 if [[ $sexp0_locs_diff_count -gt 0 ]]; then
@@ -789,9 +879,15 @@ if [[ $roundtrip_locs_parity_diff_count -gt 0 ]]; then
     [[ $exit_code -eq 0 ]] && exit_code=1
 fi
 
+if [[ $stage_failure_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: $stage_failure_count parser command(s) in $stage_failure_file_count file(s) failed or timed out; those comparisons did not run${RESET}"
+    all_pass=false
+    exit_code=2
+fi
+
 if [[ $parse_pass_count -eq 0 ]]; then
     echo -e "${RED}${BOLD}ERROR: No files could be compared${RESET}"
-    exit 1
+    exit $(( exit_code == 2 ? 2 : 1 ))
 fi
 
 if $all_pass; then

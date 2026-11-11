@@ -9,29 +9,11 @@ function eachIntLazy(list, f) {
   return import("@rescript/runtime/lib/es6/Stdlib_List.mjs").then(m => m.forEach).then(each => Promise.resolve(each(list, f)));
 }
 
-eachIntLazy({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}, n => {
+eachIntLazy({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}, n => {
   console.log("lazy", n);
 });
 
-eachIntAsync({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}, n => {
+eachIntAsync({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}, n => {
   console.log("async", n);
 });
 
@@ -52,18 +34,23 @@ let N1 = {
 
 let N2 = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
 
-let N_each = N2.forEach;
+let N3 = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
+
+let N_each = N3.forEach;
 
 let N = {
   N0: N0,
   N1: N1,
   N2: N2,
+  N3: N3,
   each: N_each
 };
 
 let M0 = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
 
 let M1 = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
+
+let MConstrained = await import("@rescript/runtime/lib/es6/Stdlib_List.mjs");
 
 async function f() {
   return (await import("@rescript/runtime/lib/es6/Stdlib_List.mjs")).forEach;
@@ -141,11 +128,27 @@ async function f9(value) {
   }
 }
 
-let each = M1.forEach;
+let each = MConstrained.forEach;
 
 let M2;
 
 let each2 = O.forEach;
+
+let M$make = M.make;
+
+let N$N0$make = N0.make;
+
+let N$N1$O$make = O.make;
+
+let N$N2$make = N2.make;
+
+let N$N3$make = N3.make;
+
+let M0$make = M0.make;
+
+let M1$make = M1.make;
+
+let MConstrained$make = MConstrained.make;
 
 export {
   eachIntAsync,
@@ -155,6 +158,7 @@ export {
   N,
   M0,
   M1,
+  MConstrained,
   each,
   M2,
   each2,
@@ -168,5 +172,13 @@ export {
   f7,
   f8,
   f9,
+  M$make,
+  N$N0$make,
+  N$N1$O$make,
+  N$N2$make,
+  N$N3$make,
+  M0$make,
+  M1$make,
+  MConstrained$make,
 }
 /*  Not a pure module */

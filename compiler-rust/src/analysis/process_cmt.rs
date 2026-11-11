@@ -20,6 +20,8 @@ pub struct Ctx<'a> {
     pub arena: &'a ParseArena,
     /// The module's type context.
     pub types: &'a TypeContext,
+    /// Where an attribute reader's error is kept (see [`attrs::Raised`]).
+    pub raised: &'a attrs::Raised,
     /// Node storage of the typed tree.
     pub ta: &'a tt::TypedArena,
 }
@@ -70,6 +72,7 @@ fn add_declared<T: Clone>(
     attributes: Attrs<'_>,
     exported: Option<(&mut Exported, ExportedKind)>,
     add_stamp: impl FnOnce(i32, Declared<T>),
+    raised: &attrs::Raised,
 ) -> Declared<T> {
     let is_exported = match exported {
         Some((exported, kind)) => exported.add(kind, &name.txt, stamp),
@@ -82,14 +85,17 @@ fn add_declared<T: Clone>(
         stamp,
         env.module_path.clone(),
         is_exported,
-        attributes,
+        raised.declared_attributes(attributes),
     );
     add_stamp(stamp, declared.clone());
     declared
 }
 
-fn attrs_to_docstring(attributes: Attrs<'_>) -> Vec<String> {
-    attrs::find_doc_attribute(attributes).into_iter().collect()
+fn attrs_to_docstring(raised: &attrs::Raised, attributes: Attrs<'_>) -> Vec<String> {
+    raised
+        .read(attrs::find_doc_attribute(attributes))
+        .into_iter()
+        .collect()
 }
 
 fn module_item(
@@ -142,15 +148,15 @@ fn type_item(declared: &Declared<Type>, rec_status: RecStatus) -> ModuleItem {
 }
 
 /// `map_record_field`.
-fn map_record_field(ld: &decl::LabelDeclaration) -> Field {
+fn map_record_field(raised: &attrs::Raised, ld: &decl::LabelDeclaration) -> Field {
     let attributes = Attrs::Decl(&ld.ld_attributes);
     Field {
         stamp: ld.ld_id.binding_time(),
         fname: Located::mknoloc(ld.ld_id.name().to_string()),
         typ: ld.ld_type,
         optional: ld.ld_optional,
-        docstring: attrs_to_docstring(attributes),
-        deprecated: attrs::find_deprecated_attribute(attributes),
+        docstring: attrs_to_docstring(raised, attributes),
+        deprecated: raised.read(attrs::find_deprecated_attribute(attributes)),
     }
 }
 
@@ -188,6 +194,7 @@ impl Processor<'_> {
                     Attrs::Decl(&vd.val_attributes),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
+                    self.ctx.raised,
                 );
                 // When an id is shadowed, a module constraint without the doc
                 // comment is created; restore the existing doc comment.
@@ -239,14 +246,20 @@ impl Processor<'_> {
                                         }
                                         decl::ConstructorArguments::CstrRecord(fields) => {
                                             ConstructorArgs::InlineRecord(
-                                                fields.iter().map(map_record_field).collect(),
+                                                fields
+                                                    .iter()
+                                                    .map(|ld| map_record_field(self.ctx.raised, ld))
+                                                    .collect(),
                                             )
                                         }
                                     },
                                     res: cd.cd_res,
                                     type_decl: (cname.clone(), decl.clone()),
-                                    docstring: attrs_to_docstring(cd_attributes),
-                                    deprecated: attrs::find_deprecated_attribute(cd_attributes),
+                                    docstring: attrs_to_docstring(self.ctx.raised, cd_attributes),
+                                    deprecated: self
+                                        .ctx
+                                        .raised
+                                        .read(attrs::find_deprecated_attribute(cd_attributes)),
                                 };
                                 let declared = attrs::new_declared(
                                     item.clone(),
@@ -255,16 +268,19 @@ impl Processor<'_> {
                                     stamp,
                                     env.module_path.clone(),
                                     true,
-                                    cd_attributes,
+                                    self.ctx.raised.declared_attributes(cd_attributes),
                                 );
                                 self.stamps.add_constructor(stamp, declared);
                                 item
                             })
                             .collect(),
                     ),
-                    decl::TypeKind::TypeRecord(fields, _) => {
-                        TypeKind::Record(fields.iter().map(map_record_field).collect())
-                    }
+                    decl::TypeKind::TypeRecord(fields, _) => TypeKind::Record(
+                        fields
+                            .iter()
+                            .map(|ld| map_record_field(self.ctx.raised, ld))
+                            .collect(),
+                    ),
                 };
                 let attributes = Attrs::Decl(&decl.type_attributes);
                 let item = Type {
@@ -283,6 +299,7 @@ impl Processor<'_> {
                     attributes,
                     Some((exported, ExportedKind::Type)),
                     |stamp, d| stamps.add_type(stamp, d),
+                    self.ctx.raised,
                 );
                 vec![type_item(&declared, *rec_status)]
             }
@@ -300,6 +317,7 @@ impl Processor<'_> {
                     Attrs::Decl(&md.md_attributes),
                     Some((exported, ExportedKind::Module)),
                     |stamp, d| stamps.add_module(stamp, d),
+                    self.ctx.raised,
                 );
                 vec![module_item_of(&declared)]
             }
@@ -335,7 +353,8 @@ impl Processor<'_> {
         module_type: &decl::ModuleType,
     ) -> Module {
         match module_type {
-            decl::ModuleType::MtyIdent(path) | decl::ModuleType::MtyAlias(_, path) => {
+            decl::ModuleType::MtyIdent(_) | decl::ModuleType::MtyAlias(..) => {
+                let path = module_type.ident_or_alias_path().unwrap();
                 Module::Ident(*path)
             }
             decl::ModuleType::MtySignature(signature) => {
@@ -386,7 +405,10 @@ impl Processor<'_> {
                         let item = Constructor {
                             stamp,
                             cname: cname.clone(),
-                            deprecated: attrs::find_deprecated_attribute(cd_attributes),
+                            deprecated: self
+                                .ctx
+                                .raised
+                                .read(attrs::find_deprecated_attribute(cd_attributes)),
                             args: match &cd.cd_args {
                                 tt::TypedConstructorArguments::Cstr_tuple(args) => {
                                     ConstructorArgs::Args(
@@ -411,9 +433,14 @@ impl Processor<'_> {
                                                     ),
                                                     typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                                                     optional: f.ld_optional,
-                                                    docstring: attrs_to_docstring(f_attributes),
-                                                    deprecated: attrs::find_deprecated_attribute(
+                                                    docstring: attrs_to_docstring(
+                                                        self.ctx.raised,
                                                         f_attributes,
+                                                    ),
+                                                    deprecated: self.ctx.raised.read(
+                                                        attrs::find_deprecated_attribute(
+                                                            f_attributes,
+                                                        ),
                                                     ),
                                                 }
                                             })
@@ -426,7 +453,7 @@ impl Processor<'_> {
                                 .as_ref()
                                 .map(|t| self.ctx.ta.core_type(*t).ctyp_type),
                             type_decl: (td.typ_name.txt.clone(), typ_type.clone()),
-                            docstring: attrs_to_docstring(cd_attributes),
+                            docstring: attrs_to_docstring(self.ctx.raised, cd_attributes),
                         };
                         let declared = attrs::new_declared(
                             item.clone(),
@@ -435,7 +462,7 @@ impl Processor<'_> {
                             stamp,
                             env.module_path.clone(),
                             true,
-                            cd_attributes,
+                            self.ctx.raised.declared_attributes(cd_attributes),
                         );
                         self.stamps.add_constructor(stamp, declared);
                         item
@@ -452,8 +479,11 @@ impl Processor<'_> {
                             fname: self.ctx.located(&f.ld_name),
                             typ: self.ctx.ta.core_type(f.ld_type).ctyp_type,
                             optional: f.ld_optional,
-                            docstring: attrs_to_docstring(f_attributes),
-                            deprecated: attrs::find_deprecated_attribute(f_attributes),
+                            docstring: attrs_to_docstring(self.ctx.raised, f_attributes),
+                            deprecated: self
+                                .ctx
+                                .raised
+                                .read(attrs::find_deprecated_attribute(f_attributes)),
                         }
                     })
                     .collect(),
@@ -477,6 +507,7 @@ impl Processor<'_> {
             attributes,
             Some((exported, ExportedKind::Type)),
             |stamp, d| stamps.add_type(stamp, d),
+            self.ctx.raised,
         );
         type_item(&declared, rec_status)
     }
@@ -525,6 +556,7 @@ impl Processor<'_> {
             Attrs::Parsed(md.md_attributes.as_slice(), self.ctx.arena),
             Some((exported, ExportedKind::Module)),
             |stamp, d| stamps.add_module(stamp, d),
+            self.ctx.raised,
         );
         module_item_of(&declared)
     }
@@ -560,6 +592,7 @@ impl Processor<'_> {
                     ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
+                    self.ctx.raised,
                 );
                 vec![value_item(&declared)]
             }
@@ -614,10 +647,13 @@ impl Processor<'_> {
         let attributes = Attrs::Parsed(&attributes, self.ctx.arena);
         Structure {
             name: name.to_string(),
-            docstring: attrs_to_docstring(attributes),
+            docstring: attrs_to_docstring(self.ctx.raised, attributes),
             exported: Arc::new(exported),
             items,
-            deprecated: attrs::find_deprecated_attribute(attributes),
+            deprecated: self
+                .ctx
+                .raised
+                .read(attrs::find_deprecated_attribute(attributes)),
         }
     }
 
@@ -661,7 +697,9 @@ impl Processor<'_> {
                         stamp,
                         ModulePath::NotVisible,
                         false,
-                        self.ctx.parsed(attributes),
+                        self.ctx
+                            .raised
+                            .declared_attributes(self.ctx.parsed(attributes)),
                     );
                     self.stamps.add_module(stamp, declared.clone());
                     items.insert(0, module_item_of(&declared));
@@ -676,6 +714,7 @@ impl Processor<'_> {
                         Attrs::Parsed(attributes.as_slice(), self.ctx.arena),
                         Some((exported, ExportedKind::Value)),
                         |stamp, d| stamps.add_value(stamp, d),
+                        self.ctx.raised,
                     );
                     items.insert(0, value_item(&declared));
                 }
@@ -689,6 +728,12 @@ impl Processor<'_> {
             }
             tt::PatternDesc::Tpat_or(p, _, _) => {
                 self.handle_pattern(env, exported, items, None, self.ctx.ta.pattern(*p))
+            }
+            tt::PatternDesc::Tpat_dict(entries) => {
+                for entry in entries {
+                    let p = self.ctx.ta.pattern(entry.tdp_pattern);
+                    self.handle_pattern(env, exported, items, None, p);
+                }
             }
             tt::PatternDesc::Tpat_record(record_items, _, rest) => {
                 for (_, _, p, _) in record_items {
@@ -707,6 +752,7 @@ impl Processor<'_> {
                         Attrs::Parsed(&[], self.ctx.arena),
                         Some((exported, ExportedKind::Value)),
                         |stamp, d| stamps.add_value(stamp, d),
+                        self.ctx.raised,
                     );
                     items.insert(0, value_item(&declared));
                 }
@@ -716,7 +762,8 @@ impl Processor<'_> {
             }
             tt::PatternDesc::Tpat_variant(_, None, _)
             | tt::PatternDesc::Tpat_any
-            | tt::PatternDesc::Tpat_constant(_) => {}
+            | tt::PatternDesc::Tpat_constant(_)
+            | tt::PatternDesc::Tpat_interval(..) => {}
         }
     }
 
@@ -774,6 +821,7 @@ impl Processor<'_> {
                     Attrs::Parsed(mtd.mtd_attributes.as_slice(), self.ctx.arena),
                     Some((exported, ExportedKind::Module)),
                     |stamp, d| stamps.add_module(stamp, d),
+                    self.ctx.raised,
                 );
                 vec![module_item_of(&declared)]
             }
@@ -814,6 +862,7 @@ impl Processor<'_> {
                     ),
                     Some((exported, ExportedKind::Value)),
                     |stamp, d| stamps.add_value(stamp, d),
+                    self.ctx.raised,
                 );
                 vec![value_item(&declared)]
             }
@@ -847,6 +896,7 @@ impl Processor<'_> {
             Attrs::Parsed(mb.mb_attributes.as_slice(), self.ctx.arena),
             Some((exported, ExportedKind::Module)),
             |stamp, d| stamps.add_module(stamp, d),
+            self.ctx.raised,
         );
         module_item_of(&declared)
     }
@@ -895,7 +945,7 @@ impl Processor<'_> {
                         stamp,
                         ModulePath::NotVisible,
                         false,
-                        Attrs::Decl(&[]),
+                        self.ctx.raised.declared_attributes(Attrs::Decl(&[])),
                     );
                     self.stamps.add_module(stamp, declared);
                 }
@@ -938,7 +988,7 @@ impl Processor<'_> {
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    Attrs::Decl(&[]),
+                    self.ctx.raised.declared_attributes(Attrs::Decl(&[])),
                 );
                 self.stamps.add_module(stamp, declared);
                 self.scan_let_modules(env, *body);
@@ -976,13 +1026,16 @@ impl Processor<'_> {
                 }
             }
             tt::ExpressionDesc::Texp_function { body, .. } => self.scan_let_modules(env, *body),
-            tt::ExpressionDesc::Texp_try(e, cases) => {
+            tt::ExpressionDesc::Texp_try(e, cases, finally) => {
                 self.scan_let_modules(env, *e);
                 for case in self.ctx.ta.cases(*cases) {
                     if let Some(g) = case.c_guard {
                         self.scan_let_modules(env, g);
                     }
                     self.scan_let_modules(env, case.c_rhs);
+                }
+                if let Some(finally) = finally {
+                    self.scan_let_modules(env, *finally);
                 }
             }
             tt::ExpressionDesc::Texp_ifthenelse(e1, e2, e3) => {
@@ -1017,10 +1070,13 @@ impl Processor<'_> {
         let attributes = Attrs::Parsed(&attributes, self.ctx.arena);
         Structure {
             name: name.to_string(),
-            docstring: attrs_to_docstring(attributes),
+            docstring: attrs_to_docstring(self.ctx.raised, attributes),
             exported: Arc::new(exported),
             items,
-            deprecated: attrs::find_deprecated_attribute(attributes),
+            deprecated: self
+                .ctx
+                .raised
+                .read(attrs::find_deprecated_attribute(attributes)),
         }
     }
 }

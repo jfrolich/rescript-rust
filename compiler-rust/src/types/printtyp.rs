@@ -45,6 +45,10 @@ pub(crate) enum OutVariant {
     Ovar_typ(Box<OutType>),
 }
 
+/// A row of `Otyp_record`: name, runtime name given with `@as`, mutable,
+/// optional, type.
+pub(crate) type OutRecordField = (String, Option<String>, bool, bool, OutType);
+
 /// `Outcometree.out_type`.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum OutType {
@@ -56,8 +60,9 @@ pub(crate) enum OutType {
     Otyp_manifest(Box<OutType>, Box<OutType>),
     /// Fields are (name, mutable, type).
     Otyp_object(Vec<(String, bool, OutType)>, Option<bool>),
-    /// `(name, mutable, optional, type)` rows.
-    Otyp_record(Vec<(String, bool, bool, OutType)>),
+    /// Rows of name, runtime name given with `@as`, mutable, optional and
+    /// type (outcometree.ml:40-41).
+    Otyp_record(Vec<OutRecordField>),
     Otyp_stuff(String),
     Otyp_tuple(Vec<OutType>),
     Otyp_var(bool, String),
@@ -94,8 +99,10 @@ pub(crate) struct OutTypeDecl {
     pub params: Vec<(String, (bool, bool))>,
     pub typ: OutType,
     pub private: bool,
-    pub immediate: bool,
-    pub unboxed: bool,
+    /// `otype_attributes`: the annotations that change what the declaration
+    /// means at run time, as they are written, e.g. `@unboxed` or
+    /// `@tag("kind")`.
+    pub attributes: Vec<String>,
     pub cstrs: Vec<(OutType, OutType)>,
 }
 
@@ -159,9 +166,6 @@ pub(crate) enum OutSigItem {
 // Printtyp
 // ============================================================================
 
-/// Resolves an unqualified type name in the printing environment.
-pub(crate) type TypeNameLookup<'a> = Box<dyn Fn(&str) -> Option<Path> + 'a>;
-
 /// Prints extra explanation after a unification error's trace pair.
 pub(crate) type ExtraInfoPrinter<'f, W, P> =
     &'f mut dyn FnMut(&mut Formatter<W>, &mut P, TypeExprRef, TypeExprRef);
@@ -182,10 +186,9 @@ pub(crate) struct Printtyp<'a> {
     delayed: Vec<TypeExprRef>,
     /// `unique_names`: identifiers printed as `Ident.unique_toplevel_name`.
     unique_names: Vec<(crate::ident::Ident, String)>,
-    /// `Env.lookup_type (Lident s) !printing_env` for
-    /// `non_shadowed_pervasive_or_stdlib`; `None` stands for `Env.empty`,
-    /// where every lookup fails.
-    printing_env_lookup_type: Option<TypeNameLookup<'a>>,
+    /// `!printing_env`, set by `wrap_printing_env`; `None` stands for
+    /// `Env.empty`.
+    printing_env: Option<crate::types::env::Env>,
     /// Types added to the printing environment by `tree_of_signature_rec`
     /// (`Env.add_signature`), most recent last. Only the first
     /// `signature_types_visible` entries are in scope; later entries are
@@ -215,7 +218,7 @@ impl<'a> Printtyp<'a> {
             aliased: Vec::new(),
             delayed: Vec::new(),
             unique_names: Vec::new(),
-            printing_env_lookup_type: None,
+            printing_env: None,
             signature_types: Vec::new(),
             signature_types_visible: 0,
             inlined_types: None,
@@ -223,9 +226,9 @@ impl<'a> Printtyp<'a> {
         }
     }
 
-    /// `set_printing_env`: resolve unqualified type names in `lookup`.
-    pub(crate) fn set_printing_env(&mut self, lookup: TypeNameLookup<'a>) {
-        self.printing_env_lookup_type = Some(lookup);
+    /// `set_printing_env env`.
+    pub(crate) fn set_printing_env(&mut self, env: &crate::types::env::Env) {
+        self.printing_env = Some(env.clone());
     }
 
     // ------------------------------------------------------------------
@@ -249,11 +252,13 @@ impl<'a> Printtyp<'a> {
         {
             return path.same(found);
         }
-        match &self.printing_env_lookup_type {
+        // `Env.lookup_type (Lident s) !printing_env`; every lookup fails in
+        // `Env.empty`.
+        match &self.printing_env {
             None => true,
-            Some(lookup) => match lookup(s) {
-                Some(found) => path.same(&found),
-                None => true,
+            Some(env) => match env.find_type_with_path(s) {
+                Ok((found, _)) => path.same(&found),
+                Err(_) => true,
             },
         }
     }
@@ -438,7 +443,7 @@ impl<'a> Printtyp<'a> {
     fn aliasable(&self, ty: TypeExprRef) -> bool {
         !matches!(
             &*self.ctx.borrow_desc(ty),
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tpoly { .. }
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tpoly { .. }
         )
     }
 
@@ -471,7 +476,7 @@ impl<'a> Printtyp<'a> {
             let repr = self.ctx.repr(current);
             match &*self.ctx.borrow_desc(repr) {
                 TypeDesc::Tfield { rest, .. } => current = *rest,
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tconstr { .. } => {
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tconstr { .. } => {
                     return true;
                 }
                 _ => return false,
@@ -490,7 +495,7 @@ impl<'a> Printtyp<'a> {
         visited.push(px);
         let desc = *self.ctx.get_desc(ty);
         match desc {
-            TypeDesc::Tvar(_) => self.add_named_var(ty),
+            TypeDesc::Tvar(..) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
                 for arg in self.ctx.type_args(args).iter() {
                     self.mark_loops_rec(visited, arg.typ);
@@ -562,7 +567,7 @@ impl<'a> Printtyp<'a> {
                 }
                 self.mark_loops_rec(visited, body);
             }
-            TypeDesc::Tunivar(_) => self.add_named_var(ty),
+            TypeDesc::Tunivar(..) => self.add_named_var(ty),
         }
         visited.truncate(depth);
     }
@@ -605,7 +610,7 @@ impl<'a> Printtyp<'a> {
     // ------------------------------------------------------------------
 
     fn is_non_gen(&self, sch: bool, ty: TypeExprRef) -> bool {
-        sch && matches!(&*self.ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+        sch && matches!(&*self.ctx.borrow_desc(ty), TypeDesc::Tvar(..))
             && self.ctx.get_level(ty) != GENERIC_LEVEL
     }
 
@@ -621,7 +626,7 @@ impl<'a> Printtyp<'a> {
         let desc = *self.ctx.get_desc(ty);
         let pr_typ = |this: &mut Self| -> OutType {
             match &desc {
-                TypeDesc::Tvar(_) => {
+                TypeDesc::Tvar(..) => {
                     let non_gen = this.is_non_gen(sch, ty);
                     let name = this.name_of_type(non_gen, ty);
                     OutType::Otyp_var(non_gen, name)
@@ -706,7 +711,7 @@ impl<'a> Printtyp<'a> {
                         tr
                     }
                 }
-                TypeDesc::Tunivar(_) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
+                TypeDesc::Tunivar(..) => OutType::Otyp_var(false, this.name_of_type(false, ty)),
                 TypeDesc::Tpackage { path, lids, args } => {
                     let n = this
                         .ctx
@@ -832,7 +837,7 @@ impl<'a> Printtyp<'a> {
             .map(|(s, mutable, t)| (s, mutable, self.tree_of_typexp(sch, t)))
             .collect();
         let rest = match &*self.ctx.borrow_desc(rest) {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => Some(self.is_non_gen(sch, rest)),
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => Some(self.is_non_gen(sch, rest)),
             TypeDesc::Tconstr { .. } => Some(false),
             TypeDesc::Tnil => None,
             _ => unreachable!("typfields (1)"),
@@ -841,10 +846,7 @@ impl<'a> Printtyp<'a> {
     }
 
     /// `tree_of_label` (compiler/ml/printtyp.ml).
-    fn tree_of_label(
-        &mut self,
-        l: &crate::types::decl::LabelDeclaration,
-    ) -> (String, bool, bool, OutType) {
+    fn tree_of_label(&mut self, l: &crate::types::decl::LabelDeclaration) -> OutRecordField {
         let opt = l.ld_optional;
         let typ = match &*self.ctx.borrow_desc(l.ld_type) {
             TypeDesc::Tconstr { path, args, .. }
@@ -856,6 +858,7 @@ impl<'a> Printtyp<'a> {
         };
         (
             l.ld_id.name().to_string(),
+            l.ld_runtime_name.clone(),
             matches!(l.ld_mutable, crate::types::asttypes::MutableFlag::Mutable),
             opt,
             self.tree_of_typexp(false, typ),
@@ -948,7 +951,7 @@ impl<'a> Printtyp<'a> {
             visited.push(ty);
             let desc = *ctx.get_desc(ty);
             match desc {
-                TypeDesc::Tvar(_) => vars.push(ty),
+                TypeDesc::Tvar(..) => vars.push(ty),
                 TypeDesc::Tobject { fields, .. } => go(ctx, visited, vars, fields),
                 TypeDesc::Tfield { typ, rest, .. } => {
                     go(ctx, visited, vars, typ);
@@ -1014,7 +1017,10 @@ impl<'a> Printtyp<'a> {
             for param in &params {
                 let is_underscore = matches!(&*self.ctx.borrow_desc(*param), TypeDesc::Tvar(Some(name)) if name == "_");
                 if is_underscore && vars.contains(param) {
-                    self.ctx.set_desc(*param, TypeDesc::Tvar(None));
+                    self.ctx.set_desc(
+                        *param,
+                        TypeDesc::Tvar(None),
+                    );
                 }
             }
         }
@@ -1148,18 +1154,43 @@ impl<'a> Printtyp<'a> {
                 boxed_unboxed,
             ),
         };
-        let immediate = decl
+        // What the declaration itself states, not what it inherits from an
+        // abbreviated type; a malformed annotation was reported when the
+        // declaration was typed, and is left out.
+        let mut attributes = Vec::new();
+        // `Builtin_attributes.immediate`
+        if decl
             .type_attributes
             .iter()
-            .any(|attr| matches!(attr.attr_name.txt.as_str(), "immediate" | "ocaml.immediate"));
+            .any(|attr| attr.attr_name.txt == "immediate")
+        {
+            attributes.push("@immediate".to_string());
+        }
+        if unboxed {
+            attributes.push("@unboxed".to_string());
+        }
+        // `Ast_untagged_variants.process_tag_name`
+        if let Ok(Some(name)) =
+            crate::types::typemod::process_variant_tag_name(self.ctx, &decl.type_attributes)
+        {
+            attributes.push(format!(
+                "@tag(\"{}\")",
+                crate::string_literal::encode_js_string(&name)
+            ));
+        }
+        // `Ast_untagged_variants.process_runtime_annotation ?loc:None`
+        if let Some(annotation) =
+            crate::types::variant_layout::stated_runtime_annotation(self.ctx, decl)
+        {
+            attributes.push(annotation);
+        }
         self.inlined_types = saved_inlined;
         OutTypeDecl {
             name: id.name().to_string(),
             params: args,
             typ,
             private,
-            immediate,
-            unboxed,
+            attributes,
             cstrs: constraints,
         }
     }
@@ -1173,26 +1204,30 @@ impl<'a> Printtyp<'a> {
     ) -> OutConstructor {
         use crate::types::decl::ConstructorArguments;
         let name = cd.cd_id.name().to_string();
-        let nullary =
-            matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty());
-        let repr = if !nullary {
+        // The `@as` of a nullary case or of a tagged case with a payload sets
+        // its runtime tag; an untagged case is its payload.
+        let tagged = matches!(&cd.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty())
+            || matches!(
+                layout.and_then(|layout| layout.constructors.get(position)),
+                Some(crate::types::VariantConstructorCase::Block(
+                    crate::types::VariantBlock::Tagged(_)
+                ))
+            );
+        let repr = if !tagged {
             None
         } else {
-            let tag_type = layout.and_then(|layout| match layout.constructors.get(position) {
-                Some(crate::types::VariantConstructorCase::Constant(tag)) => tag.literal.clone(),
-                Some(crate::types::VariantConstructorCase::Block(block)) => {
-                    block.tag().literal.clone()
-                }
-                None => None,
-            });
-            match tag_type {
+            // printtyp.ml: the declared `@as`, `Option.map as_annotation
+            // cd.cd_runtime_tag`.
+            match cd.cd_runtime_tag.clone() {
                 Some(crate::types::VariantLiteralTag::Null) => Some("@as(null)".to_string()),
                 Some(crate::types::VariantLiteralTag::Undefined) => {
                     Some("@as(undefined)".to_string())
                 }
-                Some(crate::types::VariantLiteralTag::String(s)) => {
-                    Some(format!("@as(\"{}\")", ocaml_string_escaped(&s)))
-                }
+                // `Printf.sprintf "@as(\"%s\")" (String_literal.encode_js_string s)`
+                Some(crate::types::VariantLiteralTag::String(s)) => Some(format!(
+                    "@as(\"{}\")",
+                    crate::string_literal::encode_js_string(&s)
+                )),
                 Some(crate::types::VariantLiteralTag::Int(i)) => Some(format!("@as({i})")),
                 Some(crate::types::VariantLiteralTag::Float(f)) => Some(format!("@as({f})")),
                 Some(crate::types::VariantLiteralTag::Bool(b)) => Some(format!("@as({b})")),
@@ -1510,24 +1545,6 @@ fn tree_of_rec(rs: crate::types::decl::RecStatus) -> OutRecStatus {
     }
 }
 
-/// OCaml `String.escaped`, as used by `Printf "%S"`.
-fn ocaml_string_escaped(s: &str) -> String {
-    let mut out = String::new();
-    for byte in s.bytes() {
-        match byte {
-            b'"' => out.push_str("\\\""),
-            b'\\' => out.push_str("\\\\"),
-            b'\n' => out.push_str("\\n"),
-            b'\t' => out.push_str("\\t"),
-            b'\r' => out.push_str("\\r"),
-            8 => out.push_str("\\b"),
-            32..=126 => out.push(byte as char),
-            _ => out.push_str(&format!("\\{byte:03}")),
-        }
-    }
-    out
-}
-
 /// `Ctype.flatten_fields` (compiler/ml/ctype.ml): the chain is accumulated
 /// in reverse and then stably sorted by name.
 fn flatten_fields(
@@ -1835,8 +1852,17 @@ fn print_object_fields(fields: &[(String, bool, OutType)], rest: &Option<bool>) 
     ]))
 }
 
-fn print_record_decl_row_doc((name, mutable, opt, arg): &(String, bool, bool, OutType)) -> Doc {
+/// `print_record_decl_row_doc` (res_outcome_printer.ml:395-414).
+fn print_record_decl_row_doc((name, runtime_name, mutable, opt, arg): &OutRecordField) -> Doc {
     Doc::group(Doc::concat(vec![
+        match runtime_name {
+            Some(runtime_name) => Doc::concat(vec![
+                Doc::text("@as("),
+                print_string_literal_doc(runtime_name),
+                Doc::text(") "),
+            ]),
+            None => Doc::nil(),
+        },
         if *mutable {
             Doc::text("mutable ")
         } else {
@@ -1849,7 +1875,7 @@ fn print_record_decl_row_doc((name, mutable, opt, arg): &(String, bool, bool, Ou
     ]))
 }
 
-fn print_record_declaration_doc(inline: bool, rows: &[(String, bool, bool, OutType)]) -> Doc {
+fn print_record_declaration_doc(inline: bool, rows: &[OutRecordField]) -> Doc {
     let content = Doc::concat(vec![
         Doc::lbrace(),
         Doc::indent(Doc::concat(vec![
@@ -1970,9 +1996,14 @@ fn print_type_params_doc(params: Vec<Doc>, trailing_comma: bool) -> Doc {
 // Print a digested FFI declaration as the surface attributes the user wrote;
 // the stored form is the declaration itself (res_outcome_printer.ml:481-613).
 
+/// `print_string_literal_doc` (res_outcome_printer.ml:44-45): the string as
+/// a ReScript string literal, `String_literal.encode_js_string` keeping valid
+/// UTF-8 and escaping only what the literal needs.
 fn print_string_literal_doc(s: &str) -> Doc {
-    // `"\"" ^ String.escaped s ^ "\""`
-    Doc::text(crate::types::external_ffi_types::debug::quote(s))
+    Doc::text(format!(
+        "\"{}\"",
+        crate::string_literal::encode_js_string(s)
+    ))
 }
 
 fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> Doc {
@@ -1981,8 +2012,9 @@ fn print_inline_const_doc(c: &crate::types::external_ffi_types::InlineConst) -> 
         InlineConst::ConstString(s) => print_string_literal_doc(s),
         InlineConst::ConstBool(b) => Doc::text(if *b { "true" } else { "false" }),
         InlineConst::ConstInt(i) => Doc::text(i.to_string()),
-        InlineConst::ConstBigint { negative, digits } => {
-            Doc::text(format!("{}{}n", if *negative { "-" } else { "" }, digits))
+        // res_outcome_printer.ml: `Bigint_utils.to_string positive digits ^ "n"`.
+        InlineConst::ConstBigint { positive, digits } => {
+            Doc::text(format!("{}{}n", if *positive { "" } else { "-" }, digits))
         }
         InlineConst::ConstFloat(f) => Doc::text(f.clone()),
     }
@@ -2214,11 +2246,10 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
             print_out_module_type_doc(mty),
         ])),
         OutSigItem::Osig_type(decl, rec_status) => {
-            let attrs = match (decl.immediate, decl.unboxed) {
-                (false, false) => Doc::nil(),
-                (true, false) => Doc::concat(vec![Doc::text("@immediate"), Doc::line()]),
-                (false, true) => Doc::concat(vec![Doc::text("@unboxed"), Doc::line()]),
-                (true, true) => Doc::concat(vec![Doc::text("@immediate @unboxed"), Doc::line()]),
+            let attrs = if decl.attributes.is_empty() {
+                Doc::nil()
+            } else {
+                Doc::concat(vec![Doc::text(decl.attributes.join(" ")), Doc::line()])
             };
             let kw = Doc::text(match rec_status {
                 OutRecStatus::Orec_not => "type ",
@@ -2244,7 +2275,16 @@ pub(crate) fn print_out_sig_item_doc_with(item: &OutSigItem, print_name_as_is: b
                     private_doc,
                     print_record_declaration_doc(false, record),
                 ]),
-                typ => Doc::concat(vec![Doc::text(" = "), print_out_type_doc(typ)]),
+                // res_outcome_printer.ml: a manifest prints `= manifest = private
+                // kind`, and every other kind takes the private keyword too.
+                OutType::Otyp_manifest(manifest, typ) => Doc::concat(vec![
+                    Doc::text(" = "),
+                    print_out_type_doc(manifest),
+                    Doc::text(" = "),
+                    private_doc,
+                    print_out_type_doc(typ),
+                ]),
+                typ => Doc::concat(vec![Doc::text(" = "), private_doc, print_out_type_doc(typ)]),
             };
             let constraints = if decl.cstrs.is_empty() {
                 Doc::nil()
@@ -2419,7 +2459,7 @@ fn print_out_extension_constructor_doc(ext: &OutExtensionConstructor) -> Doc {
         Doc::text("type "),
         print_ident_like(&ext.type_name, false, false),
         print_extension_type_params_doc(&ext.type_params),
-        Doc::text(" += "),
+        Doc::text(" +="),
         Doc::line(),
         if ext.private {
             Doc::text("private ")
@@ -2471,6 +2511,27 @@ pub(crate) fn print_out_type(out_type: &OutType) -> String {
     print_out_type_doc(out_type).to_string(80)
 }
 
+/// `pp_doc` (res_outcome_printer.ml:426-440): print a doc rendered at width
+/// 80 into a Format box. Each line break of a multi-line doc is a newline of
+/// the enclosing box, so the following lines are indented with the box, and
+/// the first line claims the whole margin, so the box breaks around the doc
+/// instead of continuing on the doc's last line.
+pub(crate) fn pp_doc<W: std::io::Write>(ppf: &mut Formatter<W>, rendered: &str) {
+    if !rendered.contains('\n') {
+        ppf.string_as(rendered.len(), rendered);
+        return;
+    }
+    for (index, line) in rendered.split('\n').enumerate() {
+        if index == 0 {
+            let margin = ppf.margin();
+            ppf.string_as(margin, line);
+        } else {
+            ppf.newline();
+            ppf.string_as(line.len(), line);
+        }
+    }
+}
+
 // ============================================================================
 // Unification errors (compiler/ml/printtyp.ml:1219-1567)
 // ============================================================================
@@ -2505,10 +2566,6 @@ pub(crate) fn expand_trace(
     out
 }
 
-/// `pp_print_string` of a rendered type, measured by its byte length.
-fn pp_type_text<W: std::io::Write>(ppf: &mut Formatter<W>, text: &str) {
-    ppf.string_as(text.len(), text);
-}
 
 fn open_tag<W: std::io::Write>(ppf: &mut Formatter<W>, tag: &str) {
     ppf.string_as(0, tag);
@@ -2520,10 +2577,12 @@ fn close_tag<W: std::io::Write>(ppf: &mut Formatter<W>) {
 
 impl<'a> Printtyp<'a> {
     fn is_tvar(&self, t: TypeExprRef) -> bool {
-        matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(_))
+        matches!(&*self.ctx.borrow_desc(self.ctx.repr(t)), TypeDesc::Tvar(..))
     }
 
-    /// `same_path` (printtyp.ml:1219-1232); `best_type_path` is `(p, Id)`.
+    /// `same_path` (printtyp.ml:1187-1204); `best_type_path` is `(p, Id)`.
+    /// A module alias names the same type as its target, so both paths are
+    /// compared after `Env.normalize_path None !printing_env`.
     pub(crate) fn same_path(&self, t: TypeExprRef, t2: TypeExprRef) -> bool {
         let t = self.ctx.repr(t);
         let t2 = self.ctx.repr(t2);
@@ -2543,7 +2602,7 @@ impl<'a> Printtyp<'a> {
                     ..
                 },
             ) => {
-                p1.same(p2)
+                self.normalized_paths_same(p1, p2)
                     && tl1.len() == tl2.len()
                     && self
                         .ctx
@@ -2554,6 +2613,26 @@ impl<'a> Printtyp<'a> {
             }
             _ => false,
         }
+    }
+
+    /// `Path.same (Env.normalize_path None env p1) (Env.normalize_path None
+    /// env p2)` with `env = !printing_env` (printtyp.ml:1196-1201). The
+    /// normalization runs through Env's `find_module ~alias:true`, forcing
+    /// what it reaches, as in OCaml.
+    fn normalized_paths_same(&self, p1: &Path, p2: &Path) -> bool {
+        let empty;
+        let env = match &self.printing_env {
+            Some(env) => env,
+            None => {
+                empty = crate::types::env::Env::empty();
+                &empty
+            }
+        };
+        // OCaml evaluates the arguments of `Path.same` right to left, so
+        // `p2` is normalized, and what it reaches forced, before `p1`.
+        let n2 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p2);
+        let n1 = crate::types::ctype::force_normalize_path_full_side_effects(self.ctx, env, p1);
+        n1.same(&n2)
     }
 
     fn path_same_name(&mut self, p1: &Path, p2: &Path) {
@@ -2611,9 +2690,10 @@ impl<'a> Printtyp<'a> {
             return t;
         }
         let more_level = self.ctx.get_level(btype::row_more(self.ctx, &row));
-        let row_more = self
-            .ctx
-            .alloc_type_at_level(TypeDesc::Tvar(None), more_level);
+        let row_more = self.ctx.alloc_type_at_level(
+            TypeDesc::Tvar(None),
+            more_level,
+        );
         let level = self.ctx.get_level(t);
         self.ctx.alloc_type_at_level(
             TypeDesc::Tvariant(self.ctx.new_row_desc(RowDesc {
@@ -2631,7 +2711,7 @@ impl<'a> Printtyp<'a> {
         let level = self.ctx.get_level(ty);
         let desc = *self.ctx.get_desc(ty);
         match desc {
-            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => ty,
+            TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => ty,
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                 let more = self.ctx.repr(row.row_more);
@@ -2678,11 +2758,14 @@ impl<'a> Printtyp<'a> {
                     level,
                 )
             }
-            desc @ (TypeDesc::Tvar(_) | TypeDesc::Tnil) => {
+            desc @ (TypeDesc::Tvar(..) | TypeDesc::Tnil) => {
                 self.ctx.alloc_type_at_level(desc, level)
             }
-            TypeDesc::Tunivar(_) => ty,
-            _ => self.ctx.alloc_type_at_level(TypeDesc::Tvar(None), level),
+            TypeDesc::Tunivar(..) => ty,
+            _ => self.ctx.alloc_type_at_level(
+                TypeDesc::Tvar(None),
+                level,
+            ),
         }
     }
 
@@ -2731,8 +2814,8 @@ impl<'a> Printtyp<'a> {
             | (TypeDesc::Tnil | TypeDesc::Tconstr { .. }, TypeDesc::Tfield { .. })
             | (TypeDesc::Tnil, TypeDesc::Tconstr { .. })
             | (TypeDesc::Tconstr { .. }, TypeDesc::Tnil)
-            | (_, TypeDesc::Tvar(_))
-            | (TypeDesc::Tvar(_), _)
+            | (_, TypeDesc::Tvar(..))
+            | (TypeDesc::Tvar(..), _)
             | (TypeDesc::Tvariant(_), TypeDesc::Tvariant(_)) => true,
             (
                 TypeDesc::Tfield {
@@ -2791,8 +2874,9 @@ impl<'a> Printtyp<'a> {
         ppf: &mut Formatter<W>,
         ty: TypeExprRef,
     ) {
+        // `print_out_type` (res_outcome_printer.ml:442).
         let text = self.type_expr(ty);
-        pp_type_text(ppf, &text);
+        pp_doc(ppf, &text);
     }
 
     /// `super_type_expansion ~tag t ppf t'`.
@@ -2885,27 +2969,28 @@ impl<'a> Printtyp<'a> {
         let d4 = *self.ctx.get_desc(t4);
         let binding_time = |p: &Path| p.binding_time();
         match (&d3, &d4) {
-            (TypeDesc::Ttuple(l), TypeDesc::Tvar(_)) | (TypeDesc::Tvar(_), TypeDesc::Ttuple(l))
+            (TypeDesc::Ttuple(l), TypeDesc::Tvar(..))
+            | (TypeDesc::Tvar(..), TypeDesc::Ttuple(l))
                 if l.is_empty() =>
             {
                 ppf.cut();
                 ppf.str("Self type cannot escape its class");
             }
-            (TypeDesc::Tconstr { path: p, .. }, TypeDesc::Tvar(_))
+            (TypeDesc::Tconstr { path: p, .. }, TypeDesc::Tvar(..))
                 if unif && self.ctx.get_level(t4) < binding_time(p) =>
             {
                 self.escape_scope(ppf, p);
             }
-            (TypeDesc::Tvar(_), TypeDesc::Tconstr { path: p, .. })
+            (TypeDesc::Tvar(..), TypeDesc::Tconstr { path: p, .. })
                 if unif && self.ctx.get_level(t3) < binding_time(p) =>
             {
                 self.escape_scope(ppf, p);
             }
-            (TypeDesc::Tvar(_), TypeDesc::Tunivar(_))
-            | (TypeDesc::Tunivar(_), TypeDesc::Tvar(_)) => {
+            (TypeDesc::Tvar(..), TypeDesc::Tunivar(..))
+            | (TypeDesc::Tunivar(..), TypeDesc::Tvar(..)) => {
                 ppf.cut();
                 ppf.str("The universal variable ");
-                let u = if matches!(d3, TypeDesc::Tunivar(_)) {
+                let u = if matches!(d3, TypeDesc::Tunivar(..)) {
                     t3
                 } else {
                     t4
@@ -2913,8 +2998,8 @@ impl<'a> Printtyp<'a> {
                 self.pp_type_expr(ppf, u);
                 ppf.str(" would escape its scope");
             }
-            (TypeDesc::Tvar(_), _) | (_, TypeDesc::Tvar(_)) => {
-                let (t, t2) = if matches!(d3, TypeDesc::Tvar(_)) {
+            (TypeDesc::Tvar(..), _) | (_, TypeDesc::Tvar(..)) => {
+                let (t, t2) = if matches!(d3, TypeDesc::Tvar(..)) {
                     (t3, t4)
                 } else {
                     (t4, t3)
@@ -3098,7 +3183,25 @@ impl<'a> Printtyp<'a> {
         }
     }
 
+    /// `escape_explanation ppf p` (printtyp.ml:1303-1318).
     fn escape_scope<W: std::io::Write>(&mut self, ppf: &mut Formatter<W>, p: &Path) {
+        if let PathView::Pident(id) = p.view()
+            && let Some(constructor) = self.ctx.existential_constructor(id)
+        {
+            let constructor = constructor.as_str();
+            ppf.cut();
+            ppf.open_box(BoxKind::Box, 0);
+            ppf.str(id.name());
+            ppf.str(" is an existential type bound by the constructor ");
+            ppf.str(constructor);
+            ppf.str(".");
+            ppf.space();
+            ppf.str("It is only known in the scope of the pattern that matches ");
+            ppf.str(constructor);
+            ppf.str(".");
+            ppf.close_box();
+            return;
+        }
         ppf.cut();
         ppf.open_box(BoxKind::Box, 0);
         ppf.str("The type constructor");
@@ -3492,6 +3595,26 @@ fn print_subtype_context<W: std::io::Write>(
                 );
             }
         }
+        C::CoercionIntoPrivateType { typename } => {
+            ppf.space();
+            info(ppf, &typename.name());
+            ppf.str(
+                " is private: its values can only be built in the module that defines it, so another type cannot be coerced to it.",
+            );
+        }
+        C::RecordArrayMismatch {
+            array_record_name,
+            object_record_name,
+        } => {
+            ppf.space();
+            ppf.str("The record ");
+            info(ppf, &array_record_name.name());
+            ppf.str(
+                " is represented as a JavaScript array (its fields have the runtime names \"0\", \"1\", ...) and ",
+            );
+            info(ppf, &object_record_name.name());
+            ppf.str(" as an object, so neither can be coerced to the other.");
+        }
     }
 }
 
@@ -3613,7 +3736,7 @@ fn print_variant_configuration_issue<W: std::io::Write>(
                 ppf.str("- Variant ");
                 info(ppf, &name.name());
                 ppf.str(" is ");
-                error_tag(ppf, if unboxed { "not " } else { "" });
+                error_tag(ppf, if unboxed { "" } else { "not " });
                 ppf.str("unboxed.");
             }
             ppf.cut();
@@ -3689,7 +3812,7 @@ fn print_variant_configuration_issue<W: std::io::Write>(
     }
 }
 
-/// `print_record_field_subtype_violation` (printtyp.ml:1700-1738).
+/// `print_record_field_subtype_violation` (printtyp.ml:1666-1716).
 fn print_record_field_subtype_violation<W: std::io::Write>(
     ppf: &mut Formatter<W>,
     issue: &crate::types::ctype::RecordFieldSubtypeViolation,
@@ -3742,9 +3865,9 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
                 }
             }
             ppf.str(" in record ");
-            info(ppf, &right_record_name.name());
-            ppf.str(", but in record ");
             info(ppf, &left_record_name.name());
+            ppf.str(", but in record ");
+            info(ppf, &right_record_name.name());
             match right_as {
                 Some(as_name) => {
                     ppf.str(" it is configured to be ");
@@ -3763,9 +3886,18 @@ fn print_record_field_subtype_violation<W: std::io::Write>(
             ppf.str("The field ");
             info(ppf, label);
             ppf.str(" is missing in record ");
-            info(ppf, &right_record_name.name());
-            ppf.str(", but present in record ");
             info(ppf, &left_record_name.name());
+            ppf.str(", but present in record ");
+            info(ppf, &right_record_name.name());
+        }
+        V::MutableMismatch { label } => {
+            ppf.str("The field ");
+            info(ppf, label);
+            ppf.str(" is mutable in record ");
+            info(ppf, &right_record_name.name());
+            ppf.str(", but not in record ");
+            info(ppf, &left_record_name.name());
+            ppf.str(". A coercion can't make a field writable.");
         }
     }
 }
@@ -3780,8 +3912,8 @@ impl<'a> Printtyp<'a> {
         ppf: &mut Formatter<W>,
         unif: bool,
         tr: &[TracePair],
-        txt1: &str,
-        txt2: &str,
+        txt1: &mut dyn FnMut(&mut Formatter<W>),
+        txt2: &mut dyn FnMut(&mut Formatter<W>),
     ) {
         self.reset();
         self.trace_same_names(tr);
@@ -3803,11 +3935,11 @@ impl<'a> Printtyp<'a> {
             .collect();
         ppf.open_box(BoxKind::V, 0);
         ppf.open_box(BoxKind::Box, 0);
-        ppf.str(txt1);
+        txt1(ppf);
         ppf.break_(1, 2);
         self.type_expansion(ppf, t1, t1e);
         ppf.space();
-        ppf.str(txt2);
+        txt2(ppf);
         ppf.break_(1, 2);
         self.type_expansion(ppf, t2, t2e);
         ppf.close_box();
@@ -3882,5 +4014,118 @@ impl<'a> Printtyp<'a> {
         ppf.break_(1, 2);
         self.type_path_expansion(ppf, &tp0.0, &tp0.1);
         ppf.close_box();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pp_doc;
+    use crate::parser::formatter::Formatter;
+
+    /// `@[<hv 2>Modules do not match:@ %a@;<1 -2>is not included in@ %a@]`
+    /// (includemod.ml:566-569) at column 2, the sides printed by `pp_doc`.
+    fn modules_do_not_match(actual: &str, expected: &str) -> String {
+        let mut buf = Vec::new();
+        {
+            let mut ppf = Formatter::new(&mut buf);
+            ppf.string_as(2, "");
+            ppf.open_hvbox(2);
+            ppf.str("Modules do not match:");
+            ppf.space();
+            pp_doc(&mut ppf, actual);
+            ppf.break_(1, -2);
+            ppf.str("is not included in");
+            ppf.space();
+            pp_doc(&mut ppf, expected);
+            ppf.close_box();
+            ppf.flush();
+        }
+        String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn pp_doc_indents_every_line_of_a_multi_line_doc_with_its_box() {
+        // The upstream example of bf272baf34.
+        assert_eq!(
+            modules_do_not_match("{\n  type t = int\n}", "{\n  type t = X.t\n}"),
+            "Modules do not match:\n    {\n      type t = int\n    }\n  is not included in\n    {\n      type t = X.t\n    }"
+        );
+    }
+
+    #[test]
+    fn pp_doc_breaks_the_box_around_a_short_multi_line_doc() {
+        // A multi-line doc claims the whole margin, so the box breaks even
+        // though every line is short, and a single-line doc after it starts
+        // on its own line.
+        assert_eq!(
+            modules_do_not_match("{\n  let unrelated: string\n}", "HasFoo"),
+            "Modules do not match:\n    {\n      let unrelated: string\n    }\n  is not included in\n    HasFoo"
+        );
+    }
+
+    #[test]
+    fn record_rows_print_their_runtime_name_as_an_as_attribute() {
+        use super::{OutType, print_out_type};
+        // The upstream example of 52ae045512, and escaped quotes and backslashes.
+        let row = |name: &str, runtime_name: Option<&str>, mutable| {
+            (
+                name.to_string(),
+                runtime_name.map(str::to_string),
+                mutable,
+                false,
+                OutType::Otyp_stuff("int".to_string()),
+            )
+        };
+        assert_eq!(
+            print_out_type(&OutType::Otyp_record(vec![row(
+                "field",
+                Some("wire"),
+                false
+            )])),
+            "{@as(\"wire\") field: int}"
+        );
+        assert_eq!(
+            print_out_type(&OutType::Otyp_record(vec![
+                row("a", Some("x\"y\\"), true),
+                row("b", None, false),
+            ])),
+            "{@as(\"x\\\"y\\\\\") mutable a: int, b: int}"
+        );
+    }
+
+    #[test]
+    fn record_rows_print_their_runtime_name_as_a_rescript_string_literal() {
+        use super::{OutType, print_out_type};
+        // `String_literal.encode_js_string` (upstream 0800cb42b8): the bytes
+        // of valid UTF-8 stay as they are (the compiler holds one char per
+        // byte), control bytes take JavaScript escapes, and backticks and
+        // dollars need none in a double-quoted literal.
+        let row = |runtime_name: &str| {
+            (
+                "name".to_string(),
+                Some(runtime_name.to_string()),
+                false,
+                false,
+                OutType::Otyp_stuff("int".to_string()),
+            )
+        };
+        let print =
+            |runtime_name: &str| print_out_type(&OutType::Otyp_record(vec![row(runtime_name)]));
+        assert_eq!(
+            print("pr\u{c3}\u{a9}nom"),
+            "{@as(\"pr\u{c3}\u{a9}nom\") name: int}"
+        );
+        assert_eq!(
+            print("\u{1}\t\u{b}\u{c}\u{7f}`$"),
+            "{@as(\"\\x01\\t\\v\\f\\x7F`$\") name: int}"
+        );
+    }
+
+    #[test]
+    fn pp_doc_prints_a_single_line_doc_as_one_string() {
+        assert_eq!(
+            modules_do_not_match("S", "T"),
+            "Modules do not match: S is not included in T"
+        );
     }
 }

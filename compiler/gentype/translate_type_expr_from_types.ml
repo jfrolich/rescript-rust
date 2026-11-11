@@ -46,6 +46,13 @@ let translate_obj_type closed_flag fields_translations =
   let type_ = Object (closed_flag, fields) in
   {dependencies; type_}
 
+(* The Temporal types declared by TypeScript's [ESNext.Temporal] library. *)
+let is_temporal_value_type = function
+  | "Duration" | "Instant" | "PlainDate" | "PlainDateTime" | "PlainMonthDay"
+  | "PlainTime" | "PlainYearMonth" | "ZonedDateTime" ->
+    true
+  | _ -> false
+
 let translate_constr ~config ~params_translation ~(path : Path.t) ~type_env =
   let default_case () =
     let type_args =
@@ -67,7 +74,7 @@ let translate_constr ~config ~params_translation ~(path : Path.t) ~type_env =
   in
   match (path |> path_to_list |> List.rev, params_translation) with
   | ["bool"], [] -> {dependencies = []; type_ = boolean_t}
-  | ["int"], [] -> {dependencies = []; type_ = number_t}
+  | (["int"] | ["char"]), [] -> {dependencies = []; type_ = number_t}
   | ["float"], [] -> {dependencies = []; type_ = number_t}
   | (["string"] | ["Stdlib"; "String"; "t"]), [] ->
     {dependencies = []; type_ = string_t}
@@ -127,8 +134,20 @@ let translate_constr ~config ~params_translation ~(path : Path.t) ~type_env =
   | ["Stdlib"; "Symbol"; "t"], [] -> {dependencies = []; type_ = ident "symbol"}
   | ["Stdlib"; "Intl"; intl_module; "t"], [] ->
     {dependencies = []; type_ = ident ("Intl." ^ intl_module)}
-  | (["Stdlib"; "Error"; "t"] | ["Stdlib"; "JsError"; "t"]), [] ->
-    {dependencies = []; type_ = ident "Error"}
+  | ["Stdlib"; "Temporal"; temporal_module; "t"], []
+    when is_temporal_value_type temporal_module ->
+    {dependencies = []; type_ = ident ("Temporal." ^ temporal_module)}
+  (* Conversions between Temporal types return the shared types of
+     [Stdlib_Temporal_Common], like [Stdlib_Temporal_Common.plainDate]. *)
+  | ( ( ["Stdlib"; "Temporal"; "Common"; temporal_type]
+      | ["Stdlib"; "Temporal_Common"; temporal_type] ),
+      [] )
+    when is_temporal_value_type (String.capitalize_ascii temporal_type) ->
+    {
+      dependencies = [];
+      type_ = ident ("Temporal." ^ String.capitalize_ascii temporal_type);
+    }
+  | ["Stdlib"; "JsError"; "t"], [] -> {dependencies = []; type_ = ident "Error"}
   | (["Stdlib"; "Iterable"; "t"] | ["iterable"]), [param_translation] ->
     {
       dependencies = param_translation.dependencies;
@@ -691,7 +710,7 @@ let translate_type_expr_from_types ~config ~type_env type_expr =
   let translation =
     type_expr |> translateTypeExprFromTypes_ ~config ~type_vars_gen ~type_env
   in
-  if !Debug.dependencies then
+  if !(Debug.dependencies ()) then
     translation.dependencies
     |> List.iter (fun dep ->
         Log_.item "Dependency: %s\n" (dep |> dep_to_string));
@@ -702,7 +721,7 @@ let translate_type_exprs_from_types ~config ~type_env type_exprs =
   let translations =
     type_exprs |> translateTypeExprsFromTypes_ ~config ~type_vars_gen ~type_env
   in
-  if !Debug.dependencies then
+  if !(Debug.dependencies ()) then
     translations
     |> List.iter (fun translation ->
         translation.dependencies

@@ -386,14 +386,8 @@ impl RawArena {
     }
 
     /// Function application.
-    pub fn apply(
-        &self,
-        func: RawLambda,
-        args: &[RawLambda],
-        info: ApInfo,
-        transformed_jsx: bool,
-    ) -> RawLambda {
-        self.with(|a| a.apply_raw(func, args, info, transformed_jsx))
+    pub fn apply(&self, func: RawLambda, args: &[RawLambda], info: ApInfo) -> RawLambda {
+        self.with(|a| a.apply_raw(func, args, info))
     }
 
     /// Switch on integer/block tag.
@@ -446,6 +440,11 @@ impl RawArena {
         handler: RawLambda,
     ) -> RawLambda {
         self.with(|a| a.static_catch(body, label, params, handler))
+    }
+
+    /// Evaluate the finally block on every exit from the body.
+    pub fn try_finally(&self, body: RawLambda, finally: RawLambda) -> RawLambda {
+        self.a.borrow_mut().try_finally(body, finally)
     }
 
     /// Try-with exception handling.
@@ -631,7 +630,9 @@ pub(crate) fn collect_free_variables<S: FreeVarSet>(a: &LamArena, lam: RawLambda
             collect(a, ifso, fv);
             collect(a, ifnot, fv);
         }
-        View::Sequence(first, second) | View::While(first, second) => {
+        View::TryFinally(first, second)
+        | View::Sequence(first, second)
+        | View::While(first, second) => {
             collect(a, first, fv);
             collect(a, second, fv);
         }

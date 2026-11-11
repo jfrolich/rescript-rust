@@ -50,7 +50,7 @@ function areSame(x, y) {
   return x.toString() === y.toString();
 }
 
-assertTrue("fromArray", () => areSame(Stdlib_Option.getExn(new BigInt64Array([
+assertTrue("fromArray", () => areSame(Stdlib_Option.getOrThrow(new BigInt64Array([
     num1,
     num2
   ])[1], undefined), num2));
@@ -58,25 +58,25 @@ assertTrue("fromArray", () => areSame(Stdlib_Option.getExn(new BigInt64Array([
 assertTrue("fromBuffer", () => {
   let x = new BigInt64Array(new ArrayBuffer(16));
   x[1] = num2;
-  return areSame(Stdlib_Option.getExn(x[1], undefined), num2);
+  return areSame(Stdlib_Option.getOrThrow(x[1], undefined), num2);
 });
 
 assertWillThrow("fromBuffer when too short can throw when used", () => {
   let x = new BigInt64Array(new ArrayBuffer(1));
   x[0] = num1;
-  areSame(Stdlib_Option.getExn(x[0], undefined), num1);
+  areSame(Stdlib_Option.getOrThrow(x[0], undefined), num1);
 });
 
 assertTrue("fromBufferWithRange", () => {
   let x = new BigInt64Array(new ArrayBuffer(16), 0, 1);
   x[0] = num1;
-  return areSame(Stdlib_Option.getExn(x[0], undefined), num1);
+  return areSame(Stdlib_Option.getOrThrow(x[0], undefined), num1);
 });
 
 assertWillThrow("fromBufferWithRange is unsafe, out of range", () => {
   let x = new BigInt64Array(new ArrayBuffer(16), 13, 1);
   x[0] = num1;
-  areSame(Stdlib_Option.getExn(x[0], undefined), num1);
+  areSame(Stdlib_Option.getOrThrow(x[0], undefined), num1);
 });
 
 assertTrue("fromLength is NOT in bytes", () => {
@@ -84,9 +84,87 @@ assertTrue("fromLength is NOT in bytes", () => {
   return x.byteLength === 8;
 });
 
-function o(prim0, prim1) {
-  return BigInt64Array.from(prim0, prim1);
+assertTrue("a typed array is a TypedArray.t through a coercion", () => {
+  let x = new BigInt64Array(2);
+  return x.length === 2;
+});
+
+function o(x, map) {
+  return BigInt64Array.from(x, map);
 }
+
+assertTrue("copyAllWithin returns the typed array it mutated", () => {
+  let x = new Int32Array([
+    1,
+    2,
+    3
+  ]);
+  let r = x.copyWithin(1);
+  if (r === x) {
+    return r.toString() === "1,1,2";
+  } else {
+    return false;
+  }
+});
+
+assertTrue("copyWithin returns the typed array it mutated", () => {
+  let x = new Int32Array([
+    1,
+    2,
+    3,
+    4
+  ]);
+  let r = x.copyWithin(1, 2, 4);
+  if (r === x) {
+    return r.toString() === "1,3,4,4";
+  } else {
+    return false;
+  }
+});
+
+assertTrue("TypedArray.copyAllWithin returns the typed array it mutated", () => {
+  let x = new Int32Array([
+    1,
+    2,
+    3
+  ]);
+  let r = x.copyWithin(1);
+  if (r === x) {
+    return r.toString() === "1,1,2";
+  } else {
+    return false;
+  }
+});
+
+assertTrue("TypedArray.copyWithin returns the typed array it mutated", () => {
+  let x = new Int32Array([
+    1,
+    2,
+    3,
+    4
+  ]);
+  let r = x.copyWithin(1, 2, 4);
+  if (r === x) {
+    return r.toString() === "1,3,4,4";
+  } else {
+    return false;
+  }
+});
+
+assertTrue("TypedArray.map keeps the element type", () => {
+  let x = new Int32Array([
+    1,
+    2,
+    3
+  ]);
+  let r = x.map(v => (v << 1));
+  let s = x.map((v, i) => v + i | 0);
+  if (r.toString() === "2,4,6") {
+    return s.toString() === "1,3,5";
+  } else {
+    return false;
+  }
+});
 
 export {
   eq,

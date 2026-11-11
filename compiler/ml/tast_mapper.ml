@@ -165,13 +165,19 @@ let pat sub x =
   let pat_extra = List.map (tuple3 extra id id) x.pat_extra in
   let pat_desc =
     match x.pat_desc with
-    | (Tpat_any | Tpat_var _ | Tpat_constant _) as d -> d
+    | (Tpat_any | Tpat_var _ | Tpat_constant _ | Tpat_interval _) as d -> d
     | Tpat_tuple l -> Tpat_tuple (List.map (sub.pat sub) l)
     | Tpat_construct (loc, cd, l) ->
       Tpat_construct (loc, cd, List.map (sub.pat sub) l)
     | Tpat_variant (l, po, rd) -> Tpat_variant (l, opt (sub.pat sub) po, rd)
     | Tpat_record (l, closed, rest) ->
       Tpat_record (List.map (tuple4 id id (sub.pat sub) id) l, closed, rest)
+    | Tpat_dict entries ->
+      Tpat_dict
+        (List.map
+           (fun entry ->
+             {entry with tdp_pattern = sub.pat sub entry.tdp_pattern})
+           entries)
     | Tpat_array l -> Tpat_array (List.map (sub.pat sub) l)
     | Tpat_or (p1, p2, rd) -> Tpat_or (sub.pat sub p1, sub.pat sub p2, rd)
     | Tpat_alias (p, id, s) -> Tpat_alias (sub.pat sub p, id, s)
@@ -213,7 +219,9 @@ let expr sub x =
     | Texp_match (exp, cases, exn_cases, p) ->
       Texp_match
         (sub.expr sub exp, sub.cases sub cases, sub.cases sub exn_cases, p)
-    | Texp_try (exp, cases) -> Texp_try (sub.expr sub exp, sub.cases sub cases)
+    | Texp_try (exp, cases, finally) ->
+      Texp_try
+        (sub.expr sub exp, sub.cases sub cases, opt (sub.expr sub) finally)
     | Texp_tuple list -> Texp_tuple (List.map (sub.expr sub) list)
     | Texp_construct (lid, cd, args) ->
       Texp_construct (lid, cd, List.map (sub.expr sub) args)
@@ -221,10 +229,7 @@ let expr sub x =
     | Texp_record {fields; representation; extended_expression} ->
       let fields =
         Array.map
-          (function
-            | label, Kept t, o -> (label, Kept t, o)
-            | label, Overridden (lid, exp), o ->
-              (label, Overridden (lid, sub.expr sub exp), o))
+          (fun (label, lid, exp) -> (label, lid, sub.expr sub exp))
           fields
       in
       Texp_record
@@ -237,6 +242,15 @@ let expr sub x =
     | Texp_setfield (exp1, lid, ld, exp2) ->
       Texp_setfield (sub.expr sub exp1, lid, ld, sub.expr sub exp2)
     | Texp_array list -> Texp_array (List.map (sub.expr sub) list)
+    | Texp_dict entries ->
+      Texp_dict
+        (List.map
+           (function
+             | Tdict_entry (key, exp) -> Tdict_entry (key, sub.expr sub exp)
+             | Tdict_spread exp -> Tdict_spread (sub.expr sub exp))
+           entries)
+    | Texp_spread (kind, parts) ->
+      Texp_spread (kind, List.map (sub.expr sub) parts)
     | Texp_ifthenelse (exp1, exp2, expo) ->
       Texp_ifthenelse
         (sub.expr sub exp1, sub.expr sub exp2, opt (sub.expr sub) expo)
@@ -273,7 +287,6 @@ let expr sub x =
       Texp_letexception (sub.extension_constructor sub cd, sub.expr sub exp)
     | Texp_assert exp -> Texp_assert (sub.expr sub exp)
     | Texp_pack mexpr -> Texp_pack (sub.module_expr sub mexpr)
-    | Texp_extension_constructor _ as e -> e
   in
   {x with exp_extra; exp_desc; exp_env}
 

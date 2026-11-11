@@ -2,10 +2,10 @@ name: CI
 
 on:
   push:
-    branches: [master, 11.0_release]
+    branches: [master, maintenance/*]
 
   pull_request:
-    branches: [master, 11.0_release]
+    branches: [master, maintenance/*]
 
   # Release builds are started by publish.yml after a maintainer indicates
   # whether the package version is current stable. The npm tag is derived from
@@ -79,41 +79,36 @@ jobs:
   build-compiler:
     outputs:
       api-docs-artifact-id: ${{ steps.upload-api-docs.outputs.artifact-id }}
+      website-branch: ${{ steps.api-docs-plan.outputs.website-branch }}
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-24.04 # x64
-            ocaml_compiler: ocaml-variants.5.5.1+options,ocaml-option-static
+          - os: ubuntu-26.04 # x64
+            ocaml_compiler: ocaml-variants.5.5.2+options,ocaml-option-static
             upload_binaries: true
             upload_libs: true
             node-target: linux-x64
             rust-target: x86_64-unknown-linux-musl
             dune-profile: static
-          - os: ubuntu-24.04-arm # ARM
-            ocaml_compiler: ocaml-variants.5.5.1+options,ocaml-option-static
+          - os: ubuntu-26.04-arm # ARM
+            ocaml_compiler: ocaml-variants.5.5.2+options,ocaml-option-static
             upload_binaries: true
-            # Build the playground compiler and run the benchmarks on the fastest runner
+            # Build the playground compiler on the fastest runner
             build_playground: true
             generate_api_docs: true
-            benchmarks: true
+            test_commit_records: true
             node-target: linux-arm64
             rust-target: aarch64-unknown-linux-musl
             dune-profile: static
-          - os: macos-15-intel # x64
-            ocaml_compiler: 5.5.1
-            upload_binaries: true
-            node-target: darwin-x64
-            rust-target: x86_64-apple-darwin
-            dune-profile: release
-          - os: macos-15 # ARM
-            ocaml_compiler: 5.5.1
+          - os: macos-26 # ARM
+            ocaml_compiler: 5.5.2
             upload_binaries: true
             node-target: darwin-arm64
             rust-target: aarch64-apple-darwin
             dune-profile: release
           - os: windows-2025
-            ocaml_compiler: 5.5.1
+            ocaml_compiler: 5.5.2
             upload_binaries: true
             node-target: win32-x64
             rust-target: x86_64-pc-windows-gnu
@@ -121,6 +116,9 @@ jobs:
             dune-profile: release
 
           # Verify that the compiler still builds with the oldest OCaml version we support.
+          # Steps comparing OCaml and Rust rewatch are skipped on this job; the
+          # first linux-x64 job runs them. OCaml 5.0 does not build with GCC 15
+          # (C23 by default), so this job stays on Ubuntu 24.04.
           - os: ubuntu-24.04
             ocaml_compiler: ocaml-variants.5.0.0+options,ocaml-option-static
             node-target: linux-x64
@@ -139,6 +137,7 @@ jobs:
           git config --system core.autocrlf false
           git config --system core.eol lf
           git config --system core.longpaths true
+          git config --system core.symlinks true
 
       - name: Checkout
         uses: actions/checkout@v7
@@ -214,7 +213,7 @@ jobs:
 
       - name: "Syntax: Run tests"
         env:
-          ROUNDTRIP_TEST: ${{ runner.os == 'Windows' && '0' || '1' }}
+          ROUNDTRIP_TEST: 1
         run: ./scripts/test_syntax.sh
         shell: bash
 
@@ -237,67 +236,111 @@ jobs:
       - name: Version Check
         run: yarn constraints
 
+      - name: Type check JS
+        run: yarn typecheck
+
+      - name: Test release plan
+        run: yarn test-release-plan
+
+      - name: Test commit records
+        if: matrix.test_commit_records
+        run: yarn test-commit-records
+
       - name: Run tests
         run: node scripts/test.js -all
 
       - name: Check for diffs in tests folder
         run: git diff --ignore-cr-at-eol --exit-code tests
 
+      # On Windows, after running setup-ocaml (if it wasn't cached yet or the cache couldn't be restored),
+      # Cygwin bash is used instead of Git Bash for Windows, breaking the test scripts below.
+      # So we need to adjust the path to bring back Git Bash for Windows.
+      # Cygwin's make would also hand /cygdrive paths to yarn, so put the
+      # runner's MinGW make (used on a cache hit) in front of it as well, and
+      # stop Git Bash from sourcing Cygwin's bash_env.
+      - name: "Windows: Use Git Bash"
+        if: ${{ runner.os == 'Windows' }}
+        run: |
+          echo "C:\mingw64\bin" >> $GITHUB_PATH
+          echo "C:\Program Files\Git\bin" >> $GITHUB_PATH
+          echo "BASH_ENV=" >> $GITHUB_ENV
+        shell: bash
+
+      # Git Bash does not include make.
+      - name: "Windows: Install make"
+        if: ${{ runner.os == 'Windows' }}
+        run: command -v make || choco install make --no-progress
+        shell: bash
+
+      # Linux runs these tests in the coverage workflow.
       - name: Run analysis / tools tests
-        if: runner.os != 'Windows' && runner.os != 'Linux'
+        if: runner.os != 'Linux'
         run: opam exec -- make -C tests/analysis_tests test && make -C tests/tools_tests test
+        shell: bash
 
       - name: Run gentype tests
-        if: runner.os != 'Windows'
         run: make -C tests/gentype_tests/typescript-react-example clean test
-
-      # On Windows, after running setup-ocaml (if it wasn't cached yet or the cache couldn't be restored),
-      # Cygwin bash is used instead of Git Bash for Windows, breaking the rewatch tests.
-      # So we need to adjust the path to bring back Git Bash for Windows.
-      - name: Rewatch tests need Git Bash for Windows
-        if: ${{ runner.os == 'Windows' }}
-        run: echo "C:\Program Files\Git\bin" >> $GITHUB_PATH
         shell: bash
 
-      - name: Run rewatch tests
-        run: ./rewatch/tests/suite.sh rewatch/target/release/rescript
-        shell: bash
-
-      - name: Run syntax benchmarks
-        if: matrix.benchmarks
+      - name: Run OCaml rewatch parity tests
+        if: ${{ !contains(matrix.ocaml_compiler, '5.0.0') }}
+        timeout-minutes: 20
         run: |
-          set -o pipefail
-          ./_build/install/default/bin/syntax_benchmarks | tee tests/benchmark-output.json
+          . rewatch-ocaml/tests/process_watchdog.sh
+          start_process_watchdog
+          bash rewatch-ocaml/tests/check_canonical_test_coverage.sh
+          bash rewatch-ocaml/tests/check_config_acceptance.sh \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+          bash rewatch-ocaml/tests/check_command_validation.sh \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+        shell: bash
 
-      # Benchmarking is disabled for now because of inconsistent run times on different runners
-      #
-      # - name: Restore previous benchmark data
-      #   if: matrix.benchmarks
-      #   uses: actions/cache/restore@v6
-      #   with:
-      #     path: ./tests/benchmark-cache
-      #     key: syntax-benchmark-v1
+      - name: Run OCaml rewatch interactive output tests
+        # Terminal rendering depends on the host OS, not the CPU architecture.
+        # Use the faster ARM runners for one Linux and one macOS check. Windows
+        # does not provide a reliable native equivalent of the `script` PTY.
+        if: matrix.node-target == 'linux-arm64' || matrix.node-target == 'darwin-arm64'
+        timeout-minutes: 15
+        run: |
+          bash rewatch-ocaml/tests/check_interactive_output.sh \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+        shell: bash
 
-      # - name: Create new benchmark data and comment on alert
-      #   # Do not run for PRs created from other repos as those won't be able to write to the pull request
-      #   if: ${{ matrix.benchmarks && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.event.repository.full_name) }}
-      #   uses: benchmark-action/github-action-benchmark@v1
-      #   with:
-      #     name: Syntax Benchmarks
-      #     tool: customSmallerIsBetter
-      #     output-file-path: tests/benchmark-output.json
-      #     external-data-json-path: ./tests/benchmark-cache/benchmark-data.json
-      #     github-token: ${{ secrets.GITHUB_TOKEN }}
-      #     alert-threshold: "105%"
-      #     comment-always: false
-      #     comment-on-alert: true
+      - name: Run OCaml rewatch verbose output tests
+        if: ${{ !contains(matrix.ocaml_compiler, '5.0.0') }}
+        timeout-minutes: 10
+        run: |
+          bash rewatch-ocaml/tests/check_verbose_output.sh \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe \
+            packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+        shell: bash
 
-      # - name: Save benchmark data as new baseline
-      #   if: matrix.benchmarks && github.ref == 'refs/heads/master'
-      #   uses: actions/cache/save@v6
-      #   with:
-      #     path: ./tests/benchmark-cache
-      #     key: syntax-benchmark-v1
+      - name: Run OCaml rewatch unit tests
+        timeout-minutes: 10
+        run: |
+          opam exec -- dune build tests/rewatch_ounit_tests/rewatch_ounit_tests_main.exe
+          # Run the executable directly so a stuck test leaves live progress;
+          # dune otherwise buffers the test output until the action exits.
+          opam exec -- ./_build/default/tests/rewatch_ounit_tests/rewatch_ounit_tests_main.exe -runner sequential
+        shell: bash
+
+      - name: Run OCaml rewatch focused integration tests
+        timeout-minutes: 30
+        run: |
+          sh rewatch-ocaml/tests/run.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+        shell: bash
+
+      - name: Run OCaml rewatch canonical tests
+        run: ./rewatch/tests/suite.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript-ocaml.exe
+        shell: bash
+
+      # The Rust build system is the default `rescript`.
+      - name: Run Rust rewatch tests
+        run: ./rewatch/tests/suite.sh packages/@rescript/${{ matrix.node-target }}/bin/rescript.exe
+        shell: bash
 
       - name: Build playground compiler
         if: matrix.build_playground
@@ -364,6 +407,11 @@ jobs:
             !packages/@rescript/runtime/lib/ocaml/*.ast
             !packages/@rescript/runtime/lib/ocaml/*.iast
 
+      - name: Select API docs website branch
+        id: api-docs-plan
+        if: ${{ matrix.generate_api_docs }}
+        run: node scripts/releasePlan.js --github-output "$GITHUB_OUTPUT"
+
       - name: Generate API Docs
         if: ${{ matrix.generate_api_docs }}
         run: yarn apidocs:generate
@@ -380,7 +428,7 @@ jobs:
     needs:
       - build-compiler
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     permissions:
       contents: read
       pages: write
@@ -432,7 +480,7 @@ jobs:
       - build-compiler
     outputs:
       commit_sha: ${{ steps.publish.outputs.sha }}
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -465,12 +513,13 @@ jobs:
   api-docs:
     needs:
       - build-compiler
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     steps:
       - name: Checkout rescript-lang.org
         uses: actions/checkout@v7
         with:
           repository: rescript-lang/rescript-lang.org
+          ref: ${{ needs.build-compiler.outputs.website-branch }}
 
       - name: Download artifacts
         uses: actions/download-artifact@v8
@@ -502,7 +551,7 @@ jobs:
           yarn build
 
   test-devcontainer:
-    runs-on: ubuntu-24.04-arm
+    runs-on: ubuntu-26.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -519,10 +568,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-          - os: macos-15
-          - os: ubuntu-24.04
-          - os: ubuntu-24.04-arm
+          - os: macos-26
+          - os: ubuntu-26.04
+          - os: ubuntu-26.04-arm
           - os: windows-2025
     runs-on: ${{ matrix.os }}
     steps:
@@ -547,6 +595,10 @@ jobs:
           fi
           echo "path=$dir" >> "$GITHUB_OUTPUT"
           cp -r tests/package_tests/installation_test/* "$dir"
+          # The compiled stdlib tests run against the installed runtime. Their
+          # Test.mjs imports @babel/code-frame, which tests/tests depends on.
+          cp -r tests/tests/src/stdlib "$dir/stdlib"
+          echo "code-frame=$(node -p 'require("./tests/tests/package.json").dependencies["@babel/code-frame"]')" >> "$GITHUB_OUTPUT"
 
       - name: Install ReScript package
         run: |
@@ -554,7 +606,8 @@ jobs:
           npm i --no-audit \
             "https://pkg.pr.new/rescript-lang/rescript@${COMMIT_SHA}" \
             "https://pkg.pr.new/rescript-lang/rescript/@rescript/runtime@${COMMIT_SHA}" \
-            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}"
+            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}" \
+            "@babel/code-frame@${{ steps.tmp-dir.outputs.code-frame }}"
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
@@ -578,6 +631,16 @@ jobs:
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
+      # build-compiler runs the stdlib tests on the Node.js version in .nvmrc,
+      # this job on the oldest supported one, so tests of APIs missing there
+      # must stay out of Stdlib_TestSuite and Stdlib_TempTests.
+      - name: Run stdlib tests
+        run: |
+          node stdlib/Stdlib_TestSuite.mjs
+          node stdlib/Stdlib_TempTests.mjs
+        shell: bash
+        working-directory: ${{ steps.tmp-dir.outputs.path }}
+
   test-installation-pnpm:
     needs:
       - pkg-pr-new
@@ -585,10 +648,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-15-intel
-          - os: macos-15
-          - os: ubuntu-24.04
-          - os: ubuntu-24.04-arm
+          - os: macos-26
+          - os: ubuntu-26.04
+          - os: ubuntu-26.04-arm
           - os: windows-2025
     runs-on: ${{ matrix.os }}
     steps:
@@ -618,6 +680,10 @@ jobs:
           fi
           echo "path=$dir" >> "$GITHUB_OUTPUT"
           cp -r tests/package_tests/installation_test/* "$dir"
+          # The compiled stdlib tests run against the installed runtime. Their
+          # Test.mjs imports @babel/code-frame, which tests/tests depends on.
+          cp -r tests/tests/src/stdlib "$dir/stdlib"
+          echo "code-frame=$(node -p 'require("./tests/tests/package.json").dependencies["@babel/code-frame"]')" >> "$GITHUB_OUTPUT"
 
       - name: Install ReScript package
         run: |
@@ -626,7 +692,8 @@ jobs:
           pnpm --config.block-exotic-subdeps=false i \
             "https://pkg.pr.new/rescript-lang/rescript@${COMMIT_SHA}" \
             "https://pkg.pr.new/rescript-lang/rescript/@rescript/runtime@${COMMIT_SHA}" \
-            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}"
+            "https://pkg.pr.new/rescript-lang/rescript/@rescript/belt@${COMMIT_SHA}" \
+            "@babel/code-frame@${{ steps.tmp-dir.outputs.code-frame }}"
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
 
@@ -644,3 +711,35 @@ jobs:
           node src/BeltTest.mjs
         shell: bash
         working-directory: ${{ steps.tmp-dir.outputs.path }}
+
+      # build-compiler runs the stdlib tests on the Node.js version in .nvmrc,
+      # this job on the oldest supported one, so tests of APIs missing there
+      # must stay out of Stdlib_TestSuite and Stdlib_TempTests.
+      - name: Run stdlib tests
+        run: |
+          node stdlib/Stdlib_TestSuite.mjs
+          node stdlib/Stdlib_TempTests.mjs
+        shell: bash
+        working-directory: ${{ steps.tmp-dir.outputs.path }}
+
+  # The single CI check that the master ruleset requires. Matrix job names
+  # contain runner labels, so requiring this job instead keeps the ruleset
+  # unchanged when runners or jobs change. It runs even when a needed job fails
+  # or the run is cancelled, because a skipped required check counts as passed.
+  ci-ok:
+    if: ${{ always() }}
+    needs:
+      - build-compiler
+      - pkg-pr-new
+      - api-docs
+      - test-devcontainer
+      - test-installation-npm
+      - test-installation-pnpm
+    runs-on: ubuntu-26.04
+    steps:
+      - name: Check that all needed jobs succeeded
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          jq -r 'to_entries[] | "\(.key): \(.value.result)"' <<< "$NEEDS"
+          jq -e 'all(.[]; .result == "success")' <<< "$NEEDS" > /dev/null

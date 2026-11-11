@@ -92,6 +92,10 @@ const SYNTHETIC_POSITION_BASE: u32 = 0x8000_0000;
 const SHARED_EXPRESSION_BASE: u32 = 0x8000_0000;
 /// First index of core types appended while the arena is shared.
 const SHARED_CORE_TYPE_BASE: u32 = 0x8000_0000;
+/// First index of strings appended through a shared arena
+/// ([`ParseArena::push_shared_string`]); above every interned and
+/// typechecker-synthetic string index.
+const SHARED_STRING_BASE: u32 = 0xC000_0000;
 
 impl LocIdx {
     /// Check if this is the "none" location (index 0).
@@ -483,6 +487,9 @@ pub struct ParseArena {
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
     store_locations: bool,
+    /// Assigned once by the first consuming context. The numeric scope
+    /// survives arena moves and needs no address-based registration.
+    declaration_location_scope: std::sync::OnceLock<u64>,
     next_location_identity: std::sync::atomic::AtomicU32,
     /// Location-free builds: `next_location_identity` when parsing (including
     /// the frontend) finished. Up to here each identity is the index the same
@@ -534,6 +541,8 @@ pub struct ParseArena {
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
     case_lists: ListPool<Case>,
+    /// Pool behind the elements of `Pexp_spread`.
+    spread_element_lists: ListPool<crate::parser::ast::SpreadElement>,
     /// N-ary source parameter lists keyed by the function body's arena index.
     ///
     /// `PexpFun` keeps only a compact first-parameter fallback for frozen-v0 PPX
@@ -551,10 +560,6 @@ pub struct ParseArena {
     /// while the arena is still exclusively borrowed.
     nary_fun_default_bindings_by_first_pattern:
         HashMap<PatIdx, Box<[FunDefaultBinding]>>,
-    /// Ghost copies of character-interval pattern locations
-    /// (typecore.ml:1337 `{loc with loc_ghost = true}`), allocated before
-    /// type checking for the same aliasing reason.
-    interval_ghost_locs: HashMap<LocIdx, LocIdx>,
     /// N-ary locally-abstract-type (`newtypes`) lists keyed by the function's
     /// first parameter pattern, mirroring `Pexp_fun.newtypes` in the current
     /// upstream parsetree. Each entry is `(name, attributes)`; the parser puts
@@ -575,6 +580,10 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice PPX (see `driver::is_builtin_external_ppx`).
     builtin_spice_disabled: bool,
+    /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
+    /// this arena, which decides the error a `let?` binding raises
+    /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
+    experimental_let_unwrap: bool,
     /// OCaml `Used_attributes` (compiler/ml/used_attributes.ml): attribute name
     /// locations marked as consumed by the builtin PPX, consulted by the
     /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
@@ -597,10 +606,19 @@ pub struct ParseArena {
     /// `SHARED_CORE_TYPE_BASE`: the tuples the type checker rebuilds from
     /// polymorphic variant payload groups (`Ast_helper.Typ.tuple`).
     shared_core_types: elsa::sync::FrozenVec<Box<CoreType>>,
+    /// Strings built through a shared arena, addressed from
+    /// `SHARED_STRING_BASE`: the payloads printers rebuild for `%raw`
+    /// (`Ast_raw.to_extension`).
+    shared_strings: elsa::sync::FrozenVec<Box<String>>,
     /// `Lident` of `true`, `false`, `null` and `undefined`, for those payloads.
     runtime_tag_lidents: [LidentIdx; 4],
     /// The attribute name `as`.
     as_attribute_name: StrIdx,
+    /// The JSX component attribute names `react.component`,
+    /// `react.componentWithProps`, `jsx.component` and
+    /// `jsx.componentWithProps`, which printers put back from the
+    /// `jsx_component` nodes (`Ast_helper.Jsx_component.to_attribute`).
+    jsx_component_attribute_names: [StrIdx; 4],
     /// Positions of typechecker-interned locations, addressed from
     /// `SYNTHETIC_POSITION_BASE`.
     synthetic_positions: elsa::sync::FrozenVec<Box<Position>>,
@@ -791,6 +809,13 @@ impl Default for ParseArena {
         // that can arrive from external CMIs so that round-tripping imported
         // attrs does not depend on local source text having mentioned them.
         let as_attribute_name = strings.intern("as");
+        let jsx_component_attribute_names = [
+            "react.component",
+            "react.componentWithProps",
+            "jsx.component",
+            "jsx.componentWithProps",
+        ]
+        .map(|name| strings.intern(name));
         let runtime_tag_lidents = ["true", "false", "null", "undefined"]
             .map(|name| longidents.push(Longident::Lident(strings.intern(name))));
         let _ = strings.intern("deprecated");
@@ -991,6 +1016,7 @@ impl Default for ParseArena {
 
         Self {
             store_locations: true,
+            declaration_location_scope: std::sync::OnceLock::new(),
             next_location_identity: std::sync::atomic::AtomicU32::new(2),
             parse_location_slots: None,
             reimported_location_identities: std::sync::Mutex::new(Vec::new()),
@@ -1014,11 +1040,11 @@ impl Default for ParseArena {
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
+            spread_element_lists: ListPool::default(),
             nary_fun_params_by_first_pattern: HashMap::new(),
             nary_fun_param_lists: ListPool::default(),
             nary_fun_unknown_arity_by_first_pattern: HashMap::new(),
             nary_fun_default_bindings_by_first_pattern: HashMap::new(),
-            interval_ghost_locs: HashMap::new(),
             nary_fun_newtypes_by_first_pattern: HashMap::new(),
             nary_arrow_args_by_first_type: HashMap::new(),
             nary_arrow_arg_lists: ListPool::default(),
@@ -1026,6 +1052,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
+            experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             patterns: Arena::default(),
             synthetic_patterns: SyntheticVec::default(),
@@ -1033,8 +1060,10 @@ impl Default for ParseArena {
             synthetic_locations: elsa::sync::FrozenVec::new(),
             shared_expressions: elsa::sync::FrozenVec::new(),
             shared_core_types: elsa::sync::FrozenVec::new(),
+            shared_strings: elsa::sync::FrozenVec::new(),
             runtime_tag_lidents,
             as_attribute_name,
+            jsx_component_attribute_names,
             synthetic_positions: elsa::sync::FrozenVec::new(),
             synthetic_strings: elsa::sync::FrozenVec::new(),
             synthetic_string_base: u32::MAX,
@@ -1182,6 +1211,11 @@ impl ParseArena {
     pub fn set_source_file(&mut self, file_name: StrIdx) {
         self.absent_position.file_name = file_name;
         self.record_position_file_name(file_name);
+    }
+
+    /// The file this arena's source was parsed from.
+    pub fn source_file(&self) -> StrIdx {
+        self.absent_position.file_name
     }
 
     /// Whether this arena stores complete source coordinates.
@@ -1361,6 +1395,10 @@ impl ParseArena {
         }
         self.position_file_names.insert(file_name);
         self.last_position_file_name = Some(file_name);
+    }
+
+    pub(crate) fn declaration_location_scope(&self, allocate: impl FnOnce() -> u64) -> u64 {
+        *self.declaration_location_scope.get_or_init(allocate)
     }
 
     /// Push a position into the arena and return its index.
@@ -1691,6 +1729,19 @@ impl ParseArena {
         let ghost = InternedLocation::new(loc.loc_start, loc.loc_end, true);
         let slot = self.synthetic_locations.len();
         self.synthetic_locations.push(Box::new(ghost));
+        LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
+    }
+
+    /// A typechecker-generated ghost location from `start` to `end` (OCaml
+    /// `{Location.loc_start; loc_end; loc_ghost = true}`), appended to the
+    /// synthetic storage like `push_typecheck_ghost_loc`.
+    pub fn push_typecheck_ghost_span(&self, start: PosIdx, end: PosIdx) -> LocIdx {
+        if !self.store_locations {
+            return self.fresh_location_identity(true);
+        }
+        let slot = self.synthetic_locations.len();
+        self.synthetic_locations
+            .push(Box::new(InternedLocation::new(start, end, true)));
         LocIdx::from_u32(SYNTHETIC_LOCATION_BASE + slot as u32)
     }
 
@@ -2073,30 +2124,6 @@ impl ParseArena {
         self.static_array_lidents.belt_list_concat_many
     }
 
-    /// Fresh `Ldot(Lident "Primitive_array", "spread")` for one desugared occurrence.
-    /// OCaml builds this longident inline at each spread site
-    /// (compiler/syntax/src/res_core.ml:4528), so every occurrence allocates a
-    /// new Longident block; only the name strings are static.
-    pub fn fresh_belt_array_spread_lid(&mut self) -> LidentIdx {
-        let module_str = self.strings.intern("Primitive_array");
-        let spread_str = self.strings.intern("spread");
-        self.longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(module_str)),
-            spread_str,
-        ))
-    }
-
-    /// Fresh `Ldot(Lident "Primitive_list", "spread")` for one desugared occurrence.
-    /// See `fresh_belt_array_spread_lid`; OCaml site is res_core.ml:4386.
-    pub fn fresh_belt_list_spread_lid(&mut self) -> LidentIdx {
-        let module_str = self.strings.intern("Primitive_list");
-        let spread_str = self.strings.intern("spread");
-        self.longidents.push(Longident::Ldot(
-            Box::new(Longident::Lident(module_str)),
-            spread_str,
-        ))
-    }
-
     /// Get the static `Stdlib_RegExp.t` longident index used for `%re`.
     pub fn regexp_t_lident(&self) -> LidentIdx {
         self.static_regexp_t_lident
@@ -2253,13 +2280,25 @@ impl ParseArena {
     #[inline]
     pub fn get_string(&self, idx: StrIdx) -> &str {
         let raw = idx.raw();
-        if raw < self.synthetic_string_base {
+        if raw >= SHARED_STRING_BASE {
+            self.shared_strings
+                .get((raw - SHARED_STRING_BASE) as usize)
+                .expect("shared string read before it was pushed")
+        } else if raw < self.synthetic_string_base {
             self.strings.get(idx)
         } else {
             self.synthetic_strings
                 .get((raw - self.synthetic_string_base) as usize)
                 .expect("typechecker synthetic string read before initialization")
         }
+    }
+
+    /// The name of `idx` when it is a file this arena's positions are in
+    /// (its source file included, with or without stored locations).
+    pub fn own_file_name(&self, idx: StrIdx) -> Option<&str> {
+        self.position_file_names
+            .contains(&idx)
+            .then(|| self.get_string(idx))
     }
 
     /// The interned name of string `idx`, computed once per parsed string.
@@ -2322,6 +2361,14 @@ impl ParseArena {
     pub fn push_typecheck_longident(&self, longident: Longident) -> LidentIdx {
         let slot = self.synthetic_longidents.push(longident);
         LidentIdx::from_u32(self.synthetic_longident_base + slot as u32)
+    }
+
+    /// Append a string through a shared arena, at any stage. Such strings are
+    /// not interned and are never marshalled.
+    pub fn push_shared_string(&self, string: String) -> StrIdx {
+        let slot = self.shared_strings.len();
+        self.shared_strings.push(Box::new(string));
+        StrIdx::from_raw(SHARED_STRING_BASE + slot as u32)
     }
 
     /// Append a typechecker-generated string to storage reserved before the
@@ -2420,6 +2467,28 @@ impl ParseArena {
     pub fn char_constant(&mut self, semantic: i32) -> Constant {
         let source = self.intern_string(&crate::string_literal::encode_char_source(semantic));
         Constant::Char { source, semantic }
+    }
+
+    /// `push_string_literal` through a shared arena
+    /// ([`Self::push_shared_string`]), for nodes printers rebuild.
+    pub fn push_shared_string_literal(&self, literal: &StringLiteral) -> StringConst {
+        match literal {
+            StringLiteral::Valid { source, semantic } => {
+                let source_idx = self.push_shared_string(source.to_string());
+                let semantic_idx = if source == semantic {
+                    source_idx
+                } else {
+                    self.push_shared_string(semantic.to_string())
+                };
+                StringConst::Valid {
+                    source: source_idx,
+                    semantic: semantic_idx,
+                }
+            }
+            StringLiteral::InvalidSource(source) => {
+                StringConst::InvalidSource(self.push_shared_string(source.to_string()))
+            }
+        }
     }
 
     /// `string_constant` for nodes the type checker synthesizes.
@@ -2733,6 +2802,30 @@ impl ParseArena {
         self.case_lists.get(list)
     }
 
+    /// Store the elements of a literal with spreads.
+    pub fn push_spread_element_list(
+        &mut self,
+        items: &[crate::parser::ast::SpreadElement],
+    ) -> SpreadElementList {
+        self.spread_element_lists.push(items)
+    }
+
+    /// `push_spread_element_list` for nodes the type checker synthesizes.
+    pub fn push_shared_spread_element_list(
+        &self,
+        items: &[crate::parser::ast::SpreadElement],
+    ) -> SpreadElementList {
+        self.spread_element_lists.push_shared(items)
+    }
+
+    /// The elements of a spread list.
+    pub fn spread_element_list(
+        &self,
+        list: SpreadElementList,
+    ) -> &[crate::parser::ast::SpreadElement] {
+        self.spread_element_lists.get(list)
+    }
+
     /// The arguments of a `Pexp_apply`, in source order.
     pub fn apply_args(&self, args: ApplyArgs) -> &[(ArgLabel, ExprIdx)] {
         self.apply_args.get(args)
@@ -2772,6 +2865,23 @@ impl ParseArena {
     }
 
     /// The interned attribute name `as`.
+    /// The name of the attribute spelling a JSX component annotation.
+    pub fn jsx_component_attribute_name(
+        &self,
+        kind: &crate::parser::ast::JsxComponentKind,
+        namespace: crate::parser::ast::JsxComponentNamespace,
+    ) -> StrIdx {
+        use crate::parser::ast::{JsxComponentKind, JsxComponentNamespace};
+        let index = match (namespace, kind) {
+            (JsxComponentNamespace::React, JsxComponentKind::Labelled(_)) => 0,
+            (JsxComponentNamespace::React, JsxComponentKind::WithProps) => 1,
+            (JsxComponentNamespace::Jsx, JsxComponentKind::Labelled(_)) => 2,
+            (JsxComponentNamespace::Jsx, JsxComponentKind::WithProps) => 3,
+        };
+        self.jsx_component_attribute_names[index]
+    }
+
+    /// The interned attribute name `as`.
     pub fn as_attribute_name(&self) -> StrIdx {
         self.as_attribute_name
     }
@@ -2793,6 +2903,27 @@ impl ParseArena {
         args: Vec<crate::parser::ast::TypeArg>,
     ) {
         let first_type = args.first().expect("Ptyp_arrow has arguments").typ;
+        let list = self.nary_arrow_arg_lists.push(&args);
+        self.nary_arrow_args_by_first_type.insert(first_type, list);
+    }
+
+    /// Remove the n-ary parameters recorded under `first_type`, so a caller
+    /// can rewrite them while also mutating the arena; put them back with
+    /// [`Self::restore_nary_arrow_args`].
+    pub fn take_nary_arrow_args(
+        &mut self,
+        first_type: CoreTypeIdx,
+    ) -> Option<Vec<crate::parser::ast::TypeArg>> {
+        let list = self.nary_arrow_args_by_first_type.remove(&first_type)?;
+        Some(self.nary_arrow_arg_lists.get(list).to_vec())
+    }
+
+    /// Put back parameters removed by [`Self::take_nary_arrow_args`].
+    pub fn restore_nary_arrow_args(
+        &mut self,
+        first_type: CoreTypeIdx,
+        args: Vec<crate::parser::ast::TypeArg>,
+    ) {
         let list = self.nary_arrow_arg_lists.push(&args);
         self.nary_arrow_args_by_first_type.insert(first_type, list);
     }
@@ -2843,31 +2974,6 @@ impl ParseArena {
     ) {
         self.nary_fun_default_bindings_by_first_pattern
             .insert(first_pattern, bindings.into_boxed_slice());
-    }
-
-    /// Allocate the ghost locations used by character-interval expansion.
-    pub fn prepare_interval_ghost_locs(&mut self) {
-        // Read the parser-owned pattern storage directly: patterns pushed by
-        // earlier preparation can sit above a previous synthetic base.
-        for i in 0..self.patterns.len() {
-            let pat = self.patterns.get(PatIdx(i as u32));
-            if !matches!(
-                &pat.ppat_desc,
-                crate::parser::ast::PatternDesc::Ppat_interval(_)
-            ) {
-                continue;
-            }
-            let loc = pat.ppat_loc;
-            if !self.interval_ghost_locs.contains_key(&loc) {
-                let ghost = self.mk_ghost_loc(loc);
-                self.interval_ghost_locs.insert(loc, ghost);
-            }
-        }
-    }
-
-    /// The ghost copy of an interval pattern's location.
-    pub fn interval_ghost_loc(&self, loc: LocIdx) -> Option<LocIdx> {
-        self.interval_ghost_locs.get(&loc).copied()
     }
 
     /// Return optional-default lowering prepared before type checking.
@@ -2977,6 +3083,16 @@ impl ParseArena {
     /// Whether built-in Spice deriving is enabled for this parse.
     pub fn builtin_spice_enabled(&self) -> bool {
         !self.builtin_spice_disabled
+    }
+
+    /// Set the LetUnwrap experimental feature for the builtin PPX.
+    pub fn set_experimental_let_unwrap(&mut self, enabled: bool) {
+        self.experimental_let_unwrap = enabled;
+    }
+
+    /// Whether the LetUnwrap experimental feature is on for the builtin PPX.
+    pub fn experimental_let_unwrap(&self) -> bool {
+        self.experimental_let_unwrap
     }
 
     /// Record a nested builtin-ppx error unless an earlier one is pending.
@@ -3124,8 +3240,8 @@ impl ParseArena {
             .copied()
             .flatten()
             .or_else(|| match &self.get_expr(owner).pexp_desc {
-                ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = inner;
+                ExpressionDesc::Pexp_match((_, cases))
+                | ExpressionDesc::Pexp_try((_, cases, _)) => {
                     self.case_list(*cases)
                         .get(case_index)
                         .and_then(|case| case.pc_guard)
@@ -3266,6 +3382,16 @@ impl ParseArena {
                 .get((raw - SHARED_CORE_TYPE_BASE) as usize)
                 .expect("shared core type read before it was pushed")
         }
+    }
+
+    /// Get a mutable core type by index; shared core types are immutable.
+    #[inline]
+    pub fn get_core_type_mut(&mut self, idx: CoreTypeIdx) -> &mut CoreType {
+        assert!(
+            idx.0 < SHARED_CORE_TYPE_BASE,
+            "shared core types are immutable"
+        );
+        self.core_types.get_mut(idx)
     }
 
     /// Append a core type while the arena is shared.
@@ -3450,6 +3576,8 @@ pub type ExprFieldList = ArenaList<ExpressionRecordField>;
 pub type PatFieldList = ArenaList<PatternRecordField>;
 /// The cases of a `switch` or `try`.
 pub type CaseList = ArenaList<Case>;
+/// The elements of a literal with spreads (`Pexp_spread`).
+pub type SpreadElementList = ArenaList<crate::parser::ast::SpreadElement>;
 
 /// Lists pushed through a shared arena reference (by the type checker) set
 /// this bit in `ArenaList::start`; the rest is the slot in `ListPool::shared`.

@@ -1,7 +1,7 @@
 //! Sexp printer for Typedtree - used for parity testing between OCaml and Rust compilers
 
 use crate::ident::Ident;
-use crate::parse_arena::{LidentIdx, LocIdx, ParseArena};
+use crate::parse_arena::{LocIdx, ParseArena};
 use crate::parser::ast::{
     Attribute, ClosedFlag, DirectionFlag, MutableFlag, OverrideFlag, Payload, PrivateFlag, RecFlag,
 };
@@ -14,12 +14,12 @@ use crate::types::path::PathView;
 use crate::types::tast_arena::{TExprIdx, TypedArena};
 use crate::types::type_expr::{RowDesc, RowField, TypeDesc, TypeExprRef};
 use crate::types::typedtree::{
-    Case, Constant, ExpressionDesc, ExtensionConstructor, ExtensionConstructorKind, Loc,
-    ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint, OpenDeclaration, Partial,
-    Pattern, PatternDesc, RecordField, RecordLabelDefinition, Structure, StructureItem,
-    StructureItemDesc, TypeExtension, TypedConstructorArguments, TypedConstructorDeclaration,
-    TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration, TypedTypeDeclaration, TypedTypeKind,
-    ValueBinding,
+    Case, Constant, DictEntry, ExpressionDesc, ExtensionConstructor,
+    ExtensionConstructorKind, ModuleBinding, ModuleExpr, ModuleExprDesc, ModuleTypeConstraint,
+    OpenDeclaration, Partial, Pattern, PatternDesc, RecordField, Structure,
+    StructureItem, StructureItemDesc, TypeExtension, TypedConstructorArguments,
+    TypedConstructorDeclaration, TypedCoreType, TypedCoreTypeDesc, TypedLabelDeclaration,
+    TypedTypeDeclaration, TypedTypeKind, ValueBinding,
 };
 use crate::types::variance::Variance;
 use std::collections::HashMap;
@@ -195,10 +195,6 @@ fn sexp_longident_idx(
     idx: crate::parse_arena::LidentIdx,
 ) -> Sexp {
     sexp_longident(arena, ctx, arena.get_longident(idx))
-}
-
-fn sexp_lident_name(name: &str) -> Sexp {
-    Sexp::list(vec![Sexp::atom("Lident"), string(name)])
 }
 
 // ============================================================================
@@ -405,11 +401,11 @@ fn sexp_type_expr_inline(
     let te = ctx.repr(te); // Follow Tlink chains, but keep Tsubst visible.
     let desc = ctx.get_desc(te);
     match &*desc {
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             let id = state.tvar_id(te);
             return Sexp::list(vec![Sexp::atom("Tvar"), Sexp::atom(&id.to_string())]);
         }
-        TypeDesc::Tunivar(_) => {
+        TypeDesc::Tunivar(..) => {
             let id = state.tunivar_id(te);
             return Sexp::list(vec![Sexp::atom("Tunivar"), Sexp::atom(&id.to_string())]);
         }
@@ -443,7 +439,7 @@ fn sexp_type_expr_body_inline(
 ) -> Sexp {
     let desc = ctx.get_desc(te);
     match &*desc {
-        TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) => {
+        TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => {
             unreachable!("variable nodes handled before body serialization")
         }
         TypeDesc::Tarrow { args, ret } => {
@@ -675,6 +671,11 @@ fn sexp_pattern_desc(
         PatternDesc::Tpat_constant(c) => {
             Sexp::list(vec![Sexp::atom("Tpat_constant"), sexp_constant(c)])
         }
+        PatternDesc::Tpat_interval(c1, c2) => Sexp::list(vec![
+            Sexp::atom("Tpat_interval"),
+            sexp_constant(&c1.constant()),
+            sexp_constant(&c2.constant()),
+        ]),
         PatternDesc::Tpat_tuple(pats) => {
             let mut items = vec![Sexp::atom("Tpat_tuple")];
             for p in cx.ta.patterns(*pats) {
@@ -728,6 +729,17 @@ fn sexp_pattern_desc(
             }
             Sexp::list(items)
         }
+        PatternDesc::Tpat_dict(entries) => {
+            let mut items = vec![Sexp::atom("Tpat_dict")];
+            for entry in entries.iter() {
+                items.push(Sexp::list(vec![
+                    string(&entry.tdp_key.txt),
+                    sexp_pattern(arena, ctx, cx, cx.ta.pattern(entry.tdp_pattern)),
+                    Sexp::atom(if entry.tdp_optional { "true" } else { "false" }),
+                ]));
+            }
+            Sexp::list(items)
+        }
         PatternDesc::Tpat_or(p1, p2, _) => Sexp::list(vec![
             Sexp::atom("Tpat_or"),
             sexp_pattern(arena, ctx, cx, cx.ta.pattern(*p1)),
@@ -761,43 +773,6 @@ fn sexp_expression(arena: &ParseArena, ctx: &TypeContext, cx: Cx<'_>, e: TExprId
     items.push(desc);
     items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
     items.push(attrs);
-    Sexp::list(items)
-}
-
-fn sexp_omitted_optional_none_expression(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    cx: Cx<'_>,
-    li: &Loc<LidentIdx>,
-    option_ty: TypeExprRef,
-) -> Sexp {
-    sexp_omitted_optional_none_expression_at_loc(arena, ctx, cx, li.loc, option_ty)
-}
-
-fn sexp_omitted_optional_none_expression_at_loc(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    cx: Cx<'_>,
-    loc: LocIdx,
-    option_ty: TypeExprRef,
-) -> Sexp {
-    let loc_sexp = if cx.with_locs {
-        vec![location_idx(arena, cx, loc)]
-    } else {
-        vec![]
-    };
-    let desc = Sexp::list(vec![
-        Sexp::atom("Texp_construct"),
-        sexp_longident_idx(arena, ctx, arena.none_lid()),
-        Sexp::list(Vec::new()),
-    ]);
-    let ty = sexp_type_expr(arena, ctx, option_ty);
-
-    let mut items = vec![Sexp::atom("expression")];
-    items.extend(loc_sexp);
-    items.push(desc);
-    items.push(Sexp::list(vec![Sexp::atom("type"), ty]));
-    items.push(Sexp::list(vec![Sexp::atom("attributes")]));
     Sexp::list(items)
 }
 
@@ -866,45 +841,18 @@ fn sexp_exp_extra(
     }
 }
 
-fn sexp_record_definition(
-    arena: &ParseArena,
-    ctx: &TypeContext,
-    cx: Cx<'_>,
-    def: &RecordLabelDefinition,
-) -> Sexp {
-    match def {
-        RecordLabelDefinition::Kept(ty) => {
-            Sexp::list(vec![Sexp::atom("Kept"), sexp_type_expr(arena, ctx, *ty)])
-        }
-        RecordLabelDefinition::Overridden(li, e) => Sexp::list(vec![
-            Sexp::atom("Overridden"),
-            sexp_longident_idx(arena, ctx, li.txt),
-            sexp_expression(arena, ctx, cx, *e),
-        ]),
-        // Intentional Rust performance representation: `OmittedOptionalNone`
-        // is the sparse internal form of the `option_none` expression that
-        // OCaml compiler/ml/typecore.ml:2833-2842 materializes. Sexp output
-        // must expand it here, not remove the sparse storage optimization.
-        RecordLabelDefinition::OmittedOptionalNone(li, option_ty) => Sexp::list(vec![
-            Sexp::atom("Overridden"),
-            sexp_longident_idx(arena, ctx, li.txt),
-            sexp_omitted_optional_none_expression(arena, ctx, cx, li, *option_ty),
-        ]),
-    }
-}
-
+/// A written record field: `(name lid expression)`, as
+/// compiler/ml/sexp_typedtree.ml prints `(ld, li, e)`.
 fn sexp_record_field(
     arena: &ParseArena,
     ctx: &TypeContext,
     cx: Cx<'_>,
-    field_name: &str,
-    def: &RecordLabelDefinition,
-    opt_flag: bool,
+    (ld, li, e): &RecordField,
 ) -> Sexp {
     Sexp::list(vec![
-        string(field_name),
-        sexp_record_definition(arena, ctx, cx, def),
-        Sexp::atom(if opt_flag { "optional" } else { "required" }),
+        string(&ld.lbl_name),
+        sexp_longident_idx(arena, ctx, li.txt),
+        sexp_expression(arena, ctx, cx, *e),
     ])
 }
 
@@ -1008,13 +956,26 @@ fn sexp_expression_desc(
                 sexp_partial(p),
             ])
         }
-        ExpressionDesc::Texp_try(e, cases) => {
+        ExpressionDesc::Texp_try(e, cases, finally) => {
+            // Match OCaml eval order: e, cases, finally
             let e_sexp = sexp_expression(arena, ctx, cx, *e);
             let mut case_items = Vec::new();
             for c in cx.ta.cases(*cases).iter() {
                 case_items.push(sexp_case(arena, ctx, cx, c));
             }
-            Sexp::list(vec![Sexp::atom("Texp_try"), e_sexp, Sexp::list(case_items)])
+            let finally_sexp = match finally {
+                None => Sexp::atom("None"),
+                Some(e) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    sexp_expression(arena, ctx, cx, *e),
+                ]),
+            };
+            Sexp::list(vec![
+                Sexp::atom("Texp_try"),
+                e_sexp,
+                Sexp::list(case_items),
+                finally_sexp,
+            ])
         }
         ExpressionDesc::Texp_tuple(exprs) => {
             let mut items = vec![Sexp::atom("Texp_tuple")];
@@ -1049,87 +1010,12 @@ fn sexp_expression_desc(
             extended_expression,
             ..
         } => {
-            let mut field_items = Vec::new();
-            for (_li, ld, def, opt_flag) in cx.ta.record_fields(*fields).iter() {
-                field_items.push(sexp_record_field(
-                    arena,
-                    ctx,
-                    cx,
-                    &ld.lbl_name,
-                    def,
-                    *opt_flag,
-                ));
-            }
-            let ext_sexp = match extended_expression {
-                None => Sexp::atom("None"),
-                Some(e) => Sexp::list(vec![
-                    Sexp::atom("Some"),
-                    sexp_expression(arena, ctx, cx, *e),
-                ]),
-            };
-            Sexp::list(vec![
-                Sexp::atom("Texp_record"),
-                Sexp::list(field_items),
-                ext_sexp,
-            ])
-        }
-        ExpressionDesc::Texp_record_sparse {
-            fields,
-            all_labels,
-            omitted_loc,
-            extended_expression,
-        } => {
-            // Intentional Rust performance representation: this is the
-            // typedtree boundary that expands sparse records back to OCaml's
-            // full record-field shape for parity output.
-            let mut explicit_by_pos: HashMap<usize, &RecordField> =
-                HashMap::with_capacity(fields.len());
-            for field in cx.ta.record_fields(*fields).iter() {
-                let pos = field.1.lbl_pos;
-                if pos >= 0 {
-                    explicit_by_pos.insert(pos as usize, field);
-                }
-            }
-
-            // OCaml compiler/ml/typecore.ml:2833-2842 builds definitions from
-            // the complete label array before translcore.ml:1145-1191 walks
-            // every slot. Serialize the carried shared array rather than
-            // rediscovering labels through potentially alias-expanded types.
-            let mut field_items = Vec::with_capacity(all_labels.len());
-            for (idx, label) in all_labels.iter().enumerate() {
-                let pos = if label.lbl_pos >= 0 {
-                    label.lbl_pos as usize
-                } else {
-                    idx
-                };
-                if let Some((_li, ld, def, opt_flag)) = explicit_by_pos.get(&pos) {
-                    field_items.push(sexp_record_field(
-                        arena,
-                        ctx,
-                        cx,
-                        &ld.lbl_name,
-                        def,
-                        *opt_flag,
-                    ));
-                } else if label.lbl_optional {
-                    let def = Sexp::list(vec![
-                        Sexp::atom("Overridden"),
-                        sexp_lident_name(&label.lbl_name),
-                        sexp_omitted_optional_none_expression_at_loc(
-                            arena,
-                            ctx,
-                            cx,
-                            *omitted_loc,
-                            label.lbl_arg,
-                        ),
-                    ]);
-                    field_items.push(Sexp::list(vec![
-                        string(&label.lbl_name),
-                        def,
-                        Sexp::atom("required"),
-                    ]));
-                }
-            }
+            let field_items = cx
+                .ta
+                .record_fields(*fields)
+                .iter()
+                .map(|field| sexp_record_field(arena, ctx, cx, field))
+                .collect();
             let ext_sexp = match extended_expression {
                 None => Sexp::atom("None"),
                 Some(e) => Sexp::list(vec![
@@ -1158,6 +1044,33 @@ fn sexp_expression_desc(
             let mut items = vec![Sexp::atom("Texp_array")];
             for e in cx.ta.expr_list(*exprs).iter() {
                 items.push(sexp_expression(arena, ctx, cx, *e));
+            }
+            Sexp::list(items)
+        }
+        ExpressionDesc::Texp_spread(kind, parts) => {
+            let mut items = vec![
+                Sexp::atom("Texp_spread"),
+                Sexp::atom(crate::parser::sexp::spread_kind(*kind)),
+            ];
+            for e in cx.ta.expr_list(*parts).iter() {
+                items.push(sexp_expression(arena, ctx, cx, *e));
+            }
+            Sexp::list(items)
+        }
+        ExpressionDesc::Texp_dict(entries) => {
+            let mut items = vec![Sexp::atom("Texp_dict")];
+            for entry in cx.ta.dict_entries(*entries).iter() {
+                items.push(match entry {
+                    DictEntry::Tdict_entry(key, e) => Sexp::list(vec![
+                        Sexp::atom("Tdict_entry"),
+                        string(&key.txt),
+                        sexp_expression(arena, ctx, cx, *e),
+                    ]),
+                    DictEntry::Tdict_spread(e) => Sexp::list(vec![
+                        Sexp::atom("Tdict_spread"),
+                        sexp_expression(arena, ctx, cx, *e),
+                    ]),
+                });
             }
             Sexp::list(items)
         }
@@ -1286,11 +1199,6 @@ fn sexp_expression_desc(
         ExpressionDesc::Texp_pack(me) => Sexp::list(vec![
             Sexp::atom("Texp_pack"),
             sexp_module_expr(arena, ctx, cx, cx.ta.module_expr(*me)),
-        ]),
-        ExpressionDesc::Texp_extension_constructor(lid, path) => Sexp::list(vec![
-            Sexp::atom("Texp_extension_constructor"),
-            sexp_longident_idx(arena, ctx, lid.txt),
-            sexp_path(path),
         ]),
     }
 }

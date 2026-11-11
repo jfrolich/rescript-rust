@@ -236,6 +236,12 @@ type type_declaration = {
   type_attributes: Parsetree.attributes;
   type_immediate: bool; (* true iff type should not be a pointer *)
   type_representation: type_representation;
+  type_shape: Variant_runtime.value_shape;
+      (** What the declaration itself states about its values at run time,
+          resolved in its own environment when it is declared. An
+          abbreviation without an annotation states [Unstated]; readers take
+          the shape of the first type on an expansion chain that states one
+          ([Variant_layout.value_shape]). *)
   type_inlined_types: type_inlined_type list;
       (** Representation of inlined types, needed for printing *)
 }
@@ -251,7 +257,9 @@ and type_kind =
 
 and record_representation =
   | Record_regular (* All fields are boxed / tagged *)
-  | Record_float_unused (* Was: all fields are floats. Now: unused *)
+  | Record_array
+    (* A regular record whose fields have the runtime names "0", "1", ...
+         in declaration order, represented as a JavaScript array *)
   | Record_unboxed of bool (* Unboxed single-field record, inlined or not *)
   | Record_inlined of
       (* Inlined record *)
@@ -401,7 +409,8 @@ type label_description = {
   lbl_optional: bool; (* Is this an optional field? *)
   lbl_pos: int; (* Position in block *)
   mutable lbl_all: label_description array;
-  (* All the labels in this type. This is mutable only because of a specific feature related to dicts, and should not be mutated elsewhere. *)
+  (* All the labels in this type. Mutable only to tie the knot when
+     [Dict_pattern] synthesizes labels; never mutated afterwards. *)
   lbl_repres: record_representation; (* Representation for this record *)
   lbl_private: private_flag; (* Read-only field? *)
   lbl_loc: Location.t;

@@ -32,10 +32,7 @@ function fn(authState, route) {
     }
     if (exit === 2) {
       console.log(authState.VAL);
-      div({
-        hd: string("VerifyEmail"),
-        tl: /* [] */0
-      }, undefined);
+      div({hd: string("VerifyEmail"), tl: /* [] */0}, undefined);
       return 2;
     }
   } else {
@@ -48,41 +45,32 @@ function fn(authState, route) {
       }
     } else {
       if (route === "SignUp" || route === "SignIn" || route === "Invite" || route === "PasswordReset") {
-        div({
-          hd: string("LoggedOut"),
-          tl: /* [] */0
-        }, undefined);
+        div({hd: string("LoggedOut"), tl: /* [] */0}, undefined);
         return 1;
       }
       exit$1 = 2;
     }
     if (exit$1 === 2) {
-      div({
-        hd: string("Redirect"),
-        tl: /* [] */0
-      }, undefined);
+      div({hd: string("Redirect"), tl: /* [] */0}, undefined);
       return 3;
     }
   }
   console.log(onboardingRoute);
-  div({
-    hd: string("Onboarding"),
-    tl: /* [] */0
-  }, undefined);
+  div({hd: string("Onboarding"), tl: /* [] */0}, undefined);
   return 0;
 }
 
 Mocha.describe("Gpr_4280_test", () => {
-  Mocha.test("fn with Unauthenticated and Invite", () => Test_utils.eq("File \"gpr_4280_test.res\", line 41, characters 54-61", fn("Unauthenticated", "Invite"), 1));
-  Mocha.test("fn with Unauthenticated and Onboarding", () => Test_utils.eq("File \"gpr_4280_test.res\", line 43, characters 7-14", fn("Unauthenticated", {
+  Mocha.test("fn with Unauthenticated and Invite", () => Test_utils.eq("File \"gpr_4280_test.res\", line 42, characters 54-61", fn("Unauthenticated", "Invite"), 1));
+  Mocha.test("fn with Unauthenticated and Onboarding", () => Test_utils.eq("File \"gpr_4280_test.res\", line 44, characters 7-14", fn("Unauthenticated", {
     NAME: "Onboarding",
     VAL: 0
   }), 0));
-  Mocha.test("fn with Unverified and Invite", () => Test_utils.eq("File \"gpr_4280_test.res\", line 45, characters 49-56", fn({
+  Mocha.test("fn with Unverified and Invite", () => Test_utils.eq("File \"gpr_4280_test.res\", line 46, characters 49-56", fn({
     NAME: "Unverified",
     VAL: 0
   }, "Invite"), 2));
-  Mocha.test("fn with Unauthenticated and unknown route", () => Test_utils.eq("File \"gpr_4280_test.res\", line 46, characters 61-68", fn("Unauthenticated", "xx"), 3));
+  Mocha.test("fn with Unauthenticated and unknown route", () => Test_utils.eq("File \"gpr_4280_test.res\", line 47, characters 61-68", fn("Unauthenticated", "xx"), 3));
 });
 
 export {

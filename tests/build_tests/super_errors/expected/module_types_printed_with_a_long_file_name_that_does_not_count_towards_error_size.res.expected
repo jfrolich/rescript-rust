@@ -1,0 +1,19 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m5:5-8:1[0m
+
+  3 [2m│[0m   type t = {f0: int, f1: int}
+  4 [2m│[0m   let v: string
+  [1;31m5[0m [2m│[0m } = [1;31m{[0m
+  [1;31m6[0m [2m│[0m [1;31m  type t = {f0: int, f1: int}[0m
+  [1;31m7[0m [2m│[0m [1;31m  let v = 1[0m
+  [1;31m8[0m [2m│[0m [1;31m}[0m
+  9 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m7:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_printed_with_a_long_file_name_that_does_not_count_towards_error_size.res[0m:[2m4:3-15[0m):
+    let v: string

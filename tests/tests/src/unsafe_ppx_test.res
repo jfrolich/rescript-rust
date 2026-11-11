@@ -3,6 +3,7 @@ let x: string = %raw(`"\\x01\\x02\\x03"`)
 let max: (float, float) => float = %raw("Math.max")
 
 let u = v => max(1., v)
+
 /* let max2 : float -> float -> float = [%raw {Math.max} ] */
 %%raw(`
 
@@ -14,13 +15,14 @@ function $$test(x,y){
 let regression3: (float, float) => float = %raw("Math.max")
 
 let regression4: (float, float => float) => float = %raw("Math.max")
+
 let g = a => {
   let regression: (float, string => 'a) => string = %raw(`function(x,y){
    return ""
 }`)
 
   let regression2: (float, float) => float = %raw("Math.max")
-  ignore(regression(a, failwith))
+  ignore(regression(a, s => throw(Failure(s))))
   ignore(regression2(3., 2.))
   ignore(regression3(3., 2.))
   ignore(regression4(3., x => x))

@@ -5,7 +5,9 @@
 //! `js_ir::build`).
 
 use crate::js_ir::CallInfo;
-use crate::js_ir::arena::{Block, Clause, Expr, ExprKind, FunInfo, JsArena, StringClauseInfo};
+use crate::js_ir::arena::{
+    Block, Clause, Expr, ExprKind, FunInfo, JsArena, PropName, StringClauseInfo,
+};
 use crate::js_ir::build::{exp as E, expression_has_no_side_effects, int_of, stmt as S};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::lambda::lam_compat::Comparison;
@@ -26,8 +28,7 @@ pub(crate) fn js_expr_no_side_effects(a: &JsArena, expr: Expr) -> bool {
         | ExprKind::TemplateLiteral(_)
         | ExprKind::JsonLiteral(_) => true,
         ExprKind::StaticIndex(target, _, _) => pure(target),
-        ExprKind::StringIndex(left, right)
-        | ExprKind::ArrayIndex(left, right)
+        ExprKind::ArrayIndex(left, right)
         | ExprKind::In(left, right)
         | ExprKind::StringAppend(left, right)
         | ExprKind::Seq(left, right) => pure(left) && pure(right),
@@ -41,9 +42,11 @@ pub(crate) fn js_expr_no_side_effects(a: &JsArena, expr: Expr) -> bool {
         ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             a.exprs(items).iter().all(|e| pure(*e))
         }
-        ExprKind::Object(dup, props) => {
-            dup.is_none_or(pure) && a.props(props).iter().all(|(_, value)| pure(*value))
-        }
+        ExprKind::Jsx(_) => false,
+        ExprKind::Object(props) => a.props(props).iter().all(|(name, value)| match name {
+            PropName::Spread => false,
+            PropName::Lit(_) | PropName::Symbol | PropName::RecordSpread => pure(*value),
+        }),
         ExprKind::Cond(test, consequent, alternate) => {
             pure(test) && pure(consequent) && pure(alternate)
         }
@@ -74,6 +77,12 @@ pub(crate) fn js_expr_no_side_effects(a: &JsArena, expr: Expr) -> bool {
             pure(tag) && a.exprs(values).iter().all(|e| pure(*e))
         }
         ExprKind::InterpolatedTemplate(_, values) => a.exprs(values).iter().all(|e| pure(*e)),
+        ExprKind::Call(func, args, _)
+            if a.exprs(args).len() == 1
+                && crate::js_ir::build::is_array_is_array_callee(a, func) =>
+        {
+            pure(a.exprs(args)[0])
+        }
         ExprKind::FlatCall(_, _)
         | ExprKind::Call(_, _, _)
         | ExprKind::New(_, _)
@@ -159,6 +168,19 @@ pub(crate) fn comparison_to_binop(cmp: Comparison) -> BinOp {
         Comparison::Le => BinOp::Le,
         Comparison::Gt => BinOp::Gt,
         Comparison::Ge => BinOp::Ge,
+    }
+}
+
+/// lam_compile_util.ml `jsop_of_float_comp`: for operands that may be NaN,
+/// see `BinOp::FloatLt`.
+pub(crate) fn comparison_to_float_binop(cmp: Comparison) -> BinOp {
+    match cmp {
+        Comparison::Eq => BinOp::EqEqEq,
+        Comparison::Neq => BinOp::NotEqEq,
+        Comparison::Lt => BinOp::FloatLt,
+        Comparison::Le => BinOp::FloatLe,
+        Comparison::Gt => BinOp::FloatGt,
+        Comparison::Ge => BinOp::FloatGe,
     }
 }
 
@@ -639,10 +661,6 @@ pub(crate) fn raw_typeof_comparison(
     let typeof_expr = ocaml_typeof_expr(expr, j);
     let name = E::string(type_name, j);
     E::bin(op, typeof_expr, name, j)
-}
-
-pub(crate) fn is_type_number_expr(expr: Expr, j: &mut JsArena) -> Expr {
-    raw_typeof_comparison(expr, BinOp::EqEqEq, "number", j)
 }
 
 pub(crate) fn pure_indexed_block_item(a: &JsArena, target: Expr, idx: i32) -> Option<Expr> {

@@ -93,14 +93,6 @@ fn print_function_attribute<W: Write>(f: &mut Formatter<W>, attr: &FunctionAttri
     }
 }
 
-fn print_apply_inline_attribute<W: Write>(f: &mut Formatter<W>, attr: InlineAttribute) {
-    match attr {
-        InlineAttribute::Default => {}
-        InlineAttribute::Always => f.string(" always_inline"),
-        InlineAttribute::Never => f.string(" never_inline"),
-    }
-}
-
 fn let_kind_suffix(kind: LetKind) -> &'static str {
     match kind {
         LetKind::Alias => "a",
@@ -151,6 +143,10 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>()
                 .join(";");
+            // printlambda.ml: `Blk_record {array = true}` prints `array[...]`.
+            if matches!(tag_info, TagInfo::Record(r) if r.array) {
+                f.string("array");
+            }
             f.string("[");
             f.string(&names);
             f.string("]");
@@ -261,7 +257,6 @@ fn print_apply<W: Write>(
     f: &mut Formatter<W>,
     func: RawLambda,
     args: &[RawLambda],
-    inlined: InlineAttribute,
     reraise_exn: Option<&Ident>,
 ) {
     f.open_box(BoxKind::Box, 2);
@@ -272,7 +267,6 @@ fn print_apply<W: Write>(
         f.space();
         lam(a, f, *arg, reraise_exn);
     }
-    print_apply_inline_attribute(f, inlined);
     f.string(")");
     f.close_box();
 }
@@ -440,9 +434,7 @@ fn lam<W: Write>(a: &LamArena, f: &mut Formatter<W>, lam0: RawLambda, reraise_ex
             f.close_box();
         }
         View::Const(cst) => print_struct_const(f, cst),
-        View::Apply {
-            func, args, info, ..
-        } => print_apply(a, f, func, args, info.inlined, reraise_exn),
+        View::Apply { func, args, .. } => print_apply(a, f, func, args, reraise_exn),
         View::Function { params, body, func } => {
             print_function(a, f, params, &func.attr, body, reraise_exn)
         }
@@ -562,6 +554,19 @@ fn lam<W: Write>(a: &LamArena, f: &mut Formatter<W>, lam0: RawLambda, reraise_ex
             f.string(")");
             f.space();
             lam(a, f, handler, reraise_exn);
+            f.string(")");
+            f.close_box();
+        }
+        // printlambda.ml: "@[<2>(try@ %a@;<1 -1>finally@ %a)@]"
+        View::TryFinally(body, finally) => {
+            f.open_box(BoxKind::Box, 2);
+            f.string("(try");
+            f.space();
+            lam(a, f, body, None);
+            f.break_(1, -1);
+            f.string("finally");
+            f.space();
+            lam(a, f, finally, None);
             f.string(")");
             f.close_box();
         }

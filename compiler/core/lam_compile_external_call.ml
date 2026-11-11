@@ -25,6 +25,7 @@
 [@@@warning "+9"]
 
 module E = Js_exp_make
+module S = Js_stmt_make
 
 let external_var
     ({bundle; module_bind_name; import_attributes} :
@@ -113,6 +114,52 @@ let ocaml_to_js_eff ~(arg_label : External_arg_spec.label_noname)
     in
     (Splice1 single_arg, [])
   | Nothing -> (Splice1 arg, [])
+
+(* The translation of a polymorphic variant argument other than a literal
+   reads it twice, as [e.NAME] and [e.VAL], or inside the function that a
+   dispatch on its tag builds, where an [await] is a syntax error. So unless
+   the translation can read it in place, the argument is bound to a temporary
+   after its statements, which keeps it in its place among the arguments (see
+   [sequence_arguments] in [Lam_compile]). Of an optional argument known to be
+   present, only the payload is bound, so that the translation still knows it
+   is present. *)
+let hold_arg ~(arg_label : External_arg_spec.label_noname)
+    ~(arg_type : External_arg_spec.attr)
+    ((block, arg) as compiled : J.block * E.t) : J.block * E.t =
+  let needs_temporary (e : E.t) =
+    match arg_type with
+    | Poly_var _ -> not (Js_of_lam_variant.eval_as_event_in_place e)
+    | Poly_var_string _ | Int _ -> not (Js_of_lam_variant.eval_in_place e)
+    | Arg_cst _ | Extern_unit | Nothing | Ignore | Unwrap -> false
+  in
+  let hold (e : E.t) =
+    let tmp = Ext_ident.create_tmp () in
+    (Ext_list.append_one block (S.define_variable ~kind:Strict tmp e), E.var tmp)
+  in
+  match (arg_label, arg.expression_desc) with
+  | Arg_optional, Optional_block (x, identity) ->
+    if needs_temporary x then
+      let block, x = hold x in
+      (block, {arg with expression_desc = Optional_block (x, identity)})
+    else compiled
+  | (Arg_optional | Arg_label | Arg_empty), _ ->
+    if needs_temporary arg then hold arg else compiled
+
+(* [hold_arg] for the compiled arguments of a call, which have the
+   statements that run before their values are read. The specs pair with the
+   arguments as in [assemble_args_no_splice], and no spec translates an
+   argument past them. *)
+let hold_args (arg_types : External_arg_spec.params)
+    (args : (J.block * E.t) list) =
+  let rec aux (arg_types : External_arg_spec.params) args =
+    match (arg_types, args) with
+    | {arg_type = Arg_cst _; _} :: arg_types, args -> aux arg_types args
+    | {arg_label; arg_type} :: arg_types, arg :: args ->
+      hold_arg ~arg_label ~arg_type arg :: aux arg_types args
+    | [], args -> args
+    | _ :: _, [] -> assert false
+  in
+  aux arg_types args
 
 let empty_pair = ([], [])
 
@@ -223,8 +270,9 @@ let translate_scoped_module_val
       E.external_var_field ?import_attributes ~external_name:bundle ~field:fn
         ~default id
     | x :: rest ->
-      (* TODO: what happens when scope contains "default" ?*)
-      let default = false in
+      (* A leading "default" scope is the module's default export: import
+         it as such, like [external x: t = "default"] *)
+      let default = x = "default" in
       let id =
         Lam_compile_env.add_js_module ?import_attributes module_bind_name bundle
           default ~dynamic_import:false
@@ -242,14 +290,28 @@ let translate_scoped_module_val
       let start = E.js_global x in
       Ext_list.fold_left (Ext_list.append_one rest fn) start E.dot)
 
+(* The function a JSX external refers to; [Translcore] only builds [Pjsx]
+   for [Decl_val] externals that aren't the module itself *)
+let jsx_callee
+    ({kind; module_; scopes; variadic = _; effective_arity = _} :
+      External_ffi_types.external_decl) =
+  match (kind, module_) with
+  | Decl_val {name}, None -> translate_scoped_module_val None name scopes
+  | Decl_val {name}, Some (Module_named emn) ->
+    translate_scoped_module_val (Some emn) name scopes
+  | Decl_val _, Some Module_itself
+  | ( ( Decl_send _ | Decl_new _ | Decl_get _ | Decl_set _ | Decl_get_index
+      | Decl_set_index ),
+      _ ) ->
+    assert false
+
 let translate_scoped_access scopes obj =
   match scopes with
   | [] -> obj
   | x :: xs -> Ext_list.fold_left xs (E.dot obj x) E.dot
 
-let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
-    arg_types ~(prim_name : string) (decl : External_ffi_types.external_decl)
-    (args : J.expression list) =
+let translate_ffi (cxt : Lam_compile_context.t) arg_types ~(prim_name : string)
+    (decl : External_ffi_types.external_decl) (args : J.expression list) =
   let {External_ffi_types.kind; module_; scopes; variadic = splice; _} = decl in
   (* a bare [@module] binds the module itself under the primitive name *)
   let module_itself_name () : External_ffi_types.external_module_name =
@@ -281,13 +343,11 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
     if splice then
       let args, eff, dynamic = assemble_args_has_splice arg_types args in
       let args = if dynamic then E.variadic_args args else args in
-      add_eff eff
-        (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
+      add_eff eff (E.call ~info:Js_call_info.na_full_call fn args)
     else
       let args, eff = assemble_args_no_splice arg_types args in
       (* TODO: fix in rest calling convention *)
-      add_eff eff
-        (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
+      add_eff eff (E.call ~info:Js_call_info.na_full_call fn args)
   | Decl_new _, Some Module_itself ->
     (* the module itself, as a class *)
     let fn = external_var (module_itself_name ()) in
@@ -302,22 +362,17 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
   | Decl_val {name}, _ when decl.effective_arity = 0 ->
     (* a global value *)
     let e = translate_scoped_module_val named_module name scopes in
-    if args = [] then e
-    else E.call ~info:(Js_call_info.na_full_call transformed_jsx) e args
+    if args = [] then e else E.call ~info:Js_call_info.na_full_call e args
   | Decl_val {name = fn}, _ ->
     (* a global (possibly module-scoped) function call *)
     let fn = translate_scoped_module_val named_module fn scopes in
     if splice then
       let args, eff, dynamic = assemble_args_has_splice arg_types args in
       let args = if dynamic then E.variadic_args args else args in
-      add_eff eff
-        (E.call ~info:(Js_call_info.na_full_call transformed_jsx) fn args)
+      add_eff eff (E.call ~info:Js_call_info.na_full_call fn args)
     else
       let args, eff = assemble_args_no_splice arg_types args in
-      add_eff eff
-      @@ E.call
-           ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
-           fn args
+      add_eff eff @@ E.call ~info:Js_call_info.na_full_call fn args
   | Decl_new {name = fn}, _ ->
     if splice then
       let args, eff, dynamic = assemble_args_has_splice arg_types args in
@@ -337,22 +392,22 @@ let translate_ffi ?(transformed_jsx = false) (cxt : Lam_compile_context.t)
     | self :: args ->
       (* PR2162 [self_type] more checks in syntax:
          - should not be [@as] *)
-      let[@warning "-8"] (_self_type :: arg_types) = arg_types in
+      let arg_types =
+        match arg_types with
+        | _self_type :: arg_types -> arg_types
+        | [] -> assert false
+      in
       if splice then
         let args, eff, dynamic = assemble_args_has_splice arg_types args in
         let args = if dynamic then E.variadic_args args else args in
         add_eff eff
           (let self = translate_scoped_access scopes self in
-           E.call
-             ~info:{call_info = Call_na; call_transformed_jsx = transformed_jsx}
-             (E.dot self name) args)
+           E.call ~info:Js_call_info.na_full_call (E.dot self name) args)
       else
         let args, eff = assemble_args_no_splice arg_types args in
         add_eff eff
           (let self = translate_scoped_access scopes self in
-           E.call
-             ~info:(Js_call_info.na_full_call transformed_jsx)
-             (E.dot self name) args)
+           E.call ~info:Js_call_info.na_full_call (E.dot self name) args)
     | _ -> assert false)
   | Decl_get {name}, _ -> (
     let args, cur_eff = assemble_args_no_splice arg_types args in

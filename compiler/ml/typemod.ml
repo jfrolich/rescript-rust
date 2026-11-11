@@ -34,6 +34,7 @@ type error =
   | With_changes_module_alias of Longident.t * Ident.t * Path.t
   | With_cannot_remove_constrained_type
   | Repeated_name of string * string * Warnings.loc
+  | Js_name_clash of string * string * string * Warnings.loc
   | Non_generalizable of type_expr
   | Non_generalizable_module of module_type
   | Interface_not_compiled of string
@@ -85,19 +86,19 @@ let extract_sig_open env loc mty =
 
 (* Compute the environment after opening a module *)
 
-let type_open_ ?used_slot ?toplevel ovf env loc lid =
+let type_open_ ?used_slot ovf env loc lid =
   let path = Typetexp.lookup_module ~load:true env lid.loc lid.txt in
-  match Env.open_signature ~loc ?used_slot ?toplevel ovf path env with
+  match Env.open_signature ~loc ?used_slot ovf path env with
   | Some env -> (path, env)
   | None ->
     let md = Env.find_module path env in
     ignore (extract_sig_open env lid.loc md.md_type);
     assert false
 
-let type_open ?toplevel env sod =
+let type_open env sod =
   let path, newenv =
     Builtin_attributes.warning_scope sod.popen_attributes (fun () ->
-        type_open_ ?toplevel sod.popen_override env sod.popen_loc sod.popen_lid)
+        type_open_ sod.popen_override env sod.popen_loc sod.popen_lid)
   in
   let od =
     {
@@ -108,11 +109,6 @@ let type_open ?toplevel env sod =
     }
   in
   (path, newenv, od)
-
-(* Record a module type *)
-let rm node =
-  Stypes.record (Stypes.Ti_mod node);
-  node
 
 (* Forward declaration, to be filled in by type_module_type_of *)
 let type_module_type_of_fwd :
@@ -334,6 +330,7 @@ let merge_constraint initial_env loc sg constr =
           type_attributes = [];
           type_immediate = false;
           type_representation = Boxed;
+          type_shape = Unstated;
           type_inlined_types = [];
         }
       and id_row = Ident.create (s ^ "#row") in
@@ -641,6 +638,42 @@ let check_sig_item names loc = function
   | Sig_typext (id, _, _) -> check_typext names loc (Ident.name id)
   | _ -> ()
 
+(* Two runtime components of a module must not get the same JavaScript name:
+   the module's fields, and the exports of a compilation unit, are named by
+   [Ext_ident.convert], which maps both [delete] and [$$delete] to [$$delete]
+   and [\"a-b"] like [a$b]. The exports of a compilation unit keep [default]
+   as written. Values are checked after [simplify_signature], so a value that
+   is shadowed by one of the same name is not a field. *)
+let check_js_names ~toplevel (sg : Types.signature) =
+  let seen = Hashtbl.create 17 in
+  List.iter
+    (fun (item : Types.signature_item) ->
+      let component =
+        match item with
+        | Sig_value (_, {val_kind = Val_prim _}) | Sig_type _ | Sig_modtype _ ->
+          None
+        | Sig_value (id, {val_loc}) -> Some ("value", id, val_loc)
+        | Sig_typext (id, {ext_loc}, _) ->
+          Some ("extension constructor", id, ext_loc)
+        | Sig_module (id, {md_loc}, _) -> Some ("module", id, md_loc)
+      in
+      match component with
+      | None -> ()
+      | Some (kind, id, loc) -> (
+        let name = Ident.name id in
+        let js_name =
+          if toplevel && name = "default" then name else Ext_ident.convert name
+        in
+        match Hashtbl.find_opt seen js_name with
+        | Some (other_kind, other_loc) ->
+          raise
+            (Error
+               ( loc,
+                 Env.empty,
+                 Js_name_clash (kind, other_kind, js_name, other_loc) ))
+        | None -> Hashtbl.add seen js_name (kind, loc)))
+    sg
+
 (* Simplify multiple specifications of a value or an extension in a signature.
    (Other signature components, e.g. types, modules, etc, are checked for
    name uniqueness.)  If multiple specifications with the same name,
@@ -707,6 +740,7 @@ and transl_modtype_aux env smty =
       env loc smty.pmty_attributes
   | Pmty_signature ssg ->
     let sg = transl_signature env ssg in
+    check_js_names ~toplevel:false sg.sig_type;
     mkmty (Tmty_signature sg) (Mty_signature sg.sig_type) env loc
       smty.pmty_attributes
   | Pmty_functor (param, sarg, sres) ->
@@ -987,7 +1021,7 @@ exception Not_a_path
 let rec path_of_module mexp =
   match mexp.mod_desc with
   | Tmod_ident (p, _) -> p
-  | Tmod_apply (funct, arg, _coercion) when !Clflags.applicative_functors ->
+  | Tmod_apply (funct, arg, _coercion) ->
     Papply (path_of_module funct, path_of_module arg)
   | Tmod_constraint (mexp, _, _, _) -> path_of_module mexp
   | _ -> raise Not_a_path
@@ -1258,22 +1292,20 @@ and type_module_aux ~alias sttn funct_body anchor env smod =
           in
           {md with mod_type = mty}
     in
-    rm md
+    md
   | Pmod_structure sstr ->
-    let str, sg, _finalenv =
-      type_structure funct_body anchor env sstr smod.pmod_loc
-    in
+    let str, sg, _finalenv = type_structure funct_body anchor env sstr in
     let md =
-      rm
-        {
-          mod_desc = Tmod_structure str;
-          mod_type = Mty_signature sg;
-          mod_env = env;
-          mod_attributes = smod.pmod_attributes;
-          mod_loc = smod.pmod_loc;
-        }
+      {
+        mod_desc = Tmod_structure str;
+        mod_type = Mty_signature sg;
+        mod_env = env;
+        mod_attributes = smod.pmod_attributes;
+        mod_loc = smod.pmod_loc;
+      }
     in
     let sg' = simplify_signature sg in
+    check_js_names ~toplevel:false sg';
     if List.length sg' = List.length sg then md
     else
       wrap_constraint
@@ -1290,14 +1322,13 @@ and type_module_aux ~alias sttn funct_body anchor env smod =
     Ctype.init_def (Ident.current_time ());
     (* PR#6981 *)
     let body = type_module sttn funct_body None newenv sbody in
-    rm
-      {
-        mod_desc = Tmod_functor (id, name, mty, body);
-        mod_type = Mty_functor (id, ty_arg, body.mod_type);
-        mod_env = env;
-        mod_attributes = smod.pmod_attributes;
-        mod_loc = smod.pmod_loc;
-      }
+    {
+      mod_desc = Tmod_functor (id, name, mty, body);
+      mod_type = Mty_functor (id, ty_arg, body.mod_type);
+      mod_env = env;
+      mod_attributes = smod.pmod_attributes;
+      mod_loc = smod.pmod_loc;
+    }
   | Pmod_apply (sfunct, sarg) -> (
     let arg = type_module true funct_body None env sarg in
     let path = path_of_module arg in
@@ -1334,26 +1365,24 @@ and type_module_aux ~alias sttn funct_body anchor env smod =
                    (smod.pmod_loc, env, Cannot_eliminate_dependency mty_functor))
           )
       in
-      rm
-        {
-          mod_desc = Tmod_apply (funct, arg, coercion);
-          mod_type = mty_appl;
-          mod_env = env;
-          mod_attributes = smod.pmod_attributes;
-          mod_loc = smod.pmod_loc;
-        }
+      {
+        mod_desc = Tmod_apply (funct, arg, coercion);
+        mod_type = mty_appl;
+        mod_env = env;
+        mod_attributes = smod.pmod_attributes;
+        mod_loc = smod.pmod_loc;
+      }
     | Mty_alias (_, path) ->
       raise (Error (sfunct.pmod_loc, env, Cannot_scrape_alias path))
     | _ -> raise (Error (sfunct.pmod_loc, env, Cannot_apply funct.mod_type)))
   | Pmod_constraint (sarg, smty) ->
     let arg = type_module ~alias true funct_body anchor env sarg in
     let mty = transl_modtype env smty in
-    rm
-      {
-        (wrap_constraint env arg mty.mty_type (Tmodtype_explicit mty)) with
-        mod_loc = smod.pmod_loc;
-        mod_attributes = smod.pmod_attributes;
-      }
+    {
+      (wrap_constraint env arg mty.mty_type (Tmodtype_explicit mty)) with
+      mod_loc = smod.pmod_loc;
+      mod_attributes = smod.pmod_attributes;
+    }
   | Pmod_unpack sexp ->
     let exp = Typecore.type_exp ~context:None env sexp in
     let mty =
@@ -1371,21 +1400,30 @@ and type_module_aux ~alias sttn funct_body anchor env smod =
     in
     if funct_body && Mtype.contains_type env mty then
       raise (Error (smod.pmod_loc, env, Not_allowed_in_functor_body));
-    rm
-      {
-        mod_desc = Tmod_unpack (exp, mty);
-        mod_type = mty;
-        mod_env = env;
-        mod_attributes = smod.pmod_attributes;
-        mod_loc = smod.pmod_loc;
-      }
+    {
+      mod_desc = Tmod_unpack (exp, mty);
+      mod_type = mty;
+      mod_env = env;
+      mod_attributes = smod.pmod_attributes;
+      mod_loc = smod.pmod_loc;
+    }
   | Pmod_extension ext ->
     raise (Error_forward (Builtin_attributes.error_of_extension ext))
+  | Pmod_await sarg ->
+    (* The builtin ppx turns the dynamic import forms into [unpack] and
+       removes any other [await], which has no effect; this only types a tree
+       that bypassed it *)
+    let arg = type_module ~alias sttn funct_body anchor env sarg in
+    {
+      arg with
+      mod_loc = smod.pmod_loc;
+      mod_attributes = arg.mod_attributes @ smod.pmod_attributes;
+    }
 
-and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
+and type_structure funct_body anchor env sstr =
   let names = new_names () in
 
-  let type_str_item env srem {pstr_loc = loc; pstr_desc = desc} =
+  let type_str_item env {pstr_loc = loc; pstr_desc = desc} =
     match desc with
     | Pstr_eval (sexpr, attrs) ->
       let expr =
@@ -1394,30 +1432,39 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
       in
       (Tstr_eval (expr, attrs), [], env)
     | Pstr_value (rec_flag, sdefs) ->
-      let scope =
-        match rec_flag with
-        | Recursive ->
-          Some
-            (Annot.Idef {scope with Location.loc_start = loc.Location.loc_start})
-        | Nonrecursive ->
-          let start =
-            match srem with
-            | [] -> loc.Location.loc_end
-            | {pstr_loc = loc2} :: _ -> loc2.Location.loc_start
-          in
-          Some (Annot.Idef {scope with Location.loc_start = start})
-      in
       let defs, newenv =
-        Typecore.type_binding ~context:None env rec_flag sdefs scope
+        Typecore.type_binding ~context:None env rec_flag sdefs
       in
       let () =
         if rec_flag = Recursive then Rec_check.check_recursive_bindings defs
+      in
+      (* The environment keeps let-bound values without attributes, so uses
+         in this module do not warn. The signature carries their [deprecated]
+         attributes, so uses from other modules do. *)
+      let deprecated =
+        List.concat_map
+          (fun (vb : value_binding) ->
+            match Builtin_attributes.deprecated_attributes vb.vb_attributes with
+            | [] -> []
+            | attrs ->
+              List.map (fun id -> (id, attrs)) (pat_bound_idents vb.vb_pat))
+          defs
       in
       (* Note: Env.find_value does not trigger the value_used event. Values
          will be marked as being used during the signature inclusion test. *)
       ( Tstr_value (rec_flag, defs),
         List.map
-          (fun id -> Sig_value (id, Env.find_value (Pident id) newenv))
+          (fun id ->
+            let vd = Env.find_value (Pident id) newenv in
+            let vd =
+              match
+                List.find_opt (fun (id', _) -> Ident.same id id') deprecated
+              with
+              | None -> vd
+              | Some (_, attrs) ->
+                {vd with val_attributes = attrs @ vd.val_attributes}
+            in
+            Sig_value (id, vd))
           (let_bound_idents defs),
         newenv )
     | Pstr_primitive sdesc ->
@@ -1563,7 +1610,7 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
       let newenv, mtd, sg = transl_modtype_decl names env pmtd in
       (Tstr_modtype mtd, [sg], newenv)
     | Pstr_open sod ->
-      let _path, newenv, od = type_open ~toplevel env sod in
+      let _path, newenv, od = type_open env sod in
       (Tstr_open od, [], newenv)
     | Pstr_include sincl ->
       let smodl = sincl.pincl_mod in
@@ -1589,6 +1636,9 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
       (Tstr_include incl, sg, new_env)
     | Pstr_extension (ext, _attrs) ->
       raise (Error_forward (Builtin_attributes.error_of_extension ext))
+    | Pstr_raw {name_loc} ->
+      (* The built-in PPX lowers raw JavaScript before type checking. *)
+      raise (Error_forward (Ast_raw.uninterpreted ~loc:name_loc "raw"))
     | Pstr_attribute x ->
       Builtin_attributes.warning_attribute x;
       (Tstr_attribute x, [], env)
@@ -1599,7 +1649,7 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
     | [] -> ([], [], env)
     | pstr :: srem ->
       let previous_saved_types = Cmt_format.get_saved_types () in
-      let desc, sg, new_env = type_str_item env srem pstr in
+      let desc, sg, new_env = type_str_item env pstr in
       let str = {str_desc = desc; str_loc = pstr.pstr_loc; str_env = env} in
       Cmt_format.set_saved_types
         (Cmt_format.Partial_structure_item str :: previous_saved_types);
@@ -1607,12 +1657,6 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
       let new_sg = if rescript_hide desc then sig_rem else sg @ sig_rem in
       (str :: str_rem, new_sg, final_env)
   in
-  if !Clflags.annotations then
-    (* moved to genannot *)
-    List.iter
-      (function
-        | {pstr_loc = l} -> Stypes.record_phrase l)
-      sstr;
   let previous_saved_types = Cmt_format.get_saved_types () in
   let run () =
     let items, sg, final_env = type_struct env sstr in
@@ -1621,10 +1665,7 @@ and type_structure ?(toplevel = false) funct_body anchor env sstr scope =
       (Cmt_format.Partial_structure str :: previous_saved_types);
     (str, sg, final_env)
   in
-  if toplevel then run () else Builtin_attributes.warning_scope [] run
-
-let type_toplevel_phrase env s =
-  type_structure ~toplevel:true false None env s Location.none
+  Builtin_attributes.warning_scope [] run
 
 let type_module_alias = type_module ~alias:true true false None
 let type_module = type_module true false None
@@ -1650,16 +1691,19 @@ let type_module_type_of env smod =
   let tmty =
     match smod.pmod_desc with
     | Pmod_ident lid ->
-      (* turn off strengthening in this case *)
-      let path, md = Typetexp.find_module env smod.pmod_loc lid.txt in
-      rm
-        {
-          mod_desc = Tmod_ident (path, lid);
-          mod_type = md.md_type;
-          mod_env = env;
-          mod_attributes = smod.pmod_attributes;
-          mod_loc = smod.pmod_loc;
-        }
+      (* turn off strengthening in this case; look the module up in the
+         warning scope of its attributes, as [type_module] does *)
+      let path, md =
+        Builtin_attributes.warning_scope smod.pmod_attributes (fun () ->
+            Typetexp.find_module env smod.pmod_loc lid.txt)
+      in
+      {
+        mod_desc = Tmod_ident (path, lid);
+        mod_type = md.md_type;
+        mod_env = env;
+        mod_attributes = smod.pmod_attributes;
+        mod_loc = smod.pmod_loc;
+      }
     | _ -> type_module env smod
   in
   let mty = tmty.mod_type in
@@ -1721,7 +1765,7 @@ let () =
   Typecore.type_module := type_module_alias;
   Typetexp.transl_modtype_longident := transl_modtype_longident;
   Typetexp.transl_modtype := transl_modtype;
-  Typecore.type_open := type_open_ ?toplevel:None;
+  Typecore.type_open := type_open_;
   Typecore.type_package := type_package;
   type_module_type_of_fwd := type_module_type_of
 
@@ -1732,17 +1776,15 @@ let type_implementation_more ?check_exists sourcefile outputprefix modulename
   Cmt_format.clear ();
   try
     Delayed_checks.reset_delayed_checks ();
-    let str, sg, finalenv =
-      type_structure initial_env ast (Location.in_file sourcefile)
-    in
+    let str, sg, finalenv = type_structure initial_env ast in
     let simple_sg = simplify_signature sg in
-    let mli_status = !Clflags.assume_no_mli in
+    let mli_status = !((Clflags.current ()).assume_no_mli) in
     if mli_status = Clflags.Mli_exists then (
       let sourceintf =
         Filename.remove_extension sourcefile ^ Literals.suffix_resi
       in
       let intf_file =
-        try find_in_path_uncap !Config.load_path (modulename ^ ".cmi")
+        try find_in_path_uncap (Config.get_load_path ()) (modulename ^ ".cmi")
         with Not_found ->
           raise
             (Error
@@ -1761,10 +1803,11 @@ let type_implementation_more ?check_exists sourcefile outputprefix modulename
          so that value declarations which are not used internally but exported
          are not reported as being unused. *)
       Cmt_format.save_cmt (outputprefix ^ ".cmt") modulename
-        (Cmt_format.Implementation str) (Some sourcefile) initial_env None;
+        (Cmt_format.Implementation str) (Some sourcefile) initial_env;
       (str, coercion, finalenv, dclsig)
       (* identifier is useless might read from serialized cmi files*))
-    else
+    else (
+      check_js_names ~toplevel:true simple_sg;
       let coercion =
         Includemod.compunit initial_env sourcefile sg "(inferred signature)"
           simple_sg
@@ -1776,26 +1819,24 @@ let type_implementation_more ?check_exists sourcefile outputprefix modulename
          the value being exported. We can still capture unused
          declarations like "let x = true;; let x = 1;;", because in this
          case, the inferred signature contains only the last declaration. *)
-      (if not !Clflags.dont_write_files then
-         let deprecated = Builtin_attributes.deprecated_of_str ast in
-         let cmi =
-           Env.save_signature ?check_exists ~deprecated simple_sg modulename
-             (outputprefix ^ ".cmi")
-         in
-         Cmt_format.save_cmt (outputprefix ^ ".cmt") modulename
-           (Cmt_format.Implementation str) (Some sourcefile) initial_env
-           (Some cmi));
-      (str, coercion, finalenv, simple_sg)
+      if not !((Clflags.current ()).dont_write_files) then (
+        let deprecated = Builtin_attributes.deprecated_of_str ast in
+        ignore
+          (Env.save_signature ?check_exists ~deprecated simple_sg modulename
+             (outputprefix ^ ".cmi"));
+        Cmt_format.save_cmt (outputprefix ^ ".cmt") modulename
+          (Cmt_format.Implementation str) (Some sourcefile) initial_env);
+      (str, coercion, finalenv, simple_sg))
   with e ->
     Cmt_format.save_cmt (outputprefix ^ ".cmt") modulename
       (Cmt_format.Partial_implementation
          (Array.of_list (Cmt_format.get_saved_types ())))
-      (Some sourcefile) initial_env None;
+      (Some sourcefile) initial_env;
     raise e
 
-let save_signature modname tsg outputprefix source_file initial_env cmi =
+let save_signature modname tsg outputprefix source_file initial_env =
   Cmt_format.save_cmt (outputprefix ^ ".cmti") modname
-    (Cmt_format.Interface tsg) (Some source_file) initial_env (Some cmi)
+    (Cmt_format.Interface tsg) (Some source_file) initial_env
 
 (* "Packaging" of several compilation units into one unit
    having them as sub-modules. *)
@@ -1817,7 +1858,7 @@ let report_error ppf = function
   | Cannot_apply mty ->
     fprintf ppf "@[This module is not a functor; it has type@ %a@]" modtype mty
   | Not_included errs ->
-    fprintf ppf "@[<v>Signature mismatch:@ %a@]" Includemod.report_error errs
+    fprintf ppf "@[<v>Signature mismatch:@,@,%a@]" Includemod.report_error errs
   | Cannot_eliminate_dependency mty ->
     fprintf ppf
       "@[This functor has type@ %a@ The parameter cannot be eliminated in the \
@@ -1833,12 +1874,16 @@ let report_error ppf = function
   | With_mismatch (lid, explanation) ->
     fprintf ppf
       "@[<v>@[In this `with' constraint, the new definition of %a@ does not \
-       match its original definition@ in the constrained signature:@]@ %a@]"
+       match its original definition@ in the constrained signature:@]@,\
+       @,\
+       %a@]"
       longident lid Includemod.report_error explanation
   | With_makes_applicative_functor_ill_typed (lid, path, explanation) ->
     fprintf ppf
       "@[<v>@[This `with' constraint on %a makes the applicative functor @ \
-       type %s ill-typed in the constrained signature:@]@ %a@]"
+       type %s ill-typed in the constrained signature:@]@,\
+       @,\
+       %a@]"
       longident lid (Path.name path) Includemod.report_error explanation
   | With_changes_module_alias (lid, id, path) ->
     fprintf ppf
@@ -1855,6 +1900,11 @@ let report_error ppf = function
       "@[Multiple definition of the %s name %s @ at @{<loc>%a@}@ @ Names must \
        be unique in a given structure or signature.@]"
       kind name Location.print_loc repeated_loc
+  | Js_name_clash (kind, other_kind, js_name, other_loc) ->
+    fprintf ppf
+      "@[This %s has the same JavaScript name %s@ as the %s at @{<loc>%a@}.@ \
+       Rename one of them.@]"
+      kind js_name other_kind Location.print_loc other_loc
   | Non_generalizable typ ->
     (* modified *)
     fprintf ppf "@[<v>";

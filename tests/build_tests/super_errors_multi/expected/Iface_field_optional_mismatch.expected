@@ -6,12 +6,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_field_optional_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_field_optional_mismatch/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_field_optional_mismatch/Foo.res:1:1-28):
     type t = {a: int, b: string}
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_field_optional_mismatch/Foo.resi:1:1-29):
     type t = {a: int, b?: string}
-  /.../fixtures/Iface_field_optional_mismatch/Foo.resi:1:1-29:
-    Expected declaration
-  /.../fixtures/Iface_field_optional_mismatch/Foo.res:1:1-28:
-    Actual declaration
+  
   The optional attribute of field b is different.

@@ -235,8 +235,8 @@ end
 (* One time setup for all relevant modules *)
 let () =
   Bs_conditional_initial.setup_env ();
-  Clflags.binary_annotations := false;
-  Clflags.color := Some Always;
+  (Clflags.current ()).binary_annotations := false;
+  (Clflags.current ()).color := Some Always;
   Lazy.force Res_outcome_printer.setup
 
 let error_of_exn e =
@@ -270,7 +270,7 @@ module Res_driver = struct
     Format.flush_str_formatter ()
 
   let parse_implementation ~sourcefile ~src =
-    Location.input_name := sourcefile;
+    Location.set_input_name sourcefile;
     let parse_result =
       let engine = setup ~filename:sourcefile ~src in
       let structure = Res_core.parse_implementation engine in
@@ -286,6 +286,7 @@ module Res_driver = struct
         diagnostics;
         invalid;
         comments = List.rev engine.comments;
+        newline = Res_parser.newline engine;
       }
     in
     let () =
@@ -504,11 +505,10 @@ module Compile = struct
         cmt_args = [||];
         cmt_sourcefile = Some sourcefile;
         cmt_builddir = Sys.getcwd ();
-        cmt_loadpath = !Config.load_path;
+        cmt_loadpath = Config.get_load_path ();
         cmt_source_digest = None;
         cmt_initial_env = env;
         cmt_imports = [];
-        cmt_interface_digest = None;
         cmt_use_summaries = false;
         cmt_extra_info = {Cmt_utils.deprecated_used = []};
       }
@@ -532,7 +532,6 @@ module Compile = struct
         {
           Gentype_config.default with
           module_;
-          platform_lib = "rescript";
           project_root;
           bsb_project_root = project_root;
           suffix = Literals.suffix_js;
@@ -581,7 +580,9 @@ module Compile = struct
     let print_javascript () =
       Js_dump_program.pp_deps_program ~output_prefix:"" module_system
         lambda_output
-        (Ext_pp.from_buffer buffer)
+        (Ext_pp.from_buffer
+           ~track_positions:(Option.is_some source_map_builder)
+           buffer)
     in
     (match source_map_builder with
     | None -> print_javascript ()
@@ -635,7 +636,7 @@ module Compile = struct
       let filename = get_filename ~lang config.filename in
       let modulename = "Playground" in
       let impl = rescript_parse ~filename in
-      Clflags.open_modules := open_modules;
+      (Clflags.current ()).open_modules := open_modules;
       (* let env = !Toploop.toplevel_env in *)
       (* Res_compmisc.init_path (); *)
       (* let modulename = module_of_filename ppf sourcefile outputprefix in *)
@@ -645,30 +646,37 @@ module Compile = struct
       (* Question ?? *)
       (* let finalenv = ref Env.empty in *)
       let types_signature = ref [] in
-      Js_config.jsx_version := Some Js_config.Jsx_v4;
-      Js_config.jsx_preserve := jsx_preserve_mode;
-      Js_config.source_map := source_map_mode;
-      Js_config.source_map_sources_content := source_map_sources_content;
-      Js_config.source_map_root := source_map_root;
+      (Js_config.current ()).jsx_version := Some Js_config.Jsx_v4;
+      (Clflags.current ()).jsx_preserve := jsx_preserve_mode;
+      (Js_config.current ()).source_map := source_map_mode;
+      (Js_config.current ()).source_map_sources_content :=
+        source_map_sources_content;
+      (Js_config.current ()).source_map_root := source_map_root;
       experimental_features
       |> List.iter Experimental_features.enable_from_string;
       (* default *)
       let ast = impl str in
       let ast = Ppx_entry.rewrite_implementation ast in
-      let typed_tree =
-        let a, b, _, signature =
-          Typemod.type_implementation_more modulename modulename modulename env
-            ast
-        in
-        (* finalenv := c ; *)
-        types_signature := signature;
-        (a, b)
+      let structure, coercion, finalenv, signature =
+        Typemod.type_implementation_more modulename modulename modulename env
+          ast
       in
-      let {Translmod.lambda; exports; hoisted_functions} =
-        Translmod.transl_implementation modulename typed_tree
+      types_signature := signature;
+      let typed_tree = (structure, coercion) in
+      let ({Translmod.lambda} as implementation) =
+        Translmod.transl_implementation modulename finalenv signature typed_tree
+      in
+      let optimized_lambda = ref None in
+      let on_optimized_lambda =
+        if include_debug_outputs then
+          Some
+            (fun lambda ->
+              optimized_lambda :=
+                Some (Printer.to_string Printlambda.lambda lambda))
+        else None
       in
       let lambda_output =
-        Lam_compile_main.compile "" exports hoisted_functions lambda
+        Lam_compile_main.compile ?on_optimized_lambda "" implementation
       in
       let js_code, source_map =
         render_javascript ~module_system ~filename ~source:str ~source_map_mode
@@ -725,7 +733,15 @@ module Compile = struct
               ("lam", inject @@ Js.string lam);
             |]
         in
-        Js.Unsafe.obj (Array.concat [attrs; debug_attrs; gentype_attrs])
+        let optimized_lambda_attrs =
+          match !optimized_lambda with
+          | None -> [||]
+          | Some output ->
+            Js.Unsafe.[|("lambda_optimized", inject @@ Js.string output)|]
+        in
+        Js.Unsafe.obj
+          (Array.concat
+             [attrs; debug_attrs; gentype_attrs; optimized_lambda_attrs])
       else Js.Unsafe.obj attrs
     with e -> (
       match e with
@@ -757,7 +773,7 @@ module Compile = struct
 end
 
 (* To add a directory to the load path *)
-let dir_directory d = Config.load_path := d :: !Config.load_path
+let dir_directory d = Config.set_load_path (d :: Config.get_load_path ())
 let () = dir_directory "/static"
 
 module Export = struct

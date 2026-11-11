@@ -35,49 +35,62 @@ let input_cmi ic =
   let flags = input_value ic in
   {cmi_name = name; cmi_sign = sign; cmi_crcs = crcs; cmi_flags = flags}
 
-let read_cmi filename =
-  let ic = open_in_bin filename in
+(* Earlier compilers wrote OCaml-style magic numbers *)
+let legacy_magic_prefix = "Caml1999I"
+
+let check_magic_number filename buffer =
+  if buffer <> Config.cmi_magic_number then
+    let pre_len = String.length Config.cmi_magic_number - 3 in
+    if
+      String.sub buffer 0 pre_len = String.sub Config.cmi_magic_number 0 pre_len
+    then
+      let msg =
+        if buffer < Config.cmi_magic_number then "an older" else "a newer"
+      in
+      raise (Error (Wrong_version_interface (filename, msg)))
+    else if String.starts_with ~prefix:legacy_magic_prefix buffer then
+      raise (Error (Wrong_version_interface (filename, "an older")))
+    else raise (Error (Not_an_interface filename))
+
+let read_cmi_channel filename ic =
   try
-    let buffer =
-      really_input_string ic (String.length Config.cmi_magic_number)
+    check_magic_number filename
+      (really_input_string ic (String.length Config.cmi_magic_number));
+    input_cmi ic
+  with End_of_file | Failure _ -> raise (Error (Corrupted_interface filename))
+
+(* The same as [read_cmi_channel] on a channel holding [contents]. *)
+let read_cmi_contents filename contents =
+  let magic_length = String.length Config.cmi_magic_number in
+  if String.length contents < magic_length then
+    raise (Error (Corrupted_interface filename));
+  check_magic_number filename (String.sub contents 0 magic_length);
+  try
+    let input offset =
+      let value = Marshal.from_string contents offset in
+      ( value,
+        offset + Marshal.total_size (Bytes.unsafe_of_string contents) offset )
     in
-    if buffer <> Config.cmi_magic_number then (
-      close_in ic;
-      let pre_len = String.length Config.cmi_magic_number - 3 in
-      if
-        String.sub buffer 0 pre_len
-        = String.sub Config.cmi_magic_number 0 pre_len
-      then
-        let msg =
-          if buffer < Config.cmi_magic_number then "an older" else "a newer"
-        in
-        raise (Error (Wrong_version_interface (filename, msg)))
-      else raise (Error (Not_an_interface filename)));
-    let cmi = input_cmi ic in
-    close_in ic;
-    cmi
-  with
-  | End_of_file | Failure _ ->
-    close_in ic;
+    let (name, sign), offset = input magic_length in
+    let crcs, offset = input offset in
+    let flags, _ = input offset in
+    {cmi_name = name; cmi_sign = sign; cmi_crcs = crcs; cmi_flags = flags}
+  with Failure _ | Invalid_argument _ ->
     raise (Error (Corrupted_interface filename))
-  | Error e ->
-    close_in ic;
-    raise (Error e)
 
-let output_cmi filename oc cmi =
-  (* beware: the provided signature must have been substituted for saving *)
-  output_string oc Config.cmi_magic_number;
-  output_value oc (cmi.cmi_name, cmi.cmi_sign);
-  flush oc;
-  let crc = Digest.file filename in
-  let crcs = (cmi.cmi_name, Some crc) :: cmi.cmi_crcs in
-  output_value oc crcs;
-  output_value oc cmi.cmi_flags;
-  crc
+let read_cmi filename =
+  match
+    Build_file_store.read (Compiler_request_state.resolve_path filename)
+  with
+  | Some contents -> read_cmi_contents filename contents
+  | None ->
+    raise
+      (Sys_error
+         (Compiler_request_state.resolve_path filename
+         ^ ": No such file or directory"))
 
-(* This function is also called by [save_cmt] as cmi_format is subset of
-       cmt_format, so dont close the channel yet
-*)
+(* Writes the .cmi file, keeping an existing one with the same contents
+   when [check_exists] is given *)
 let create_cmi ?check_exists filename (cmi : cmi_infos) =
   (* beware: the provided signature must have been substituted for saving *)
   let content =
@@ -86,9 +99,10 @@ let create_cmi ?check_exists filename (cmi : cmi_infos) =
   in
   let crc = Digest.string content in
   let cmi_infos =
-    if check_exists <> None && Sys.file_exists filename then
-      Some (read_cmi filename)
-    else None
+    if check_exists = None then None
+    else
+      Build_file_store.read (Compiler_request_state.resolve_path filename)
+      |> Option.map (read_cmi_contents filename)
   in
   match cmi_infos with
   | Some
@@ -104,11 +118,12 @@ let create_cmi ?check_exists filename (cmi : cmi_infos) =
     crc
   | _ ->
     let crcs = (cmi.cmi_name, Some crc) :: cmi.cmi_crcs in
-    let oc = open_out_bin filename in
-    output_string oc content;
-    output_value oc crcs;
-    output_value oc cmi.cmi_flags;
-    close_out oc;
+    Build_file_store.write
+      (Compiler_request_state.resolve_path filename)
+      (String.concat ""
+         [
+           content; Marshal.to_string crcs []; Marshal.to_string cmi.cmi_flags [];
+         ]);
     crc
 
 (* Error report *)
@@ -121,8 +136,8 @@ let report_error ppf = function
       filename
   | Wrong_version_interface (filename, older_newer) ->
     fprintf ppf
-      "%a@ is not a compiled interface for this version of OCaml.@.It seems to \
-       be for %s version of OCaml."
+      "%a@ is not a compiled interface for this version of ReScript.@.It seems \
+       to be for %s version of ReScript."
       Location.print_filename filename older_newer
   | Corrupted_interface filename ->
     fprintf ppf "Corrupted compiled interface@ %a" Location.print_filename

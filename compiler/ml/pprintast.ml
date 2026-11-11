@@ -252,10 +252,6 @@ let constant f = function
   | Pconst_string payload ->
     pp f "{js|%a|js}" print_string_with_byte_width
       (String_literal.string_source payload)
-  | Pconst_json source ->
-    pp f "{json|%a|json}" print_string_with_byte_width source
-  | Pconst_raw_source source ->
-    pp f "{js|%a|js}" print_string_with_byte_width source
   | Pconst_integer (i, None) -> paren (i.[0] = '-') (fun f -> pp f "%s") f i
   | Pconst_integer (i, Some m) ->
     paren (i.[0] = '-') (fun f (i, m) -> pp f "%s%c" i m) f (i, m)
@@ -294,14 +290,24 @@ let tyvar_loc f str = pp f "'%s" str.txt
 let string_quot f x = pp f "`%s" x
 
 let rec type_with_label ctxt f arg =
-  match arg.lbl with
-  | Nolabel ->
-    pp f "%a%a" (core_type1 ctxt) arg.typ (attributes ctxt) arg.attrs
-    (* otherwise parenthesize *)
+  let attrs, lbl, typ =
+    match arg with
+    | Parg_type {attrs; lbl; typ} -> (attrs, lbl, typ)
+    | Parg_fixed {attrs; lbl; value; loc} ->
+      (* Printed in its legacy spelling, [_ [@as value]]. *)
+      ( attrs,
+        lbl,
+        Ast_helper.Typ.any ~loc
+          ~attrs:[Ast_fixed_arg.to_attribute ~loc value]
+          () )
+  in
+  match lbl with
+  | Nolabel -> pp f "%a%a" (core_type1 ctxt) typ (attributes ctxt) attrs
+  (* otherwise parenthesize *)
   | Labelled {txt = s} ->
-    pp f "%s:%a%a" s (core_type1 ctxt) arg.typ (attributes ctxt) arg.attrs
+    pp f "%s:%a%a" s (core_type1 ctxt) typ (attributes ctxt) attrs
   | Optional {txt = s} ->
-    pp f "?%s:%a%a" s (core_type1 ctxt) arg.typ (attributes ctxt) arg.attrs
+    pp f "?%s:%a%a" s (core_type1 ctxt) typ (attributes ctxt) attrs
 
 and core_type ctxt f x =
   if x.ptyp_attributes <> [] then
@@ -486,6 +492,14 @@ and simple_pattern ctxt (f : Format.formatter) (x : pattern) : unit =
     | Ppat_array l -> pp f "@[<2>[|%a|]@]" (list (pattern1 ctxt) ~sep:";") l
     | Ppat_unpack s -> pp f "(module@ %s)@ " s.txt
     | Ppat_type li -> pp f "#%a" longident_loc li
+    | Ppat_variant_spread li -> pp f "...%a" longident_loc li
+    | Ppat_dict entries ->
+      let entry f {pdp_key; pdp_pattern; pdp_optional} =
+        pp f "@[<2>%S:@;%s%a@]" pdp_key.txt
+          (if pdp_optional then "?" else "")
+          (pattern1 ctxt) pdp_pattern
+      in
+      pp f "@[<2>dict{%a}@]" (list entry ~sep:",@;") entries
     | Ppat_record (l, closed, rest) -> (
       let longident_x_pattern f {lid = li; x = p; opt} =
         let opt_str = if opt then "?" else "" in
@@ -659,11 +673,20 @@ and expression ctxt f x =
     | Pexp_match (e, l) ->
       pp f "@[<hv0>@[<hv0>@[<2>match %a@]@ with@]%a@]" (expression reset_ctxt) e
         (case_list ctxt) l
-    | Pexp_try (e, l) ->
-      pp f "@[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]@]"
-        (* "try@;@[<2>%a@]@\nwith@\n%a"*)
-        (expression reset_ctxt)
-        e (case_list ctxt) l
+    | Pexp_try (e, l, finally) -> (
+      let pp_finally f = function
+        | None -> ()
+        | Some fin -> pp f "@ @[<hv2>finally@ %a@]" (expression reset_ctxt) fin
+      in
+      match l with
+      | [] ->
+        pp f "@[<0>@[<hv2>try@ %a@]%a@]" (expression reset_ctxt) e pp_finally
+          finally
+      | _ ->
+        pp f "@[<0>@[<hv2>try@ %a@]@ @[<0>with%a@]%a@]"
+          (* "try@;@[<2>%a@]@\nwith@\n%a"*)
+          (expression reset_ctxt)
+          e (case_list ctxt) l pp_finally finally)
     | Pexp_let (rf, l, e) ->
       (* pp f "@[<2>let %a%a in@;<1 -2>%a@]"
          (*no indentation here, a new line*) *)
@@ -773,6 +796,13 @@ and expression ctxt f x =
       in
       pp f "@[<2>`%s@;%a@]" l (simple_expr ctxt) payload
     | Pexp_extension e -> extension ctxt f e
+    | Pexp_raw {kind; name_loc; source} ->
+      extension ctxt f
+        (Ast_raw.to_extension
+           ~name:(Ast_raw.extension_name kind)
+           ~name_loc source)
+    | Pexp_todo {name_loc; message} ->
+      extension ctxt f (Ast_todo.to_extension ~name_loc message)
     | Pexp_await e -> pp f "@[<hov2>await@ %a@]" (simple_expr ctxt) e
     | Pexp_regexp {pattern; flags} -> pp f "/%s/%s" pattern flags
     | Pexp_template {source_segments; values} ->
@@ -841,7 +871,7 @@ and simple_expr ctxt f x =
       pp f "@[<hov2>(%a)@]" (list (simple_expr ctxt) ~sep:",@;") l
     | Pexp_constraint (e, ct) ->
       pp f "(%a :@ %a)" (expression ctxt) e (core_type ctxt) ct
-    | Pexp_coerce (e, (), ct) ->
+    | Pexp_coerce (e, ct) ->
       pp f "(%a :> %a)" (expression ctxt) e (core_type ctxt) ct
     | Pexp_variant (l, {txt = []}) -> pp f "`%s" l
     | Pexp_record (l, eo) ->
@@ -864,6 +894,24 @@ and simple_expr ctxt f x =
       pp f "@[<0>@[<2>[|%a|]@]@]"
         (list (simple_expr (under_semi ctxt)) ~sep:";")
         l
+    | Pexp_dict entries ->
+      let dict_entry f = function
+        | Pdict_entry (key, e) ->
+          pp f "@[<hov2>%S:@;%a@]" key.txt (simple_expr ctxt) e
+        | Pdict_spread e -> pp f "...%a" (simple_expr ctxt) e
+      in
+      pp f "@[<hv2>dict{%a}@]" (list dict_entry ~sep:",@;") entries
+    | Pexp_spread (kind, elements) ->
+      let element f = function
+        | Pspread_item e -> simple_expr ctxt f e
+        | Pspread e -> pp f "...%a" (simple_expr ctxt) e
+      in
+      let opening, closing =
+        match kind with
+        | Spread_array -> ("[", "]")
+        | Spread_list -> ("list{", "}")
+      in
+      pp f "@[<hv2>%s%a%s@]" opening (list element ~sep:",@;") elements closing
     | Pexp_break -> pp f "break"
     | Pexp_continue -> pp f "continue"
     | Pexp_while (e1, e2) ->
@@ -1029,7 +1077,8 @@ and signature_item ctxt f x : unit =
   | Psig_value vd ->
     let intro = if vd.pval_prim = None then "val" else "external" in
     pp f "@[<2>%s@ %a@ :@ %a@]%a" intro protect_ident vd.pval_name.txt
-      (value_description ctxt) vd (item_attributes ctxt) vd.pval_attributes
+      (value_description ctxt) vd (item_attributes ctxt)
+      (Ast_helper.Val.description_attributes vd)
   | Psig_typext te -> type_extension ctxt f te
   | Psig_exception ed -> exception_declaration ctxt f ed
   | Psig_module
@@ -1100,6 +1149,7 @@ and module_expr ctxt f x =
       (* Cf: #7200 *)
     | Pmod_unpack e -> pp f "(val@ %a)" (expression ctxt) e
     | Pmod_extension e -> extension ctxt f e
+    | Pmod_await me -> pp f "await@ %a" (module_expr ctxt) me
 
 and structure ctxt f x = list ~sep:"@\n" (structure_item ctxt) f x
 
@@ -1215,7 +1265,8 @@ and binding ctxt f {pvb_pat = p; pvb_expr = x; pvb_constraint; _} =
 and bindings ctxt f (rf, l) =
   let binding kwd rf f x =
     pp f "@[<2>%s %a%a@]%a" kwd rec_flag rf (binding ctxt) x
-      (item_attributes ctxt) x.pvb_attributes
+      (item_attributes ctxt)
+      (Ast_helper.Vb.binding_attributes x)
   in
   match l with
   | [] -> ()
@@ -1272,7 +1323,8 @@ and structure_item ctxt f x =
       md (item_attributes ctxt) attrs
   | Pstr_primitive vd ->
     pp f "@[<hov2>external@ %a@ :@ %a@]%a" protect_ident vd.pval_name.txt
-      (value_description ctxt) vd (item_attributes ctxt) vd.pval_attributes
+      (value_description ctxt) vd (item_attributes ctxt)
+      (Ast_helper.Val.description_attributes vd)
   | Pstr_include incl ->
     pp f "@[<hov2>include@ %a@]%a" (module_expr ctxt) incl.pincl_mod
       (item_attributes ctxt) incl.pincl_attributes
@@ -1297,6 +1349,9 @@ and structure_item ctxt f x =
   | Pstr_extension (e, a) ->
     item_extension ctxt f e;
     item_attributes ctxt f a
+  | Pstr_raw {name_loc; source; attrs} ->
+    item_extension ctxt f (Ast_raw.to_extension ~name:"raw" ~name_loc source);
+    item_attributes ctxt f attrs
 
 and type_param ctxt f (ct, a) =
   pp f "%s%a" (type_variance a) (core_type ctxt) ct
@@ -1450,15 +1505,6 @@ and label_x_expression_param ctxt f (l, e) =
     if Some lbl = simple_name then pp f "~%s" lbl
     else pp f "~%s:%a" lbl (simple_expr ctxt) e
 
-let expression f x = pp f "@[%a@]" (expression reset_ctxt) x
-
-let string_of_expression x =
-  ignore (flush_str_formatter ());
-  let f = str_formatter in
-  expression f x;
-  flush_str_formatter ()
-
-let core_type = core_type reset_ctxt
 let pattern = pattern reset_ctxt
 let signature = signature reset_ctxt
 let structure = structure reset_ctxt

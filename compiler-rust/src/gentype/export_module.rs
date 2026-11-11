@@ -211,7 +211,7 @@ pub fn export_module_item_to_fields(
             } = export_module_value_to_type(config, export_module_value);
             let field_for_type = Field {
                 mutable_: Mutable::Mutable,
-                name_js: field_name.clone(),
+                name_js: crate::gentype::runtime::js_field_name(&field_name),
                 optional: Optional::Mandatory,
                 type_: type_for_type,
                 doc_string,
@@ -336,8 +336,10 @@ pub fn emit_all_module_items(
             if crate::gentype::debug::code_items.load(std::sync::atomic::Ordering::Relaxed) {
                 crate::gentype::log_::item(&format!("EmitModule {module_name} @."));
             }
-            let emitted_module_item =
-                crate::gentype::module_name::for_inner_module(file_name, module_name);
+            let emitted_module_item = crate::gentype::module_name::for_inner_module(
+                file_name,
+                &crate::gentype::runtime::js_export_name(module_name),
+            );
             crate::gentype::emit_type::emit_export_const(
                 config,
                 emitters,
@@ -346,7 +348,7 @@ pub fn emit_all_module_items(
                 crate::gentype::emit_type::ExportConst {
                     comment: "",
                     doc_string,
-                    name: module_name,
+                    name: &crate::gentype::runtime::ts_binding_name(module_name),
                     type_: &type_for_type,
                     line: &emitted_module_item,
                 },
@@ -366,6 +368,8 @@ pub fn extend_export_modules(
     resolved_name: &crate::gentype::resolved_name::T,
 ) {
     let list = crate::gentype::resolved_name::to_list(resolved_name);
-    let value_name = crate::gentype::resolved_name::to_string(resolved_name);
+    let value_name = crate::gentype::runtime::ts_binding_name(
+        &crate::gentype::resolved_name::to_string(resolved_name),
+    );
     extend_export_module_items(&list, doc_string, module_items_emitter, type_, &value_name);
 }

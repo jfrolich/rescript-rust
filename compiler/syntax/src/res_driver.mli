@@ -5,6 +5,10 @@ type ('ast, 'diagnostics) parse_result = {
   diagnostics: 'diagnostics;
   invalid: bool;
   comments: Res_comment.t list;
+  newline: string;
+      (* The newline to format the source with: CRLF when its first line break
+         outside literals and comments is CRLF, LF otherwise. The printer
+         copies literals and comments with their bytes unchanged. *)
 }
 
 type 'diagnostics parsing_engine = {
@@ -49,13 +53,16 @@ type print_engine = {
 
 val parsing_engine : Res_diagnostics.t list parsing_engine
 
-val print_engine : print_engine
+(* Prints ReScript with line breaks written as [newline] *)
+val print_engine : newline:string -> print_engine
+
+exception Already_reported
 
 (* ReScript implementation parsing compatible with ocaml pparse driver. Used by the compiler. *)
 val parse_implementation :
   ?ignore_parse_errors:bool -> string -> Parsetree.structure
-[@@live] [@@raises Location.Error]
+[@@live] [@@raises Location.Error Already_reported]
 
 (* ReScript interface parsing compatible with ocaml pparse driver. Used by the compiler *)
 val parse_interface : ?ignore_parse_errors:bool -> string -> Parsetree.signature
-[@@live] [@@raises Location.Error]
+[@@live] [@@raises Location.Error Already_reported]

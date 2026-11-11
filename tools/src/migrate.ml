@@ -56,7 +56,7 @@ module Expr_utils = struct
       true
     | Pexp_construct (_, {txt = [e]})
     | Pexp_constraint (e, _)
-    | Pexp_coerce (e, _, _)
+    | Pexp_coerce (e, _)
     | Pexp_let (_, _, e)
     | Pexp_sequence (e, _)
     | Pexp_letmodule (_, _, e)
@@ -742,6 +742,26 @@ let make_mapper (deprecated_used : Cmt_utils.deprecated_used list) =
   in
   mapper
 
+(* The deprecation locations in the .cmt refer to the source it was compiled
+   from. Applying them to a source that changed since (for example one that
+   was already migrated) rewrites the wrong code, so refuse stale artifacts. *)
+let load_deprecated_used ~state ~path =
+  match Cmt.load_cmt_infos_from_path ~state ~path with
+  | None ->
+    Error
+      (Printf.sprintf
+         "error: failed to run migration for %s because build artifacts could \
+          not be found. try to build the project"
+         path)
+  | Some {cmt_source_digest = Some digest}
+    when not (Digest.equal digest (Digest.file path)) ->
+    Error
+      (Printf.sprintf
+         "error: failed to run migration for %s because build artifacts are \
+          out of date. rebuild the project and run the migration again"
+         path)
+  | Some {cmt_extra_info = {deprecated_used}} -> Ok deprecated_used
+
 let migrate ~entry_point_file ~output_mode =
   let path =
     match Filename.is_relative entry_point_file with
@@ -753,14 +773,9 @@ let migrate ~entry_point_file ~output_mode =
     if Filename.check_suffix path ".res" then
       let parser = Res_driver.parsing_engine.parse_implementation in
       let {Res_driver.parsetree; comments; source} = parser ~filename:path in
-      match Cmt.load_cmt_infos_from_path ~state ~path with
-      | None ->
-        Error
-          (Printf.sprintf
-             "error: failed to run migration for %s because build artifacts \
-              could not be found. try to build the project"
-             path)
-      | Some {cmt_extra_info = {deprecated_used}} ->
+      match load_deprecated_used ~state ~path with
+      | Error e -> Error e
+      | Ok deprecated_used ->
         let mapper = make_mapper deprecated_used in
         let ast_mapped = mapper.structure mapper parsetree in
         (* Second pass: apply any post-migration transforms signaled via @apply.transforms *)
@@ -774,27 +789,29 @@ let migrate ~entry_point_file ~output_mode =
         let ast_transformed =
           apply_transforms.structure apply_transforms ast_mapped
         in
-        Ok
-          ( Res_printer.print_implementation
-              ~width:Res_printer.default_print_width ast_transformed ~comments,
-            source )
+        (* Only reprint when a migration changed the AST, so that files
+           without migrations keep their formatting. *)
+        if ast_transformed = parsetree then Ok (None, source)
+        else
+          Ok
+            ( Some
+                (Res_printer.print_implementation
+                   ~width:Res_printer.default_print_width ast_transformed
+                   ~comments),
+              source )
     else if Filename.check_suffix path ".resi" then
       let parser = Res_driver.parsing_engine.parse_interface in
       let {Res_driver.parsetree = signature; comments; source} =
         parser ~filename:path
       in
 
-      match Cmt.load_cmt_infos_from_path ~state ~path with
-      | None ->
-        Error
-          (Printf.sprintf
-             "error: failed to run migration for %s because build artifacts \
-              could not be found. try to build the project"
-             path)
-      | Some {cmt_extra_info = {deprecated_used}} ->
+      match load_deprecated_used ~state ~path with
+      | Error e -> Error e
+      | Ok deprecated_used ->
         let mapper = make_mapper deprecated_used in
         let ast_mapped = mapper.signature mapper signature in
-        Ok (Res_printer.print_interface ast_mapped ~comments, source)
+        if ast_mapped = signature then Ok (None, source)
+        else Ok (Some (Res_printer.print_interface ast_mapped ~comments), source)
     else
       Error
         (Printf.sprintf
@@ -803,7 +820,7 @@ let migrate ~entry_point_file ~output_mode =
   in
   match result with
   | Error e -> Error e
-  | Ok (contents, source) when contents <> source -> (
+  | Ok (Some contents, source) when contents <> source -> (
     match output_mode with
     | `Stdout -> Ok contents
     | `File ->
@@ -811,7 +828,7 @@ let migrate ~entry_point_file ~output_mode =
       Printf.fprintf oc "%s" contents;
       close_out oc;
       Ok (Filename.basename path ^ ": File migrated successfully"))
-  | Ok (contents, _) -> (
+  | Ok (_, source) -> (
     match output_mode with
-    | `Stdout -> Ok contents
+    | `Stdout -> Ok source
     | `File -> Ok (Filename.basename path ^ ": File did not need migration"))

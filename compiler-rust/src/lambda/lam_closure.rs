@@ -222,7 +222,11 @@ fn iter(a: &LamArena, lam: Lam, pos: Position, fv: &mut StatsMap, local: &mut Bo
             local.extend(a.idents(a.catch_payload(info).params).iter().copied());
             iter(a, handler, Position::Sink, fv, local);
         }
-        Node::TryWith { body, handler, .. } => {
+        Node::TryWith { body, handler, .. }
+        | Node::TryFinally {
+            body,
+            finally: handler,
+        } => {
             iter(a, body, pos, fv, local);
             iter(a, handler, Position::Sink, fv, local);
         }

@@ -13,8 +13,6 @@
 (*                                                                        *)
 (**************************************************************************)
 
-type hoisted_function = {binding: Ident.t; path: string list; loc: Location.t}
-
 type tag_info =
   | Blk_constructor of {
       name: string;
@@ -33,6 +31,9 @@ type tag_info =
   | Blk_record of {
       fields: (string * bool (* optional *)) array;
       mutable_flag: Asttypes.mutable_flag;
+      array: bool;
+          (* [Record_array]: the fields are the elements of a JavaScript
+             array *)
     }
   | Blk_module of string list
   | Blk_module_export of Ident.t list
@@ -61,14 +62,16 @@ let mutable_flag_of_tag_info (tag : tag_info) =
   | Blk_module_export _ | Blk_extension ->
     Immutable
 
-let blk_record fields mutable_flag = Blk_record {fields; mutable_flag}
+let blk_record fields mutable_flag ~array =
+  Blk_record {fields; mutable_flag; array}
 let blk_record_ext fields mutable_flag = Blk_record_ext {fields; mutable_flag}
 
 let blk_record_inlined fields name num_nonconst ~runtime mutable_flag =
   Blk_record_inlined {fields; name; num_nonconst; mutable_flag; runtime}
 
 let ref_tag_info : tag_info =
-  Blk_record {fields = [|("contents", false)|]; mutable_flag = Mutable}
+  Blk_record
+    {fields = [|("contents", false)|]; mutable_flag = Mutable; array = false}
 
 type field_dbg_info =
   | Fld_record of {name: string}
@@ -85,8 +88,6 @@ type field_dbg_info =
 let fld_record name = Fld_record {name}
 
 let fld_record_extension name = Fld_record_extension {name}
-
-let ref_field_info : field_dbg_info = Fld_record {name = "contents"}
 
 type set_field_dbg_info =
   | Fld_record_set of string
@@ -123,6 +124,20 @@ type import_source =
    rather than primitives. See [builtin]. *)
 type eliminated = Identity | Ignore
 
+(* A JSX element, built by [Translcore] from a call the JSX PPX produced. The arguments of [Pjsx] are, in evaluation order: the tag,
+   the spread props (if [jsx_spread]), one value per [jsx_props] entry, the
+   children ([jsx_children] of them) and the key (if [jsx_key]). *)
+type jsx_element = {
+  jsx_name: string; (* name of the external, only printed by [Printlambda] *)
+  jsx_ffi: External_ffi_types.external_decl;
+  jsx_multi: bool; (* [jsxs]: each child is a separate argument *)
+  jsx_fragment: bool; (* the tag is the JSX module's [jsxFragment] *)
+  jsx_spread: bool;
+  jsx_props: (string * bool) list; (* runtime name, optional *)
+  jsx_children: int option; (* [None]: no children prop *)
+  jsx_key: bool;
+}
+
 type primitive =
   | Pdebugger
   | Ptypeof
@@ -141,8 +156,8 @@ type primitive =
       prim_name: string;
       arg_types: External_arg_spec.params;
       ffi: External_ffi_types.external_decl;
-      transformed_jsx: bool;
     }
+  | Pjsx of jsx_element
   | Pjs_object_create of External_arg_spec.obj_params
   | Pjs_object_get of string
   | Pjs_object_set of string
@@ -229,7 +244,6 @@ type primitive =
   | Parrayrefu
   | Parraysetu
   | Parrayrefs
-  | Parraysets
   (* List primitives *)
   | Pmakelist
   (* dict primitives *)
@@ -246,9 +260,6 @@ type primitive =
   | Phash_mixint
   | Phash_mixstring
   | Phash_finalmix
-  (* Test if the argument is a block or an immediate integer *)
-  | Pisint
-  (* Test if the (integer) argument is outside an interval *)
   (* Test if the argument is null or undefined *)
   | Pis_null_undefined
   (* exn *)
@@ -278,6 +289,12 @@ type primitive =
      and the primitive arguments contain [value]. The source forms are retained
      for JavaScript output; semantic forms are used by optimizations. *)
   | Ptemplate of Asttypes.template_segment list
+  (* {...target, ...sources} *)
+  | Pdict_spread
+  (* [Primitive_array.spread(parts)] and [Primitive_list.spread(parts)], the
+     concatenation of an array of arrays or lists *)
+  | Parray_spread
+  | Plist_spread
 
 and comparison = Ceq | Cneq | Clt | Cgt | Cle | Cge
 
@@ -347,6 +364,7 @@ type t =
   | Lstaticraise of int * t list
   | Lstaticcatch of t * (int * Ident.t list) * t
   | Ltrywith of t * Ident.t * t
+  | Ltryfinally of t * t
   | Lifthenelse of t * t * t
   | Lsequence of t * t
   | Lbreak
@@ -366,14 +384,7 @@ and lfunction = {
 
 and prim_info = {primitive: primitive; args: t list; loc: Location.t}
 
-and ap_info = {ap_loc: Location.t; ap_inlined: inline_attribute}
-
-and lambda_apply = {
-  ap_func: t;
-  ap_args: t list;
-  ap_info: ap_info;
-  ap_transformed_jsx: bool;
-}
+and lambda_apply = {ap_func: t; ap_args: t list; ap_loc: Location.t}
 
 and switch_key =
   | Switch_int of int
@@ -419,7 +430,7 @@ let const_constructor (tag : Variant_runtime.tag) =
   if tag.name = "()" then const_unit
   else
     match tag.literal with
-    | Some (Variant_runtime.Int v) -> Const_int (Int32.of_int v)
+    | Variant_runtime.Int v when tag.name <> "[]" -> Const_int (Int32.of_int v)
     | _ -> Const_constructor tag
 
 (* A constructor with an optional shape carries no payload when constant. *)
@@ -466,7 +477,7 @@ let eq_primitive_approx (lhs : primitive) (rhs : primitive) =
   (* bool primitives *)
   | Psequand | Psequor | Pnot | Pboolcomp _ | Pboolorder | Pboolmin | Pboolmax
   (* int primitives *)
-  | Pisint | Pnegint | Paddint | Psubint | Pmulint | Pdivint | Pmodint | Ppowint
+  | Pnegint | Paddint | Psubint | Pmulint | Pdivint | Pmodint | Ppowint
   | Pnotint | Pandint | Porint | Pxorint | Plslint | Plsrint | Pasrint
   | Pintorder | Pintmin | Pintmax
   (* float primitives *)
@@ -482,7 +493,9 @@ let eq_primitive_approx (lhs : primitive) (rhs : primitive) =
   (* List primitives *)
   | Pmakelist
   (* dict primitives *)
-  | Pmakedict | Pdict_has
+  | Pmakedict | Pdict_spread | Pdict_has
+  (* spread primitives *)
+  | Parray_spread | Plist_spread
   (* promise *)
   | Pawait
   (* etc *)
@@ -490,7 +503,7 @@ let eq_primitive_approx (lhs : primitive) (rhs : primitive) =
   | Pnull_undefined_to_opt | Pis_null | Pis_not_none | Psome | Psome_not_nest
   | Pis_undefined | Pis_null_undefined | Ptypeof | Pis_poly_var_block
   | Pdebugger | Pinit_mod | Pupdate_mod | Pduprecord | Pmakearray | Parraylength
-  | Parrayrefu | Parraysetu | Parrayrefs | Parraysets | Pjs_fn_method | Phash
+  | Parrayrefu | Parraysetu | Parrayrefs | Pjs_fn_method | Phash
   | Phash_mixstring | Phash_mixint | Phash_finalmix | Precord_rest _ ->
     rhs = lhs
   (* Reachable only via the optimizer's term-equality comparison, which the
@@ -517,6 +530,10 @@ let eq_primitive_approx (lhs : primitive) (rhs : primitive) =
     match rhs with
     | Pjs_call rhs ->
       prim_name = rhs.prim_name && arg_types = rhs.arg_types && ffi = rhs.ffi
+    | _ -> false)
+  | Pjsx jsx -> (
+    match rhs with
+    | Pjsx rhs -> jsx = rhs
     | _ -> false)
   | Pimport src -> (
     match rhs with
@@ -572,10 +589,25 @@ let str_of_field_info (x : field_dbg_info) : string option =
 let is_immutable_block (info : tag_info) =
   mutable_flag_of_tag_info info = Immutable
 
-(* A constant that has to be built at run time rather than shared. *)
+(* The number of [Some] around a none, as in [Some (Some None)], or [-1] if
+   [c] is not a nested none. *)
+let rec const_some_none_depth (c : structured_constant) : int =
+  match c with
+  | Const_some v ->
+    let depth = const_some_none_depth v in
+    if depth < 0 then depth else depth + 1
+  | Const_module_alias | Const_js_undefined _
+  (* A constructor represented by [undefined], [@as(undefined)] *)
+  | Const_constructor {literal = Undefined} ->
+    0
+  | _ -> -1
+
+(* A constant that has to be built at run time rather than shared. A [Some]
+   around a (nested) none is emitted as a new optional block, see
+   [Lam_compile_const.translate_some]. *)
 let rec const_is_allocating (c : structured_constant) : bool =
   match c with
-  | Const_some t -> const_is_allocating t
+  | Const_some t -> const_some_none_depth t >= 0 || const_is_allocating t
   | Const_block _ -> true
   | Const_js_null | Const_js_undefined _ | Const_js_true | Const_js_false
   | Const_int _ | Const_assertfalse | Const_constructor _ | Const_char _
@@ -664,6 +696,7 @@ let letrec bindings body : t = Lletrec (bindings, body)
 let staticraise i args : t = Lstaticraise (i, args)
 let staticcatch body catch handler : t = Lstaticcatch (body, catch, handler)
 let try_ body id handler : t = Ltrywith (body, id, handler)
+let try_finally body finally : t = Ltryfinally (body, finally)
 let break : t = Lbreak
 let continue : t = Lcontinue
 let while_ cond body : t = Lwhile (cond, body)
@@ -698,6 +731,49 @@ let rec is_eta_conversion_exn params inner_args outer_args : t list =
     r :: is_eta_conversion_exn xs ys rest
   | [], [], [] -> []
   | _, _, _ -> raise_notrace Not_simple_form
+
+let may_skip_operands (primitive : primitive) =
+  match primitive with
+  | Psequand | Psequor -> true
+  | Pdebugger | Ptypeof | Psome | Psome_not_nest | Pmakeblock _ | Pfield _
+  | Psetfield _ | Pduprecord | Precord_rest _ | Pjs_call _ | Pjsx _
+  | Pjs_object_create _ | Pjs_object_get _ | Pjs_object_set _ | Praise
+  | Pobjcomp _ | Pobjorder | Pobjmin | Pobjmax | Pobjtag | Pobjsize | Pnot
+  | Pboolcomp _ | Pboolorder | Pboolmin | Pboolmax | Pnegint | Paddint | Psubint
+  | Pmulint | Pdivint | Pmodint | Ppowint | Pandint | Porint | Pxorint | Pnotint
+  | Plslint | Plsrint | Pasrint | Pintcomp _ | Pintorder | Pintmin | Pintmax
+  | Pintoffloat | Pfloatofint | Pnegfloat | Pmodfloat | Paddfloat | Psubfloat
+  | Pmulfloat | Pdivfloat | Ppowfloat | Pfloatcomp _ | Pfloatorder | Pfloatmin
+  | Pfloatmax | Pnegbigint | Paddbigint | Psubbigint | Ppowbigint | Pmulbigint
+  | Pdivbigint | Pmodbigint | Pandbigint | Porbigint | Pxorbigint | Pnotbigint
+  | Plslbigint | Pasrbigint | Pbigintcomp _ | Pbigintorder | Pbigintmin
+  | Pbigintmax | Pstringlength | Pstringrefu | Pstringrefs | Pstringcomp _
+  | Pstringorder | Pstringmin | Pstringmax | Pstringadd | Pmakearray
+  | Parraylength | Parrayrefu | Parraysetu | Parrayrefs | Pmakelist | Pmakedict
+  | Pdict_has | Pawait | Pimport _ | Pinit_mod | Pupdate_mod | Phash
+  | Phash_mixint | Phash_mixstring | Phash_finalmix | Pis_null_undefined
+  | Pcreate_extension _ | Pjscomp _ | Pnull_to_opt | Pnull_undefined_to_opt
+  | Pis_null | Pis_undefined | Pis_not_none | Pval_from_option
+  | Pval_from_option_not_nest | Pis_poly_var_block | Praw_js_code _
+  | Pjs_fn_method | Ptagged_template _ | Ptemplate _ | Pdict_spread
+  | Parray_spread | Plist_spread ->
+    false
+
+(* Whether [primitive] on [args], the arguments of a call, evaluates them as
+   the call does. [&&] and [||] may skip their right operand, so the argument
+   for it must be one whose evaluation does nothing. *)
+let evaluates_args_as_call (primitive : primitive) (args : t list) =
+  (not (may_skip_operands primitive))
+  ||
+  match args with
+  | [] -> true
+  | _ :: rest ->
+    List.for_all
+      (fun (arg : t) ->
+        match arg with
+        | Lconst _ | Lvar _ -> true
+        | _ -> false)
+      rest
 
 let rec eq_approx (l1 : t) (l2 : t) =
   match l1 with
@@ -757,7 +833,7 @@ let rec eq_approx (l1 : t) (l2 : t) =
     | _ -> false)
   | Lfunction _
   | Llet (_, _, _, _)
-  | Lletrec _ | Lswitch _ | Lstaticcatch _ | Ltrywith _
+  | Lletrec _ | Lswitch _ | Lstaticcatch _ | Ltrywith _ | Ltryfinally _
   | Lfor (_, _, _, _, _)
   | Lfor_of (_, _, _)
   | Lfor_await_of (_, _, _) ->
@@ -773,81 +849,77 @@ and eq_option l1 l2 =
 
 and eq_approx_list ls ls1 = Ext_list.for_all2_no_exn ls ls1 eq_approx
 
-(* Classify constants by the JavaScript value emitted by [Lam_compile_const]
-   and [Js_dump], not by their source constructor. Unknown representations
-   must retain runtime dispatch. *)
-type value_kind =
-  | Is_literal of Variant_runtime.literal_tag
-  | Is_object
-  | Is_array
-  | Unknown_value
-
-let runtime_value_kind (c : structured_constant) =
+(* The JavaScript value a constant is emitted as by [Lam_compile_const] and
+   [Js_dump], not its source constructor. A constant of another
+   representation keeps the dispatch at run time. *)
+let untagged_value (c : structured_constant) : Untagged_dispatch.value option =
   match c with
-  | Const_string s -> Is_literal (String s)
-  | Const_int i -> Is_literal (Int (Int32.to_int i))
-  | Const_float f -> Is_literal (Float f)
-  | Const_js_true -> Is_literal (Bool true)
-  | Const_js_false -> Is_literal (Bool false)
-  | Const_js_null -> Is_literal Null
-  | Const_js_undefined _ -> Is_literal Undefined
-  | Const_polyvar name -> Is_literal (String name)
-  | Const_constructor {name = "[]"; literal = None} -> Is_literal (Int 0)
-  | Const_constructor {name; literal = None} -> Is_literal (String name)
-  | Const_constructor {literal = Some (BigInt _)} -> Unknown_value
-  | Const_constructor {literal = Some literal} -> Is_literal literal
-  | Const_block (Blk_tuple, _) -> Is_array
-  | Const_block (Blk_record {fields}, _) ->
-    if
-      Array.length fields <> 0
-      && Ext_array.for_alli fields (fun i (name, _) -> string_of_int i = name)
-    then Is_array
-    else Is_object
+  | Const_string s -> Some (Literal (String s))
+  | Const_int i -> Some (Literal (Int (Int32.to_int i)))
+  | Const_float f -> Some (Literal (Float f))
+  | Const_js_true -> Some (Literal (Bool true))
+  | Const_js_false -> Some (Literal (Bool false))
+  | Const_js_null -> Some (Literal Null)
+  | Const_js_undefined _ -> Some (Literal Undefined)
+  | Const_polyvar name -> Some (Literal (String name))
+  | Const_constructor {literal} -> Some (Literal literal)
+  | Const_bigint (sign, digits) ->
+    Some (Literal (BigInt (Bigint_utils.to_string sign digits)))
+  | Const_block (Blk_tuple, _) -> Some Array
+  | Const_block (Blk_record {array}, _) ->
+    if array then Some Array else Some Object
   | Const_block
       ( ( Blk_constructor _ | Blk_record_inlined _ | Blk_poly_var
         | Blk_record_ext _ | Blk_module _ | Blk_module_export _ | Blk_extension
           ),
         _ ) ->
-    Is_object
-  | Const_char _ | Const_bigint _ | Const_some _ | Const_module_alias
-  | Const_assertfalse ->
-    Unknown_value
+    Some Object
+  | Const_char _ | Const_some _ | Const_module_alias | Const_assertfalse -> None
 
 (* Runtime equality, rather than equality of tags: [@as(1)] and a payload
-   [1.0] are the same JavaScript number. Bigint spellings are not compared;
-   both bigint payloads and bigint constructors are classified as unknown.
+   [1.0] are the same JavaScript number, and [1_0n] and [10n] the same bigint.
    Integer tags are emitted through [Int32.of_int], just like [Const_int]. *)
-let literal_denotes_same (a : Variant_runtime.literal_tag)
-    (b : Variant_runtime.literal_tag) =
-  match (a, b) with
-  | String x, String y -> x = y
-  | Int x, Int y -> Int32.of_int x = Int32.of_int y
-  | Float x, Float y -> float_of_string x = float_of_string y
-  | Int x, Float y | Float y, Int x ->
-    Int32.to_float (Int32.of_int x) = float_of_string y
-  | Bool x, Bool y -> x = y
-  | Null, Null | Undefined, Undefined -> true
-  | (String _ | Int _ | Float _ | Bool _ | BigInt _ | Null | Undefined), _ ->
-    false
+let literal_denotes_same = Variant_runtime.same_literal_value
 
-(* Mirror [Dynamic_checks]: literals take precedence; the object case excludes
-   arrays when an array case exists. Int and float share one runtime type. *)
-let value_has_block_type ~block_types (kind : value_kind)
-    (block_type : Variant_runtime.block_type) =
-  match (block_type, kind) with
-  | (IntType | FloatType), Is_literal (Int _ | Float _) -> true
-  | StringType, Is_literal (String _) -> true
-  | BooleanType, Is_literal (Bool _) -> true
-  | ObjectType, Is_object -> true
-  | InstanceType Array, Is_array -> true
-  | ObjectType, Is_array ->
-    not (List.mem (Variant_runtime.InstanceType Array) block_types)
-  | UnknownType, (Is_literal _ | Is_object | Is_array) -> true
-  | UnknownType, Unknown_value -> false
-  | ( ( IntType | FloatType | StringType | BooleanType | ObjectType | BigintType
-      | FunctionType | InstanceType _ ),
-      _ ) ->
-    false
+(* The dispatch of a switch on an untagged variant, which the code generator
+   prints and constant folding evaluates. A switch with literal arms and no
+   payload arm left is a plain switch on the literals. *)
+let untagged_plan (sw : lambda_switch) =
+  match sw.sw_dispatch with
+  | Switch_variant ({block_types = _ :: _} as facts)
+    when (sw.sw_consts_full && sw.sw_consts = [])
+         || not (sw.sw_blocks_full && sw.sw_blocks = []) -> (
+    let exception Not_untagged in
+    match
+      ( List.map
+          (fun (key, action) ->
+            match key with
+            | Switch_constructor (Constant {literal}) -> (literal, action)
+            | Switch_constructor (Block _) | Switch_int _ -> raise Not_untagged)
+          sw.sw_consts,
+        List.map
+          (fun (key, action) ->
+            match key with
+            | Switch_constructor (Block (Untagged {block_type})) ->
+              (block_type, action)
+            | Switch_constructor (Constant _ | Block (Tagged _)) | Switch_int _
+              ->
+              raise Not_untagged)
+          sw.sw_blocks )
+    with
+    | literal_arms, payload_arms ->
+      Some
+        (Untagged_dispatch.plan ~same:eq_approx
+           {
+             facts;
+             literal_arms;
+             payload_arms;
+             literals_complete = sw.sw_consts_full;
+             payloads_complete = sw.sw_blocks_full;
+             fallback = sw.sw_failaction;
+           })
+    | exception Not_untagged -> None)
+  | Switch_variant _ | Switch_direct -> None
 
 let switch lam (lam_switch : lambda_switch) : t =
   let action_or_switch = function
@@ -857,52 +929,25 @@ let switch lam (lam_switch : lambda_switch) : t =
       | Some action -> action
       | None -> Lswitch (lam, lam_switch))
   in
-  (* An untagged variant is dispatched on the value, so a constant scrutinee is
-     decided here rather than by the constructor it was written with - which
-     has no runtime existence and may be shared with a literal constructor.
-     [`Undecided] means this layer cannot name the constant's runtime shape, so
-     the switch has to stay; it is not the same as "no case matches". *)
-  let untagged_action (facts : Variant_runtime.matching_facts) cst =
-    let find_in cases matches =
-      `Case
-        (Ext_list.find_opt cases (fun (key, action) ->
-             match key with
-             | Switch_constructor case when matches case -> Some action
-             | Switch_int _ | Switch_constructor _ -> None))
-    in
-    let literal_of_tag (tag : Variant_runtime.tag) =
-      match tag.literal with
-      | Some literal -> literal
-      | None -> Variant_runtime.String tag.name
-    in
-    let matches_block = value_has_block_type ~block_types:facts.block_types in
-    let kind = runtime_value_kind cst in
-    match kind with
-    | Unknown_value -> `Undecided
-    | Is_literal literal
-      when Ext_list.exists facts.literal_tags (literal_denotes_same literal) ->
-      (* The literal side wins, exactly as it does at runtime. *)
-      find_in lam_switch.sw_consts (function
-        | Constant tag -> literal_denotes_same literal (literal_of_tag tag)
-        | Block _ -> false)
-    | Is_literal _ | Is_object | Is_array ->
-      (* Not a declared literal, so the payload's runtime shape decides. *)
-      if Ext_list.exists facts.block_types (matches_block kind) then
-        find_in lam_switch.sw_blocks (function
-          | Block (Untagged {block_type}) -> matches_block kind block_type
-          | Constant _ | Block (Tagged _) -> false)
-      else `Undecided
-  in
   match (lam, lam_switch.sw_dispatch) with
-  | Lconst cst, Switch_variant ({block_types = _ :: _} as facts) -> (
-    match untagged_action facts cst with
-    | `Case action -> action_or_switch action
-    | `Undecided -> Lswitch (lam, lam_switch))
-  | Lconst (Const_constructor cstr_name), _ ->
+  | Lconst cst, Switch_variant {block_types = _ :: _} -> (
+    (* An untagged variant is dispatched on the value, so a constant
+       scrutinee takes the arm the generated code takes for its JavaScript
+       value, not the arm of the constructor it was written with *)
+    match (untagged_plan lam_switch, untagged_value cst) with
+    | Some plan, Some value -> (
+      match Untagged_dispatch.select plan value with
+      | Arm action -> action
+      | Default -> action_or_switch None
+      | Nothing -> Lswitch (lam, lam_switch))
+    | (Some _ | None), _ -> Lswitch (lam, lam_switch))
+  | Lconst (Const_constructor constant), _ ->
+    (* By runtime value: a coercion accepts [@as(1.)] for [@as(1.0)] *)
     let action =
       Ext_list.find_opt lam_switch.sw_consts (fun (key, action) ->
           match key with
-          | Switch_constructor (Constant tag) when cstr_name = tag ->
+          | Switch_constructor (Constant tag)
+            when literal_denotes_same constant.literal tag.literal ->
             Some action
           | Switch_int _ | Switch_constructor _ -> None)
     in
@@ -915,9 +960,9 @@ let switch lam (lam_switch : lambda_switch) : t =
       Ext_list.find_opt lam_switch.sw_consts (fun (key, action) ->
           match key with
           | Switch_int ordinal when ordinal = i -> Some action
-          | Switch_constructor
-              (Constant {literal = Some (Variant_runtime.Int value)})
-            when value = i ->
+          | Switch_constructor (Constant {literal})
+            when literal_denotes_same (Int i) literal ->
+            (* A constant represented as a number, compared by value *)
             Some action
           | Switch_int _ | Switch_constructor _ -> None)
     in
@@ -931,13 +976,21 @@ let switch lam (lam_switch : lambda_switch) : t =
       | Blk_module _ | Blk_module_export _ | Blk_extension ->
         None
     in
+    let same_runtime (block : Variant_runtime.block)
+        (case : Variant_runtime.block) =
+      match (block, case) with
+      | Tagged block, Tagged case ->
+        block.tag_name = case.tag_name
+        && literal_denotes_same block.tag.literal case.tag.literal
+      | _ -> block = case
+    in
     let action =
       Ext_list.find_opt lam_switch.sw_blocks (fun (key, action) ->
-          match key with
-          | Switch_constructor (Block case_runtime)
-            when runtime = Some case_runtime ->
+          match (key, runtime) with
+          | Switch_constructor (Block case_runtime), Some runtime
+            when same_runtime runtime case_runtime ->
             Some action
-          | Switch_int _ | Switch_constructor _ -> None)
+          | (Switch_int _ | Switch_constructor _), _ -> None)
     in
     action_or_switch action
   | _ -> Lswitch (lam, lam_switch)
@@ -998,13 +1051,14 @@ let prim ~primitive:(prim : primitive) ~args loc : t =
         | Cneq -> a <> b
         | _ -> assert false)
     | ( Pintcomp ((Ceq | Cneq) as op),
-        Const_constructor {name = a; literal = None},
-        Const_constructor {name = b; literal = None} ) ->
-      (* Both runtime representations are the constructor names *)
+        Const_constructor {literal = a},
+        Const_constructor {literal = b} ) ->
+      (* Constants are compared by their runtime values *)
+      let same = Variant_runtime.same_literal_value a b in
       Lift.bool
         (match op with
-        | Ceq -> a = b
-        | Cneq -> a <> b
+        | Ceq -> same
+        | Cneq -> not same
         | _ -> assert false)
     | ( ( Paddint | Psubint | Pmulint | Pdivint | Pmodint | Pandint | Porint
         | Pxorint | Plslint | Plsrint | Pasrint ),
@@ -1072,8 +1126,13 @@ let prim ~primitive:(prim : primitive) ~args loc : t =
     *)
     | _ -> default ())
 
-let rec apply ?(ap_transformed_jsx = false) fn args (ap_info : ap_info) : t =
+let lfunction_can_be_inlined (lfunction : lfunction) =
+  (not lfunction.attr.async) && lfunction.attr.directive = None
+
+let rec apply fn args (ap_loc : Location.t) : t =
   match fn with
+  | Lfunction lfunction when not (lfunction_can_be_inlined lfunction) ->
+    Lapply {ap_func = fn; ap_args = args; ap_loc}
   | Lfunction
       {
         params;
@@ -1083,50 +1142,46 @@ let rec apply ?(ap_transformed_jsx = false) fn args (ap_info : ap_info) : t =
               primitive =
                 ( Pnull_to_opt | Pnull_undefined_to_opt | Pis_null
                 | Pis_null_undefined | Ptypeof ) as wrap;
-              args =
-                [Lprim ({primitive = _; args = inner_args} as primitive_call)];
+              args = [Lprim ({primitive; args = inner_args} as primitive_call)];
             };
-      } -> (
+      }
+    when evaluates_args_as_call primitive args -> (
     match is_eta_conversion_exn params inner_args args with
     | args ->
-      let loc = ap_info.ap_loc in
       prim ~primitive:wrap
-        ~args:[prim ~primitive:primitive_call.primitive ~args loc]
-        loc
-    | exception Not_simple_form ->
-      Lapply {ap_func = fn; ap_args = args; ap_info; ap_transformed_jsx})
+        ~args:[prim ~primitive:primitive_call.primitive ~args ap_loc]
+        ap_loc
+    | exception Not_simple_form -> Lapply {ap_func = fn; ap_args = args; ap_loc}
+    )
   | Lfunction
-      {
-        params;
-        body = Lprim ({primitive = _; args = inner_args} as primitive_call);
-      } -> (
+      {params; body = Lprim ({primitive; args = inner_args} as primitive_call)}
+    when evaluates_args_as_call primitive args -> (
     match is_eta_conversion_exn params inner_args args with
-    | args -> prim ~primitive:primitive_call.primitive ~args ap_info.ap_loc
-    | exception _ ->
-      Lapply {ap_func = fn; ap_args = args; ap_info; ap_transformed_jsx})
+    | args -> prim ~primitive:primitive_call.primitive ~args ap_loc
+    | exception _ -> Lapply {ap_func = fn; ap_args = args; ap_loc})
   | Lfunction
       {
         params;
         body =
           Lsequence
-            ( Lprim ({primitive = _; args = inner_args} as primitive_call),
+            ( Lprim ({primitive; args = inner_args} as primitive_call),
               (Lconst _ as const) );
-      } -> (
+      }
+    when evaluates_args_as_call primitive args -> (
     match is_eta_conversion_exn params inner_args args with
-    | args ->
-      seq (prim ~primitive:primitive_call.primitive ~args ap_info.ap_loc) const
+    | args -> seq (prim ~primitive:primitive_call.primitive ~args ap_loc) const
     | exception _ ->
-      Lapply {ap_func = fn; ap_args = args; ap_info; ap_transformed_jsx}
+      Lapply {ap_func = fn; ap_args = args; ap_loc}
       (* | Lfunction {params;body} when Ext_list.same_length params args ->
           Ext_list.fold_right2 (fun p arg acc ->
             Llet(Strict,p,arg,acc)
           ) params args body *)
       (* TODO: more rigirous analysis on [let_kind] *))
   | Llet (kind, id, e, (Lfunction _ as fn)) ->
-    let_ kind id e (apply fn args ap_info ~ap_transformed_jsx)
+    let_ kind id e (apply fn args ap_loc)
   (* | Llet (kind0, id0, e0, Llet (kind,id, e, (Lfunction _ as fn))) ->
      Llet(kind0,id0,e0,Llet (kind, id, e, apply fn args loc status)) *)
-  | _ -> Lapply {ap_func = fn; ap_args = args; ap_info; ap_transformed_jsx}
+  | _ -> Lapply {ap_func = fn; ap_args = args; ap_loc}
 
 let not_ loc x : t =
   match x with
@@ -1158,15 +1213,14 @@ let rec eval_const_as_bool (v : structured_constant) : bool option =
   | Const_bigint _ | Const_block _ ->
     Some true
   | Const_some b -> eval_const_as_bool b
-  | Const_constructor {name; literal} -> (
+  | Const_constructor {literal} -> (
     (* Truthiness of the canonical runtime representation *)
     match literal with
-    | None -> Some (name <> "[]") (* the name string; [] is the number 0 *)
-    | Some (String s) -> Some (s <> "")
-    | Some (Int i) -> Some (i <> 0)
-    | Some (Bool b) -> Some b
-    | Some (Null | Undefined) -> Some false
-    | Some (Float _ | BigInt _) -> None)
+    | String s -> Some (s <> "")
+    | Int i -> Some (i <> 0)
+    | Bool b -> Some b
+    | Null | Undefined -> Some false
+    | Float _ | BigInt _ -> None)
 
 let if_ (a : t) (b : t) (c : t) : t =
   match a with
@@ -1190,44 +1244,7 @@ let if_ (a : t) (b : t) (c : t) : t =
        matching's own exit bookkeeping inspects after the term is assembled,
        and doing it here leaves static raises without their catch. It is
        {!Lam_pass_guard_raises} instead. *)
-    | _ -> (
-      match a with
-      | Lprim {primitive = Pisint; args = [Lvar i]; _} -> (
-        match b with
-        | Lifthenelse
-            (Lprim {primitive = Pintcomp Ceq; args = [Lvar j; Lconst _]}, _, b_f)
-          when Ident.same i j && eq_approx b_f c ->
-          b
-        | Lprim {primitive = Pintcomp Ceq; args = [Lvar j; Lconst _]}
-          when Ident.same i j && eq_approx lambda_false c ->
-          b
-        | Lifthenelse
-            ( Lprim
-                ({primitive = Pintcomp Cneq; args = [Lvar j; Lconst _]} as
-                 b_pred),
-              b_t,
-              b_f )
-          when Ident.same i j && eq_approx b_t c ->
-          Lifthenelse (Lprim {b_pred with primitive = Pintcomp Ceq}, b_f, b_t)
-        | Lprim
-            {primitive = Pintcomp Cneq; args = [Lvar j; Lconst _] as args; loc}
-        | Lprim
-            {
-              primitive = Pnot;
-              args =
-                [
-                  Lprim
-                    {
-                      primitive = Pintcomp Ceq;
-                      args = [Lvar j; Lconst _] as args;
-                      loc;
-                    };
-                ];
-            }
-          when Ident.same i j && eq_approx lambda_true c ->
-          Lprim {primitive = Pintcomp Cneq; args; loc}
-        | _ -> Lifthenelse (a, b, c))
-      | _ -> Lifthenelse (a, b, c)))
+    | _ -> Lifthenelse (a, b, c))
 
 let sequor l r = if_ l lambda_true r
 

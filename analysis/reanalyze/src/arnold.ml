@@ -974,28 +974,28 @@ module Compile = struct
     | Texp_field (e, _lid, _desc) -> e |> expression ~ctx
     | Texp_record {fields; extended_expression} ->
       extended_expression
-      :: (fields |> Array.to_list
-         |> List.map
-              (fun
-                ( _desc,
-                  (record_label_definition : Typedtree.record_label_definition),
-                  _ )
-              ->
-                match record_label_definition with
-                | Kept _typeExpr -> None
-                | Overridden (_loc, e) -> Some e))
+      :: (fields |> Array.to_list |> List.map (fun (_desc, _lid, e) -> Some e))
       |> List.map (expression_opt ~ctx)
       |> Command.unordered_sequence
     | Texp_setfield (e1, _loc, _desc, e2) ->
       [e1; e2] |> List.map (expression ~ctx) |> Command.unordered_sequence
     | Texp_tuple expressions | Texp_array expressions ->
       expressions |> List.map (expression ~ctx) |> Command.unordered_sequence
+    | Texp_dict entries ->
+      entries
+      |> List.map (function Typedtree.Tdict_entry (_, e) | Tdict_spread e ->
+          expression ~ctx e)
+      |> Command.unordered_sequence
+    | Texp_spread (_, parts) ->
+      parts |> List.map (expression ~ctx) |> Command.unordered_sequence
     | Texp_assert _ -> Command.nothing
-    | Texp_try (e, cases) ->
+    | Texp_try (e, cases, finally) -> (
       let c_e = e |> expression ~ctx in
       let c_cases = cases |> List.map (case ~ctx) |> Command.nondet in
       let open Command in
-      c_e +++ c_cases
+      match finally with
+      | None -> c_e +++ c_cases
+      | Some finally -> c_e +++ c_cases +++ expression ~ctx finally)
     | Texp_variant (_label, e_opt) -> e_opt |> expression_opt ~ctx
     | Texp_while _ ->
       not_implemented "Texp_while";
@@ -1028,12 +1028,8 @@ module Compile = struct
     | Texp_pack _ ->
       not_implemented "Texp_pack";
       assert false
-    | Texp_extension_constructor _ when true ->
-      not_implemented "Texp_extension_constructor";
-      assert false
-    | _ ->
-      (* ocaml 4.08: Texp_letop(_) | Texp_open(_) *)
-      not_implemented "Texp_letop(_) | Texp_open(_)";
+    | Texp_break | Texp_continue ->
+      not_implemented "Texp_break | Texp_continue";
       assert false
 
   and expression_opt ~ctx e_opt =

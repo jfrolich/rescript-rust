@@ -856,9 +856,9 @@ fn wrap_handlers(
     mut result: RawLambda,
     handlers: Vec<(i32, RawLambda)>,
 ) -> RawLambda {
-    // OCaml composes handlers as h(oh(x)), so first handler is outermost.
-    // We reverse to get the first handler as outermost.
-    for (exit_id, handler) in handlers.into_iter().rev() {
+    // switch.ml composes h(oh(x)) in action order: the first handler
+    // is innermost and the last handler outermost.
+    for (exit_id, handler) in handlers {
         if let Node::StaticRaise { label, .. } = b.node(result)
             && label == exit_id
         {
@@ -889,7 +889,8 @@ pub fn zyva_with_shared_actions(
     let (handlers, actions) = abstract_shared(b, shared_actions, next_raise);
 
     let (low, high) = edges;
-    let ok_inter = low.abs() <= INTER_LIMIT && high.abs() <= INTER_LIMIT;
+    let ok_inter = i64::from(low).abs() <= i64::from(INTER_LIMIT)
+        && i64::from(high).abs() <= i64::from(INTER_LIMIT);
     let mut compiler = SwitchCompiler::new(b, ok_inter);
 
     let result = build_clustered_test(&mut compiler, cases, &actions, arg);

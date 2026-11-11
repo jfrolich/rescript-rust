@@ -817,6 +817,10 @@ pub enum TypeDesc {
     },
 }
 
+impl TypeDesc {
+
+}
+
 /// Top bit distinguishes worker-store indices from compilation-local indices.
 pub(crate) const STORE_REF_TAG: u32 = 1 << 31;
 
@@ -1415,6 +1419,11 @@ impl TypeArg {
         Self::with_label(TypeArgLabel::new(&lbl), typ)
     }
 
+    /// Keep the compact label when changing a parameter's type.
+    pub fn with_type(&self, typ: TypeExprRef) -> Self {
+        Self { typ, ..*self }
+    }
+
     /// Create a new type argument from a compact label.
     #[inline]
     pub fn with_label(label: TypeArgLabel, typ: TypeExprRef) -> Self {
@@ -1734,6 +1743,8 @@ impl<'a, T: Copy, const N: usize> From<&'a smallvec::SmallVec<[T; N]>> for PoolS
 mod tests {
     use super::*;
 
+
+
     #[test]
     fn compact_type_node_sizes() {
         use std::mem::size_of;
@@ -1803,15 +1814,23 @@ mod tests {
 
     #[test]
     fn test_type_expr_creation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(Some(crate::name::Name::new("a"))), GENERIC_LEVEL, 1);
+        let ty = TypeExpr::new(
+            TypeDesc::Tvar(Some(crate::name::Name::new("a"))),
+            GENERIC_LEVEL,
+            1,
+        );
         assert_eq!(ty.id(), 1);
         assert_eq!(ty.level(), GENERIC_LEVEL);
-        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(_)));
+        assert!(matches!(*ty.desc.borrow(), TypeDesc::Tvar(..)));
     }
 
     #[test]
     fn test_type_expr_mutation() {
-        let ty = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
+        let ty = TypeExpr::new(
+            TypeDesc::Tvar(None),
+            0,
+            1,
+        );
         ty.set_level(GENERIC_LEVEL);
         assert_eq!(ty.level(), GENERIC_LEVEL);
 
@@ -1821,9 +1840,21 @@ mod tests {
 
     #[test]
     fn test_type_expr_equality() {
-        let ty1 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty2 = TypeExpr::new(TypeDesc::Tvar(None), 0, 1);
-        let ty3 = TypeExpr::new(TypeDesc::Tvar(None), 0, 2);
+        let ty1 = TypeExpr::new(
+            TypeDesc::Tvar(None),
+            0,
+            1,
+        );
+        let ty2 = TypeExpr::new(
+            TypeDesc::Tvar(None),
+            0,
+            1,
+        );
+        let ty3 = TypeExpr::new(
+            TypeDesc::Tvar(None),
+            0,
+            2,
+        );
 
         assert_eq!(ty1, ty2); // Same id
         assert_ne!(ty1, ty3); // Different id
@@ -1857,9 +1888,8 @@ mod tests {
                 format!("TypeArg {{ lbl: Nolabel, typ: {:?} }}", typ)
             );
         }
-        let ctx = crate::types::TypeContext::new(std::sync::Arc::new(
-            crate::context::IdGenerator::new(),
-        ));
+        let ctx =
+            crate::types::TypeContext::new(std::sync::Arc::new(crate::context::IdGenerator::new()));
         for ghost in [false, true] {
             let loc = Location {
                 loc_start: Position::new(StrIdx(17), 3, 21, 24),

@@ -62,6 +62,7 @@ type success = {
   parsetree: string,
   typedtree: string,
   lambda: string,
+  lambdaOptimized: option<string>,
   gentype: option<string>,
   sourceMap: option<string>,
   warnings: array<string>,
@@ -89,7 +90,7 @@ type normalizedConfig = {
   sourceMapRoot: string,
 }
 
-let defaultWarnFlags = "+a-4-9-20-40-41-42-50-61-102-109"
+let defaultWarnFlags = "+a-4-9-20-41-102-109"
 
 let defaultCompilerVersion = Env.viteDefaultCompilerVersion->Option.getOr("local")
 
@@ -138,10 +139,12 @@ let parseCompilerVersions = defaultVersion => {
 let compilerVersions = parseCompilerVersions(defaultConfig.compilerVersion)
 let availableCompilerVersions = compilerVersions->Array.map(Version.toPublic)
 let compilerRoot = pathFromBase("playground-bundles")
+
 let compilerPreviewRoot = switch Env.viteCompilerPreviewRoot {
 | Some(root) => root === "" ? None : Some(root->Version.normalizeRoot)
 | None => None
 }
+
 let loadedScripts: Map.t<string, promise<unit>> = Map.make()
 let compilerApis: Map.t<string, compilerApi> = Map.make()
 let compilers: Map.t<string, compilerInstance> = Map.make()
@@ -415,9 +418,20 @@ let normalize = (compileOutput, elapsedMs): compileResult => {
     }
 
     let gentype = compileOutput->CompileResult.gentype
+    let lambdaOptimized = compileOutput->CompileResult.lambdaOptimized
     let sourceMap = compileOutput->CompileResult.sourceMap
 
-    Ok({jsCode, parsetree, typedtree, lambda, gentype, sourceMap, warnings, time: elapsedMs})
+    Ok({
+      jsCode,
+      parsetree,
+      typedtree,
+      lambda,
+      lambdaOptimized,
+      gentype,
+      sourceMap,
+      warnings,
+      time: elapsedMs,
+    })
 
   | _ => Error(failureFromCompileOutput(compileOutput, elapsedMs))
   }

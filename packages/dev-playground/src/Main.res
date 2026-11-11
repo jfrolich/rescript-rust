@@ -427,7 +427,7 @@ module Problems = {
   @jsx.component
   let make = (~compileResult: Signal.t<option<compileSnapshot>>) => {
     <div class="problems">
-      <div class="problems-title"> {View.text("Problems")} </div>
+      <div class="problems-title">{View.text("Problems")}</div>
       <pre class="problems-output">
         {View.signalText(() =>
           switch Signal.get(compileResult) {
@@ -467,7 +467,7 @@ module SettingsPanel = {
       Computed.make(() =>
         CompilerApi.selectableCompilerVersions(
           Signal.get(config).compilerVersion,
-        )->Array.map(version => <option value=version.id> {View.text(version.label)} </option>)
+        )->Array.map(version => <option value=version.id>{View.text(version.label)}</option>)
       ),
     )
 
@@ -476,9 +476,7 @@ module SettingsPanel = {
         Signal.get(activeTab) === Settings ? "settings-panel" : "settings-panel hidden-panel"}
     >
       <section class="settings-section">
-        <label class="setting-label" for_="compiler-version">
-          {View.text("Compiler Version")}
-        </label>
+        <label class="setting-label" for_="compiler-version">{View.text("Compiler Version")}</label>
         <select
           id="compiler-version"
           value={() => Signal.get(config).compilerVersion}
@@ -492,7 +490,7 @@ module SettingsPanel = {
         </select>
       </section>
       <section class="settings-section">
-        <label class="setting-label"> {View.text("Loaded Compiler")} </label>
+        <label class="setting-label">{View.text("Loaded Compiler")}</label>
         <div class="setting-value">
           {View.signalText(() =>
             switch Signal.get(compilerInfo) {
@@ -503,7 +501,7 @@ module SettingsPanel = {
         </div>
       </section>
       <section class="settings-section">
-        <label class="setting-label" for_="module-system"> {View.text("Module System")} </label>
+        <label class="setting-label" for_="module-system">{View.text("Module System")}</label>
         <select
           id="module-system"
           value={() => (Signal.get(config).moduleSystem :> string)}
@@ -520,13 +518,13 @@ module SettingsPanel = {
           {View.fragment(
             moduleSystems->Array.map(moduleSystem => {
               let value = (moduleSystem :> string)
-              <option value> {View.text(value)} </option>
+              <option value>{View.text(value)}</option>
             }),
           )}
         </select>
       </section>
       <section class="settings-section">
-        <label class="setting-label" for_="warning-flags"> {View.text("Warning Flags")} </label>
+        <label class="setting-label" for_="warning-flags">{View.text("Warning Flags")}</label>
         <input
           id="warning-flags"
           value={() => Signal.get(config).warnFlags}
@@ -559,7 +557,7 @@ module SettingsPanel = {
             compileNow()
           }}
         />
-        <label for_="jsx-preserve"> {View.text("Preserve JSX output")} </label>
+        <label for_="jsx-preserve">{View.text("Preserve JSX output")}</label>
       </section>
       <section class="settings-section setting-row">
         <input
@@ -572,13 +570,13 @@ module SettingsPanel = {
             compileNow()
           }}
         />
-        <label for_="gentype-enabled"> {View.text("gentype")} </label>
+        <label for_="gentype-enabled">{View.text("gentype")}</label>
       </section>
       <section class="settings-section source-map-settings">
-        <div class="setting-label"> {View.text("Source Map")} </div>
+        <div class="setting-label">{View.text("Source Map")}</div>
         <div class="source-map-controls">
           <div class="source-map-control">
-            <label for_="source-map-mode"> {View.text("Mode")} </label>
+            <label for_="source-map-mode">{View.text("Mode")}</label>
             <select
               id="source-map-mode"
               value={() => (Signal.get(config).sourceMapMode :> string)}
@@ -595,7 +593,7 @@ module SettingsPanel = {
               {View.fragment(
                 sourceMapModes->Array.map(sourceMapMode => {
                   let value = (sourceMapMode :> string)
-                  <option value> {View.text(value)} </option>
+                  <option value>{View.text(value)}</option>
                 }),
               )}
             </select>
@@ -624,7 +622,7 @@ module SettingsPanel = {
               {View.text("Include sources content")}
             </label>
             <div class="source-map-control">
-              <label for_="source-map-root"> {View.text("Source Root")} </label>
+              <label for_="source-map-root">{View.text("Source Root")}</label>
               <input
                 id="source-map-root"
                 disabled={() => Signal.get(config).sourceMapMode === Disabled}
@@ -654,10 +652,10 @@ module SettingsPanel = {
             compileNow()
           }}
         />
-        <label for_="feature-let-unwrap"> {View.text("Experimental: let?")} </label>
+        <label for_="feature-let-unwrap">{View.text("Experimental: let?")}</label>
       </section>
       <section class="settings-section">
-        <label class="setting-label"> {View.text("Loaded Libraries")} </label>
+        <label class="setting-label">{View.text("Loaded Libraries")}</label>
         <div class="setting-value">
           {View.signalText(() =>
             switch Signal.get(compilerInfo) {
@@ -814,11 +812,19 @@ module App = {
   let make = () => {
     let source = Signal.make(defaultSource)
     let activeTab = Signal.make(JavaScript)
+    let lambdaMode = Signal.make(LambdaView.Before)
     let mappedSourcePosition: Signal.t<option<SourceMapNavigation.position>> = Signal.make(None)
     let mappedGeneratedPosition: Signal.t<option<SourceMapNavigation.position>> = Signal.make(None)
     let status = Signal.make(Loading)
     let compilerInfo: Signal.t<option<CompilerApi.info>> = Signal.make(None)
     let compileResult: Signal.t<option<compileSnapshot>> = Signal.make(None)
+    let lambdaInput = () =>
+      switch Signal.get(compileResult) {
+      | Some({result: Ok(result)}) =>
+        Some({LambdaView.before: result.lambda, after: result.lambdaOptimized})
+      | Some({result: Error(_)}) | None => None
+      }
+    let lambdaVisible = () => Signal.get(activeTab) === Lambda && lambdaInput()->Option.isSome
     let config = Signal.make(CompilerApi.defaultConfig)
     let visibleTabNodes: Signal.t<array<View.node>> = Obj.magic(
       Computed.make(() =>
@@ -1233,7 +1239,7 @@ module App = {
     <main class="app-shell">
       <header class="topbar">
         <div>
-          <h1> {View.text("ReScript Developer Playground")} </h1>
+          <h1>{View.text("ReScript Developer Playground")}</h1>
         </div>
         <StatusBadge status />
       </header>
@@ -1244,7 +1250,7 @@ module App = {
       >
         <div class="source-column">
           <div class="column-header">
-            <h2> {View.text("Source")} </h2>
+            <h2>{View.text("Source")}</h2>
             <div class="actions">
               <button class="secondary-action" onClick={_ => formatSource()}>
                 {View.text("Format")}
@@ -1276,9 +1282,7 @@ module App = {
             style={() => editorShellStyle(Signal.get(editorScrollTop))}
           >
             <div class="line-number-gutter" ariaHidden=true />
-            <pre class="syntax-layer" ariaHidden=true>
-              {View.signalFragment(highlightedSource)}
-            </pre>
+            <pre class="syntax-layer" ariaHidden=true>{View.signalFragment(highlightedSource)}</pre>
             <textarea
               id={sourceEditorId}
               class="editor"
@@ -1318,7 +1322,7 @@ module App = {
         </div>
         <PaneSeparator layout={paneLayout} />
         <div class="result-column">
-          <div class="tabs"> {View.signalFragment(visibleTabNodes)} </div>
+          <div class="tabs">{View.signalFragment(visibleTabNodes)}</div>
           <div
             class={() =>
               Signal.get(activeTab) === Settings ? "output-panel hidden-panel" : "output-panel"}
@@ -1327,18 +1331,22 @@ module App = {
               {View.signalText(() => resultSummary(Signal.get(compileResult)))}
             </div>
             <div class="output-shell">
-              <pre class="output">
-                {View.tracked(() => {
-                  let selectedTab = Signal.get(activeTab)
-                  interactiveOutputNode(
-                    Signal.get(compileResult),
-                    Signal.get(source),
-                    selectedTab,
-                    Signal.get(mappedGeneratedPosition),
-                    revealOriginalMapping,
-                    () => Signal.set(activeTab, SourceMap),
-                  )
-                })}
+              <LambdaView input={lambdaInput} visible={lambdaVisible} mode={lambdaMode} />
+              <pre class={() => lambdaVisible() ? "output hidden-panel" : "output"}>
+                {View.tracked(() =>
+                  if lambdaVisible() {
+                    View.empty()
+                  } else {
+                    interactiveOutputNode(
+                      Signal.get(compileResult),
+                      Signal.get(source),
+                      Signal.get(activeTab),
+                      Signal.get(mappedGeneratedPosition),
+                      revealOriginalMapping,
+                      () => Signal.set(activeTab, SourceMap),
+                    )
+                  }
+                )}
               </pre>
             </div>
             <Problems compileResult />

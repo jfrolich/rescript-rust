@@ -2,7 +2,7 @@
 Bindings to JavaScript's `Intl.DateTimeFormat`.
 */
 
-@notUndefined
+@instanceOf("Intl.DateTimeFormat")
 type t
 
 type dateStyle = [#full | #long | #medium | #short]
@@ -104,6 +104,7 @@ type dateTimePart = {
 }
 
 type dateTimeRangeSource = [#startRange | #shared | #endRange]
+
 type dateTimeRangePart = {
   \"type": dateTimeComponent,
   value: string,

@@ -4,11 +4,11 @@
 //! module types, and signatures - the building blocks of module interfaces.
 
 use super::asttypes::{Located, MutableFlag, PrivateFlag};
+use super::decl_loc::DeclLoc;
 use super::path::Path;
 use super::type_expr::TypeExprRef;
 use super::variance::Variance;
 use crate::ident::Ident;
-use super::decl_loc::DeclLoc;
 use serde::{Deserialize, Serialize};
 
 // ============================================================================
@@ -97,6 +97,10 @@ pub struct TypeDeclaration {
     pub type_immediate: bool,
     /// Runtime representation for single-payload unboxing.
     pub type_representation: TypeRepresentation,
+    /// OCaml `type_shape`: what the declaration itself states about its
+    /// values at run time, resolved in its own environment when it is
+    /// declared (`Variant_layout.resolve_shapes`).
+    pub type_shape: super::variant_runtime::ValueShape,
     /// Inlined types (for record printing)
     pub type_inlined_types: Vec<TypeInlinedType>,
     /// Qualified path for this type (e.g., Pdot(Pident "Pervasives") "ref").
@@ -268,8 +272,9 @@ impl TypeDeclaration {
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
-    /// Float record (unused, kept for compatibility)
-    RecordFloatUnused,
+    /// A regular record whose fields have the runtime names "0", "1", ...
+    /// in declaration order, represented as a JavaScript array
+    RecordArray,
     /// Unboxed single-field record
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)
@@ -466,9 +471,51 @@ pub struct LabelDescription {
     pub lbl_attributes: Vec<Attribute>,
 }
 
-/// Reference to an array of label descriptions.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// OCaml `lbl_all`: a handle to the array of all labels of a record, shared
+/// by those labels (`Datarepr.label_descrs`, compiler/ml/datarepr.ml:261-288).
+///
+/// Like `TypeExprRef`, the handle names one of two pools: with
+/// `type_expr::STORE_REF_TAG` an array built during a worker-store build,
+/// valid for every compilation leasing that store; otherwise entry `n - 1` of
+/// the compilation's own pool. `NONE` is `dummy_label`'s empty `lbl_all`
+/// (datarepr.ml:245-258) and never names an array.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LabelArrayRef(pub u32);
+
+impl LabelArrayRef {
+    /// `dummy_label.lbl_all`: no array.
+    pub const NONE: LabelArrayRef = LabelArrayRef(0);
+
+    /// The `idx`-th array of the compilation's pool.
+    pub(crate) fn local(idx: usize) -> Self {
+        let raw = u32::try_from(idx + 1).expect("label array index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "local label array index collides with the store tag"
+        );
+        LabelArrayRef(raw)
+    }
+
+    /// The `idx`-th array of the worker store's pool.
+    pub(crate) fn store(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("label array index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::STORE_REF_TAG == 0,
+            "store label array index exceeds the tag range"
+        );
+        LabelArrayRef(raw | super::type_expr::STORE_REF_TAG)
+    }
+
+    /// Where the handle points: `Some(Ok(i))` for the store's `i`-th array,
+    /// `Some(Err(i))` for the compilation's, `None` for `NONE`.
+    pub(crate) fn index(self) -> Option<Result<usize, usize>> {
+        if self.0 & super::type_expr::STORE_REF_TAG != 0 {
+            Some(Ok((self.0 & !super::type_expr::STORE_REF_TAG) as usize))
+        } else {
+            (self.0 as usize).checked_sub(1).map(Err)
+        }
+    }
+}
 
 // ============================================================================
 // Module Types
@@ -491,8 +538,21 @@ pub enum ModuleType {
         /// The result's module type.
         result: Box<ModuleType>,
     },
-    /// Module alias
-    MtyAlias(AliasPresence, Path),
+    /// Module alias. The target is a shared path block, like a `Pdot`
+    /// prefix: copies of the declaration share it, and `Subst.module_path`
+    /// returns an unreplaced `Pident` target itself (subst.ml:69-75).
+    MtyAlias(AliasPresence, std::sync::Arc<Path>),
+}
+
+impl ModuleType {
+    /// The path of an `Mty_ident` or an `Mty_alias`.
+    pub fn ident_or_alias_path(&self) -> Option<&Path> {
+        match self {
+            ModuleType::MtyIdent(path) => Some(path),
+            ModuleType::MtyAlias(_, path) => Some(path),
+            _ => None,
+        }
+    }
 }
 
 /// Alias presence flag.
@@ -744,8 +804,12 @@ pub enum AttributePayload {
     /// Record-form `@deprecated({reason, migrate})` payload with optional
     /// migration metadata (the plain string form is `Str`).
     Deprecated {
-        /// Why the item is deprecated.
-        reason: String,
+        /// The first `reason` field that is a semantic string
+        /// (builtin_attributes.ml:72-78 `List.find_map`): `Ok(None)` when
+        /// there is none, which `deprecated_of_attrs_with_migrate` reads as
+        /// not deprecated; `Err` the location of a template with an invalid
+        /// escape met first, where reading it raises.
+        reason: Result<Option<String>, DeclLoc>,
         /// Whether the migration can be applied automatically.
         can_be_automigrated: bool,
         /// The `migrate` template expression, marshalled in the current
@@ -756,10 +820,84 @@ pub enum AttributePayload {
     },
     /// Structure payload (list of string pairs)
     Structure(Vec<(String, String)>),
+    /// A string payload that is not a bare string constant but that
+    /// `Ast_payload.semantic_string_of_payload` reads: one in braces, or a
+    /// backquoted string without interpolation.
+    SemanticString(Box<SemanticStringPayload>),
     /// A tuple of string constants, such as the `("./module", "Name")` of
     /// `@genType.import`, which genType reads back from a stored signature
     /// (compiler/gentype/annotation.ml:136-148).
     StrTuple(Vec<String>),
+}
+
+/// The expression of an [`AttributePayload::SemanticString`]: `braces`
+/// `Pexp_braces` around a string constant, or around `Pexp_template
+/// {source_segments = [_]; values = []}` when `template`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SemanticStringPayload {
+    /// `Ast_payload.semantic_string_of_expression`: what JavaScript
+    /// evaluates the string to; or, for a backquoted string with an invalid
+    /// escape (only a PPX makes one: the parser rejects them), the
+    /// template's `pexp_loc`, where reading it raises "Invalid string escape
+    /// sequence" (compiler/ml/ast_payload.ml:39-51).
+    pub semantic: Result<String, DeclLoc>,
+    /// The `Pexp_braces` around it.
+    pub braces: u32,
+    /// A backquoted string rather than a string constant.
+    pub template: bool,
+}
+
+impl AttributePayload {
+    /// `Ast_payload.semantic_string_of_payload`; `Err` is the location of
+    /// a template it raises on.
+    pub fn semantic_string(&self) -> Result<Option<&str>, DeclLoc> {
+        match self {
+            AttributePayload::Str(semantic) => Ok(Some(semantic)),
+            AttributePayload::SemanticString(payload) => match &payload.semantic {
+                Ok(semantic) => Ok(Some(semantic)),
+                Err(loc) => Err(*loc),
+            },
+            _ => Ok(None),
+        }
+    }
+
+    /// The location of the template a [`Self::SemanticString`] payload
+    /// failed to decode, or a record-form `@deprecated`'s `reason`.
+    pub fn invalid_escape_loc_mut(&mut self) -> Option<&mut DeclLoc> {
+        match self {
+            AttributePayload::SemanticString(payload) => payload.semantic.as_mut().err(),
+            AttributePayload::Deprecated { reason, .. } => reason.as_mut().err(),
+            _ => None,
+        }
+    }
+
+    /// `Builtin_attributes.string_of_opt_payload` (builtin_attributes.ml:21-24)
+    /// of a `@deprecated` payload, as `deprecated_of_attrs` reads it: the
+    /// semantic string, or `""` (the record form included); `Err` where
+    /// `string_of_payload` raises.
+    pub fn deprecated_string_of_opt_payload(&self) -> Result<&str, DeclLoc> {
+        Ok(self.semantic_string()?.unwrap_or(""))
+    }
+
+    /// `Builtin_attributes.deprecated_of_attrs_with_migrate`
+    /// (builtin_attributes.ml:68-112) of a `@deprecated` payload: the reason
+    /// and whether a migration template makes it automigratable, `None` for
+    /// a record without a `reason`; `Err` where a reader raises.
+    pub fn deprecated_with_migrate(&self) -> Result<Option<(&str, bool)>, DeclLoc> {
+        match self {
+            AttributePayload::Deprecated {
+                reason,
+                can_be_automigrated,
+                ..
+            } => match reason {
+                Ok(reason) => Ok(reason
+                    .as_deref()
+                    .map(|reason| (reason, *can_be_automigrated))),
+                Err(loc) => Err(*loc),
+            },
+            _ => Ok(Some((self.deprecated_string_of_opt_payload()?, false))),
+        }
+    }
 }
 
 /// Visitor over the location handles of a signature (see
@@ -772,6 +910,9 @@ pub trait SignatureLocationVisitor {
     fn attribute(&mut self, attr: &mut Attribute) {
         self.location(&mut attr.attr_loc);
         self.location(&mut attr.attr_name.loc);
+        if let Some(loc) = attr.attr_payload.invalid_escape_loc_mut() {
+            self.location(loc);
+        }
     }
 }
 
@@ -785,6 +926,49 @@ pub fn for_each_signature_location(sig: &mut [SignatureItem], f: &mut dyn FnMut(
         }
     }
     walk_signature_locations(sig, &mut Locations(f));
+}
+
+/// Visit the `type_shape` of every type declaration of a signature,
+/// recursively through module types.
+pub fn for_each_signature_shape(
+    sig: &mut [SignatureItem],
+    f: &mut dyn FnMut(&mut crate::types::ValueShape),
+) {
+    fn module_type(mty: &mut ModuleType, f: &mut dyn FnMut(&mut crate::types::ValueShape)) {
+        match mty {
+            ModuleType::MtySignature(sig) => {
+                for_each_signature_shape(&mut std::sync::Arc::make_mut(sig)[..], f)
+            }
+            ModuleType::MtyFunctor {
+                param_type, result, ..
+            } => {
+                if let Some(param) = param_type {
+                    module_type(param, f);
+                }
+                module_type(result, f);
+            }
+            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+        }
+    }
+    for item in sig {
+        match item {
+            SignatureItem::SigType(_, td, _) => {
+                if matches!(td.type_shape, crate::types::ValueShape::RecognizedAs(_)) {
+                    f(&mut std::sync::Arc::make_mut(td).type_shape);
+                }
+            }
+            SignatureItem::SigModule(_, md, _) => module_type(&mut md.md_type, f),
+            SignatureItem::SigModtype(_, mtd) => {
+                if let Some(mty) = &mut mtd.mtd_type {
+                    module_type(mty, f);
+                }
+            }
+            SignatureItem::SigValue(..)
+            | SignatureItem::SigTypext(..)
+            | SignatureItem::SigClass
+            | SignatureItem::SigClassType => {}
+        }
+    }
 }
 
 /// Walk the declarations of a signature, recursively through module types,

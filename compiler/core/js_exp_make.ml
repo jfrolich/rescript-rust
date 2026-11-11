@@ -69,6 +69,14 @@ let nil : t = {expression_desc = Null; comment = None; source_loc = None}
 let call ?comment ~info e0 args : t =
   {expression_desc = Call (e0, args, info); comment; source_loc = None}
 
+let jsx ~callee ~tag ~spread ~props ~children ~key ~multi ~fragment : t =
+  {
+    expression_desc =
+      Jsx {callee; tag; spread; props; children; key; multi; fragment};
+    comment = None;
+    source_loc = None;
+  }
+
 let tagged_template ?comment call_expr string_args value_args : t =
   {
     expression_desc = Tagged_template (call_expr, string_args, value_args);
@@ -360,7 +368,7 @@ let dummy_obj ?comment (info : Lambda.tag_info) : t =
   match info with
   | Blk_record _ | Blk_module _ | Blk_constructor _ | Blk_record_inlined _
   | Blk_poly_var | Blk_extension | Blk_record_ext _ ->
-    {comment; source_loc = None; expression_desc = Object (None, [])}
+    {comment; source_loc = None; expression_desc = Object []}
   | Blk_tuple | Blk_module_export _ ->
     {comment; source_loc = None; expression_desc = Array []}
 
@@ -717,8 +725,21 @@ let rec string_append ?comment (e : t) (el : t) : t =
       | _ -> append ())
     | _ -> append ())
 
+let object_entries ?dup properties : J.object_entry list =
+  (match dup with
+    | Some e -> [J.Record_spread e]
+    | None -> [])
+  @ List.map (fun (name, value) -> J.Object_property (name, value)) properties
+
 let obj ?comment ?dup properties : t =
-  {expression_desc = Object (dup, properties); comment; source_loc = None}
+  {
+    expression_desc = Object (object_entries ?dup properties);
+    comment;
+    source_loc = None;
+  }
+
+let obj_entries ?comment entries : t =
+  {expression_desc = Object entries; comment; source_loc = None}
 
 let rec triple_equal ?comment (e0 : t) (e1 : t) : t =
   match (e0.expression_desc, e1.expression_desc) with
@@ -763,9 +784,6 @@ let bin ?comment (op : J.binop) (e0 : t) (e1 : t) : t =
    optimization if [e1 = e2], then and_ e1 e2 -> e2
      be careful for side effect
 *)
-
-let string_of_expression = ref (fun _ -> "")
-let debug = false
 
 (**
   [push_negation e] attempts to simplify a negated expression by pushing the negation
@@ -841,10 +859,6 @@ let simplify_max_depth = 10
   returns [None].
 *)
 let rec simplify_and_ ~n (e1 : t) (e2 : t) : t option =
-  if debug then
-    Printf.eprintf "%s simplify_and %s %s\n"
-      (String.make (n * 2) ' ')
-      (!string_of_expression e1) (!string_of_expression e2);
   (* Bail out if recursion is too deep to prevent exponential blowup *)
   if n > simplify_max_depth then None
   else
@@ -896,18 +910,6 @@ let rec simplify_and_ ~n (e1 : t) (e2 : t) : t option =
           | None -> None
           | Some e -> simplify_and_force ~n:(n + 1) e e2)
         | Some a_, Some b_ -> simplify_or_force ~n:(n + 1) a_ b_)
-      | ( Bin
-            ( ((EqEqEq | NotEqEq) as op1),
-              {expression_desc = Var i1},
-              {expression_desc = Bool b1} ),
-          Bin
-            ( ((EqEqEq | NotEqEq) as op2),
-              {expression_desc = Var i2},
-              {expression_desc = Bool b2} ) )
-        when Js_op_util.same_vident i1 i2 ->
-        let op_eq = op1 = op2 in
-        let consistent = if op_eq then b1 = b2 else b1 <> b2 in
-        if consistent then Some e1 else Some false_
       | ( Bin
             ( EqEqEq,
               {expression_desc = Typeof {expression_desc = Var ia}},
@@ -1045,7 +1047,21 @@ let rec simplify_and_ ~n (e1 : t) (e2 : t) : t option =
               {expression_desc = Typeof {expression_desc = Var ia}},
               {expression_desc = Str "boolean"} ) )
         when Js_op_util.same_vident ia ib ->
-        Some {expression_desc = Bool (not b); comment = None; source_loc = None}
+        (* A boolean other than [b] is [!b] *)
+        Some
+          {
+            expression_desc =
+              Bin
+                ( EqEqEq,
+                  {expression_desc = Var ib; comment = None; source_loc = None},
+                  {
+                    expression_desc = Bool (not b);
+                    comment = None;
+                    source_loc = None;
+                  } );
+            comment = None;
+            source_loc = None;
+          }
       | ( Bin
             ( EqEqEq,
               {expression_desc = Typeof {expression_desc = Var ia}},
@@ -1133,41 +1149,43 @@ let rec simplify_and_ ~n (e1 : t) (e2 : t) : t option =
       | ( Bin
             ( EqEqEq,
               {expression_desc = Var ia},
-              {expression_desc = Bool _ | Null | Undefined _ | Number _ | Str _}
-            ),
+              {
+                expression_desc =
+                  (Bool _ | Null | Undefined _ | Number _ | Str _) as v1;
+              } ),
           Bin
             ( EqEqEq,
               {expression_desc = Var ib},
-              {expression_desc = Bool _ | Null | Undefined _ | Number _ | Str _}
-            ) )
-        when Js_op_util.same_vident ia ib ->
-        (* Note: case x = y is handled above *)
-        Some false_
+              {
+                expression_desc =
+                  (Bool _ | Null | Undefined _ | Number _ | Str _) as v2;
+              } ) )
+        when Js_op_util.same_vident ia ib -> (
+        match Js_analyzer.eq_literal v1 v2 with
+        | Some true -> Some e1
+        | Some false -> Some false_
+        | None -> None)
       | ( Bin
             ( ((EqEqEq | NotEqEq) as op1),
               {expression_desc = Var ia},
-              ({
-                 expression_desc = Bool _ | Null | Undefined _ | Number _ | Str _;
-               } as v1) ),
+              {
+                expression_desc =
+                  (Bool _ | Null | Undefined _ | Number _ | Str _) as v1;
+              } ),
           Bin
             ( ((EqEqEq | NotEqEq) as op2),
               {expression_desc = Var ib},
-              ({
-                 expression_desc = Bool _ | Null | Undefined _ | Number _ | Str _;
-               } as v2) ) )
-        when Js_op_util.same_vident ia ib && op1 != op2 ->
-        if Js_analyzer.eq_expression v1 v2 then Some false_
-        else if op1 = EqEqEq then Some e1
-        else Some e2
+              {
+                expression_desc =
+                  (Bool _ | Null | Undefined _ | Number _ | Str _) as v2;
+              } ) )
+        when Js_op_util.same_vident ia ib && op1 != op2 -> (
+        match Js_analyzer.eq_literal v1 v2 with
+        | Some true -> Some false_
+        | Some false -> if op1 = EqEqEq then Some e1 else Some e2
+        | None -> None)
       | _ -> None
     in
-    (if debug then
-       match res with
-       | None -> ()
-       | Some e ->
-         Printf.eprintf "%s = %s\n"
-           (String.make (n * 2) ' ')
-           (!string_of_expression e));
     res
 
 and simplify_and_force ~n (e1 : t) (e2 : t) : t option =
@@ -1198,11 +1216,6 @@ and simplify_and_force ~n (e1 : t) (e2 : t) : t option =
   in the context of OR expressions.
 *)
 and simplify_or_ ~n (e1 : t) (e2 : t) : t option =
-  if debug then
-    Printf.eprintf "%ssimplify_or %s %s\n"
-      (String.make (n * 2) ' ')
-      (!string_of_expression e1) (!string_of_expression e2);
-
   let res =
     match (e1.expression_desc, e2.expression_desc) with
     | Bool true, _ -> Some true_
@@ -1217,13 +1230,6 @@ and simplify_or_ ~n (e1 : t) (e2 : t) : t option =
         | None -> None)
       | _ -> None)
   in
-  (if debug then
-     match res with
-     | None -> ()
-     | Some e ->
-       Printf.eprintf "%s = %s\n"
-         (String.make (n * 2) ' ')
-         (!string_of_expression e));
   res
 
 and simplify_or_force ~n (e1 : t) (e2 : t) : t option =
@@ -1390,56 +1396,54 @@ let literal_tag = function
   | Null -> nil
   | Undefined -> undefined
 
-(* The [typeof] string an untagged payload answers to. *)
-let block_type_name = function
-  | Variant_runtime.IntType | FloatType -> str "number"
-  | BigintType -> str "bigint"
-  | BooleanType -> str "boolean"
-  | FunctionType -> str "function"
-  | StringType -> str "string"
-  | InstanceType i -> js_global (Variant_runtime.Instance.to_string i)
-  | ObjectType -> str "object"
-  | UnknownType ->
-    (* TODO: this should not happen *)
-    assert false
+(* The constructor of a class at a global path such as "Intl.Locale": a
+   global with properties, so that a binding that shadows the global's name
+   is noticed. *)
+let class_constructor (instance : Variant_runtime.Instance.t) =
+  match
+    String.split_on_char '.' (Variant_runtime.Instance.to_string instance)
+  with
+  | [] -> assert false
+  | global :: properties -> List.fold_left dot (js_global global) properties
+
+(* The [typeof] string an untagged payload answers to, as a [switch] key.
+   Instances are told apart by [is_instance_of], an unknown payload is not
+   checked *)
+let block_type_name block_type =
+  match Variant_runtime.typeof_name block_type with
+  | Some name -> str name
+  | None -> assert false
 
 let tag_type = function
   | Variant_runtime.Literal d -> literal_tag d
   | Payload_shape b -> block_type_name b
 
-let rec emit_check (check : t Ast_untagged_variants.Dynamic_checks.t) =
-  match check with
-  | TagType t -> tag_type t
-  | BinOp (op, x, y) ->
-    let op =
-      match op with
-      | EqEqEq -> Js_op.EqEqEq
-      | NotEqEq -> NotEqEq
-      | And -> And
-      | Or -> Or
-    in
-    bin op (emit_check x) (emit_check y)
-  | TypeOf x -> typeof (emit_check x)
-  | IsInstanceOf (Array, x) -> is_array (emit_check x)
-  | IsInstanceOf (instance, x) ->
-    let instance_name = Variant_runtime.Instance.to_string instance in
-    instanceof (emit_check x) (js_global instance_name)
-  | Not x -> not (emit_check x)
-  | Expr x -> x
+let is_instance_of (instance : Variant_runtime.Instance.t) e =
+  match instance with
+  | Array -> is_array e
+  | Class _ -> instanceof e (class_constructor instance)
 
-let is_a_literal_case ~literal_cases ~block_cases (e : t) =
-  let check =
-    Ast_untagged_variants.Dynamic_checks.is_a_literal_case ~literal_cases
-      ~block_cases (Expr e)
+(* Whether a value of a tagged variant is a constant rather than a block,
+   given the literals of its constants *)
+let is_int_tag ~(literal_tags : Variant_runtime.literal_tag list) e =
+  let has_null = List.mem Variant_runtime.Null literal_tags in
+  let has_undefined = List.mem Variant_runtime.Undefined literal_tags in
+  let has_other =
+    List.exists
+      (function
+        | Variant_runtime.Null | Undefined -> false
+        | String _ | Int _ | Float _ | BigInt _ | Bool _ -> true)
+      literal_tags
   in
-  emit_check check
-
-let is_int_tag ?has_null_undefined_other e =
-  let check =
-    Ast_untagged_variants.Dynamic_checks.is_int_tag ?has_null_undefined_other
-      (Expr e)
-  in
-  emit_check check
+  let is_null = bin EqEqEq e nil in
+  let is_undefined = bin EqEqEq e undefined in
+  let not_an_object = bin NotEqEq (typeof e) (str "object") in
+  match (has_null, has_undefined, has_other) with
+  | true, false, false -> is_null
+  | true, true, false -> bin Or is_null is_undefined
+  | false, true, false -> is_undefined
+  | true, _, true -> bin Or is_null not_an_object
+  | false, _, _ -> not_an_object
 
 let tag ?comment ?(name = Js_dump_lit.tag) e : t =
   {expression_desc = Caml_block_tag (e, name); comment; source_loc = None}
@@ -1490,9 +1494,6 @@ let string_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
   | _ -> bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
 
 let string_equal ?comment (e0 : t) (e1 : t) : t = string_comp Ceq ?comment e0 e1
-
-let is_type_number ?comment (e : t) : t =
-  string_equal ?comment (typeof e) (str "number")
 
 let is_type_object (e : t) : t = string_equal (typeof e) (str "object")
 
@@ -1563,8 +1564,15 @@ let bool_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
       bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1)
   | _, _ -> bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
 
+let float_comp (cmp : Lambda.comparison) ?comment (e0 : t) (e1 : t) =
+  match cmp with
+  | Ceq | Cneq -> int_comp cmp ?comment e0 e1
+  | Clt | Cgt | Cle | Cge ->
+    bin ?comment (Lam_compile_util.jsop_of_float_comp cmp) e0 e1
+
+(* The operands may be of any type, so they may be NaN *)
 let js_comp cmp ?comment e0 e1 =
-  bin ?comment (Lam_compile_util.jsop_of_comp cmp) e0 e1
+  bin ?comment (Lam_compile_util.jsop_of_float_comp cmp) e0 e1
 
 let rec int32_lsr ?comment (e1 : J.expression) (e2 : J.expression) :
     J.expression =

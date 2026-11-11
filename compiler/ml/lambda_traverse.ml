@@ -20,6 +20,15 @@
 
 open Lambda
 
+(* Preserve the option wrapper so unchanged switch defaults do not rebuild
+   their parent node. *)
+let option_map_sharing option f =
+  match option with
+  | None -> option
+  | Some value ->
+    let mapped = f value in
+    if mapped == value then option else Some mapped
+
 (** [shallow_map_sharing f lam] rewrites [lam]'s immediate children with [f]
     and rebuilds the node through its smart constructor, so the result is
     normalized. A node whose children all come back physically unchanged is
@@ -31,7 +40,7 @@ let shallow_map_sharing (f : t -> t) (lam : t) : t =
     let fn = f ap.ap_func in
     let args = Ext_list.map_sharing ap.ap_args f in
     if fn == ap.ap_func && args == ap.ap_args then lam
-    else apply fn args ap.ap_info ~ap_transformed_jsx:ap.ap_transformed_jsx
+    else apply fn args ap.ap_loc
   | Lfunction {params; body; attr; loc} ->
     let body' = f body in
     if body' == body then lam else function_ ~loc ~attr ~params ~body:body'
@@ -48,7 +57,7 @@ let shallow_map_sharing (f : t -> t) (lam : t) : t =
     let e' = f e in
     let consts = Ext_list.map_snd_sharing sw.sw_consts f in
     let blocks = Ext_list.map_snd_sharing sw.sw_blocks f in
-    let fail = Ext_option.map_sharing sw.sw_failaction f in
+    let fail = option_map_sharing sw.sw_failaction f in
     if
       e' == e && consts == sw.sw_consts && blocks == sw.sw_blocks
       && fail == sw.sw_failaction
@@ -59,7 +68,7 @@ let shallow_map_sharing (f : t -> t) (lam : t) : t =
   | Lstringswitch (e, cases, d) ->
     let e' = f e in
     let cases' = Ext_list.map_snd_sharing cases f in
-    let d' = Ext_option.map_sharing d f in
+    let d' = option_map_sharing d f in
     if e' == e && cases' == cases && d' == d then lam
     else stringswitch e' cases' d'
   | Lstaticraise (i, args) ->
@@ -71,6 +80,9 @@ let shallow_map_sharing (f : t -> t) (lam : t) : t =
   | Ltrywith (b, id, h) ->
     let b' = f b and h' = f h in
     if b' == b && h' == h then lam else try_ b' id h'
+  | Ltryfinally (b, fin) ->
+    let b' = f b and fin' = f fin in
+    if b' == b && fin' == fin then lam else try_finally b' fin'
   | Lifthenelse (a, b, c) ->
     let a' = f a and b' = f b and c' = f c in
     if a' == a && b' == b && c' == c then lam else if_ a' b' c'
@@ -94,7 +106,7 @@ let shallow_map_sharing (f : t -> t) (lam : t) : t =
     if b' == b then lam else assign id b'
 
 (*
-   Those keys are later compared with Pervasives.compare.
+   Those keys are later compared with Stdlib.compare.
    For that reason, they should not include cycles.
 *)
 
@@ -114,9 +126,7 @@ let make_key e =
     | Lvar id -> ( try Ident.find_same id env with Not_found -> e)
     | Lglobal_module _ | Lconst _ -> e
     | Lapply ap ->
-      apply ~ap_transformed_jsx:ap.ap_transformed_jsx (tr_rec env ap.ap_func)
-        (tr_recs env ap.ap_args)
-        {ap.ap_info with ap_loc = Location.none}
+      apply (tr_rec env ap.ap_func) (tr_recs env ap.ap_args) Location.none
     | Llet (Alias, x, ex, e) ->
       (* Ignore aliases -> substitute *)
       let ex = tr_rec env ex in
@@ -139,6 +149,7 @@ let make_key e =
     | Lstaticcatch (e1, xs, e2) ->
       staticcatch (tr_rec env e1) xs (tr_rec env e2)
     | Ltrywith (e1, x, e2) -> try_ (tr_rec env e1) x (tr_rec env e2)
+    | Ltryfinally (e1, e2) -> try_finally (tr_rec env e1) (tr_rec env e2)
     | Lifthenelse (cond, ifso, ifnot) ->
       if_ (tr_rec env cond) (tr_rec env ifso) (tr_rec env ifnot)
     | Lsequence (e1, e2) -> seq (tr_rec env e1) (tr_rec env e2)
@@ -176,12 +187,14 @@ let shallow_exists (f : t -> bool) (lam : t) : bool =
     f arg
     || Ext_list.exists_snd sw_consts f
     || Ext_list.exists_snd sw_blocks f
-    || Ext_option.exists sw_failaction f
+    || Option.fold ~none:false ~some:f sw_failaction
   | Lstringswitch (arg, cases, default) ->
-    f arg || Ext_list.exists_snd cases f || Ext_option.exists default f
+    f arg
+    || Ext_list.exists_snd cases f
+    || Option.fold ~none:false ~some:f default
   | Lstaticraise (_, args) -> Ext_list.exists args f
   | Lstaticcatch (e1, _, e2) -> f e1 || f e2
-  | Ltrywith (e1, _, e2) -> f e1 || f e2
+  | Ltrywith (e1, _, e2) | Ltryfinally (e1, e2) -> f e1 || f e2
   | Lifthenelse (e1, e2, e3) -> f e1 || f e2 || f e3
   | Lsequence (e1, e2) -> f e1 || f e2
   | Lwhile (e1, e2) -> f e1 || f e2
@@ -201,23 +214,23 @@ let free_ids get l =
   let fv = ref Set_ident.empty in
   let rec free l =
     iter free l;
-    fv := List.fold_left Set_ident.add !fv (get l);
+    fv := List.fold_left (fun acc id -> Set_ident.add id acc) !fv (get l);
     match l with
     | Lfunction {params} ->
-      List.iter (fun param -> fv := Set_ident.remove !fv param) params
-    | Llet (_str, id, _arg, _body) -> fv := Set_ident.remove !fv id
+      List.iter (fun param -> fv := Set_ident.remove param !fv) params
+    | Llet (_str, id, _arg, _body) -> fv := Set_ident.remove id !fv
     | Lletrec (decl, _body) ->
-      List.iter (fun (id, _exp) -> fv := Set_ident.remove !fv id) decl
+      List.iter (fun (id, _exp) -> fv := Set_ident.remove id !fv) decl
     | Lstaticcatch (_e1, (_, vars), _e2) ->
-      List.iter (fun id -> fv := Set_ident.remove !fv id) vars
-    | Ltrywith (_e1, exn, _e2) -> fv := Set_ident.remove !fv exn
-    | Lfor (v, _e1, _e2, _dir, _e3) -> fv := Set_ident.remove !fv v
+      List.iter (fun id -> fv := Set_ident.remove id !fv) vars
+    | Ltrywith (_e1, exn, _e2) -> fv := Set_ident.remove exn !fv
+    | Lfor (v, _e1, _e2, _dir, _e3) -> fv := Set_ident.remove v !fv
     | Lfor_of (v, _e1, _e2) | Lfor_await_of (v, _e1, _e2) ->
-      fv := Set_ident.remove !fv v
-    | Lassign (id, _e) -> fv := Set_ident.add !fv id
+      fv := Set_ident.remove v !fv
+    | Lassign (id, _e) -> fv := Set_ident.add id !fv
     | Lvar _ | Lglobal_module _ | Lconst _ | Lapply _ | Lprim _ | Lswitch _
-    | Lstringswitch _ | Lstaticraise _ | Lifthenelse _ | Lsequence _ | Lbreak
-    | Lcontinue | Lwhile _ ->
+    | Lstringswitch _ | Lstaticraise _ | Ltryfinally _ | Lifthenelse _
+    | Lsequence _ | Lbreak | Lcontinue | Lwhile _ ->
       ()
   in
   free l;
@@ -229,6 +242,17 @@ let free_variables l =
       | Lvar id -> [id]
       | _ -> [])
     l
+
+let assigned_variables l =
+  let assigned = ref Set_ident.empty in
+  let rec walk l =
+    (match l with
+    | Lassign (id, _) -> assigned := Set_ident.add id !assigned
+    | _ -> ());
+    iter walk l
+  in
+  walk l;
+  !assigned
 
 (* Substitution rebuilds through [shallow_map_sharing], so the result is
    normalized and an untouched subterm is returned physically unchanged. *)

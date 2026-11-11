@@ -21,6 +21,7 @@ external compare: (string, string) => Stdlib_Ordering.t = "%compare"
 
 @val @scope("Number") external isNaN: float => bool = "isNaN"
 @send external charCodeAt: (string, int) => float = "charCodeAt"
+
 let charCodeAt = (s, i) => {
   let c = charCodeAt(s, i)
   isNaN(c) ? None : Some(c->Stdlib_Int.fromFloat)
@@ -38,19 +39,23 @@ let charCodeAt = (s, i) => {
 @send external includesFrom: (string, string, int) => bool = "includes"
 
 @send external indexOf: (string, string) => int = "indexOf"
+
 let indexOfOpt = (s, search) =>
   switch indexOf(s, search) {
   | -1 => None
   | index => Some(index)
   }
+
 @send external indexOfFrom: (string, string, int) => int = "indexOf"
 
 @send external lastIndexOf: (string, string) => int = "lastIndexOf"
+
 let lastIndexOfOpt = (s, search) =>
   switch lastIndexOf(s, search) {
   | -1 => None
   | index => Some(index)
   }
+
 @send external lastIndexOfFrom: (string, string, int) => int = "lastIndexOf"
 
 @return(nullable) @send
@@ -66,41 +71,6 @@ type normalizeForm = [#NFC | #NFD | #NFKC | #NFKD]
 @send external replaceRegExp: (string, Stdlib_RegExp.t, string) => string = "replace"
 @send external replaceAll: (string, string, string) => string = "replaceAll"
 @send external replaceAllRegExp: (string, Stdlib_RegExp.t, string) => string = "replaceAll"
-
-@send
-external unsafeReplaceRegExpBy0: (
-  string,
-  Stdlib_RegExp.t,
-  (~match: string, ~offset: int, ~input: string) => string,
-) => string = "replace"
-
-@send
-external unsafeReplaceRegExpBy1: (
-  string,
-  Stdlib_RegExp.t,
-  (~match: string, ~group1: string, ~offset: int, ~input: string) => string,
-) => string = "replace"
-
-@send
-external unsafeReplaceRegExpBy2: (
-  string,
-  Stdlib_RegExp.t,
-  (~match: string, ~group1: string, ~group2: string, ~offset: int, ~input: string) => string,
-) => string = "replace"
-
-@send
-external unsafeReplaceRegExpBy3: (
-  string,
-  Stdlib_RegExp.t,
-  (
-    ~match: string,
-    ~group1: string,
-    ~group2: string,
-    ~group3: string,
-    ~offset: int,
-    ~input: string,
-  ) => string,
-) => string = "replace"
 
 @send
 external replaceRegExpBy0Unsafe: (
@@ -138,6 +108,7 @@ external replaceRegExpBy3Unsafe: (
 ) => string = "replace"
 
 @send external search: (string, Stdlib_RegExp.t) => int = "search"
+
 let searchOpt = (s, re) =>
   switch search(s, re) {
   | -1 => None
@@ -145,16 +116,11 @@ let searchOpt = (s, re) =>
   }
 
 @send external slice: (string, ~start: int, ~end: int=?) => string = "slice"
-@deprecated({
-  reason: "Use `slice` instead",
-  migrate: String.slice(),
-})
-@send
-external sliceToEnd: (string, ~start: int) => string = "slice"
 
 @send external split: (string, string) => array<string> = "split"
 @send external splitAtMost: (string, string, ~limit: int) => array<string> = "split"
 @send external splitByRegExp: (string, Stdlib_RegExp.t) => array<option<string>> = "split"
+
 @send
 external splitByRegExpAtMost: (string, Stdlib_RegExp.t, ~limit: int) => array<option<string>> =
   "split"
@@ -163,12 +129,6 @@ external splitByRegExpAtMost: (string, Stdlib_RegExp.t, ~limit: int) => array<op
 @send external startsWithFrom: (string, string, int) => bool = "startsWith"
 
 @send external substring: (string, ~start: int, ~end: int=?) => string = "substring"
-@deprecated({
-  reason: "Use `substring` instead",
-  migrate: String.substring(),
-})
-@send
-external substringToEnd: (string, ~start: int) => string = "substring"
 
 @send external toLowerCase: string => string = "toLowerCase"
 @send external toLocaleLowerCase: string => string = "toLocaleLowerCase"
@@ -196,7 +156,7 @@ let capitalize = s =>
   if isEmpty(s) {
     s
   } else {
-    toUpperCase(getUnsafe(s, 0)) ++ sliceToEnd(s, ~start=1)
+    toUpperCase(getUnsafe(s, 0)) ++ slice(s, ~start=1)
   }
 
 external ignore: string => unit = "%ignore"

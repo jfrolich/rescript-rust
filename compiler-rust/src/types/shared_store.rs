@@ -69,7 +69,7 @@ pub(crate) struct SharedGraph {
     layouts: Box<[Layout]>,
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
-    locations: Box<[crate::location::Location]>,
+    locations: super::decl_loc::DeclLocTable,
 }
 
 /// Internalization slot of one portable dependency signature.
@@ -94,8 +94,23 @@ pub(crate) fn page_location(
     let graph = pages[(base >> PAGE_BITS) as usize]
         .get()
         .expect("shared declaration location refers to an unpublished graph");
-    assert_eq!(graph.base, base, "shared declaration location names no graph");
-    graph.locations[index]
+    assert_eq!(
+        graph.base, base,
+        "shared declaration location names no graph"
+    );
+    graph.locations.get(index)
+}
+
+pub(crate) fn page_location_identity(
+    pages: &[OnceLock<Arc<SharedGraph>>],
+    base: u32,
+    index: usize,
+) -> Option<super::decl_loc::LocationIdentity> {
+    let graph = pages[(base >> PAGE_BITS) as usize]
+        .get()
+        .expect("shared location refers to an unpublished graph");
+    assert_eq!(graph.base, base);
+    graph.locations.identity(index)
 }
 
 /// The graph owning shared index `idx`, and `idx`'s offset in it.
@@ -202,7 +217,7 @@ pub(crate) struct SharedGraphParts {
     pub(crate) nodes: Vec<(TypeDesc, i32)>,
     pub(crate) payloads: SharedGraphPayloads,
     pub(crate) layouts: Vec<Layout>,
-    pub(crate) locations: Vec<crate::location::Location>,
+    pub(crate) locations: super::decl_loc::DeclLocTable,
 }
 
 pub(crate) struct SharedTypePool {
@@ -215,6 +230,18 @@ pub(crate) struct SharedTypePool {
 }
 
 impl SharedTypePool {
+
+
+
+
+
+
+
+
+
+
+
+
     fn new(generation: u64) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
             .map(|_| OnceLock::new())
@@ -278,10 +305,26 @@ impl SharedTypePool {
             locations,
         } = build(base);
         assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
-        assert_eq!(payloads.lists.len(), sizes.list_items, "shared graph list size changed");
-        assert_eq!(payloads.args.len(), sizes.arg_items, "shared graph parameter count changed");
-        assert_eq!(payloads.rows.len(), sizes.rows, "shared graph row count changed");
-        assert_eq!(payloads.lids.len(), sizes.lids, "shared graph package count changed");
+        assert_eq!(
+            payloads.lists.len(),
+            sizes.list_items,
+            "shared graph list size changed"
+        );
+        assert_eq!(
+            payloads.args.len(),
+            sizes.arg_items,
+            "shared graph parameter count changed"
+        );
+        assert_eq!(
+            payloads.rows.len(),
+            sizes.rows,
+            "shared graph row count changed"
+        );
+        assert_eq!(
+            payloads.lids.len(),
+            sizes.lids,
+            "shared graph package count changed"
+        );
         assert_eq!(
             built_layouts.len(),
             sizes.layouts,
@@ -303,7 +346,7 @@ impl SharedTypePool {
             rows: payloads.rows.into_boxed_slice(),
             lids: payloads.lids.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
-            locations: locations.into_boxed_slice(),
+            locations,
         });
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
@@ -382,6 +425,8 @@ pub(crate) fn pool_for(generation: u64) -> Arc<SharedTypePool> {
 mod tests {
     use super::*;
 
+
+
     #[test]
     fn published_graphs_are_readable_from_other_threads() {
         let pool = Arc::new(SharedTypePool::new(u64::MAX));
@@ -394,12 +439,19 @@ mod tests {
                 |_| SharedGraphParts {
                     nodes: vec![
                         (TypeDesc::Tnil, 7),
-                        (TypeDesc::Tvar(Some("a".into())), 8),
+                        (
+                            TypeDesc::Tvar(
+                                Some("a".into()),
+                            ),
+                            8,
+                        ),
                         (TypeDesc::Tnil, 9),
                     ],
                     payloads: Default::default(),
                     layouts: Vec::new(),
-                    locations: vec![crate::location::Location::in_file(StrIdx::from_raw(4))],
+                    locations: [crate::location::Location::in_file(StrIdx::from_raw(4))]
+                        .into_iter()
+                        .collect(),
                 },
             )
             .unwrap();
@@ -413,7 +465,7 @@ mod tests {
                     nodes: vec![(TypeDesc::Tnil, 1)],
                     payloads: Default::default(),
                     layouts: Vec::new(),
-                    locations: Vec::new(),
+                    locations: Default::default(),
                 },
             )
             .unwrap();

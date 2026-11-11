@@ -8,8 +8,6 @@ module Console = Stdlib_Console
 module DataView = Stdlib_DataView
 module Date = Stdlib_Date
 module Dict = Stdlib_Dict
-module Exn = Stdlib_Exn
-module Error = Stdlib_Error
 module File = Stdlib_File
 module Float = Stdlib_Float
 module Int = Stdlib_Int
@@ -32,6 +30,7 @@ module Result = Stdlib_Result
 module String = Stdlib_String
 module Symbol = Stdlib_Symbol
 module TaggedTemplate = Stdlib_TaggedTemplate
+module Temporal = Stdlib_Temporal
 module Type = Stdlib_Type
 
 module Iterable = Stdlib_Iterable
@@ -67,11 +66,7 @@ type date = Date.t
 type null<+'a> = Primitive_js_extern.null<'a>
 type undefined<+'a> = Primitive_js_extern.undefined<'a>
 type nullable<+'a> = Primitive_js_extern.nullable<'a>
-@deprecated("Use Lazy.t instead")
-type lazy_t<+'a> = Lazy.t<'a>
 
-@deprecated("Use rescript-webapi instead") @val external window: Dom.window = "window"
-@deprecated("Use rescript-webapi instead") @val external document: Dom.document = "document"
 /**
 `globalThis` gives you the host global object (`window` in browsers, `global` in Node, etc.).
 You can reach shared globals from any runtime without special checks.
@@ -155,7 +150,7 @@ let panic = JsError.panic
 ## Examples
 
 ```rescript
-list{1, 2}->List.tailExn == list{2}
+list{1, 2}->List.tailOrThrow == list{2}
 ```
 */
 let assertEqual = (a, b) => {
@@ -175,6 +170,7 @@ null->Nullable.toOption == None
 ```
 */
 external null: nullable<'a> = "#null"
+
 /**
 `undefined` returns the JavaScript `undefined` value as a `nullable<'a>`.
 Use the `Nullable` helpers to convert it into an `option` or to read the value.
@@ -186,6 +182,7 @@ undefined->Nullable.toOption == None
 ```
 */
 external undefined: nullable<'a> = "#undefined"
+
 /**
 `typeof(value)` exposes JavaScript's `typeof` operator and returns a `Type.t` enum.
 It helps you inspect values that come from JavaScript APIs.

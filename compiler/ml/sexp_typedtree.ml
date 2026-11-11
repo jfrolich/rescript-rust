@@ -323,6 +323,8 @@ and pattern_desc ~with_locs desc =
     let p_sexp = pattern ~with_locs p in
     Sexp.list [Sexp.atom "Tpat_alias"; p_sexp; ident id]
   | Tpat_constant c -> Sexp.list [Sexp.atom "Tpat_constant"; constant c]
+  | Tpat_interval (c1, c2) ->
+    Sexp.list [Sexp.atom "Tpat_interval"; constant c1; constant c2]
   | Tpat_tuple l ->
     let items = List.map (pattern ~with_locs) l in
     Sexp.list (Sexp.atom "Tpat_tuple" :: items)
@@ -349,6 +351,16 @@ and pattern_desc ~with_locs desc =
   | Tpat_array l ->
     let items = List.map (pattern ~with_locs) l in
     Sexp.list (Sexp.atom "Tpat_array" :: items)
+  | Tpat_dict entries ->
+    let entry {tdp_key; tdp_pattern; tdp_optional} =
+      Sexp.list
+        [
+          string tdp_key.txt;
+          pattern ~with_locs tdp_pattern;
+          Sexp.atom (string_of_bool tdp_optional);
+        ]
+    in
+    Sexp.list (Sexp.atom "Tpat_dict" :: List.map entry entries)
   | Tpat_or (p1, p2, _) ->
     let p1_sexp = pattern ~with_locs p1 in
     let p2_sexp = pattern ~with_locs p2 in
@@ -439,13 +451,15 @@ and expression_desc ~with_locs desc =
       exn_cases_sexp;
       partial p;
     ]
-  | Texp_try (e, cases) ->
+  | Texp_try (e, cases, finally) ->
     let e_sexp = expression ~with_locs e in
     let cases_sexp = Sexp.list (List.map (case ~with_locs) cases) in
+    let finally_sexp = opt (expression ~with_locs) finally in
     Sexp.list [
       Sexp.atom "Texp_try";
       e_sexp;
       cases_sexp;
+      finally_sexp;
     ]
   | Texp_tuple l ->
     let items = List.map (expression ~with_locs) l in
@@ -461,16 +475,9 @@ and expression_desc ~with_locs desc =
     let arg_sexp = opt (expression ~with_locs) arg in
     Sexp.list [Sexp.atom "Texp_variant"; string label; arg_sexp]
   | Texp_record { fields; representation = _; extended_expression } ->
-    let fields_sexp = Sexp.list (Array.to_list (Array.map (fun (ld, def, opt_flag) ->
-      let def_sexp = match def with
-        | Kept ty ->
-          let ty_sexp = type_expr ty in
-          Sexp.list [Sexp.atom "Kept"; ty_sexp]
-        | Overridden (li, e) ->
-          let e_sexp = expression ~with_locs e in
-          Sexp.list [Sexp.atom "Overridden"; longident_loc li; e_sexp]
-      in
-      Sexp.list [string ld.Types.lbl_name; def_sexp; Sexp.atom (if opt_flag then "optional" else "required")]
+    let fields_sexp = Sexp.list (Array.to_list (Array.map (fun (ld, li, e) ->
+      let e_sexp = expression ~with_locs e in
+      Sexp.list [string ld.Types.lbl_name; longident_loc li; e_sexp]
     ) fields)) in
     let ext_sexp = opt (expression ~with_locs) extended_expression in
     Sexp.list [
@@ -488,6 +495,23 @@ and expression_desc ~with_locs desc =
   | Texp_array l ->
     let items = List.map (expression ~with_locs) l in
     Sexp.list (Sexp.atom "Texp_array" :: items)
+  | Texp_dict entries ->
+    let entry = function
+      | Tdict_entry (key, e) ->
+        Sexp.list
+          [Sexp.atom "Tdict_entry"; string key.txt; expression ~with_locs e]
+      | Tdict_spread e ->
+        Sexp.list [Sexp.atom "Tdict_spread"; expression ~with_locs e]
+    in
+    Sexp.list (Sexp.atom "Texp_dict" :: List.map entry entries)
+  | Texp_spread (kind, parts) ->
+    let kind =
+      match kind with
+      | Spread_array -> "Spread_array"
+      | Spread_list -> "Spread_list"
+    in
+    let parts = List.map (expression ~with_locs) parts in
+    Sexp.list (Sexp.atom "Texp_spread" :: Sexp.atom kind :: parts)
   | Texp_ifthenelse (e1, e2, e3) ->
     let e1_sexp = expression ~with_locs e1 in
     let e2_sexp = expression ~with_locs e2 in
@@ -534,8 +558,6 @@ and expression_desc ~with_locs desc =
   | Texp_pack me ->
     let me_sexp = module_expr ~with_locs me in
     Sexp.list [Sexp.atom "Texp_pack"; me_sexp]
-  | Texp_extension_constructor (li, p) ->
-    Sexp.list [Sexp.atom "Texp_extension_constructor"; longident_loc li; path p]
   | Texp_break -> Sexp.list [Sexp.atom "Texp_break"]
   | Texp_continue -> Sexp.list [Sexp.atom "Texp_continue"]
   | Texp_for_of _ -> Sexp.list [Sexp.atom "Texp_for_of"]

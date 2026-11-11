@@ -71,6 +71,10 @@ cross-module optimization modes.
 - Optional external arguments and uncurried external calls:
   `uncurried_optional_external_patterns.res`,
   `external_arity_patterns.res`.
+- Left-to-right argument and literal-element evaluation when a later one
+  compiles to statements (held field, global and assignable reads, JS method
+  objects kept as `this`, property reads of objects with statements, dict
+  rows, `for` bounds): `argument_evaluation_order_patterns.res`.
 - Tella-derived binding families:
   `tella_scoped_send_patterns.res`, `tella_aws_binding_patterns.res`,
   `tella_chrome_svix_binding_patterns.res`,

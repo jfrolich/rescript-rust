@@ -145,25 +145,7 @@ Test.run([
     30
   ],
   "is: list"
-], Object.is({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}, {
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}), eq, false);
+], Object.is({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}, {hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}), eq, false);
 
 Test.run([
   [
@@ -173,25 +155,7 @@ Test.run([
     30
   ],
   "is: list"
-], Primitive_object.equal({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}, {
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}), eq, true);
+], Primitive_object.equal({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}, {hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}), eq, true);
 
 Test.run([
   [
@@ -201,32 +165,14 @@ Test.run([
     30
   ],
   "is: list"
-], ({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}) === ({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: {
-      hd: 3,
-      tl: /* [] */0
-    }
-  }
-}), eq, false);
+], ({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}) === ({hd: 1, tl: {hd: 2, tl: {hd: 3, tl: /* [] */0}}}), eq, false);
 
 let d = new Date(2000, 1);
 
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    31,
+    32,
     13,
     23
   ],
@@ -236,7 +182,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    36,
+    38,
     20,
     30
   ],
@@ -250,7 +196,7 @@ let x = {
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    39,
+    41,
     20,
     33
   ],
@@ -260,7 +206,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    40,
+    42,
     20,
     33
   ],
@@ -274,7 +220,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    41,
+    43,
     20,
     33
   ],
@@ -284,7 +230,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    42,
+    44,
     20,
     45
   ],
@@ -294,7 +240,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    43,
+    45,
     20,
     45
   ],
@@ -304,7 +250,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    44,
+    46,
     20,
     45
   ],
@@ -318,7 +264,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    46,
+    48,
     20,
     31
   ],
@@ -328,7 +274,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    47,
+    49,
     20,
     31
   ],
@@ -338,7 +284,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    48,
+    50,
     20,
     31
   ],
@@ -350,7 +296,7 @@ let mkBig = Stdlib_BigInt.fromString;
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    51,
+    53,
     20,
     32
   ],
@@ -360,7 +306,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    52,
+    54,
     20,
     32
   ],
@@ -370,7 +316,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    53,
+    55,
     20,
     32
   ],
@@ -380,7 +326,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    54,
+    56,
     20,
     32
   ],
@@ -390,7 +336,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    55,
+    57,
     20,
     32
   ],
@@ -400,7 +346,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    60,
+    62,
     13,
     50
   ],
@@ -424,7 +370,7 @@ function assignOverwritesTarget(title, source) {
   Test.run([
     [
       "Stdlib_ObjectTests.res",
-      68,
+      70,
       22,
       39
     ],
@@ -435,7 +381,7 @@ function assignOverwritesTarget(title, source) {
   Test.run([
     [
       "Stdlib_ObjectTests.res",
-      69,
+      71,
       22,
       39
     ],
@@ -446,7 +392,7 @@ function assignOverwritesTarget(title, source) {
   Test.run([
     [
       "Stdlib_ObjectTests.res",
-      70,
+      72,
       22,
       39
     ],
@@ -468,7 +414,7 @@ function runGetTest(i) {
   Test.run([
     [
       "Stdlib_ObjectTests.res",
-      88,
+      90,
       22,
       46
     ],
@@ -551,7 +497,7 @@ function getSymbolTestWhenExists() {
   Test.run([
     [
       "Stdlib_ObjectTests.res",
-      148,
+      150,
       15,
       63
     ],
@@ -564,7 +510,7 @@ getSymbolTestWhenExists();
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    157,
+    160,
     13,
     65
   ],
@@ -574,7 +520,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    166,
+    169,
     13,
     46
   ],
@@ -586,7 +532,7 @@ Test.run([
 Test.run([
   [
     "Stdlib_ObjectTests.res",
-    173,
+    176,
     13,
     46
   ],

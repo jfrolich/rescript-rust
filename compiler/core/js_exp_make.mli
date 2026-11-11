@@ -164,7 +164,8 @@ val assign : ?comment:string -> t -> t -> t
 val literal_tag : Variant_runtime.literal_tag -> t
 val tag_type : Variant_runtime.tag_type -> t
 
-val emit_check : t Ast_untagged_variants.Dynamic_checks.t -> t
+val is_instance_of : Variant_runtime.Instance.t -> t -> t
+(** [Array.isArray(e)] or [e instanceof C] *)
 
 val triple_equal : ?comment:string -> t -> t -> t
 (* TODO: reduce [triple_equal] use *)
@@ -179,15 +180,7 @@ val eq_null_undefined_boolean : ?comment:string -> t -> t -> t
 
 val neq_null_undefined_boolean : ?comment:string -> t -> t -> t
 
-val is_type_number : ?comment:string -> t -> t
-
-val is_int_tag : ?has_null_undefined_other:bool * bool * bool -> t -> t
-
-val is_a_literal_case :
-  literal_cases:Variant_runtime.literal_tag list ->
-  block_cases:Variant_runtime.block_type list ->
-  t ->
-  t
+val is_int_tag : literal_tags:Variant_runtime.literal_tag list -> t -> t
 
 val is_type_object : t -> t
 
@@ -246,6 +239,8 @@ val bigint_div : checked:bool -> ?comment:string -> t -> t -> t
 
 val bigint_mod : checked:bool -> ?comment:string -> t -> t -> t
 
+val float_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
+
 val js_comp : Lambda.comparison -> ?comment:string -> t -> t -> t
 
 val not : t -> t
@@ -253,6 +248,17 @@ val not : t -> t
 val call : ?comment:string -> info:Js_call_info.t -> t -> t list -> t
 
 val tagged_template : ?comment:string -> t -> string list -> t list -> t
+
+val jsx :
+  callee:t ->
+  tag:t ->
+  spread:t option ->
+  props:(string * t) list ->
+  children:t list option ->
+  key:t option ->
+  multi:bool ->
+  fragment:bool ->
+  t
 
 val interpolated_template :
   ?comment:string -> Asttypes.template_segment list -> t list -> t
@@ -277,7 +283,11 @@ val seq : ?comment:string -> t -> t -> t
 
 val fuse_to_seq : t -> t list -> t
 
+val object_entries : ?dup:J.expression -> J.property_map -> J.object_entry list
+
 val obj : ?comment:string -> ?dup:J.expression -> J.property_map -> t
+
+val obj_entries : ?comment:string -> J.object_entry list -> t
 
 val true_ : t
 
@@ -327,5 +337,3 @@ val is_null_undefined : ?comment:string -> t -> t
 val make_exception : string -> t
 
 val variadic_args : t list -> t list
-
-val string_of_expression : (t -> string) ref

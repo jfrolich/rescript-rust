@@ -7,6 +7,7 @@
 @inline let f2 = `中文`
 
 @inline let escapedValue = `\x61\n\uD83D\uDE00`
+
 /* Do we need fix 
   let f2 : string = blabla
 */
@@ -22,6 +23,7 @@ module N1 = () => {
   @inline let xx = 3e-6
   let xx0 = 3e-6
 }
+
 let h = f
 
 let hh = f ++ f
@@ -37,3 +39,12 @@ let (a, b, c, d, e) = (f, f1, f2, f3, f4)
 @inline let f6 = 1
 
 let () = Console.log((xx, xx0))
+
+module BigintConsts = (
+  X: {
+    @inline(12n) let pos: bigint
+    @inline(-5n) let neg: bigint
+  },
+) => {
+  let both = (X.pos, X.neg)
+}

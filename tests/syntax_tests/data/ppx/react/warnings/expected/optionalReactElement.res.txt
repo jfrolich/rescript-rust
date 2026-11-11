@@ -15,9 +15,11 @@ type props<'triggerLabel, 'triggerIcon> = {
   triggerLabel: 'triggerLabel,
   triggerIcon?: 'triggerIcon,
 }
+
 let make = ({triggerLabel, ?triggerIcon, _}: props<string, React.element>): React.element => {
   React.null
 }
+
 let make = React.component({
   let \"OptionalReactElement" = (props: props<_>) => make(props)
   \"OptionalReactElement"

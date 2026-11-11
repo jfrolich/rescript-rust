@@ -6,30 +6,20 @@ let a0 = {
   RE_EXN_ID: "Not_found"
 };
 
-let b = Stdlib_List.length({
-  hd: 1,
-  tl: {
-    hd: 2,
-    tl: /* [] */0
-  }
-});
+let b = Stdlib_List.length({hd: 1, tl: {hd: 2, tl: /* [] */0}});
 
 let List = {
   size: Stdlib_List.size,
   head: Stdlib_List.head,
-  headExn: Stdlib_List.headExn,
   headOrThrow: Stdlib_List.headOrThrow,
   tail: Stdlib_List.tail,
-  tailExn: Stdlib_List.tailExn,
   tailOrThrow: Stdlib_List.tailOrThrow,
   add: Stdlib_List.add,
   get: Stdlib_List.get,
-  getExn: Stdlib_List.getExn,
   getOrThrow: Stdlib_List.getOrThrow,
   make: Stdlib_List.make,
   fromInitializer: Stdlib_List.fromInitializer,
   shuffle: Stdlib_List.shuffle,
-  toShuffled: Stdlib_List.toShuffled,
   drop: Stdlib_List.drop,
   take: Stdlib_List.take,
   splitAt: Stdlib_List.splitAt,
@@ -61,7 +51,6 @@ let List = {
   compareLength: Stdlib_List.compareLength,
   compare: Stdlib_List.compare,
   equal: Stdlib_List.equal,
-  has: Stdlib_List.has,
   includes: Stdlib_List.includes,
   find: Stdlib_List.find,
   filter: Stdlib_List.filter,
@@ -69,10 +58,6 @@ let List = {
   filterMap: Stdlib_List.filterMap,
   partition: Stdlib_List.partition,
   unzip: Stdlib_List.unzip,
-  getAssoc: Stdlib_List.getAssoc,
-  hasAssoc: Stdlib_List.hasAssoc,
-  removeAssoc: Stdlib_List.removeAssoc,
-  setAssoc: Stdlib_List.setAssoc,
   sort: Stdlib_List.sort,
   b: b,
   length: 3
@@ -88,6 +73,8 @@ let a4 = a0;
 
 let a5 = a0;
 
+let List$make = Stdlib_List.make;
+
 export {
   a0,
   a1,
@@ -96,5 +83,6 @@ export {
   a4,
   a5,
   List,
+  List$make,
 }
 /* b Not a pure module */

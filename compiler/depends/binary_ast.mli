@@ -25,22 +25,32 @@
 type _ kind = Ml : Parsetree.structure kind | Mli : Parsetree.signature kind
 
 val read_ast_exn : fname:string -> 'a kind -> 'a
-
-val magic_sep_char : char
+(** Raises [End_of_file] when the file ends before its header or its AST does,
+    as when a killed build cut it short. *)
 
 val write_ast : sourcefile:string -> output:string -> 'a kind -> 'a -> unit
-(**
-   Check out {!Bsb_depfile_gen} for set decoding
-   The [.ml] file can be recognized as an ast directly, the format
-   is
-   {
-   magic number;
-   filename;
-   ast
-   }
-   when [fname] is "-" it means the file is from an standard input or pipe.
-   An empty name would marshallized.
+(** [write_ast ~sourcefile ~output kind ast] writes to [output]:
+    - the length in bytes of the dependency block ([output_binary_int]);
+    - the dependency block: a newline, then each module name [ast] refers to
+      (predefined names excluded), each followed by a newline;
+    - [sourcefile] and a newline;
+    - the marshalled [ast].
+    [read_ast_exn] skips the dependency block; OCaml rewatch reads it with
+    {!read_header}, and Rust rewatch in [get_dep_modules]
+    (rewatch/src/build/deps.rs). *)
 
-   Use case cat - | fan -printer -impl -
-   redirect the standard input to fan
-*)
+type header = {source_start: int; source_end: int}
+(** Where the parts of an AST's header end: the dependency block takes the
+    bytes from 4 to [source_start], the source path those up to
+    [source_end], a newline, and the marshalled AST follows. *)
+
+val read_header : ?length:int -> string -> header option
+(** [read_header ?length contents] reads the header of an AST whose first
+    [length] bytes, all of them by default, are those of [contents]. It is
+    [None] when they end before the header does, or give an impossible length
+    for the dependency block. *)
+
+val header_dependencies : string -> header -> string list
+(** The module names in the dependency block. *)
+
+val header_source : string -> header -> string

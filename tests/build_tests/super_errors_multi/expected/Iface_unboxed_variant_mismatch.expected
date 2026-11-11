@@ -6,13 +6,12 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_unboxed_variant_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_unboxed_variant_mismatch/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_unboxed_variant_mismatch/Foo.res:1:1-18):
     type t = Wrap(int)
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_unboxed_variant_mismatch/Foo.resi:2:1-18):
     @unboxed type t = Wrap(int)
-  /.../fixtures/Iface_unboxed_variant_mismatch/Foo.resi:2:1-18:
-    Expected declaration
-  /.../fixtures/Iface_unboxed_variant_mismatch/Foo.res:1:1-18:
-    Actual declaration
+  
   Their internal representations differ:
-  the second declaration uses unboxed representation.
+    The expected declaration uses unboxed representation.

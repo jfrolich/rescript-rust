@@ -27,13 +27,12 @@ type t =
   | Partial_application (*  5 *)
   | Partial_match of string (*  8 *)
   | Non_closed_record_pattern of string (*  9 *)
-  | Unused_match (* 11 *)
-  | Unused_pat (* 12 *)
+  | Unused_match of string (* 11 *)
+  | Unused_pat of string (* 12 *)
   | Unused_argument (* 20 *)
   | Nonreturning_statement (* 21 *)
   | Preprocessor of string (* 22 *)
   | Useless_record_with (* 23 *)
-  | Bad_module_name of string (* 24 *)
   | All_clauses_guarded (* 8, used to be 25 *)
   | Unused_var of string (* 26 *)
   | Unused_var_strict of string (* 27 *)
@@ -76,8 +75,6 @@ val without_warnings : (unit -> 'a) -> 'a
 
 val is_active : t -> bool
 
-val is_error : t -> bool
-
 type reporting_information = {
   number: int;
   message: string;
@@ -100,10 +97,6 @@ type state
 val backup : unit -> state
 
 val restore : state -> unit
-
-val has_warnings : bool ref
-
-val nerrors : int ref
 
 val message : t -> string
 

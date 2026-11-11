@@ -15,11 +15,15 @@ depends: [
   "wtf8"
   "ocamlformat" {with-test & = "0.29.0"}
   "yojson" {= "3.0.0"}
+  "spawn" {= "v0.17.0"}
+  "cmdliner" {= "2.1.1"}
+  "luv" {= "0.5.14+rescript.1"}
+  "re" {= "1.14.0"}
   "ounit2" {with-test & = "2.2.7"}
   "odoc" {with-doc}
   "ocaml-lsp-server" {with-dev-setup & >= "1.23.0"}
-  "js_of_ocaml" {os != "win32" & with-test & = "6.4.1"}
-  "wasm_of_ocaml-compiler" {os != "win32" & with-test & = "6.4.1"}
+  "js_of_ocaml" {os != "win32" & with-test & = "6.5.0"}
+  "wasm_of_ocaml-compiler" {os != "win32" & with-test & = "6.5.0"}
 ]
 build: [
   ["dune" "subst"] {dev}
@@ -33,5 +37,12 @@ build: [
     "@install"
     "@runtest" {with-test}
     "@doc" {with-doc}
+  ]
+]
+pin-depends: [
+  # libuv 1.53.0; https://github.com/rescript-lang/luv
+  [
+    "luv.0.5.14+rescript.1"
+    "git+https://github.com/rescript-lang/luv.git#2094c025da82482a8b71118a87e609f82666a2f6"
   ]
 ]

@@ -16,30 +16,30 @@ function Hooks(props) {
         children: "Hooks example " + (props.vehicle.name + (" clicked " + (String(count) + " times")))
       }),
       JsxRuntime.jsx("button", {
-        children: "Click me",
-        onClick: param => setCount(param => count + 1 | 0)
+        onClick: param => setCount(param => count + 1 | 0),
+        children: "Click me"
       }),
       JsxRuntime.jsxs(ImportHooks.make, {
         person: {
           name: "Mary",
           age: 71
         },
+        renderMe: x => x.randomString,
         children: [
           "child1",
           "child2"
-        ],
-        renderMe: x => x.randomString
+        ]
       }),
       JsxRuntime.jsxs(ImportHookDefault.make, {
         person: {
           name: "DefaultImport",
           age: 42
         },
+        renderMe: x => x.randomString,
         children: [
           "child1",
           "child2"
-        ],
-        renderMe: x => x.randomString
+        ]
       })
     ]
   });
@@ -129,8 +129,8 @@ let make = React.forwardRef((props, ref) => {
     return null;
   } else {
     return JsxRuntime.jsx("button", {
-      children: props.vehicle.name,
-      ref: Primitive_option.some(ref)
+      ref: Primitive_option.some(ref),
+      children: props.vehicle.name
     });
   }
 });
@@ -140,8 +140,8 @@ let WithRef = {
 };
 
 let input = React.forwardRef((r, ref) => JsxRuntime.jsx("div", {
-  children: r.x,
-  ref: Primitive_option.some(ref)
+  ref: Primitive_option.some(ref),
+  children: r.x
 }));
 
 let ForwardRef = {
@@ -204,6 +204,18 @@ let make$1 = Hooks;
 
 let $$default = Hooks;
 
+let Inner$make = Hooks$Inner;
+
+let Inner$Inner2$make = Hooks$Inner$Inner2;
+
+let NoProps$make = Hooks$NoProps;
+
+let WithRef$make = make;
+
+let RenderPropRequiresConversion$make = Hooks$RenderPropRequiresConversion;
+
+let DD$make = Hooks$DD;
+
 export {
   make$1 as make,
   $$default as default,
@@ -219,5 +231,11 @@ export {
   RenderPropRequiresConversion,
   WithChildren,
   DD,
+  Inner$make,
+  Inner$Inner2$make,
+  NoProps$make,
+  WithRef$make,
+  RenderPropRequiresConversion$make,
+  DD$make,
 }
 /* make Not a pure module */

@@ -10,7 +10,7 @@ jobs:
     # Upstream's branch policy. In this repository the read-only token gets a
     # 403 on the first delete, and a write token would delete working branches.
     if: github.repository == 'rescript-lang/rescript'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
       - name: Cleanup Stale Branches
         uses: cbrgm/cleanup-stale-branches-action@v1

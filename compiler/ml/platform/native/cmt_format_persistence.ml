@@ -15,38 +15,40 @@
 
 open Cmt_format_common
 
-let output_cmt output_channel cmt =
-  output_string output_channel Config.cmt_magic_number;
-  output_value output_channel (cmt : cmt_infos)
+let set_args value = (Compiler_request_state.current ()).cmt_args <- value
 
-let save_cmt filename modname binary_annots sourcefile initial_env cmi =
-  if !Clflags.binary_annotations then
-    Misc.output_to_bin_file_directly filename
-      (fun temp_file_name output_channel ->
-        let interface_digest =
-          match cmi with
-          | None -> None
-          | Some cmi ->
-            Some (Cmi_format.output_cmi temp_file_name output_channel cmi)
-        in
-        let cmt =
-          {
-            cmt_modname = modname;
-            cmt_annots = clear_env binary_annots;
-            cmt_value_dependencies = value_dependencies ();
-            cmt_comments = [];
-            cmt_args = Sys.argv;
-            cmt_sourcefile = sourcefile;
-            cmt_builddir = Sys.getcwd ();
-            cmt_loadpath = !Config.load_path;
-            cmt_source_digest = Misc.may_map Digest.file sourcefile;
-            cmt_initial_env =
-              (if need_to_clear_env then keep_only_summary initial_env
-               else initial_env);
-            cmt_imports = List.sort compare (Env.imports ());
-            cmt_interface_digest = interface_digest;
-            cmt_use_summaries = need_to_clear_env;
-            cmt_extra_info = {deprecated_used = deprecated_uses ()};
-          }
-        in
-        output_cmt output_channel cmt)
+let read_source_file path =
+  let path = Compiler_request_state.resolve_path path in
+  match Build_file_store.read path with
+  | Some contents -> contents
+  | None -> raise (Sys_error (path ^ ": No such file or directory"))
+
+(* Unlike OCaml, no copy of the .cmi is written in front of the cmt infos:
+   tools read the .cmi itself. *)
+let save_cmt filename modname binary_annots sourcefile initial_env =
+  if !((Clflags.current ()).binary_annotations) then
+    let cmt =
+      {
+        cmt_modname = modname;
+        cmt_annots = clear_env binary_annots;
+        cmt_value_dependencies = value_dependencies ();
+        cmt_comments = [];
+        cmt_args = (Compiler_request_state.current ()).cmt_args;
+        cmt_sourcefile = sourcefile;
+        cmt_builddir = Compiler_request_state.cwd ();
+        cmt_loadpath = Config.get_load_path ();
+        cmt_source_digest =
+          Misc.may_map
+            (fun path -> Digest.string (read_source_file path))
+            sourcefile;
+        cmt_initial_env =
+          (if need_to_clear_env then keep_only_summary initial_env
+           else initial_env);
+        cmt_imports = List.sort compare (Env.imports ());
+        cmt_use_summaries = need_to_clear_env;
+        cmt_extra_info = {deprecated_used = deprecated_uses ()};
+      }
+    in
+    Build_file_store.write
+      (Compiler_request_state.resolve_path filename)
+      (Config.cmt_magic_number ^ Marshal.to_string (cmt : cmt_infos) [])

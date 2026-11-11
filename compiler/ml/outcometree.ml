@@ -13,41 +13,20 @@
 (*                                                                        *)
 (**************************************************************************)
 
-(* Module [Outcometree]: results displayed by the toplevel *)
+(* Module [Outcometree]: printable representation of types and
+   signature items *)
 
-(* These types represent messages that the toplevel displays as normal
-   results or errors. The real displaying is customisable using the hooks:
-      [Toploop.print_out_value]
-      [Toploop.print_out_type]
-      [Toploop.print_out_sig_item]
-      [Toploop.print_out_phrase] *)
+(* [Printtyp] builds these trees. They are printed through the hooks
+   [Oprint.out_type], [Oprint.out_sig_item],
+   [Oprint.out_signature] and related refs, which bsc sets to the ReScript
+   printer through [Res_outcome_printer.setup]. *)
 
 type out_ident =
   | Oide_apply of out_ident * out_ident
   | Oide_dot of out_ident * string
   | Oide_ident of string
 
-type out_string = Ostr_string | Ostr_bytes
-
 type out_attribute = {oattr_name: string}
-
-type out_value =
-  | Oval_array of out_value list
-  | Oval_char of char
-  | Oval_constr of out_ident * out_value list
-  | Oval_ellipsis
-  | Oval_float of float
-  | Oval_int of int
-  | Oval_int32 of int32
-  | Oval_int64 of int64
-  | Oval_nativeint of nativeint
-  | Oval_list of out_value list
-  | Oval_printer of (Format.formatter -> unit)
-  | Oval_record of (out_ident * out_value) list
-  | Oval_string of string * int * out_string (* string, size-to-print, kind *)
-  | Oval_stuff of string
-  | Oval_tuple of out_value list
-  | Oval_variant of string * out_value option
 
 type out_type =
   | Otyp_abstract
@@ -58,7 +37,8 @@ type out_type =
   | Otyp_manifest of out_type * out_type
   | Otyp_object of (string * bool * out_type) list * bool option
     (* fields are (name, mutable, type) *)
-  | Otyp_record of (string * bool * bool * out_type) list
+  | Otyp_record of (string * string option * bool * bool * out_type) list
+      (** name, runtime name given with [@as], mutable, optional, type *)
   | Otyp_stuff of string
   | Otyp_sum of (string * out_type list * out_type option * string option) list
   | Otyp_tuple of out_type list
@@ -66,7 +46,6 @@ type out_type =
   | Otyp_variant of bool * out_variant * bool * string list option
   | Otyp_poly of string list * out_type
   | Otyp_module of string * string list * out_type list
-  | Otyp_attribute of out_type * out_attribute
 
 and out_variant =
   | Ovar_fields of (string * bool * out_type list) list
@@ -90,8 +69,9 @@ and out_type_decl = {
   otype_params: (string * (bool * bool)) list;
   otype_type: out_type;
   otype_private: Asttypes.private_flag;
-  otype_immediate: bool;
-  otype_unboxed: bool;
+  otype_attributes: string list;
+      (** The annotations that change what the declaration means at run time,
+          as they are written, e.g. [@unboxed] or [@tag("kind")] *)
   otype_cstrs: (out_type * out_type) list;
 }
 and out_extension_constructor = {
@@ -118,8 +98,3 @@ and out_val_decl = {
 }
 and out_rec_status = Orec_not | Orec_first | Orec_next
 and out_ext_status = Oext_first | Oext_next | Oext_exception
-
-type out_phrase =
-  | Ophr_eval of out_value * out_type
-  | Ophr_signature of (out_sig_item * out_value option) list
-  | Ophr_exception of (exn * out_value)

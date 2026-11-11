@@ -43,9 +43,9 @@ pub enum Warning {
     /// Warning 10: Statement has non-unit type.
     StatementType,
     /// Warning 11: Unused match case.
-    UnusedMatch,
+    UnusedMatch { reason: String },
     /// Warning 12: Unused sub-pattern.
-    UnusedPat,
+    UnusedPat { reason: String },
     /// Warning 14: Illegal backslash escape.
     IllegalBackslash,
     /// Warning 16: Unerasable optional argument.
@@ -58,8 +58,6 @@ pub enum Warning {
     Preprocessor { message: String },
     /// Warning 23: Useless record with clause.
     UselessRecordWith,
-    /// Warning 24: Bad module name.
-    BadModuleName { name: String },
     /// Warning 26: Unused variable (let-bound or as-pattern).
     UnusedVariable { name: String },
     /// Warning 27: Unused variable (other).
@@ -176,15 +174,14 @@ impl Warning {
             Warning::AllClausesGuarded => 8,
             Warning::NonClosedRecordPattern { .. } => 9,
             Warning::StatementType => 10,
-            Warning::UnusedMatch => 11,
-            Warning::UnusedPat => 12,
+            Warning::UnusedMatch { .. } => 11,
+            Warning::UnusedPat { .. } => 12,
             Warning::IllegalBackslash => 14,
             Warning::UnerasableOptionalArgument => 16,
             Warning::UnusedArgument => 20,
             Warning::NonreturningStatement => 21,
             Warning::Preprocessor { .. } => 22,
             Warning::UselessRecordWith => 23,
-            Warning::BadModuleName { .. } => 24,
             Warning::UnusedVariable { .. } => 26,
             Warning::UnusedVariableStrict { .. } => 27,
             Warning::WildcardArgToConstantConstr => 28,
@@ -293,8 +290,14 @@ impl Warning {
                  If this is on purpose, wrap it with `ignore`."
                     .to_string()
             }
-            Warning::UnusedMatch => "this match case is unused.".to_string(),
-            Warning::UnusedPat => "this sub-pattern is unused.".to_string(),
+            Warning::UnusedMatch { reason } if reason.is_empty() => {
+                "this match case is unused.".to_string()
+            }
+            Warning::UnusedMatch { reason } => format!("this match case is unused.\n{reason}"),
+            Warning::UnusedPat { reason } if reason.is_empty() => {
+                "this sub-pattern is unused.".to_string()
+            }
+            Warning::UnusedPat { reason } => format!("this sub-pattern is unused.\n{reason}"),
             Warning::IllegalBackslash => "illegal backslash escape in string.".to_string(),
             Warning::UnerasableOptionalArgument => {
                 "This optional parameter in final position will, in practice, not be optional.\n\
@@ -313,13 +316,6 @@ impl Warning {
                 "All the fields are already explicitly listed in this record. \
                  You can remove the `...` spread."
                     .to_string()
-            }
-            Warning::BadModuleName { name } => {
-                format!(
-                    "This file's name is potentially invalid. \
-                     {} isn't a valid module name.",
-                    name
-                )
             }
             Warning::UnusedVariable { name } | Warning::UnusedVariableStrict { name } => {
                 // Match compiler/ext/warnings.ml:393-400.
@@ -620,11 +616,11 @@ impl WarningConfig {
             disabled: false,
         };
         // Match OCaml compiler/ext/bsc_warnings.ml:46-48. ReScript starts
-        // from `+a-4-9-20-41-50-102` and warning-as-error
-        // `-a+5+6+101+109`; later -w/-warn-error flags are layered on top
-        // by Warnings.parse_options in compiler/ext/warnings.ml:286-290.
-        config.parse("+a-4-9-20-41-50-102").ok();
-        config.parse_as_error("-a+5+6+101+109").ok();
+        // from `+a-4-9-20-41-102` and warning-as-error `-a+5+101+109`;
+        // later -w/-warn-error flags are layered on top by
+        // Warnings.parse_options in compiler/ext/warnings.ml.
+        config.parse("+a-4-9-20-41-102").ok();
+        config.parse_as_error("-a+5+101+109").ok();
         config
     }
 
@@ -789,19 +785,19 @@ const ALL_WARNINGS: [usize; LAST_WARNING_NUMBER] = {
 fn letter_warnings(letter: char) -> &'static [usize] {
     match letter {
         'a' => &ALL_WARNINGS,
-        'c' => &[1, 2],
+        'c' => &[],
         'd' => &[3],
         'e' => &[4],
         'f' => &[5],
-        'k' => &[32, 33, 34, 35, 36, 37, 38, 39],
-        'l' => &[6],
-        'm' => &[7],
+        'k' => &[32, 33, 34, 35, 37, 38, 39],
+        'l' => &[],
+        'm' => &[],
         'p' => &[8],
         'r' => &[9],
-        's' => &[10],
+        's' => &[],
         'u' => &[11, 12],
-        'v' => &[13],
-        'x' => &[14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 30],
+        'v' => &[],
+        'x' => &[20, 21, 22, 23, 30],
         'y' => &[26],
         'z' => &[27],
         _ => &[],

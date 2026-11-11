@@ -15,7 +15,8 @@ export REWATCH_EXECUTABLE
 # Make sure we are in the right directory
 cd $(dirname $0)
 
-if [[ "$REWATCH_EXECUTABLE" == */cli/rescript.js ]]; then
+if [[ "$REWATCH_EXECUTABLE" == */cli/rescript.js ||
+  "$REWATCH_EXECUTABLE" == */cli/rescript-ocaml.js ]]; then
   echo "Using rewatch CLI script: $REWATCH_EXECUTABLE"
 else
   echo "Using rewatch executable: $REWATCH_EXECUTABLE"
@@ -62,53 +63,6 @@ else
   exit 1
 fi
 
-# sury-ppx 11.0.0-rc.0 only ships an arm64 binary for macOS. Temporarily
-# disable the PPX fixture on Intel Macs until the package ships an x64 binary.
-if [[ "$(uname -s)" == "Darwin" && "$(uname -m)" == "x86_64" ]]; then
-  PPX_CONFIG=../testrepo/packages/with-ppx/rescript.json
-  PPX_SOURCE=../testrepo/packages/with-ppx/src/FileWithPpx.res
-  PPX_OUTPUT=../testrepo/packages/with-ppx/src/FileWithPpx.mjs
-  PPX_BACKUP_DIR=$(mktemp -d)
-  PPX_FIXTURE_SHELL_PID=$BASHPID
-
-  cp "$PPX_CONFIG" "$PPX_BACKUP_DIR/rescript.json"
-  cp "$PPX_SOURCE" "$PPX_BACKUP_DIR/FileWithPpx.res"
-  cp "$PPX_OUTPUT" "$PPX_BACKUP_DIR/FileWithPpx.mjs"
-  cp "$(git rev-parse --git-path index)" "$PPX_BACKUP_DIR/index"
-  export GIT_INDEX_FILE="$PPX_BACKUP_DIR/index"
-
-  restore_ppx_fixture() {
-    if [ "$BASHPID" != "$PPX_FIXTURE_SHELL_PID" ]; then
-      return
-    fi
-    cp "$PPX_BACKUP_DIR/rescript.json" "$PPX_CONFIG"
-    cp "$PPX_BACKUP_DIR/FileWithPpx.res" "$PPX_SOURCE"
-    cp "$PPX_BACKUP_DIR/FileWithPpx.mjs" "$PPX_OUTPUT"
-    unset GIT_INDEX_FILE
-    rm -rf "$PPX_BACKUP_DIR"
-  }
-  trap restore_ppx_fixture EXIT
-
-  bold "Disable sury-ppx fixture on Intel macOS"
-  node -e '
-    const fs = require("fs");
-    const path = process.argv[1];
-    const config = JSON.parse(fs.readFileSync(path, "utf8"));
-    delete config["ppx-flags"];
-    fs.writeFileSync(path, `${JSON.stringify(config, null, 2)}\n`);
-  ' "$PPX_CONFIG"
-  printf "\n" > "$PPX_SOURCE"
-
-  if ! error_output=$(cd ../testrepo && "$REWATCH_EXECUTABLE" clean 2>&1 && "$REWATCH_EXECUTABLE" build 2>&1); then
-    error "Error preparing testrepo without sury-ppx"
-    printf "%s\n" "$error_output" >&2
-    exit 1
-  fi
-
-  git add "$PPX_CONFIG" "$PPX_SOURCE" "$PPX_OUTPUT"
-  success "sury-ppx fixture disabled"
-fi
-
 # Individual test files
 # Comment out any test to skip it
 
@@ -134,11 +88,18 @@ fi
 ./compile/21-namespaced-interface-is-checked.sh &&
 ./compile/22-worker-store-respects-package-visibility.sh &&
 ./compile/23-interface-mismatch-names-the-resi.sh &&
+./compile/21-rebuild-dependency-for-package-specs.sh &&
+./compile/22-qualified-own-namespace-dependency.sh &&
+./compile/23-root-source-dir-rebuild.sh &&
 ./compile/24-location-free-retry.sh &&
 ./compile/25-deterministic-records.sh &&
 ./compile/14-no-testrepo-changes.sh &&
 ./compile/15-no-new-files.sh &&
 ./compile/16-snapshots-unchanged.sh &&
+
+# GenType tests
+./gentype/01-gentype-project-root.sh &&
+./gentype/02-gentype-output-not-replayed.sh &&
 
 # Watch tests
 ./watch/01-watch-recompile.sh &&
@@ -150,6 +111,9 @@ fi
 ./watch/06-watch-missing-source-folder.sh &&
 ./watch/07-changed-interface-after-failed-implementation.sh &&
 ./watch/08-watch-inlined-value-change.sh &&
+./watch/08-watch-overlapping-source-removed.sh &&
+./watch/09-watch-recovers-from-invalid-config.sh &&
+./watch/10-watch-recovers-new-dependency-config.sh &&
 
 # Lock tests
 ./lock/01-lock-when-watching.sh &&
@@ -162,12 +126,15 @@ fi
 ./format/02-format-single-file.sh &&
 ./format/03-format-stdin.sh &&
 ./format/04-format-current-project.sh &&
+./format/05-format-line-endings.sh &&
 
 # Clean tests
 ./clean/01-clean-single-project.sh &&
 ./clean/02-clean-dev-dependencies.sh &&
 ./clean/03-clean-node-modules.sh &&
 ./clean/04-clean-rebuild-no-compiler-update.sh &&
+./clean/05-clean-invalid-module-graph.sh &&
+./clean/06-clean-duplicate-names-across-packages.sh &&
 
 # Experimental tests
 ./experimental/01-experimental-features-emit.sh &&

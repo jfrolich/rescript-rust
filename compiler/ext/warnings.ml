@@ -34,13 +34,12 @@ type t =
   | Partial_application (*  5 *)
   | Partial_match of string (*  8 *)
   | Non_closed_record_pattern of string (*  9 *)
-  | Unused_match (* 11 *)
-  | Unused_pat (* 12 *)
+  | Unused_match of string (* 11 *)
+  | Unused_pat of string (* 12 *)
   | Unused_argument (* 20 *)
   | Nonreturning_statement (* 21 *)
   | Preprocessor of string (* 22 *)
   | Useless_record_with (* 23 *)
-  | Bad_module_name of string (* 24 *)
   | All_clauses_guarded (* 8, used to be 25 *)
   | Unused_var of string (* 26 *)
   | Unused_var_strict of string (* 27 *)
@@ -89,13 +88,12 @@ let number = function
   | Partial_application -> 5
   | Partial_match _ -> 8
   | Non_closed_record_pattern _ -> 9
-  | Unused_match -> 11
-  | Unused_pat -> 12
+  | Unused_match _ -> 11
+  | Unused_pat _ -> 12
   | Unused_argument -> 20
   | Nonreturning_statement -> 21
   | Preprocessor _ -> 22
   | Useless_record_with -> 23
-  | Bad_module_name _ -> 24
   | All_clauses_guarded -> 8 (* used to be 25 *)
   | Unused_var _ -> 26
   | Unused_var_strict _ -> 27
@@ -142,7 +140,7 @@ let letter_all =
 let letter = function
   | 'a' -> letter_all
   | 'b' -> []
-  | 'c' -> [1; 2]
+  | 'c' -> []
   | 'd' -> [3]
   | 'e' -> [4]
   | 'f' -> [5]
@@ -150,44 +148,25 @@ let letter = function
   | 'h' -> []
   | 'i' -> []
   | 'j' -> []
-  | 'k' -> [32; 33; 34; 35; 36; 37; 38; 39]
-  | 'l' -> [6]
-  | 'm' -> [7]
+  | 'k' -> [32; 33; 34; 35; 37; 38; 39]
+  | 'l' -> []
+  | 'm' -> []
   | 'n' -> []
   | 'o' -> []
   | 'p' -> [8]
   | 'q' -> []
   | 'r' -> [9]
-  | 's' -> [10]
+  | 's' -> []
   | 't' -> []
   | 'u' -> [11; 12]
-  | 'v' -> [13]
+  | 'v' -> []
   | 'w' -> []
-  | 'x' -> [14; 15; 16; 17; 18; 19; 20; 21; 22; 23; 24; 30]
+  | 'x' -> [20; 21; 22; 23; 30]
   | 'y' -> [26]
   | 'z' -> [27]
   | _ -> assert false
 
 type state = {active: bool array; error: bool array}
-
-let current =
-  ref
-    {
-      active = Array.make (last_warning_number + 1) true;
-      error = Array.make (last_warning_number + 1) false;
-    }
-
-let disabled = ref false
-
-let without_warnings f = Misc.protect_refs [Misc.R (disabled, true)] f
-
-let backup () = !current
-
-let restore x = current := x
-
-let is_active x = (not !disabled) && !current.active.(number x)
-
-let is_error x = (not !disabled) && !current.error.(number x)
 
 let parse_opt error active flags s =
   let set i = flags.(i) <- true in
@@ -247,17 +226,45 @@ let parse_opt error active flags s =
   in
   loop 0
 
+type request_state = {current: state ref; disabled: bool ref; nerrors: int ref}
+
+let default_state =
+  let active = Array.make (last_warning_number + 1) true in
+  let error = Array.make (last_warning_number + 1) false in
+  parse_opt error active active Bsc_warnings.defaults_w;
+  parse_opt error active error Bsc_warnings.defaults_warn_error;
+  {active; error}
+
+let fresh_state () =
+  {current = ref default_state; disabled = ref false; nerrors = ref 0}
+
+(* A compiler request can overlap another request on a different domain. *)
+let key = Request_local.new_key fresh_state
+let request_state () = Domain.DLS.get key
+
+let without_warnings f =
+  Misc.protect_refs [Misc.R ((request_state ()).disabled, true)] f
+
+let backup () = !((request_state ()).current)
+let restore x = (request_state ()).current := x
+let is_active x =
+  let state = request_state () in
+  (not !(state.disabled)) && !(state.current).active.(number x)
+
+let is_error x =
+  let state = request_state () in
+  (not !(state.disabled)) && !(state.current).error.(number x)
+
 let parse_options errflag s =
-  let error = Array.copy !current.error in
-  let active = Array.copy !current.active in
+  let state = backup () in
+  let error = Array.copy state.error in
+  let active = Array.copy state.active in
   parse_opt error active (if errflag then error else active) s;
-  current := {error; active}
+  restore {error; active}
 
 let reset () =
   parse_options false Bsc_warnings.defaults_w;
   parse_options true Bsc_warnings.defaults_warn_error
-
-let () = reset ()
 
 let message = function
   | Deprecated (s, _, _, can_be_automigrated) ->
@@ -290,8 +297,10 @@ let message = function
   | Non_closed_record_pattern s ->
     "the following labels are not bound in this record pattern: " ^ s
     ^ "\nEither bind these labels explicitly or add ', _' to the pattern."
-  | Unused_match -> "this match case is unused."
-  | Unused_pat -> "this sub-pattern is unused."
+  | Unused_match "" -> "this match case is unused."
+  | Unused_match reason -> "this match case is unused.\n  " ^ reason
+  | Unused_pat "" -> "this sub-pattern is unused."
+  | Unused_pat reason -> "this sub-pattern is unused.\n  " ^ reason
   | Unused_argument -> "this argument will not be used by the function."
   | Nonreturning_statement ->
     "This statement does not continue execution; following code is unreachable."
@@ -299,12 +308,6 @@ let message = function
   | Useless_record_with ->
     "All the fields are already explicitly listed in this record. You can \
      remove the `...` spread."
-  | Bad_module_name modname ->
-    "This file's name is potentially invalid. The build systems conventionally \
-     turn a file name into a module name by upper-casing the first letter. "
-    ^ modname ^ " isn't a valid module name.\n"
-    ^ "Note: some build systems might e.g. turn kebab-case into CamelCase \
-       module, which is why this isn't a hard error."
   | All_clauses_guarded ->
     "this pattern-matching is not exhaustive.\n\
      All clauses in this pattern-matching are guarded."
@@ -468,9 +471,7 @@ let sub_locs = function
     [(def, "Definition"); (use, "Expected signature")]
   | _ -> []
 
-let has_warnings = ref false
-
-let nerrors = ref 0
+let nerrors () = !((request_state ()).nerrors)
 
 type reporting_information = {
   number: int;
@@ -483,8 +484,7 @@ let report w =
   match is_active w with
   | false -> `Inactive
   | true ->
-    has_warnings := true;
-    if is_error w then incr nerrors;
+    if is_error w then incr (request_state ()).nerrors;
     `Active
       {
         number = number w;
@@ -495,11 +495,11 @@ let report w =
 
 exception Errors
 
-let reset_fatal () = nerrors := 0
+let reset_fatal () = (request_state ()).nerrors := 0
 
 let check_fatal () =
-  if !nerrors > 0 then (
-    nerrors := 0;
+  if nerrors () > 0 then (
+    reset_fatal ();
     raise Errors)
 
 let descriptions =
@@ -516,17 +516,10 @@ let descriptions =
     (9, "Missing fields in a record pattern.");
     (11, "Redundant case in a pattern matching (unused match case).");
     (12, "Redundant sub-pattern in a pattern-matching.");
-    (17, "Undeclared virtual method.");
-    (18, "Non-principal type.");
-    (19, "Type without principality.");
     (20, "Unused function argument.");
     (21, "Non-returning statement.");
     (22, "Preprocessor warning.");
     (23, "Useless record \"with\" clause.");
-    ( 24,
-      "Bad module name: the source file name is not a valid ReScript module \
-       name." );
-    (25, "Deprecated: now part of warning 8.");
     ( 26,
       "Suspicious unused variable: unused variable that is bound\n\
       \    with \"let\" or \"as\", and doesn't start with an underscore (\"_\")\n\
@@ -539,12 +532,10 @@ let descriptions =
     ( 30,
       "Two labels or constructors of the same name are defined in two\n\
       \    mutually recursive types." );
-    (31, "A module is linked twice in the same executable.");
     (32, "Unused value declaration.");
     (33, "Unused open statement.");
     (34, "Unused type declaration.");
     (35, "Unused for-loop index.");
-    (36, "Unused ancestor variable.");
     (37, "Unused constructor.");
     (38, "Unused extension constructor.");
     (39, "Unused rec flag.");
@@ -552,16 +543,13 @@ let descriptions =
     (43, "Nonoptional label applied as optional.");
     (44, "Open statement shadows an already defined identifier.");
     (45, "Open statement shadows an already defined label or constructor.");
-    (46, "Error in environment variable.");
     (47, "Illegal attribute payload.");
     (49, "Absent cmi file when looking up module alias.");
     (52, "Fragile constant pattern.");
     (53, "Attribute cannot appear in this context");
     (54, "Attribute used more than once on an expression");
-    (55, "Inlining impossible");
     (56, "Unreachable case in a pattern-matching (based on type information).");
     (57, "Ambiguous or-pattern variables under guard");
-    (59, "Assignment to non-mutable value");
     (60, "Unused module declaration");
     (62, "Type constraint on GADT type declaration");
     (101, "Unused bs attributes");
@@ -578,19 +566,20 @@ let descriptions =
   ]
 
 let help_warnings () =
-  List.iter (fun (i, s) -> Printf.printf "%3i %s\n" i s) descriptions;
-  print_endline "  A all warnings";
+  let output = Compiler_request_output.stdout_formatter () in
+  List.iter (fun (i, s) -> Format.fprintf output "%3i %s@." i s) descriptions;
+  Format.fprintf output "  A all warnings@.";
   for i = Char.code 'b' to Char.code 'z' do
     let c = Char.chr i in
     match letter c with
     | [] -> ()
     | [n] ->
-      Printf.printf "  %c Alias for warning %i.\n" (Char.uppercase_ascii c) n
+      Format.fprintf output "  %c Alias for warning %i.@."
+        (Char.uppercase_ascii c) n
     | l ->
-      Printf.printf "  %c warnings %s.\n" (Char.uppercase_ascii c)
+      Format.fprintf output "  %c warnings %s.@." (Char.uppercase_ascii c)
         (String.concat ", " (List.map string_of_int l))
-  done;
-  exit 0
+  done
 
 let loc_to_string (loc : loc) : string =
   Format.sprintf "(%02d,%02d--%02d,%02d)" loc.loc_start.pos_lnum

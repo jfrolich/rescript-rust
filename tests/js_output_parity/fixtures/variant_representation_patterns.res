@@ -73,17 +73,13 @@ let describeSpread = value =>
   | SpreadSix => "six"
   }
 
-@deriving(jsConverter)
 type polyConverted = [
   | @as("x") #polyX
   | @as("hi") #polyHi
   | @as(`tick`) #polyTick
 ]
 
-let convertPoly = value => {
-  let jsValue = polyConvertedToJs(value)
-  (jsValue, polyConvertedFromJs(jsValue))
-}
+let convertPoly = (value: polyConverted) => (value :> string)
 
 @tag("kind")
 type taggedInline =

@@ -17,6 +17,38 @@ pub fn parsetree_runtime_name(label: &LabelDeclaration, arena: &ParseArena) -> O
         .map(|name| name.txt.semantic(arena).to_string())
 }
 
+/// OCaml `Record_runtime.is_array`: whether the fields have the runtime
+/// names "0", "1", ... in declaration order, so the record is represented
+/// as a JavaScript array (`RecordArray`).
+pub fn is_array(labels: &[super::decl::LabelDeclaration]) -> bool {
+    !labels.is_empty()
+        && labels
+            .iter()
+            .enumerate()
+            .all(|(i, lbl)| is_decimal_index(lbl.declaration_name().as_str(), i))
+}
+
+/// `name = string_of_int i` without allocating: canonical decimal digits
+/// (no sign, no leading zeros) spelling exactly `i`.
+fn is_decimal_index(name: &str, i: usize) -> bool {
+    !name.is_empty()
+        && name.bytes().all(|b| b.is_ascii_digit())
+        && (name == "0" || !name.starts_with('0'))
+        && name.parse::<usize>() == Ok(i)
+}
+
+/// The representation typedecl.ml gives a record declaration that is not
+/// unboxed.
+pub fn boxed_representation(
+    labels: &[super::decl::LabelDeclaration],
+) -> super::decl::RecordRepresentation {
+    if is_array(labels) {
+        super::decl::RecordRepresentation::RecordArray
+    } else {
+        super::decl::RecordRepresentation::RecordRegular
+    }
+}
+
 /// OCaml `Record_runtime.check_duplicated_labels`: the first field that
 /// collides with an earlier one, by declared or by runtime name.
 pub fn check_duplicated_labels(

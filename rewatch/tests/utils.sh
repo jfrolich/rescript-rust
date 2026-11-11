@@ -10,15 +10,6 @@ is_windows() {
   [[ $OSTYPE == 'msys'* || $OSTYPE == 'cygwin'* || $OSTYPE == 'win'* ]];
 }
 
-platform_timeout() {
-  local timeout="$1"
-  if is_windows; then
-    echo $((timeout * 4))
-  else
-    echo "$timeout"
-  fi
-}
-
 process_is_running() {
   local pid="$1"
   if is_windows; then
@@ -71,7 +62,7 @@ replace() {
 
 wait_for_pid_gone() {
   local pid="$1"; local timeout
-  timeout=$(platform_timeout "${2:-10}")
+  timeout=${2:-20}
   while process_is_running "$pid" && [ "$timeout" -gt 0 ]; do
     sleep 1
     timeout=$((timeout - 1))
@@ -85,14 +76,40 @@ exit_watcher() {
     watcher_pid=$(cat lib/watch.lock)
   fi
 
-  rm -f lib/watch.lock
+  # Windows refuses to delete a file while another process has it open
+  # without delete sharing, so a watcher reading the lock can make one
+  # attempt fail.
+  local attempts=0
+  until rm -f lib/watch.lock 2> /dev/null; do
+    attempts=$((attempts + 1))
+    if [ "$attempts" -ge 50 ]; then
+      rm -f lib/watch.lock
+      break
+    fi
+    sleep 0.1
+  done
 
   if [ -n "$watcher_pid" ]; then
-    if ! wait_for_pid_gone "$watcher_pid" 10; then
+    if ! wait_for_pid_gone "$watcher_pid" 20; then
       error "Watcher process $watcher_pid did not exit after watch.lock was removed"
+      kill_process "$watcher_pid"
+      rm -f lib/watch.lock
       return 1
     fi
   fi
+}
+
+# Stop a watcher that ignored the shutdown protocol, so that it does not keep
+# running into later tests.
+kill_process() {
+  local pid="$1"
+  if is_windows; then
+    WATCH_PID="$pid" powershell.exe -NoProfile -NonInteractive -Command \
+      'Stop-Process -Id ([int]$env:WATCH_PID) -Force -ErrorAction SilentlyContinue'
+  else
+    kill -9 "$pid" 2> /dev/null
+  fi
+  wait_for_pid_gone "$pid" 5 || true
 }
 
 clear_locks() {
@@ -101,7 +118,7 @@ clear_locks() {
 
 wait_for_file() {
   local file="$1"; local timeout
-  timeout=$(platform_timeout "${2:-30}")
+  timeout=${2:-60}
   while [ "$timeout" -gt 0 ]; do
     [ -f "$file" ] && return 0
     sleep 1
@@ -112,7 +129,7 @@ wait_for_file() {
 
 wait_for_pattern() {
   local file="$1"; local pattern="$2"; local timeout
-  timeout=$(platform_timeout "${3:-30}")
+  timeout=${3:-60}
   while [ "$timeout" -gt 0 ]; do
     grep -q "$pattern" "$file" 2>/dev/null && return 0
     sleep 1
@@ -123,7 +140,7 @@ wait_for_pattern() {
 
 wait_for_pattern_count() {
   local file="$1"; local pattern="$2"; local expected="$3"; local timeout
-  timeout=$(platform_timeout "${4:-30}")
+  timeout=${4:-60}
   while [ "$timeout" -gt 0 ]; do
     local current_count
     current_count=$(grep -c "$pattern" "$file" 2>/dev/null || true)
@@ -137,7 +154,7 @@ wait_for_pattern_count() {
 
 wait_for_pattern_gone() {
   local file="$1"; local pattern="$2"; local timeout
-  timeout=$(platform_timeout "${3:-30}")
+  timeout=${3:-60}
   while [ "$timeout" -gt 0 ]; do
     if [ -f "$file" ] && ! grep -q "$pattern" "$file" 2>/dev/null; then
       return 0
@@ -150,7 +167,7 @@ wait_for_pattern_gone() {
 
 wait_for_file_gone() {
   local file="$1"; local timeout
-  timeout=$(platform_timeout "${2:-30}")
+  timeout=${2:-60}
   while [ "$timeout" -gt 0 ]; do
     [ ! -f "$file" ] && return 0
     sleep 1

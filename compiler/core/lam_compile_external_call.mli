@@ -29,8 +29,22 @@ val ocaml_to_js_eff :
   Js_of_lam_variant.arg_expression * J.expression list
 (** Compile ocaml external function call to JS IR. *)
 
+val hold_arg :
+  arg_label:External_arg_spec.label_noname ->
+  arg_type:External_arg_spec.attr ->
+  J.block * J.expression ->
+  J.block * J.expression
+(** Binds a compiled argument, after its statements, to a temporary unless
+    [ocaml_to_js_eff] can read it in place: it reads a polymorphic variant
+    argument twice, or inside a function it builds *)
+
+val hold_args :
+  External_arg_spec.params ->
+  (J.block * J.expression) list ->
+  (J.block * J.expression) list
+(** [hold_arg] for the compiled arguments of a call to an external *)
+
 val translate_ffi :
-  ?transformed_jsx:bool ->
   Lam_compile_context.t ->
   External_arg_spec.params ->
   prim_name:string ->
@@ -42,3 +56,6 @@ val translate_ffi :
     Attributes starting with `js` are reserved
     examples: "variadic"
 *)
+
+val jsx_callee : External_ffi_types.external_decl -> J.expression
+(** The function a JSX external refers to, for [J.Jsx] *)

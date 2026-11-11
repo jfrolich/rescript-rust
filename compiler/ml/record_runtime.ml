@@ -22,6 +22,15 @@ let declaration_name (lbl : Types.label_declaration) =
   | Some name -> name
   | None -> Ident.name lbl.ld_id
 
+(* A record whose fields have the runtime names "0", "1", ... in declaration
+   order is represented as a JavaScript array ([Record_array]). *)
+let is_array (lbls : Types.label_declaration list) =
+  let rec loop i = function
+    | [] -> true
+    | lbl :: rest -> declaration_name lbl = string_of_int i && loop (i + 1) rest
+  in
+  lbls <> [] && loop 0 lbls
+
 (* Two fields collide when they end up with the same runtime name, which a
    rename can cause between fields whose declared names differ. *)
 let rec check_duplicated_labels_aux (lbls : Parsetree.label_declaration list)
@@ -29,9 +38,9 @@ let rec check_duplicated_labels_aux (lbls : Parsetree.label_declaration list)
   match lbls with
   | [] -> None
   | ({pld_name = {txt}} as lbl) :: rest -> (
-    if Set_string.mem coll txt && txt <> "..." then Some lbl.pld_name
+    if Set_string.mem txt coll && txt <> "..." then Some lbl.pld_name
     else
-      let coll_with_lbl = Set_string.add coll txt in
+      let coll_with_lbl = Set_string.add txt coll in
       match lbl.pld_runtime_name with
       | None -> check_duplicated_labels_aux rest coll_with_lbl
       | Some {txt; loc} ->
@@ -39,9 +48,9 @@ let rec check_duplicated_labels_aux (lbls : Parsetree.label_declaration list)
         (* Checked against the fields seen before this one rather than against
            [coll_with_lbl], so that [@as("x") x] renames a field to the name it
            already has. *)
-        if Set_string.mem coll name then Some {Asttypes.txt = name; loc}
+        if Set_string.mem name coll then Some {Asttypes.txt = name; loc}
         else
-          check_duplicated_labels_aux rest (Set_string.add coll_with_lbl name))
+          check_duplicated_labels_aux rest (Set_string.add name coll_with_lbl))
 
 (* A field has one runtime name, so only the first [@as] naming it is taken
    out; a second one is left behind and reported here. *)

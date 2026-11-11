@@ -40,6 +40,7 @@ let exists_var (p : Ident.t -> bool) (l : Lambda.t) : bool =
     | Lassign (id, e) -> p id || hit e
     | Lstaticcatch (e1, _, e2)
     | Ltrywith (e1, _, e2)
+    | Ltryfinally (e1, e2)
     | Lsequence (e1, e2)
     | Lwhile (e1, e2)
     | Lfor_of (_, e1, e2)
@@ -63,27 +64,38 @@ let exists_var (p : Ident.t -> bool) (l : Lambda.t) : bool =
   in
   hit l
 
-let preprocess_deps (groups : bindings) : _ * Ident.t array * Vec_int.t array =
-  let len = List.length groups in
-  let domain : _ Ordered_hash_map_local_ident.t =
-    Ordered_hash_map_local_ident.create len
+(* The bindings of a group as arrays, and for each binding the indices of
+   the bindings its body refers to, in binding order. *)
+let preprocess_deps (groups : bindings) :
+    Ident.t array * Lambda.t array * int array array =
+  let ids = Array.of_list (List.map fst groups) in
+  let lams = Array.of_list (List.map snd groups) in
+  let len = Array.length ids in
+  let index = Hash_ident.create len in
+  Array.iteri (fun i id -> Hash_ident.replace index id i) ids;
+  (* [seen.(j) = i] once body [i] has referred to binding [j]: one array
+     for all bodies, so finding the edges costs the size of the bodies,
+     not [len] per body *)
+  let seen = Array.make len (-1) in
+  let edges i lam =
+    let found = ref [] and count = ref 0 in
+    (* stop walking [lam] once it has referred to every binding *)
+    ignore
+      (exists_var
+         (fun id ->
+           match Hash_ident.find_opt index id with
+           | Some j when seen.(j) <> i ->
+             seen.(j) <- i;
+             found := j :: !found;
+             incr count;
+             !count = len
+           | Some _ | None -> false)
+         lam);
+    let edges = Array.of_list !found in
+    Array.sort Int.compare edges;
+    edges
   in
-  let mask = Hash_set_ident_mask.create len in
-  Ext_list.iter groups (fun (x, lam) ->
-      Ordered_hash_map_local_ident.add domain x lam;
-      Hash_set_ident_mask.add_unmask mask x);
-  let int_mapping = Ordered_hash_map_local_ident.to_sorted_array domain in
-  let node_vec =
-    Array.init (Array.length int_mapping) (fun _ -> Vec_int.empty ())
-  in
-  Ordered_hash_map_local_ident.iter domain (fun _id lam key_index ->
-      let base_key = node_vec.(key_index) in
-      ignore (exists_var (Hash_set_ident_mask.mask_and_check_all_hit mask) lam);
-      Hash_set_ident_mask.iter_and_unmask mask (fun ident hit ->
-          if hit then
-            let key = Ordered_hash_map_local_ident.rank domain ident in
-            Vec_int.push base_key key));
-  (domain, int_mapping, node_vec)
+  (ids, lams, Array.mapi edges lams)
 
 let bind_rec (groups : bindings) (body : Lambda.t) : Lambda.t =
   match groups with
@@ -91,25 +103,18 @@ let bind_rec (groups : bindings) (body : Lambda.t) : Lambda.t =
     if exists_var (Ident.same id) bind then letrec groups body
     else let_ Strict id bind body
   | _ ->
-    let domain, int_mapping, node_vec = preprocess_deps groups in
-    let clusters = Ext_scc.graph node_vec in
-    if Int_vec_vec.length clusters <= 1 then letrec groups body
+    let ids, lams, node_edges = preprocess_deps groups in
+    let clusters = Ext_scc.graph node_edges in
+    if List.compare_length_with clusters 1 <= 0 then letrec groups body
     else
-      Int_vec_vec.fold_right
-        (fun (v : Vec_int.t) acc ->
+      List.fold_right
+        (fun (cluster : int array) acc ->
           let bindings =
-            Vec_int.map_into_list
-              (fun i ->
-                let id = int_mapping.(i) in
-                let lam = Ordered_hash_map_local_ident.find_value domain id in
-                (id, lam))
-              v
+            List.map (fun i -> (ids.(i), lams.(i))) (Array.to_list cluster)
           in
-          match bindings with
-          | [(id, lam)] ->
-            let base_key = Ordered_hash_map_local_ident.rank domain id in
-            if Int_vec_util.mem base_key node_vec.(base_key) then
-              letrec bindings acc
-            else let_ Strict id lam acc
+          match cluster with
+          | [|i|] ->
+            if Array.mem i node_edges.(i) then letrec bindings acc
+            else let_ Strict ids.(i) lams.(i) acc
           | _ -> letrec bindings acc)
         clusters body

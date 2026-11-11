@@ -151,7 +151,7 @@ let rec pattern_variables : Typedtree.pattern -> Ident.t list =
   | Tpat_any -> []
   | Tpat_var (id, _) -> [id]
   | Tpat_alias (pat, id, _) -> id :: pattern_variables pat
-  | Tpat_constant _ -> []
+  | Tpat_constant _ | Tpat_interval _ -> []
   | Tpat_tuple pats -> List.concat (List.map pattern_variables pats)
   | Tpat_construct (_, _, pats) -> List.concat (List.map pattern_variables pats)
   | Tpat_variant (_, Some pat, _) -> pattern_variables pat
@@ -163,6 +163,10 @@ let rec pattern_variables : Typedtree.pattern -> Ident.t list =
     match rest with
     | None -> fields
     | Some {rest_ident; _} -> rest_ident :: fields)
+  | Tpat_dict entries ->
+    List.concat_map
+      (fun {Typedtree.tdp_pattern} -> pattern_variables tdp_pattern)
+      entries
   | Tpat_array pats -> List.concat (List.map pattern_variables pats)
   | Tpat_or (l, r, _) -> pattern_variables l @ pattern_variables r
 
@@ -202,14 +206,16 @@ let rec classify_expression : Typedtree.expression -> sd =
   | Texp_ident _ | Texp_for _ | Texp_for_of _ | Texp_for_await_of _
   | Texp_constant _ | Texp_tuple _ | Texp_array _ | Texp_construct _
   | Texp_variant _ | Texp_record _ | Texp_object_literal _ | Texp_setfield _
-  | Texp_while _ | Texp_pack _ | Texp_function _ | Texp_extension_constructor _
-  | Texp_break | Texp_continue ->
+  | Texp_while _ | Texp_pack _ | Texp_function _ | Texp_break | Texp_continue ->
     Static
   | Texp_apply {funct = {exp_desc = Texp_ident (_, _, vd)}} when is_ref vd ->
     Static
-  | Texp_apply _ | Texp_match _ | Texp_ifthenelse _ | Texp_object_get _
-  | Texp_object_set _ | Texp_field _ | Texp_assert _ | Texp_try _
-  | Texp_tagged_template _ | Texp_template _ ->
+  (* A dict literal is built by the [Pmakedict] and [Pdict_spread] primitives,
+     and an array or list literal with spreads by [Parray_spread] or
+     [Plist_spread], see [Translcore] *)
+  | Texp_apply _ | Texp_dict _ | Texp_spread _ | Texp_match _
+  | Texp_ifthenelse _ | Texp_object_get _ | Texp_object_set _ | Texp_field _
+  | Texp_assert _ | Texp_try _ | Texp_tagged_template _ | Texp_template _ ->
     Dynamic
 
 let rec expression : Env.env -> Typedtree.expression -> Use.t =
@@ -267,6 +273,12 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
   | Texp_template {values} -> Use.guard (list expression env values)
   | Texp_tuple exprs -> Use.guard (list expression env exprs)
   | Texp_array exprs -> Use.guard (list expression env exprs)
+  | Texp_dict entries ->
+    let entry env = function
+      | Tdict_entry (_, e) | Tdict_spread e -> expression env e
+    in
+    Use.inspect (list entry env entries)
+  | Texp_spread (_, parts) -> Use.inspect (list expression env parts)
   | Texp_construct (_, desc, exprs) ->
     let access_constructor =
       match desc.cstr_kind with
@@ -282,13 +294,10 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
     let use =
       match rep with
       | Record_unboxed _ -> fun x -> x
-      | Record_float_unused -> assert false
-      | Record_regular | Record_inlined _ | Record_extension -> Use.guard
+      | Record_regular | Record_array | Record_inlined _ | Record_extension ->
+        Use.guard
     in
-    let field env = function
-      | _, Kept _, _ -> Use.empty
-      | _, Overridden (_, e), _ -> expression env e
-    in
+    let field env (_, _, e) = expression env e in
     Use.join (use (array field env es)) (option expression env eo)
   | Texp_ifthenelse (cond, ifso, ifnot) ->
     Use.(
@@ -310,10 +319,15 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
   | Texp_letexception (_, e) -> expression env e
   | Texp_assert e -> Use.inspect (expression env e)
   | Texp_pack m -> modexp env m
-  | Texp_try (e, cases) ->
+  | Texp_try (e, cases, finally) ->
     (* This is more permissive than the old check. *)
     let case env {Typedtree.c_rhs} = expression env c_rhs in
-    Use.join (expression env e) (list case env cases)
+    let finally =
+      match finally with
+      | None -> Use.empty
+      | Some finally -> Use.discard (expression env finally)
+    in
+    Use.join (Use.join (expression env e) (list case env cases)) finally
   | Texp_function {params; body} ->
     let env =
       List.fold_left
@@ -327,7 +341,6 @@ let rec expression : Env.env -> Typedtree.expression -> Use.t =
         env params
     in
     Use.delay (expression env body)
-  | Texp_extension_constructor _ -> Use.empty
 
 and option : 'a. (Env.env -> 'a -> Use.t) -> Env.env -> 'a option -> Use.t =
  fun f env -> value_default (f env) ~default:Use.empty
@@ -455,11 +468,12 @@ and is_destructuring_pattern : Typedtree.pattern -> bool =
   | Tpat_any -> false
   | Tpat_var (_, _) -> false
   | Tpat_alias (pat, _, _) -> is_destructuring_pattern pat
-  | Tpat_constant _ -> true
+  | Tpat_constant _ | Tpat_interval _ -> true
   | Tpat_tuple _ -> true
   | Tpat_construct (_, _, _) -> true
   | Tpat_variant _ -> true
   | Tpat_record (_, _, _) -> true
+  | Tpat_dict _ -> true
   | Tpat_array _ -> true
   | Tpat_or (l, r, _) ->
     is_destructuring_pattern l || is_destructuring_pattern r
@@ -483,10 +497,10 @@ let check_recursive_bindings valbinds =
   in
   Ext_list.iter valbinds (fun {vb_expr} ->
       match vb_expr.exp_desc with
-      | Texp_record
-          {fields = [|(_, Overridden (_, {exp_desc = Texp_function _}), _)|]}
-      | Texp_function _ ->
+      | Texp_record {fields = [|(lbl, _, {exp_desc = Texp_function _})|]}
+        when Array.length lbl.lbl_all = 1 ->
         ()
+      | Texp_function _ -> ()
       (*TODO: add uncurried function too*)
       | _ -> check_recursive_expression ids vb_expr)
 

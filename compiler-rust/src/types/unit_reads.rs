@@ -99,7 +99,7 @@ impl Collector<'_> {
                     stack.push(*body);
                     stack.extend(ctx.type_list(vars).iter());
                 }
-                TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+                TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) | TypeDesc::Tnil => {}
                 TypeDesc::Tvariant(row) => {
                     let row = &ctx.row_desc(row);
                     if let Some((path, _)) = &row.row_name {
@@ -145,13 +145,11 @@ impl<'a> TastIterator<'a> for Collector<'a> {
             ExpressionDesc::Texp_field(_, _, ld) | ExpressionDesc::Texp_setfield(_, _, ld, _) => {
                 self.label(ld)
             }
-            ExpressionDesc::Texp_record { fields, .. }
-            | ExpressionDesc::Texp_record_sparse { fields, .. } => {
-                for (_, ld, _, _) in self.ta.record_fields(*fields) {
+            ExpressionDesc::Texp_record { fields, .. } => {
+                for (ld, _, _) in self.ta.record_fields(*fields) {
                     self.label(ld);
                 }
             }
-            ExpressionDesc::Texp_extension_constructor(_, path) => self.path(path, Kind::Extension),
             _ => {}
         }
         self.ty(e.exp_type);

@@ -213,6 +213,24 @@ for await /* c0 */ x /* c1 */ of /* c2 */ xs /* c3 */ {
 | /* before */ InfiniteLoop2 /* after */ => /* here */ () /* trailing */
 } // trailing
 
+/* c0 */ try /* c1 */ {
+  // in body
+  dangerous() /* c2 */
+} /* c3 */ finally {
+  // in finally
+  cleanup() /* c4 */
+} // trailing finally
+
+try {
+  dangerous()
+} catch {
+// Above
+| /* before */ Exit /* after */ => /* here */ () /* trailing */
+} finally {
+  /* leading */ cleanup() // trailing cleanup
+  // last
+}
+
 // Pexp_fun
 let f = (/* c0 */ a /* c1 */, /* c2 */ b /* c3 */) : /* c4 */int  /* c5 */ => /* c6 */ 20 /* c7 */
 let multiply = (/* c0 */ m1 /* c1 */, /* c2 */ m2 /* c3 */) => {
@@ -353,4 +371,23 @@ let c = {
   ...M.a,
   // foo
   bar: "foo"
+}
+
+// dict literals with spreads
+let d = dict{
+  // before the spread
+  ...base,
+  // first row after a spread
+  "a": 1,
+}
+
+let e = dict{
+  // first row before a spread
+  "x": 0,
+  "y": 0, // trailing
+  ...base,
+  // first row of a run
+  "a": 1,
+  "b": 2, // trailing
+  // after the last row
 }

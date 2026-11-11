@@ -43,6 +43,16 @@ let list{/* inside */} = list{}
 let /* before */ list{/* a1 */ a /* a2 */, /* b1 */ b /* b2 */} /* after */ = list{1, 2}
 let /* before */ list{/* a1 */ a /* a2 */, /* b1 */ ...b /* b2 */} /* after */ = list{1, 2}
 
+// A list pattern that is only a spread is the spread's operand
+let list{/* d */ ...r} = list{1, 2}
+let list{...r /* after */} = list{1, 2}
+let list{/* d1 */ /* d2 */ ...list{/* e */ ...r}} = list{1, 2}
+let f = (list{/* d */ ...r}) => r
+let f = x =>
+  switch x {
+  | list{/* d */ ...r} => r
+  }
+
 // Ppat_record
 let /* before */ {/* c0 */ name /* c1 */, /* c2 */ age /* c3 */} /* after */ = {
   name: "steve",
@@ -92,3 +102,20 @@ let /* before */ %raw("eval(gc())") /* after */ = stuff
 
 // Ppat_interval
 let /* c0 */ 'a' .. 'z' /* c1 */ = x
+
+// Ppat_dict
+let f = d =>
+  switch d {
+  | /* c0 */ dict{/* c1 */ "a" /* c2 */: /* c3 */ b /* c4 */, "b": ?/* c5 */ c} /* c6 */ => b
+  | dict{"a": /* c7 */ a} => a
+  | dict{/* empty */} => 0
+  | _ => 1
+  }
+
+// Ppat_variant_spread and Ppat_type
+let g = x =>
+  switch x {
+  | /* c0 */ .../* c1 */ t /* c2 */ => 0
+  | #.../* c3 */ M.t /* c4 */ as y => 0
+  | _ => 1
+  }

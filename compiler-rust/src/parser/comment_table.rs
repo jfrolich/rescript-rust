@@ -456,6 +456,8 @@ pub enum Node<'a> {
     Expression(&'a Expression),
     /// An expression stored in the arena.
     ExpressionIdx(ExprIdx),
+    /// A JSX child, whose braces may hold comments outside the expression.
+    JsxChild(ExprIdx),
     /// A record expression field: `label: expr`.
     ExprRecordRow(&'a Loc<LidentIdx>, ExprIdx),
     /// An extension constructor (`exception` or `+=` constructor).
@@ -478,6 +480,8 @@ pub enum Node<'a> {
     PatternIdx(PatIdx),
     /// A record pattern field: `label: pat`.
     PatternRecordRow(&'a Loc<LidentIdx>, PatIdx),
+    /// A dict pattern entry: `"key": pat`.
+    PatternDictRow(&'a crate::parser::ast::DictPatternEntry),
     /// The rest (`...`) part of a record pattern.
     PatternRecordRest(&'a crate::parser::ast::RecordPatRest),
     /// A field of a polymorphic variant type.
@@ -518,7 +522,7 @@ impl<'a> Node<'a> {
                 Some(braces_loc) => braces_loc,
                 None => e.pexp_loc,
             },
-            Node::ExpressionIdx(idx) => {
+            Node::ExpressionIdx(idx) | Node::JsxChild(idx) => {
                 let e = arena.get_expr(*idx);
                 match parsetree_viewer::process_braces(arena, e).0 {
                     Some(braces_loc) => braces_loc,
@@ -554,6 +558,11 @@ impl<'a> Node<'a> {
             Node::Pattern(p) => p.ppat_loc,
             Node::PatternIdx(idx) => arena.get_pat(*idx).ppat_loc,
             Node::PatternRecordRest(rest) => rest.rest_loc,
+            Node::PatternDictRow(row) => {
+                let start = *arena.loc_start(row.pdp_key.loc);
+                let end = *arena.loc_end(arena.get_pat(row.pdp_pattern).ppat_loc);
+                arena.from_location(&Location::from_positions(start, end))
+            }
             Node::PatternRecordRow(li, pat_idx) => {
                 let p = arena.get_pat(*pat_idx);
                 // For punned patterns, li.loc and p.ppat_loc are the same
@@ -754,6 +763,32 @@ pub fn walk_signature(
     walk_list(&nodes, t, comments, arena);
 }
 
+/// Walks the scrutinee of a switch or the body of a try, and returns the
+/// comments after it (res_comments_table.ml `walk_switch_or_try_head`).
+fn walk_switch_or_try_head(
+    expr_idx: ExprIdx,
+    t: &mut CommentTable,
+    comments: Vec<Comment>,
+    arena: &mut ParseArena,
+) -> Vec<Comment> {
+    // Safety: arena is append-only, expression won't be invalidated
+    let expr = arena.get_expr(expr_idx).clone();
+    let (before, inside, after) = partition_by_loc(comments, expr.pexp_loc, arena);
+    let after = if is_block_expr(arena, &expr) {
+        let (after_expr, rest) = partition_adjacent_trailing(expr.pexp_loc, after, arena);
+        let combined: Vec<Comment> = before.into_iter().chain(inside).chain(after_expr).collect();
+        walk_expression(&expr, t, combined, arena);
+        rest
+    } else {
+        t.attach_leading(expr.pexp_loc, before, arena);
+        walk_expression(&expr, t, inside, arena);
+        after
+    };
+    let (after_expr, rest) = partition_adjacent_trailing(expr.pexp_loc, after, arena);
+    t.attach_trailing(expr.pexp_loc, after_expr, arena);
+    rest
+}
+
 /// Walk a list of nodes.
 fn walk_list(
     nodes: &[Node<'_>],
@@ -764,13 +799,18 @@ fn walk_list(
     walk_list_impl(nodes, t, comments, None, arena);
 }
 
+/// The previous node of `walk_list`: its location, and its expression when it
+/// is a JSX child.
+type PrevNode = (LocIdx, Option<ExprIdx>);
+
 fn walk_list_impl(
     nodes: &[Node<'_>],
     t: &mut CommentTable,
     comments: Vec<Comment>,
-    prev_loc: Option<LocIdx>,
+    prev_node: Option<PrevNode>,
     arena: &mut ParseArena,
 ) {
+    let prev_loc = prev_node.map(|(loc, _)| loc);
     if comments.is_empty() {
         return;
     }
@@ -790,12 +830,33 @@ fn walk_list_impl(
     let prev_loc_resolved = prev_loc.map(|l| arena.to_location(l));
     let curr_loc_resolved = arena.to_location(curr_loc);
 
-    match &prev_loc {
-        None => {
+    match (&prev_loc, prev_node.and_then(|(_, child)| child)) {
+        (None, _) => {
             // First node, all leading comments attach here
             t.attach_leading(curr_loc, leading, arena);
         }
-        Some(prev_loc_idx) => {
+        (Some(prev_loc_idx), Some(child)) => {
+            // Keep standalone containers together, even when they span lines.
+            let child = arena.get_expr(child);
+            let child_may_trail = !matches!(
+                &child.pexp_desc,
+                ExpressionDesc::Pexp_jsx_element(_) | ExpressionDesc::Pexp_braces(_)
+            );
+            let child_end_line = arena.loc_end(child.pexp_loc).line;
+            let split = leading
+                .iter()
+                .position(|comment| {
+                    !(comment.jsx_container().is_none()
+                        && child_may_trail
+                        && comment.loc().loc_start.line == child_end_line)
+                })
+                .unwrap_or(leading.len());
+            let mut leading = leading;
+            let before_curr = leading.split_off(split);
+            t.attach_trailing(*prev_loc_idx, leading, arena);
+            t.attach_leading(curr_loc, before_curr, arena);
+        }
+        (Some(prev_loc_idx), None) => {
             let prev_loc_resolved = prev_loc_resolved.as_ref().unwrap();
             // Check if on same line
             if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
@@ -814,7 +875,11 @@ fn walk_list_impl(
     }
 
     walk_node(node, t, inside, arena);
-    walk_list_impl(rest_nodes, t, trailing, Some(curr_loc), arena);
+    let child = match node {
+        Node::JsxChild(child) => Some(*child),
+        _ => None,
+    };
+    walk_list_impl(rest_nodes, t, trailing, Some((curr_loc, child)), arena);
 }
 
 /// Walk a node and its children.
@@ -842,6 +907,16 @@ fn walk_node(
             // Safety: arena is append-only, expression won't be invalidated
             let e = arena.get_expr(*idx).clone();
             walk_expression(&e, t, comments, arena);
+        }
+        Node::JsxChild(idx) => {
+            // Braces may contain comments outside the expression itself. Keep
+            // those on the child, rather than moving them into record fields
+            // or call args.
+            let e = arena.get_expr(*idx).clone();
+            let (leading, inside, trailing) = partition_by_loc(comments, e.pexp_loc, arena);
+            t.attach_leading(e.pexp_loc, leading, arena);
+            walk_expression(&e, t, inside, arena);
+            t.attach_trailing(e.pexp_loc, trailing, arena);
         }
         Node::ExprRecordRow(li, expr_idx) => {
             // Safety: arena is append-only, expression won't be invalidated
@@ -871,6 +946,20 @@ fn walk_node(
             walk_pattern_record_row(li, &p, t, comments, arena);
         }
         Node::PatternRecordRest(rest) => walk_pattern_record_rest(rest, t, comments, arena),
+        Node::PatternDictRow(row) => {
+            // Unlike a record row, a dict row is never punned: `dict{"a": a}`
+            // keeps its key, so comments around the key stay on the key.
+            let key_loc = row.pdp_key.loc;
+            let (before_key, after_key) = partition_leading_trailing(comments, key_loc, arena);
+            t.attach_leading(key_loc, before_key, arena);
+            let (after_key, rest) = partition_adjacent_trailing(key_loc, after_key, arena);
+            t.attach_trailing(key_loc, after_key, arena);
+            let pattern = arena.get_pat(row.pdp_pattern).clone();
+            let (leading, inside, trailing) = partition_by_loc(rest, pattern.ppat_loc, arena);
+            t.attach_leading(pattern.ppat_loc, leading, arena);
+            walk_pattern(&pattern, t, inside, arena);
+            t.attach_trailing(pattern.ppat_loc, trailing, arena);
+        }
         Node::RowField(rf) => walk_row_field(rf, t, comments, arena),
         Node::SignatureItem(si) => walk_signature_item(si, t, comments, arena),
         Node::StructureItem(si) => walk_structure_item(si, t, comments, arena),
@@ -921,6 +1010,12 @@ fn walk_structure_item(
             let (ref ext, _) = **inner;
             walk_extension(ext, t, comments, arena)
         }
+        StructureItemDesc::Pstr_raw(raw) => walk_extension(
+            &crate::ast_raw::to_extension(arena, "raw", raw.name_loc, &raw.source),
+            t,
+            comments,
+            arena,
+        ),
         StructureItemDesc::Pstr_include(id) => walk_include_declaration(id, t, comments, arena),
         StructureItemDesc::Pstr_exception(ec) => walk_extension_constructor(ec, t, comments, arena),
         StructureItemDesc::Pstr_typext(te) => walk_type_extension(te, t, comments, arena),
@@ -1591,6 +1686,42 @@ fn walk_expression(
     }
 
     match &expr.pexp_desc {
+        ExpressionDesc::Pexp_dict(entries) if parsetree_viewer::dict_has_spread(entries) => {
+            let parts = parsetree_viewer::dict_expr_parts(arena, expr.pexp_loc, entries);
+            // The rows themselves, not the array of each run of rows, which
+            // the printer does not print comments for.
+            let part_exprs: Vec<Expression> = parts
+                .into_iter()
+                .flat_map(|part| match part {
+                    parsetree_viewer::DictExprPart::Rows(rows) => match &rows.pexp_desc {
+                        ExpressionDesc::Pexp_array(items) => arena
+                            .expr_list(*items)
+                            .iter()
+                            .map(|row| arena.get_expr(*row).clone())
+                            .collect(),
+                        _ => vec![rows],
+                    },
+                    parsetree_viewer::DictExprPart::Spread(spread) => {
+                        vec![arena.get_expr(spread).clone()]
+                    }
+                })
+                .collect();
+            let nodes: Vec<Node<'_>> = part_exprs.iter().map(Node::Expression).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
+        ExpressionDesc::Pexp_dict(entries) => {
+            let rows = parsetree_viewer::dict_expr_rows(arena, expr.pexp_loc, entries);
+            walk_list(&[Node::Expression(&rows)], t, comments, arena);
+        }
+        // res_comments_table.ml `Pexp_spread`: the items and spreads in order.
+        ExpressionDesc::Pexp_spread(_, elements) => {
+            let nodes: Vec<Node<'_>> = arena
+                .spread_element_list(*elements)
+                .iter()
+                .map(|element| Node::ExpressionIdx(element.expr()))
+                .collect();
+            walk_list(&nodes, t, comments, arena);
+        }
         ExpressionDesc::Pexp_braces(braces) if is_block_expr_idx(arena, braces.expr) => {
             let inner = arena.get_expr(braces.expr).clone();
             walk_expression(&inner, t, comments, arena);
@@ -1736,6 +1867,24 @@ fn walk_expression(
             walk_list(&nodes, t, comments, arena);
         }
         ExpressionDesc::Pexp_extension(ext) => walk_extension(ext, t, comments, arena),
+        ExpressionDesc::Pexp_raw(raw) => walk_extension(
+            &crate::ast_raw::to_extension(
+                arena,
+                crate::ast_raw::extension_name(raw.kind),
+                raw.name_loc,
+                &raw.source,
+            ),
+            t,
+            comments,
+            arena,
+        ),
+        // res_comments_table.ml `Pexp_todo`: walked as the extension.
+        ExpressionDesc::Pexp_todo(todo) => walk_extension(
+            &crate::ast_todo::to_extension(arena, todo.name_loc, todo.message),
+            t,
+            comments,
+            arena,
+        ),
         ExpressionDesc::Pexp_letexception(inner) => {
             let (ref ext, ref body_idx) = **inner;
             // Safety: arena is append-only, expression won't be invalidated
@@ -2175,31 +2324,45 @@ fn walk_expression(
             walk_module_expr(&mod_expr, t, inside, arena);
             t.attach_trailing(mod_expr.pmod_loc, after, arena);
         }
-        ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-            let (ref match_expr_idx, ref cases) = *inner;
-            // Safety: arena is append-only, expression won't be invalidated
-            let match_expr = arena.get_expr(*match_expr_idx).clone();
-            let (before, inside, after) = partition_by_loc(comments, match_expr.pexp_loc, arena);
-
-            let after = if is_block_expr(arena, &match_expr) {
-                let (after_expr, rest) =
-                    partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
-                let combined: Vec<Comment> =
-                    before.into_iter().chain(inside).chain(after_expr).collect();
-                walk_expression(&match_expr, t, combined, arena);
-                rest
-            } else {
-                t.attach_leading(match_expr.pexp_loc, before, arena);
-                walk_expression(&match_expr, t, inside, arena);
-                after
-            };
-
-            let (after_expr, rest) = partition_adjacent_trailing(match_expr.pexp_loc, after, arena);
-            t.attach_trailing(match_expr.pexp_loc, after_expr, arena);
-
+        ExpressionDesc::Pexp_match((match_expr_idx, cases))
+        | ExpressionDesc::Pexp_try((match_expr_idx, cases, None)) => {
+            let rest = walk_switch_or_try_head(*match_expr_idx, t, comments, arena);
             let cases = arena.case_list(*cases).to_vec();
             let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
             walk_list(&nodes, t, rest, arena);
+        }
+        ExpressionDesc::Pexp_try((try_expr_idx, cases, Some(finally_idx))) => {
+            // Safety: arena is append-only, expression won't be invalidated
+            let finally = arena.get_expr(*finally_idx).clone();
+            let (before_finally, inside, after) =
+                partition_by_loc(comments, finally.pexp_loc, arena);
+            let rest = walk_switch_or_try_head(*try_expr_idx, t, before_finally, arena);
+            // The finally location starts at its first expression, so comments
+            // between the cases and that expression lead the finally block.
+            let cases = arena.case_list(*cases).to_vec();
+            let rest = match (cases.first(), cases.last()) {
+                (Some(first), Some(last)) => {
+                    let mut cases_loc = arena.to_location(arena.get_pat(first.pc_lhs).ppat_loc);
+                    cases_loc.loc_end = arena.to_location(arena.get_expr(last.pc_rhs).pexp_loc).loc_end;
+                    let cases_loc = arena.from_location(&cases_loc);
+                    let (before, inside, after) = partition_by_loc(rest, cases_loc, arena);
+                    let (after_cases, rest) = partition_adjacent_trailing(cases_loc, after, arena);
+                    let nodes: Vec<Node<'_>> = cases.iter().map(Node::Case).collect();
+                    let combined: Vec<Comment> =
+                        before.into_iter().chain(inside).chain(after_cases).collect();
+                    walk_list(&nodes, t, combined, arena);
+                    rest
+                }
+                _ => rest,
+            };
+            t.attach_leading(finally.pexp_loc, rest, arena);
+            if is_block_expr(arena, &finally) {
+                let combined: Vec<Comment> = inside.into_iter().chain(after).collect();
+                walk_expression(&finally, t, combined, arena);
+            } else {
+                walk_expression(&finally, t, inside, arena);
+                t.attach_trailing(finally.pexp_loc, after, arena);
+            }
         }
         ExpressionDesc::Pexp_apply(inner) => {
             let PexpApply { ref funct, .. } = *inner;
@@ -2271,96 +2434,6 @@ fn walk_expression(
                             }
                         }
                     }
-                }
-            }
-
-            // Dictionary spreads are encoded as a call to
-            // `Primitive_dict.spread`. Walk the reconstructed source parts so
-            // comments attach to the spread expressions and literal rows that
-            // the printer emits, rather than to the synthetic call.
-            if let Some(parts) = parsetree_viewer::collect_spread_dict_expr_parts(arena, expr) {
-                let source_parts: Vec<Expression> = parts
-                    .into_iter()
-                    .map(|part| match part {
-                        parsetree_viewer::DictExprPart::Rows(rows)
-                        | parsetree_viewer::DictExprPart::Spread(rows) => rows.clone(),
-                    })
-                    .collect();
-                let nodes: Vec<Node<'_>> = source_parts.iter().map(Node::Expression).collect();
-                walk_list(&nodes, t, comments, arena);
-                return;
-            }
-
-            // Special case for Primitive_dict.make (dict{} syntax)
-            // Match OCaml: just walk the key_values array expression
-            if args.len() == 1 {
-                if let ExpressionDesc::Pexp_ident(ident) = &funct_expr.pexp_desc {
-                    if let Longident::Ldot(parent, method_idx) = arena.get_longident(ident.txt) {
-                        if arena.get_string(*method_idx) == "make" {
-                            if let Longident::Lident(module_idx) = parent.as_ref() {
-                                if arena.get_string(*module_idx) == "Primitive_dict" {
-                                    let (_, key_values_idx) = &args[0];
-                                    let key_values = arena.get_expr(*key_values_idx);
-                                    // Check if key_values is a tuple array (matching OCaml's is_tuple_array)
-                                    if parsetree_viewer::is_tuple_array(arena, key_values) {
-                                        // Walk the key_values expression directly
-                                        walk_list(
-                                            &[Node::ExpressionIdx(*key_values_idx)],
-                                            t,
-                                            comments,
-                                            arena,
-                                        );
-                                        return;
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            // Special case for Primitive_array.spread (spread array syntax).
-            // Match OCaml: flatten all sub-array expressions and walk them together.
-            if args.len() == 1 && parsetree_viewer::is_spread_belt_array_concat(arena, &funct_expr)
-            {
-                let (_, arg_idx) = &args[0];
-                let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_arrays) = &arg.pexp_desc {
-                    let mut all_expr_idxs: Vec<ExprIdx> = Vec::new();
-                    for sub_array_idx in arena.expr_list(*sub_arrays).iter() {
-                        let sub_array = arena.get_expr(*sub_array_idx);
-                        if let ExpressionDesc::Pexp_array(exprs) = &sub_array.pexp_desc {
-                            all_expr_idxs.extend(arena.expr_list(*exprs).iter().copied());
-                        } else {
-                            all_expr_idxs.push(*sub_array_idx);
-                        }
-                    }
-                    let nodes: Vec<Node<'_>> =
-                        all_expr_idxs.into_iter().map(Node::ExpressionIdx).collect();
-                    walk_list(&nodes, t, comments, arena);
-                    return;
-                }
-            }
-
-            // Special case for Primitive_list.spread (spread list syntax).
-            // Match OCaml: flatten all sub-list expressions and walk them together.
-            if args.len() == 1 && parsetree_viewer::is_spread_belt_list_concat(arena, &funct_expr) {
-                let (_, arg_idx) = &args[0];
-                let arg = arena.get_expr(*arg_idx);
-                if let ExpressionDesc::Pexp_array(sub_lists) = &arg.pexp_desc {
-                    let mut all_exprs: Vec<Expression> = Vec::new();
-                    for sub_list_idx in arena.expr_list(*sub_lists).iter() {
-                        let sub_list = arena.get_expr(*sub_list_idx);
-                        let (exprs, spread) =
-                            parsetree_viewer::collect_list_expressions(arena, sub_list);
-                        all_exprs.extend(exprs.into_iter().cloned());
-                        if let Some(spread_expr) = spread {
-                            all_exprs.push(spread_expr.clone());
-                        }
-                    }
-                    let nodes: Vec<Node<'_>> = all_exprs.iter().map(Node::Expression).collect();
-                    walk_list(&nodes, t, comments, arena);
-                    return;
                 }
             }
 
@@ -2704,25 +2777,16 @@ fn walk_jsx_element(
 
     match jsx {
         JsxElement::Fragment(fragment) => {
-            // For fragment, get the opening token location (<>)
-            let opening_loc = {
-                let full_loc = arena.to_location(pexp_loc);
-                arena.from_location(&Location::from_positions(
-                    full_loc.loc_start,
-                    *arena.get_position(fragment.opening),
-                ))
-            };
-
-            // Partition on same line as opening
-            let (on_same_line, rest) = partition_by_on_same_line(opening_loc, comments, arena);
-            t.attach_trailing(opening_loc, on_same_line, arena);
-
-            let nodes: Vec<Node<'_>> = fragment
-                .children
-                .iter()
-                .map(|e| Node::ExpressionIdx(*e))
-                .collect();
-            walk_list(&nodes, t, rest, arena);
+            if fragment.children.is_empty() {
+                t.attach_inside(pexp_loc, comments, arena);
+            } else {
+                let nodes: Vec<Node<'_>> = fragment
+                    .children
+                    .iter()
+                    .map(|e| Node::JsxChild(*e))
+                    .collect();
+                walk_list(&nodes, t, comments, arena);
+            }
         }
         JsxElement::Unary(unary) => {
             // Compute the closing token location for />
@@ -2814,11 +2878,6 @@ fn walk_jsx_element(
                 rest
             };
 
-            // Comments after '>' on the same line should be attached to '>'
-            let (after_opening_greater_than, rest) =
-                partition_by_on_same_line(opening_greater_than_loc, rest, arena);
-            t.attach_trailing(opening_greater_than_loc, after_opening_greater_than, arena);
-
             // Get closing tag location if present
             let (comments_for_children, _rest) = match &container.closing_tag {
                 None => (rest, vec![]),
@@ -2834,37 +2893,12 @@ fn walk_jsx_element(
             };
 
             if container.children.is_empty() {
-                // Attach all comments to the closing tag if there are no children
-                if let Some(closing_tag) = &container.closing_tag {
-                    let closing_tag_loc = arena.from_location(&Location::from_positions(
-                        *arena.get_position(closing_tag.start),
-                        *arena.get_position(closing_tag.end),
-                    ));
-
-                    let opening_end_line = arena.to_location(opening_greater_than_loc).loc_end.line;
-                    let closing_start_line = arena.get_position(closing_tag.start).line;
-
-                    // Check if there's space between opening and closing tags
-                    if opening_end_line < closing_start_line + 1 {
-                        // Comments between tags get attached to "inside" the expression
-                        let (inside_comments, leading_for_closing) = partition_between_lines(
-                            opening_end_line,
-                            closing_start_line,
-                            comments_for_children,
-                        );
-                        t.attach_inside(pexp_loc, inside_comments, arena);
-                        t.attach_leading(closing_tag_loc, leading_for_closing, arena);
-                    } else {
-                        // If closing tag is on the same line, attach to closing tag
-                        t.attach_leading(closing_tag_loc, comments_for_children, arena);
-                    }
-                }
+                t.attach_inside(pexp_loc, comments_for_children, arena);
             } else {
-                // Walk through children
                 let children_nodes: Vec<Node<'_>> = container
                     .children
                     .iter()
-                    .map(|e| Node::ExpressionIdx(*e))
+                    .map(|e| Node::JsxChild(*e))
                     .collect();
                 walk_list(&children_nodes, t, comments_for_children, arena);
             }
@@ -3143,6 +3177,13 @@ fn walk_pattern(
                 .collect();
             walk_list(&nodes, t, comments, arena);
         }
+        PatternDesc::Ppat_dict(entries) if entries.is_empty() => {
+            t.attach_inside(pattern.ppat_loc, comments, arena);
+        }
+        PatternDesc::Ppat_dict(entries) => {
+            let nodes: Vec<Node<'_>> = entries.iter().map(Node::PatternDictRow).collect();
+            walk_list(&nodes, t, comments, arena);
+        }
         PatternDesc::Ppat_record(inner) => {
             let (ref fields, _, ref record_rest) = **inner;
             let fields = arena.pat_field_list(*fields).to_vec();
@@ -3183,7 +3224,7 @@ fn walk_pattern(
             walk_core_type(&typ, t, inside, arena);
             t.attach_trailing(typ_loc, after, arena);
         }
-        PatternDesc::Ppat_type(lid) => {
+        PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
             let (leading, trailing) = partition_leading_trailing(comments, lid.loc, arena);
             t.attach_leading(lid.loc, leading, arena);
             t.attach_trailing(lid.loc, trailing, arena);
@@ -3670,6 +3711,10 @@ fn walk_module_expr(
         }
         ModuleExprDesc::Pmod_extension(ext) => {
             walk_extension(ext, t, comments, arena);
+        }
+        ModuleExprDesc::Pmod_await(inner) => {
+            let inner = arena.get_mod_expr(*inner).clone();
+            walk_module_expr(&inner, t, comments, arena);
         }
     }
 }

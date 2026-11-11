@@ -51,8 +51,6 @@ let print_constant const =
     ^ ", semantic="
     ^ String_literal.string_semantic payload
     ^ ")"
-  | Pconst_json source -> "Pconst_json(" ^ source ^ ")"
-  | Pconst_raw_source source -> "Pconst_raw_source(" ^ source ^ ")"
   | Pconst_float (s, _) -> "Pconst_float(" ^ s ^ ")"
 
 let print_core_type typ ~pos =
@@ -111,6 +109,16 @@ let rec print_pattern pattern ~pos ~indentation =
     ^ (patterns
       |> List.map (fun pat -> "," ^ print_pattern pat ~pos ~indentation)
       |> String.concat "")
+    ^ ")"
+  | Ppat_dict entries ->
+    "Ppat_dict(\n"
+    ^ (Ext_list.map entries (fun {pdp_key; pdp_pattern} ->
+           add_indentation (indentation + 1)
+           ^ str pdp_key.txt ^ ": "
+           ^ print_pattern pdp_pattern ~pos ~indentation:(indentation + 1))
+      |> String.concat "\n")
+    ^ "\n"
+    ^ add_indentation indentation
     ^ ")"
   | Ppat_record (fields, _, rest) ->
     "Ppat_record(\n"
@@ -194,6 +202,40 @@ and print_expr_item expr ~pos ~indentation =
       |> List.map (fun expr ->
           expr |> print_expr_item ~pos ~indentation:(indentation + 1))
       |> String.concat ("\n" ^ add_indentation (indentation + 1)))
+    ^ "\n"
+    ^ add_indentation indentation
+    ^ ")"
+  | Pexp_dict entries ->
+    "Pexp_dict(\n"
+    ^ (entries
+      |> List.map (fun entry ->
+          add_indentation (indentation + 1)
+          ^
+          match entry with
+          | Parsetree.Pdict_entry (key, expr) ->
+            (key |> print_loc_denominator_loc ~pos)
+            ^ "\"" ^ key.txt ^ "\": "
+            ^ print_expr_item expr ~pos ~indentation:(indentation + 1)
+          | Pdict_spread expr ->
+            "..." ^ print_expr_item expr ~pos ~indentation:(indentation + 1))
+      |> String.concat "\n")
+    ^ "\n"
+    ^ add_indentation indentation
+    ^ ")"
+  | Pexp_spread (kind, elements) ->
+    (match kind with
+      | Spread_array -> "Pexp_spread(array,\n"
+      | Spread_list -> "Pexp_spread(list,\n")
+    ^ (elements
+      |> List.map (fun element ->
+          add_indentation (indentation + 1)
+          ^
+          match element with
+          | Parsetree.Pspread_item expr ->
+            print_expr_item expr ~pos ~indentation:(indentation + 1)
+          | Pspread expr ->
+            "..." ^ print_expr_item expr ~pos ~indentation:(indentation + 1))
+      |> String.concat "\n")
     ^ "\n"
     ^ add_indentation indentation
     ^ ")"
@@ -341,7 +383,7 @@ let print_value_binding value ~pos ~indentation =
       ^ ". "
       ^ print_core_type pvc_type ~pos
   in
-  print_attributes value.Parsetree.pvb_attributes
+  print_attributes (Ast_helper.Vb.binding_attributes value)
   ^ "value" ^ ":\n"
   ^ add_indentation (indentation + 1)
   ^ (value.pvb_pat |> print_pattern ~pos ~indentation:(indentation + 1))

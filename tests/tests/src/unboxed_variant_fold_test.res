@@ -17,6 +17,7 @@ type color =
   | @as("primary") Primary
   | @as("secondary") Secondary
   | Color(string)
+
 let colorName = v =>
   switch v {
   | Color(n) => n
@@ -24,6 +25,7 @@ let colorName = v =>
   }
 
 @unboxed type number = | @as(1) One | Number(int)
+
 let numberName = v =>
   switch v {
   | One => "one"
@@ -32,6 +34,7 @@ let numberName = v =>
 
 // No literal constructors at all, so no overlap is possible.
 @unboxed type pure = I(int) | S(string)
+
 let pureName = v =>
   switch v {
   | I(_) => "int"
@@ -43,6 +46,7 @@ type opt =
   | @as(null) Nothing
   | @as(undefined) Missing
   | Obj({x: int})
+
 let optName = v =>
   switch v {
   | Nothing => "null"
@@ -51,14 +55,50 @@ let optName = v =>
   }
 
 @unboxed type flag = | @as(true) Yes | Str(string)
+
 let flagName = v =>
   switch v {
   | Yes => "yes"
   | Str(_) => "str"
   }
 
+// A boolean payload only receives the boolean that is not a literal case. The
+// first arm can never match (warning 11); folding must not select it either.
+@unboxed type answer = | @as(true) Yes2 | Answer(bool)
+
+@warning("-11")
+let answerName = v =>
+  switch v {
+  | Answer(true) => "answer true"
+  | Yes2 => "yes"
+  | Answer(false) => "answer false"
+  }
+
+// Yes2 also covers Answer(true), so this match is exhaustive.
+let answerName2 = v =>
+  switch v {
+  | Yes2 => "yes"
+  | Answer(false) => "answer false"
+  }
+
+@unboxed
+type mixed =
+  | @as(false) Off
+  | @as(null) Unset
+  | Toggle(bool)
+  | Label(string)
+
+let mixedName = v =>
+  switch v {
+  | Off => "off"
+  | Unset => "unset"
+  | Toggle(b) => b ? "toggle true" : "toggle false"
+  | Label(s) => s
+  }
+
 // @as(1) and a float payload of 1.0 are one JavaScript number.
 @unboxed type num = | @as(1) One2 | F(float)
+
 let numName = v =>
   switch v {
   | One2 => "one"
@@ -67,6 +107,7 @@ let numName = v =>
 
 // An untagged inline record stays an object rather than becoming its payload.
 @unboxed type rec_ = | @as("empty") Empty | R({y: int})
+
 let recName = v =>
   switch v {
   | Empty => "empty"
@@ -75,6 +116,7 @@ let recName = v =>
 
 // The overlapping literal is reachable only through the default arm.
 @unboxed type c2 = | @as("a") A | @as("b") B | C(string)
+
 let pick = v =>
   switch v {
   | C(s) => s
@@ -84,6 +126,7 @@ let pick = v =>
 // A payload that is itself an untagged constant.
 @unboxed type inner = | @as("primary") P | I2(string)
 @unboxed type outer = | @as("x") X | W(inner)
+
 let outerName = v =>
   switch v {
   | X => "x"
@@ -92,6 +135,7 @@ let outerName = v =>
 
 // An ordinary boxed variant keeps its constructor identity, tag and all.
 type boxed = | @as("primary") BoxedPrimary | BoxedColor(string)
+
 let boxedName = v =>
   switch v {
   | BoxedPrimary => "not Color"
@@ -100,6 +144,7 @@ let boxedName = v =>
 
 // Tuple constants emit as arrays, and must not select the object case.
 @unboxed type objects = Tuple((int, int)) | Record({x: int})
+
 let objectName = value =>
   switch value {
   | Tuple(_) => "tuple"
@@ -108,6 +153,7 @@ let objectName = value =>
 
 // The built-in empty-list constructor is the JavaScript number zero.
 @unboxed type lists = | @as(0) Zero | Values(list<int>)
+
 let listName = value =>
   switch value {
   | Zero => "zero"
@@ -117,6 +163,7 @@ let listName = value =>
 // Bigint constructor spellings can differ while their runtime values agree.
 @unboxed type bigintInner = | @as(1_0n) DecimalTen
 @unboxed type bigintOuter = | @as(10n) BigOne | Wrapped(bigintInner)
+
 let bigintName = value =>
   switch value {
   | BigOne => "one"
@@ -125,10 +172,30 @@ let bigintName = value =>
 
 // Integer constructor tags use the same 32-bit representation as int values.
 @unboxed type wide = | @as(4294967297) WideOne | WideInt(int)
+
 let wideName = value =>
   switch value {
   | WideOne => "one"
   | WideInt(_) => "int"
+  }
+
+// A number and a bigint with the same digits are different values.
+@unboxed type numberOrBigint = | @as(1) NumberOne | @as(1n) BigintOne | Other(string)
+
+let numberOrBigintName = value =>
+  switch value {
+  | NumberOne => "number"
+  | BigintOne => "bigint"
+  | Other(s) => s
+  }
+
+// A bigint payload equal to a bigint literal folds to the literal's case
+@unboxed type bigintOrPayload = | @as(2n) BigTwo | BigOther(bigint)
+
+let bigintOrPayloadName = value =>
+  switch value {
+  | BigTwo => "two"
+  | BigOther(_) => "other"
   }
 
 @inline(never) let id = x => x
@@ -165,6 +232,14 @@ describe(__MODULE__, () => {
     eq(__LOC__, optName(Missing), optName(id(Missing)))
     eq(__LOC__, flagName(Str("true")), flagName(id(Str("true"))))
     eq(__LOC__, flagName(Yes), flagName(id(Yes)))
+    eq(__LOC__, answerName(Answer(true)), answerName(id(Answer(true))))
+    eq(__LOC__, answerName(Answer(false)), answerName(id(Answer(false))))
+    eq(__LOC__, answerName(Yes2), answerName(id(Yes2)))
+    eq(__LOC__, mixedName(Toggle(true)), mixedName(id(Toggle(true))))
+    eq(__LOC__, mixedName(Toggle(false)), mixedName(id(Toggle(false))))
+    eq(__LOC__, mixedName(Off), mixedName(id(Off)))
+    eq(__LOC__, mixedName(Unset), mixedName(id(Unset)))
+    eq(__LOC__, mixedName(Label("false")), mixedName(id(Label("false"))))
     eq(__LOC__, numName(F(1.0)), numName(id(F(1.0))))
     eq(__LOC__, numName(F(2.5)), numName(id(F(2.5))))
     eq(__LOC__, numName(One2), numName(id(One2)))
@@ -192,6 +267,13 @@ describe(__MODULE__, () => {
     eq(__LOC__, numberName(Number(1)), "one")
     eq(__LOC__, numberName(Number(2)), "number")
     eq(__LOC__, pureName(I(1)), "int")
+    eq(__LOC__, answerName(Answer(true)), "yes")
+    eq(__LOC__, answerName(Answer(false)), "answer false")
+    eq(__LOC__, answerName2(id(Answer(true))), "yes")
+    eq(__LOC__, answerName2(id(Answer(false))), "answer false")
+    eq(__LOC__, mixedName(Toggle(false)), "off")
+    eq(__LOC__, mixedName(Toggle(true)), "toggle true")
+    eq(__LOC__, mixedName(Label("false")), "false")
     eq(__LOC__, numName(F(1.0)), "one")
     eq(__LOC__, pick(C("a")), "lit")
     eq(__LOC__, outerName(W(I2("x"))), "x")
@@ -200,5 +282,14 @@ describe(__MODULE__, () => {
     eq(__LOC__, listName(Values(list{})), "zero")
     eq(__LOC__, bigintName(Wrapped(DecimalTen)), "one")
     eq(__LOC__, wideName(WideInt(1)), "one")
+    eq(__LOC__, numberOrBigintName(BigintOne), "bigint")
+    eq(__LOC__, bigintOrPayloadName(BigOther(2n)), "two")
+    eq(__LOC__, bigintOrPayloadName(BigOther(02n)), "two")
+  })
+
+  test("a number and a bigint literal with the same digits", () => {
+    eq(__LOC__, numberOrBigintName(id(NumberOne)), "number")
+    eq(__LOC__, numberOrBigintName(id(BigintOne)), "bigint")
+    eq(__LOC__, numberOrBigintName(id(Other("x"))), "x")
   })
 })

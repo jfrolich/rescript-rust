@@ -28,12 +28,10 @@ function pureName(v) {
 }
 
 function optName(v) {
-  if (v == null) {
-    if (v === null) {
-      return "null";
-    } else {
-      return "undef";
-    }
+  if (v === null) {
+    return "null";
+  } else if (v === undefined) {
+    return "undef";
   } else {
     return "obj";
   }
@@ -44,6 +42,40 @@ function flagName(v) {
     return "yes";
   } else {
     return "str";
+  }
+}
+
+function answerName(v) {
+  if (v === true) {
+    return "yes";
+  } else if (v) {
+    return "answer true";
+  } else {
+    return "answer false";
+  }
+}
+
+function answerName2(v) {
+  if (v === true) {
+    return "yes";
+  } else {
+    return "answer false";
+  }
+}
+
+function mixedName(v) {
+  if (v === false) {
+    return "off";
+  } else if (v === null) {
+    return "unset";
+  } else if (typeof v === "boolean") {
+    if (v) {
+      return "toggle true";
+    } else {
+      return "toggle false";
+    }
+  } else {
+    return v;
   }
 }
 
@@ -119,6 +151,24 @@ function wideName(value) {
   }
 }
 
+function numberOrBigintName(value) {
+  if (value === 1) {
+    return "number";
+  } else if (value === 1n) {
+    return "bigint";
+  } else {
+    return value;
+  }
+}
+
+function bigintOrPayloadName(value) {
+  if (value === 2n) {
+    return "two";
+  } else {
+    return "other";
+  }
+}
+
 function id(x) {
   return x;
 }
@@ -135,78 +185,98 @@ function makeRecord(value) {
 
 Mocha.describe("Unboxed_variant_fold_test", () => {
   Mocha.test("constructors preserve dynamic payloads and effects", () => {
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 142, characters 7-14", colorName(makeColor("primary")), "not Color");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 143, characters 7-14", colorName(makeColor("blue")), "blue");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 144, characters 7-14", recName(makeRecord(1)), "rec");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 209, characters 7-14", colorName(makeColor("primary")), "not Color");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 210, characters 7-14", colorName(makeColor("blue")), "blue");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 211, characters 7-14", recName(makeRecord(1)), "rec");
     let calls = 0;
     calls = calls + 1 | 0;
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 150, characters 7-14", colorName("primary"), "not Color");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 151, characters 7-14", calls, 1);
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 217, characters 7-14", colorName("primary"), "not Color");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 218, characters 7-14", calls, 1);
   });
   Mocha.test("folding agrees with runtime dispatch", () => {
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 154, characters 7-14", "not Color", colorName(id("primary")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 155, characters 7-14", "not Color", colorName(id("secondary")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 156, characters 7-14", "blue", colorName(id("blue")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 157, characters 7-14", "not Color", colorName(id("primary")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 158, characters 7-14", "one", numberName(id(1)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 159, characters 7-14", "number", numberName(id(2)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 160, characters 7-14", "one", numberName(id(1)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 161, characters 7-14", "int", pureName(id(1)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 162, characters 7-14", "string", pureName(id("x")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 163, characters 7-14", "obj", optName(id({
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 221, characters 7-14", "not Color", colorName(id("primary")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 222, characters 7-14", "not Color", colorName(id("secondary")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 223, characters 7-14", "blue", colorName(id("blue")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 224, characters 7-14", "not Color", colorName(id("primary")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 225, characters 7-14", "one", numberName(id(1)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 226, characters 7-14", "number", numberName(id(2)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 227, characters 7-14", "one", numberName(id(1)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 228, characters 7-14", "int", pureName(id(1)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 229, characters 7-14", "string", pureName(id("x")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 230, characters 7-14", "obj", optName(id({
       x: 1
     })));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 164, characters 7-14", "null", optName(id(null)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 165, characters 7-14", "undef", optName(id(undefined)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 166, characters 7-14", "str", flagName(id("true")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 167, characters 7-14", "yes", flagName(id(true)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 168, characters 7-14", "one", numName(id(1.0)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 169, characters 7-14", "float", numName(id(2.5)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 170, characters 7-14", "one", numName(id(1)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 171, characters 7-14", "rec", recName(id({
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 231, characters 7-14", "null", optName(id(null)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 232, characters 7-14", "undef", optName(id(undefined)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 233, characters 7-14", "str", flagName(id("true")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 234, characters 7-14", "yes", flagName(id(true)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 235, characters 7-14", "yes", answerName(id(true)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 236, characters 7-14", "answer false", answerName(id(false)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 237, characters 7-14", "yes", answerName(id(true)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 238, characters 7-14", "toggle true", mixedName(id(true)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 239, characters 7-14", "off", mixedName(id(false)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 240, characters 7-14", "off", mixedName(id(false)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 241, characters 7-14", "unset", mixedName(id(null)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 242, characters 7-14", "false", mixedName(id("false")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 243, characters 7-14", "one", numName(id(1.0)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 244, characters 7-14", "float", numName(id(2.5)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 245, characters 7-14", "one", numName(id(1)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 246, characters 7-14", "rec", recName(id({
       y: 1
     })));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 172, characters 7-14", "empty", recName(id("empty")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 173, characters 7-14", "lit", pick(id("a")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 174, characters 7-14", "z", pick(id("z")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 175, characters 7-14", "lit", pick(id("a")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 176, characters 7-14", "w", outerName(id("primary")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 177, characters 7-14", "x", outerName(id("x")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 178, characters 7-14", "x", outerName(id("x")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 179, characters 7-14", "primary", boxedName(id({
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 247, characters 7-14", "empty", recName(id("empty")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 248, characters 7-14", "lit", pick(id("a")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 249, characters 7-14", "z", pick(id("z")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 250, characters 7-14", "lit", pick(id("a")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 251, characters 7-14", "w", outerName(id("primary")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 252, characters 7-14", "x", outerName(id("x")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 253, characters 7-14", "x", outerName(id("x")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 254, characters 7-14", "primary", boxedName(id({
       TAG: "BoxedColor",
       _0: "primary"
     })));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 180, characters 7-14", "not Color", boxedName(id("primary")));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 181, characters 7-14", "tuple", objectName(id([
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 255, characters 7-14", "not Color", boxedName(id("primary")));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 256, characters 7-14", "tuple", objectName(id([
       1,
       2
     ])));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 182, characters 7-14", "record", objectName(id({
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 257, characters 7-14", "record", objectName(id({
       x: 1
     })));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 183, characters 7-14", "zero", listName(id(/* [] */0)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 184, characters 7-14", "list", listName(id({
-      hd: 1,
-      tl: /* [] */0
-    })));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 185, characters 7-14", bigintName(10n), bigintName(id(10n)));
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 186, characters 7-14", "one", wideName(id(1)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 258, characters 7-14", "zero", listName(id(/* [] */0)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 259, characters 7-14", "list", listName(id({hd: 1, tl: /* [] */0})));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 260, characters 7-14", "one", bigintName(id(10n)));
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 261, characters 7-14", "one", wideName(id(1)));
   });
   Mocha.test("the folded answers themselves are correct", () => {
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 190, characters 7-14", "not Color", "not Color");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 191, characters 7-14", "blue", "blue");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 192, characters 7-14", "one", "one");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 193, characters 7-14", "number", "number");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 194, characters 7-14", "int", "int");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 195, characters 7-14", "one", "one");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 196, characters 7-14", "lit", "lit");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 197, characters 7-14", "x", "x");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 198, characters 7-14", "primary", "primary");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 199, characters 7-14", "tuple", "tuple");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 200, characters 7-14", "zero", "zero");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 201, characters 7-14", bigintName(10n), "one");
-    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 202, characters 7-14", "one", "one");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 265, characters 7-14", "not Color", "not Color");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 266, characters 7-14", "blue", "blue");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 267, characters 7-14", "one", "one");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 268, characters 7-14", "number", "number");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 269, characters 7-14", "int", "int");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 270, characters 7-14", "yes", "yes");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 271, characters 7-14", "answer false", "answer false");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 272, characters 7-14", answerName2(id(true)), "yes");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 273, characters 7-14", answerName2(id(false)), "answer false");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 274, characters 7-14", "off", "off");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 275, characters 7-14", "toggle true", "toggle true");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 276, characters 7-14", "false", "false");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 277, characters 7-14", "one", "one");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 278, characters 7-14", "lit", "lit");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 279, characters 7-14", "x", "x");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 280, characters 7-14", "primary", "primary");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 281, characters 7-14", "tuple", "tuple");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 282, characters 7-14", "zero", "zero");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 283, characters 7-14", "one", "one");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 284, characters 7-14", "one", "one");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 285, characters 7-14", "bigint", "bigint");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 286, characters 7-14", "two", "two");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 287, characters 7-14", "two", "two");
+  });
+  Mocha.test("a number and a bigint literal with the same digits", () => {
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 291, characters 7-14", numberOrBigintName(id(1)), "number");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 292, characters 7-14", numberOrBigintName(id(1n)), "bigint");
+    Test_utils.eq("File \"unboxed_variant_fold_test.res\", line 293, characters 7-14", numberOrBigintName(id("x")), "x");
   });
 });
 
@@ -216,6 +286,9 @@ export {
   pureName,
   optName,
   flagName,
+  answerName,
+  answerName2,
+  mixedName,
   numName,
   recName,
   pick,
@@ -225,6 +298,8 @@ export {
   listName,
   bigintName,
   wideName,
+  numberOrBigintName,
+  bigintOrPayloadName,
   id,
   makeColor,
   makeRecord,

@@ -3,10 +3,10 @@
 
 function local(x, y) {
   if (x === "Int") {
-    if (y === 0) {
-      return 0;
-    } else {
+    if (y !== 0) {
       return 1;
+    } else {
+      return 0;
     }
   } else if (y !== undefined) {
     return 3;
@@ -17,15 +17,14 @@ function local(x, y) {
 
 function field(h) {
   if (h.tag === "Int") {
-    let match = h.value;
-    if (match === 0) {
-      return 0;
-    } else {
+    if (h.value !== 0) {
       return 1;
+    } else {
+      return 0;
     }
   }
-  let match$1 = h.value;
-  if (match$1 !== undefined && match$1) {
+  let match = h.value;
+  if (match !== undefined && match) {
     return 2;
   } else {
     return 3;

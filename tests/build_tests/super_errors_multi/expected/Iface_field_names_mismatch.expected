@@ -6,12 +6,12 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_field_names_mismatch/Foo.res
   does not match the interface /.../fixtures/Iface_field_names_mismatch/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_field_names_mismatch/Foo.res:1:1-25):
     type t = {a: int, b: int}
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_field_names_mismatch/Foo.resi:1:1-25):
     type t = {x: int, y: int}
-  /.../fixtures/Iface_field_names_mismatch/Foo.resi:1:1-25:
-    Expected declaration
-  /.../fixtures/Iface_field_names_mismatch/Foo.res:1:1-25:
-    Actual declaration
-  Fields number 1 have different names, a and x.
+  
+  The field a is named x in the expected declaration.
+  The field b is named y in the expected declaration.

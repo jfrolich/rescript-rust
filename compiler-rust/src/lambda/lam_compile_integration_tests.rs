@@ -544,7 +544,9 @@ fn import_keeps_nested_module_field_alias_binding_materialized_like_snapshot() {
         "expected Import to keep the nested module-field alias binding materialized, got:\n{output}"
     );
     assert!(
-        output.contains("let N_each = N2.forEach;\n\nlet N = {\n  N0: N0,\n  N1: N1,\n  N2: N2,\n  each: N_each\n};"),
+        output.contains(
+            "let N_each = N3.forEach;\n\nlet N = {\n  N0: N0,\n  N1: N1,\n  N2: N2,\n  N3: N3,\n  each: N_each\n};"
+        ),
         "expected Import to keep the outer module-field alias binding materialized with the module-prefixed name, got:\n{output}"
     );
     assert!(
@@ -598,30 +600,6 @@ fn inline_string_test_keeps_alias_materialized_named_matcher_like_snapshot() {
     assert!(
         !output.contains("console.log([\n  \"Some\",\n  \"None\",\n  \"Some\"\n]);"),
         "unexpected full constant inlining remained in inline_string_test:\n{output}"
-    );
-}
-
-#[test]
-fn gpr_3142_test_reuses_same_name_export_alias_bindings_like_snapshot() {
-    let output = compile_checked_in_test_file_to_js("gpr_3142_test");
-    assert!(
-        output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 20, characters 7-14\", tToJs(\"a\"), \"x\")")
-            && output.contains("Test_utils.eq(\"File \\\"gpr_3142_test.res\\\", line 27, characters 7-14\", tFromJs(\"x\"), \"a\")"),
-        "expected gpr_3142_test to inline the exported aliases back to direct converter calls at the checked internal sites, got:\n{output}"
-    );
-    assert!(
-        output.contains("let v = tToJs;\n\nlet u = tFromJs;"),
-        "expected gpr_3142_test to keep the exported alias bindings materialized for the final export payload, got:\n{output}"
-    );
-    assert!(
-        output.contains("export {\n  tToJs,\n  tFromJs,\n  v,\n  u,\n}")
-            && output.contains("Mocha.describe(\"Gpr_3142_test\"")
-            && output.contains("let v = tToJs;")
-            && output.find("Mocha.describe(\"Gpr_3142_test\"").unwrap()
-                < output.find("let v = tToJs;").unwrap()
-            && !output.contains("v$1 as v")
-            && !output.contains("u$1 as u"),
-        "expected gpr_3142_test to keep the aliases only as late export bindings with no rebound export aliases, got:\n{output}"
     );
 }
 
@@ -818,7 +796,10 @@ fn uncurried_cast_keeps_local_module_field_alias_binding_materialized_like_ocaml
         output.contains("let l = Stdlib_List.map({")
             && output.contains("function partial(x) {\n  return Stdlib_List.map({")
             && output.contains("let l$1 = Stdlib_List.map({")
-            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map({"),
+            // translcore.ml `transl_apply` binds the allocating list
+            // argument of a partial application once, outside the function.
+            && output.contains("let arg = {hd: 1, tl: {hd: 2, tl: /* [] */0}};")
+            && output.contains("function partial$1(extra) {\n  return Stdlib_List.map(arg, extra);"),
         "expected uncurried_cast to rewrite map call sites back to Stdlib_List.map like OCaml, got:\n{output}"
     );
     assert!(
@@ -852,41 +833,38 @@ fn recursive_module_test_keeps_include_field_alias_binding_materialized_like_oca
 }
 
 #[test]
-fn complex_while_loop_keeps_effectful_condition_blocks_inside_iifes() {
+fn complex_while_loop_runs_condition_blocks_inside_the_loop() {
+    // lam_compile.ml:1342-1354: a condition that compiles to statements
+    // becomes `while (true) { block; if (!e) break; body }`, not a closure
+    // called on each iteration.
     let output = compile_checked_in_test_file_to_js("complex_while_loop");
     assert!(
-        output.contains("while ((() => {")
-            && output.contains("let fib = x => {")
-            && output.contains("return fib(n) > 10;"),
-        "expected complex_while_loop to keep the recursive condition binding scoped inside the while predicate IIFE, got:\n{output}"
+        output.contains("while (true) {\n    let fib = x => {")
+            && output.contains("if (fib(n) <= 10) {\n      break;\n    }\n    console.log(n.toString());"),
+        "expected complex_while_loop's recursive condition binding inside the loop, got:\n{output}"
     );
     assert!(
-        output.contains("let b = 9;") && output.contains("return (3 + b | 0) > 10;"),
-        "expected complex_while_loop's second predicate to stay as an IIFE-wrapped block, got:\n{output}"
+        output.contains("let b = 9;\n    if ((3 + b | 0) <= 10) {\n      break;\n    }"),
+        "expected complex_while_loop's second condition block inside the loop, got:\n{output}"
     );
     assert!(
-        !output.contains("while (fib(n) > 10)") && !output.contains("while ((3 + b | 0) > 10)"),
-        "unexpected dropped predicate-prelude scope in complex_while_loop:\n{output}"
+        !output.contains("while ((() => {"),
+        "unexpected condition closure in complex_while_loop:\n{output}"
     );
 }
 
 #[test]
-fn test_while_side_effect_keeps_local_condition_bindings_in_iifes() {
+fn test_while_side_effect_runs_condition_bindings_inside_the_loop() {
     let output = compile_checked_in_test_file_to_js("test_while_side_effect");
     assert!(
-        output.contains("while ((() => {")
-            && output.contains("let y = 3;")
-            && output.contains("console.log(x.contents.toString());")
-            && output.contains("y = y + 1 | 0;")
-            && output.contains("x.contents = x.contents + 1 | 0;")
-            && output.contains("return (fib(x.contents) + fib(x.contents) | 0) < 20;"),
-        "expected test_while_side_effect to keep the local binding and side effects inside the predicate IIFE, got:\n{output}"
+        output.contains(
+            "while (true) {\n  let y = 3;\n  console.log(x.contents.toString());\n  y = y + 1 | 0;\n  if (!(x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)) {\n    break;\n  }"
+        ),
+        "expected test_while_side_effect's condition bindings and effects inside the loop, got:\n{output}"
     );
     assert!(
-        !output.contains(
-            "while (x.contents = x.contents + 1 | 0, (fib(x.contents) + fib(x.contents) | 0) < 20)"
-        ),
-        "unexpected flattened predicate sequence lost the local binding scope in test_while_side_effect:\n{output}"
+        !output.contains("while ((() => {"),
+        "unexpected condition closure in test_while_side_effect:\n{output}"
     );
 }
 
@@ -904,5 +882,129 @@ fn internal_unused_test_omits_dead_private_relative_external_import_like_ocaml()
             "import * as Primitive_exceptions from \"@rescript/runtime/lib/es6/Primitive_exceptions.js\";"
         ),
         "expected checked-in runtime import to remain, got:\n{output}"
+    );
+}
+
+#[test]
+fn iterator_effect_only_match_drops_its_unused_result_binding() {
+    let source = r#"
+let iterator: IterableIterator.t<string, unit, unit> = %raw(`['a', 'b'][Symbol.iterator]()`)
+switch iterator->IterableIterator.next {
+| Yield({value: "a"}) => ()
+| _ => ()
+}
+"#;
+    let output = compile_test_source_to_js(source, "iterator_effect_only.res").unwrap();
+    assert!(!output.contains("let match"), "{output}");
+}
+
+// #9224: a record whose fields have the runtime names "0", "1", ... is
+// `RecordArray`, decided at its declaration. A spread over it copies its
+// fields one by one even with an optional field, and `{}` is an array.
+#[test]
+fn array_record_spread_and_empty_literal_are_arrays() {
+    let source = r#"
+type t = {@as("0") a?: int, @as("1") b: int}
+let upd = (r: t) => {...r, b: 2}
+type e = {@as("0") x?: int}
+let empty: e = {}
+"#;
+    let output = compile_test_source_to_js(source, "array_record_spread.res").unwrap();
+    assert!(
+        output.contains("return [\n    r[0],\n    2\n  ];"),
+        "the spread copies the fields into an array:\n{output}"
+    );
+    assert!(output.contains("let empty = [];"), "{output}");
+    assert!(!output.contains("...r"), "no object spread:\n{output}");
+}
+
+#[test]
+fn record_rest_into_an_array_record_is_rejected() {
+    let source = r#"
+type source = {@as("0") s0: int, @as("1") s1: int, @as("2") s2: int}
+type head = {@as("0") s0: int, @as("1") s1: int}
+let split = (r: source) => {
+  let {s2, ...head as rest} = r
+  (s2, rest)
+}
+"#;
+    let err = compile_test_source_to_js(source, "record_rest_array_record.res").unwrap_err();
+    assert!(
+        format!("{err:#}").contains(
+            "The rest of a record pattern cannot have a record type represented as an array"
+        ),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn coercion_between_array_and_object_records_is_rejected() {
+    for (source, name) in [
+        (
+            r#"
+type obj = {@as("0") a: int, @as("1") b: int, x: int}
+type arr = {@as("0") a: int, @as("1") b: int}
+let toArr = (x: obj) => (x :> arr)
+"#,
+            "record_coercion_into_array_record.res",
+        ),
+        (
+            r#"
+type pair = {@as("0") a: int, @as("1") b: int}
+type tail = {@as("1") b: int}
+let toTail = (r: pair) => (r :> tail)
+"#,
+            "record_coercion_array_to_object.res",
+        ),
+    ] {
+        let err = compile_test_source_to_js(source, name).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is represented as a JavaScript array"),
+            "{name}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn untagged_variant_with_an_array_record_and_an_array_is_rejected() {
+    let source = r#"
+type pair = {@as("0") x?: int, @as("1") y?: int}
+@unboxed type v = Pair(pair) | List(array<int>)
+"#;
+    let err = compile_test_source_to_js(source, "untagged_array_record_and_array.res").unwrap_err();
+    assert!(
+        format!("{err:#}")
+            .contains("At most one case can be an array, a tuple or a record represented as an array"),
+        "{err:#}"
+    );
+}
+
+// #9200 (ctype.ml `get_new_abstract_name`): the second `'a` would be named
+// `$a1`, which the `'a1` before it already took, so it gets `$a2`; the
+// printer then has no clash to disambiguate with stamps.
+#[test]
+fn numbered_existential_names_stay_distinct() {
+    let source = r#"
+type rec a2 = A2('a): a2
+type rec a1 = A1('a1): a1
+type rec a3 = A3('a): a3
+let f = (A2(y), A1(x), A3(z)) => z == x
+"#;
+    let err = compile_test_source_to_js(source, "gadt_existential_numbered_name.res").unwrap_err();
+    let message = format!("{err:#}");
+    let mut plain = String::new();
+    let mut chars = message.chars();
+    while let Some(c) = chars.next() {
+        if c == '\u{1b}' {
+            chars.by_ref().find(|c| *c == 'm');
+        } else {
+            plain.push(c);
+        }
+    }
+    let message = plain;
+    assert!(message.contains("This has type: $a1"), "{message}");
+    assert!(
+        message.contains("being compared to something of type: $a2"),
+        "{message}"
     );
 }

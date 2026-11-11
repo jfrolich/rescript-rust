@@ -18,8 +18,7 @@
 exception Fatal_error
 
 let fatal_error msg =
-  prerr_string ">> Fatal error: ";
-  prerr_endline msg;
+  Compiler_request_output.print_stderr (">> Fatal error: " ^ msg);
   raise Fatal_error
 
 let try_finally work cleanup =
@@ -54,51 +53,47 @@ let rec map_end f l1 l2 =
   | [] -> l2
   | hd :: tl -> f hd :: map_end f tl l2
 
-let rec map_left_right f = function
-  | [] -> []
-  | hd :: tl ->
-    let res = f hd in
-    res :: map_left_right f tl
-
-let rec for_all2 pred l1 l2 =
-  match (l1, l2) with
-  | [], [] -> true
-  | hd1 :: tl1, hd2 :: tl2 -> pred hd1 hd2 && for_all2 pred tl1 tl2
-  | _, _ -> false
-
 let rec replicate_list elem n =
   if n <= 0 then [] else elem :: replicate_list elem (n - 1)
-
-let rec list_remove x = function
-  | [] -> []
-  | hd :: tl -> if hd = x then tl else hd :: list_remove x tl
-
-let rec split_last = function
-  | [] -> assert false
-  | [x] -> ([], x)
-  | hd :: tl ->
-    let lst, last = split_last tl in
-    (hd :: lst, last)
 
 let may = Stdlib.Option.iter
 let may_map = Stdlib.Option.map
 
 (* File functions *)
 
-let find_in_path_uncap path name =
+(* In each directory of [path], try [name] as written before its uncapitalized
+   form: on a case-insensitive file system both match, and the result is shown
+   in error messages and used in generated import paths. [f] gets each
+   candidate and returns the first result found. *)
+let find_map_in_path_uncap path name f =
   let uname = String.uncapitalize_ascii name in
   let rec try_dir = function
-    | [] -> raise Not_found
-    | dir :: rem ->
-      let fullname = Filename.concat dir name
-      and ufullname = Filename.concat dir uname in
-      if Sys.file_exists ufullname then ufullname
-      else if Sys.file_exists fullname then fullname
-      else try_dir rem
+    | [] -> None
+    | dir :: rem -> (
+      match f (Filename.concat dir name) with
+      | Some _ as found -> found
+      | None when uname = name -> try_dir rem
+      | None -> (
+        match f (Filename.concat dir uname) with
+        | Some _ as found -> found
+        | None -> try_dir rem))
   in
   try_dir path
 
+let find_in_path_uncap_opt path name =
+  find_map_in_path_uncap path name (fun fullname ->
+      if Build_file_store.exists (Compiler_request_state.resolve_path fullname)
+      then Some fullname
+      else None)
+
+let find_in_path_uncap path name =
+  match find_in_path_uncap_opt path name with
+  | Some fullname -> fullname
+  | None -> raise Not_found
+
 let remove_file filename =
+  let filename = Compiler_request_state.resolve_path filename in
+  Build_file_store.forget filename;
   try if Sys.file_exists filename then Sys.remove filename
   with Sys_error _msg -> ()
 
@@ -121,6 +116,7 @@ let create_hashtable init =
 (* File copy *)
 
 let output_to_bin_file_directly filename fn =
+  let filename = Compiler_request_state.resolve_path filename in
   let oc = open_out_bin filename in
   match fn filename oc with
   | v ->
@@ -130,39 +126,7 @@ let output_to_bin_file_directly filename fn =
     close_out oc;
     raise e
 
-let output_to_file_via_temporary ?(mode = [Open_text]) filename fn =
-  let temp_filename, oc =
-    Filename.open_temp_file ~mode ~perms:0o666
-      ~temp_dir:(Filename.dirname filename)
-      (Filename.basename filename)
-      ".tmp"
-  in
-  (* The 0o666 permissions will be modified by the umask.  It's just
-     like what [open_out] and [open_out_bin] do.
-     With temp_dir = dirname filename, we ensure that the returned
-     temp file is in the same directory as filename itself, making
-     it safe to rename temp_filename to filename later.
-     With prefix = basename filename, we are almost certain that
-     the first generated name will be unique.  A fixed prefix
-     would work too but might generate more collisions if many
-     files are being produced simultaneously in the same directory. *)
-  match fn temp_filename oc with
-  | res -> (
-    close_out oc;
-    try
-      Sys.rename temp_filename filename;
-      res
-    with exn ->
-      remove_file temp_filename;
-      raise exn)
-  | exception exn ->
-    close_out oc;
-    remove_file temp_filename;
-    raise exn
-
 (* Integer operations *)
-
-let rec log2 n = if n <= 1 then 0 else 1 + log2 (n asr 1)
 
 module Int_literal_converter = struct
   (* To convert integer literals, allowing max_int + 1 (PR#4210) *)
@@ -170,28 +134,23 @@ module Int_literal_converter = struct
     if String.length str = 0 || str.[0] = '-' then of_string str
     else neg (of_string ("-" ^ str))
   let int s = cvt_int_aux s ( ~- ) int_of_string
-  let int32 s = cvt_int_aux s Int32.neg Int32.of_string
-  let int64 s = cvt_int_aux s Int64.neg Int64.of_string
 end
-
-(* String operations *)
-
-let chop_extensions file =
-  let dirname = Filename.dirname file and basename = Filename.basename file in
-  try
-    let pos = String.index basename '.' in
-    let basename = String.sub basename 0 pos in
-    if Filename.is_implicit file && dirname = Filename.current_dir_name then
-      basename
-    else Filename.concat dirname basename
-  with Not_found -> file
 
 let get_ref r =
   let v = !r in
   r := [];
   v
 
-let fst3 (x, _, _) = x
+(** [edit_distance a b cutoff] computes the edit distance between
+    strings [a] and [b]. To help efficiency, it uses a cutoff: if the
+    distance [d] is smaller than [cutoff], it returns [Some d], else
+    [None].
+
+    The distance algorithm currently used is Damerau-Levenshtein: it
+    computes the number of insertion, deletion, substitution of
+    letters, or swapping of adjacent letters to go from one word to the
+    other. The particular algorithm may change in the future.
+*)
 let edit_distance a b cutoff =
   let la, lb = (String.length a, String.length b) in
   let cutoff =
@@ -265,7 +224,7 @@ let did_you_mean ppf get_choices =
   match get_choices () with
   | [] -> ()
   | choices ->
-    let rest, last = split_last choices in
+    let rest, last = Ext_list.split_at_last choices in
     Format.fprintf ppf "@\nHint: Did you mean %s%s%s?@?"
       (String.concat ", " rest)
       (if rest = [] then "" else " or ")
@@ -334,19 +293,20 @@ module Color = struct
     | Format.String_tag "filename" -> [FG Cyan]
     | _ -> raise Not_found
 
-  let color_enabled = ref true
+  let color_key = Request_local.new_key (fun () -> ref true)
+  let color_enabled () = Domain.DLS.get color_key
 
   (* either prints the tag of [s] or delegates to [or_else] *)
   let mark_open_tag ~or_else s =
     try
       let style = style_of_tag s in
-      if !color_enabled then ansi_of_style_l style else ""
+      if !(color_enabled ()) then ansi_of_style_l style else ""
     with Not_found -> or_else s
 
   let mark_close_tag ~or_else s =
     try
       let _ = style_of_tag s in
-      if !color_enabled then ansi_of_style_l [Reset] else ""
+      if !(color_enabled ()) then ansi_of_style_l [Reset] else ""
     with Not_found -> or_else s
 
   (* add color handling to formatter [ppf] *)
@@ -376,24 +336,20 @@ module Color = struct
 
   type setting = Auto | Always | Never
 
-  let setup =
-    let first = ref true in
-    (* initialize only once *)
-    let formatter_l =
+  (* Install shared formatter hooks during module initialization. Their tag
+     callbacks read the calling domain's color setting. *)
+  let () =
+    Format.set_mark_tags true;
+    List.iter set_color_tag_handling
       [Format.std_formatter; Format.err_formatter; Format.str_formatter]
-    in
-    fun o ->
-      if !first then (
-        first := false;
-        Format.set_mark_tags true;
-        List.iter set_color_tag_handling formatter_l;
-        color_enabled :=
-          match o with
-          | Some Always -> true
-          | Some Auto -> should_enable_color ()
-          | Some Never -> false
-          | None -> should_enable_color ());
-      ()
+
+  let setup option =
+    color_enabled () :=
+      match option with
+      | Some Always -> true
+      | Some Auto -> should_enable_color ()
+      | Some Never -> false
+      | None -> should_enable_color ()
 end
 
 let normalise_eol s =

@@ -15,7 +15,7 @@
 //! - `Env` - The main environment type
 //! - Lookup functions for values, types, and modules
 
-use super::asttypes::{MutableFlag, PrivateFlag};
+use super::asttypes::PrivateFlag;
 use super::context::TypeContext;
 use super::decl::{
     ConstructorArguments, ConstructorDeclaration, ConstructorDescription, ConstructorKind,
@@ -64,7 +64,7 @@ fn free_vars_rec(
     }
     let desc = ctx.get_desc(ty);
     match &*desc {
-        TypeDesc::Tvar(_) => {
+        TypeDesc::Tvar(..) => {
             result.insert(ty);
         }
         _ => {
@@ -73,6 +73,70 @@ fn free_vars_rec(
             });
         }
     }
+}
+
+/// OCaml `Datarepr.free_vars ~param:true (newgenty (Ttuple tys))`
+/// (datarepr.ml:24-44) as `Type_set.elements`: the free type variables of
+/// `tys`, where a non-static polymorphic variant whose row variable is free
+/// counts as one parameter itself, ordered by node (allocation order,
+/// OCaml's `type_expr.id`).
+pub(crate) fn free_vars_param(ctx: &TypeContext, tys: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    fn walk(
+        ctx: &TypeContext,
+        ty: TypeExprRef,
+        result: &mut Vec<TypeExprRef>,
+        visited: &mut HashSet<TypeExprRef>,
+    ) {
+        let ty = ctx.repr(ty);
+        if !visited.insert(ty) {
+            return;
+        }
+        let desc = ctx.get_desc(ty).into_desc();
+        match desc {
+            TypeDesc::Tvar(..) => result.push(ty),
+            TypeDesc::Tvariant(row) => {
+                let row = super::btype::row_repr(ctx, &ctx.row_desc(row));
+                // `iter_row loop row`: the fields, and the name's arguments.
+                for (_, field) in row.row_fields.iter() {
+                    match super::btype::row_field_repr(ctx, field) {
+                        super::type_expr::RowField::Rpresent(Some(arg)) => {
+                            walk(ctx, arg, result, visited)
+                        }
+                        super::type_expr::RowField::Reither { types, .. } => {
+                            for arg in types.iter() {
+                                walk(ctx, *arg, result, visited);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if let Some((_, args)) = &row.row_name {
+                    for arg in args.iter() {
+                        walk(ctx, *arg, result, visited);
+                    }
+                }
+                if !super::btype::static_row(ctx, &row) {
+                    let more = ctx.repr(row.row_more);
+                    if matches!(&*ctx.get_desc(more), TypeDesc::Tvar(..)) {
+                        result.push(ty);
+                    } else {
+                        walk(ctx, more, result, visited);
+                    }
+                }
+            }
+            _ => super::btype::iter_type_expr(ctx, ty, |child| {
+                walk(ctx, child, result, visited);
+            }),
+        }
+    }
+    let mut result = Vec::new();
+    let mut visited = HashSet::new();
+    for &ty in tys {
+        walk(ctx, ty, &mut result, &mut visited);
+    }
+    result.sort_by_key(|ty| ty.0);
+    result.dedup();
+    result
 }
 
 /// Compute existential type variables for a GADT constructor.
@@ -276,7 +340,9 @@ impl OpenedLayers {
 /// open.
 #[derive(Debug, Clone)]
 struct IdOpened<T> {
-    root: Option<Path>,
+    /// The open's root path, one block shared by every lookup through the
+    /// open and by all the tables it opens (env.ml `add_components`).
+    root: Option<Arc<Path>>,
     components: Rc<OpenedMap<(Ident, T, i32)>>,
     next: Rc<IdTbl<T>>,
     /// The open's `using` callback (OCaml `IdTbl.opened.using`), as a slot
@@ -439,6 +505,83 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
+/// The persistent map of one layer of an Env table. It allocates nothing
+/// until its first insertion: every `open` starts a new layer in each of the
+/// environment's tables, most layers never get a binding of their own, and
+/// an empty persistent map still owns a root node and a hasher.
+#[derive(Clone)]
+struct LayerMap<K, V>(Option<PersistentHashMap<K, V>>);
+
+impl<K, V> std::fmt::Debug for LayerMap<K, V>
+where
+    K: std::fmt::Debug + std::hash::Hash + Eq,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(map) => map.fmt(f),
+            None => f.write_str("{}"),
+        }
+    }
+}
+
+impl<K, V> Default for LayerMap<K, V> {
+    fn default() -> Self {
+        LayerMap(None)
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> LayerMap<K, V> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.0.as_ref().is_none_or(|map| map.is_empty())
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |map| map.len())
+    }
+
+    #[inline]
+    fn get(&self, key: &K) -> Option<&V> {
+        self.0.as_ref()?.get(key)
+    }
+
+    #[inline]
+    fn contains_key(&self, key: &K) -> bool {
+        self.0.as_ref().is_some_and(|map| map.contains_key(key))
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.0.as_mut()?.get_mut(key)
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.0.get_or_insert_with(Default::default).insert(key, value);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().flat_map(|map| map.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+
+    /// Whether both are the same map, sharing every node.
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => left.ptr_eq(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Same-name bindings in an Env table, oldest first. Most names are bound
 /// once, so a single binding is stored inline; a name bound again moves its
 /// bindings to a shared vector, so copying a persistent-map node on insert
@@ -479,14 +622,49 @@ impl<T> std::ops::Deref for IdBucket<T> {
     }
 }
 
+/// A binding added to an `IdTbl` since its map was last extended, heading
+/// the list of the bindings added before it.
+#[derive(Debug)]
+struct Recent<T> {
+    id: Ident,
+    value: T,
+    next: Option<std::rc::Rc<Recent<T>>>,
+    /// Bindings in the list headed by this one.
+    len: u32,
+    /// One bit per name bound in the list headed by this one (see
+    /// `recent_name_bit`): a lookup of a name whose bit is clear skips the
+    /// list.
+    names: u64,
+}
+
+/// How many bindings an `IdTbl` keeps in its recent list before moving them
+/// into its map. Larger batches copy the map less often but make every
+/// lookup of a listed name walk further; 16 measured best of 8 to 64 on a
+/// 3,735-module application.
+const RECENT_LIMIT: u32 = 16;
+
+#[inline]
+fn recent_name_bit(name: Name) -> u64 {
+    1 << (name.content_hash() & 63)
+}
+
 /// A table of bindings indexed by identifier.
 ///
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
 /// open is represented symbolically as an `opened` layer rather than flattening
 /// every opened binding into the same name map with an origin boolean.
+///
+/// The local bindings are a persistent map plus the list of the bindings
+/// added since the map was last extended, newest first. Every snapshot of an
+/// environment keeps its version of the table alive, and adding to a shared
+/// map copies whole map nodes, which the snapshot then holds until the module
+/// is torn down. Adding to the list allocates one small node instead; the
+/// list is moved into the map once it holds `RECENT_LIMIT` bindings, so the
+/// map is copied once per batch. Every reader looks in the list first.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
+    current: LayerMap<Name, IdBucket<T>>,
+    recent: Option<std::rc::Rc<Recent<T>>>,
     opened: Option<Rc<IdOpened<T>>>,
 }
 
@@ -494,13 +672,71 @@ impl<T: Clone> IdTbl<T> {
     /// An empty table.
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            recent: None,
             opened: None,
         }
     }
 
     /// Bind `id` to `value`, shadowing earlier bindings of its name.
     pub fn add(&mut self, id: Ident, value: T) {
+        let (len, names) = self
+            .recent
+            .as_ref()
+            .map_or((0, 0), |recent| (recent.len, recent.names));
+        self.recent = Some(std::rc::Rc::new(Recent {
+            names: names | recent_name_bit(id.name_atom()),
+            len: len + 1,
+            id,
+            value,
+            next: self.recent.take(),
+        }));
+        if len + 1 >= RECENT_LIMIT {
+            self.move_recent_to_map();
+        }
+    }
+
+    /// Move the recent bindings into the map, oldest first.
+    fn move_recent_to_map(&mut self) {
+        let mut next = self.recent.take();
+        let mut newest_first = Vec::with_capacity(next.as_ref().map_or(0, |r| r.len as usize));
+        while let Some(node) = next {
+            // A snapshot may still hold the list; then copy the binding out.
+            match std::rc::Rc::try_unwrap(node) {
+                Ok(node) => {
+                    newest_first.push((node.id, node.value));
+                    next = node.next;
+                }
+                Err(node) => {
+                    newest_first.push((node.id, node.value.clone()));
+                    next = node.next.clone();
+                }
+            }
+        }
+        for (id, value) in newest_first.into_iter().rev() {
+            self.add_to_map(id, value);
+        }
+    }
+
+    /// The recent bindings of `key`, newest first.
+    #[inline]
+    fn recent_named(&self, key: Name) -> impl Iterator<Item = (&Ident, &T)> {
+        let bit = recent_name_bit(key);
+        let has_name = move |node: &&Recent<T>| node.names & bit != 0;
+        std::iter::successors(self.recent.as_deref().filter(has_name), move |node| {
+            node.next.as_deref().filter(has_name)
+        })
+        .filter(move |node| node.id.name_atom() == key)
+        .map(|node| (&node.id, &node.value))
+    }
+
+    /// Every recent binding, newest first.
+    fn recent_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
+        std::iter::successors(self.recent.as_deref(), |node| node.next.as_deref())
+            .map(|node| (&node.id, &node.value))
+    }
+
+    fn add_to_map(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         // `get_mut` copies the shared map path even when the key is absent,
         // so probe first: most added names are new.
@@ -521,13 +757,13 @@ impl<T: Clone> IdTbl<T> {
         components: Vec<(Ident, T, i32)>,
         slot: Option<u32>,
     ) {
-        self.add_open_layer_table(root, Rc::new(id_open_table(components)), slot);
+        self.add_open_layer_table(Arc::new(root), Rc::new(id_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
-        root: Path,
+        root: Arc<Path>,
         components: Rc<OpenedMap<(Ident, T, i32)>>,
         slot: Option<u32>,
     ) {
@@ -536,7 +772,8 @@ impl<T: Clone> IdTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            recent: None,
             opened: Some(Rc::new(IdOpened {
                 root: Some(root),
                 components,
@@ -555,10 +792,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
-        if self
-            .current
-            .get(&key)
-            .is_some_and(|entries| !entries.is_empty())
+        if self.recent_named(key).next().is_some()
+            || self
+                .current
+                .get(&key)
+                .is_some_and(|entries| !entries.is_empty())
         {
             return None;
         }
@@ -573,23 +811,30 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
+        let stamp = id.stamp();
+        let is_id = |entry_id: &Ident| {
+            if stamp == 0 {
+                entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
+            } else {
+                entry_id.same(id) && entry_id.name_atom() == id.name_atom()
+            }
+        };
+        if let Some((_, value)) = self
+            .recent_named(id.name_atom())
+            .find(|(entry_id, _)| is_id(entry_id))
+        {
+            return Some(value);
+        }
         // Opening a module starts a fresh, usually empty, local layer; skip
         // hashing the name for those.
         if self.current.is_empty() {
             return None;
         }
-        let stamp = id.stamp();
         self.current.get(&id.name_atom()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
-                .find(|(entry_id, _)| {
-                    if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
-                    } else {
-                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
-                    }
-                })
+                .find(|(entry_id, _)| is_id(entry_id))
                 .map(|(_, value)| value)
         })
     }
@@ -599,6 +844,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
+        if let Some(found) = self.recent_named(key).next() {
+            return Some(found);
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -631,6 +879,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
+        if let Some((id, value)) = self.recent_named(key).next() {
+            return Some((Path::pident(*id), value));
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -645,7 +896,8 @@ impl<T: Clone> IdTbl<T> {
                     let path = opened
                         .root
                         .as_ref()
-                        .map(|root| Path::pdot_pos(*root, key, *pos))
+                        // env.ml:293: `Pdot (root, name, pos)`.
+                        .map(|root| Path::pdot_pos(**root, key, *pos))
                         .unwrap_or_else(|| Path::pident(*id));
                     (path, value)
                 })
@@ -685,6 +937,10 @@ impl<T: Clone> IdTbl<T> {
     where
         F: FnMut(&T) -> T,
     {
+        // The map holds the bindings that can be changed in place.
+        if self.recent_named(key).next().is_some() {
+            self.move_recent_to_map();
+        }
         if self.current.contains_key(&key)
             && let Some(entries) = self.current.get_mut(&key)
             && let Some((id, value)) = entries.last_mut()
@@ -717,6 +973,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
+        items.extend(self.recent_named(key).map(|(_, value)| value));
         if let Some(entries) = self.current.get(&key) {
             items.extend(entries.iter().rev().map(|(_, value)| value));
         }
@@ -741,6 +998,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
+        items.extend(self.recent_entries());
         for entries in self.current.values() {
             items.extend(entries.iter().map(|(id, value)| (id, value)));
         }
@@ -760,7 +1018,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
-        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
+        // Read the local layer as one map, so the names come out in the
+        // order they would without a recent list.
+        let mut local = self.clone();
+        local.move_recent_to_map();
+        names.extend(ident_tbl_fold_name_order(local.current.iter().map(
             |(name, entries)| {
                 (
                     name.as_str(),
@@ -797,12 +1059,18 @@ impl<T: Clone> IdTbl<T> {
         shadowing_opens: &mut Vec<&'a OpenedMap<(Ident, T, i32)>>,
         items: &mut Vec<(&'a Ident, &'a T)>,
     ) {
-        for (name, entries) in self.current.iter() {
+        // Newest first, so the first binding seen for a name is its latest.
+        let recent = self.recent_entries();
+        let mapped = self
+            .current
+            .values()
+            .filter_map(|entries| entries.last().map(|(id, value)| (id, value)));
+        for (id, value) in recent.chain(mapped) {
+            let name = id.name_atom();
             if !shadowing_opens
                 .iter()
-                .any(|opened| opened.contains_key(name))
-                && seen.insert(*name)
-                && let Some((id, value)) = entries.last()
+                .any(|opened| opened.contains_key(&name))
+                && seen.insert(name)
             {
                 items.push((id, value));
             }
@@ -837,10 +1105,10 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
+    current: LayerMap<Name, IdBucket<T>>,
     /// Order in which each name of `current` was first added: the `Ident.add`
     /// sequence that shapes OCaml's AVL tree (compiler/ext/ident.ml:144-150).
-    current_first_add: PersistentHashMap<Name, i32>,
+    current_first_add: LayerMap<Name, i32>,
     opened: Option<Rc<TycompOpened<T>>>,
 }
 
@@ -848,8 +1116,8 @@ impl<T: Clone> TycompTbl<T> {
     /// An empty table.
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
             opened: None,
         }
     }
@@ -885,8 +1153,8 @@ impl<T: Clone> TycompTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
             opened: Some(Rc::new(TycompOpened {
                 components,
                 next: Rc::new(next),
@@ -1202,6 +1470,11 @@ struct EnvData {
     /// Local constraints (for GADTs).
     local_constraints: PersistentHashMap<Path, Arc<TypeDeclaration>>,
 
+    /// The label array `store_type` described with each local record type
+    /// (compiler/ml/env.ml:1561-1569 stores `(decl, (constructors, labels))`
+    /// in `env.types`): what `find_type_descrs (Pident id)` returns.
+    type_label_families: PersistentHashMap<Ident, super::decl::LabelArrayRef>,
+
     /// Environment flags.
     flags: EnvFlags,
 
@@ -1291,6 +1564,7 @@ impl Env {
                 scope_caches: std::rc::Rc::default(),
                 implicit_open_roots: PersistentHashSet::default(),
                 local_constraints: PersistentHashMap::default(),
+                type_label_families: PersistentHashMap::default(),
                 flags: EnvFlags::default(),
                 pending_open_slot: None,
             }),
@@ -1440,7 +1714,8 @@ impl Env {
                 .modules
                 .visible_local_entries()
                 .filter_map(|(id, decl)| match &decl.md_type {
-                    ModuleType::MtyAlias(_, target) | ModuleType::MtyIdent(target) => {
+                    ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                        let target = decl.md_type.ident_or_alias_path().unwrap();
                         Some((*id, *target))
                     }
                     _ => None,
@@ -1593,10 +1868,63 @@ impl Env {
     // ========================================================================
 
     /// Add a type binding.
+    /// Add a type binding without describing its labels: OCaml
+    /// `store_type_infos` (env.ml:1605-1612), what `components_of_module_maker`
+    /// uses (env.ml:1488), or an abstract placeholder. A previous binding of
+    /// `id` loses its labels' array. Use [`Env::store_type`] for `Env.add_type`.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
         self.bump_scope();
         let decl = decl.into();
-        self.data_mut().types.add(id, decl);
+        let data = self.data_mut();
+        data.types.add(id, decl);
+        data.type_label_families.remove(&id);
+    }
+
+    /// OCaml `Env.add_type` = `store_type` (env.ml:1561-1569, 1701): the
+    /// binding plus the labels `Datarepr.labels_of_type (Pident id) decl`
+    /// describes for a record, added with `List.fold_right`. Constructors
+    /// are added by the callers that need them.
+    pub fn store_type(
+        &mut self,
+        ctx: &TypeContext,
+        id: Ident,
+        decl: impl Into<Arc<TypeDeclaration>>,
+    ) {
+        let decl = decl.into();
+        self.add_type(id, decl.clone());
+        if let TypeKind::TypeRecord(labels, _) = &decl.type_kind
+            && !labels.is_empty()
+        {
+            let res_ty = ctx.new_generic_constr(Path::pident(id), decl.type_params.clone());
+            let descs = crate::types::env_lazy::label_descrs(
+                res_ty,
+                &decl,
+                decl.type_private,
+                ctx,
+                |_| {},
+            );
+            self.add_type_label_family(id, descs[0].lbl_all);
+            for (ld, desc) in labels.iter().zip(descs).rev() {
+                self.add_label(ld.ld_id, desc);
+            }
+        }
+    }
+
+    /// Rebind the type `id` with its declaration's `type_variance` replaced
+    /// by `variance`, keeping its labels and their array (labels do not
+    /// describe variance). Returns the new declaration, or `None` when `id`
+    /// is not bound.
+    pub fn update_type_variance(
+        &mut self,
+        id: Ident,
+        variance: Vec<super::variance::Variance>,
+    ) -> Option<Arc<TypeDeclaration>> {
+        let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
+        decl.type_variance = variance;
+        let decl = Arc::new(decl);
+        self.bump_scope();
+        self.data_mut().types.add(id, decl.clone());
+        Some(decl)
     }
 
     /// Find a type by name.
@@ -1745,8 +2073,9 @@ impl Env {
                                 }
                                 None
                             }
-                            super::decl::ModuleType::MtyIdent(type_path)
-                            | super::decl::ModuleType::MtyAlias(_, type_path) => {
+                            super::decl::ModuleType::MtyIdent(_)
+                            | super::decl::ModuleType::MtyAlias(..) => {
+                                let type_path = mty.ident_or_alias_path().unwrap();
                                 if let Ok(mtd) = env.lookup_modtype(type_path) {
                                     if let Some(resolved) = &mtd.mtd_type {
                                         return find_type_in_module_type(
@@ -1838,6 +2167,18 @@ impl Env {
         self.bump_id();
         let desc = Arc::new(desc);
         self.data_mut().labels.add(id, desc);
+    }
+
+    /// Record that the labels installed for the record type `id` share the
+    /// array `lbl_all` (the labels half of `store_type`, env.ml:1561-1569).
+    pub fn add_type_label_family(&mut self, id: Ident, lbl_all: super::decl::LabelArrayRef) {
+        self.data_mut().type_label_families.insert(id, lbl_all);
+    }
+
+    /// `snd (find_type_descrs (Pident id))` of a record type: the array its
+    /// labels were installed with.
+    pub fn type_label_family(&self, id: &Ident) -> Option<super::decl::LabelArrayRef> {
+        self.data.type_label_families.get(id).copied()
     }
 
     /// Find a label by name.
@@ -1942,19 +2283,20 @@ impl Env {
         self.bump_scope();
         self.invalidate_module_alias_caches();
         let slot = self.data.pending_open_slot;
+        let root = Arc::new(root);
         let data = self.data_mut();
         data.values
-            .add_open_layer_table(root, layers.values.clone(), slot);
+            .add_open_layer_table(root.clone(), layers.values.clone(), slot);
         data.types
-            .add_open_layer_table(root, layers.types.clone(), slot);
+            .add_open_layer_table(root.clone(), layers.types.clone(), slot);
         data.constrs
             .add_open_layer_table(layers.constrs.clone(), slot);
         data.labels
             .add_open_layer_table(layers.labels.clone(), slot);
         data.modules
-            .add_open_layer_table(root, layers.modules.clone(), slot);
+            .add_open_layer_table(root.clone(), layers.modules.clone(), slot);
         data.module_components.add_open_layer_table(
-            root,
+            root.clone(),
             layers.module_components.clone(),
             slot,
         );
@@ -2106,7 +2448,8 @@ impl Env {
                     SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
                     _ => None,
                 }),
-                ModuleType::MtyAlias(_, alias_path) | ModuleType::MtyIdent(alias_path) => {
+                ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                    let alias_path = mty.ident_or_alias_path().unwrap();
                     let md = lookup_module_inner(env, alias_path, visiting).ok()?;
                     lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
                 }
@@ -2152,53 +2495,48 @@ impl Env {
     }
 
     /// Normalize a path by following module aliases.
-    /// Equivalent to OCaml's `Env.normalize_path`.
-    /// For `Pdot(p, s)`, first normalizes the prefix `p`, then checks
-    /// if the resulting module is an alias and follows it.
-    /// For `Pident(id)`, checks if it's a module alias and follows it.
-    pub fn normalize_path(&self, path: &Path) -> Path {
-        self.normalize_path_inner(path, 0)
+    /// Equivalent to OCaml's `Env.normalize_path` (env.ml:868-888): every
+    /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
+    /// keeps its suffix string; an unchanged `Pident` is returned itself.
+    pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
+        *self.normalize_shared_path(ctx, &Arc::new(*path), 0)
     }
 
     /// Normalize the prefix of a value/extension path by following module aliases.
-    /// Equivalent to OCaml's `Env.normalize_path_prefix`.
-    pub fn normalize_path_prefix(&self, path: &Path) -> Path {
+    /// Equivalent to OCaml's `Env.normalize_path_prefix` (env.ml:898-902),
+    /// which always builds a fresh `Pdot`.
+    pub fn normalize_path_prefix(&self, ctx: &TypeContext, path: &Path) -> Path {
         match path.view() {
-            PathView::Pdot(prefix, name, pos) => {
-                let normalized_prefix = self.normalize_path(prefix);
-                if normalized_prefix == *prefix {
-                    *path
-                } else {
-                    Path::pdot_pos(normalized_prefix, *name, *pos)
-                }
+            PathView::Pdot(..) => {
+                ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
             }
             PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
         }
     }
 
-    fn normalize_path_inner(&self, path: &Path, depth: usize) -> Path {
+    /// `normalize_path` of a path block: a fresh `Pdot` around the normalized
+    /// prefix, then an alias's own stored target block (env.ml:868-878); a
+    /// `Pident` that is not an alias is the block itself.
+    fn normalize_shared_path(
+        &self,
+        ctx: &TypeContext,
+        path: &Arc<Path>,
+        depth: usize,
+    ) -> Arc<Path> {
         if depth > 20 {
-            return *path; // Prevent infinite loops
+            return path.clone(); // Prevent infinite loops
         }
-        // First, recursively normalize the prefix for Pdot paths
         let path = match path.view() {
-            PathView::Pdot(p, s, pos) => {
-                let p_norm = self.normalize_path_inner(p, depth + 1);
-                if p_norm == *p {
-                    *path
-                } else {
-                    Path::pdot_pos(p_norm, *s, *pos)
-                }
-            }
-            _ => *path,
+            PathView::Pdot(..) => Arc::new(ctx.rebuild_dotted(path, |prefix| {
+                self.normalize_shared_path(ctx, prefix, depth + 1)
+            })),
+            _ => path.clone(),
         };
-
-        // Then check if the path itself is a module alias
-        if let Ok(md) = self.lookup_module(&path) {
-            if let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type {
-                return self.normalize_path_inner(alias_path, depth + 1);
-            }
+        if let Ok(md) = self.lookup_module(&path)
+            && let super::decl::ModuleType::MtyAlias(_, alias_path) = &md.md_type
+        {
+            return self.normalize_shared_path(ctx, alias_path, depth + 1);
         }
         path
     }
@@ -2371,6 +2709,14 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
     env
 }
 
+/// The blocks of the shape of the builtin declaration numbered `block`:
+/// `Predef.common_initial_env` makes each builtin declaration once.
+fn predef_shape(block: u32) -> crate::types::ShapeBlocks {
+    crate::types::ShapeBlocks {
+        block: crate::types::ShapeAllocation::predef(block),
+    }
+}
+
 fn build_initial_env(ctx: &TypeContext) -> Env {
     let mut env = Env::empty();
 
@@ -2387,6 +2733,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         type_attributes: vec![],
         type_immediate: immediate,
         type_representation: crate::types::TypeRepresentation::Boxed,
+        type_shape: crate::types::ValueShape::Unstated,
         type_inlined_types: vec![],
         type_path: None,
     };
@@ -2423,6 +2770,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                                  decl: TypeDeclaration,
                                  ctx: &TypeContext| {
         let type_path = Path::pident(id);
+        let mut record_family = None;
 
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
@@ -2479,36 +2827,26 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     env.add_constructor(cd.cd_id, cstr_desc);
                 }
             }
-            TypeKind::TypeRecord(labels, repr) => {
+            TypeKind::TypeRecord(labels, _) => {
                 let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
-                for (pos, ld) in labels.iter().enumerate() {
-                    let label_desc = LabelDescription {
-                        lbl_name: ld.ld_id.name_atom(),
-                        lbl_runtime_name: ld.declaration_name(),
-                        lbl_res: res_ty,
-                        lbl_arg: crate::types::ctype::remap_label_type_to_params(
-                            ctx,
-                            ld.ld_type,
-                            &decl.type_params,
-                        ),
-                        lbl_mut: ld.ld_mutable,
-                        lbl_optional: ld.ld_optional,
-                        lbl_pos: pos as i32,
-                        lbl_all: crate::types::decl::LabelArrayRef(0),
-                        lbl_repres: repr.clone(),
-                        lbl_private: decl.type_private,
-                        lbl_loc: ld.ld_loc,
-                        lbl_attributes: ld.ld_attributes.clone(),
-                    };
+                // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
+                for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
+                    res_ty, &decl, decl.type_private, ctx, |_| {},
+                )) {
+                    record_family = Some(label_desc.lbl_all);
                     env.add_label(ld.ld_id, label_desc);
                 }
             }
             _ => {}
         }
         env.add_type(id, decl);
+        if let Some(family) = record_family {
+            env.add_type_label_family(id, family);
+        }
     };
 
     use super::predef;
+    use super::variant_runtime::{BlockType, ValueShape};
 
     // ---- Abstract types ----
     // Order matches OCaml's Predef.common_initial_env add_type order
@@ -2521,14 +2859,43 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 cstr(predef::ident_true(), vec![]),
             ]),
             type_immediate: true,
+            type_shape: ValueShape::recognized_as(BlockType::Boolean, predef_shape(1)),
             ..decl_abstr(0, true)
         },
         ctx,
     );
-    add_type_with_constrs(&mut env, predef::ident_int(), decl_abstr(0, true), ctx);
-    add_type_with_constrs(&mut env, predef::ident_float(), decl_abstr(0, false), ctx);
-    add_type_with_constrs(&mut env, predef::ident_bigint(), decl_abstr(0, false), ctx);
-    add_type_with_constrs(&mut env, predef::ident_string(), decl_abstr(0, false), ctx);
+    // predef.ml `recognized_as`: what `typeof` or `instanceof` recognizes a
+    // builtin type's values by, as an annotation states it for a declared
+    // type.
+    let recognized_as =
+        |block_type: BlockType, block: u32, decl: TypeDeclaration| TypeDeclaration {
+            type_shape: ValueShape::recognized_as(block_type, predef_shape(block)),
+            ..decl
+        };
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_int(),
+        recognized_as(BlockType::Number, 2, decl_abstr(0, true)),
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_float(),
+        recognized_as(BlockType::Number, 3, decl_abstr(0, false)),
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_bigint(),
+        recognized_as(BlockType::Bigint, 4, decl_abstr(0, false)),
+        ctx,
+    );
+    add_type_with_constrs(
+        &mut env,
+        predef::ident_string(),
+        recognized_as(BlockType::String, 5, decl_abstr(0, false)),
+        ctx,
+    );
     add_type_with_constrs(
         &mut env,
         predef::ident_unit(),
@@ -2537,12 +2904,6 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
             type_immediate: true,
             ..decl_abstr(0, true)
         },
-        ctx,
-    );
-    add_type_with_constrs(
-        &mut env,
-        predef::ident_extension_constructor(),
-        decl_abstr(0, false),
         ctx,
     );
     add_type_with_constrs(
@@ -2603,14 +2964,30 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![tvar],
                 type_arity: 1,
                 type_variance: vec![crate::types::variance::Variance::covariant()],
+                // A constant: its blocks and its name string are static.
+                type_shape: ValueShape::recognized_as(
+                    BlockType::Instance(crate::types::VariantInstance::Class {
+                        name: "Promise".to_string(),
+                        ancestors: Vec::new(),
+                        blocks: crate::types::ClassBlocks {
+                            block: crate::types::ShapeAllocation::predef(10),
+                            name: crate::types::ShapeString::Allocation(
+                                crate::types::ShapeAllocation::predef(11),
+                            ),
+                            ancestors: Vec::new(),
+                        },
+                    }),
+                    predef_shape(6),
+                ),
                 ..decl_abstr(1, false)
             },
             ctx,
         );
     }
     {
-        // Upstream compiler/ml/predef.ml:367-376: first-class tags are an
-        // abstract, invariant two-parameter builtin type.
+        // Upstream compiler/ml/predef.ml:364-372: first-class tags are an
+        // abstract two-parameter builtin type, contravariant in the
+        // parameter and covariant in the output.
         let param = ctx.new_generic_var(None);
         let output = ctx.new_generic_var(None);
         add_type_with_constrs(
@@ -2620,8 +2997,8 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 type_params: vec![param, output],
                 type_arity: 2,
                 type_variance: vec![
-                    crate::types::variance::Variance::full(),
-                    crate::types::variance::Variance::full(),
+                    crate::types::variance::Variance::covariant().conjugate(),
+                    crate::types::variance::Variance::covariant(),
                 ],
                 ..decl_abstr(2, false)
             },
@@ -2635,6 +3012,13 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         TypeDeclaration {
             type_params: vec![ctx.new_generic_var(None)],
             type_variance: vec![crate::types::variance::Variance::full()],
+            type_shape: ValueShape::recognized_as(
+                // A constant: its `InstanceType Array` block is static.
+                BlockType::Instance(crate::types::VariantInstance::Array(
+                    crate::types::ShapeAllocation::predef(12),
+                )),
+                predef_shape(8),
+            ),
             ..decl_abstr(1, false)
         },
         ctx,
@@ -2665,7 +3049,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     );
     {
         let tvar = ctx.new_generic_var(None);
-        let list_ty = ctx.new_generic_constr(predef::path_list(), vec![tvar]);
+        let list_ty = ctx.new_generic_predef_constr(predef::path_list(), vec![tvar]);
         add_type_with_constrs(
             &mut env,
             predef::ident_list(),
@@ -2684,27 +3068,14 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     }
     {
         let tvar = ctx.new_generic_var(None);
-        let option_t = ctx.new_generic_constr(predef::path_option(), vec![tvar]);
-        let dict_label = crate::types::decl::LabelDeclaration {
-            ld_id: predef::ident_dict_magic_field(),
-            ld_runtime_name: None,
-            ld_mutable: MutableFlag::Immutable,
-            ld_optional: true,
-            ld_type: option_t,
-            ld_loc: crate::types::DeclLoc::none(),
-            ld_attributes: vec![],
-        };
         add_type_with_constrs(
             &mut env,
             predef::ident_dict(),
             TypeDeclaration {
                 type_params: vec![tvar],
                 type_arity: 1,
-                type_kind: TypeKind::TypeRecord(
-                    crate::types::decl::SharedVec::from(vec![dict_label]),
-                    crate::types::decl::RecordRepresentation::RecordRegular,
-                ),
                 type_variance: vec![crate::types::variance::Variance::full()],
+                type_shape: ValueShape::recognized_as(BlockType::Object, predef_shape(9)),
                 ..decl_abstr(1, false)
             },
             ctx,
@@ -2712,7 +3083,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     }
     {
         let tvar = ctx.new_generic_var(None);
-        let type_unknown = ctx.new_generic_constr(predef::path_unknown(), vec![]);
+        let type_unknown = ctx.new_generic_predef_constr(predef::path_unknown(), vec![]);
         add_type_with_constrs(
             &mut env,
             predef::ident_unknown(),
@@ -2736,16 +3107,16 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
     // Standard exception constructors (extension constructors of exn)
     {
-        let exn_ty = ctx.new_generic_constr(predef::path_exn(), vec![]);
-        let string_ty_for_exn = ctx.new_generic_constr(predef::path_string(), vec![]);
-        let int_ty_for_exn = ctx.new_generic_constr(predef::path_int(), vec![]);
+        let exn_ty = ctx.new_generic_predef_constr(predef::path_exn(), vec![]);
+        let string_ty_for_exn = ctx.new_generic_predef_constr(predef::path_string(), vec![]);
+        let int_ty_for_exn = ctx.new_generic_predef_constr(predef::path_int(), vec![]);
 
         let add_exception =
             |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
                 let path = Path::pident(id);
                 let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located::noloc(
-                        "ocaml.warn_on_literal_pattern".to_string(),
+                        "warn_on_literal_pattern".to_string(),
                     ),
                     attr_payload: crate::types::decl::AttributePayload::Structure(vec![]),
                     attr_loc: crate::types::DeclLoc::none(),
@@ -2793,7 +3164,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
             vec![string_ty_for_exn],
             exn_ty,
         );
-        let unknown_ty_for_exn = ctx.new_generic_constr(predef::path_unknown(), vec![]);
+        let unknown_ty_for_exn = ctx.new_generic_predef_constr(predef::path_unknown(), vec![]);
         add_exception(
             &mut env,
             predef::ident_js_exn(),
@@ -2814,13 +3185,13 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         );
     }
 
-    // char = int (private manifest)
+    // predef.ml build_initial_env: `char` is an alias of `int`, so a char
+    // literal is its code point.
     add_type_with_constrs(
         &mut env,
         predef::ident_char(),
         TypeDeclaration {
-            type_manifest: Some(ctx.new_generic_constr(predef::path_int(), vec![])),
-            type_private: PrivateFlag::Private,
+            type_manifest: Some(ctx.new_generic_predef_constr(predef::path_int(), vec![])),
             ..decl_abstr(0, true)
         },
         ctx,
@@ -2862,6 +3233,158 @@ mod tests {
                 "predef declarations live in the worker store"
             );
         }
+    }
+
+    /// Everything a reader can ask an `IdTbl`, in a comparable form.
+    fn id_tbl_readings(tbl: &IdTbl<i32>, names: &[&str], ids: &[Ident]) -> Vec<String> {
+        let mut readings = Vec::new();
+        for name in names {
+            readings.push(format!(
+                "{name}: {:?} {:?} {:?} {:?}",
+                tbl.find_by_name_with_id(*name),
+                tbl.find_by_name_with_path(*name),
+                tbl.find_all(*name),
+                tbl.open_slot_use(*name),
+            ));
+        }
+        for id in ids {
+            readings.push(format!("{id:?}: {:?}", tbl.find_by_ident(id)));
+        }
+        let mut all: Vec<_> = tbl.iter().map(|(id, value)| (id.stamp(), *value)).collect();
+        all.sort_unstable();
+        readings.push(format!("all: {all:?}"));
+        let mut visible: Vec<_> = tbl
+            .visible_local_entries()
+            .map(|(id, value)| (id.stamp(), *value))
+            .collect();
+        visible.sort_unstable();
+        readings.push(format!("visible: {visible:?}"));
+        readings.push(format!("fold order: {:?}", tbl.fold_name_order()));
+        readings
+    }
+
+    #[test]
+    fn recent_bindings_read_like_map_bindings() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "opened", "missing"];
+        // `listed` adds through the recent list, `mapped` straight to the map.
+        let mut listed = IdTbl::new();
+        let mut mapped = IdTbl::new();
+        let mut ids = vec![Ident::create_local("missing")];
+        let steps = 3 * RECENT_LIMIT as usize + 5;
+        for step in 0..steps {
+            if step == RECENT_LIMIT as usize + 3 {
+                // An open in the middle of a batch: the bindings before it
+                // stay readable below the opened layer.
+                let root = Path::pident(Ident::create_persistent("Opened"));
+                for tbl in [&mut listed, &mut mapped] {
+                    let components = vec![
+                        (Ident::create_persistent("opened"), -1, 0),
+                        (Ident::create_persistent("a"), -2, 1),
+                    ];
+                    tbl.add_open_layer(root, components, Some(7));
+                }
+            }
+            // Rebind a few names many times, in an irregular order.
+            let id = Ident::create_local(names[(step * 5 + step / 4) % 7]);
+            ids.push(id);
+            listed.add(id, step as i32);
+            mapped.add_to_map(id, step as i32);
+            assert_eq!(
+                id_tbl_readings(&listed, &names, &ids),
+                id_tbl_readings(&mapped, &names, &ids),
+                "after {} additions",
+                step + 1
+            );
+        }
+        assert!(
+            mapped.recent.is_none() && listed.recent.is_some(),
+            "the comparison must end with bindings still in the list"
+        );
+    }
+
+    #[test]
+    fn adding_to_a_table_leaves_a_snapshot_and_its_map_alone() {
+        let mut tbl = IdTbl::new();
+        let first = Ident::create_local("x");
+        tbl.add(first, 1);
+        tbl.move_recent_to_map();
+        let snapshot = tbl.clone();
+
+        let second = Ident::create_local("x");
+        tbl.add(second, 2);
+        tbl.add(Ident::create_local("y"), 3);
+        assert!(
+            tbl.current.ptr_eq(&snapshot.current),
+            "a binding added after a snapshot must not copy the map"
+        );
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_by_ident(&first), Some(&1));
+        assert_eq!(snapshot.find_by_name_with_id("x"), Some((&first, &1)));
+        assert_eq!(snapshot.find_by_name("y"), None);
+
+        // Filling the batch moves it into the table's own copy of the map.
+        for n in 0..RECENT_LIMIT {
+            tbl.add(Ident::create_local("z"), 10 + n as i32);
+        }
+        assert!(!tbl.current.ptr_eq(&snapshot.current));
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_all("x"), vec![&2, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&1]);
+        assert_eq!(snapshot.find_by_name("z"), None);
+    }
+
+    #[test]
+    fn a_table_layer_has_no_map_until_a_binding_is_moved_into_it() {
+        let mut values: IdTbl<i32> = IdTbl::new();
+        assert!(values.current.0.is_none());
+        let first = Ident::create_local("x");
+        values.add(first, 1);
+        assert!(
+            values.current.0.is_none(),
+            "a recent binding needs no map"
+        );
+        for n in 1..RECENT_LIMIT {
+            values.add(Ident::create_local("y"), n as i32);
+        }
+        assert!(values.current.0.is_some());
+        assert_eq!(values.current.len(), 2);
+
+        // An open starts a new layer, which again has no map; the layer
+        // below keeps its own.
+        let root = Path::pident(Ident::create_persistent("Opened"));
+        values.add_open_layer(root, vec![(Ident::create_persistent("z"), 7, 0)], None);
+        assert!(values.current.0.is_none() && values.current.is_empty());
+        assert_eq!(values.find_by_name("x"), Some(&1));
+        assert_eq!(values.find_by_ident(&first), Some(&1));
+        assert_eq!(values.find_by_name("z"), Some(&7));
+        // Every binding of both layers: `x`, each `y` and the opened `z`.
+        assert_eq!(values.iter().count(), RECENT_LIMIT as usize + 1);
+
+        let mut labels: TycompTbl<i32> = TycompTbl::new();
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), None);
+        assert!(labels.fold_name_order().is_empty());
+        labels.add(Ident::create_local("l"), 1);
+        assert!(labels.current.0.is_some() && labels.current_first_add.0.is_some());
+        labels.add_open_layer(vec![(Ident::create_persistent("m"), 2)], None);
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), Some(&1));
+        assert_eq!(labels.find_all("m"), vec![&2]);
+    }
+
+    #[test]
+    fn updating_a_recent_binding_leaves_a_snapshot_alone() {
+        let mut tbl = IdTbl::new();
+        tbl.add(Ident::create_local("x"), 1);
+        let id = Ident::create_local("x");
+        tbl.add(id, 2);
+        let snapshot = tbl.clone();
+
+        let updated = tbl.update_by_name("x", &mut |value| value * 10);
+        assert_eq!(updated, Some((id, 20)));
+        assert_eq!(tbl.find_all("x"), vec![&20, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&2, &1]);
+        assert_eq!(tbl.update_by_name("unbound", &mut |value| *value), None);
     }
 
     #[test]
@@ -2925,6 +3448,7 @@ mod tests {
             type_attributes: vec![],
             type_immediate: false,
             type_representation: crate::types::TypeRepresentation::Boxed,
+            type_shape: crate::types::ValueShape::Unstated,
             type_inlined_types: vec![],
             type_path: None,
         };
@@ -3020,7 +3544,10 @@ mod tests {
         env.add_module(
             alias_id,
             ModuleDeclaration {
-                md_type: ModuleType::MtyAlias(AliasPresence::MtaPresent, Path::pident(target_id)),
+                md_type: ModuleType::MtyAlias(
+                    AliasPresence::MtaPresent,
+                    std::sync::Arc::new(Path::pident(target_id)),
+                ),
                 md_attributes: vec![],
                 md_loc: crate::types::DeclLoc::none(),
                 md_path: None,

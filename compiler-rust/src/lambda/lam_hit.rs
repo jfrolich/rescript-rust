@@ -9,9 +9,12 @@ pub fn hit_variable(a: &LamArena, fv: &Ident, lam: Lam) -> bool {
     match a.node(lam) {
         Node::Var(id) => a.ident(id) == *fv,
         Node::Assign { id, value } => a.ident(id) == *fv || hit_variable(a, fv, value),
-        Node::StaticCatch { body, handler, .. } | Node::TryWith { body, handler, .. } => {
-            hit_variable(a, fv, body) || hit_variable(a, fv, handler)
-        }
+        Node::StaticCatch { body, handler, .. }
+        | Node::TryWith { body, handler, .. }
+        | Node::TryFinally {
+            body,
+            finally: handler,
+        } => hit_variable(a, fv, body) || hit_variable(a, fv, handler),
         Node::Function { body, .. } => hit_variable(a, fv, body),
         Node::Let { value, body, .. } => hit_variable(a, fv, value) || hit_variable(a, fv, body),
         Node::LetRec { values, body, .. } => hit_variable(a, fv, body) || hit_list(a.list(values)),

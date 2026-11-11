@@ -104,14 +104,14 @@ module Int_array: {
     if i >= 0 && i < k {
       sub(tree, i + 1)
     } else {
-      invalid_arg("Array.get")
+      throw(Invalid_argument("Array.get"))
     }
 
   let set = ((tree, k), i, v) =>
     if i >= 0 && i < k {
       (update(tree, i + 1, v), k)
     } else {
-      invalid_arg("Array.set")
+      throw(Invalid_argument("Array.set"))
     }
 
   let push_front = ((tree, k), v) => (loext(tree, v), k + 1)
@@ -120,7 +120,7 @@ module Int_array: {
     if k > 0 {
       (lorem(tree), k - 1)
     } else {
-      invalid_arg("Array.pop_front")
+      throw(Invalid_argument("Array.pop_front"))
     }
 
   let push_back = ((tree, k), v) => (update(tree, k + 1, v), k + 1)
@@ -129,7 +129,7 @@ module Int_array: {
     if k > 0 {
       (delete(tree, k), k - 1)
     } else {
-      invalid_arg("Array.pop_back")
+      throw(Invalid_argument("Array.pop_back"))
     }
 
   let filter_from = (i, p, s) => {
@@ -166,6 +166,7 @@ module Int_array: {
       append(smaller, push_front(larger, head))
     }
   }
+
   let of_array = arr => {
     let v = ref(empty)
     for i in 0 to Array.length(arr) - 1 {

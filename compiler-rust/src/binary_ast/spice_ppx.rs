@@ -722,6 +722,7 @@ fn mk_type_arrow_with_arity(
 ) -> CoreType {
     let arg_type_idx = arena.push_core_type(arg_type);
     let arg = TypeArg {
+        fixed: None,
         attrs: Attributes::new(),
         lbl: ArgLabel::Nolabel,
         typ: arg_type_idx,
@@ -1762,6 +1763,7 @@ fn codecs_generate_codecs_for(
                         let e_pat = pat_var(arena, "e", e_loc);
                         let pat = pat_tuple(vec![e_pat, pat_any(arena)], arena);
                         let vb = ValueBinding {
+                            pvb_jsx_component: None,
                             pvb_pat: arena.push_pat(pat),
                             pvb_expr: arena.push_expr(expr.clone()),
                             pvb_attributes: Attributes::new(),
@@ -1777,6 +1779,7 @@ fn codecs_generate_codecs_for(
                         let d_pat = pat_var(arena, "d", d_loc);
                         let pat = pat_tuple(vec![pat_any(arena), d_pat], arena);
                         let vb = ValueBinding {
+                            pvb_jsx_component: None,
                             pvb_pat: arena.push_pat(pat),
                             pvb_expr: arena.push_expr(expr),
                             pvb_attributes: Attributes::new(),
@@ -2949,6 +2952,7 @@ fn variants_generate_decoder_case(
             let decoded = expr_let(
                 RecFlag::Nonrecursive,
                 vec![ValueBinding {
+                    pvb_jsx_component: None,
                     pvb_pat: payload_pattern,
                     pvb_expr: arena.push_expr(payload_value),
                     pvb_attributes: Attributes::new(),
@@ -4087,7 +4091,7 @@ fn unused_value_warning_attribute(arena: &mut ParseArena) -> Attribute {
         pstr_loc: arena.dummy_loc(),
     };
     (
-        Located::new(arena.intern_string("ocaml.warning"), arena.dummy_loc()),
+        Located::new(arena.intern_string("warning"), arena.dummy_loc()),
         Payload::PStr(Box::new(vec![item])),
     )
 }
@@ -4142,6 +4146,7 @@ fn generate_codec_decls(
                 Attributes::new()
             };
             vbs.push(ValueBinding {
+                pvb_jsx_component: None,
                 pvb_pat: arena.push_pat(pat),
                 pvb_expr: arena.push_expr(expr),
                 pvb_attributes: attributes,
@@ -4179,6 +4184,7 @@ fn generate_codec_decls(
         let name = format!("{}{}", type_name, DECODER_FUNC_SUFFIX);
         let pat = pat_var_dynamic(arena, &name, arena.none_loc());
         vbs.push(ValueBinding {
+            pvb_jsx_component: None,
             pvb_pat: arena.push_pat(pat),
             pvb_expr: arena.push_expr(expr),
             pvb_attributes: Attributes::new(),
@@ -4455,6 +4461,9 @@ fn module_expr_contains_spice_type_decl(mod_expr: &ModuleExpr, arena: &ParseAren
             module_expr_contains_spice_type_decl(arena.get_mod_expr(*lhs), arena)
                 || module_type_contains_spice_type_decl(arena.get_mod_type(*mty), arena)
         }
+        ModuleExprDesc::Pmod_await(inner) => {
+            module_expr_contains_spice_type_decl(arena.get_mod_expr(*inner), arena)
+        }
         ModuleExprDesc::Pmod_ident(_)
         | ModuleExprDesc::Pmod_unpack(_)
         | ModuleExprDesc::Pmod_extension(_) => false,
@@ -4523,7 +4532,8 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
         | StructureItemDesc::Pstr_exception(_)
         | StructureItemDesc::Pstr_open(_)
         | StructureItemDesc::Pstr_attribute(_)
-        | StructureItemDesc::Pstr_extension(_) => false,
+        | StructureItemDesc::Pstr_extension(_)
+        | StructureItemDesc::Pstr_raw(_) => false,
     }
 }
 
@@ -4587,6 +4597,13 @@ impl<'a> LocCloner<'a> {
         }
         let position = *self.arena.get_position(*pos);
         *pos = self.arena.push_position(position);
+    }
+
+    fn raw_source(&mut self, source: &mut crate::parser::ast::RawSource) {
+        match source {
+            crate::parser::ast::RawSource::String(s)
+            | crate::parser::ast::RawSource::Template(s) => self.located(s),
+        }
     }
 
     fn located<T>(&mut self, loc: &mut Located<T>) {
@@ -4823,6 +4840,12 @@ impl<'a> LocCloner<'a> {
                 }
                 *items = self.arena.push_pat_list(&new_items);
             }
+            PatternDesc::Ppat_dict(entries) => {
+                for entry in entries.iter_mut() {
+                    self.located(&mut entry.pdp_key);
+                    self.pattern_idx(&mut entry.pdp_pattern);
+                }
+            }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.located(lid);
                 self.located(&mut *args);
@@ -4867,7 +4890,9 @@ impl<'a> LocCloner<'a> {
                 self.pattern_idx(pat);
                 self.core_type_idx(typ);
             }
-            PatternDesc::Ppat_type(lid) => self.located(lid),
+            PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
+                self.located(lid)
+            }
             PatternDesc::Ppat_unpack(name) => self.located(name),
             PatternDesc::Ppat_exception(pat) => self.pattern_idx(pat),
             PatternDesc::Ppat_extension(ext) => self.extension(ext),
@@ -5065,14 +5090,24 @@ impl<'a> LocCloner<'a> {
                 }
                 *args = self.arena.push_apply_args(&new_args);
             }
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref mut expr, ref mut cases) = *inner;
+            ExpressionDesc::Pexp_match((expr, cases)) => {
                 self.expression_idx(expr);
                 let mut new_cases = self.arena.case_list(*cases).to_vec();
                 for case in new_cases.iter_mut() {
                     self.case(case);
                 }
                 *cases = self.arena.push_case_list(&new_cases);
+            }
+            ExpressionDesc::Pexp_try((expr, cases, finally)) => {
+                self.expression_idx(expr);
+                let mut new_cases = self.arena.case_list(*cases).to_vec();
+                for case in new_cases.iter_mut() {
+                    self.case(case);
+                }
+                *cases = self.arena.push_case_list(&new_cases);
+                if let Some(finally) = finally {
+                    self.expression_idx(finally);
+                }
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
                 // The copy gets its own list; the original keeps its own.
@@ -5081,6 +5116,27 @@ impl<'a> LocCloner<'a> {
                     self.expression_idx(item);
                 }
                 *items = self.arena.push_expr_list(&new_items);
+            }
+            ExpressionDesc::Pexp_dict(entries) => {
+                for entry in entries.iter_mut() {
+                    match entry {
+                        crate::parser::ast::DictEntry::Pdict_entry(key, e) => {
+                            self.located(key);
+                            self.expression_idx(e);
+                        }
+                        crate::parser::ast::DictEntry::Pdict_spread(e) => self.expression_idx(e),
+                    }
+                }
+            }
+            ExpressionDesc::Pexp_spread(_, elements) => {
+                let mut new_elements = self.arena.spread_element_list(*elements).to_vec();
+                for element in new_elements.iter_mut() {
+                    match element {
+                        crate::parser::ast::SpreadElement::Pspread_item(e)
+                        | crate::parser::ast::SpreadElement::Pspread(e) => self.expression_idx(e),
+                    }
+                }
+                *elements = self.arena.push_spread_element_list(&new_elements);
             }
             ExpressionDesc::Pexp_construct(lid, args) => {
                 self.located(lid);
@@ -5213,6 +5269,17 @@ impl<'a> LocCloner<'a> {
                 self.expression_idx(expr);
             }
             ExpressionDesc::Pexp_extension(ext) => self.extension(ext),
+            ExpressionDesc::Pexp_raw(raw) => {
+                self.loc(&mut raw.name_loc);
+                self.raw_source(&mut raw.source);
+            }
+            // ast_mapper.ml `Pexp_todo`: `name_loc`, then the message.
+            ExpressionDesc::Pexp_todo(todo) => {
+                self.loc(&mut todo.name_loc);
+                if let Some(message) = &mut todo.message {
+                    self.expression_idx(message);
+                }
+            }
             ExpressionDesc::Pexp_await(expr) => self.expression_idx(expr),
             ExpressionDesc::Pexp_jsx_element(element) => self.jsx_element(element),
         }
@@ -5255,6 +5322,7 @@ impl<'a> LocCloner<'a> {
             }
             ModuleExprDesc::Pmod_unpack(expr) => self.expression_idx(expr),
             ModuleExprDesc::Pmod_extension(ext) => self.extension(ext),
+            ModuleExprDesc::Pmod_await(inner) => self.mod_expr_idx(inner),
         }
     }
 
@@ -5493,6 +5561,11 @@ impl<'a> LocCloner<'a> {
                 self.extension(ext);
                 self.attributes(attrs);
             }
+            StructureItemDesc::Pstr_raw(raw) => {
+                self.loc(&mut raw.name_loc);
+                self.raw_source(&mut raw.source);
+                self.attributes(&mut raw.attrs);
+            }
         }
     }
 
@@ -5683,6 +5756,7 @@ fn generate_sig_decls(
             let name = format!("{}{}", type_name, suffix);
             let name_idx = arena.push_string(name);
             let vd = ValueDescription {
+                pval_jsx_component: None,
                 pval_name: Located::new(name_idx, arena.none_loc()),
                 pval_type: arena.push_core_type(ty),
                 pval_prim: None,
@@ -5706,6 +5780,7 @@ fn generate_sig_decls(
         let name = format!("{}{}", type_name, DECODER_FUNC_SUFFIX);
         let name_idx = arena.push_string(name);
         let vd = ValueDescription {
+            pval_jsx_component: None,
             pval_name: Located::new(name_idx, arena.none_loc()),
             pval_type: arena.push_core_type(ty),
             pval_prim: None,

@@ -49,10 +49,6 @@ pub use program_printer::{
 /// has no such data, so the lookup is not repeated.
 type CmjCache<T> = RefCell<AHashMap<String, Option<Arc<T>>>>;
 
-/// A module name and a nested field path inside it, the key of the hoisted
-/// export cache.
-type HoistedExportKey = (String, Vec<String>);
-
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ModuleId {
@@ -112,7 +108,6 @@ pub struct ModulePathResolver {
     cmj_export_constants_cache: CmjCache<AHashMap<String, CmjExportConstant>>,
     cmj_export_arities_cache: CmjCache<AHashMap<String, CmjExportArity>>,
     cmj_export_lambdas_cache: CmjCache<crate::lambda::CmjExportLambdas>,
-    cmj_hoisted_exports_cache: RefCell<AHashMap<HoistedExportKey, Option<String>>>,
 }
 
 /// Why an import of a ReScript module cannot be emitted
@@ -185,7 +180,6 @@ impl ModulePathResolver {
             cmj_export_constants_cache: RefCell::new(AHashMap::new()),
             cmj_export_arities_cache: RefCell::new(AHashMap::new()),
             cmj_export_lambdas_cache: RefCell::new(AHashMap::new()),
-            cmj_hoisted_exports_cache: RefCell::new(AHashMap::new()),
         }
     }
 
@@ -380,21 +374,6 @@ impl ModulePathResolver {
         resolved
     }
 
-    /// Resolve a source-level nested field path through hoisted CMJ metadata.
-    pub fn module_cmj_hoisted_export(&self, module_name: &str, path: &[String]) -> Option<String> {
-        let key = (module_name.to_string(), path.to_vec());
-        if let Some(cached) = self.cmj_hoisted_exports_cache.borrow().get(&key) {
-            return cached.clone();
-        }
-        let resolved = self
-            .persistent_env
-            .as_ref()
-            .and_then(|env| env.module_cmj_hoisted_export(module_name, path));
-        self.cmj_hoisted_exports_cache
-            .borrow_mut()
-            .insert(key, resolved.clone());
-        resolved
-    }
 
     /// Read closed lambda exports recorded in a module's companion `.cmj`.
     pub fn module_cmj_export_lambdas(

@@ -4,8 +4,8 @@ Testing JSX and more complex formatting scenarios.
 ```rescript
 let component = () => {
   <div className="container">
-    <h1> {"Title"->React.string} </h1>
-    <button onClick={_ => Console.log("clicked")}> {"Click me"->React.string} </button>
+    <h1>{"Title"->React.string}</h1>
+    <button onClick={_ => Console.log("clicked")}>{"Click me"->React.string}</button>
   </div>
 }
 ```
@@ -49,6 +49,7 @@ Testing resi code blocks.
 ```resi
 type x = int
 let x: int => string
+
 module M: {
   let ff: string => int
 }

@@ -140,6 +140,9 @@ type type_declaration = {
   type_attributes: Parsetree.attributes;
   type_immediate: bool;
   type_representation: type_representation;
+  type_shape: Variant_runtime.value_shape;
+      (** Resolved from the declaration's annotations in its own
+          environment, when it is declared *)
   type_inlined_types: type_inlined_type list;
 }
 
@@ -154,7 +157,9 @@ and type_kind =
 
 and record_representation =
   | Record_regular (* All fields are boxed / tagged *)
-  | Record_float_unused (* Was: all fields are floats. Now: unused *)
+  | Record_array
+    (* A regular record whose fields have the runtime names "0", "1", ...
+         in declaration order, represented as a JavaScript array *)
   | Record_unboxed of bool (* Unboxed single-field record, inlined or not *)
   | Record_inlined of
       (* Inlined record *)
@@ -325,7 +330,7 @@ type label_description = {
 let same_record_representation x y =
   match x with
   | Record_regular -> y = Record_regular
-  | Record_float_unused -> y = Record_float_unused
+  | Record_array -> y = Record_array
   | Record_inlined {name} -> (
     match y with
     | Record_inlined y -> name = y.name

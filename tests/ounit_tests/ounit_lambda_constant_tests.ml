@@ -3,16 +3,16 @@ open OUnit
 let ( =~ ) = OUnit.assert_equal
 
 let runtime name : Variant_runtime.tagged_block =
-  {tag = {name; literal = None}; tag_name = None}
+  {tag = {name; literal = String name}; tag_name = None}
 
 let constructor name =
   Lambda.Blk_constructor {name; num_nonconst = 1; runtime = runtime name}
 
 let literal name value : Variant_runtime.constructor_case =
-  Constant {name; literal = Some value}
+  Constant {name; literal = value}
 
 let block name shape : Variant_runtime.constructor_case =
-  Block (Untagged {tag = {name; literal = None}; block_type = shape})
+  Block (Untagged {tag = {name; literal = String name}; block_type = shape})
 
 let action s = Lambda.const (Const_string s)
 
@@ -82,7 +82,7 @@ let switch_tests =
       assert_fold color_switch (Const_string "primary") "literal";
       assert_fold color_switch (Const_string "blue") "payload";
       assert_fold color_switch
-        (Const_constructor {name = "Alias"; literal = Some (String "primary")})
+        (Const_constructor {name = "Alias"; literal = String "primary"})
         "literal" );
     ( "declaration literals missing from match select default" >:: fun _ ->
       let sw =
@@ -101,7 +101,7 @@ let switch_tests =
       assert_fold sw (Const_string "blue") "default" );
     ( "ints and floats use JavaScript numeric equality" >:: fun _ ->
       let one = literal "One" (Int 1) in
-      let number = block "Number" FloatType in
+      let number = block "Number" NumberType in
       let sw =
         variant_switch ~constructors:[one; number]
           ~cases:[(one, "literal"); (number, "number")]
@@ -112,7 +112,7 @@ let switch_tests =
       assert_fold sw (Const_float "2.5") "number" );
     ( "integer tag emission truncates to 32 bits" >:: fun _ ->
       let one = literal "One" (Int 4294967297) in
-      let number = block "Number" FloatType in
+      let number = block "Number" NumberType in
       let sw =
         variant_switch ~constructors:[one; number]
           ~cases:[(one, "literal"); (number, "number")]
@@ -131,14 +131,23 @@ let switch_tests =
       assert_fold sw (Const_block (Blk_tuple, [Const_int 1l])) "array";
       assert_fold sw
         (Const_block
-           ( Lambda.blk_record [|("0", false)|] Asttypes.Immutable,
+           ( Lambda.blk_record [|("0", false)|] Asttypes.Immutable ~array:true,
              [Const_int 1l] ))
         "array";
       assert_fold sw
         (Const_block
-           ( Lambda.blk_record [|("x", false)|] Asttypes.Immutable,
+           ( Lambda.blk_record [|("x", false)|] Asttypes.Immutable ~array:false,
              [Const_int 1l] ))
         "object" );
+    ( "null without a null case is an object" >:: fun _ ->
+      let record = block "Record" ObjectType in
+      let text = block "Text" StringType in
+      let sw =
+        variant_switch ~constructors:[record; text]
+          ~cases:[(record, "record"); (text, "text")]
+          ~default:None
+      in
+      assert_fold sw Const_js_null "record" );
     ( "empty list is zero at runtime" >:: fun _ ->
       let zero = literal "Zero" (Int 0) in
       let values = block "Values" UnknownType in
@@ -147,7 +156,8 @@ let switch_tests =
           ~cases:[(zero, "zero"); (values, "values")]
           ~default:None
       in
-      assert_fold sw (Const_constructor {name = "[]"; literal = None}) "zero" );
+      assert_fold sw (Const_constructor {name = "[]"; literal = Int 0}) "zero"
+    );
     ( "unknown values do not select default" >:: fun _ ->
       let one = literal "One" (BigInt "1") in
       let value = block "Value" UnknownType in
@@ -156,13 +166,22 @@ let switch_tests =
           ~cases:[(one, "one")]
           ~default:(Some "default")
       in
-      List.iter (assert_deferred sw)
-        [
-          Const_bigint (false, "1");
-          Const_constructor {name = "DecimalTen"; literal = Some (BigInt "1_0")};
-          Const_char 65;
-          Const_some (Const_int 1l);
-        ] );
+      List.iter (assert_deferred sw) [Const_char 65; Const_some (Const_int 1l)]
+    );
+    ( "bigints compare by value" >:: fun _ ->
+      let one = literal "One" (BigInt "1") in
+      let value = block "Value" UnknownType in
+      let sw =
+        variant_switch ~constructors:[one; value]
+          ~cases:[(one, "one")]
+          ~default:(Some "default")
+      in
+      assert_fold sw (Const_bigint (true, "1")) "one";
+      assert_fold sw (Const_bigint (true, "01")) "one";
+      assert_fold sw (Const_bigint (false, "1")) "default";
+      assert_fold sw
+        (Const_constructor {name = "DecimalTen"; literal = BigInt "1_0"})
+        "default" );
     ( "tagged switch still folds by constructor" >:: fun _ ->
       let runtime = runtime "Color" in
       let case = Variant_runtime.Block (Tagged runtime) in
@@ -191,6 +210,81 @@ let suites =
   __FILE__
   >::: switch_tests
        @ [
+           ( "constant constructors compare by runtime value" >:: fun _ ->
+             let compare op a b =
+               Lambda.prim ~primitive:(Pintcomp op)
+                 ~args:[Lambda.const a; Lambda.const b]
+                 Location.none
+             in
+             let named =
+               Lambda.Const_constructor {name = "A"; literal = String "A"}
+             and declared =
+               Lambda.Const_constructor {name = "B"; literal = String "A"}
+             and other =
+               Lambda.Const_constructor {name = "C"; literal = String "C"}
+             and number =
+               Lambda.Const_constructor {name = "D"; literal = Float "1.0"}
+             and same_number =
+               Lambda.Const_constructor {name = "E"; literal = Float "1"}
+             in
+             Lambda.const Const_js_true =~ compare Ceq named declared;
+             Lambda.const Const_js_false =~ compare Ceq named other;
+             Lambda.const Const_js_true =~ compare Cneq named other;
+             Lambda.const Const_js_true =~ compare Ceq number same_number );
+           ( "integer pattern constants agree with Lambda" >:: fun _ ->
+             List.iter
+               (fun (literal, expected) ->
+                 match Typecore.constant (Pconst_integer (literal, None)) with
+                 | Ok (Asttypes.Const_int value as typed) ->
+                   expected =~ value;
+                   Lambda.Const_int (Int32.of_int expected)
+                   =~ Lambda.const_of_typed typed
+                 | _ ->
+                   assert_failure ("integer literal was rejected: " ^ literal))
+               [
+                 ("-0xFFFF_FFFF", 1);
+                 ("0xFFFF_FFFF", -1);
+                 ("2147483647", 2147483647);
+                 ("-2147483648", -2147483648);
+               ] );
+           ( "overflow parsing keeps its existing host limits" >:: fun _ ->
+             let result =
+               Typecore.constant (Pconst_integer ("2147483649", None))
+             in
+             if Sys.int_size > 32 then
+               Ok (Asttypes.Const_int (-2147483647)) =~ result
+             else Error (Typecore.Literal_overflow "int") =~ result;
+             Error (Typecore.Literal_overflow "int")
+             =~ Typecore.constant
+                  (Pconst_integer ("999999999999999999999999999", None)) );
+           ( "record array layout" >:: fun _ ->
+             (* a field [name], renamed to [runtime] by [@as] if given *)
+             let field (name, runtime) : Types.label_declaration =
+               {
+                 ld_id = Ident.create name;
+                 ld_runtime_name = runtime;
+                 ld_mutable = Asttypes.Immutable;
+                 ld_optional = false;
+                 ld_type = Ctype.newvar ();
+                 ld_loc = Location.none;
+                 ld_attributes = [];
+               }
+             in
+             List.iter
+               (fun (fields, expected) ->
+                 OUnit.assert_equal expected
+                   (Record_runtime.is_array (List.map field fields)))
+               [
+                 ([], false);
+                 ([("a", Some "0")], true);
+                 ([("a", Some "0"); ("b", Some "1")], true);
+                 ([("a", Some "1")], false);
+                 ([("a", Some "1"); ("b", Some "0")], false);
+                 ([("a", Some "0"); ("b", Some "2")], false);
+                 ([("a", Some "0"); ("b", None)], false);
+                 ([("a", Some "00")], false);
+                 ([("name", None)], false);
+               ] );
            ( "regexp literals lower to raw JavaScript" >:: fun _ ->
              let expression = Ast_helper.Exp.regexp {|a\/b\d|} "ig" in
              let wire =
@@ -254,12 +348,11 @@ let suites =
                        ];
                    ]
                  in
-                 let typed, _, _ =
-                   Typemod.type_structure Env.initial_safe_string structure
-                     Location.none
+                 let typed, signature, env =
+                   Typemod.type_structure (Env.initial_safe_string ()) structure
                  in
                  let implementation =
-                   Translmod.transl_implementation "RegexpTest"
+                   Translmod.transl_implementation "RegexpTest" env signature
                      (typed, Typedtree.Tcoerce_none)
                  in
                  let sources = ref [] in
@@ -292,4 +385,19 @@ let suites =
              with
              | Lambda.Lconst (Lambda.Const_int length) -> 3l =~ length
              | _ -> OUnit.assert_failure "expected a folded string length" );
+           ( "a nested None is an allocating constant" >:: fun _ ->
+             let none = Lambda.Const_js_undefined {is_unit = false} in
+             let some x = Lambda.Const_some x in
+             let int = Lambda.Const_int 1l in
+             List.iter
+               (fun (constant, expected) ->
+                 OUnit.assert_equal ~printer:string_of_bool expected
+                   (Lambda.const_is_allocating constant))
+               [
+                 (some none, true);
+                 (some (some none), true);
+                 (some int, false);
+                 (some (some int), false);
+                 (none, false);
+               ] );
          ]

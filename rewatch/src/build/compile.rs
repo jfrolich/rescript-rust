@@ -124,6 +124,9 @@ impl Ord for WorkUnit {
 struct CompletionMsg {
     module_name: String,
     result: Result<Option<String>>,
+    /// What GenType printed for this compile (bsc's stdout), shown with this
+    /// pass's warnings but not kept for replay.
+    gentype_output: Option<String>,
     interface_result: Option<Result<Option<String>>>,
     is_clean: bool,
     is_compiled: bool,
@@ -293,6 +296,7 @@ struct PendingRegistryUpdate {
 
 struct InProcessModuleResult {
     warning: Option<String>,
+    gentype_output: Option<String>,
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
@@ -323,6 +327,14 @@ fn apply_pending_registry_updates(
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
+            // No compilation loads the signature of a module nothing depends
+            // on, so it need not keep a decoded one for that.
+            if build_command_state
+                .get_module(&update.module_name)
+                .is_some_and(|module| module.dependents.is_empty())
+            {
+                pers_struct.release_signature_for_dependent();
+            }
             registry.register_module_arc(&update.module_name, pers_struct, update.module_info);
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
@@ -403,6 +415,9 @@ struct CompileWarning {
     module_name: String,
     package_name: String,
     warning: String,
+    /// Whether the warning goes to the package's compiler log and is kept for
+    /// replay: false for what GenType printed, which bsc prints to stdout.
+    log: bool,
 }
 
 /// Compute the weighted critical-path priority of every module in the universe:
@@ -498,6 +513,7 @@ fn compile_one(
     if !is_dirty {
         return WorkerMsg::Completed(CompletionMsg {
             module_name: module_name.to_string(),
+            gentype_output: None,
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: true,
@@ -533,6 +549,7 @@ fn compile_one(
                 }
                 Err(err) => WorkerMsg::Completed(CompletionMsg {
                     module_name: module_name.to_string(),
+                    gentype_output: None,
                     result: Err(err),
                     interface_result: None,
                     is_clean: false,
@@ -545,6 +562,7 @@ fn compile_one(
         // entry here just marks the mlmap compiled so its members can proceed.
         SourceType::MlMap(_) => WorkerMsg::Completed(CompletionMsg {
             module_name: package.namespace.to_suffix().unwrap(),
+            gentype_output: None,
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: false,
@@ -572,6 +590,7 @@ fn collect_stored_warnings_for_modules_not_recompiled(
                     module_name: module_name.clone(),
                     package_name: module.package_name.clone(),
                     warning: warning.clone(),
+                    log: true,
                 });
             }
             if let Some(ref interface) = source_file.interface
@@ -581,6 +600,7 @@ fn collect_stored_warnings_for_modules_not_recompiled(
                     module_name: module_name.clone(),
                     package_name: module.package_name.clone(),
                     warning: warning.clone(),
+                    log: true,
                 });
             }
         }
@@ -600,11 +620,13 @@ fn append_compile_warnings(
     for CompileWarning {
         package_name,
         warning,
+        log,
         ..
     } in warning_entries
     {
         if let Some(package) = build_state.get_package(&package_name)
             && write_log
+            && log
         {
             logs::append(package, &warning);
         }
@@ -1397,6 +1419,7 @@ pub fn compile(
             result,
             interface_result,
             is_compiled,
+            gentype_output,
             ..
         } = msg;
 
@@ -1502,6 +1525,15 @@ pub fn compile(
                 module_name: module_name.clone(),
                 package_name: package_name.clone(),
                 warning,
+                log: true,
+            });
+        }
+        if let Some(warning) = gentype_output {
+            warning_entries.push(CompileWarning {
+                module_name: module_name.clone(),
+                package_name: package_name.clone(),
+                warning,
+                log: false,
             });
         }
         if let Some(error) = compile_error {
@@ -1515,6 +1547,7 @@ pub fn compile(
                 module_name: module_name.clone(),
                 package_name: package_name.clone(),
                 warning,
+                log: true,
             });
         }
         if let Some(error) = interface_error {
@@ -1625,6 +1658,9 @@ pub fn get_runtime_path_args(
 
 pub fn compiler_args(
     config: &config::Config,
+    // Match the parser's root spelling: canonical during builds, caller-supplied
+    // for compiler-args consumers such as editor incremental type checking.
+    project_root: &Path,
     ast_path: &Path,
     file_path: &Path,
     is_interface: bool,
@@ -1672,7 +1708,6 @@ pub fn compiler_args(
     let root_config = project_context.get_root_config();
     let jsx_args = root_config.get_jsx_args();
     let jsx_module_args = root_config.get_jsx_module_args();
-    let jsx_mode_args = root_config.get_jsx_mode_args();
     let jsx_preserve_args = root_config.get_jsx_preserve_args();
     let source_map_args = root_config.get_source_map_args(source_map_command);
     let bsb_project_root = project_context.get_root_path();
@@ -1708,7 +1743,10 @@ pub fn compiler_args(
     };
 
     let package_name_arg = vec!["-bs-package-name".to_string(), config.name.to_owned()];
-    let project_root_args = config.get_project_root_args();
+    let project_root_args = vec![
+        "-bs-project-root".to_string(),
+        project_root.to_string_lossy().to_string(),
+    ];
 
     let implementation_args = if is_interface {
         debug!("Compiling interface file: {}", &module_name);
@@ -1757,7 +1795,6 @@ pub fn compiler_args(
         dependency_paths,
         jsx_args,
         jsx_module_args,
-        jsx_mode_args,
         jsx_preserve_args,
         source_map_args,
         bsc_flags.to_owned(),
@@ -2056,7 +2093,6 @@ fn build_package_compiler_options(
         &[
             root_config.get_jsx_args(),
             root_config.get_jsx_module_args(),
-            root_config.get_jsx_mode_args(),
             root_config.get_jsx_preserve_args(),
             bsc_flags,
             warning_args,
@@ -2159,7 +2195,10 @@ fn build_package_compiler_options(
             // OCaml bsc wires -bs-project-root into GenTypeConfig.project_root at
             // compiler/bsc/rescript_compiler_main.ml:266-269 before
             // compiler/gentype/GenTypeConfig.ml:124-131 builds Config.t.
-            let mut gentype_args = package.config.get_project_root_args();
+            let mut gentype_args = vec![
+                "-bs-project-root".to_string(),
+                package.path.to_string_lossy().to_string(),
+            ];
             gentype_args.extend(package.config.get_gentype_args(
                 current_package_dirs,
                 Some(project_context.get_root_path()),
@@ -2382,7 +2421,6 @@ fn in_memory_module_info_for_package(
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
     cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
-    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
 ) -> InMemoryModuleInfo {
     let package_outputs = package_outputs(package, root_config, &source_path);
@@ -2390,7 +2428,6 @@ fn in_memory_module_info_for_package(
         .with_package_outputs(package_outputs)
         .with_cmj_export_arities(cmj_export_arities)
         .with_cmj_export_lambdas(cmj_export_lambdas)
-        .with_cmj_hoisted_exports(hoisted_exports)
         .with_package(
             package.name.clone(),
             package.path.clone(),
@@ -2408,7 +2445,6 @@ fn js_metadata_registry_updates_for_package(
     cmj_export_constants: AHashMap<String, CmjExportConstant>,
     cmj_export_arities: AHashMap<String, CmjExportArity>,
     cmj_export_lambdas: rescript_compiler::lambda::CmjExportLambdas,
-    hoisted_exports: Vec<rescript_compiler::lambda::HoistedExport>,
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
@@ -2422,7 +2458,6 @@ fn js_metadata_registry_updates_for_package(
         cmj_export_constants,
         cmj_export_arities,
         cmj_export_lambdas,
-        hoisted_exports,
         is_runtime,
     );
 
@@ -2762,6 +2797,7 @@ fn panicked_completion(module_name: String, message: &str) -> WorkerMsg {
         result: Err(anyhow!("Compilation panicked for {module_name}: {message}")),
         module_name,
         interface_result: None,
+        gentype_output: None,
         is_clean: false,
         is_compiled: true,
         registry_updates: Vec::new(),
@@ -3186,7 +3222,9 @@ pub(crate) fn compile_runtime_sources(
         .stack_size(256 * 1024 * 1024)
         .build()
         .context("failed to create runtime in-process compiler pool")?;
-    let mut runtime_modules = runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths))?;
+    let let_unwrap = runtime_let_unwrap(runtime_config);
+    let mut runtime_modules =
+        runtime_compile_pool.install(|| collect_runtime_sources(runtime_paths, let_unwrap))?;
     populate_runtime_deps(&mut runtime_modules);
 
     seed_runtime_registry(registry, &runtime_modules);
@@ -3414,6 +3452,7 @@ fn compile_runtime_module_from_source(
         &options,
         &local_registry,
         has_runtime_interface,
+        None,
     )
     .map_err(|err| {
         anyhow!(
@@ -3429,8 +3468,7 @@ fn compile_runtime_module_from_source(
         true,
     )
     .with_cmj_export_arities(compile_result.cmj_export_arities)
-    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas)
-    .with_cmj_hoisted_exports(compile_result.hoisted_exports);
+    .with_cmj_export_lambdas(compile_result.cmj_export_lambdas);
 
     let mut shared_registry = registry.lock().unwrap();
     if has_runtime_interface {
@@ -3481,16 +3519,19 @@ pub(crate) fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, P
 
 /// Read and parse the runtime sources (in parallel on the current Rayon
 /// pool), keeping the order of `paths`.
-fn collect_runtime_sources(paths: Vec<(String, PathBuf)>) -> Result<Vec<RuntimeModuleSource>> {
+fn collect_runtime_sources(
+    paths: Vec<(String, PathBuf)>,
+    let_unwrap: bool,
+) -> Result<Vec<RuntimeModuleSource>> {
     paths
         .into_par_iter()
         .map(|(module_name, path)| {
             let res_source = read_source_latin1(&path)?;
-            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source)?;
+            let (res_arena, structure, mut deps) = parse_runtime_structure(&path, &res_source, let_unwrap)?;
             let resi_path = path.with_extension("resi");
             let resi = if resi_path.exists() {
                 let source = read_source_latin1(&resi_path)?;
-                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source)?;
+                let (arena, signature, intf_deps) = parse_runtime_signature(&resi_path, &source, let_unwrap)?;
                 deps.extend(intf_deps);
                 Some(RuntimeInterfaceSource {
                     path: resi_path,
@@ -3553,9 +3594,12 @@ fn populate_runtime_deps(runtime_modules: &mut [RuntimeModuleSource]) {
     }
 }
 
+/// `let_unwrap` is the runtime package's LetUnwrap setting
+/// ([`runtime_let_unwrap`]); a `@@config` flag can also enable it.
 pub(crate) fn parse_runtime_signature(
     path: &Path,
     source: &str,
+    let_unwrap: bool,
 ) -> Result<(ParseArena, Signature, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
@@ -3568,13 +3612,17 @@ pub(crate) fn parse_runtime_signature(
                 parser.diagnostics().len()
             ));
         }
-        let signature = rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut())
-            .map_err(|err| {
-                anyhow!(
-                    "runtime interface PPX rewrite failed for {}: {err}",
-                    path.display()
-                )
-            })?;
+        let let_unwrap = let_unwrap
+            || rescript_compiler::driver::extract_file_config_from_signature(&signature, parser.arena())
+                .let_unwrap;
+        let signature =
+            rescript_compiler::binary_ast::ppx::rewrite_signature(&signature, parser.arena_mut(), let_unwrap)
+                .map_err(|err| {
+                    anyhow!(
+                        "runtime interface PPX rewrite failed for {}: {err}",
+                        path.display()
+                    )
+                })?;
         let deps = rescript_compiler::binary_ast::deps::extract_signature_deps(parser.arena(), &signature)
             .into_iter()
             .collect();
@@ -3584,9 +3632,12 @@ pub(crate) fn parse_runtime_signature(
     })
 }
 
+/// `let_unwrap` is the runtime package's LetUnwrap setting
+/// ([`runtime_let_unwrap`]); a `@@config` flag can also enable it.
 pub(crate) fn parse_runtime_structure(
     path: &Path,
     source: &str,
+    let_unwrap: bool,
 ) -> Result<(ParseArena, Structure, AHashSet<String>)> {
     rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let filename = path.to_string_lossy();
@@ -3599,13 +3650,17 @@ pub(crate) fn parse_runtime_structure(
                 parser.diagnostics().len()
             ));
         }
-        let structure = rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut())
-            .map_err(|err| {
-                anyhow!(
-                    "runtime implementation PPX rewrite failed for {}: {err}",
-                    path.display()
-                )
-            })?;
+        let let_unwrap = let_unwrap
+            || rescript_compiler::driver::extract_file_config_from_structure(&structure, parser.arena())
+                .let_unwrap;
+        let structure =
+            rescript_compiler::binary_ast::ppx::rewrite_structure(&structure, parser.arena_mut(), let_unwrap)
+                .map_err(|err| {
+                    anyhow!(
+                        "runtime implementation PPX rewrite failed for {}: {err}",
+                        path.display()
+                    )
+                })?;
         let structure =
             rescript_compiler::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
         let deps = rescript_compiler::binary_ast::deps::extract_structure_deps(parser.arena(), &structure)
@@ -3725,6 +3780,14 @@ fn runtime_compile_order(runtime_modules: &[RuntimeModuleSource]) -> Vec<usize> 
     order
 }
 
+/// Whether the runtime package enables LetUnwrap, through its compiler flags
+/// or its experimental features.
+pub(crate) fn runtime_let_unwrap(runtime_config: &config::Config) -> bool {
+    let bsc_flags = config::flatten_flags(&runtime_config.compiler_flags);
+    parse_in_process_compiler_flags(&bsc_flags).experimental_let_unwrap
+        || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap)
+}
+
 pub(crate) fn runtime_compiler_options(
     runtime_root: &Path,
     runtime_path: &Path,
@@ -3762,8 +3825,7 @@ pub(crate) fn runtime_compiler_options(
         js_output_targets,
         jsx_version: parsed_flags.jsx_version,
         jsx_module: parsed_flags.jsx_module.clone(),
-        experimental_let_unwrap: parsed_flags.experimental_let_unwrap
-            || runtime_config.has_experimental_feature(config::ExperimentalFeature::LetUnwrap),
+        experimental_let_unwrap: runtime_let_unwrap(runtime_config),
         jsx_preserve: parsed_flags.jsx_preserve,
         debug: parsed_flags.debug,
         no_version_header: parsed_flags.no_version_header,
@@ -3915,7 +3977,6 @@ fn compile_module_in_process_to_js_boundary(
         AHashMap::new(),
         AHashMap::new(),
         Default::default(),
-        Vec::new(),
         is_runtime,
     );
 
@@ -3923,7 +3984,7 @@ fn compile_module_in_process_to_js_boundary(
     // Build a local registry that includes the .resi result (if any).
     let mut local_registry = registry.clone();
     let mut interface_registry_update: Option<PendingRegistryUpdate> = None;
-    let mut gentype_ignore_interface = false;
+    let mut gentype_interface = None;
     // The interface's warnings, reported before the implementation's (the
     // subprocess path compiles the interface first).
     let mut interface_warnings = String::new();
@@ -3999,7 +4060,7 @@ fn compile_module_in_process_to_js_boundary(
 
         // Register the .resi's PersStruct in the local registry so the
         // .res compilation can find it for moregen constraints.
-        gentype_ignore_interface = intf_result.gentype_ignore_interface;
+        gentype_interface = intf_result.gentype;
         let intf_fingerprint = intf_result
             .pers_struct
             .as_ref()
@@ -4115,7 +4176,7 @@ fn compile_module_in_process_to_js_boundary(
                             options,
                             &local_registry,
                             has_interface,
-                            gentype_ignore_interface,
+                            gentype_interface.clone(),
                             signature_hook,
                         )
                     })
@@ -4265,12 +4326,17 @@ fn finish_in_process_js(
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let (result, registry_updates) = match result {
-        Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
-        Err(err) => (Err(err), Vec::new()),
+    let (result, registry_updates, gentype_output) = match result {
+        Ok(outcome) => (
+            Ok(outcome.warning),
+            outcome.registry_updates,
+            outcome.gentype_output,
+        ),
+        Err(err) => (Err(err), Vec::new(), None),
     };
     CompletionMsg {
         module_name,
+        gentype_output,
         result,
         interface_result: None,
         is_clean,
@@ -4308,7 +4374,10 @@ fn finish_in_process_js_inner(
         .get_package(&module.package_name)
         .expect("Package not found");
     // The warnings bsc prints to stderr, filtered like the subprocess path.
-    let warning = visible_compiler_warnings(&std::mem::take(&mut pre_js.warnings), package.is_local_dep);
+    let compiler_warnings = std::mem::take(&mut pre_js.warnings);
+    let warning = visible_compiler_warnings(&compiler_warnings, package.is_local_dep);
+    // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
+    let gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -4340,7 +4409,6 @@ fn finish_in_process_js_inner(
             metadata.cmj_export_constants,
             metadata.cmj_export_arities,
             metadata.cmj_export_lambdas,
-            metadata.hoisted_exports,
             is_runtime,
         );
         let registry_updates = vec![PendingRegistryUpdate {
@@ -4385,7 +4453,6 @@ fn finish_in_process_js_inner(
             compile_result.cmj_export_constants.clone(),
             compile_result.cmj_export_arities.clone(),
             compile_result.cmj_export_lambdas.clone(),
-            compile_result.hoisted_exports.clone(),
             is_runtime,
             has_interface,
             metadata_interface_registry_update,
@@ -4397,6 +4464,7 @@ fn finish_in_process_js_inner(
     if registry_only {
         return Ok(InProcessModuleResult {
             warning,
+            gentype_output: None,
             registry_updates,
         });
     }
@@ -4448,6 +4516,16 @@ fn finish_in_process_js_inner(
         }
     }
 
+    // What GenType prints follows the compile's warnings in this pass's
+    // output, so a first pass the build retries with locations prints
+    // nothing; like bsc's stdout, it is not kept for replay.
+    let gentype_printed = rescript_compiler::driver::apply_gentype_outcome(
+        gentype,
+        &compiler_warnings,
+        &source_abs.to_string_lossy(),
+    )
+    .map_err(|err| in_process_compile_error(&module_name, err))?;
+
     if let Some(js_post_build) = &package.config.js_post_build {
         for spec in root_config.get_package_specs() {
             let suffix = root_config.get_suffix(&spec);
@@ -4492,6 +4570,7 @@ fn finish_in_process_js_inner(
 
     Ok(InProcessModuleResult {
         warning,
+        gentype_output: (!gentype_printed.is_empty()).then_some(gentype_printed),
         registry_updates,
     })
 }
@@ -4565,6 +4644,31 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    /// The runtime's stored interfaces are keyed by the compiler that
+    /// encoded them: another compiler's key misses them.
+    #[test]
+    fn runtime_interfaces_of_another_compiler_are_not_read() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let db = temp_dir.path().join("rescript.sqlite");
+        let store = |hash: &str| RuntimeStore {
+            db: db.clone(),
+            compiler_hash: hash.to_string(),
+        };
+        let runtime_root = temp_dir.path().join("runtime");
+        fs::create_dir_all(&runtime_root).expect("runtime directory should be created");
+        let paths = vec![("Stdlib".to_string(), runtime_root.join("Stdlib.res"))];
+        let old_key = store("old").key(&runtime_root, &paths);
+        let new_key = store("new").key(&runtime_root, &paths);
+        assert_ne!(old_key, new_key);
+        super::super::state_db::write_runtime_interfaces(
+            &db,
+            &old_key,
+            &[("Stdlib".to_string(), vec![1, 2, 3])],
+        );
+        assert!(super::super::state_db::read_runtime_interfaces(&db, &old_key).is_some());
+        assert!(super::super::state_db::read_runtime_interfaces(&db, &new_key).is_none());
+    }
 
     /// A job that panics still reports, so a scheduler that waits for every
     /// job in flight while holding a sender itself does not hang.
@@ -4806,11 +4910,13 @@ mod tests {
                     module_name: "Zed".to_string(),
                     package_name: "test-package".to_string(),
                     warning: "warning: fresh\n".to_string(),
+                    log: true,
                 },
                 CompileWarning {
                     module_name: "Alpha".to_string(),
                     package_name: "test-package".to_string(),
                     warning: "warning: stored\n".to_string(),
+                    log: true,
                 },
             ],
             &mut compile_warnings,

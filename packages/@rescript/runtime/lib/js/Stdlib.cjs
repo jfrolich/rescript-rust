@@ -12,7 +12,7 @@ function assertEqual(a, b) {
     RE_EXN_ID: "Assert_failure",
     _1: [
       "Stdlib.res",
-      163,
+      158,
       4
     ],
     Error: new Error()
@@ -38,10 +38,6 @@ let $$DataView;
 let $$Date;
 
 let Dict;
-
-let Exn;
-
-let $$Error;
 
 let File;
 
@@ -86,6 +82,8 @@ let $$String;
 let $$Symbol;
 
 let TaggedTemplate;
+
+let $$Temporal;
 
 let Type;
 
@@ -153,8 +151,6 @@ exports.Console = Console;
 exports.$$DataView = $$DataView;
 exports.$$Date = $$Date;
 exports.Dict = Dict;
-exports.Exn = Exn;
-exports.$$Error = $$Error;
 exports.File = File;
 exports.Float = Float;
 exports.Int = Int;
@@ -177,6 +173,7 @@ exports.Result = Result;
 exports.$$String = $$String;
 exports.$$Symbol = $$Symbol;
 exports.TaggedTemplate = TaggedTemplate;
+exports.$$Temporal = $$Temporal;
 exports.Type = Type;
 exports.Iterable = Iterable;
 exports.$$Iterator = $$Iterator;

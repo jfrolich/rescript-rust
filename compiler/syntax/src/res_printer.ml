@@ -28,6 +28,36 @@ let add_parens doc =
          Doc.rparen;
        ])
 
+(* Keep the delimiters on the expression's first and last lines. The parser
+   excludes parentheses from expression locations, so breaking just inside
+   them would create blank lines or move comments on the next formatting pass. *)
+let add_statement_parens doc =
+  Doc.group (Doc.concat [Doc.lparen; doc; Doc.rparen])
+
+(* Module expressions hug their parens, so a multi-line structure or
+   signature keeps its braces next to them: [(M: {...})] *)
+let add_mod_expr_parens doc = Doc.concat [Doc.lparen; doc; Doc.rparen]
+
+(* Whether a module expression's printed form starts with a doc comment:
+   doc comments print before other attributes, and an unparenthesized
+   constraint or application starts with its leftmost module *)
+let rec mod_expr_starts_with_doc_comment (mod_expr : Parsetree.module_expr) =
+  match mod_expr.pmod_desc with
+  (* A functor's attributes print on its first parameter, an await's after
+     [await] *)
+  | Pmod_functor _ | Pmod_await _ -> false
+  | _
+    when List.exists Parsetree_viewer.is_doc_comment_attribute
+           mod_expr.pmod_attributes ->
+    true
+  | _ when Parsetree_viewer.mod_expr_has_attributes mod_expr -> false
+  | Pmod_constraint (inner, _) -> mod_expr_starts_with_doc_comment inner
+  | Pmod_apply _ ->
+    let _, call_expr = Parsetree_viewer.mod_expr_apply mod_expr in
+    (not (Parens.mod_apply_callee call_expr))
+    && mod_expr_starts_with_doc_comment call_expr
+  | _ -> false
+
 let add_braces ?(force_break = false) doc =
   Doc.breakable_group ~force_break
     (Doc.concat
@@ -57,12 +87,6 @@ let has_leading_line_comment tbl loc =
   match get_first_leading_comment tbl loc with
   | Some comment -> Comment.is_single_line_comment comment
   | None -> false
-
-let get_leading_line_comment_count tbl loc =
-  match Hashtbl.find_opt tbl.Comment_table.leading loc with
-  | Some comments ->
-    List.filter Comment.is_single_line_comment comments |> List.length
-  | None -> 0
 
 let has_trailing_single_line_comment tbl loc =
   match Hashtbl.find_opt tbl.Comment_table.trailing loc with
@@ -157,6 +181,14 @@ let print_multiline_comment_content txt =
     Doc.concat
       [Doc.text "/* "; Doc.text (Comment.trim_spaces line); Doc.text " */"]
   | first :: rest ->
+    (* The printer writes the line break, so drop the CRs of a CRLF one *)
+    let first =
+      let len = ref (String.length first) in
+      while !len > 0 && String.unsafe_get first (!len - 1) = '\r' do
+        decr len
+      done;
+      String.sub first 0 !len [@doesNotRaise]
+    in
     let first_line = Comment.trim_spaces first in
     Doc.concat
       [
@@ -198,13 +230,14 @@ let print_trailing_comment (prev_loc : Location.t) (node_loc : Location.t)
   else if not single_line then Doc.concat [Doc.space; content]
   else Doc.line_suffix (Doc.concat [Doc.space; content])
 
+let print_comment_content comment =
+  let txt = Comment.txt comment in
+  if Comment.is_single_line_comment comment then Doc.text ("//" ^ txt)
+  else print_multiline_comment_content txt
+
 let print_leading_comment ?next_comment comment =
   let single_line = Comment.is_single_line_comment comment in
-  let content =
-    let txt = Comment.txt comment in
-    if single_line then Doc.text ("//" ^ txt)
-    else print_multiline_comment_content txt
-  in
+  let content = print_comment_content comment in
   let separator =
     Doc.concat
       [
@@ -270,7 +303,9 @@ let print_comments_inside_file cmt_tbl =
     match comments with
     | [] -> Doc.nil
     | [comment] ->
-      let cmt_doc = print_leading_comment comment in
+      (* Nothing follows the last comment: the line break after a line comment
+         would add an empty line to the final newline of the file. *)
+      let cmt_doc = print_comment_content comment in
       let doc =
         Doc.group (Doc.concat [Doc.concat (List.rev (cmt_doc :: acc))])
       in
@@ -302,10 +337,8 @@ let print_leading_comments node tbl loc =
         else if diff > 1 then Doc.concat [Doc.hard_line; Doc.hard_line]
         else Doc.hard_line
       in
-      let doc =
-        Doc.group
-          (Doc.concat [Doc.concat (List.rev (cmt_doc :: acc)); separator; node])
-      in
+      let comments = Doc.concat (List.rev (separator :: cmt_doc :: acc)) in
+      let doc = Doc.group (Doc.concat [Doc.comment comments; node]) in
       doc
     | comment :: (next_comment :: _comments as rest) ->
       let cmt_doc = print_leading_comment ~next_comment comment in
@@ -363,9 +396,9 @@ let print_comments_before_marker doc (tbl : Comment_table.t) loc marker =
     Hashtbl.replace tbl.trailing loc after_marker;
     print_trailing_comments doc tbl.trailing loc
 
-let is_empty_doc doc = doc = Doc.nil
-
-let print_list ~get_loc ~nodes ~print ?(force_break = false) t =
+(* [~space_multiline] adds a blank line next to nodes printed on several lines *)
+let print_list ~get_loc ~nodes ~print ?(force_break = false)
+    ?(space_multiline = false) t =
   let rec loop first_loc_opt prev_loc_opt acc nodes =
     match nodes with
     | [] -> (first_loc_opt, prev_loc_opt, Doc.concat (List.rev acc))
@@ -377,19 +410,21 @@ let print_list ~get_loc ~nodes ~print ?(force_break = false) t =
         | Some comment -> (Comment.loc comment).loc_start
       in
       let raw_doc = print node t in
-      if is_empty_doc raw_doc then loop first_loc_opt prev_loc_opt acc nodes
+      if Doc.is_nil raw_doc then loop first_loc_opt prev_loc_opt acc nodes
       else
         let doc = print_comments raw_doc t loc in
         let acc =
-          match prev_loc_opt with
-          | None -> [doc]
-          | Some prev_loc ->
+          match (prev_loc_opt, acc) with
+          | Some prev_loc, prev_doc :: _ ->
             let sep =
               if start_pos.pos_lnum - prev_loc.Location.loc_end.pos_lnum > 1
               then Doc.concat [Doc.hard_line; Doc.hard_line]
+              else if space_multiline then
+                Doc.item_separator ~prev:prev_doc ~next:doc
               else Doc.hard_line
             in
             doc :: sep :: acc
+          | _ -> [doc]
         in
         let first_loc_opt =
           match first_loc_opt with
@@ -420,7 +455,7 @@ let print_listi ~get_loc ~nodes ~print ?(ignore_empty_lines = false)
         | Some comment -> (Comment.loc comment).loc_start
       in
       let raw_doc = print node t i in
-      if is_empty_doc raw_doc then loop i first_loc_opt prev_loc_opt acc nodes
+      if Doc.is_nil raw_doc then loop i first_loc_opt prev_loc_opt acc nodes
       else
         let doc = print_comments raw_doc t loc in
         let acc =
@@ -472,11 +507,17 @@ let classify_ident_content ?(allow_uident = false) ?(allow_hyphen = false) txt =
         match String.unsafe_get txt i with
         | '\\' -> UppercaseExoticIdent
         | 'A' .. 'Z' when allow_uident -> loop (i + 1)
-        | 'a' .. 'z' | '_' -> loop (i + 1)
+        | 'a' .. 'z' | '$' -> loop (i + 1)
+        (* The scanner reads [_] as an identifier only when one of these
+           follows; otherwise it is a wildcard. *)
+        | '_' when len > 1 -> (
+          match String.unsafe_get txt 1 with
+          | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '_' | '$' -> loop (i + 1)
+          | _ -> ExoticIdent)
         | _ -> ExoticIdent
       else
         match String.unsafe_get txt i with
-        | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '\'' | '_' -> loop (i + 1)
+        | 'A' .. 'Z' | 'a' .. 'z' | '0' .. '9' | '\'' | '_' | '$' -> loop (i + 1)
         | '-' when allow_hyphen -> loop (i + 1)
         | _ -> ExoticIdent
     in
@@ -613,17 +654,6 @@ let interleave_template_parts sources values =
   in
   loop Doc.nil sources values
 
-let raw_source_fits_double_quotes source =
-  let rec loop index =
-    if index >= String.length source then true
-    else
-      match String.unsafe_get source index with
-      | '"' -> false
-      | '\\' -> index + 1 < String.length source && loop (index + 2)
-      | _ -> loop (index + 1)
-  in
-  loop 0
-
 let print_constant c =
   match c with
   | Parsetree.Pconst_integer (s, suffix) -> (
@@ -637,14 +667,6 @@ let print_constant c =
         print_string_contents (String_literal.string_source payload);
         Doc.text "\"";
       ]
-  | Pconst_json source ->
-    Doc.concat [Doc.text "json`"; print_string_contents source; Doc.text "`"]
-  | Pconst_raw_source source ->
-    let delimiter =
-      if raw_source_fits_double_quotes source then "\"" else "`"
-    in
-    Doc.concat
-      [Doc.text delimiter; print_string_contents source; Doc.text delimiter]
   | Pconst_char {source} ->
     Doc.concat [Doc.text "'"; Doc.text source; Doc.text "'"]
   | Pconst_float (s, _) -> Doc.text s
@@ -680,13 +702,29 @@ let rec print_structure ~state (s : Parsetree.structure) t =
   match s with
   | [] -> print_comments_inside_file t
   | structure ->
-    print_list
+    let previous_can_continue = ref false in
+    print_list ~space_multiline:true
       ~get_loc:(fun s -> s.Parsetree.pstr_loc)
       ~nodes:structure
-      ~print:(print_structure_item ~state)
+      ~print:(fun item cmt_tbl ->
+        let protect_regexp = !previous_can_continue in
+        (previous_can_continue :=
+           match item.Parsetree.pstr_desc with
+           | Pstr_value _ | Pstr_eval _ -> true
+           | _ -> false);
+        print_structure_item ~state ~protect_regexp item cmt_tbl)
       t
 
-and print_structure_item ~state (si : Parsetree.structure_item) cmt_tbl =
+and print_statement_expr ~protect_regexp expr kind doc =
+  match kind with
+  | Parens.Parenthesized -> add_parens doc
+  | Braced braces -> print_braces doc expr braces
+  | Nothing when protect_regexp && Parens.starts_with_regexp expr ->
+    add_statement_parens doc
+  | Nothing -> doc
+
+and print_structure_item ~state ?(protect_regexp = false)
+    (si : Parsetree.structure_item) cmt_tbl =
   let clear_pending () =
     state.State.pending_inline_record_defs_for_external <- None
   in
@@ -706,16 +744,23 @@ and print_structure_item ~state (si : Parsetree.structure_item) cmt_tbl =
   | Pstr_eval (expr, attrs) ->
     clear_pending ();
     let expr_doc =
+      let protect_regexp = protect_regexp && attrs = [] in
       let doc = print_expression_with_comments ~state expr cmt_tbl in
-      match Parens.structure_expr expr with
-      | Parens.Parenthesized -> add_parens doc
-      | Braced braces -> print_braces doc expr braces
-      | Nothing -> doc
+      print_statement_expr ~protect_regexp expr (Parens.structure_expr expr) doc
     in
     Doc.concat [print_attributes ~state attrs cmt_tbl; expr_doc]
   | Pstr_attribute attr ->
     clear_pending ();
     fst (print_attribute ~state ~standalone:true attr cmt_tbl)
+  | Pstr_raw {name_loc; source; attrs} ->
+    clear_pending ();
+    Doc.concat
+      [
+        print_attributes ~state attrs cmt_tbl;
+        print_extension ~state ~at_module_lvl:true
+          (Ast_raw.to_extension ~name:"raw" ~name_loc source)
+          cmt_tbl;
+      ]
   | Pstr_extension (extension, attrs) ->
     clear_pending ();
     Doc.concat
@@ -798,18 +843,17 @@ and print_module_binding ~state ~is_rec module_binding cmt_tbl i =
   in
   let mod_expr_doc, mod_constraint_doc =
     match module_binding.pmb_expr with
-    | {pmod_desc = Pmod_constraint (mod_expr, mod_type)}
-      when not
-             (Parsetree_viewer.has_await_attribute
-                module_binding.pmb_expr.pmod_attributes) ->
-      ( print_mod_expr ~state mod_expr cmt_tbl,
+    | {pmod_desc = Pmod_constraint (mod_expr, mod_type)} as constrained
+    (* [module M: S = E] has no node for the constraint's attributes *)
+      when not (Parsetree_viewer.mod_expr_has_attributes constrained) ->
+      let mod_expr_doc =
+        if Parens.mod_expr_parens constrained then
+          add_mod_expr_parens (print_mod_expr ~state mod_expr cmt_tbl)
+        else print_mod_expr_constraint_parens ~state mod_expr cmt_tbl
+      in
+      ( mod_expr_doc,
         Doc.concat [Doc.text ": "; print_mod_type ~state mod_type cmt_tbl] )
     | mod_expr -> (print_mod_expr ~state mod_expr cmt_tbl, Doc.nil)
-  in
-  let mod_expr_doc_parens =
-    if Parens.mod_expr_parens module_binding.pmb_expr then
-      Doc.concat [Doc.lparen; mod_expr_doc; Doc.rparen]
-    else mod_expr_doc
   in
   let mod_name =
     let doc = Doc.text module_binding.pmb_name.Location.txt in
@@ -824,7 +868,7 @@ and print_module_binding ~state ~is_rec module_binding cmt_tbl i =
         mod_name;
         mod_constraint_doc;
         Doc.text " = ";
-        mod_expr_doc_parens;
+        mod_expr_doc;
       ]
   in
   print_comments doc cmt_tbl module_binding.pmb_loc
@@ -983,7 +1027,10 @@ and print_mod_type ~state mod_type cmt_tbl =
            ])
     | Pmty_typeof mod_expr ->
       Doc.concat
-        [Doc.text "module type of "; print_mod_expr ~state mod_expr cmt_tbl]
+        [
+          Doc.text "module type of ";
+          print_mod_expr_constraint_parens ~state mod_expr cmt_tbl;
+        ]
     | Pmty_extension extension ->
       print_extension ~state ~at_module_lvl:false extension cmt_tbl
     | Pmty_alias longident ->
@@ -1074,7 +1121,7 @@ and print_signature ~state signature cmt_tbl =
   match signature with
   | [] -> print_comments_inside_file cmt_tbl
   | signature ->
-    print_list
+    print_list ~space_multiline:true
       ~get_loc:(fun s -> s.Parsetree.psig_loc)
       ~nodes:signature
       ~print:(print_signature_item ~state)
@@ -1199,30 +1246,35 @@ and print_include_declaration ~state
       print_attributes ~state include_declaration.pincl_attributes cmt_tbl;
       Doc.text "include ";
       (let include_doc =
-         match include_declaration.pincl_mod.pmod_desc with
+         match include_declaration.pincl_mod with
          (* 
            include Module.Name({ type t = t })
            try as oneliner if there is a single type alias declaration
           *)
-         | Pmod_apply
-             ( {pmod_desc = Pmod_ident longident_loc},
-               {
-                 pmod_desc =
-                   Pmod_structure
-                     [
-                       ({
-                          pstr_desc =
-                            Pstr_type
-                              ( _,
-                                [
-                                  {
-                                    ptype_kind = Ptype_abstract;
-                                    ptype_manifest = Some _;
-                                  };
-                                ] );
-                        } as structure_item);
-                     ];
-               } ) ->
+         | {
+          pmod_attributes = [];
+          pmod_desc =
+            Pmod_apply
+              ( {pmod_desc = Pmod_ident longident_loc; pmod_attributes = []},
+                {
+                  pmod_attributes = [];
+                  pmod_desc =
+                    Pmod_structure
+                      [
+                        ({
+                           pstr_desc =
+                             Pstr_type
+                               ( _,
+                                 [
+                                   {
+                                     ptype_kind = Ptype_abstract;
+                                     ptype_manifest = Some _;
+                                   };
+                                 ] );
+                         } as structure_item);
+                      ];
+                } );
+         } ->
            Doc.concat
              [
                print_longident_location longident_loc cmt_tbl;
@@ -1244,7 +1296,7 @@ and print_include_declaration ~state
              ]
          | _ -> print_mod_expr ~state include_declaration.pincl_mod cmt_tbl
        in
-       if Parens.include_mod_expr include_declaration.pincl_mod then
+       if Parens.mod_constraint include_declaration.pincl_mod then
          add_parens include_doc
        else include_doc);
     ]
@@ -1265,7 +1317,8 @@ and print_value_description ~state value_description cmt_tbl =
   in
   let attrs =
     print_attributes ~state ~loc:value_description.pval_name.loc
-      value_description.pval_attributes cmt_tbl
+      (Ast_helper.Val.description_attributes value_description)
+      cmt_tbl
   in
   let header = if is_external then "external " else "let " in
   let inline_record_definitions =
@@ -1625,14 +1678,14 @@ and print_type_param ~state (param : Parsetree.core_type * Asttypes.variance)
   in
   Doc.concat [printed_variance; print_typ_expr ~state typ cmt_tbl]
 
+and get_field_start_line (ld : Parsetree.label_declaration) =
+  (* For spread fields (...), use the type location instead of pld_loc
+     because pld_loc may incorrectly include preceding whitespace *)
+  if ld.pld_name.txt = "..." then ld.pld_type.ptyp_loc.loc_start.pos_lnum
+  else ld.pld_loc.loc_start.pos_lnum
+
 and print_record_declaration ?check_break_from_loc ?inline_record_definitions
     ?record_loc ~state (lds : Parsetree.label_declaration list) cmt_tbl =
-  let get_field_start_line (ld : Parsetree.label_declaration) =
-    (* For spread fields (...), use the type location instead of pld_loc
-       because pld_loc may incorrectly include preceding whitespace *)
-    if ld.pld_name.txt = "..." then ld.pld_type.ptyp_loc.loc_start.pos_lnum
-    else ld.pld_loc.loc_start.pos_lnum
-  in
   let force_break =
     match (check_break_from_loc, record_loc, lds) with
     | Some loc, _, _ -> loc.Location.loc_start.pos_lnum < loc.loc_end.pos_lnum
@@ -1685,59 +1738,60 @@ and collect_literal_dict_rows (e : Parsetree.expression) =
     List.filter_map tuple_to_row expressions
   | _ -> []
 
-and print_literal_dict_rows ~state ?(leading_line = true)
-    ?(trailing_comma = true) (e : Parsetree.expression) cmt_tbl =
+(* The rows, separated by [","] and a line, without indentation *)
+and print_literal_dict_rows ~state rows cmt_tbl =
+  Doc.join
+    ~sep:(Doc.concat [Doc.text ","; Doc.line])
+    (List.map
+       (fun ((row, e) :
+              (Longident.t Location.loc * Parsetree.expression)
+              * Parsetree.expression) ->
+         let doc = print_bs_object_row ~state row cmt_tbl in
+         print_comments doc cmt_tbl e.pexp_loc)
+       rows)
+
+and print_literal_dict_expr ~state (e : Parsetree.expression) cmt_tbl =
   let rows = collect_literal_dict_rows e in
-  let rows_doc =
-    Doc.join
-      ~sep:(Doc.concat [Doc.text ","; Doc.line])
-      (List.map
-         (fun ((row, e) :
-                (Longident.t Location.loc * Parsetree.expression)
-                * Parsetree.expression) ->
-           let doc = print_bs_object_row ~state row cmt_tbl in
-           print_comments doc cmt_tbl e.pexp_loc)
-         rows)
-  in
+  let rows_doc = print_literal_dict_rows ~state rows cmt_tbl in
   let force_break =
     e.pexp_loc.loc_start.pos_lnum < e.pexp_loc.loc_end.pos_lnum
     || Doc.will_break rows_doc
   in
-  Doc.breakable_group ~force_break
-    (Doc.concat
-       [
-         Doc.indent
-           (Doc.concat
-              [
-                (if rows = [] || not leading_line then Doc.nil else Doc.soft_line);
-                rows_doc;
-              ]);
-         (if rows = [] || not trailing_comma then Doc.nil
-          else Doc.concat [Doc.trailing_comma; Doc.soft_line]);
-       ])
+  if rows = [] then Doc.nil
+  else
+    Doc.breakable_group ~force_break
+      (Doc.concat
+         [
+           Doc.indent (Doc.concat [Doc.soft_line; rows_doc]);
+           Doc.trailing_comma;
+           Doc.soft_line;
+         ])
 
-and print_literal_dict_expr ~state (e : Parsetree.expression) cmt_tbl =
-  print_literal_dict_rows ~state e cmt_tbl
+(* [...expr] in an array, list or dict. The leading comments of [expr] go
+   before the dots, which are part of the spread and not of [expr]. *)
+and print_spread_with_comments ~state expr cmt_tbl =
+  let leading_comments_doc =
+    print_leading_comments Doc.nil cmt_tbl.Comment_table.leading
+      expr.Parsetree.pexp_loc
+  in
+  let doc =
+    let doc = print_expression ~state expr cmt_tbl in
+    match Parens.expr_allowing_coercion expr with
+    | Parens.Parenthesized -> add_parens doc
+    | Braced braces -> print_braces doc expr braces
+    | Nothing -> doc
+  in
+  Doc.concat
+    [
+      leading_comments_doc;
+      Doc.dotdotdot;
+      print_trailing_comments doc cmt_tbl.Comment_table.trailing
+        expr.Parsetree.pexp_loc;
+    ]
 
 and print_spread_dict_expr ~state parts (expr : Parsetree.expression) cmt_tbl =
   let print_spread_part spread_expr =
-    let leading_comments_doc =
-      print_leading_comments Doc.nil cmt_tbl.Comment_table.leading
-        spread_expr.Parsetree.pexp_loc
-    in
-    let spread_doc =
-      let doc = print_expression ~state spread_expr cmt_tbl in
-      match Parens.expr_allowing_coercion spread_expr with
-      | Parens.Parenthesized -> add_parens doc
-      | Braced braces -> print_braces doc spread_expr braces
-      | Nothing -> doc
-    in
-    let spread_with_trailing_comments =
-      print_trailing_comments spread_doc cmt_tbl.Comment_table.trailing
-        spread_expr.Parsetree.pexp_loc
-    in
-    Doc.concat
-      [leading_comments_doc; Doc.dotdotdot; spread_with_trailing_comments]
+    print_spread_with_comments ~state spread_expr cmt_tbl
   in
   let parts_doc =
     Doc.join
@@ -1745,8 +1799,10 @@ and print_spread_dict_expr ~state parts (expr : Parsetree.expression) cmt_tbl =
       (List.map
          (function
            | Parsetree_viewer.DictExprRows rows_expr ->
-             print_literal_dict_rows ~state ~leading_line:false
-               ~trailing_comma:false rows_expr cmt_tbl
+             (* Already indented with the spreads *)
+             print_literal_dict_rows ~state
+               (collect_literal_dict_rows rows_expr)
+               cmt_tbl
            | Parsetree_viewer.DictExprSpread spread_expr ->
              print_spread_part spread_expr)
          parts)
@@ -1818,8 +1874,8 @@ and print_constructor_declaration2 ~state i
     print_comments doc cmt_tbl cd.pcd_name.loc
   in
   let constr_args =
-    print_constructor_arguments ~is_dot_dot_dot ~state ~indent:true cd.pcd_args
-      cmt_tbl
+    print_constructor_arguments ~is_dot_dot_dot ~name_loc:cd.pcd_name.loc ~state
+      ~indent:true cd.pcd_args cmt_tbl
   in
   let gadt =
     match cd.pcd_res with
@@ -1842,8 +1898,8 @@ and print_constructor_declaration2 ~state i
            ]);
     ]
 
-and print_constructor_arguments ?(is_dot_dot_dot = false) ~state ~indent
-    (cd_args : Parsetree.constructor_arguments) cmt_tbl =
+and print_constructor_arguments ?(is_dot_dot_dot = false) ~name_loc ~state
+    ~indent (cd_args : Parsetree.constructor_arguments) cmt_tbl =
   match cd_args with
   | Pcstr_tuple [] -> Doc.nil
   | Pcstr_tuple types ->
@@ -1892,7 +1948,15 @@ and print_constructor_arguments ?(is_dot_dot_dot = false) ~state ~indent
           Doc.rparen;
         ]
     in
-    Doc.group (if indent then Doc.indent args else args)
+    (* Like a record type declaration, keep the inline record multiline when
+       the first field starts on a later line than the constructor name. *)
+    let force_break =
+      match lds with
+      | first :: _ ->
+        name_loc.Location.loc_end.pos_lnum < get_field_start_line first
+      | [] -> false
+    in
+    Doc.breakable_group ~force_break (if indent then Doc.indent args else args)
 
 and print_label_declaration ?inline_record_definitions ~state
     (ld : Parsetree.label_declaration) cmt_tbl =
@@ -1947,7 +2011,10 @@ and print_typ_expr ?inline_record_definitions ~(state : State.t)
     in
     match args with
     | [] -> Doc.nil
-    | [{attrs = []; lbl = Nolabel; typ}] ->
+    | [
+     (( Parg_type {attrs = []; lbl = Nolabel}
+      | Parg_fixed {attrs = []; lbl = Nolabel} ) as arg);
+    ] ->
       let has_attrs_before = not (attrs_before = []) in
       let attrs =
         if has_attrs_before then
@@ -1955,12 +2022,16 @@ and print_typ_expr ?inline_record_definitions ~(state : State.t)
         else Doc.nil
       in
       let typ_doc =
-        let doc =
-          print_typ_expr ?inline_record_definitions ~state typ cmt_tbl
-        in
-        match typ.ptyp_desc with
-        | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_alias _ -> add_parens doc
-        | _ -> doc
+        match arg with
+        | Parg_type {typ} -> (
+          let doc =
+            print_typ_expr ?inline_record_definitions ~state typ cmt_tbl
+          in
+          match typ.ptyp_desc with
+          | Ptyp_arrow _ | Ptyp_tuple _ | Ptyp_alias _ -> add_parens doc
+          | _ -> doc)
+        | Parg_fixed _ ->
+          print_type_parameter ?inline_record_definitions ~state arg cmt_tbl
       in
       Doc.group
         (Doc.concat
@@ -2352,8 +2423,29 @@ and print_object_field ~state (field : Parsetree.object_field) cmt_tbl =
 (* es6 arrow type arg
  * type t = (~foo: string, ~bar: float=?, unit) => unit
  * i.e. ~foo: string, ~bar: float *)
-and print_type_parameter ?inline_record_definitions ~state {attrs; lbl; typ}
-    cmt_tbl =
+and print_type_parameter ?inline_record_definitions ~state parameter cmt_tbl =
+  let attrs, lbl, value_doc, end_loc =
+    match parameter with
+    | Parsetree.Parg_type {attrs; lbl; typ} ->
+      ( attrs,
+        lbl,
+        print_typ_expr ?inline_record_definitions ~state typ cmt_tbl,
+        typ.ptyp_loc )
+    | Parsetree.Parg_fixed {attrs; lbl; value; loc} ->
+      (* Comments go around [@as(...) _], as for the [_] it is written with. *)
+      let loc = Ast_fixed_arg.underscore_loc loc in
+      let as_doc, _ =
+        print_attribute ~state
+          (Ast_fixed_arg.to_attribute {value with loc = Location.none})
+          cmt_tbl
+      in
+      ( attrs,
+        lbl,
+        print_comments
+          (Doc.group (Doc.concat [as_doc; Doc.space; Doc.text "_"]))
+          cmt_tbl loc,
+        loc )
+  in
   (* Converting .ml code to .res requires processing uncurried attributes *)
   let attrs = print_attributes ~state attrs cmt_tbl in
   let label =
@@ -2369,16 +2461,8 @@ and print_type_parameter ?inline_record_definitions ~state {attrs; lbl; typ}
     | Nolabel | Labelled _ -> Doc.nil
     | Optional _ -> Doc.text "=?"
   in
-  let loc = {(Asttypes.get_lbl_loc lbl) with loc_end = typ.ptyp_loc.loc_end} in
-  let doc =
-    Doc.group
-      (Doc.concat
-         [
-           attrs;
-           label;
-           print_typ_expr ?inline_record_definitions ~state typ cmt_tbl;
-         ])
-  in
+  let loc = {(Asttypes.get_lbl_loc lbl) with loc_end = end_loc.loc_end} in
+  let doc = Doc.group (Doc.concat [attrs; label; value_doc]) in
   (* [loc] ends before [=?]. *)
   print_comments_before_marker doc cmt_tbl loc optional_indicator
 
@@ -2386,7 +2470,7 @@ and print_value_binding ~state ~rec_flag (vb : Parsetree.value_binding) cmt_tbl
     i =
   let has_unwrap = ref false in
   let attrs =
-    vb.pvb_attributes
+    Ast_helper.Vb.binding_attributes vb
     |> List.filter_map (function
       | {Asttypes.txt = "let.unwrap"}, _ ->
         has_unwrap := true;
@@ -2412,27 +2496,55 @@ and print_value_binding ~state ~rec_flag (vb : Parsetree.value_binding) cmt_tbl
              print_comments (print_ident_like txt) cmt_tbl loc)
            pvc_newtypes)
     in
-    Doc.group
-      (Doc.concat
-         [
-           attrs;
-           header;
-           print_pattern ~state pattern cmt_tbl;
-           Doc.text ":";
-           Doc.indent
-             (Doc.concat
-                [
-                  Doc.line;
-                  Doc.text "type ";
-                  newtypes;
-                  Doc.dot;
-                  Doc.space;
-                  print_typ_expr ~state pvc_type cmt_tbl;
-                  Doc.text " =";
-                  Doc.line;
-                  print_expression_with_comments_and_parens ~state expr cmt_tbl;
-                ]);
-         ])
+    let pattern_doc = print_pattern ~state pattern cmt_tbl in
+    let typ_doc = print_typ_expr ~state pvc_type cmt_tbl in
+    let expr_doc =
+      print_expression_with_comments_and_parens ~state expr cmt_tbl
+    in
+    (* Keep `let f: type a. t = body` on one line up to the body's first
+       line break when it fits; otherwise break after `:` and `=`. The
+       attributes stay outside, so that [fits] measures from the `let`. *)
+    Doc.concat
+      [
+        attrs;
+        Doc.custom_layout
+          [
+            (* not a group: a group would be marked broken by the body's line
+               breaks, and [fits] would then accept a header that overflows *)
+            Doc.concat
+              [
+                header;
+                pattern_doc;
+                Doc.text ": type ";
+                newtypes;
+                Doc.dot;
+                Doc.space;
+                typ_doc;
+                Doc.text " = ";
+                expr_doc;
+              ];
+            Doc.group
+              (Doc.concat
+                 [
+                   header;
+                   pattern_doc;
+                   Doc.text ":";
+                   Doc.indent
+                     (Doc.concat
+                        [
+                          Doc.line;
+                          Doc.text "type ";
+                          newtypes;
+                          Doc.dot;
+                          Doc.space;
+                          typ_doc;
+                          Doc.text " =";
+                          Doc.line;
+                          expr_doc;
+                        ]);
+                 ]);
+          ];
+      ]
   | {
    pvb_pat =
      {
@@ -2563,12 +2675,10 @@ and print_value_binding ~state ~rec_flag (vb : Parsetree.value_binding) cmt_tbl
           match vb.pvb_expr with
           | {pexp_attributes = []; pexp_desc = Pexp_ternary (if_expr, _, _)} ->
             Parsetree_viewer.is_binary_expression if_expr
-            || Parsetree_viewer.has_attributes if_expr.pexp_attributes
+            || if_expr.pexp_attributes <> []
           | {pexp_desc = Pexp_tagged_template _} -> false
           | {pexp_desc = Pexp_jsx_element _} -> true
-          | e ->
-            Parsetree_viewer.has_attributes e.pexp_attributes
-            || Parsetree_viewer.is_array_access e)
+          | e -> e.pexp_attributes <> [] || Parsetree_viewer.is_array_access e)
       in
       Doc.group
         (Doc.concat
@@ -2653,8 +2763,13 @@ and print_extension ~state ~at_module_lvl (string_loc, payload) cmt_tbl =
 and print_pattern_args ~state (patterns : Parsetree.pattern list) cmt_tbl =
   match patterns with
   | [] -> Doc.nil
-  | [{ppat_loc; ppat_desc = Ppat_construct ({txt = Longident.Lident "()"}, _)}]
-    ->
+  | [
+   {
+     ppat_loc;
+     ppat_desc = Ppat_construct ({txt = Longident.Lident "()"}, _);
+     ppat_attributes = [];
+   };
+  ] ->
     Doc.concat [Doc.lparen; print_comments_inside cmt_tbl ppat_loc; Doc.rparen]
   | [{ppat_desc = Ppat_tuple []; ppat_loc = loc}] ->
     Doc.concat [Doc.lparen; print_comments_inside cmt_tbl loc; Doc.rparen]
@@ -2767,11 +2882,18 @@ and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
             (match tail.Parsetree.ppat_desc with
             | Ppat_construct ({txt = Longident.Lident "[]"}, _) -> Doc.nil
             | _ ->
-              let doc =
-                Doc.concat [Doc.text "..."; print_pattern ~state tail cmt_tbl]
+              (* Taken before [print_pattern] prints the other comments *)
+              let leading =
+                print_leading_comments Doc.nil cmt_tbl.leading tail.ppat_loc
               in
-              let tail = print_comments doc cmt_tbl tail.ppat_loc in
-              Doc.concat [Doc.text ","; Doc.line; tail]);
+              Doc.concat
+                [
+                  Doc.text ",";
+                  Doc.line;
+                  leading;
+                  Doc.text "...";
+                  print_pattern ~state tail cmt_tbl;
+                ]);
           ]
       in
       Doc.group
@@ -2798,30 +2920,32 @@ and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
       in
       let args_doc = print_pattern_args ~state variant_args cmt_tbl in
       Doc.group (Doc.concat [variant_name; args_doc])
-    | Ppat_type ident
-      when Parsetree_viewer.has_res_pat_variant_spread_attribute
-             p.ppat_attributes ->
+    | Ppat_variant_spread ident ->
       Doc.concat [Doc.text "..."; print_ident_path ident cmt_tbl]
     | Ppat_type ident ->
       Doc.concat [Doc.text "#..."; print_ident_path ident cmt_tbl]
-    | Ppat_record (rows, _, _rest)
-      when Parsetree_viewer.has_dict_pattern_attribute p.ppat_attributes ->
+    | Ppat_dict [] ->
       Doc.concat
-        [
-          Doc.text "dict{";
-          Doc.indent
-            (Doc.concat
-               [
-                 Doc.soft_line;
-                 Doc.join
-                   ~sep:(Doc.concat [Doc.text ","; Doc.line])
-                   (Ext_list.map rows (fun row ->
-                        print_pattern_dict_row ~state row cmt_tbl));
-               ]);
-          Doc.if_breaks (Doc.text ",") Doc.nil;
-          Doc.soft_line;
-          Doc.rbrace;
-        ]
+        [Doc.text "dict{"; print_comments_inside cmt_tbl p.ppat_loc; Doc.rbrace]
+    | Ppat_dict rows ->
+      (* Its own group, as when it was a record pattern with an attribute *)
+      Doc.group
+        (Doc.concat
+           [
+             Doc.text "dict{";
+             Doc.indent
+               (Doc.concat
+                  [
+                    Doc.soft_line;
+                    Doc.join
+                      ~sep:(Doc.concat [Doc.text ","; Doc.line])
+                      (Ext_list.map rows (fun row ->
+                           print_pattern_dict_row ~state row cmt_tbl));
+                  ]);
+             Doc.if_breaks (Doc.text ",") Doc.nil;
+             Doc.soft_line;
+             Doc.rbrace;
+           ])
     | Ppat_record ([], Open, None) ->
       Doc.concat [Doc.lbrace; Doc.text "_"; Doc.rbrace]
     | Ppat_record (rows, open_flag, rest) ->
@@ -2916,7 +3040,8 @@ and print_pattern ~state (p : Parsetree.pattern) cmt_tbl =
       let needs_parens =
         match p.ppat_desc with
         | Ppat_or (_, _) | Ppat_alias (_, _) -> true
-        | _ -> false
+        (* Attributes before [x as z] belong to the alias *)
+        | _ -> p.ppat_attributes <> []
       in
       let rendered_pattern =
         let p = print_pattern ~state p cmt_tbl in
@@ -3009,11 +3134,9 @@ and print_pattern_record_row ~state row cmt_tbl =
     print_comments doc cmt_tbl loc_for_comments
 
 and print_pattern_dict_row ~state
-    ({lid = longident; x = pattern; opt} :
-      Parsetree.pattern Parsetree.record_element) cmt_tbl =
-  let loc_for_comments =
-    {longident.loc with loc_end = pattern.ppat_loc.loc_end}
-  in
+    ({pdp_key = key; pdp_pattern = pattern; pdp_optional = opt} :
+      Parsetree.dict_pattern_entry) cmt_tbl =
+  let loc_for_comments = {key.loc with loc_end = pattern.ppat_loc.loc_end} in
   let rhs_doc =
     let doc = print_pattern ~state pattern cmt_tbl in
     let doc =
@@ -3022,7 +3145,10 @@ and print_pattern_dict_row ~state
     if opt then Doc.concat [Doc.text "?"; doc] else doc
   in
   let lbl_doc =
-    Doc.concat [Doc.text "\""; print_longident longident.txt; Doc.text "\""]
+    print_comments
+      (Doc.concat
+         [Doc.text "\""; print_longident (Lident key.txt); Doc.text "\""])
+      cmt_tbl key.loc
   in
   let doc =
     Doc.group
@@ -3093,6 +3219,38 @@ and print_expression_args ~state (args : Parsetree.expression list) cmt_tbl =
         Doc.rparen;
       ]
 
+(* The operand of [switch], [try], [if], [while] or a loop, which is followed
+   by more code on the same line. A line comment still pending at its end
+   would move after that code, into the block, so the operand goes into
+   parentheses with the comment before the [)]. *)
+and print_operand_before_brace doc =
+  if Doc.has_pending_line_suffix doc then add_operand_parens doc else doc
+
+(* An operand followed by a block, see [print_operand_before_brace], with the
+   parentheses or braces it needs *)
+and print_block_operand ~state expr cmt_tbl =
+  let doc = print_expression_with_comments ~state expr cmt_tbl in
+  print_operand_before_brace
+    (match Parens.expr expr with
+    | Parens.Parenthesized -> add_operand_parens doc
+    | Braced braces -> print_braces doc expr braces
+    | Nothing -> doc)
+
+(* Parentheses around such an operand, or around one that needs them, such as
+   a coercion. They break when a line comment is still pending at the end of
+   the operand, so that the comment stays before the [)]. *)
+and add_operand_parens doc =
+  if Doc.has_pending_line_suffix doc then
+    Doc.breakable_group ~force_break:true
+      (Doc.concat
+         [
+           Doc.lparen;
+           Doc.indent (Doc.concat [Doc.soft_line; doc]);
+           Doc.soft_line;
+           Doc.rparen;
+         ])
+  else add_parens doc
+
 and print_if_chain ~state pexp_attributes ifs else_expr cmt_tbl =
   let if_docs =
     Doc.join ~sep:Doc.space
@@ -3100,53 +3258,32 @@ and print_if_chain ~state pexp_attributes ifs else_expr cmt_tbl =
          (fun i (outer_loc, if_expr, then_expr) ->
            let if_txt = if i > 0 then Doc.text "else if " else Doc.text "if " in
            let doc =
-             match if_expr with
-             | Parsetree_viewer.If if_expr ->
-               let condition =
-                 if Parsetree_viewer.is_block_expr if_expr then
-                   print_expression_block ~state ~braces:true if_expr cmt_tbl
-                 else
-                   let doc =
-                     print_expression_with_comments ~state if_expr cmt_tbl
-                   in
-                   match Parens.expr if_expr with
-                   | Parens.Parenthesized -> add_parens doc
-                   | Braced braces -> print_braces doc if_expr braces
-                   | Nothing -> Doc.if_breaks (add_parens doc) doc
-               in
-               Doc.concat
-                 [
-                   if_txt;
-                   Doc.group condition;
-                   Doc.space;
-                   (let then_expr =
-                      match Parsetree_viewer.process_braces then_expr with
-                      (* This case only happens when coming from Reason, we strip braces *)
-                      | Some _, expr -> expr
-                      | _ -> then_expr
-                    in
-                    print_expression_block ~state ~braces:true then_expr cmt_tbl);
-                 ]
-             | IfLet (pattern, condition_expr) ->
-               let condition_doc =
+             let condition =
+               if Parsetree_viewer.is_block_expr if_expr then
+                 print_expression_block ~state ~braces:true if_expr cmt_tbl
+               else
                  let doc =
-                   print_expression_with_comments ~state condition_expr cmt_tbl
+                   print_expression_with_comments ~state if_expr cmt_tbl
                  in
-                 match Parens.expr condition_expr with
-                 | Parens.Parenthesized -> add_parens doc
-                 | Braced braces -> print_braces doc condition_expr braces
-                 | Nothing -> doc
-               in
-               Doc.concat
-                 [
-                   if_txt;
-                   Doc.text "let ";
-                   print_pattern ~state pattern cmt_tbl;
-                   Doc.text " = ";
-                   condition_doc;
-                   Doc.space;
-                   print_expression_block ~state ~braces:true then_expr cmt_tbl;
-                 ]
+                 match Parens.expr if_expr with
+                 | Parens.Parenthesized -> add_operand_parens doc
+                 | Braced braces -> print_braces doc if_expr braces
+                 | Nothing -> Doc.if_breaks (add_parens doc) doc
+             in
+             Doc.concat
+               [
+                 if_txt;
+                 print_operand_before_brace (Doc.group condition);
+                 Doc.space;
+                 (let then_expr =
+                    match Parsetree_viewer.process_braces then_expr with
+                    (* Redundant braces, as in [if c { {y} }]: the branch is
+                       printed in the if's own braces, so these are dropped *)
+                    | Some _, expr -> expr
+                    | _ -> then_expr
+                  in
+                  print_expression_block ~state ~braces:true then_expr cmt_tbl);
+               ]
            in
            print_leading_comments doc cmt_tbl.leading outer_loc)
          ifs)
@@ -3162,10 +3299,8 @@ and print_if_chain ~state pexp_attributes ifs else_expr cmt_tbl =
           print_expression_block ~state ~braces:true expr cmt_tbl;
         ]
   in
-  let attrs =
-    Parsetree_viewer.filter_fragile_match_attributes pexp_attributes
-  in
-  Doc.concat [print_attributes ~state attrs cmt_tbl; if_docs; else_doc]
+  Doc.concat
+    [print_attributes ~state pexp_attributes cmt_tbl; if_docs; else_doc]
 
 and print_assignment_rhs ~operator rhs rhs_doc =
   (* Delimited expressions handle their own indentation. Binary expressions
@@ -3175,7 +3310,7 @@ and print_assignment_rhs ~operator rhs rhs_doc =
     && (Parsetree_viewer.is_binary_expression rhs
        ||
        match rhs.pexp_desc with
-       | Pexp_match _ -> not (Parsetree_viewer.is_if_let_expr rhs)
+       | Pexp_match _ -> true
        | _ -> false)
   in
   Doc.concat
@@ -3291,12 +3426,7 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
             [
               Doc.text ",";
               Doc.line;
-              Doc.dotdotdot;
-              (let doc = print_expression_with_comments ~state expr cmt_tbl in
-               match Parens.expr_allowing_coercion expr with
-               | Parens.Parenthesized -> add_parens doc
-               | Braced braces -> print_braces doc expr braces
-               | Nothing -> doc);
+              print_spread_with_comments ~state expr cmt_tbl;
             ]
         | None -> Doc.nil
       in
@@ -3330,6 +3460,10 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
       let constr = print_longident_location longident_loc cmt_tbl in
       let args = print_expression_args ~state args cmt_tbl in
       Doc.group (Doc.concat [constr; args])
+    | Pexp_ident ({txt = Longident.Lident "_"} as path) ->
+      (* The `_` placeholder of underscore apply sugar, see
+         [Parsetree_viewer.rewrite_underscore_apply]. *)
+      print_comments (Doc.text "_") cmt_tbl path.loc
     | Pexp_ident path -> print_lident_path path cmt_tbl
     | Pexp_tuple exprs ->
       Doc.group
@@ -3496,25 +3630,43 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
            ])
     | Pexp_extension extension ->
       print_extension ~state ~at_module_lvl:false extension cmt_tbl
+    | Pexp_raw {kind; name_loc; source} ->
+      print_extension ~state ~at_module_lvl:false
+        (Ast_raw.to_extension
+           ~name:(Ast_raw.extension_name kind)
+           ~name_loc source)
+        cmt_tbl
+    | Pexp_todo {name_loc; message} ->
+      print_extension ~state ~at_module_lvl:false
+        (Ast_todo.to_extension ~name_loc message)
+        cmt_tbl
     | Pexp_regexp {pattern; flags} -> Doc.text ("/" ^ pattern ^ "/" ^ flags)
     | Pexp_template {source_segments; values} ->
       print_template_literal ~state ~source_segments ~values cmt_tbl
     | Pexp_tagged_template {tag; raw_sources; values} ->
       print_tagged_template_literal ~state ~tag ~raw_sources ~values cmt_tbl
-    | Pexp_apply
-        {funct = e; args = [(Nolabel, {pexp_desc = Pexp_array sub_lists})]}
-      when Parsetree_viewer.is_spread_array e ->
-      print_array_spread_apply ~state sub_lists cmt_tbl
-    | Pexp_apply
-        {funct = e; args = [(Nolabel, {pexp_desc = Pexp_array sub_lists})]}
-      when Parsetree_viewer.is_spread_list e ->
-      print_list_spread_apply ~state sub_lists cmt_tbl
+    | Pexp_spread (kind, elements) ->
+      print_spread_expr ~state kind elements cmt_tbl
     | Pexp_apply _ ->
       if Parsetree_viewer.is_unary_expression e then
         print_unary_expression ~state e cmt_tbl
       else if Parsetree_viewer.is_binary_expression e then
         print_binary_expression ~state ~force_pipe_breaks e cmt_tbl
       else print_pexp_apply ~state e cmt_tbl
+    | Pexp_dict entries when Parsetree_viewer.dict_has_spread entries ->
+      print_spread_dict_expr ~state
+        (Parsetree_viewer.dict_expr_parts ~loc:e.pexp_loc entries)
+        e cmt_tbl
+    | Pexp_dict entries ->
+      Doc.concat
+        [
+          Doc.text "dict{";
+          print_comments_inside cmt_tbl e.pexp_loc;
+          print_literal_dict_expr ~state
+            (Parsetree_viewer.dict_expr_rows ~loc:e.pexp_loc entries)
+            cmt_tbl;
+          Doc.rbrace;
+        ]
     | Pexp_field (expr, longident_loc) ->
       let lhs =
         let doc = print_expression_with_comments ~state expr cmt_tbl in
@@ -3535,7 +3687,8 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
           Doc.group
             (Doc.concat
                [
-                 print_ternary_operand ~state condition1 cmt_tbl;
+                 print_ternary_operand ~is_condition:true ~state condition1
+                   cmt_tbl;
                  Doc.indent
                    (Doc.concat
                       [
@@ -3553,8 +3706,8 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
                                  [
                                    Doc.line;
                                    Doc.text ": ";
-                                   print_ternary_operand ~state condition
-                                     cmt_tbl;
+                                   print_ternary_operand ~is_condition:true
+                                     ~state condition cmt_tbl;
                                    Doc.line;
                                    Doc.text "? ";
                                    print_ternary_operand ~state consequent
@@ -3570,11 +3723,7 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
         | _ -> Doc.nil
       in
       let attrs = e.pexp_attributes in
-      let needs_parens =
-        match Parsetree_viewer.filter_parsing_attrs attrs with
-        | [] -> false
-        | _ -> true
-      in
+      let needs_parens = attrs <> [] in
       Doc.concat
         [
           print_attributes ~state attrs cmt_tbl;
@@ -3589,7 +3738,7 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
       let condition =
         let doc = print_expression_with_comments ~state expr1 cmt_tbl in
         match Parens.expr expr1 with
-        | Parens.Parenthesized -> add_parens doc
+        | Parens.Parenthesized -> add_operand_parens doc
         | Braced braces -> print_braces doc expr1 braces
         | Nothing -> doc
       in
@@ -3597,8 +3746,11 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
         (Doc.concat
            [
              Doc.text "while ";
-             (if Parsetree_viewer.is_block_expr expr1 then condition
-              else Doc.group (Doc.if_breaks (add_parens condition) condition));
+             print_operand_before_brace
+               (match Parens.expr expr1 with
+               | Parens.Parenthesized -> condition
+               | _ when Parsetree_viewer.is_block_expr expr1 -> condition
+               | _ -> Doc.group (Doc.if_breaks (add_parens condition) condition));
              Doc.space;
              print_expression_block ~state ~braces:true expr2 cmt_tbl;
            ])
@@ -3609,19 +3761,9 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.text "for ";
              print_pattern ~state pattern cmt_tbl;
              Doc.text " in ";
-             (let doc =
-                print_expression_with_comments ~state from_expr cmt_tbl
-              in
-              match Parens.expr from_expr with
-              | Parens.Parenthesized -> add_parens doc
-              | Braced braces -> print_braces doc from_expr braces
-              | Nothing -> doc);
+             print_block_operand ~state from_expr cmt_tbl;
              print_direction_flag direction_flag;
-             (let doc = print_expression_with_comments ~state to_expr cmt_tbl in
-              match Parens.expr to_expr with
-              | Parens.Parenthesized -> add_parens doc
-              | Braced braces -> print_braces doc to_expr braces
-              | Nothing -> doc);
+             print_block_operand ~state to_expr cmt_tbl;
              Doc.space;
              print_expression_block ~state ~braces:true body cmt_tbl;
            ])
@@ -3632,13 +3774,7 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.text "for ";
              print_pattern ~state pattern cmt_tbl;
              Doc.text " of ";
-             (let doc =
-                print_expression_with_comments ~state array_expr cmt_tbl
-              in
-              match Parens.expr array_expr with
-              | Parens.Parenthesized -> add_parens doc
-              | Braced braces -> print_braces doc array_expr braces
-              | Nothing -> doc);
+             print_block_operand ~state array_expr cmt_tbl;
              Doc.space;
              print_expression_block ~state ~braces:true body cmt_tbl;
            ])
@@ -3649,16 +3785,29 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.text "for await ";
              print_pattern ~state pattern cmt_tbl;
              Doc.text " of ";
-             (let doc =
-                print_expression_with_comments ~state iterable_expr cmt_tbl
-              in
-              match Parens.expr iterable_expr with
-              | Parens.Parenthesized -> add_parens doc
-              | Braced braces -> print_braces doc iterable_expr braces
-              | Nothing -> doc);
+             print_block_operand ~state iterable_expr cmt_tbl;
              Doc.space;
              print_expression_block ~state ~braces:true body cmt_tbl;
            ])
+    | Pexp_constraint
+        ( {pexp_desc = Pexp_pack mod_expr},
+          {ptyp_desc = Ptyp_package package_type; ptyp_loc} )
+      when Parens.mod_pack_constraint mod_expr ->
+      (* [module((M: S1): S2)] and [module(await (await M): S)] would parse as
+         functors, so this keeps the general form
+         [(module((M: S1)): module(S2))] *)
+      Doc.concat
+        [
+          Doc.lparen;
+          Doc.text "module(";
+          print_mod_expr_constraint_parens ~state mod_expr cmt_tbl;
+          Doc.text "): ";
+          print_comments
+            (print_package_type ~state ~print_module_keyword_and_parens:true
+               package_type cmt_tbl)
+            cmt_tbl ptyp_loc;
+          Doc.rparen;
+        ]
     | Pexp_constraint
         ( {pexp_desc = Pexp_pack mod_expr},
           {ptyp_desc = Ptyp_package package_type; ptyp_loc} ) ->
@@ -3670,7 +3819,7 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
                (Doc.concat
                   [
                     Doc.soft_line;
-                    print_mod_expr ~state mod_expr cmt_tbl;
+                    print_mod_expr_constraint_parens ~state mod_expr cmt_tbl;
                     Doc.text ": ";
                     print_comments
                       (print_package_type ~state
@@ -3706,38 +3855,36 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
              Doc.text "module(";
              Doc.indent
                (Doc.concat
-                  [Doc.soft_line; print_mod_expr ~state mod_expr cmt_tbl]);
+                  [
+                    Doc.soft_line;
+                    print_mod_expr_constraint_parens ~state mod_expr cmt_tbl;
+                  ]);
              Doc.soft_line;
              Doc.rparen;
            ])
     | Pexp_sequence _ -> print_expression_block ~state ~braces:true e cmt_tbl
     | Pexp_let _ -> print_expression_block ~state ~braces:true e cmt_tbl
-    | Pexp_try (expr, cases) ->
-      let expr_doc =
-        let doc = print_expression_with_comments ~state expr cmt_tbl in
-        match Parens.expr expr with
-        | Parens.Parenthesized -> add_parens doc
-        | Braced braces -> print_braces doc expr braces
-        | Nothing -> doc
+    | Pexp_try (expr, cases, finally) ->
+      let expr_doc = print_block_operand ~state expr cmt_tbl in
+      let catch_doc =
+        match cases with
+        | [] -> Doc.nil
+        | _ :: _ ->
+          Doc.concat [Doc.text " catch "; print_cases ~state cases cmt_tbl]
       in
-      Doc.concat
-        [
-          Doc.text "try ";
-          expr_doc;
-          Doc.text " catch ";
-          print_cases ~state cases cmt_tbl;
-        ]
-    | Pexp_match (_, [_; _]) when Parsetree_viewer.is_if_let_expr e ->
-      let ifs, else_expr = Parsetree_viewer.collect_if_expressions e in
-      print_if_chain ~state e.pexp_attributes ifs else_expr cmt_tbl
+      let finally_doc =
+        match finally with
+        | None -> Doc.nil
+        | Some finally ->
+          Doc.concat
+            [
+              Doc.text " finally ";
+              print_expression_block ~state ~braces:true finally cmt_tbl;
+            ]
+      in
+      Doc.concat [Doc.text "try "; expr_doc; catch_doc; finally_doc]
     | Pexp_match (expr, cases) ->
-      let expr_doc =
-        let doc = print_expression_with_comments ~state expr cmt_tbl in
-        match Parens.expr expr with
-        | Parens.Parenthesized -> add_parens doc
-        | Braced braces -> print_braces doc expr braces
-        | Nothing -> doc
-      in
+      let expr_doc = print_block_operand ~state expr cmt_tbl in
       Doc.concat
         [
           Doc.text "switch ";
@@ -3745,16 +3892,14 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
           Doc.space;
           print_cases ~state cases cmt_tbl;
         ]
-    | Pexp_coerce (expr, (), typ) ->
+    | Pexp_coerce (expr, typ) ->
       let doc_expr =
         print_expression_with_comments_and_parens ~state expr cmt_tbl
       in
       let doc_typ = print_typ_expr ~state typ cmt_tbl in
       let doc = Doc.concat [doc_expr; Doc.text " :> "; doc_typ] in
       (* Keep attributes on the coercion rather than its operand. *)
-      if Parsetree_viewer.has_printable_attributes e.pexp_attributes then
-        add_parens doc
-      else doc
+      if e.pexp_attributes <> [] then add_parens doc else doc
     | Pexp_object_get (parent_expr, label) ->
       print_object_get_doc ~state parent_expr label cmt_tbl
     | Pexp_object_set (obj, member, rhs) ->
@@ -3776,10 +3921,10 @@ and print_expression ~state (e : Parsetree.expression) cmt_tbl =
   in
   let should_print_its_own_attributes =
     match e.pexp_desc with
+    | Pexp_fun _ when Parsetree_viewer.is_underscore_apply_sugar e -> false
     | Pexp_apply _ | Pexp_fun _ | Pexp_setfield _ | Pexp_ifthenelse _
     | Pexp_ternary _ ->
       true
-    | Pexp_match _ when Parsetree_viewer.is_if_let_expr e -> true
     | Pexp_jsx_element _ -> true
     | _ -> false
   in
@@ -3885,9 +4030,9 @@ and print_pexp_fun ~state ~in_callback e cmt_tbl =
   | NoCallback -> Doc.group doc
   | FitsOnOneLine | ArgumentsFitOnOneLine -> doc
 
-and print_ternary_operand ~state expr cmt_tbl =
+and print_ternary_operand ?(is_condition = false) ~state expr cmt_tbl =
   let doc = print_expression_with_comments ~state expr cmt_tbl in
-  match Parens.ternary_operand expr with
+  match Parens.ternary_operand ~is_condition expr with
   | Parens.Parenthesized -> add_parens doc
   | Braced braces -> print_braces doc expr braces
   | Nothing -> doc
@@ -4023,19 +4168,16 @@ and print_binary_expression ~state ~force_pipe_breaks
         } ->
           if
             Parsetree_viewer.flattenable_operators parent_operator operator
-            && not (Parsetree_viewer.has_attributes expr.pexp_attributes)
+            && expr.pexp_attributes = []
           then
             let left_printed =
               flatten ~is_lhs:true ~is_multiline left operator
             in
             let right_printed =
-              let right_printeable_attrs, right_internal_attrs =
-                Parsetree_viewer.partition_printable_attributes
-                  right.pexp_attributes
-              in
+              let right_attrs = right.pexp_attributes in
               let doc =
                 print_expression_with_comments ~state
-                  {right with pexp_attributes = right_internal_attrs}
+                  {right with pexp_attributes = []}
                   cmt_tbl
               in
               let doc =
@@ -4044,10 +4186,9 @@ and print_binary_expression ~state ~force_pipe_breaks
                 else doc
               in
               let doc =
-                Doc.concat
-                  [print_attributes ~state right_printeable_attrs cmt_tbl; doc]
+                Doc.concat [print_attributes ~state right_attrs cmt_tbl; doc]
               in
-              match right_printeable_attrs with
+              match right_attrs with
               | [] -> doc
               | _ -> add_parens doc
             in
@@ -4097,25 +4238,22 @@ and print_binary_expression ~state ~force_pipe_breaks
             in
             print_comments doc cmt_tbl expr.pexp_loc
           else
-            let printeable_attrs, internal_attrs =
-              Parsetree_viewer.partition_printable_attributes
-                expr.pexp_attributes
-            in
+            let attrs = expr.pexp_attributes in
             let doc =
               print_expression_with_comments ~state
-                {expr with pexp_attributes = internal_attrs}
+                {expr with pexp_attributes = []}
                 cmt_tbl
             in
             let doc =
               if
                 Parens.sub_binary_expr_operand parent_operator operator
-                || printeable_attrs <> []
+                || attrs <> []
                    && (Parsetree_viewer.is_binary_expression expr
                       || Parsetree_viewer.is_ternary_expr expr)
               then Doc.concat [Doc.lparen; doc; Doc.rparen]
               else doc
             in
-            Doc.concat [print_attributes ~state printeable_attrs cmt_tbl; doc]
+            Doc.concat [print_attributes ~state attrs cmt_tbl; doc]
         | _ -> assert false
       else
         match expr.pexp_desc with
@@ -4234,145 +4372,45 @@ and print_binary_expression ~state ~force_pipe_breaks
       (Doc.concat
          [
            print_attributes ~state expr.pexp_attributes cmt_tbl;
-           (match
-              Parens.binary_expr
-                {
-                  expr with
-                  pexp_attributes =
-                    Parsetree_viewer.filter_printable_attributes
-                      expr.pexp_attributes;
-                }
-            with
+           (match Parens.binary_expr expr with
            | Braced braces_loc -> print_braces doc expr braces_loc
            | Parenthesized -> add_parens doc
            | Nothing -> doc);
          ])
   | _ -> Doc.nil
 
-and print_array_spread_apply ~state sub_lists cmt_tbl =
-  let make_spread_doc comma_before_spread = function
-    | Some expr ->
-      (* Extract leading comments before dotdotdot *)
-      let leading_comments_doc =
-        print_leading_comments Doc.nil cmt_tbl.Comment_table.leading
-          expr.Parsetree.pexp_loc
-      in
-      (* Print expression without leading comments (they're already extracted) *)
-      let expr_doc =
-        let doc = print_expression ~state expr cmt_tbl in
-        match Parens.expr_allowing_coercion expr with
-        | Parens.Parenthesized -> add_parens doc
-        | Braced braces -> print_braces doc expr braces
-        | Nothing -> doc
-      in
-      (* Print trailing comments with the expression *)
-      let expr_with_trailing_comments =
-        print_trailing_comments expr_doc cmt_tbl.Comment_table.trailing
-          expr.Parsetree.pexp_loc
-      in
-      Doc.concat
-        [
-          comma_before_spread;
-          leading_comments_doc;
-          Doc.dotdotdot;
-          expr_with_trailing_comments;
-        ]
-    | None -> Doc.nil
+and print_spread_expr ~state kind elements cmt_tbl =
+  let expr_doc expr =
+    let doc = print_expression ~state expr cmt_tbl in
+    match Parens.expr_allowing_coercion expr with
+    | Parens.Parenthesized -> add_parens doc
+    | Braced braces -> print_braces doc expr braces
+    | Nothing -> doc
   in
-  let make_sub_list_doc (expressions, spread) =
-    let comma_before_spread =
-      match expressions with
-      | [] -> Doc.nil
-      | _ -> Doc.concat [Doc.text ","; Doc.line]
-    in
-    let spread_doc = make_spread_doc comma_before_spread spread in
-    let expressions_doc =
-      Doc.join
-        ~sep:(Doc.concat [Doc.text ","; Doc.line])
-        (List.map
-           (fun expr ->
-             let doc = print_expression_with_comments ~state expr cmt_tbl in
-             match Parens.expr_allowing_coercion expr with
-             | Parens.Parenthesized -> add_parens doc
-             | Braced braces -> print_braces doc expr braces
-             | Nothing -> doc)
-           expressions)
-    in
-    Doc.concat [expressions_doc; spread_doc]
+  let element_doc = function
+    | Parsetree.Pspread_item expr ->
+      print_comments (expr_doc expr) cmt_tbl expr.pexp_loc
+    | Pspread expr -> print_spread_with_comments ~state expr cmt_tbl
   in
   Doc.group
     (Doc.concat
        [
-         Doc.lbracket;
+         (match kind with
+         | Spread_array -> Doc.lbracket
+         | Spread_list -> Doc.text "list{");
          Doc.indent
            (Doc.concat
               [
                 Doc.soft_line;
                 Doc.join
                   ~sep:(Doc.concat [Doc.text ","; Doc.line])
-                  (List.map make_sub_list_doc
-                     (List.map Parsetree_viewer.collect_array_expressions
-                        sub_lists));
+                  (List.map element_doc elements);
               ]);
          Doc.trailing_comma;
          Doc.soft_line;
-         Doc.rbracket;
-       ])
-
-and print_list_spread_apply ~state sub_lists cmt_tbl =
-  let make_spread_doc comma_before_spread = function
-    | Some expr ->
-      Doc.concat
-        [
-          comma_before_spread;
-          Doc.dotdotdot;
-          (let doc = print_expression_with_comments ~state expr cmt_tbl in
-           match Parens.expr_allowing_coercion expr with
-           | Parens.Parenthesized -> add_parens doc
-           | Braced braces -> print_braces doc expr braces
-           | Nothing -> doc);
-        ]
-    | None -> Doc.nil
-  in
-  let make_sub_list_doc (expressions, spread) =
-    let comma_before_spread =
-      match expressions with
-      | [] -> Doc.nil
-      | _ -> Doc.concat [Doc.text ","; Doc.line]
-    in
-    let spread_doc = make_spread_doc comma_before_spread spread in
-    Doc.concat
-      [
-        Doc.join
-          ~sep:(Doc.concat [Doc.text ","; Doc.line])
-          (List.map
-             (fun expr ->
-               let doc = print_expression_with_comments ~state expr cmt_tbl in
-               match Parens.expr_allowing_coercion expr with
-               | Parens.Parenthesized -> add_parens doc
-               | Braced braces -> print_braces doc expr braces
-               | Nothing -> doc)
-             expressions);
-        spread_doc;
-      ]
-  in
-  Doc.group
-    (Doc.concat
-       [
-         Doc.text "list{";
-         Doc.indent
-           (Doc.concat
-              [
-                Doc.soft_line;
-                Doc.join
-                  ~sep:(Doc.concat [Doc.text ","; Doc.line])
-                  (List.map make_sub_list_doc
-                     (List.map Parsetree_viewer.collect_list_expressions
-                        sub_lists));
-              ]);
-         Doc.trailing_comma;
-         Doc.soft_line;
-         Doc.rbrace;
+         (match kind with
+         | Spread_array -> Doc.rbracket
+         | Spread_list -> Doc.rbrace);
        ])
 
 (* callExpr(arg1, arg2) *)
@@ -4410,30 +4448,6 @@ and print_pexp_apply ~state expr cmt_tbl =
            member;
            Doc.rbracket;
          ])
-  | Pexp_apply _
-    when Option.is_some
-           (Res_parsetree_viewer.collect_spread_dict_expr_parts expr) -> (
-    match Res_parsetree_viewer.collect_spread_dict_expr_parts expr with
-    | Some parts -> print_spread_dict_expr ~state parts expr cmt_tbl
-    | None -> assert false)
-  | Pexp_apply
-      {
-        funct =
-          {
-            pexp_desc =
-              Pexp_ident
-                {txt = Longident.Ldot (Lident "Primitive_dict", "make")};
-          };
-        args = [(Nolabel, key_values)];
-      }
-    when Res_parsetree_viewer.is_tuple_array key_values ->
-    Doc.concat
-      [
-        Doc.text "dict{";
-        print_comments_inside cmt_tbl expr.pexp_loc;
-        print_literal_dict_expr ~state key_values cmt_tbl;
-        Doc.rbrace;
-      ]
   | Pexp_apply
       {
         funct =
@@ -4518,10 +4532,8 @@ and print_pexp_apply ~state expr cmt_tbl =
         match target_expr with
         | {pexp_attributes = []; pexp_desc = Pexp_ternary (if_expr, _, _)} ->
           Parsetree_viewer.is_binary_expression if_expr
-          || Parsetree_viewer.has_attributes if_expr.pexp_attributes
-        | e ->
-          Parsetree_viewer.has_attributes e.pexp_attributes
-          || Parsetree_viewer.is_array_access e
+          || if_expr.pexp_attributes <> []
+        | e -> e.pexp_attributes <> [] || Parsetree_viewer.is_array_access e
     in
     let target_expr =
       let doc = print_expression_with_comments ~state target_expr cmt_tbl in
@@ -4651,6 +4663,79 @@ and print_jsx_unary_tag ~state tag_name props expr_loc cmt_tbl =
          closing_tag_doc;
        ])
 
+(* Standalone JSX comments are trivia, not expression children. Keep their
+   delimiters inside braces so future literal text cannot absorb them. *)
+and join_jsx_items items =
+  let rec loop = function
+    | [] -> Doc.nil
+    | [(_, doc)] -> doc
+    | (loc, doc) :: ((next_loc, _) :: _ as rest) ->
+      let separator =
+        if
+          next_loc.Location.loc_start.pos_lnum
+          > loc.Location.loc_end.pos_lnum + 1
+        then Doc.concat [Doc.hard_line; Doc.hard_line]
+        else Doc.hard_line
+      in
+      Doc.concat [doc; separator; loop rest]
+  in
+  loop items
+
+and jsx_comment_items comments =
+  let comments = List.map Comment.to_block_if_safe comments in
+  let comment_loc comment =
+    Option.value (Comment.jsx_container comment) ~default:(Comment.loc comment)
+  in
+  let rec group_comments acc previous = function
+    | comment :: rest
+      when Comment.jsx_container previous = Comment.jsx_container comment
+           && (Option.is_some (Comment.jsx_container comment)
+              || (Comment.loc comment).loc_start.pos_lnum
+                 <= (Comment.loc previous).loc_end.pos_lnum + 1) ->
+      group_comments (comment :: acc) comment rest
+    | rest -> (List.rev acc, rest)
+  in
+  let rec print_comments = function
+    | [] -> Doc.nil
+    | comment :: rest -> (
+      let doc =
+        if Comment.is_single_line_comment comment then
+          Doc.concat [Doc.text ("//" ^ Comment.txt comment); Doc.break_parent]
+        else print_multiline_comment_content (Comment.txt comment)
+      in
+      match rest with
+      | [] -> doc
+      | next :: _ ->
+        let diff =
+          (Comment.loc next).loc_start.pos_lnum
+          - (Comment.loc comment).loc_end.pos_lnum
+        in
+        let sep =
+          if diff > 1 then Doc.concat [Doc.hard_line; Doc.hard_line]
+          else if diff > 0 || Comment.is_single_line_comment comment then
+            Doc.hard_line
+          else Doc.line
+        in
+        Doc.concat [doc; sep; print_comments rest])
+  in
+  let rec loop = function
+    | [] -> []
+    | comment :: rest ->
+      let group, rest = group_comments [comment] comment rest in
+      let loc = comment_loc comment in
+      let last = comment_loc (List.hd (List.rev group)) in
+      ({loc with loc_end = last.loc_end}, add_braces (print_comments group))
+      :: loop rest
+  in
+  loop comments
+
+and print_jsx_comment_container comments_tbl loc =
+  match Hashtbl.find_opt comments_tbl loc with
+  | None -> Doc.nil
+  | Some comments ->
+    Hashtbl.remove comments_tbl loc;
+    join_jsx_items (jsx_comment_items comments)
+
 and print_jsx_container_tag ~state tag_name
     (opening_greater_than : Lexing.position) props
     (children : Parsetree.jsx_children)
@@ -4675,13 +4760,8 @@ and print_jsx_container_tag ~state tag_name
     | [] -> false
   in
   let line_sep = get_line_sep_for_jsx_children children in
-  let print_children children =
-    Doc.concat
-      [
-        Doc.indent
-          (Doc.concat [Doc.line; print_jsx_children ~state children cmt_tbl]);
-        line_sep;
-      ]
+  let indent_children doc =
+    Doc.concat [Doc.indent (Doc.concat [line_sep; doc]); line_sep]
   in
 
   (* comments between the opening and closing tag *)
@@ -4739,9 +4819,12 @@ and print_jsx_container_tag ~state tag_name
               ]);
          Doc.concat
            [
-             (if has_children then print_children children
+             (if has_children then
+                indent_children (print_jsx_children ~state children cmt_tbl)
               else if not has_comments_inside then Doc.soft_line
-              else print_comments_inside cmt_tbl pexp_loc);
+              else
+                indent_children
+                  (print_jsx_comment_container cmt_tbl.inside pexp_loc));
              closing_element_doc;
            ];
        ])
@@ -4769,13 +4852,18 @@ and print_jsx_fragment ~state (opening_greater_than : Lexing.position)
     (Doc.concat
        [
          opening;
-         Doc.indent
-           (Doc.concat [Doc.line; print_jsx_children ~state children cmt_tbl]);
-         (if has_children then line_sep else Doc.nil);
+         (let doc =
+            if has_children then print_jsx_children ~state children cmt_tbl
+            else print_jsx_comment_container cmt_tbl.inside fragment_loc
+          in
+          if Doc.is_nil doc then doc
+          else Doc.concat [Doc.indent (Doc.concat [line_sep; doc]); line_sep]);
          closing;
        ])
 
 and get_line_sep_for_jsx_children (children : Parsetree.jsx_children) =
+  (* Single children stay inline when they fit, otherwise indent between the
+     tags. Literal JSX text will need to ignore this formatting whitespace. *)
   if
     List.length children > 1
     || List.exists
@@ -4784,7 +4872,7 @@ and get_line_sep_for_jsx_children (children : Parsetree.jsx_children) =
            | _ -> false)
          children
   then Doc.hard_line
-  else Doc.line
+  else Doc.soft_line
 
 and print_jsx_children ~state (children : Parsetree.jsx_children) cmt_tbl =
   let open Parsetree in
@@ -4793,59 +4881,144 @@ and print_jsx_children ~state (children : Parsetree.jsx_children) cmt_tbl =
     | None, _ -> expr.pexp_loc
     | Some loc, _ -> loc
   in
-  let sep = get_line_sep_for_jsx_children children in
   let print_expr (expr : Parsetree.expression) =
-    let leading_line_comment_present =
-      has_leading_line_comment cmt_tbl expr.pexp_loc
-    in
-    let expr_doc = print_expression_with_comments ~state expr cmt_tbl in
-    let add_parens_or_braces expr_doc =
-      (* {(20: int)} make sure that we also protect the expression inside *)
-      let inner_doc =
-        if Parens.braced_expr expr then add_parens expr_doc else expr_doc
+    let loc = get_loc expr in
+    match expr.pexp_desc with
+    | Pexp_jsx_element _ -> print_expression_with_comments ~state expr cmt_tbl
+    | _ ->
+      let has_line_comment =
+        has_leading_line_comment cmt_tbl loc
+        || has_any_trailing_line_comment cmt_tbl loc
+        || has_leading_line_comment cmt_tbl expr.pexp_loc
+        || has_any_trailing_line_comment cmt_tbl expr.pexp_loc
       in
-      if leading_line_comment_present then add_braces inner_doc
-      else Doc.concat [Doc.lbrace; inner_doc; Doc.rbrace]
-    in
-    match Parens.jsx_child_expr expr with
-    | Nothing -> print_comments expr_doc cmt_tbl (get_loc expr)
-    | Parenthesized -> add_parens_or_braces expr_doc
-    | Braced braces_loc ->
-      print_comments (add_parens_or_braces expr_doc) cmt_tbl braces_loc
+      let has_comments =
+        has_leading_comments cmt_tbl loc
+        || has_trailing_comments cmt_tbl loc
+        || has_leading_comments cmt_tbl expr.pexp_loc
+        || has_trailing_comments cmt_tbl expr.pexp_loc
+      in
+      (* Consume comments before printing subnodes that may share these
+         locations. Remaining comments belong inside the expression's braces. *)
+      let leading = print_leading_comments Doc.nil cmt_tbl.leading loc in
+      let inner_leading =
+        print_leading_comments Doc.nil cmt_tbl.leading expr.pexp_loc
+      in
+      let inner_trailing =
+        print_trailing_comments Doc.nil cmt_tbl.trailing expr.pexp_loc
+      in
+      let trailing = print_trailing_comments Doc.nil cmt_tbl.trailing loc in
+      let rec print_child_expr expr =
+        match expr.pexp_desc with
+        | Pexp_braces {expr = inner}
+          when Parsetree_viewer.is_block_expr inner && expr.pexp_attributes = []
+          ->
+          print_child_expr inner
+        | Pexp_let _ | Pexp_sequence _ | Pexp_letexception _ | Pexp_letmodule _
+        | Pexp_open _
+          when expr.pexp_attributes = [] ->
+          print_expression_block ~state ~braces:false expr cmt_tbl
+        | _ ->
+          let doc = print_expression_with_comments ~state expr cmt_tbl in
+          if Parens.braced_expr expr then add_parens doc else doc
+      in
+      let expr_doc = print_child_expr expr in
+      let wrap doc =
+        if has_comments || Parsetree_viewer.is_block_expr expr then
+          add_braces doc
+        else Doc.concat [Doc.lbrace; doc; Doc.rbrace]
+      in
+      wrap
+        (Doc.concat
+           [
+             leading;
+             inner_leading;
+             expr_doc;
+             inner_trailing;
+             trailing;
+             (if has_line_comment then Doc.break_parent else Doc.nil);
+           ])
   in
-  match children with
-  | [] -> Doc.nil
-  | children ->
-    let rec visit acc children =
-      match children with
-      | [] -> acc
-      | [x] -> Doc.concat [acc; print_expr x]
-      | x :: (y :: _ as rest) ->
-        let end_line_x =
-          let loc = get_loc x in
-          loc.loc_end.pos_lnum
+  let items =
+    List.concat_map
+      (fun expr ->
+        let loc = get_loc expr in
+        List.iter
+          (fun tbl ->
+            List.iter
+              (fun key ->
+                match Hashtbl.find_opt tbl key with
+                | None -> ()
+                | Some comments ->
+                  Hashtbl.replace tbl key
+                    (List.map Comment.to_block_if_safe comments))
+              (if loc = expr.pexp_loc then [loc] else [loc; expr.pexp_loc]))
+          [cmt_tbl.leading; cmt_tbl.trailing];
+        let standalone comment =
+          Option.is_some (Comment.jsx_container comment)
+          ||
+          match expr.pexp_desc with
+          | Pexp_jsx_element _ -> true
+          | Pexp_braces _ ->
+            let c = Comment.loc comment in
+            c.loc_end.pos_cnum <= loc.loc_start.pos_cnum
+            || c.loc_start.pos_cnum >= loc.loc_end.pos_cnum
+          | _ -> (Comment.loc comment).loc_start.pos_lnum > loc.loc_end.pos_lnum
         in
-        let start_line_y =
-          let loc = get_loc y in
-          loc.loc_start.pos_lnum
+        let extract ~leading tbl key =
+          match Hashtbl.find_opt tbl key with
+          | None -> []
+          | Some comments ->
+            (* Only retain comments adjacent to the expression, so extracting
+               a standalone container cannot reorder intervening comments. *)
+            let rec split = function
+              | comment :: rest when not (standalone comment) ->
+                let inside, outside = split rest in
+                (comment :: inside, outside)
+              | outside -> ([], outside)
+            in
+            let inside, outside =
+              if leading then
+                let inside, outside = split (List.rev comments) in
+                (List.rev inside, List.rev outside)
+              else split comments
+            in
+            if inside = [] then Hashtbl.remove tbl key
+            else Hashtbl.replace tbl key inside;
+            outside
         in
-        let lines_between = start_line_y - end_line_x - 1 in
-        let leading_single_line_comments =
-          get_leading_line_comment_count cmt_tbl (get_loc y)
+        let extract_both ~leading tbl =
+          let outer = extract ~leading tbl loc in
+          if loc = expr.pexp_loc then outer
+          else outer @ extract ~leading tbl expr.pexp_loc
         in
-        (* If there are lines between the jsx elements, we preserve at least one line *)
-        if
-          (* Unless they are all comments *)
-          (* The edge case of comment followed by blank line is not caught here *)
-          lines_between > 0 && not (lines_between = leading_single_line_comments)
-        then
-          let doc = Doc.concat [print_expr x; sep; Doc.hard_line] in
-          visit (Doc.concat [acc; doc]) rest
-        else
-          let doc = Doc.concat [print_expr x; sep] in
-          visit (Doc.concat [acc; doc]) rest
-    in
-    visit Doc.nil children
+        let leading = extract_both ~leading:true cmt_tbl.leading in
+        let trailing = extract_both ~leading:false cmt_tbl.trailing in
+        let item_loc =
+          (* Comments retained inside an expression occupy lines too. *)
+          let loc_start =
+            match get_first_leading_comment cmt_tbl loc with
+            | Some comment -> (Comment.loc comment).loc_start
+            | None -> loc.loc_start
+          in
+          let loc_end =
+            List.fold_left
+              (fun end_pos comment ->
+                let comment_end = (Comment.loc comment).loc_end in
+                if comment_end.pos_cnum > end_pos.Lexing.pos_cnum then
+                  comment_end
+                else end_pos)
+              loc.loc_end
+              (Option.value (Hashtbl.find_opt cmt_tbl.trailing loc) ~default:[])
+          in
+          {loc with loc_start; loc_end}
+        in
+        jsx_comment_items leading
+        @ [(item_loc, print_expr expr)]
+        @ jsx_comment_items trailing)
+      children
+  in
+  join_jsx_items items
 
 and print_jsx_prop ~state prop cmt_tbl =
   let open Parsetree in
@@ -5360,7 +5533,7 @@ and print_expr_fun_parameters ~state ~in_callback ~async ~has_constraint
        attrs = [];
        lbl = Nolabel;
        default_expr = None;
-       pat = {Parsetree.ppat_desc = Ppat_any; ppat_loc};
+       pat = {Parsetree.ppat_desc = Ppat_any; ppat_loc; ppat_attributes = []};
      };
   ] ->
     let any =
@@ -5405,6 +5578,7 @@ and print_expr_fun_parameters ~state ~in_callback ~async ~has_constraint
          {
            ppat_desc =
              Ppat_construct ({txt = Longident.Lident "()"; loc}, {txt = []});
+           ppat_attributes = [];
          };
      };
   ] ->
@@ -5516,13 +5690,14 @@ and print_exp_fun_parameter ~state parameter cmt_tbl =
              ])
           cmt_tbl pattern.ppat_loc
       | (Labelled {txt = lbl} | Optional {txt = lbl}), pattern ->
-        (* ~b as c *)
+        (* ~b as c: the parser puts attributes before [~b] on [c] *)
         Doc.concat
           [
+            print_attributes ~state pattern.ppat_attributes cmt_tbl;
             Doc.text "~";
             print_ident_like lbl;
             Doc.text " as ";
-            print_pattern ~state pattern cmt_tbl;
+            print_pattern ~state {pattern with ppat_attributes = []} cmt_tbl;
           ]
     in
     let optional_label_suffix =
@@ -5544,7 +5719,21 @@ and print_exp_fun_parameter ~state parameter cmt_tbl =
 
 and print_expression_block ~state ~braces expr cmt_tbl =
   let expr = Parsetree_viewer.unwrap_braces expr in
-  let rec collect_rows acc expr =
+  (* Include attributes and leading comments when preserving blank lines, but
+     look up comments using the original expression location. *)
+  let statement_row (expr : Parsetree.expression) doc =
+    let loc =
+      match get_first_leading_comment cmt_tbl expr.pexp_loc with
+      | Some comment ->
+        {(Comment.loc comment) with loc_end = expr.pexp_loc.loc_end}
+      | None -> (
+        match expr.pexp_attributes with
+        | ({loc}, _) :: _ -> {expr.pexp_loc with loc_start = loc.loc_start}
+        | [] -> expr.pexp_loc)
+    in
+    (loc, print_comments doc cmt_tbl expr.pexp_loc)
+  in
+  let rec collect_rows ~protect_regexp acc expr =
     match expr.Parsetree.pexp_desc with
     | Parsetree.Pexp_letmodule (mod_name, mod_expr, expr2) ->
       let name =
@@ -5554,9 +5743,7 @@ and print_expression_block ~state ~braces expr cmt_tbl =
       let name, mod_expr =
         match mod_expr.pmod_desc with
         | Pmod_constraint (mod_expr2, mod_type)
-          when not
-                 (Parsetree_viewer.has_await_attribute mod_expr.pmod_attributes)
-          ->
+          when not (Parsetree_viewer.mod_expr_has_attributes mod_expr) ->
           let name =
             Doc.concat
               [name; Doc.text ": "; print_mod_type ~state mod_type cmt_tbl]
@@ -5570,11 +5757,11 @@ and print_expression_block ~state ~braces expr cmt_tbl =
             Doc.text "module ";
             name;
             Doc.text " = ";
-            print_mod_expr ~state mod_expr cmt_tbl;
+            print_mod_expr_constraint_parens ~state mod_expr cmt_tbl;
           ]
       in
       let loc = {expr.pexp_loc with loc_end = mod_expr.pmod_loc.loc_end} in
-      collect_rows ((loc, let_module_doc) :: acc) expr2
+      collect_rows ~protect_regexp:false ((loc, let_module_doc) :: acc) expr2
     | Pexp_letexception (extension_constructor, expr2) ->
       let loc =
         let loc =
@@ -5589,7 +5776,7 @@ and print_expression_block ~state ~braces expr cmt_tbl =
       let let_exception_doc =
         print_exception_def ~state extension_constructor cmt_tbl
       in
-      collect_rows ((loc, let_exception_doc) :: acc) expr2
+      collect_rows ~protect_regexp:false ((loc, let_exception_doc) :: acc) expr2
     | Pexp_open (override_flag, longident_loc, expr2) ->
       let open_doc =
         Doc.concat
@@ -5601,17 +5788,15 @@ and print_expression_block ~state ~braces expr cmt_tbl =
           ]
       in
       let loc = {expr.pexp_loc with loc_end = longident_loc.loc.loc_end} in
-      collect_rows ((loc, open_doc) :: acc) expr2
+      collect_rows ~protect_regexp:false ((loc, open_doc) :: acc) expr2
     | Pexp_sequence (expr1, expr2) ->
       let expr_doc =
         let doc = print_expression ~state expr1 cmt_tbl in
-        match Parens.expr expr1 with
-        | Parens.Parenthesized -> add_parens doc
-        | Braced braces -> print_braces doc expr1 braces
-        | Nothing -> doc
+        print_statement_expr ~protect_regexp expr1 (Parens.expr expr1) doc
       in
-      let loc = expr1.pexp_loc in
-      collect_rows ((loc, expr_doc) :: acc) expr2
+      collect_rows ~protect_regexp:true
+        (statement_row expr1 expr_doc :: acc)
+        expr2
     | Pexp_let (rec_flag, value_bindings, expr2) -> (
       let loc =
         let loc =
@@ -5643,18 +5828,15 @@ and print_expression_block ~state ~braces expr cmt_tbl =
       match expr2.pexp_desc with
       | Pexp_construct ({txt = Longident.Lident "()"}, _) ->
         List.rev ((loc, let_doc) :: acc)
-      | _ -> collect_rows ((loc, let_doc) :: acc) expr2)
+      | _ -> collect_rows ~protect_regexp:true ((loc, let_doc) :: acc) expr2)
     | _ ->
       let expr_doc =
         let doc = print_expression ~state expr cmt_tbl in
-        match Parens.expr expr with
-        | Parens.Parenthesized -> add_parens doc
-        | Braced braces -> print_braces doc expr braces
-        | Nothing -> doc
+        print_statement_expr ~protect_regexp expr (Parens.expr expr) doc
       in
-      List.rev ((expr.pexp_loc, expr_doc) :: acc)
+      List.rev (statement_row expr expr_doc :: acc)
   in
-  let rows = collect_rows [] expr in
+  let rows = collect_rows ~protect_regexp:false [] expr in
   let block =
     print_list ~get_loc:fst ~nodes:rows
       ~print:(fun (_, doc) _ -> doc)
@@ -5792,7 +5974,7 @@ and print_doc_comments ~state ?(sep = Doc.hard_line) cmt_tbl attrs =
  *   with a line break between, we respect the users' original layout *)
 and print_attributes ?loc ?(inline = false) ~state
     (attrs : Parsetree.attributes) cmt_tbl =
-  match Parsetree_viewer.filter_parsing_attrs attrs with
+  match attrs with
   | [] -> Doc.nil
   | attrs ->
     let comment_attrs, attrs =
@@ -5821,10 +6003,11 @@ and print_attributes ?loc ?(inline = false) ~state
       | _ ->
         Doc.concat
           [
+            (* A doc comment here follows an attribute and stays on its line *)
             Doc.group
-              (Doc.join_with_sep
+              (Doc.join ~sep:Doc.line
                  (List.map
-                    (fun attr -> print_attribute ~state attr cmt_tbl)
+                    (fun attr -> fst (print_attribute ~state attr cmt_tbl))
                     attrs));
             (if inline then Doc.space else line_break);
           ]
@@ -6025,18 +6208,29 @@ and print_mod_expr ~state mod_expr cmt_tbl =
       let args, call_expr = Parsetree_viewer.mod_expr_apply mod_expr in
       let is_unit_sugar =
         match args with
-        | [{pmod_desc = Pmod_structure []}] -> true
+        | [{pmod_desc = Pmod_structure []; pmod_attributes = []}] -> true
         | _ -> false
       in
       let should_hug =
         match args with
-        | [{pmod_desc = Pmod_structure _}] -> true
+        | [
+         {
+           pmod_desc =
+             Pmod_structure _ | Pmod_await {pmod_desc = Pmod_structure _};
+         };
+        ] ->
+          true
         | _ -> false
+      in
+      let call_expr_doc =
+        let doc = print_mod_expr ~state call_expr cmt_tbl in
+        if Parens.mod_apply_callee call_expr then add_mod_expr_parens doc
+        else doc
       in
       Doc.group
         (Doc.concat
            [
-             print_mod_expr ~state call_expr cmt_tbl;
+             call_expr_doc;
              (if is_unit_sugar then
                 print_mod_apply_arg ~state
                   (List.hd args [@doesNotRaise])
@@ -6067,22 +6261,41 @@ and print_mod_expr ~state mod_expr cmt_tbl =
                     Doc.rparen;
                   ]);
            ])
-    | Pmod_constraint (mod_expr, mod_type) ->
+    | Pmod_constraint (inner, mod_type) ->
+      let doc =
+        Doc.concat
+          [
+            print_mod_expr ~state inner cmt_tbl;
+            Doc.text ": ";
+            print_mod_type ~state mod_type cmt_tbl;
+          ]
+      in
+      (* [@attr (M: S)]: without parens, the attributes would apply to [M] *)
+      if Parsetree_viewer.mod_expr_has_attributes mod_expr then
+        add_mod_expr_parens doc
+      else doc
+    | Pmod_functor _ -> print_mod_functor ~state mod_expr cmt_tbl
+    | Pmod_await inner ->
+      let inner_doc = print_mod_expr ~state inner cmt_tbl in
+      let inner_doc =
+        if Parens.mod_await_operand inner then add_mod_expr_parens inner_doc
+        else inner_doc
+      in
+      (* [@attr await M] does not parse: an await's attributes come after
+         [await], like a functor's on its first parameter *)
       Doc.concat
         [
-          print_mod_expr ~state mod_expr cmt_tbl;
-          Doc.text ": ";
-          print_mod_type ~state mod_type cmt_tbl;
+          Doc.text "await ";
+          print_mod_expr_attributes ~state mod_expr cmt_tbl;
+          inner_doc;
         ]
-    | Pmod_functor _ -> print_mod_functor ~state mod_expr cmt_tbl
   in
   let doc =
-    if Parsetree_viewer.has_await_attribute mod_expr.pmod_attributes then
-      match mod_expr.pmod_desc with
-      | Pmod_constraint _ ->
-        Doc.concat [Doc.text "await "; Doc.lparen; doc; Doc.rparen]
-      | _ -> Doc.concat [Doc.text "await "; doc]
-    else doc
+    match mod_expr.pmod_desc with
+    (* A functor's attributes belong to its first parameter, see
+       [print_mod_functor], an await's are printed above *)
+    | Pmod_functor _ | Pmod_await _ -> doc
+    | _ -> Doc.concat [print_mod_expr_attributes ~state mod_expr cmt_tbl; doc]
   in
   print_comments doc cmt_tbl mod_expr.pmod_loc
 
@@ -6092,14 +6305,15 @@ and print_mod_functor ~state mod_expr cmt_tbl =
   in
   let return_constraint, return_mod_expr =
     match return_mod_expr.pmod_desc with
-    | Pmod_constraint (mod_expr, mod_type) ->
+    | Pmod_constraint (mod_expr, mod_type)
+      when not (Parsetree_viewer.mod_expr_has_attributes return_mod_expr) ->
       let constraint_doc =
         let doc = print_mod_type ~state mod_type cmt_tbl in
         if Parens.mod_expr_functor_constraint mod_type then add_parens doc
         else doc
       in
       let mod_constraint = Doc.concat [Doc.text ": "; constraint_doc] in
-      (mod_constraint, print_mod_expr ~state mod_expr cmt_tbl)
+      (mod_constraint, print_mod_expr_constraint_parens ~state mod_expr cmt_tbl)
     | _ -> (Doc.nil, print_mod_expr ~state return_mod_expr cmt_tbl)
   in
   let parameters_doc =
@@ -6159,10 +6373,39 @@ and print_mod_functor_param ~state (attrs, lbl, opt_mod_type) cmt_tbl =
   in
   print_comments doc cmt_tbl cmt_loc
 
+(* A module expression's attributes, doc comments first, on one line with
+   it: unlike before a declaration, a line break here would leave the module
+   at the start of the next line *)
+and print_mod_expr_attributes ~state (mod_expr : Parsetree.module_expr) cmt_tbl
+    =
+  match mod_expr.pmod_attributes with
+  | [] -> Doc.nil
+  | attrs ->
+    let doc_comments, attrs =
+      Parsetree_viewer.partition_doc_comment_attributes attrs
+    in
+    Doc.concat
+      (List.map
+         (fun attr ->
+           Doc.concat [fst (print_attribute ~state attr cmt_tbl); Doc.space])
+         (doc_comments @ attrs))
+
 and print_mod_apply_arg ~state mod_expr cmt_tbl =
-  match mod_expr.pmod_desc with
-  | Pmod_structure [] -> Doc.text "()"
-  | _ -> print_mod_expr ~state mod_expr cmt_tbl
+  match mod_expr with
+  | {pmod_desc = Pmod_structure []; pmod_attributes = []} -> Doc.text "()"
+  | _ ->
+    let doc = print_mod_expr ~state mod_expr cmt_tbl in
+    (* The parser doesn't accept a doc comment at the start of an argument *)
+    if mod_expr_starts_with_doc_comment mod_expr then add_mod_expr_parens doc
+    else doc
+
+(* A constraint without attributes needs parens where [M: S] would not parse
+   or would mean something else: after [module M: T =], in a functor's
+   result, after [module type of] and inside [module(...)]. With attributes
+   it prints its own. *)
+and print_mod_expr_constraint_parens ~state mod_expr cmt_tbl =
+  let doc = print_mod_expr ~state mod_expr cmt_tbl in
+  if Parens.mod_constraint mod_expr then add_mod_expr_parens doc else doc
 
 and print_exception_def ~state (constr : Parsetree.extension_constructor)
     cmt_tbl =
@@ -6182,7 +6425,9 @@ and print_exception_def ~state (constr : Parsetree.extension_constructor)
       in
       Doc.concat
         [
-          print_constructor_arguments ~state ~indent:false args cmt_tbl; gadt_doc;
+          print_constructor_arguments ~name_loc:constr.pext_name.loc ~state
+            ~indent:false args cmt_tbl;
+          gadt_doc;
         ]
   in
   let name =
@@ -6222,7 +6467,9 @@ and print_extension_constructor ~state
       in
       Doc.concat
         [
-          print_constructor_arguments ~state ~indent:false args cmt_tbl; gadt_doc;
+          print_constructor_arguments ~name_loc:constr.pext_name.loc ~state
+            ~indent:false args cmt_tbl;
+          gadt_doc;
         ]
   in
   let name =
@@ -6234,19 +6481,24 @@ let print_type_params params = print_type_params ~state:(State.init ()) params
 let print_typ_expr t = print_typ_expr ~state:(State.init ()) t
 let print_expression e = print_expression ~state:(State.init ()) e
 let print_pattern p = print_pattern ~state:(State.init ()) p
+let print_attribute a t = fst (print_attribute ~state:(State.init ()) a t)
 
-let print_implementation ?(width = default_print_width)
-    (s : Parsetree.structure) ~comments =
+let implementation_doc (s : Parsetree.structure) ~comments =
   let cmt_tbl = Comment_table.make () in
   Comment_table.walk_structure s cmt_tbl comments;
-  let doc = print_structure ~state:(State.init ()) s cmt_tbl in
-  (* Doc.debug doc; *)
-  Doc.to_string ~width doc ^ "\n"
+  print_structure ~state:(State.init ()) s cmt_tbl
 
-let print_interface ?(width = default_print_width) (s : Parsetree.signature)
-    ~comments =
+let interface_doc (s : Parsetree.signature) ~comments =
   let cmt_tbl = Comment_table.make () in
   Comment_table.walk_signature s cmt_tbl comments;
-  Doc.to_string ~width (print_signature ~state:(State.init ()) s cmt_tbl) ^ "\n"
+  print_signature ~state:(State.init ()) s cmt_tbl
 
-let print_structure = print_structure ~state:(State.init ())
+let print_implementation ?(width = default_print_width) ?(newline = "\n")
+    (s : Parsetree.structure) ~comments =
+  Doc.to_string ~newline ~width (implementation_doc s ~comments) ^ newline
+
+let print_interface ?(width = default_print_width) ?(newline = "\n")
+    (s : Parsetree.signature) ~comments =
+  Doc.to_string ~newline ~width (interface_doc s ~comments) ^ newline
+
+let print_structure s t = print_structure ~state:(State.init ()) s t

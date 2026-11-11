@@ -145,7 +145,6 @@ impl Dumper<'_, '_> {
             ExprKind::In(l, r) => self.binary("In", l, r),
             ExprKind::Seq(l, r) => self.binary("Seq", l, r),
             ExprKind::FlatCall(l, r) => self.binary("FlatCall", l, r),
-            ExprKind::StringIndex(l, r) => self.binary("StringIndex", l, r),
             ExprKind::ArrayIndex(l, r) => self.binary("ArrayIndex", l, r),
             ExprKind::Bin(op, l, r) => self.binary(&format!("{op:?}"), l, r),
             ExprKind::Bool(b) => {
@@ -304,15 +303,8 @@ impl Dumper<'_, '_> {
                     let _ = write!(self.out, "{n:?}");
                 }
             },
-            ExprKind::Object(spread, props) => {
+            ExprKind::Object(props) => {
                 self.w("{");
-                if let Some(spread) = spread {
-                    self.w("...");
-                    self.expr(spread);
-                    if !a.props(props).is_empty() {
-                        self.w(", ");
-                    }
-                }
                 for (i, (name, value)) in a.props(props).iter().enumerate() {
                     if i > 0 {
                         self.w(", ");
@@ -322,6 +314,8 @@ impl Dumper<'_, '_> {
                             let _ = write!(self.out, "{:?}: ", a.text(*s));
                         }
                         PropName::Symbol => self.w("[symbol]: "),
+                        PropName::Spread => self.w("..."),
+                        PropName::RecordSpread => self.w("...record "),
                     }
                     self.expr(*value);
                 }
@@ -329,6 +323,17 @@ impl Dumper<'_, '_> {
             }
             ExprKind::Undefined { is_unit } => self.w(if is_unit { "unit" } else { "undefined" }),
             ExprKind::Null => self.w("null"),
+            ExprKind::Jsx(id) => {
+                let jsx = a.jsx(id);
+                self.w("Jsx(");
+                for (i, value) in jsx.expressions(a).enumerate() {
+                    if i > 0 {
+                        self.w(", ");
+                    }
+                    self.expr(value);
+                }
+                self.w(")");
+            }
             ExprKind::RecordRest(fields, source) => {
                 let fields: Vec<String> = a
                     .rest(fields)

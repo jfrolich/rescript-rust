@@ -29,7 +29,7 @@ type r = {a: int, b: string}
 let upd = (r: r) => {...r, a: r.a + 1}
 let obj = {"x": 1, "y": "two"}
 let failing = () => throw(Not_found)
-let dbg = () => %debugger
+let dbg = () => debugger()
 let mutating = () => {
   let x = ref(0)
   for i in 0 to 10 { x := x.contents + i }
@@ -41,7 +41,7 @@ module M = {
   let inner = (a, b) => a * b
 }
 let useM = M.inner(2, 3)
-let trailingDebugger = () => %debugger
+let trailingDebugger = () => debugger()
 let cb_a1 = arr => arr->Array.map(x => x + 1)
 let cb_a2 = (f: (int => int) => int) => f(x => x + 1)
 let cb_a3 = arr => Array.forEach(arr, x => Console.log(x))

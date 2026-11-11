@@ -6,16 +6,16 @@
 use super::js_exp_make::{
     bool_literal, both_bigint_literals, both_bool_literals, both_float_literals, both_int_literals,
     both_string_literals, compare_bigint_literals, compare_bool_literals, compare_string_literals,
-    comparison_to_binop, comparison_to_runtime_member, compile_int_equality,
-    compile_nullish_strict_comparison, compile_raw_comparison, int_bnot, int_expr, int_literal,
-    int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr, int32_minus, int32_mul,
-    int32_pow, is_nullish_literal, is_optional_block, is_type_number_expr, is_type_object_expr,
+    comparison_to_binop, comparison_to_float_binop, comparison_to_runtime_member,
+    compile_int_equality, compile_nullish_strict_comparison, compile_raw_comparison, int_bnot,
+    int_expr, int_literal, int32_add, int32_band, int32_bor, int32_bxor, int32_lsl, int32_lsr,
+    int32_minus, int32_mul, int32_pow, is_nullish_literal, is_optional_block, is_type_object_expr,
     is_zero_int, js_expr_no_side_effects, js_seq, ocaml_typeof_expr, runtime_compare_call_args,
     to_int32,
 };
-use super::lam_compile::{Compiled, LambdaCompiler};
+use super::lam_compile::{Compiled, LambdaCompiler, OutputFinished};
 use crate::ident::Ident;
-use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena};
+use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, PropName};
 use crate::js_ir::build::{exp as JE, stmt as JS};
 use crate::js_ir::op::{LengthObject, MutableFlag, Number};
 use crate::js_ir::{BinOp, CallInfo};
@@ -35,74 +35,147 @@ impl LambdaCompiler {
         info: PrimId,
         args: LamList,
     ) -> Compiled {
-        if let Some(compiled) = self.compile_hoisted_external_field(a, info, args) {
+        if let Some(compiled) = self.compile_flat_make_field(a, info, args) {
             return compiled;
         }
 
-        let mut prelude = vec![];
-        let mut compiled_args = PrimArgs::new();
-        for arg in a.list_small(args) {
-            let compiled = self.compile_expr(a, arg);
-            prelude.extend(compiled.prelude);
-            compiled_args.push(compiled.expr);
-        }
         let p = a.prim_payload(info);
-        self.compile_primitive_js(&p.primitive, compiled_args, prelude, &p.loc)
+        let (prim, loc) = (p.primitive.clone(), p.loc);
+        if matches!(prim, Primitive::Pdebugger) {
+            return self.compile_debugger(a, args, &loc);
+        }
+        if let (Primitive::PjsObjectGet(property), [obj]) = (&prim, a.list(args)) {
+            return self.compile_js_object_get(a, property, *obj);
+        }
+        let args = a.list_small(args);
+        let (prelude, compiled_args) = match &prim {
+            Primitive::PjsCall(call) => self.compile_arguments_held(a, false, args, |c, args| {
+                c.hold_external_args(&call.arg_types, args)
+            }),
+            Primitive::PjsObjectCreate(obj_params) => {
+                self.compile_arguments_held(a, false, args, |c, args| {
+                    c.hold_external_obj_args(obj_params, args)
+                })
+            }
+            _ => self.compile_arguments(a, false, args),
+        };
+        self.compile_primitive_js(&prim, compiled_args.into(), prelude, &loc)
     }
 
-    /// Descriptor lookup happens before argument compilation, as in
-    /// compiler/core/lam_compile.ml:284-302 and 1734-1757.
-    pub(crate) fn compile_hoisted_external_field(
+    /// Evaluate debugger's unit argument for effects before emitting the statement.
+    fn compile_debugger(&mut self, a: &mut LamArena, args: LamList, loc: &LamLoc) -> Compiled {
+        let mut prelude = Vec::new();
+        for arg in a.list_small(args) {
+            prelude.extend(self.compile_effect_block_output(a, arg).block);
+        }
+        let statement = JS::debugger(&mut self.j);
+        let loc = self.source_loc(loc);
+        prelude.push(self.j.with_stmt_loc(statement, loc));
+        Compiled {
+            prelude,
+            expr: JE::undefined(true, &mut self.j),
+            finished: OutputFinished::False,
+        }
+    }
+
+    /// Hold an effectful property receiver after its prelude unless it can be duplicated.
+    fn compile_js_object_get(&mut self, a: &mut LamArena, property: &str, obj: Lam) -> Compiled {
+        let Compiled {
+            mut prelude,
+            expr: obj,
+            ..
+        } = self.compile_expr(a, obj);
+        let expr = if prelude.is_empty()
+            || super::lam_compile_arguments::is_okay_to_duplicate(&self.j, obj)
+        {
+            self.static_index(obj, property)
+        } else {
+            let tmp = self.fresh_tmp_ident();
+            prelude.push(super::lam_compile_arguments::define_strict_variable(
+                tmp,
+                obj,
+                &mut self.j,
+            ));
+            let obj = JE::var(tmp, &mut self.j);
+            self.static_index(obj, property)
+        };
+        Compiled {
+            prelude,
+            expr,
+            finished: OutputFinished::False,
+        }
+    }
+
+    /// lam_compile.ml `flat_make_field`: every nested `make` is also exported
+    /// under a flat name (see `Translmod.implementation`), so a read
+    /// `Pfield "make" (Pfield "B" (Pfield "A" (Lglobal_module Other)))` is
+    /// emitted as `Other.A$B$make` rather than through the module objects.
+    /// The same holds below a local bound to the awaited module,
+    /// `let d = await import(Other)`. Other reads are left to the caller.
+    pub(crate) fn compile_flat_make_field(
         &mut self,
         a: &LamArena,
         info: PrimId,
         args: LamList,
     ) -> Option<Compiled> {
-        fn external_field_path<'a>(
+        enum Base {
+            Global(Ident),
+            Awaited(Ident),
+        }
+        fn extract_field_path<'a>(
             a: &'a LamArena,
+            awaited_units: &ahash::AHashSet<Ident>,
             prim: &'a Primitive,
             args: &[Lam],
             segments: &mut smallvec::SmallVec<[&'a str; 4]>,
-        ) -> Option<Ident> {
+        ) -> Option<Base> {
             let Primitive::Pfield(_, FieldDbgInfo::Module { name }) = prim else {
                 return None;
             };
-            segments.push(name.as_str());
             let [arg] = args else {
                 return None;
             };
+            segments.push(name);
             match a.view(*arg) {
-                View::GlobalModule(id) => Some(id),
-                View::Prim(prim, args, _) => external_field_path(a, prim, args, segments),
+                View::Prim(prim, args, _) => {
+                    extract_field_path(a, awaited_units, prim, args, segments)
+                }
+                View::GlobalModule(id) => Some(Base::Global(id)),
+                View::Var(id) if awaited_units.contains(&id) => Some(Base::Awaited(id)),
                 _ => None,
             }
         }
         let mut reversed = smallvec::SmallVec::new();
-        let id = external_field_path(
+        let base = extract_field_path(
             a,
+            &self.awaited_units,
             &a.prim_payload(info).primitive,
             a.list(args),
             &mut reversed,
         )?;
-        if reversed.len() < 2 {
-            return None;
-        }
-        let path: Vec<String> = reversed.iter().rev().map(|s| s.to_string()).collect();
-        let export_name = self
-            .module_path_resolver
-            .as_ref()?
-            .module_cmj_hoisted_export(id.name(), &path)?;
-        Some(Compiled {
-            prelude: Vec::new(),
-            expr: JE::qualified(
+        reversed.reverse();
+        let name = crate::lambda::flat_make_name(&reversed)?;
+        let expr = match base {
+            // `E.ml_var_dot id name`
+            Base::Global(id) => JE::qualified(
                 crate::js_ir::ModuleId {
                     id,
                     kind: crate::js_ir::Kind::Ml,
                     dynamic_import: false,
                 },
-                Some(export_name),
+                Some(name),
                 &mut self.j,
             ),
+            // `E.dot (E.var id) name`
+            Base::Awaited(id) => {
+                let base = JE::var(id, &mut self.j);
+                JE::static_index(base, &name, None, &mut self.j)
+            }
+        };
+        Some(Compiled {
+            prelude: Vec::new(),
+            expr,
+            finished: OutputFinished::False,
         })
     }
 
@@ -186,9 +259,6 @@ impl LambdaCompiler {
                 }
                 _ => JE::undefined(false, &mut self.j),
             },
-            Parraysets => {
-                self.runtime_call_expr("Primitive_array", "set", compiled_args.into_vec())
-            }
             Paddint => int32_add(
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
@@ -295,18 +365,27 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pintcomp(cmp) | Pfloatcomp(cmp) => self.compile_int_comparison(
-                *cmp,
+            Pintcomp(cmp) | Pfloatcomp(cmp @ (Comparison::Eq | Comparison::Neq)) => self
+                .compile_int_comparison(
+                    *cmp,
+                    take_arg(&mut compiled_args, 0),
+                    take_arg(&mut compiled_args, 1),
+                ),
+            Pfloatcomp(cmp) => JE::bin(
+                comparison_to_float_binop(*cmp),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
+                &mut self.j,
             ),
             Pbigintcomp(cmp) => self.compile_bigint_comparison(
                 *cmp,
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
             ),
-            Pjscomp(cmp) => compile_raw_comparison(
-                *cmp,
+            // js_exp_make.ml `js_comp`: the operands may be of any type, so
+            // they may be NaN.
+            Pjscomp(cmp) => JE::bin(
+                comparison_to_float_binop(*cmp),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 &mut self.j,
@@ -348,7 +427,7 @@ impl LambdaCompiler {
             Pboolmin => self.compile_typed_min_max(
                 "Primitive_bool",
                 "min",
-                Comparison::Lt,
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bool_literals,
@@ -356,7 +435,7 @@ impl LambdaCompiler {
             Pboolmax => self.compile_typed_min_max(
                 "Primitive_bool",
                 "max",
-                Comparison::Gt,
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bool_literals,
@@ -367,7 +446,7 @@ impl LambdaCompiler {
             Pintmin => self.compile_typed_min_max(
                 "Primitive_int",
                 "min",
-                Comparison::Lt,
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_int_literals,
@@ -375,7 +454,7 @@ impl LambdaCompiler {
             Pintmax => self.compile_typed_min_max(
                 "Primitive_int",
                 "max",
-                Comparison::Gt,
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_int_literals,
@@ -386,7 +465,7 @@ impl LambdaCompiler {
             Pfloatmin => self.compile_typed_min_max(
                 "Primitive_float",
                 "min",
-                Comparison::Lt,
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_float_literals,
@@ -394,7 +473,7 @@ impl LambdaCompiler {
             Pfloatmax => self.compile_typed_min_max(
                 "Primitive_float",
                 "max",
-                Comparison::Gt,
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_float_literals,
@@ -405,7 +484,7 @@ impl LambdaCompiler {
             Pbigintmin => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "min",
-                Comparison::Lt,
+                comparison_to_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
@@ -413,7 +492,7 @@ impl LambdaCompiler {
             Pbigintmax => self.compile_typed_min_max(
                 "Primitive_bigint",
                 "max",
-                Comparison::Gt,
+                comparison_to_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_bigint_literals,
@@ -424,7 +503,7 @@ impl LambdaCompiler {
             Pstringmin => self.compile_typed_min_max(
                 "Primitive_string",
                 "min",
-                Comparison::Lt,
+                comparison_to_float_binop(Comparison::Lt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_string_literals,
@@ -432,7 +511,7 @@ impl LambdaCompiler {
             Pstringmax => self.compile_typed_min_max(
                 "Primitive_string",
                 "max",
-                Comparison::Gt,
+                comparison_to_float_binop(Comparison::Gt),
                 take_arg(&mut compiled_args, 0),
                 take_arg(&mut compiled_args, 1),
                 both_string_literals,
@@ -558,7 +637,6 @@ impl LambdaCompiler {
                 take_arg(&mut compiled_args, 1),
                 &mut self.j,
             ),
-            Pisint => is_type_number_expr(take_arg(&mut compiled_args, 0), &mut self.j),
             PisPolyVarBlock => is_type_object_expr(take_arg(&mut compiled_args, 0), &mut self.j),
             Pmakearray => JE::array(&compiled_args, MutableFlag::Mutable, &mut self.j),
             Pmakedict => match compiled_args
@@ -588,10 +666,29 @@ impl LambdaCompiler {
                         })
                         .collect();
                     let props = self.j.prop_list(&props);
-                    JE::new(ExprKind::Object(None, props), &mut self.j)
+                    JE::new(ExprKind::Object(props), &mut self.j)
                 }
                 _ => JE::undefined(false, &mut self.j),
             },
+            ParraySpread => self.runtime_call_expr("Primitive_array", "spread", compiled_args.into_vec()),
+            PlistSpread => self.runtime_call_expr("Primitive_list", "spread", compiled_args.into_vec()),
+            PdictSpread => {
+                let mut entries = Vec::new();
+                for arg in compiled_args {
+                    match self.j.ek(arg) {
+                        ExprKind::Object(props)
+                            if self.j.props(props).iter().all(|(name, _)| {
+                                matches!(name, PropName::Lit(_) | PropName::Symbol)
+                            }) =>
+                        {
+                            entries.extend_from_slice(self.j.props(props));
+                        }
+                        _ => entries.push((PropName::Spread, arg)),
+                    }
+                }
+                let entries = self.j.prop_list(&entries);
+                self.j.expr(ExprKind::Object(entries))
+            }
             PdictHas => match <[Expr; 2]>::try_from(compiled_args.as_slice()) {
                 Ok([obj, prop]) => JE::new(ExprKind::In(prop, obj), &mut self.j),
                 _ => {
@@ -604,8 +701,10 @@ impl LambdaCompiler {
             },
             Pduprecord => match <[Expr; 1]>::try_from(compiled_args.as_slice()) {
                 Ok([source]) => {
-                    let props = self.j.prop_list(&[]);
-                    JE::new(ExprKind::Object(Some(source), props), &mut self.j)
+                    let props = self
+                        .j
+                        .prop_list(&[(crate::js_ir::arena::PropName::RecordSpread, source)]);
+                    JE::new(ExprKind::Object(props), &mut self.j)
                 }
                 _ => JE::undefined(false, &mut self.j),
             },
@@ -741,18 +840,24 @@ impl LambdaCompiler {
                     _ => JE::undefined(false, &mut self.j),
                 }
             }
+            Pjsx(jsx) => self.compile_jsx(jsx, compiled_args.into_vec()),
             Pimport(source) => self.compile_import(loc, source),
-            PjsCall(call) => self.compile_js_call(
-                &call.prim_name,
-                &call.arg_types,
-                &call.ffi,
-                call.transformed_jsx,
-                compiled_args.into_vec(),
-            ),
+            PjsCall(call) => {
+                self.compile_js_call(&call.prim_name, &call.arg_types, &call.ffi, compiled_args.into_vec())
+            }
             PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
 
-        Compiled { prelude, expr }
+        let finished = if matches!(prim, Praise) {
+            OutputFinished::True
+        } else {
+            OutputFinished::False
+        };
+        Compiled {
+            prelude,
+            expr,
+            finished,
+        }
     }
 
     fn compile_object_comparison(&mut self, cmp: Comparison, left: Expr, right: Expr) -> Expr {
@@ -910,13 +1015,13 @@ impl LambdaCompiler {
         &mut self,
         module_name: &str,
         member: &str,
-        compare: Comparison,
+        compare: BinOp,
         left: Expr,
         right: Expr,
         literal_fast_path: fn(&JsArena, Expr, Expr) -> bool,
     ) -> Expr {
         if literal_fast_path(&self.j, left, right) {
-            let test = JE::bin(comparison_to_binop(compare), left, right, &mut self.j);
+            let test = JE::bin(compare, left, right, &mut self.j);
             JE::cond(test, left, right, &mut self.j)
         } else {
             self.runtime_call_expr(module_name, member, vec![left, right])

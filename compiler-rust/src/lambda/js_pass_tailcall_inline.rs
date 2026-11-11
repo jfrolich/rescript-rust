@@ -17,10 +17,16 @@ use crate::js_ir::op::UsedStats;
 use crate::js_ir::walk::{
     Mapper, Visitor, each_child, map_expression_children, map_statement_children, walk_block,
 };
-use crate::lambda::js_pass_external_shadow::is_lexical_binding_kind;
 use crate::lambda::lam_compat::LetKind;
 
 use super::js_exp_make::js_expr_no_side_effects;
+
+fn is_lexical_binding_kind(property: LetKind) -> bool {
+    matches!(
+        property,
+        LetKind::Strict | LetKind::StrictOpt | LetKind::Alias
+    )
+}
 
 pub(crate) fn apply_js_tailcall_inline_pass(mut deps: DepsProgram) -> DepsProgram {
     tailcall_inline_program(&mut deps.program);
@@ -447,7 +453,7 @@ fn inline_tailcall_call(
     body: Block,
 ) -> Block {
     let mut bindings = Vec::new();
-    let mut substitution = HashMap::new();
+    let mut substitution = InlineSubstitution::default();
 
     for ((param, arg), immutable) in params
         .iter()
@@ -455,15 +461,21 @@ fn inline_tailcall_call(
         .zip(args)
         .zip(immutable_mask.iter().copied())
     {
-        if immutable && let ExprKind::Var(id) = j.ek(arg) {
-            substitution.insert(param, j.ident(id));
-            continue;
+        if immutable {
+            if let ExprKind::Var(id) = j.ek(arg) {
+                substitution.vars.insert(param, j.ident(id));
+                continue;
+            }
+            if is_substitutable_constant(j, arg) {
+                substitution.consts.insert(param, arg);
+                continue;
+            }
         }
 
         bindings.push(S::define(param, Some(arg), LetKind::Variable, j));
     }
 
-    let body = if substitution.is_empty() {
+    let body = if substitution.vars.is_empty() && substitution.consts.is_empty() {
         body
     } else {
         SubstituteInline { substitution }.block_items(j, &body)
@@ -472,9 +484,56 @@ fn inline_tailcall_call(
     bindings.into_iter().chain(body).collect()
 }
 
+/// The substitution that inlining a tail call applies to the callee body:
+/// each parameter bound to a variable is renamed to it, and each parameter
+/// bound to a substitutable constant is replaced by the constant. Both apply
+/// only to parameters that are never assigned, so every occurrence of such a
+/// parameter is a read.
+#[derive(Clone, Default)]
+struct InlineSubstitution {
+    vars: HashMap<Ident, Ident>,
+    consts: HashMap<Ident, Expr>,
+}
+
+impl InlineSubstitution {
+    fn remove(&mut self, ident: &Ident) {
+        self.vars.remove(ident);
+        self.consts.remove(ident);
+    }
+}
+
+/// js_pass_tailcall_inline.ml `is_substitutable_constant`: constants that are
+/// as cheap to repeat as the variable they replace: they allocate nothing,
+/// have no side effect, and print short.
+fn is_substitutable_constant(j: &JsArena, expr: Expr) -> bool {
+    matches!(
+        j.ek(expr),
+        ExprKind::Number(_) | ExprKind::Bool(_) | ExprKind::Undefined { .. } | ExprKind::Null
+    )
+}
+
+/// js_pass_tailcall_inline.ml `substituted_truth`: the truth value of a
+/// condition that is a parameter replaced by a boolean or integer constant, or
+/// its negation. Only such conditions are decided while substituting: the
+/// substitution is what made them constant.
+fn substituted_truth(j: &JsArena, consts: &HashMap<Ident, Expr>, expr: Expr) -> Option<bool> {
+    match j.ek(expr) {
+        ExprKind::Var(id) => match consts.get(&j.ident(id)).map(|c| j.ek(*c)) {
+            Some(ExprKind::Bool(b)) => Some(b),
+            Some(ExprKind::Number(n)) => match j.number(n) {
+                crate::js_ir::op::Number::Int { i, .. } => Some(*i != 0),
+                _ => None,
+            },
+            _ => None,
+        },
+        ExprKind::JsNot(inner) => substituted_truth(j, consts, inner).map(|b| !b),
+        _ => None,
+    }
+}
+
 /// Renames inlined parameters, respecting shadowing by inner bindings.
 struct SubstituteInline {
-    substitution: HashMap<Ident, Ident>,
+    substitution: InlineSubstitution,
 }
 
 impl SubstituteInline {
@@ -511,6 +570,15 @@ impl Mapper for SubstituteInline {
     }
 
     fn statement(&mut self, j: &mut JsArena, stmt: Stmt) -> Stmt {
+        // A conditional whose condition becomes a constant keeps only the
+        // branch it takes.
+        if let StmtKind::If(pred, ifso, ifnot) = j.sk(stmt)
+            && let Some(truth) = substituted_truth(j, &self.substitution.consts, pred)
+        {
+            let branch = j.block_vec(if truth { ifso } else { ifnot });
+            let branch = self.block_items(j, &branch);
+            return S::block(&branch, j);
+        }
         match j.sk(stmt) {
             StmtKind::ForRange(id) => {
                 let info = j.for_range(id);
@@ -587,7 +655,25 @@ impl Mapper for SubstituteInline {
 
     fn expression(&mut self, j: &mut JsArena, expr: Expr) -> Expr {
         match j.ek(expr) {
-            ExprKind::Var(id) => match self.substitution.get(&j.ident(id)).copied() {
+            ExprKind::Var(id) => {
+                if let Some(constant) = self.substitution.consts.get(&j.ident(id)) {
+                    return *constant;
+                }
+            }
+            ExprKind::Cond(pred, ifso, ifnot) => {
+                if let Some(truth) = substituted_truth(j, &self.substitution.consts, pred) {
+                    return self.expression(j, if truth { ifso } else { ifnot });
+                }
+            }
+            ExprKind::JsNot(pred) => {
+                if let Some(truth) = substituted_truth(j, &self.substitution.consts, pred) {
+                    return crate::js_ir::build::exp::bool(!truth, j);
+                }
+            }
+            _ => {}
+        }
+        match j.ek(expr) {
+            ExprKind::Var(id) => match self.substitution.vars.get(&j.ident(id)).copied() {
                 Some(target) => {
                     let target = j.ident_id(target);
                     j.rekind_expr(expr, ExprKind::Var(target))

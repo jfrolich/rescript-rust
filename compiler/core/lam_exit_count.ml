@@ -25,10 +25,13 @@
 type collection = int Hash_int.t
 
 (* Count occurrences of (exit n ...) statements *)
-let count_exit (exits : collection) i = Hash_int.find_default exits i 0
+let count_exit (exits : collection) i =
+  match Hash_int.find_opt exits i with
+  | Some n -> n
+  | None -> 0
 
 let incr_exit (exits : collection) i =
-  Hash_int.add_or_update exits i 1 ~update:succ
+  Hash_int.replace exits i (count_exit exits i + 1)
 
 (* Whether [Lam_pass_exits] could rewrite anything here. It names the two
    nodes that pass touches, so a new case there that rewrites something else
@@ -71,7 +74,7 @@ let count_helper (lam : Lambda.t) : collection option =
       | Lstringswitch (l, sw, d) ->
         count l;
         Ext_list.iter_snd sw count;
-        Ext_option.iter d count
+        Option.iter count d
       | Lglobal_module _ | Lvar _ | Lconst _ -> ()
       | Lapply {ap_func; ap_args; _} ->
         count ap_func;
@@ -89,7 +92,7 @@ let count_helper (lam : Lambda.t) : collection option =
         count l;
         Ext_list.iter_snd sw.sw_consts count;
         Ext_list.iter_snd sw.sw_blocks count
-      | Ltrywith (l1, _v, l2) ->
+      | Ltrywith (l1, _, l2) | Ltryfinally (l1, l2) ->
         count l1;
         count l2
       | Lifthenelse (l1, l2, l3) ->

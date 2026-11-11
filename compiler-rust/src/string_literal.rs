@@ -444,6 +444,35 @@ pub fn decode_raw_template_source(source: &str) -> String {
     }
 }
 
+/// OCaml `String_literal.encode_raw_template_source`, the inverse of
+/// [`decode_raw_template_source`]: escape backquotes, `${` and the
+/// backslashes that decoding would otherwise consume.
+pub fn encode_raw_template_source(source: &str) -> String {
+    let bytes = bytes_of(source);
+    let utf8_native = matches!(bytes, Cow::Borrowed(_));
+    let length = bytes.len();
+    let mut buffer = Vec::with_capacity(length);
+    for (index, &character) in bytes.iter().enumerate() {
+        let next = bytes.get(index + 1).copied();
+        match character {
+            b'`' => buffer.extend_from_slice(b"\\`"),
+            b'$' if next == Some(b'{') => buffer.extend_from_slice(b"\\$"),
+            b'\\' => match next {
+                None | Some(b'\\' | b'$' | b'`' | b'\n' | b'\r' | 0xe2) => {
+                    buffer.extend_from_slice(b"\\\\")
+                }
+                Some(_) => buffer.push(character),
+            },
+            _ => buffer.push(character),
+        }
+    }
+    if utf8_native {
+        String::from_utf8(buffer).expect("adding escapes keeps UTF-8 boundaries")
+    } else {
+        string_of_bytes(buffer)
+    }
+}
+
 /// OCaml `String_literal.encode_js_string`.
 pub fn encode_js_string(s: &str) -> String {
     encode_js(EncodeJsMode::String, s)
@@ -627,4 +656,22 @@ mod tests {
         assert_eq!(utf16_length(&emoji), Some(3));
         assert_eq!(code_point_at_utf16_index(&emoji, 2), Ok(Some(0xde00)));
     }
+}
+
+/// OCaml `String.escaped`, as used by `Printf "%S"`.
+pub fn ocaml_escaped(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.bytes() {
+        match byte {
+            b'"' => out.push_str("\\\""),
+            b'\\' => out.push_str("\\\\"),
+            b'\n' => out.push_str("\\n"),
+            b'\t' => out.push_str("\\t"),
+            b'\r' => out.push_str("\\r"),
+            8 => out.push_str("\\b"),
+            32..=126 => out.push(byte as char),
+            _ => out.push_str(&format!("\\{byte:03}")),
+        }
+    }
+    out
 }

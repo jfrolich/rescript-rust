@@ -307,6 +307,62 @@ run_parser_cases() {
     done < "$PARSER_MATRIX"
 }
 
+# res_parser prints the JSX warnings raised before a JSX error, then exits
+# with the uncaught error (status 2). Each fixture has a known exit status
+# (`name:status`), which both parsers must return before their output is
+# compared, so a timeout (124), a missing or unexecutable parser (126, 127), a
+# signal, or a wrong status shared by both sides fails. At status 2 the last
+# stderr line is the error, whose OCaml text (`Fatal error: exception ...`)
+# Rust does not imitate; everything before it, the warnings with their
+# locations, must match OCaml, and stdout must be empty. At status 0 stderr
+# must match exactly.
+JSX_PARSER_WARNING_FIXTURES=(
+    jsx_warning_then_error.res:2
+    jsx_error_then_warning.res:2
+    jsx_with_props_payload_warning.res:0
+    jsx_signature_warning_then_error.resi:2
+    jsx_signature_error_then_warning.resi:2
+    jsx_signature_with_props_payload_warning.resi:0
+)
+
+run_jsx_parser_warning_cases() {
+    echo -e "${BOLD}res_parser JSX warnings before errors${RESET}"
+    local entry name expected source_file safe ocaml_out rust_out diff_out ocaml_status rust_status
+    for entry in "${JSX_PARSER_WARNING_FIXTURES[@]}"; do
+        name=${entry%:*}
+        expected=${entry##*:}
+        source_file="tests/error_output_parity/compiler/fixtures/$name"
+        if [[ -n "$FILE_ARG" && "$source_file" != *"$FILE_ARG"* ]]; then
+            continue
+        fi
+        safe=$(safe_name "jsx_parser_${name}")
+        ocaml_out="$CACHE_DIR/parser/ocaml_${safe}.out"
+        rust_out="$CACHE_DIR/parser/rust_${safe}.out"
+        diff_out="$CACHE_DIR/diffs/${safe}.diff"
+        run_capture_stderr "$ocaml_out" "$OCAML_PARSER" -jsx-version 4 "$source_file"
+        run_capture_stderr "$rust_out" "$RUST_PARSER" -jsx-version 4 "$source_file"
+        ocaml_status=$(cat "$ocaml_out.status")
+        rust_status=$(cat "$rust_out.status")
+        total=$((total + 1))
+        if [[ "$ocaml_status" != "$expected" || "$rust_status" != "$expected" ]]; then
+            printf 'Expected exit status %s\nOCaml: %s\nRust:  %s\n' \
+                "$expected" "$ocaml_status" "$rust_status" > "$diff_out"
+            record_failure "$source_file" \
+                "res_parser exit status OCaml $ocaml_status, Rust $rust_status, expected $expected" || return 1
+        elif [[ "$expected" == 2 && -s "$rust_out.stdout" ]]; then
+            echo "Rust res_parser wrote to stdout at status 2" > "$diff_out"
+            record_failure "$source_file" "res_parser stdout not empty" || return 1
+        elif [[ "$expected" == 2 ]] && ! diff -u --text <(sed '$d' "$ocaml_out") <(sed '$d' "$rust_out") > "$diff_out" 2>&1; then
+            record_failure "$source_file" "res_parser warnings before the error differ" || return 1
+        elif [[ "$expected" == 0 ]] && ! diff -u --text "$ocaml_out" "$rust_out" > "$diff_out" 2>&1; then
+            record_failure "$source_file" "res_parser stderr differs" || return 1
+        else
+            rm -f "$diff_out"
+            pass=$((pass + 1))
+        fi
+    done
+}
+
 run_compiler_case() {
     local source_file="$1"
     shift
@@ -376,6 +432,7 @@ run_compiler_cases() {
 
 if [[ "$RUN_PARSER" == "true" ]]; then
     run_parser_cases || true
+    run_jsx_parser_warning_cases || true
     if [[ "$QUICK_MODE" == "true" && "$fail" -gt 0 ]]; then
         RUN_COMPILER=false
     fi

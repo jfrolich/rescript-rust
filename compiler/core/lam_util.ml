@@ -53,8 +53,10 @@
    nothing is refined it is handed back untouched rather than rebuilt. *)
 let refine_let ?original ~kind param (arg : Lambda.t) (l : Lambda.t) : Lambda.t
     =
-  let is_block_constructor = function
-    | Lambda.Pmakeblock _ -> true
+  (* A JSX element whose only argument is its tag keeps the tag bound: a
+     function bound by [let] gets the binding's name, which React shows *)
+  let keeps_binding = function
+    | Lambda.Pmakeblock _ | Pjsx _ -> true
     | _ -> false
   in
   (* SafeAlias is the predicate that justifies the (Alias) rewrite
@@ -99,18 +101,18 @@ let refine_let ?original ~kind param (arg : Lambda.t) (l : Lambda.t) : Lambda.t
          cannot refer back to `x`, and we avoid generating a redundant local. *)
     arg
   | _, _, Lprim {primitive; args = [Lvar w]; loc; _}
-    when Ident.same w param && not (is_block_constructor primitive) ->
+    when Ident.same w param && not (keeps_binding primitive) ->
     (* When we immediately feed the binding into a primitive, like
          `{ let x = value; Array.length(x) }`, we inline the primitive call
          with `value`. This only happens for primitives that are pure and do not
          allocate new blocks, so evaluation order and side effects stay the same. *)
     Lambda.prim ~primitive ~args:[arg] loc
-  | _, _, Lapply {ap_func = fn; ap_args = [Lvar w]; ap_info; ap_transformed_jsx}
+  | _, _, Lapply {ap_func = fn; ap_args = [Lvar w]; ap_loc}
     when Ident.same w param && not (Lam_hit.hit_variable param fn) ->
     (* For a function call such as `{ let x = value; someFn(x) }`, we can
          rewrite to `someFn(value)` as long as the callee does not capture `x`.
          This removes the temporary binding while preserving the call semantics. *)
-    Lambda.apply fn [arg] ap_info ~ap_transformed_jsx
+    Lambda.apply fn [arg] ap_loc
   | (Strict | StrictOpt), arg, _ when is_safe_to_alias arg ->
     (* `Strict` and `StrictOpt` bindings both evaluate the RHS immediately
          (with `StrictOpt` allowing later elimination if unused). When that RHS
@@ -193,7 +195,7 @@ let element_of_lambda (lam : Lambda.t) : Lam_id_kind.element =
   | _ -> NA
 
 let kind_of_lambda_block (xs : Lambda.t list) : Lam_id_kind.t =
-  ImmutableBlock (Ext_array.of_list_map xs (fun x -> element_of_lambda x))
+  ImmutableBlock (Ext_list.map_to_array xs (fun x -> element_of_lambda x))
 
 let field_flatten_get lam v i info (tbl : Lam_id_kind.t Hash_ident.t) : Lambda.t
     =

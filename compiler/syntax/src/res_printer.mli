@@ -16,13 +16,30 @@ val print_expression : Parsetree.expression -> Res_comments_table.t -> Res_doc.t
 val print_pattern : Parsetree.pattern -> Res_comments_table.t -> Res_doc.t
 [@@live]
 
+(* An attribute, or a doc comment for [res.doc], as written in front of an
+   item. *)
+val print_attribute : Parsetree.attribute -> Res_comments_table.t -> Res_doc.t
+
 val print_structure : Parsetree.structure -> Res_comments_table.t -> Res_doc.t
 [@@live]
 
+val implementation_doc :
+  Parsetree.structure -> comments:Res_comment.t list -> Res_doc.t
+val interface_doc :
+  Parsetree.signature -> comments:Res_comment.t list -> Res_doc.t
+
 val print_implementation :
-  ?width:int -> Parsetree.structure -> comments:Res_comment.t list -> string
+  ?width:int ->
+  ?newline:string ->
+  Parsetree.structure ->
+  comments:Res_comment.t list ->
+  string
 val print_interface :
-  ?width:int -> Parsetree.signature -> comments:Res_comment.t list -> string
+  ?width:int ->
+  ?newline:string ->
+  Parsetree.signature ->
+  comments:Res_comment.t list ->
+  string
 
 val print_ident_like :
   ?allow_uident:bool -> ?allow_hyphen:bool -> string -> Res_doc.t

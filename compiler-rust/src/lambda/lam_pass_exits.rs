@@ -7,7 +7,7 @@ use crate::context::IdGenerator;
 use crate::ident::Ident;
 use crate::lambda::arena::{IdentSpan, Lam, LamArena, Node};
 use crate::lambda::lam_analysis::EXIT_INLINE_SIZE;
-use crate::lambda::lam_analysis::size;
+use crate::lambda::lam_analysis::size_upto;
 use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_subst::{Subst, subst_lambda};
 
@@ -120,6 +120,7 @@ pub fn no_bounded_variables(a: &LamArena, lam: Lam) -> bool {
         | Node::ForOf { .. }
         | Node::ForAwaitOf { .. }
         | Node::TryWith { .. }
+        | Node::TryFinally { .. }
         | Node::Let { .. } => false,
         Node::LetRec { values, body, .. } => {
             a.list_len(values) == 0 && no_bounded_variables(a, body)
@@ -160,7 +161,7 @@ fn subst_helper(
             let handler2 = subst_helper(a, subst, counts, id_gen, handler);
             // ok_to_inline (lam_pass_exits.ml:173-179)
             let ok_to_inline = i >= 0 && no_bounded_variables(a, handler2) && {
-                let lam_size = size(a, handler2);
+                let lam_size = size_upto(a, EXIT_INLINE_SIZE, handler2);
                 (i_occur <= 2 && lam_size < EXIT_INLINE_SIZE) || lam_size < 5
             };
             if ok_to_inline {

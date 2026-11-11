@@ -101,11 +101,6 @@ pub fn path_ident_to_string(p: &Path) -> String {
     }
 }
 
-/// `Utils.is_uncurried_internal`.
-pub fn is_uncurried_internal(path: &Path) -> bool {
-    path.name().starts_with("Js.Fn.arity")
-}
-
 /// `Utils.cut_after_dash`.
 pub fn cut_after_dash(s: &str) -> &str {
     match s.find('-') {

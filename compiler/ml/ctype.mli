@@ -51,6 +51,15 @@ type subtype_context =
       right_record_name: Path.t;
       issues: Record_coercion.record_field_subtype_violation list;
     }  (** Records have fields that are not compatible. *)
+  | Coercion_into_private_type of {typename: Path.t}
+      (** The target is a private record or variant, whose values only its own
+          module can build. *)
+  | Record_array_mismatch of {
+      array_record_name: Path.t;
+      object_record_name: Path.t;
+    }
+      (** One record is represented as a JavaScript array, the other as an
+          object. *)
 
 type type_pairs = (type_expr * type_expr) list
 exception Unify of type_pairs
@@ -126,7 +135,6 @@ val object_row_is_structurally_open : type_expr -> bool
 
 val lid_of_path : ?hash:string -> Path.t -> Longident.t
 
-val sort_row_fields : (label * row_field) list -> (label * row_field) list
 val merge_row_fields :
   (label * row_field) list ->
   (label * row_field) list ->
@@ -173,6 +181,10 @@ val instance_constructor :
   type_expr list * type_expr
 (* Same, for a constructor *)
 
+val existential_constructor : Ident.t -> string option
+(* The constructor that binds this existential type, created by
+   [instance_constructor] in the current request *)
+
 val instance_parameterized_type :
   ?keep_names:bool -> type_expr list -> type_expr -> type_expr list * type_expr
 val instance_declaration : type_declaration -> type_declaration
@@ -212,7 +224,6 @@ val expand_head_opt : Env.t -> type_expr -> type_expr
 (** The compiler's own version of [expand_head] necessary for type-based
     optimisations. *)
 
-val full_expand : Env.t -> type_expr -> type_expr
 val extract_concrete_typedecl :
   Env.t -> type_expr -> Path.t * Path.t * type_declaration
 (* Return the original path of the types, and the first concrete
@@ -266,10 +277,8 @@ val deep_occur : type_expr -> type_expr -> bool
 val moregeneral : Env.t -> bool -> type_expr -> type_expr -> bool
 (* Check if the first type scheme is more general than the second. *)
 
-val rigidify : type_expr -> type_expr list
 (* "Rigidify" a type and return its type variable *)
 
-val all_distinct_vars : Env.t -> type_expr list -> bool
 (* Check those types are all distinct type variables *)
 
 val matches : Env.t -> type_expr -> type_expr -> bool
@@ -307,9 +316,7 @@ val nondep_extension_constructor :
   Env.t -> Ident.t -> extension_constructor -> extension_constructor
 
 (* Same for extension constructor *)
-(*val correct_abbrev: Env.t -> Path.t -> type_expr list -> type_expr -> unit*)
 val cyclic_abbrev : Env.t -> Ident.t -> type_expr -> bool
-val is_contractive : Env.t -> Path.t -> bool
 val normalize_type : Env.t -> type_expr -> unit
 
 val closed_schema : Env.t -> type_expr -> bool
@@ -347,3 +354,13 @@ val variant_is_subtype :
   (Env.t -> Types.row_desc -> Types.type_expr -> bool) ref
 
 val get_arity : Env.t -> type_expr -> int option
+
+module For_test : sig
+  val previous_env_is_empty : unit -> bool
+  (** The environment of the last expansion on this domain is still the
+      initial empty one. *)
+end
+
+val get_unboxed_type_representation : Env.t -> type_expr -> type_expr option
+(** The type an [@unboxed] wrapper is represented by, through any number of
+    wrappers *)

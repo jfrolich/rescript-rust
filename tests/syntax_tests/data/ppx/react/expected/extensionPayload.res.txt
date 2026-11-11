@@ -11,12 +11,14 @@ module M = {
 
     let make = ({a, _}: props<_>): React.element =>
       ReactDOM.jsx("span", {children: ?ReactDOM.someElement({React.string(a)})})
+
     let make = React.component({
       let \"ExtensionPayload$M" = (props: props<_>) => make(props)
 
       \"ExtensionPayload$M"
     })
   )
+
   let el = ReactDOM.jsx("make", {a: "b"})
 }
 

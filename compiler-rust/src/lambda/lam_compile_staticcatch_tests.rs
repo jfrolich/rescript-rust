@@ -16,10 +16,8 @@ fn equal_flattened_staticcatch_handlers_share_one_switch_body() {
             vec![Lambda::var(message)],
             ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
-            false,
         )),
         Box::new(Lambda::var(message)),
     );
@@ -97,10 +95,8 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
                     ap_args: vec![],
                     ap_info: ApInfo {
                         loc: LamLoc::NONE,
-                        inlined: InlineAttribute::Default,
                         status: ApplyStatus::Na,
                     },
-                    ap_transformed_jsx: false,
                 }))],
             )),
             exn,
@@ -112,10 +108,8 @@ fn staticcatch_trywith_return_keeps_bound_exit_effects_outside_try_like_ocaml() 
             ap_args: vec![],
             ap_info: ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
-            ap_transformed_jsx: false,
         }))),
     ));
 
@@ -148,10 +142,8 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                                 ap_args: vec![Lambda::var(acc)],
                                 ap_info: ApInfo {
                                     loc: LamLoc::NONE,
-                                    inlined: InlineAttribute::Default,
                                     status: ApplyStatus::Na,
                                 },
-                                ap_transformed_jsx: false,
                             }))],
                         )),
                         exn,
@@ -163,10 +155,8 @@ fn staticcatch_trywith_tail_loop_keeps_bound_exit_effects_outside_try_like_ocaml
                         ap_args: vec![Lambda::var(next_acc)],
                         ap_info: ApInfo {
                             loc: LamLoc::NONE,
-                            inlined: InlineAttribute::Default,
                             status: ApplyStatus::Na,
                         },
-                        ap_transformed_jsx: false,
                     }))),
                 ),
                 FunctionAttribute::default(),
@@ -229,7 +219,7 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                 runtime: Box::new(crate::types::TaggedBlock {
                     tag: crate::types::VariantTag {
                         name: crate::name::Name::new("::"),
-                        literal: None,
+                        literal: crate::types::VariantLiteralTag::String("::".to_string()),
                     },
                     tag_name: None,
                 }),
@@ -263,10 +253,8 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                     ap_args: vec![Lambda::var(inc)],
                                                     ap_info: ApInfo {
                                                         loc: LamLoc::NONE,
-                                                        inlined: InlineAttribute::Default,
                                                         status: ApplyStatus::Na,
                                                     },
-                                                    ap_transformed_jsx: false,
                                                 }))],
                                             )),
                                             raw_exn,
@@ -307,11 +295,8 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                                             )],
                                                             ap_info: ApInfo {
                                                                 loc: LamLoc::NONE,
-                                                                inlined:
-                                                                    InlineAttribute::Default,
                                                                 status: ApplyStatus::Na,
                                                             },
-                                                            ap_transformed_jsx: false,
                                                         })),
                                                         Lambda::LstaticRaise(3, vec![]),
                                                     )),
@@ -330,10 +315,8 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                                             ap_args: vec![cons],
                                             ap_info: ApInfo {
                                                 loc: LamLoc::NONE,
-                                                inlined: InlineAttribute::Default,
                                                 status: ApplyStatus::Na,
                                             },
-                                            ap_transformed_jsx: false,
                                         }))),
                                     ),
                                     FunctionAttribute::default(), LamLoc::NONE,
@@ -344,10 +327,8 @@ fn nested_wrapped_staticcatch_trywith_tail_loops_lower_like_gpr_1701() {
                             ap_args: vec![Lambda::const_(Constant::int(0))],
                             ap_info: ApInfo {
                                 loc: LamLoc::NONE,
-                                inlined: InlineAttribute::Default,
                                 status: ApplyStatus::Na,
                             },
-                            ap_transformed_jsx: false,
                         })),
                     ),
                     FunctionAttribute::default(), LamLoc::NONE,
@@ -490,7 +471,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: crate::name::Name::new("Empty"),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "Empty".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -504,7 +487,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
                                             name: crate::name::Name::new("Int1"),
-                                            literal: None,
+                                            literal: crate::types::VariantLiteralTag::String(
+                                                "Int1".to_string(),
+                                            ),
                                         },
                                         tag_name: None,
                                     }),
@@ -518,7 +503,9 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                                     crate::types::VariantBlock::Tagged(crate::types::TaggedBlock {
                                         tag: crate::types::VariantTag {
                                             name: crate::name::Name::new("Int2"),
-                                            literal: None,
+                                            literal: crate::types::VariantLiteralTag::String(
+                                                "Int2".to_string(),
+                                            ),
                                         },
                                         tag_name: None,
                                     }),
@@ -535,9 +522,6 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "Empty".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -574,10 +558,8 @@ fn nested_staticcatch_switch_forwarders_keep_collapsed_shared_return_like_gpr_36
                 vec![Lambda::const_(Constant::int(0))],
                 ApInfo {
                     loc: LamLoc::NONE,
-                    inlined: InlineAttribute::Default,
                     status: ApplyStatus::Uncurry,
                 },
-                false,
             ),
         )),
     ));
@@ -709,10 +691,8 @@ fn return_staticcatchs_keep_plain_handlers_inline_across_multiple_exit_sites() {
             vec![Lambda::var(kind)],
             ApInfo {
                 loc: LamLoc::NONE,
-                inlined: InlineAttribute::Default,
                 status: ApplyStatus::Na,
             },
-            false,
         )),
     ));
 
@@ -747,7 +727,9 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: crate::name::Name::new("One"),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "One".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -763,9 +745,6 @@ fn single_case_staticcatch_wrapped_named_variant_return_switch_falls_through_to_
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -794,7 +773,7 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                     crate::lambda::SwitchKey::Constructor(
                         crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
                             name: crate::name::Name::new("One"),
-                            literal: None,
+                            literal: crate::types::VariantLiteralTag::String("One".to_string()),
                         }),
                     ),
                     Lambda::const_(Constant::int(1)),
@@ -809,9 +788,6 @@ fn single_case_staticcatch_wrapped_named_variant_non_unit_return_switch_falls_th
                         literal_tags: vec![crate::types::VariantLiteralTag::String(
                             "One".to_string().clone(),
                         )],
-                        has_null: false,
-                        has_undefined: false,
-                        has_other_literal: true,
                     },
                 ),
             }),
@@ -857,7 +833,9 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             crate::types::VariantConstructorCase::Constant(
                                 crate::types::VariantTag {
                                     name: crate::name::Name::new("One"),
-                                    literal: None,
+                                    literal: crate::types::VariantLiteralTag::String(
+                                        "One".to_string(),
+                                    ),
                                 },
                             ),
                         ),
@@ -873,9 +851,6 @@ fn single_case_staticcatch_wrapped_named_variant_unit_handler_falls_through_like
                             literal_tags: vec![crate::types::VariantLiteralTag::String(
                                 "One".to_string().clone(),
                             )],
-                            has_null: false,
-                            has_undefined: false,
-                            has_other_literal: true,
                         },
                     ),
                 }),
@@ -934,7 +909,9 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 crate::types::VariantConstructorCase::Constant(
                                     crate::types::VariantTag {
                                         name: crate::name::Name::new("One"),
-                                        literal: None,
+                                        literal: crate::types::VariantLiteralTag::String(
+                                            "One".to_string(),
+                                        ),
                                     },
                                 ),
                             ),
@@ -950,9 +927,6 @@ fn js_pipeline_keeps_single_case_staticcatch_unit_handler_as_fallthrough_guard()
                                 literal_tags: vec![crate::types::VariantLiteralTag::String(
                                     "One".to_string().clone(),
                                 )],
-                                has_null: false,
-                                has_undefined: false,
-                                has_other_literal: true,
                             },
                         ),
                     }),

@@ -47,9 +47,6 @@ val length : t -> int
 
 val is_empty : t -> bool
 
-val clear : t -> unit
-(** Empty the buffer. *)
-
 val add_char : t -> char -> unit
 (** [add_char b c] appends the character [c] at the end of the buffer [b]. *)
 
@@ -83,8 +80,4 @@ val output_buffer : out_channel -> t -> unit
 (** [output_buffer oc b] writes the current contents of buffer [b]
     on the output channel [oc]. *)
 
-val not_equal : t -> string -> bool
-
 val add_string_char : t -> string -> char -> unit
-
-val add_char_string : t -> char -> string -> unit

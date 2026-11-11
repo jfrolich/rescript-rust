@@ -161,7 +161,10 @@ fn print_taginfo<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
         TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
             let fields = tag_info.record_fields().expect("record block");
             let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
-            f.print(format_args!("[{}]", names.join(";")));
+            // printlambda.ml: `Blk_record {array = true}` prints `array[...]`.
+            let array = matches!(tag_info, TagInfo::Record(r) if r.array);
+            let prefix = if array { "array" } else { "" };
+            f.print(format_args!("{prefix}[{}]", names.join(";")));
         }
         TagInfo::Module(names) => f.print(format_args!("[{}]", names.join(";"))),
         TagInfo::ModuleExport(_) => f.string("module/exports"),
@@ -209,6 +212,30 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
             f.print(format_args!("record_rest({})", excluded.join(", ")))
         }
         Primitive::PjsCall(call) => f.print(format_args!("js_call[{}]", call.prim_name)),
+        Primitive::Pjsx(jsx) => {
+            let mut s = format!("jsx[{}", jsx.jsx_name);
+            if jsx.jsx_multi {
+                s.push_str(" multi");
+            }
+            if jsx.jsx_fragment {
+                s.push_str(" fragment");
+            }
+            if jsx.jsx_spread {
+                s.push_str(" spread");
+            }
+            for (name, optional) in &jsx.jsx_props {
+                s.push(' ');
+                s.push_str(name);
+                if *optional {
+                    s.push('?');
+                }
+            }
+            if jsx.jsx_key {
+                s.push_str(" key");
+            }
+            s.push(']');
+            f.print(format_args!("{s}"))
+        }
         Primitive::PjsObjectCreate(_) => s(f, "js_obj_create"),
         Primitive::PjsObjectGet(name) => f.print(format_args!("js_object_get[{name}]")),
         Primitive::PjsObjectSet(name) => f.print(format_args!("js_object_set[{name}]")),
@@ -287,11 +314,12 @@ fn primitive<W: Write>(f: &mut Formatter<W>, prim: &Primitive) {
         Primitive::Parrayrefu => s(f, "array.unsafe_get"),
         Primitive::Parraysetu => s(f, "array.unsafe_set"),
         Primitive::Parrayrefs => s(f, "array.get"),
-        Primitive::Parraysets => s(f, "array.set"),
         Primitive::Pmakelist => s(f, "makelist"),
         Primitive::Pmakedict => s(f, "makedict"),
+        Primitive::PdictSpread => s(f, "dict.spread"),
+        Primitive::ParraySpread => s(f, "array.spread"),
+        Primitive::PlistSpread => s(f, "list.spread"),
         Primitive::PdictHas => s(f, "dict.has"),
-        Primitive::Pisint => s(f, "isint"),
         Primitive::PisNull => s(f, "is_null"),
         Primitive::PisUndefined => s(f, "is_undefined"),
         Primitive::PisNullUndefined => s(f, "isnullable"),
@@ -355,15 +383,6 @@ fn function_attribute<W: Write>(f: &mut Formatter<W>, attr: &FunctionAttribute) 
             f.string("never_inline");
             f.space();
         }
-    }
-}
-
-/// `apply_inlined_attribute`.
-fn apply_inlined_attribute<W: Write>(f: &mut Formatter<W>, attr: InlineAttribute) {
-    match attr {
-        InlineAttribute::Default => {}
-        InlineAttribute::Always => f.string(" always_inline"),
-        InlineAttribute::Never => f.string(" never_inline"),
     }
 }
 
@@ -461,7 +480,6 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
                 f.space();
                 lam(f, arg);
             }
-            apply_inlined_attribute(f, ap.ap_info.inlined);
             f.string(")");
             f.close_box();
         }
@@ -617,6 +635,19 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
             f.string(")");
             f.space();
             lam(f, handler);
+            f.string(")");
+            f.close_box();
+        }
+        // printlambda.ml: "@[<2>(try@ %a@;<1 -1>finally@ %a)@]"
+        Lambda::LtryFinally(body, finally) => {
+            f.open_box(BoxKind::Box, 2);
+            f.string("(try");
+            f.space();
+            lam(f, body);
+            f.break_(1, -1);
+            f.string("finally");
+            f.space();
+            lam(f, finally);
             f.string(")");
             f.close_box();
         }

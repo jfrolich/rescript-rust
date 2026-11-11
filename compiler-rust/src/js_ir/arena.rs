@@ -148,6 +148,10 @@ handle!(
     TryId
 );
 handle!(
+    /// A JSX element ([`JsxInfo`]).
+    JsxId
+);
+handle!(
     /// A node's comment and source location ([`Cold`]).
     ColdId
 );
@@ -184,13 +188,65 @@ impl FieldPos {
     }
 }
 
-/// Property name of an object literal entry (`Js_op.property_name`).
+/// Kind of an object literal entry: a property `k: v` named by a
+/// `Js_op.property_name`, or a spread `...v`. `RecordSpread` copies a
+/// record, whose fields are read like plain data; `Spread` spreads any other
+/// object, such as a dict, which may run getters or proxy traps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PropName {
     /// A literal name, quoted when it is not a valid identifier.
     Lit(StrId),
     /// The well-known `[Symbol.for("name")]` key.
     Symbol,
+    /// A spread `...v` of an object that may run getters or proxy traps.
+    Spread,
+    /// A spread `...v` of a record, whose fields are plain data.
+    RecordSpread,
+}
+
+impl PropName {
+    /// Whether the entry is a spread rather than a named property.
+    pub fn is_spread(self) -> bool {
+        matches!(self, PropName::Spread | PropName::RecordSpread)
+    }
+}
+
+/// A JSX element in JSX preserve mode (`J.Jsx`): `callee` is the fallback
+/// call target, `props` are named [`PropName::Lit`] entries.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct JsxInfo {
+    /// The JSX runtime function called when the element cannot be printed as JSX.
+    pub callee: Expr,
+    /// The element type: a component or an intrinsic element name.
+    pub tag: Expr,
+    /// The props object spread before the named props, if any.
+    pub spread: Option<Expr>,
+    /// The named props in declaration order, without statically `undefined`
+    /// optional props.
+    pub props: PropList,
+    /// The children, if the element has a `children` prop.
+    pub children: Option<ExprList>,
+    /// The `key` argument, if any.
+    pub key: Option<Expr>,
+    /// Whether each child is a separate element of the `children` array.
+    pub multi: bool,
+    /// Whether the element is a fragment.
+    pub fragment: bool,
+}
+
+impl JsxInfo {
+    /// The element's expressions in evaluation order: callee, tag, spread,
+    /// props, children, key.
+    pub fn expressions<'a>(&self, arena: &'a JsArena) -> impl Iterator<Item = Expr> + 'a {
+        let props = arena.props(self.props);
+        let children = self.children.map_or(&[][..], |c| arena.exprs(c));
+        [self.callee, self.tag]
+            .into_iter()
+            .chain(self.spread)
+            .chain(props.iter().map(|&(_, value)| value))
+            .chain(children.iter().copied())
+            .chain(self.key)
+    }
 }
 
 /// Expression node kinds (`J.expression_desc`).
@@ -222,8 +278,6 @@ pub enum ExprKind {
     FlatCall(Expr, Expr),
     /// A call `f(args)` with its call metadata.
     Call(Expr, ExprList, CallId),
-    /// Character access `s[i]`.
-    StringIndex(Expr, Expr),
     /// Element access `a[i]` by an integer index.
     ArrayIndex(Expr, Expr),
     /// A tagged template: the tag, its raw string segments and the interpolated values.
@@ -259,8 +313,10 @@ pub enum ExprKind {
     CamlBlockTag(Expr, StrId),
     /// A number literal.
     Number(NumId),
-    /// An object literal, optionally spreading a base object first.
-    Object(Option<Expr>, PropList),
+    /// An object literal: named properties and spreads, in source order.
+    Object(PropList),
+    /// A JSX element, printed as JSX in JSX preserve mode.
+    Jsx(JsxId),
     /// `undefined`.
     Undefined {
         /// Whether this `undefined` stands for the unit value `()`.
@@ -568,6 +624,7 @@ pub struct JsArena {
     int_switches: Table<IntSwitchInfo>,
     string_switches: Table<StringSwitchInfo>,
     tries: Table<TryInfo>,
+    jsxs: Table<JsxInfo>,
     colds: Table<Cold>,
     /// Scratch stacks for rebuilding lists without a temporary `Vec` per
     /// node. A user records the length as a mark, pushes above it and
@@ -664,6 +721,16 @@ impl JsArena {
                 body: empty_list,
                 catch: None,
                 finally: None,
+            }),
+            jsxs: Table::new(JsxInfo {
+                callee: Expr(NonZeroU32::MIN),
+                tag: Expr(NonZeroU32::MIN),
+                spread: None,
+                props: PropList(NonZeroU32::MIN),
+                children: None,
+                key: None,
+                multi: false,
+                fragment: false,
             }),
             colds: Table::new(Cold::default()),
             expr_scratch: Vec::new(),
@@ -1006,7 +1073,7 @@ impl JsArena {
     pub fn prop_name_text(&self, name: PropName) -> Option<&str> {
         match name {
             PropName::Lit(s) => Some(self.text(s)),
-            PropName::Symbol => None,
+            PropName::Symbol | PropName::Spread | PropName::RecordSpread => None,
         }
     }
 
@@ -1230,6 +1297,17 @@ impl JsArena {
     #[inline]
     pub fn try_info(&self, id: TryId) -> TryInfo {
         *self.tries.get(id.index())
+    }
+
+    /// Store a JSX element.
+    pub fn jsx_id(&mut self, info: JsxInfo) -> JsxId {
+        JsxId::new(self.jsxs.push(info))
+    }
+
+    /// A stored JSX element.
+    #[inline]
+    pub fn jsx(&self, id: JsxId) -> JsxInfo {
+        *self.jsxs.get(id.index())
     }
 }
 

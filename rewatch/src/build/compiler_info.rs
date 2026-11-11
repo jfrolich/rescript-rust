@@ -223,6 +223,35 @@ mod tests {
         assert!(build_path.exists());
     }
 
+    /// Stored interfaces are encoded by the compiler linked into the
+    /// executable, with no format version of their own: a build by another
+    /// executable (another hash) must not decode them. Its package is
+    /// cleaned, database included.
+    #[test]
+    fn verify_compiler_info_cleans_stored_interfaces_of_another_compiler() {
+        let temp_dir = TempDir::new().expect("temp dir should be created");
+        let old_compiler = test_compiler(temp_dir.path());
+        let package = test_package(temp_dir.path(), "dep");
+        let build_path = package.get_build_path();
+        let db = state_db::path(&package);
+        write_test_compiler_info(&package, &old_compiler, vec![]);
+        state_db::write_runtime_interfaces(&db, "key", &[("Stdlib".to_string(), vec![1, 2, 3])]);
+        assert!(state_db::read_runtime_interfaces(&db, "key").is_some());
+
+        let new_compiler = CompilerInfo {
+            bsc_hash: blake3::hash(b"another-bsc"),
+            ..test_compiler(temp_dir.path())
+        };
+        let result = verify_compiler_info(&packages_map(package), &new_compiler, &[]);
+
+        assert!(matches!(
+            result,
+            CompilerCheckResult::CleanedPackagesDueToCompiler
+        ));
+        assert!(!build_path.exists());
+        assert!(state_db::read_runtime_interfaces(&db, "key").is_none());
+    }
+
     #[test]
     fn verify_compiler_info_cleans_package_when_source_map_args_change() {
         let temp_dir = TempDir::new().expect("temp dir should be created");

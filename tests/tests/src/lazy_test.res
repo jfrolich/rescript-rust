@@ -39,6 +39,7 @@ let exotic = x =>
 /* let l_from_val = Lazy.from_val 3 */
 
 let l_from_fun = Lazy.make(_ => 3)
+
 let forward_test = Lazy.make(() => {
   let u = ref(3)
   u.contents = u.contents + 1
@@ -53,17 +54,18 @@ let f006: Lazy.t<unit => int> = Lazy.make(() => {
 })
 
 let f007 = Lazy.make(() => throw(Not_found))
+
 let f008 = Lazy.make(() => {
   Console.log("hi")
   throw(Not_found)
 })
 
-let a2 = x => Lazy.from_val(x)
+let a2 = x => Lazy.make(() => x)
 
-let a3 = Lazy.from_val(3)
+let a3 = Lazy.make(() => 3)
 let a4 = a2(3)
-let a5 = Lazy.from_val(None)
-let a6 = Lazy.from_val()
+let a5 = Lazy.make(() => None)
+let a6 = Lazy.make(() => ())
 
 let a7 = Lazy.get(a5)
 let a8 = Lazy.get(a6)
@@ -73,23 +75,27 @@ describe(__MODULE__, () => {
   // test("lazy_match", () => eq(__LOC__, h, 2))
   test("lazy_force", () => eq(__LOC__, u_v.contents, 2))
   test("lazy_from_fun", () => eq(__LOC__, Lazy.get(l_from_fun), 3))
-  test("lazy_from_val", () => eq(__LOC__, Lazy.get(Lazy.from_val(3)), 3))
+  test("lazy_from_val", () => eq(__LOC__, Lazy.get(Lazy.make(() => 3)), 3))
   test("lazy_from_val2", () =>
-    eq(__LOC__, Lazy.get(Lazy.get(Lazy.from_val(Lazy.make(() => 3)))), 3)
+    eq(__LOC__, Lazy.get(Lazy.get(Lazy.make(() => Lazy.make(() => 3)))), 3)
   )
   test("lazy_from_val3", () =>
     eq(
       __LOC__,
       {
-        %debugger
+        debugger()
         Lazy.get(Lazy.get(Lazy.make(() => forward_test)))
       },
       4,
     )
   )
-  test(__FILE__, () => eq(__LOC__, a3, a4))
+  test(__FILE__, () => eq(__LOC__, Lazy.get(a3), Lazy.get(a4)))
   test(__FILE__, () => eq(__LOC__, a7, None))
   test(__FILE__, () => eq(__LOC__, a8, ()))
-  test(__LOC__, () => ok(__LOC__, Lazy.isEvaluated(Lazy.from_val(3))))
+  test(__LOC__, () => {
+    let evaluated = Lazy.make(() => 3)
+    ignore(Lazy.get(evaluated))
+    ok(__LOC__, Lazy.isEvaluated(evaluated))
+  })
   test(__LOC__, () => ok(__LOC__, !Lazy.isEvaluated(Lazy.make(() => throw(Not_found)))))
 })

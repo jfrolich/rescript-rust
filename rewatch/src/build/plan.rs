@@ -393,6 +393,7 @@ fn source_step(
     let compile = |ast_path: &Path, is_interface: bool| {
         compile::compiler_args(
             &package.config,
+            &package.path,
             ast_path,
             implementation,
             is_interface,

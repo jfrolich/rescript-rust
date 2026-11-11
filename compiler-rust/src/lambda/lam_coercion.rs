@@ -356,6 +356,15 @@ pub(crate) fn push_effect_expression(j: &mut JsArena, block: &mut Block, expr: E
 /// all-empty switch collapses. `push_effect_expression` is more aggressive and
 /// strips every side-effect-free expression, which matches OCaml's
 /// `output_of_expression` (js_output.ml:42-52) but not `S.exp`.
+pub(crate) fn push_s_if_empty(j: &mut JsArena, block: &mut Block, cond: Expr) {
+    if matches!(j.ek(cond), ExprKind::Bool(_))
+        || crate::js_ir::build::expression_has_no_side_effects(j, cond)
+    {
+        return;
+    }
+    push_s_exp(j, block, cond);
+}
+
 pub(crate) fn push_s_exp(j: &mut JsArena, block: &mut Block, expr: Expr) {
     let trivial =
         |a: &JsArena, e: Expr| matches!(a.ek(e), ExprKind::Number(_) | ExprKind::Undefined { .. });

@@ -57,19 +57,19 @@ value=""
 </A>
 
 <div>
-  // Must not jump inside braces
+  // Move this child comment inside braces
   {React.string("Hello, World!")}
 </div>
 
 <div>
-  // Must not jump inside braces
-  {// But this one is inside
+  // Move this child comment inside braces
+  {// This one is already inside
     React.string("Hello, World!")}
 </div>
 
 <div>
-  // Outside comment
-  {// But this one is inside
+  // Move this block comment inside braces
+  {// This one is already inside
     let x = 1
     let y = 2
   }
@@ -81,3 +81,15 @@ let x = <>
   // before b
   {b} // after b
 </>
+
+let standaloneMultilineComment = <div>{/* multiline
+    comment */}</div>
+
+let x =
+  <a
+    href="https://blog.wildcards.world/how-to-buy-a-wildcard-web3-ethereum/"
+    target=// Decided to leave this wildcard braning in here ;)
+    "_blank"
+    rel="noopener noreferrer">
+    {"Read this guide"->React.string}
+  </a>

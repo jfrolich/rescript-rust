@@ -51,7 +51,7 @@ if [ $? -eq 0 ]; then
   printf "%s\n" "$output" >&2
   exit 1
 fi
-if ! echo "$output" | grep -q "is not included in"; then
+if ! echo "$output" | grep -q "Expected declaration"; then
   error "The interface mismatch was not reported"
   printf "%s\n" "$output" >&2
   exit 1

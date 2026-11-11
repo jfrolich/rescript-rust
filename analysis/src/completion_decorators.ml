@@ -25,7 +25,7 @@ It is also possible to map a ReScript record to a JavaScript array by passing in
     ( "deriving",
       Some "deriving($0)",
       [
-        {|When the `@deriving` decorator is applied to a record type, it expands the type into a factory function plus a set of getter/setter functions for its fields.
+        {|When the `@deriving(accessors)` decorator is applied to a record type, it generates a getter function for each field. Applied to a variant type, it generates a function for each constructor.
   
 [Read more and see examples in the documentation](https://rescript-lang.org/syntax-lookup#deriving-decorator).|};
       ] );
@@ -265,13 +265,6 @@ You will need this decorator whenever you want to use a JSX component in ReScrip
   
 [Read more and see examples in the documentation](https://rescript-lang.org/syntax-lookup#unboxed-decorator).|};
       ] );
-    ( "uncurry",
-      None,
-      [
-        {|The `@uncurry` decorator can be used to mark any callback argument within an external function as an uncurried function without the need for any explicit uncurried function syntax (`(.) => { ... }`).
-
-[Read more and see examples in the documentation](https://rescript-lang.org/syntax-lookup#uncurry-decorator).|};
-      ] );
     ( "unwrap",
       None,
       [
@@ -297,6 +290,46 @@ You will need this decorator whenever you want to use a JSX component in ReScrip
       None,
       [
         {|The `@editor.completeFrom` decorator instructs the editor where it can draw additional completions from for this type.|};
+      ] );
+    ( "instanceOf",
+      Some "instanceOf(\"$0\")",
+      [
+        {|The `@instanceOf` decorator states that the values of an abstract type are instances of a global JavaScript class. Such a type can be the payload of an untagged variant case, which is then recognized with `instanceof`, and is never `undefined`, like with `@notUndefined`.
+
+A private abbreviation of another annotated type declares a subclass. A case of the superclass then excludes the instances of a subclass that is a case too, whatever the order of the cases.
+
+Example usage:
+```rescript
+@instanceOf("Blob")
+type blob
+
+@instanceOf("File")
+type file = private blob
+```|};
+      ] );
+    ( "typeOf",
+      Some "typeOf(\"$0\")",
+      [
+        {|The `@typeOf` decorator states the JavaScript `typeof` of the values of an abstract type: one of `"string"`, `"number"`, `"bigint"`, `"boolean"`, `"symbol"`, `"function"` or `"object"`. Such a type can be the payload of an untagged variant case, and is never `undefined`, like with `@notUndefined`.
+
+Example usage:
+```rescript
+@typeOf("symbol")
+type key
+```|};
+      ] );
+    ( "notUndefined",
+      None,
+      [
+        {|The `@notUndefined` decorator marks an abstract type as one that can never be `undefined` in JavaScript. This allows the compiler to generate more efficient code when the type is used inside an `option`.
+
+Example usage:
+```rescript
+@notUndefined
+type t
+```
+
+[Read more and see examples in the documentation](https://rescript-lang.org/syntax-lookup#notundefined-decorator).|};
       ] );
   ]
 
@@ -330,18 +363,5 @@ let toplevel =
         {|The `@@jsxConfig` decorator is used to change the config for JSX on the fly.
 
 [Read more and see examples in the documentation](https://rescript-lang.org/docs/manual/latest/jsx#file-level-configuration).|};
-      ] );
-    ( "notUndefined",
-      None,
-      [
-        {|The `@notUndefined` decorator marks an abstract type as one that can never be `undefined` in JavaScript. This allows the compiler to generate more efficient code when the type is used inside an `option`.
-
-Example usage:
-```rescript
-@notUndefined
-type t
-```
-
-[Read more and see examples in the documentation](https://rescript-lang.org/syntax-lookup#notundefined-decorator).|};
       ] );
   ]

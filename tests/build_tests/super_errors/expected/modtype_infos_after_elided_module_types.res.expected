@@ -1,0 +1,22 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/modtype_infos_after_elided_module_types.res[0m:[2m10:5-17:1[0m
+
+   8 [2m│[0m     let v: string
+   9 [2m│[0m   }
+  [1;31m10[0m [2m│[0m } = [1;31m{[0m
+  [1;31m11[0m [2m│[0m [1;31m  module type S = {[0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m16[0m [2m│[0m [1;31m  }[0m
+  [1;31m17[0m [2m│[0m [1;31m}[0m
+  18 [2m│[0m 
+
+  Signature mismatch:
+  
+  In module type S:
+  
+  Actual declaration ([36m/.../fixtures/modtype_infos_after_elided_module_types.res[0m:[2m15:5-14[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/modtype_infos_after_elided_module_types.res[0m:[2m8:5-17[0m):
+    let v: string

@@ -1,0 +1,16 @@
+We've found a bug for you!
+  /.../fixtures/Cross_private_abbreviation_mismatch/Priv.res:3:1-10
+
+  1 │ type a
+  2 │ type b
+  3 │ type t = b
+  4 │ 
+
+  The implementation /.../fixtures/Cross_private_abbreviation_mismatch/Priv.res
+  does not match the interface /.../fixtures/Cross_private_abbreviation_mismatch/Priv.resi:
+  
+  Actual declaration (/.../fixtures/Cross_private_abbreviation_mismatch/Priv.res:3:1-10):
+    type t = b
+  
+  Expected declaration (/.../fixtures/Cross_private_abbreviation_mismatch/Priv.resi:2:1-18):
+    type t = private a

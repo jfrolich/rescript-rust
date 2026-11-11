@@ -61,7 +61,8 @@ let rec get_attribute_payload check_text (attributes : Typedtree.attributes) =
       match payload with
       | PStr [] -> Some UnrecognizedPayload
       | PStr ({pstr_desc = Pstr_eval (expr, _)} :: _) -> expr |> from_expr
-      | PStr ({pstr_desc = Pstr_extension _} :: _) -> Some UnrecognizedPayload
+      | PStr ({pstr_desc = Pstr_extension _ | Pstr_raw _} :: _) ->
+        Some UnrecognizedPayload
       | PStr ({pstr_desc = Pstr_value _} :: _) -> Some UnrecognizedPayload
       | PStr ({pstr_desc = Pstr_primitive _} :: _) -> Some UnrecognizedPayload
       | PStr ({pstr_desc = Pstr_type _} :: _) -> Some UnrecognizedPayload
@@ -82,10 +83,7 @@ let has_attribute check_text (attributes : Typedtree.attributes) =
   get_attribute_payload check_text attributes <> None
 
 let is_ocaml_suppress_dead_warning attributes =
-  match
-    attributes
-    |> get_attribute_payload (fun x -> x = "ocaml.warning" || x = "warning")
-  with
+  match attributes |> get_attribute_payload (fun x -> x = "warning") with
   | Some (StringPayload s) ->
     let numeric =
       match Str.search_forward (Str.regexp (Str.quote "-32")) s 0 with

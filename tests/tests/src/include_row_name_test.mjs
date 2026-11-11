@@ -2,16 +2,10 @@
 
 import * as Include_row_name_core from "./include_row_name_core.mjs";
 
-let count = Include_row_name_core.boxShadows({
-  hd: {
-    NAME: "shadow",
-    VAL: "1px"
-  },
-  tl: {
-    hd: "none",
-    tl: /* [] */0
-  }
-});
+let count = Include_row_name_core.boxShadows({hd: {
+  NAME: "shadow",
+  VAL: "1px"
+}, tl: {hd: "none", tl: /* [] */0}});
 
 let Shadow = Include_row_name_core.Shadow;
 

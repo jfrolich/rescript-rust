@@ -28,7 +28,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-const SCHEMA_VERSION: i64 = 12;
+// PortableIdentities no longer stores obsolete descriptor/arrow-label blocks.
+const SCHEMA_VERSION: i64 = 18;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -952,6 +953,28 @@ mod tests {
             },
         );
         state
+    }
+
+    #[test]
+    fn obsolete_portable_identity_schema_is_rebuilt() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        write_record(&package, None, &state(1, None));
+        let conn = Connection::open(path(&package)).unwrap();
+        conn.pragma_update(None, "user_version", 17).unwrap();
+        drop(conn);
+        assert!(read(&package).is_none());
+        assert!(read_meta(&package).is_none());
+        let conn = open_for_write(&package).unwrap();
+        let version: i64 = conn
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        drop(conn);
+        let rebuilt = read(&package).expect("fresh schema is readable");
+        assert!(rebuilt.meta.is_empty());
+        assert!(rebuilt.modules.is_empty());
+        assert!(rebuilt.stored_interfaces.is_empty());
     }
 
     #[test]

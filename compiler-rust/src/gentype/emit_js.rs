@@ -27,24 +27,36 @@ pub struct Env {
     pub imported_value_or_component: bool,
 }
 
-/// Translates the type declarations of an imported `.cmt` file, given the
-/// configuration, the generated file's relative path and the resolver.
+/// Reads a module's type declarations (EmitJs.ml:449-453), adding the
+/// warnings their translation prints to the reader's notes.
 pub type InputCmtTranslateTypeDeclarations<'a> = dyn Fn(
+        &crate::gentype::log_::Notes,
         &mut crate::gentype::config::T,
         &str,
         &crate::gentype::module_resolver::Resolver,
         &str,
-    ) -> std::sync::Arc<code_item::TypeDeclarations>
+    ) -> Result<std::sync::Arc<code_item::TypeDeclarations>, String>
     + 'a;
 
 /// Maps the `.cmt` file an import path names to the typed artifact gentype
 /// reads, or to an empty string when there is none.
 pub type GetCmtFile<'a> = dyn Fn(&str) -> String + 'a;
 
-/// The generated file being emitted, and how the declarations of the types
-/// it imports are found.
+/// Where emitting a translation puts its genType warnings: the compile's
+/// notes, and the file a declaration location is in.
+pub struct EmitNotes<'a> {
+    /// The compile's notes.
+    pub notes: &'a crate::gentype::log_::Notes,
+    /// The file a declaration location is in.
+    pub file: &'a dyn Fn(crate::types::DeclLoc) -> String,
+}
+
+/// The generated file being emitted, where its warnings go, and how the
+/// declarations of the types it imports are found.
 #[derive(Clone, Copy)]
 pub struct EmitTarget<'a> {
+    /// Where emitting puts its warnings.
+    pub notes: &'a EmitNotes<'a>,
     /// The module the file is generated for.
     pub file_name: &'a crate::gentype::module_name::T,
     /// The generated file's path, relative to the project root.
@@ -158,6 +170,7 @@ pub fn code_item_to_string(
 /// cannot express; warns about that.
 pub fn emit_export_type(
     locs: &dyn crate::types::DeclLocs,
+    notes: &EmitNotes<'_>,
     emitters: crate::gentype::emitters::T,
     config: &crate::gentype::config::T,
     type_name_is_interface: &impl Fn(&str) -> bool,
@@ -171,16 +184,15 @@ pub fn emit_export_type(
     let opaque = match export_type.opaque {
         Some(true) => export_type.opaque,
         _ if is_gadt => {
-            crate::gentype::log_::color::setup();
-            crate::gentype::log_::info(
-                || {
-                    format!(
-                        "GADT types are not supported: exporting {} as opaque type",
-                        crate::gentype::resolved_name::to_string(&export_type.resolved_type_name)
-                    )
-                },
-                &locs.resolve_loc(export_type.loc),
+            let loc = locs.resolve_loc(export_type.loc);
+            notes.notes.info(
+                &(notes.file)(export_type.loc),
+                &loc,
                 "Warning genType",
+                &format!(
+                    "GADT types are not supported: exporting {} as opaque type",
+                    crate::gentype::resolved_name::to_string(&export_type.resolved_type_name)
+                ),
             );
             Some(true)
         }
@@ -222,6 +234,7 @@ pub fn type_name_is_interface(
 /// Emit the type a declaration exports.
 pub fn emit_export_from_type_declaration(
     locs: &dyn crate::types::DeclLocs,
+    notes: &EmitNotes<'_>,
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
@@ -233,6 +246,7 @@ pub fn emit_export_from_type_declaration(
         env,
         emit_export_type(
             locs,
+            notes,
             emitters,
             config,
             type_name_is_interface,
@@ -244,6 +258,7 @@ pub fn emit_export_from_type_declaration(
 /// Emit the types the declarations export.
 pub fn emit_export_from_type_declarations(
     locs: &dyn crate::types::DeclLocs,
+    notes: &EmitNotes<'_>,
     config: &crate::gentype::config::T,
     emitters: crate::gentype::emitters::T,
     env: Env,
@@ -256,6 +271,7 @@ pub fn emit_export_from_type_declarations(
         |(env, emitters), export_from_type_declaration| {
             emit_export_from_type_declaration(
                 locs,
+                notes,
                 config,
                 emitters,
                 env,
@@ -316,6 +332,7 @@ pub fn emit_code_item(
 ) -> (Env, crate::gentype::emitters::T) {
     // Mirrors compiler/gentype/EmitJs.ml:139-389.
     let EmitTarget {
+        notes,
         file_name,
         output_file_relative,
         resolver,
@@ -495,7 +512,7 @@ pub fn emit_code_item(
             let make = "make";
             let name = match original_name == default {
                 true => crate::gentype::runtime::DEFAULT.to_string(),
-                false => resolved_name_str,
+                false => crate::gentype::runtime::ts_binding_name(&resolved_name_str),
             };
 
             let (type_, hook_type) = match type_ {
@@ -592,6 +609,7 @@ pub fn emit_code_item(
                     config.emit_import_react = true;
                     emit_export_type(
                         &crate::types::DeclLocTable::default(),
+                        notes,
                         emitters,
                         config,
                         type_name_is_interface,
@@ -701,15 +719,17 @@ pub fn read_cmt_files_recursively(
     config: &mut crate::gentype::config::T,
     env: Env,
     import_type: &code_item::ImportType,
-) -> Env {
+) -> Result<Env, String> {
     // Mirrors compiler/gentype/EmitJs.ml:417-484.
     let EmitTarget {
+        notes,
         get_cmt_file,
         input_cmt_translate_type_declarations,
         output_file_relative,
         resolver,
         ..
     } = target;
+    let notes = notes.notes;
     fn update_type_map_from_other_files(
         config: &crate::gentype::config::T,
         type_name: &str,
@@ -746,15 +766,16 @@ pub fn read_cmt_files_recursively(
                         export_type_map_from_cmt,
                         &mut env.export_type_map_from_other_files,
                     );
-                    env
+                    Ok(env)
                 }
                 None => {
                     let type_declarations = input_cmt_translate_type_declarations(
+                        notes,
                         config,
                         output_file_relative,
                         resolver,
                         cmt_file,
-                    );
+                    )?;
                     let file = Path::new(cmt_file)
                         .file_name()
                         .and_then(|s| s.to_str())
@@ -780,13 +801,15 @@ pub fn read_cmt_files_recursively(
                         .iter()
                         .flat_map(|type_declaration| type_declaration.import_types.iter().cloned())
                         .collect::<Vec<_>>();
-                    new_import_types.iter().fold(env, |env, new_import_type| {
-                        read_cmt_files_recursively(target, config, env, new_import_type)
-                    })
+                    new_import_types
+                        .iter()
+                        .try_fold(env, |env, new_import_type| {
+                            read_cmt_files_recursively(target, config, env, new_import_type)
+                        })
                 }
             }
         }
-        _ => env,
+        _ => Ok(env),
     }
 }
 
@@ -798,9 +821,9 @@ pub fn emit_import_type(
     env: Env,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_type: &code_item::ImportType,
-) -> (Env, crate::gentype::emitters::T) {
+) -> Result<(Env, crate::gentype::emitters::T), String> {
     // Mirrors compiler/gentype/EmitJs.ml:486-500.
-    let env = read_cmt_files_recursively(target, config, env, import_type);
+    let env = read_cmt_files_recursively(target, config, env, import_type)?;
     let emitters = crate::gentype::emit_type::emit_import_type_as(
         emitters,
         config,
@@ -809,7 +832,7 @@ pub fn emit_import_type(
         &|type_name| type_name_is_interface(&env, type_name),
         &import_type.import_path,
     );
-    (env, emitters)
+    Ok((env, emitters))
 }
 
 /// Emit the type imports.
@@ -820,11 +843,11 @@ pub fn emit_import_types(
     env: Env,
     type_name_is_interface: &impl Fn(&Env, &str) -> bool,
     import_types: &[code_item::ImportType],
-) -> (Env, crate::gentype::emitters::T) {
+) -> Result<(Env, crate::gentype::emitters::T), String> {
     // Mirrors compiler/gentype/EmitJs.ml:502-511.
     import_types
         .iter()
-        .fold((env, emitters), |(env, emitters), import_type| {
+        .try_fold((env, emitters), |(env, emitters), import_type| {
             emit_import_type(
                 target,
                 config,
@@ -1000,9 +1023,11 @@ pub fn emit_translation_as_string(
     locs: &dyn crate::types::DeclLocs,
     config: &mut crate::gentype::config::T,
     translation: &crate::gentype::translation::T,
-) -> String {
+) -> Result<String, String> {
     // Mirrors compiler/gentype/EmitJs.ml:604-711.
-    let EmitTarget { file_name, .. } = target;
+    let EmitTarget {
+        notes, file_name, ..
+    } = target;
     let initial_env = Env {
         requires: BTreeMap::new(),
         requires_early: BTreeMap::new(),
@@ -1073,10 +1098,11 @@ pub fn emit_translation_as_string(
         env,
         &type_name_is_interface_for_env,
         &import_types,
-    );
+    )?;
     let env_for_type_declarations = env.clone();
     let (env, emitters) = emit_export_from_type_declarations(
         locs,
+        notes,
         config,
         emitters,
         env,
@@ -1132,22 +1158,13 @@ pub fn emit_translation_as_string(
         true => crate::gentype::emit_type::emit_import_react(emitters),
         false => emitters,
     };
-    let env = match config.emit_import_curry {
-        true => require_module(
-            true,
-            env,
-            crate::gentype::import_path::bs_curry_path(config),
-            &crate::gentype::module_name::CURRY.to_string(),
-        ),
-        false => env,
-    };
     let emitters = crate::gentype::export_module::emit_all_module_items(
         config,
         emitters,
         file_name,
         &module_items_emitter,
     );
-    crate::gentype::emitters::to_string(
+    Ok(crate::gentype::emitters::to_string(
         "\n\n",
         emit_requires(
             env.imported_value_or_component,
@@ -1156,5 +1173,5 @@ pub fn emit_translation_as_string(
             &env.requires,
             emit_requires(false, true, config, &env.requires_early, emitters),
         ),
-    )
+    ))
 }

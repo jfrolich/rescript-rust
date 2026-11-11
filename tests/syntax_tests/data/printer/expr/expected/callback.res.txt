@@ -1,5 +1,6 @@
 array->Array.forEach(((value, height)) => add(rbt, value, ~height)->ignore)
 someArray->Array.forEach(((value, height)) => add(rbt, value, ~height)->ignore)
+
 someArraaaaaaayWithAVeryLooooooooooooooooooooooooooooooooooooooongName->Array.forEach(((
   value,
   height,
@@ -14,9 +15,11 @@ let make = (arr, ~compare) => {
 Thing.map(foo, (arg1, arg2) => MyModuleBlah.toList(argument))
 Thing.map(foo, bar, baz, (aaaaaaaaaaarg1, aaaaarg2) => MyModuleBlah.toList(argument))
 Thing.map(fooooooooooooooooooo, bar, baz, (abc, z) => MyModuleBlah.toList(argument))
+
 Thing.map(fooooooooooooooooooo, baaaaaaaaaaaaaaaaaar, baaaaaaaaaaaaaaaaaaaaaaaaaz, (abc, z) =>
   MyModuleBlah.toList(argument)
 )
+
 Fooooooooooooooooooo.baaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa(baaaz, quuuuux =>
   something(here)
 )
@@ -119,6 +122,7 @@ Thing.map(
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg3,
   ~fn=(param1, parm2) => doStuff(param1, parm2),
 )
+
 Thing.map(
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg1,
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg2,
@@ -135,6 +139,7 @@ Thing.map(~fn=?(arg1, arg2) => MyModuleBlah.toList(argument), foo)
 Thing.map(~fn=(arg1, arg2) => {
   MyModuleBlah.toList(argument)
 }, longArgument, veryLooooongArgument)
+
 Thing.map(~fn=?(arg1, arg2) => {
   MyModuleBlah.toList(argument)
 }, longArgument, veryLooooongArgument)
@@ -146,6 +151,7 @@ Thing.map(
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg3,
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg4,
 )
+
 Thing.map(
   ~fn=?(param1, parm2) => doStuff(param1, parm2),
   aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaarg2,
@@ -204,12 +210,12 @@ let f = () => {
         <ul>
           {users
           ->Array.map(user => {
-            <li key=user.id> {user.username->React.string} </li>
+            <li key=user.id>{user.username->React.string}</li>
           })
           ->React.array}
         </ul>
         {reloadableUser.last->AsyncData.isLoading ? "Loading next page"->React.string : React.null}
-        <button onClick={_ => setPage(x => x + 1)}> {"Load next page"->React.string} </button>
+        <button onClick={_ => setPage(x => x + 1)}>{"Load next page"->React.string}</button>
       </>
     }}
   </div>
@@ -380,3 +386,19 @@ React.useEffect5(
 
 apply(a, b, c, /* before */ () => () /* after */)
 apply(/* before */ () => () /* after */, a, b, c)
+
+let x = React.useMemo2(() =>
+  if isLoggedIn {
+    userItems->Belt.Array.forEach(((itemKey, userItem)) =>
+      if (
+        switch userItem.status {
+        | ForTrade => filters.exclude->Array.includes(ItemFilters.Catalog)
+        }
+      ) {
+        let itemVariantList = switch Dict.get(userItemMap, itemId) {
+        | Some(list) => list
+        }
+      }
+    )
+  }
+, (excludeString, isLoggedIn))

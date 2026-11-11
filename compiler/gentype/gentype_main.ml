@@ -43,7 +43,7 @@ let input_cmt_translate_type_declarations ~config ~output_file_relative
       }
       |> Translate_signature.translate_signature ~config ~output_file_relative
            ~resolver ~type_env
-    | Packed _ | Partial_implementation _ | Partial_interface _ -> []
+    | Partial_implementation _ | Partial_interface _ -> []
   in
   translations |> Translation.combine
   |> Translation.add_type_declarations_from_module_equations ~type_env
@@ -133,7 +133,7 @@ let read_input_cmt is_interface cmt_file =
 
 let process_cmt_file cmt =
   let config = Paths.read_config ~namespace:(cmt |> Paths.find_name_space) in
-  if !Debug.basic then Log_.item "Cmt %s\n" cmt;
+  if !(Debug.basic ()) then Log_.item "Cmt %s\n" cmt;
   let cmt_file = cmt |> Paths.get_cmt_file in
   if cmt_file <> "" then
     let file_name = cmt |> Paths.get_module_name in

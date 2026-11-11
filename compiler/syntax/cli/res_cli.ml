@@ -39,7 +39,7 @@ end = struct
       ("-recover", Arg.Unit (fun () -> recover := true), "Emit partial ast");
       ( "-print",
         Arg.String (fun txt -> print := txt),
-        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens or res. Default: \
+        "Print either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens, doc or res. Default: \
          res" );
       ( "-width",
         Arg.Int (fun w -> width := w),
@@ -62,9 +62,6 @@ end = struct
 end
 
 module Cli_arg_processor = struct
-  type backend = Parser : 'diagnostics Res_driver.parsing_engine -> backend
-  [@@unboxed]
-
   let process_file ~is_interface ~width ~recover ~target ~jsx_version
       ~jsx_module ~test_ast_conversion filename =
     let len = String.length filename in
@@ -72,40 +69,48 @@ module Cli_arg_processor = struct
       is_interface
       || (len > 0 && (String.get [@doesNotRaise]) filename (len - 1) = 'i')
     in
-    let parsing_engine = Parser Res_driver.parsing_engine in
+    let source = lazy (Ext_io.load_file filename) in
+    let load_source () = Lazy.force source in
+    (* The engine for the newline of the parsed source *)
     let print_engine =
       match target with
-      | "binary" -> Res_driver_binary.print_engine
-      | "binary0" -> Res_driver_binary0.print_engine
-      | "ml" -> Res_driver_ml_printer.print_engine
-      | "ast" -> Res_ast_debugger.print_engine
-      | "sexp" -> Res_ast_debugger.sexp_print_engine
-      | "sexp-locs" | "sexp-locs-ppx" -> Res_ast_debugger.sexp_locs_print_engine
-      | "sexp0-locs" -> Res_ast_debugger.sexp0_locs_print_engine
-      | "comments" -> Res_ast_debugger.comments_print_engine
-      | "tokens" -> Res_token_debugger.token_print_engine
-      | "res" -> Res_driver.print_engine
+      | "binary" -> Fun.const Res_driver_binary.print_engine
+      | "binary0" -> Fun.const Res_driver_binary0.print_engine
+      | "ml" -> Fun.const Res_driver_ml_printer.print_engine
+      | "ast" -> Fun.const Res_ast_debugger.print_engine
+      | "sexp" -> Fun.const Res_ast_debugger.sexp_print_engine
+      | "sexp-locs" | "sexp-locs-ppx" ->
+        Fun.const Res_ast_debugger.sexp_locs_print_engine
+      | "sexp0-locs" -> Fun.const Res_ast_debugger.sexp0_locs_print_engine
+      | "comments" -> Fun.const Res_ast_debugger.comments_print_engine
+      | "tokens" -> Fun.const Res_token_debugger.token_print_engine
+      | "res" ->
+        (* Keep the line endings of a CRLF file, like bsc -format *)
+        fun newline -> Res_driver.print_engine ~newline
+      | "doc" -> Fun.const Res_ast_debugger.doc_print_engine
       | target ->
         print_endline
-          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens \
+          ("-print needs to be either binary, binary0, ml, ast, sexp, sexp-locs, sexp-locs-ppx, sexp0-locs, comments, tokens, doc \
             or res. You provided " ^ target);
         exit 1
     in
 
-    let (Parser backend) = parsing_engine in
     (* Color the Format tags (e.g. @{<error>...@}) of printed diagnostics *)
     Misc.Color.setup None;
 
     (* Special case for tokens - bypass parsing entirely *)
     if target = "tokens" then
-      print_engine.print_implementation ~width ~filename ~comments:[] []
+      (print_engine "\n").print_implementation ~width ~filename ~comments:[] []
     else if process_interface then
-      let parse_result = backend.parse_interface ~filename in
+      let parse_result =
+        Res_driver.parse_interface_from_source ~display_filename:filename
+          ~source:(load_source ())
+      in
       if parse_result.invalid then (
-        backend.string_of_diagnostics ~source:parse_result.source
-          ~filename:parse_result.filename parse_result.diagnostics;
+        Res_diagnostics.print_report parse_result.diagnostics
+          parse_result.source;
         if recover then
-          print_engine.print_interface ~width ~filename
+          (print_engine parse_result.newline).print_interface ~width ~filename
             ~comments:parse_result.comments parse_result.parsetree
         else exit 1)
       else
@@ -127,16 +132,19 @@ module Cli_arg_processor = struct
             Bs_builtin_ppx.mapper.signature Bs_builtin_ppx.mapper parsetree
           else parsetree
         in
-        print_engine.print_interface ~width ~filename
+        (print_engine parse_result.newline).print_interface ~width ~filename
           ~comments:parse_result.comments parsetree
     else
-      let parse_result = backend.parse_implementation ~filename in
+      let parse_result =
+        Res_driver.parse_implementation_from_source ~display_filename:filename
+          ~source:(load_source ())
+      in
       if parse_result.invalid then (
-        backend.string_of_diagnostics ~source:parse_result.source
-          ~filename:parse_result.filename parse_result.diagnostics;
+        Res_diagnostics.print_report parse_result.diagnostics
+          parse_result.source;
         if recover then
-          print_engine.print_implementation ~width ~filename
-            ~comments:parse_result.comments parse_result.parsetree
+          (print_engine parse_result.newline).print_implementation ~width
+            ~filename ~comments:parse_result.comments parse_result.parsetree
         else exit 1)
       else
         let parsetree =
@@ -157,8 +165,8 @@ module Cli_arg_processor = struct
             Bs_builtin_ppx.mapper.structure Bs_builtin_ppx.mapper parsetree
           else parsetree
         in
-        print_engine.print_implementation ~width ~filename
-          ~comments:parse_result.comments parsetree
+        (print_engine parse_result.newline).print_implementation ~width
+          ~filename ~comments:parse_result.comments parsetree
   [@@raises exit]
 end
 

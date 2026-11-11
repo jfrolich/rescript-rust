@@ -4,63 +4,36 @@ import * as Stdlib_List from "@rescript/runtime/lib/es6/Stdlib_List.mjs";
 import * as Primitive_object from "@rescript/runtime/lib/es6/Primitive_object.mjs";
 import * as Primitive_exceptions from "@rescript/runtime/lib/es6/Primitive_exceptions.mjs";
 
-let graph = {
-  hd: [
-    "a",
-    "b"
-  ],
-  tl: {
-    hd: [
-      "a",
-      "c"
-    ],
-    tl: {
-      hd: [
-        "a",
-        "d"
-      ],
-      tl: {
-        hd: [
-          "b",
-          "e"
-        ],
-        tl: {
-          hd: [
-            "c",
-            "f"
-          ],
-          tl: {
-            hd: [
-              "d",
-              "e"
-            ],
-            tl: {
-              hd: [
-                "e",
-                "f"
-              ],
-              tl: {
-                hd: [
-                  "e",
-                  "g"
-                ],
-                tl: /* [] */0
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-};
+let graph = {hd: [
+  "a",
+  "b"
+], tl: {hd: [
+  "a",
+  "c"
+], tl: {hd: [
+  "a",
+  "d"
+], tl: {hd: [
+  "b",
+  "e"
+], tl: {hd: [
+  "c",
+  "f"
+], tl: {hd: [
+  "d",
+  "e"
+], tl: {hd: [
+  "e",
+  "f"
+], tl: {hd: [
+  "e",
+  "g"
+], tl: /* [] */0}}}}}}}};
 
 function nexts(x, g) {
   return Stdlib_List.reduce(g, /* [] */0, (acc, param) => {
     if (param[0] === x) {
-      return {
-        hd: param[1],
-        tl: acc
-      };
+      return {hd: param[1], tl: acc};
     } else {
       return acc;
     }
@@ -76,45 +49,18 @@ function dfs1(_nodes, graph, _visited) {
     }
     let xs = nodes.tl;
     let x = nodes.hd;
-    if (Stdlib_List.has(visited, x, (prim0, prim1) => prim0 === prim1)) {
+    if (Stdlib_List.some(visited, y => y === x)) {
       _nodes = xs;
       continue;
     }
     console.log(x);
-    _visited = {
-      hd: x,
-      tl: visited
-    };
+    _visited = {hd: x, tl: visited};
     _nodes = Stdlib_List.concat(nexts(x, graph), xs);
     continue;
   };
 }
 
-if (!Primitive_object.equal(dfs1({
-    hd: "a",
-    tl: /* [] */0
-  }, graph, /* [] */0), {
-    hd: "a",
-    tl: {
-      hd: "d",
-      tl: {
-        hd: "e",
-        tl: {
-          hd: "g",
-          tl: {
-            hd: "f",
-            tl: {
-              hd: "c",
-              tl: {
-                hd: "b",
-                tl: /* [] */0
-              }
-            }
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs1({hd: "a", tl: /* [] */0}, graph, /* [] */0), {hd: "a", tl: {hd: "d", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "c", tl: {hd: "b", tl: /* [] */0}}}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -128,31 +74,10 @@ if (!Primitive_object.equal(dfs1({
 
 console.log();
 
-if (!Primitive_object.equal(dfs1({
-    hd: "b",
-    tl: /* [] */0
-  }, {
-    hd: [
-      "f",
-      "d"
-    ],
-    tl: graph
-  }, /* [] */0), {
-    hd: "b",
-    tl: {
-      hd: "e",
-      tl: {
-        hd: "g",
-        tl: {
-          hd: "f",
-          tl: {
-            hd: "d",
-            tl: /* [] */0
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs1({hd: "b", tl: /* [] */0}, {hd: [
+    "f",
+    "d"
+  ], tl: graph}, /* [] */0), {hd: "b", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "d", tl: /* [] */0}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -174,14 +99,11 @@ function dfs2(nodes, graph, visited) {
       }
       let xs = nodes.tl;
       let x = nodes.hd;
-      if (Stdlib_List.has(visited, x, (prim0, prim1) => prim0 === prim1)) {
+      if (Stdlib_List.some(visited, y => y === x)) {
         _nodes = xs;
         continue;
       }
-      _visited = aux(nexts(x, graph), graph, {
-        hd: x,
-        tl: visited
-      });
+      _visited = aux(nexts(x, graph), graph, {hd: x, tl: visited});
       _nodes = xs;
       continue;
     };
@@ -189,31 +111,7 @@ function dfs2(nodes, graph, visited) {
   return Stdlib_List.reverse(aux(nodes, graph, visited));
 }
 
-if (!Primitive_object.equal(dfs2({
-    hd: "a",
-    tl: /* [] */0
-  }, graph, /* [] */0), {
-    hd: "a",
-    tl: {
-      hd: "d",
-      tl: {
-        hd: "e",
-        tl: {
-          hd: "g",
-          tl: {
-            hd: "f",
-            tl: {
-              hd: "c",
-              tl: {
-                hd: "b",
-                tl: /* [] */0
-              }
-            }
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs2({hd: "a", tl: /* [] */0}, graph, /* [] */0), {hd: "a", tl: {hd: "d", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "c", tl: {hd: "b", tl: /* [] */0}}}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -225,31 +123,10 @@ if (!Primitive_object.equal(dfs2({
   };
 }
 
-if (!Primitive_object.equal(dfs2({
-    hd: "b",
-    tl: /* [] */0
-  }, {
-    hd: [
-      "f",
-      "d"
-    ],
-    tl: graph
-  }, /* [] */0), {
-    hd: "b",
-    tl: {
-      hd: "e",
-      tl: {
-        hd: "g",
-        tl: {
-          hd: "f",
-          tl: {
-            hd: "d",
-            tl: /* [] */0
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs2({hd: "b", tl: /* [] */0}, {hd: [
+    "f",
+    "d"
+  ], tl: graph}, /* [] */0), {hd: "b", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "d", tl: /* [] */0}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -264,44 +141,17 @@ if (!Primitive_object.equal(dfs2({
 function dfs3(nodes, graph) {
   let visited = /* [] */0;
   let aux = (node, graph) => {
-    if (Stdlib_List.has(visited, node, (prim0, prim1) => prim0 === prim1)) {
+    if (Stdlib_List.some(visited, y => y === node)) {
       return;
     }
-    visited = {
-      hd: node,
-      tl: visited
-    };
+    visited = {hd: node, tl: visited};
     Stdlib_List.forEach(nexts(node, graph), x => aux(x, graph));
   };
   Stdlib_List.forEach(nodes, node => aux(node, graph));
   return Stdlib_List.reverse(visited);
 }
 
-if (!Primitive_object.equal(dfs3({
-    hd: "a",
-    tl: /* [] */0
-  }, graph), {
-    hd: "a",
-    tl: {
-      hd: "d",
-      tl: {
-        hd: "e",
-        tl: {
-          hd: "g",
-          tl: {
-            hd: "f",
-            tl: {
-              hd: "c",
-              tl: {
-                hd: "b",
-                tl: /* [] */0
-              }
-            }
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs3({hd: "a", tl: /* [] */0}, graph), {hd: "a", tl: {hd: "d", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "c", tl: {hd: "b", tl: /* [] */0}}}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -313,31 +163,10 @@ if (!Primitive_object.equal(dfs3({
   };
 }
 
-if (!Primitive_object.equal(dfs3({
-    hd: "b",
-    tl: /* [] */0
-  }, {
-    hd: [
-      "f",
-      "d"
-    ],
-    tl: graph
-  }), {
-    hd: "b",
-    tl: {
-      hd: "e",
-      tl: {
-        hd: "g",
-        tl: {
-          hd: "f",
-          tl: {
-            hd: "d",
-            tl: /* [] */0
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(dfs3({hd: "b", tl: /* [] */0}, {hd: [
+    "f",
+    "d"
+  ], tl: graph}), {hd: "b", tl: {hd: "e", tl: {hd: "g", tl: {hd: "f", tl: {hd: "d", tl: /* [] */0}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -349,80 +178,41 @@ if (!Primitive_object.equal(dfs3({
   };
 }
 
-let grwork = {
-  hd: [
-    "wake",
-    "shower"
-  ],
-  tl: {
-    hd: [
-      "shower",
-      "dress"
-    ],
-    tl: {
-      hd: [
-        "dress",
-        "go"
-      ],
-      tl: {
-        hd: [
-          "wake",
-          "eat"
-        ],
-        tl: {
-          hd: [
-            "eat",
-            "washup"
-          ],
-          tl: {
-            hd: [
-              "washup",
-              "go"
-            ],
-            tl: /* [] */0
-          }
-        }
-      }
-    }
-  }
-};
+let grwork = {hd: [
+  "wake",
+  "shower"
+], tl: {hd: [
+  "shower",
+  "dress"
+], tl: {hd: [
+  "dress",
+  "go"
+], tl: {hd: [
+  "wake",
+  "eat"
+], tl: {hd: [
+  "eat",
+  "washup"
+], tl: {hd: [
+  "washup",
+  "go"
+], tl: /* [] */0}}}}}};
 
 function unsafe_topsort(graph) {
   let visited = /* [] */0;
   let sort_node = node => {
-    if (Stdlib_List.has(visited, node, (prim0, prim1) => prim0 === prim1)) {
+    if (Stdlib_List.some(visited, y => y === node)) {
       return;
     }
     let nodes = nexts(node, graph);
     Stdlib_List.forEach(nodes, sort_node);
-    visited = {
-      hd: node,
-      tl: visited
-    };
+    visited = {hd: node, tl: visited};
   };
   Stdlib_List.forEach(graph, param => sort_node(param[0]));
   return visited;
 }
 
-if (!Primitive_object.equal(unsafe_topsort(grwork), {
-    hd: "wake",
-    tl: {
-      hd: "shower",
-      tl: {
-        hd: "dress",
-        tl: {
-          hd: "eat",
-          tl: {
-            hd: "washup",
-            tl: {
-              hd: "go",
-              tl: /* [] */0
-            }
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(unsafe_topsort(grwork), {hd: "wake", tl: {hd: "shower", tl: {hd: "dress", tl: {hd: "eat", tl: {hd: "washup", tl: {hd: "go", tl: /* [] */0}}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
@@ -439,60 +229,33 @@ let Cycle = /* @__PURE__ */Primitive_exceptions.create("Topsort_test.Cycle");
 function pathsort(graph) {
   let visited = /* [] */0;
   let $plus$great = (node, path) => {
-    if (Stdlib_List.has(path, node, (prim0, prim1) => prim0 === prim1)) {
+    if (Stdlib_List.some(path, y => y === node)) {
       throw {
         RE_EXN_ID: Cycle,
-        _1: {
-          hd: node,
-          tl: path
-        },
+        _1: {hd: node, tl: path},
         Error: new Error()
       };
     }
-    return {
-      hd: node,
-      tl: path
-    };
+    return {hd: node, tl: path};
   };
   let sort_nodes = (path, nodes) => Stdlib_List.forEach(nodes, node => sort_node(path, node));
   let sort_node = (path, node) => {
-    if (Stdlib_List.has(visited, node, (prim0, prim1) => prim0 === prim1)) {
+    if (Stdlib_List.some(visited, y => y === node)) {
       return;
     }
     sort_nodes($plus$great(node, path), nexts(node, graph));
-    visited = {
-      hd: node,
-      tl: visited
-    };
+    visited = {hd: node, tl: visited};
   };
   Stdlib_List.forEach(graph, param => sort_node(/* [] */0, param[0]));
   return visited;
 }
 
-if (!Primitive_object.equal(pathsort(grwork), {
-    hd: "wake",
-    tl: {
-      hd: "shower",
-      tl: {
-        hd: "dress",
-        tl: {
-          hd: "eat",
-          tl: {
-            hd: "washup",
-            tl: {
-              hd: "go",
-              tl: /* [] */0
-            }
-          }
-        }
-      }
-    }
-  })) {
+if (!Primitive_object.equal(pathsort(grwork), {hd: "wake", tl: {hd: "shower", tl: {hd: "dress", tl: {hd: "eat", tl: {hd: "washup", tl: {hd: "go", tl: /* [] */0}}}}}})) {
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
       "topsort_test.res",
-      141,
+      142,
       9
     ],
     Error: new Error()
@@ -500,18 +263,15 @@ if (!Primitive_object.equal(pathsort(grwork), {
 }
 
 try {
-  pathsort({
-    hd: [
-      "go",
-      "eat"
-    ],
-    tl: grwork
-  });
+  pathsort({hd: [
+    "go",
+    "eat"
+  ], tl: grwork});
   throw {
     RE_EXN_ID: "Assert_failure",
     _1: [
       "topsort_test.res",
-      145,
+      146,
       2
     ],
     Error: new Error()
@@ -547,7 +307,7 @@ try {
       RE_EXN_ID: "Assert_failure",
       _1: [
         "topsort_test.res",
-        148,
+        149,
         7
       ],
       Error: new Error()

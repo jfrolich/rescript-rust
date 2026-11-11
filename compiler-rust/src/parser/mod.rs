@@ -37,6 +37,7 @@
 //! ```
 
 pub mod ast;
+pub mod ast_spread;
 #[cfg(test)]
 pub mod benchmark;
 pub mod code_frame;

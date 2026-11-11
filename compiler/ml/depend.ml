@@ -34,8 +34,6 @@ let bound = Node (String_set.empty, String_map.empty)
 let get_map (Node (_s, m)) = m
 let make_leaf s = Node (String_set.singleton s, String_map.empty)
 let make_node m = Node (String_set.empty, m)
-let rec weaken_map s (Node (s0, m0)) =
-  Node (String_set.union s s0, String_map.map (weaken_map s) m0)
 let rec collect_free (Node (s, m)) =
   String_map.fold (fun _ n -> String_set.union (collect_free n)) m s
 
@@ -56,18 +54,26 @@ let rec lookup_map lid m =
 
 (* Collect free module identifiers in the a.s.t. *)
 
-let free_structure_names = ref String_set.empty
+let free_structure_names_key =
+  Request_local.new_key (fun () -> ref String_set.empty)
+
+let free_structure_names () = Domain.DLS.get free_structure_names_key
 
 let add_names s =
-  free_structure_names := String_set.union s !free_structure_names
+  free_structure_names () := String_set.union s !(free_structure_names ())
 
 let rec add_path bv ?(p = []) = function
   | Lident s ->
     let free =
-      try lookup_free (s :: p) bv with Not_found -> String_set.singleton s
+      try lookup_free (s :: p) bv
+      with Not_found -> (
+        (* Also record [S.M] for a qualified free path: when [S] is the
+           namespace of the module's own package, the build system resolves
+           [M] in that namespace, which [S] alone cannot tell it. *)
+        match p with
+        | [] -> String_set.singleton s
+        | m :: _ -> String_set.of_list [s; s ^ "." ^ m])
     in
-    (*StringSet.iter (fun s -> Printf.eprintf "%s " s) free;
-      prerr_endline "";*)
     add_names free
   | Ldot (l, s) -> add_path bv ~p:(s :: p) l
 
@@ -91,7 +97,7 @@ let addmodule bv lid = add_path bv lid.txt
 
 let handle_extension ext =
   match (fst ext).txt with
-  | "error" | "ocaml.error" ->
+  | "error" ->
     raise (Location.Error (Builtin_attributes.error_of_extension ext))
   | _ -> ()
 
@@ -100,7 +106,11 @@ let rec add_type bv ty =
   | Ptyp_any -> ()
   | Ptyp_var _ -> ()
   | Ptyp_arrow {params; ret} ->
-    List.iter (fun arg -> add_type bv arg.typ) params;
+    List.iter
+      (function
+        | Parg_type {typ} -> add_type bv typ
+        | Parg_fixed _ -> ())
+      params;
     add_type bv ret
   | Ptyp_tuple tl -> List.iter (add_type bv) tl
   | Ptyp_constr (c, tl) ->
@@ -166,7 +176,8 @@ let add_type_extension bv te =
   add bv te.ptyext_path;
   List.iter (add_extension_constructor bv) te.ptyext_constructors
 
-let pattern_bv = ref String_map.empty
+let pattern_bv_key = Request_local.new_key (fun () -> ref String_map.empty)
+let pattern_bv () = Domain.DLS.get pattern_bv_key
 
 let rec add_pattern bv pat =
   match pat.ppat_desc with
@@ -178,6 +189,8 @@ let rec add_pattern bv pat =
   | Ppat_construct (c, {txt = args}) ->
     add bv c;
     List.iter (add_pattern bv) args
+  | Ppat_dict entries ->
+    List.iter (fun {pdp_pattern} -> add_pattern bv pdp_pattern) entries
   | Ppat_record (pl, _, rest) ->
     List.iter
       (fun {lid = lbl; x = p} ->
@@ -193,15 +206,16 @@ let rec add_pattern bv pat =
     add_pattern bv p;
     add_type bv ty
   | Ppat_variant (_, {txt = args}) -> List.iter (add_pattern bv) args
-  | Ppat_type li -> add bv li
-  | Ppat_unpack id -> pattern_bv := String_map.add id.txt bound !pattern_bv
+  | Ppat_type li | Ppat_variant_spread li -> add bv li
+  | Ppat_unpack id ->
+    pattern_bv () := String_map.add id.txt bound !(pattern_bv ())
   | Ppat_exception p -> add_pattern bv p
   | Ppat_extension e -> handle_extension e
 
 let add_pattern bv pat =
-  pattern_bv := bv;
+  pattern_bv () := bv;
   add_pattern bv pat;
-  !pattern_bv
+  !(pattern_bv ())
 
 let rec add_expr bv exp =
   match exp.pexp_desc with
@@ -231,9 +245,10 @@ let rec add_expr bv exp =
   | Pexp_match (e, pel) ->
     add_expr bv e;
     add_cases bv pel
-  | Pexp_try (e, pel) ->
+  | Pexp_try (e, pel, finally) ->
     add_expr bv e;
-    add_cases bv pel
+    add_cases bv pel;
+    add_opt add_expr bv finally
   | Pexp_tuple el -> List.iter (add_expr bv) el
   | Pexp_construct (c, {txt = args}) ->
     add bv c;
@@ -254,6 +269,16 @@ let rec add_expr bv exp =
     add bv fld;
     add_expr bv e2
   | Pexp_array el -> List.iter (add_expr bv) el
+  | Pexp_dict entries ->
+    List.iter
+      (function
+        | Pdict_entry (_, e) | Pdict_spread e -> add_expr bv e)
+      entries
+  | Pexp_spread (_, elements) ->
+    List.iter
+      (function
+        | Pspread_item e | Pspread e -> add_expr bv e)
+      elements
   | Pexp_ifthenelse (e1, e2, opte3) ->
     add_expr bv e1;
     add_expr bv e2;
@@ -281,7 +306,7 @@ let rec add_expr bv exp =
     add_pattern bv pat |> ignore;
     add_expr bv e1;
     add_expr bv e2
-  | Pexp_coerce (e1, (), ty3) ->
+  | Pexp_coerce (e1, ty3) ->
     add_expr bv e1;
     add_type bv ty3
   | Pexp_constraint (e1, ty2) ->
@@ -301,13 +326,8 @@ let rec add_expr bv exp =
   | Pexp_open (_ovf, m, e) ->
     let bv = open_module bv m.txt in
     add_expr bv e
-  | Pexp_extension
-      (( {txt = "ocaml.extension_constructor" | "extension_constructor"; _},
-         PStr [item] ) as e) -> (
-    match item.pstr_desc with
-    | Pstr_eval ({pexp_desc = Pexp_construct (c, {txt = []})}, _) -> add bv c
-    | _ -> handle_extension e)
   | Pexp_extension e -> handle_extension e
+  | Pexp_raw _ | Pexp_todo _ -> ()
   | Pexp_await e -> add_expr bv e
   | Pexp_jsx_element (Jsx_fragment {jsx_fragment_children = children}) ->
     add_jsx_children bv children
@@ -387,13 +407,13 @@ and add_module_alias bv l =
       bound (* cannot delay *))
 
 and add_modtype_binding bv mty =
-  if not !Clflags.transparent_modules then add_modtype bv mty;
+  if not !((Clflags.current ()).transparent_modules) then add_modtype bv mty;
   match mty.pmty_desc with
   | Pmty_alias l -> add_module_alias bv l
   | Pmty_signature s -> make_node (add_signature_binding bv s)
   | Pmty_typeof modl -> add_module_binding bv modl
   | _ ->
-    if !Clflags.transparent_modules then add_modtype bv mty;
+    if !((Clflags.current ()).transparent_modules) then add_modtype bv mty;
     bound
 
 and add_signature bv sg = ignore (add_signature_binding bv sg)
@@ -443,7 +463,7 @@ and add_sig_item (bv, m) item =
     (bv, m)
 
 and add_module_binding bv modl =
-  if not !Clflags.transparent_modules then add_module bv modl;
+  if not !((Clflags.current ()).transparent_modules) then add_module bv modl;
   match modl.pmod_desc with
   | Pmod_ident l -> (
     try
@@ -457,7 +477,7 @@ and add_module_binding bv modl =
         bound))
   | Pmod_structure s -> make_node (snd (add_structure_binding bv s))
   | _ ->
-    if !Clflags.transparent_modules then add_module bv modl;
+    if !((Clflags.current ()).transparent_modules) then add_module bv modl;
     bound
 
 and add_module bv modl =
@@ -475,6 +495,7 @@ and add_module bv modl =
     add_modtype bv mty
   | Pmod_unpack e -> add_expr bv e
   | Pmod_extension e -> handle_extension e
+  | Pmod_await modl -> add_module bv modl
 
 and add_structure bv item_list =
   let bv, m = add_structure_binding bv item_list in
@@ -526,11 +547,12 @@ and add_struct_item (bv, m) item : _ String_map.t * _ String_map.t =
     add_names s;
     let add = String_map.fold String_map.add m' in
     (add bv, add m)
-  | Pstr_attribute _ -> (bv, m)
+  | Pstr_attribute _ | Pstr_raw _ -> (bv, m)
   | Pstr_extension (e, _) ->
     handle_extension e;
     (bv, m)
 
 and add_implementation bv l =
-  if !Clflags.transparent_modules then ignore (add_structure_binding bv l)
+  if !((Clflags.current ()).transparent_modules) then
+    ignore (add_structure_binding bv l)
   else ignore (add_structure bv l)

@@ -210,8 +210,7 @@ let rec expr_to_context_path_inner ~(in_jsx_context : bool)
     (e : Parsetree.expression) =
   match e.pexp_desc with
   | Pexp_braces {expr} -> expr_to_context_path_inner ~in_jsx_context expr
-  | Pexp_constant (Pconst_string _ | Pconst_json _ | Pconst_raw_source _) ->
-    Some Completable.CPString
+  | Pexp_constant (Pconst_string _) -> Some Completable.CPString
   | Pexp_template _ -> Some Completable.CPString
   | Pexp_tagged_template {tag} -> (
     match expr_to_context_path ~in_jsx_context tag with
@@ -231,6 +230,19 @@ let rec expr_to_context_path_inner ~(in_jsx_context : bool)
          (match exprs with
          | [] -> None
          | exp :: _ -> expr_to_context_path ~in_jsx_context exp))
+  | Pexp_dict _ -> Some (CPDict None)
+  | Pexp_spread (kind, _) ->
+    (* Typed like the runtime call it compiles to, as when the parser
+       represented it as [Pexp_apply] *)
+    Some
+      (CPApply
+         ( CPId
+             {
+               path = [Ast_spread.module_name kind; "spread"];
+               completion_context = Value;
+               loc = e.pexp_loc;
+             },
+           [Nolabel] ))
   | Pexp_ident {txt = Lident "->"} -> None
   | Pexp_ident {txt; loc} ->
     Some
@@ -509,6 +521,12 @@ let completion_with_parser1 ~debug ~offset ~pos_cursor ~kind_file
                  }
               :: pattern_path)
             ?context_path)
+    | Ppat_dict entries ->
+      Ext_list.iter entries (fun {pdp_pattern; pdp_optional} ->
+          scope_pattern
+            ~pattern_path:
+              (Completable.NDictValue {optional = pdp_optional} :: pattern_path)
+            ?context_path pdp_pattern)
     | Ppat_record (fields, _, rest) -> (
       Ext_list.iter fields (fun {lid = fname; x = p} ->
           match fname with
@@ -537,7 +555,7 @@ let completion_with_parser1 ~debug ~offset ~pos_cursor ~kind_file
       scope_pattern ~pattern_path
         ?context_path:(Type_utils.context_path_from_core_type core_type)
         p
-    | Ppat_type _ -> ()
+    | Ppat_type _ | Ppat_variant_spread _ -> ()
     | Ppat_unpack {txt; loc} ->
       scope := !scope |> Scope.add_module ~name:txt ~loc
     | Ppat_exception p -> scope_pattern ~pattern_path ?context_path p
@@ -744,13 +762,23 @@ let completion_with_parser1 ~debug ~offset ~pos_cursor ~kind_file
       mbs |> List.iter scope_module_binding;
       mbs |> List.iter (fun b -> iterator.module_binding iterator b);
       processed := true
-    | Pstr_include {pincl_mod = {pmod_desc = med}} -> (
-      match med with
-      | Pmod_ident {txt = lid; loc}
-      | Pmod_apply ({pmod_desc = Pmod_ident {txt = lid; loc}}, _) ->
+    | Pstr_include {pincl_mod} -> (
+      (* [include await M] and [include (await F)(X)] include [M] and [F] *)
+      let without_awaits m = snd (Ast_await.remove_awaits false m) in
+      let included_path =
+        match (without_awaits pincl_mod).pmod_desc with
+        | Pmod_ident lid -> Some lid
+        | Pmod_apply (functor_, _) -> (
+          match (without_awaits functor_).pmod_desc with
+          | Pmod_ident lid -> Some lid
+          | _ -> None)
+        | _ -> None
+      in
+      match included_path with
+      | Some {txt = lid; loc} ->
         let module_name = Longident.flatten lid |> String.concat "." in
         scope := !scope |> Scope.add_include ~name:module_name ~loc
-      | _ -> ())
+      | None -> ())
     | _ -> ());
     if not !processed then
       Ast_iterator.default_iterator.structure_item iterator item
@@ -1272,6 +1300,9 @@ let completion_with_parser1 ~debug ~offset ~pos_cursor ~kind_file
         | Pexp_object_literal fields ->
           List.iter (fun (_, e) -> iterator.expr iterator e) fields
         | Pexp_extension ({txt}, _) -> set_result (CextensionNode txt)
+        | Pexp_raw {kind} ->
+          set_result (CextensionNode (Ast_raw.extension_name kind))
+        | Pexp_todo _ -> set_result (CextensionNode Ast_todo.name)
         | Pexp_constant _ -> set_result Cnone
         | Pexp_ident lid ->
           let lid_path = flatten_lid_check_dot lid in

@@ -13,8 +13,8 @@ use std::borrow::Cow;
 
 use crate::parse_arena::{
     ApplyArgs, ArityIdx, CaseList, CoreTypeIdx, ExprFieldList, ExprIdx, ExprList, LidentIdx,
-    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx, StrIdx,
-    TypeList, VbList,
+    LocIdx, Located, ModExprIdx, ModTypeIdx, PatFieldList, PatIdx, PatList, PosIdx,
+    SpreadElementList, StrIdx, TypeList, VbList,
 };
 use serde::{Deserialize, Serialize};
 
@@ -190,11 +190,6 @@ pub enum Constant {
     Char { source: StrIdx, semantic: i32 },
     /// An ordinary double-quoted string literal (OCaml `Pconst_string`).
     String(StringConst),
-    /// The JavaScript source inside a non-interpolated ``json`...` `` literal.
-    Json(StrIdx),
-    /// JavaScript source carried by a compiler extension such as `raw`,
-    /// `ffi` or `re`.
-    RawSource(StrIdx),
     /// Float constant with optional suffix.
     Float(StrIdx, Option<char>),
 }
@@ -495,8 +490,38 @@ pub struct TypeArg {
     pub attrs: Attributes,
     /// Argument label.
     pub lbl: ArgLabel,
-    /// Argument type (arena index).
+    /// Argument type (arena index). For a fixed argument this is the bare
+    /// `_` it is written with, located at that `_` (what OCaml
+    /// `Ast_external_process.arg_parts` types a `Parg_fixed` as).
     pub typ: CoreTypeIdx,
+    /// OCaml `Parg_fixed {value; loc}`: an external argument written
+    /// `@as(value) _`, whose value is fixed by the binding. `None` is
+    /// `Parg_type`.
+    pub fixed: Option<Box<FixedArg>>,
+}
+
+/// The payload of OCaml `Parg_fixed`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FixedArg {
+    /// The fixed value as written.
+    pub value: FixedValue,
+    /// The location of the value: the `@as` payload.
+    pub value_loc: LocIdx,
+    /// The whole argument, from `@as` to `_`.
+    pub loc: LocIdx,
+}
+
+/// OCaml `Parsetree.fixed_value`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum FixedValue {
+    /// `@as(1)`: the integer literal's source.
+    Int(StringLoc),
+    /// `@as("s")`.
+    String(StringLiteral),
+    /// `@as(`s`)`: the source between the backquotes.
+    Template(StringLoc),
+    /// `@as(json`{}`)`: the JavaScript source between the backquotes.
+    Json(StringLoc),
 }
 
 /// Core type descriptions.
@@ -601,12 +626,16 @@ pub enum PatternDesc {
     Ppat_record(Box<(PatFieldList, ClosedFlag, Option<RecordPatRest>)>),
     /// Array: `[P1, ..., Pn]`.
     Ppat_array(PatList),
+    /// Dict: `dict{"k1": P1, "k2": ?P2}`.
+    Ppat_dict(Box<Vec<DictPatternEntry>>),
     /// Or-pattern: `P1 | P2`.
     Ppat_or(PatIdx, PatIdx),
     /// Constraint: `(P: T)`.
     Ppat_constraint(Box<(PatIdx, CoreTypeIdx)>),
     /// Type pattern: `#tconstr`.
     Ppat_type(Loc<LidentIdx>),
+    /// Variant spread: `...t`.
+    Ppat_variant_spread(Loc<LidentIdx>),
     /// Unpack: `module(P)`.
     Ppat_unpack(StringLoc),
     /// Exception: `exception P`.
@@ -624,6 +653,54 @@ pub struct PatternRecordField {
     pub pat: PatIdx,
     /// Whether this is optional.
     pub opt: bool,
+}
+
+/// An entry of a dict pattern (compiler/ml/parsetree.ml `dict_pattern_entry`):
+/// `"k": P`, or `"k": ?P` when `pdp_optional`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DictPatternEntry {
+    pub pdp_key: StringLoc,
+    pub pdp_pattern: PatIdx,
+    pub pdp_optional: bool,
+}
+
+/// An entry of a dict literal (compiler/ml/parsetree.ml `dict_entry`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum DictEntry {
+    /// `"k": E`
+    Pdict_entry(StringLoc, ExprIdx),
+    /// `...E`
+    Pdict_spread(ExprIdx),
+}
+
+/// The kind of a literal with spreads (compiler/ml/parsetree.ml
+/// `spread_kind`).
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpreadKind {
+    /// `[E1, ...E2]`
+    Spread_array,
+    /// `list{...E1, E2}`
+    Spread_list,
+}
+
+/// An element of a literal with spreads (compiler/ml/parsetree.ml
+/// `spread_element`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum SpreadElement {
+    /// `E`
+    Pspread_item(ExprIdx),
+    /// `...E`
+    Pspread(ExprIdx),
+}
+
+impl SpreadElement {
+    /// The element's expression, item or spread.
+    pub fn expr(self) -> ExprIdx {
+        match self {
+            SpreadElement::Pspread_item(e) | SpreadElement::Pspread(e) => e,
+        }
+    }
 }
 
 /// Record-rest pattern binding (`...Type.t as name`).
@@ -690,11 +767,61 @@ pub struct PexpApply {
 }
 
 /// OCaml `Pexp_template {source_segments; values}`: an ordinary backquoted
-/// expression. There is always one more source segment than value.
+/// expression. Each segment's location covers its text only, without the
+/// backquotes, `${` or `}` around it, and there is always one more source
+/// segment than value.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PexpTemplate {
     pub source_segments: Vec<StringLoc>,
     pub values: Vec<ExprIdx>,
+}
+
+/// OCaml `Pexp_raw {kind; name_loc; source}`. `name_loc` is the location of
+/// `%raw` or `%ffi`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PexpRaw {
+    pub kind: RawKind,
+    pub name_loc: LocIdx,
+    pub source: RawSource,
+}
+
+/// OCaml `Pexp_todo {name_loc; message}`: `%todo` or `%todo("message")`.
+/// `name_loc` is the location of `%todo`; `message` is a string literal or a
+/// template without interpolations, as written.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PexpTodo {
+    pub name_loc: LocIdx,
+    pub message: Option<ExprIdx>,
+}
+
+/// OCaml `Pstr_raw {name_loc; source; attrs}`. `name_loc` is the location of
+/// `%%raw`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PstrRaw {
+    pub name_loc: LocIdx,
+    pub source: RawSource,
+    pub attrs: Attributes,
+}
+
+/// OCaml `Parsetree.raw_kind`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RawKind {
+    /// `%raw`: any JavaScript expression.
+    Expression,
+    /// `%ffi`: a JavaScript function.
+    Function,
+}
+
+/// OCaml `Parsetree.raw_source`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum RawSource {
+    /// `%raw("...")`: the JavaScript source, which is also the text between
+    /// the quotes. The location is the string literal's.
+    String(StringLoc),
+    /// `%raw(`...`)`: the template source as written, from which
+    /// `String_literal.decode_raw_template_source` gives the JavaScript
+    /// source.
+    Template(StringLoc),
 }
 
 /// OCaml `Pexp_tagged_template {tag; raw_sources; values}`.
@@ -738,8 +865,10 @@ pub enum ExpressionDesc {
     Pexp_apply(PexpApply),
     /// Match: `switch E { | P1 => E1 | ... }`.
     Pexp_match((ExprIdx, CaseList)),
-    /// Try: `try E { | P1 => E1 | ... }`.
-    Pexp_try((ExprIdx, CaseList)),
+    /// Try: `try E catch { | P1 => E1 | ... } finally { E_fin }`. The case
+    /// list is empty when there is no catch, and then there is always a
+    /// finally expression (parsetree.ml `Pexp_try`).
+    Pexp_try((ExprIdx, CaseList, Option<ExprIdx>)),
     /// Tuple: `(E1, E2, ..., En)`.
     Pexp_tuple(ExprList),
     /// Constructor: `C`, `C(E)` or `C(E1, ..., En)`, with the source argument
@@ -755,6 +884,13 @@ pub enum ExpressionDesc {
     Pexp_setfield(Box<(ExprIdx, Loc<LidentIdx>, ExprIdx)>),
     /// Array: `[E1, ..., En]`.
     Pexp_array(ExprList),
+    /// Dict: `dict{"k1": E1, ...E2}`.
+    Pexp_dict(Box<Vec<DictEntry>>),
+    /// Literal with spreads: `[E1, ...E2]` or `list{...E1, E2}`. The parser
+    /// produces it only for literals that need it: an array literal without
+    /// a spread is `Pexp_array`, and a list literal whose only spread is its
+    /// tail is a chain of `::` constructors (parsetree.ml `Pexp_spread`).
+    Pexp_spread(SpreadKind, SpreadElementList),
     /// If-then-else: `if E1 { E2 } else { E3 }`.
     Pexp_ifthenelse(Box<(ExprIdx, ExprIdx, Option<ExprIdx>)>),
     /// Ternary: `E1 ? E2 : E3`.
@@ -800,6 +936,10 @@ pub enum ExpressionDesc {
     Pexp_open(Box<(OverrideFlag, Loc<LidentIdx>, ExprIdx)>),
     /// Extension: `[%id]`.
     Pexp_extension(Box<Extension>),
+    /// `%raw("...")` and `%ffi("...")`: JavaScript source.
+    Pexp_raw(Box<PexpRaw>),
+    /// `%todo` and `%todo("message")`: code that is not written yet.
+    Pexp_todo(PexpTodo),
     /// Await: `await E`.
     Pexp_await(ExprIdx),
     /// An ordinary backquoted template: `` `a ${b}` ``.
@@ -854,10 +994,42 @@ pub struct ValueBinding {
     pub pvb_pat: PatIdx,
     /// Expression (arena index).
     pub pvb_expr: ExprIdx,
+    /// The `@react.component` annotation, taken out of the attributes when
+    /// the binding is built (`Ast_helper.Vb.mk`).
+    pub pvb_jsx_component: Option<Box<JsxComponent>>,
     /// Attributes.
     pub pvb_attributes: Attributes,
     /// Location.
     pub pvb_loc: Location,
+}
+
+/// OCaml `Parsetree.jsx_component`: a JSX component definition,
+/// `@react.component`, `@jsx.component` or their `componentWithProps` forms
+/// on a `let`, an `external` or a signature item. The attribute is the
+/// surface syntax; this is what it means.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct JsxComponent {
+    pub pjc_kind: JsxComponentKind,
+    pub pjc_namespace: JsxComponentNamespace,
+    /// The attribute's own location.
+    pub pjc_loc: LocIdx,
+}
+
+/// OCaml `Parsetree.jsx_component_kind`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum JsxComponentKind {
+    /// `@react.component`: the props are the labelled arguments.
+    /// `@react.component(: t)` makes them share the props type `t`.
+    Labelled(Option<CoreTypeIdx>),
+    /// `@react.componentWithProps`: the function takes a props record.
+    WithProps,
+}
+
+/// OCaml `Parsetree.jsx_component_namespace`: how the attribute was spelled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum JsxComponentNamespace {
+    React,
+    Jsx,
 }
 
 // ============================================================================
@@ -982,6 +1154,9 @@ pub enum ModuleExprDesc {
     Pmod_unpack(ExprIdx),
     /// Extension: `[%id]`.
     Pmod_extension(Box<Extension>),
+    /// `await ME`: a dynamic import when ME is a module path, possibly
+    /// constrained; elsewhere it has no effect.
+    Pmod_await(ModExprIdx),
 }
 
 /// A module type.
@@ -1069,6 +1244,8 @@ pub enum StructureItemDesc {
     Pstr_attribute(Box<Attribute>),
     /// Extension: `[%%id]`.
     Pstr_extension(Box<(Extension, Attributes)>),
+    /// `%%raw("...")`: JavaScript statements.
+    Pstr_raw(Box<PstrRaw>),
 }
 
 /// A signature item.
@@ -1149,6 +1326,9 @@ pub struct ValueDescription {
     pub pval_type: CoreTypeIdx,
     /// The primitive (for externals): `None` for `val x: T`.
     pub pval_prim: Option<PrimitiveRepr>,
+    /// The `@react.component` annotation, taken out of the attributes when
+    /// the description is built (`Ast_helper.Val.mk`).
+    pub pval_jsx_component: Option<Box<JsxComponent>>,
     /// Attributes.
     pub pval_attributes: Attributes,
     /// Location.
@@ -1405,6 +1585,19 @@ mod tests {
         assert_send_sync::<RecFlag>();
         assert_send_sync::<ClosedFlag>();
     }
+
+    /// `Pexp_spread` keeps its elements in an arena list pool, so the node
+    /// adds no payload to `ExpressionDesc`.
+    #[test]
+    fn spread_literal_layout() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<SpreadKind>(), 1);
+        assert_eq!(size_of::<SpreadElement>(), 8);
+        assert_eq!(size_of::<SpreadElementList>(), 8);
+        assert_eq!(size_of::<ExpressionDesc>(), EXPRESSION_DESC_SIZE);
+    }
+
+    const EXPRESSION_DESC_SIZE: usize = 24;
 
     #[test]
     #[ignore]

@@ -28,22 +28,24 @@
    2. all variables are of right scope
 *)
 let check ~file ~pass lam =
-  let defined_variables = Hash_set_ident.create 1000 in
+  let defined_variables = Hash_ident.create 1000 in
   let success = ref true in
   let use (id : Ident.t) =
-    if not @@ Hash_set_ident.mem defined_variables id then (
-      Format.fprintf Format.err_formatter
+    if not @@ Hash_ident.mem defined_variables id then (
+      Format.fprintf
+        (Compiler_request_output.stderr_formatter ())
         "\n[SANITY after %s]:%s/%d used before defined in %s@." pass id.name
         id.stamp file;
       success := false)
   in
   let def (id : Ident.t) =
-    if Hash_set_ident.mem defined_variables id then (
-      Format.fprintf Format.err_formatter
+    if Hash_ident.mem defined_variables id then (
+      Format.fprintf
+        (Compiler_request_output.stderr_formatter ())
         "\n[SANITY after %s]:%s/%d bound twice in %s@." pass id.name id.stamp
         file;
       success := false)
-    else Hash_set_ident.add defined_variables id
+    else Hash_ident.add defined_variables id ()
   in
   let rec check_list xs (cxt : Set_int.t) =
     Ext_list.iter xs (fun x -> check_staticfails x cxt)
@@ -78,19 +80,19 @@ let check ~file ~pass lam =
       check_staticfails arg cxt;
       check_list_snd sw.sw_consts cxt;
       check_list_snd sw.sw_blocks cxt;
-      Ext_option.iter sw.sw_failaction (fun x -> check_staticfails x cxt)
+      Option.iter (fun x -> check_staticfails x cxt) sw.sw_failaction
     | Lstringswitch (arg, cases, default) ->
       check_staticfails arg cxt;
       check_list_snd cases cxt;
-      Ext_option.iter default (fun x -> check_staticfails x cxt)
+      Option.iter (fun x -> check_staticfails x cxt) default
     | Lstaticraise (i, args) ->
-      if Set_int.mem cxt i then check_list args cxt
+      if Set_int.mem i cxt then check_list args cxt
       else
         failwith (Printf.sprintf "exit %d unbound after %s in %s" i pass file)
     | Lstaticcatch (e1, (j, _vars), e2) ->
-      check_staticfails e1 (Set_int.add cxt j);
+      check_staticfails e1 (Set_int.add j cxt);
       check_staticfails e2 cxt
-    | Ltrywith (e1, _exn, e2) ->
+    | Ltrywith (e1, _, e2) | Ltryfinally (e1, e2) ->
       check_staticfails e1 cxt;
       check_staticfails e2 cxt
     | Lifthenelse (e1, e2, e3) -> check_list [e1; e2; e3] cxt
@@ -124,13 +126,13 @@ let check ~file ~pass lam =
       iter arg;
       iter_list_snd sw.sw_consts;
       iter_list_snd sw.sw_blocks;
-      Ext_option.iter sw.sw_failaction iter;
+      Option.iter iter sw.sw_failaction;
       assert (
         not (sw.sw_failaction <> None && sw.sw_consts_full && sw.sw_blocks_full))
     | Lstringswitch (arg, cases, default) ->
       iter arg;
       iter_list_snd cases;
-      Ext_option.iter default iter
+      Option.iter iter default
     | Lstaticraise (_i, args) -> iter_list args
     | Lstaticcatch (e1, (_, vars), e2) ->
       iter e1;
@@ -139,6 +141,9 @@ let check ~file ~pass lam =
     | Ltrywith (e1, exn, e2) ->
       iter e1;
       def exn;
+      iter e2
+    | Ltryfinally (e1, e2) ->
+      iter e1;
       iter e2
     | Lifthenelse (e1, e2, e3) ->
       iter e1;

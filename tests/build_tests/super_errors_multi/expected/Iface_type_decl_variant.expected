@@ -8,12 +8,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_type_decl_variant/Foo.res
   does not match the interface /.../fixtures/Iface_type_decl_variant/Foo.resi:
-  Type declarations do not match:
+  
+  Actual declaration (/.../fixtures/Iface_type_decl_variant/Foo.res:1:1-3:13):
     type t = A | B(string)
-  is not included in
+  
+  Expected declaration (/.../fixtures/Iface_type_decl_variant/Foo.resi:1:1-3:10):
     type t = A | B(int)
-  /.../fixtures/Iface_type_decl_variant/Foo.resi:1:1-3:10:
-    Expected declaration
-  /.../fixtures/Iface_type_decl_variant/Foo.res:1:1-3:13:
-    Actual declaration
-  The types for field B are not equal.
+  
+  The types for constructor B are not equal.

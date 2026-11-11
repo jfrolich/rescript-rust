@@ -6,7 +6,9 @@ use crate::ident::Ident;
 use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
-use crate::lambda::lam_beta_reduce::{propagate_beta_reduce, propagate_beta_reduce_with_map};
+use crate::lambda::lam_beta_reduce::{
+    BetaReduceEnv, propagate_beta_reduce, propagate_beta_reduce_with_map,
+};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_compile_context::{BoxedNullable, RecFlag};
@@ -100,6 +102,13 @@ fn external_inline_args_are_allowed(a: &LamArena, args: &[Lam], ident_tbl: &Iden
     })
 }
 
+/// How deep inlining may nest: simplifying an inlined body can inline the
+/// functions it calls, and so on. Without a bound, a chain of small functions
+/// that each call the previous one gets the whole chain inlined into every
+/// function, which is quadratic in the length of the chain. Functions marked
+/// `@inline` are always inlined.
+pub(crate) const MAX_INLINE_DEPTH: usize = 4;
+
 /// `Lam_pass_remove_alias.simplify_alias` (lam_pass_remove_alias.ml:50-290).
 pub fn simplify_alias(
     a: &mut LamArena,
@@ -110,10 +119,16 @@ pub fn simplify_alias(
 ) -> Lam {
     let export_idents = std::mem::take(&mut meta.export_idents);
     let id_gen = meta.id_gen.clone();
+    // lam_pass_remove_alias.ml:57-61: inlining keeps the reads of assigned
+    // variables in order (see `lam_beta_reduce`). Only SROA, which runs
+    // later, makes assignments now, so this is usually empty.
+    let assignable = crate::lambda::lambda_traverse::arena_assigned_variables(a, lam);
     let result = Simplifier {
         ident_tbl: &mut meta.ident_tbl,
+        assignable: &assignable,
         export_idents: &export_idents,
         id_gen: &id_gen,
+        inline_depth: 0,
         jsx_preserve,
         external_inline,
     }
@@ -124,8 +139,12 @@ pub fn simplify_alias(
 
 struct Simplifier<'a, 'r> {
     ident_tbl: &'a mut IdentTable,
+    /// The variables the module assigns (`meta.assignable`).
+    assignable: &'a ahash::AHashSet<Ident>,
     export_idents: &'a ahash::AHashSet<Ident>,
     id_gen: &'a crate::context::IdGenerator,
+    inline_depth: usize,
+    /// `!((Clflags.current ()).jsx_preserve)`, read by the JSX tag case.
     jsx_preserve: bool,
     external_inline: &'a mut ExternalInlineResolver<'r>,
 }
@@ -209,11 +228,11 @@ impl Simplifier<'_, '_> {
         info: crate::lambda::arena::PrimId,
     ) -> Lam {
         let primitive = &a.prim_payload(info).primitive;
-        // 7432: no optimization of the component of a JSX call in preserve
-        // mode.
+        // In JSX preserve mode, keep a JSX tag like `M.make` as it is:
+        // flattening it may give a variable with a lowercase name, which JSX
+        // reads as an intrinsic element (#7432).
         if self.jsx_preserve
-            && matches!(primitive, Primitive::PjsCall(call)
-                if call.prim_name == "jsx" || call.prim_name == "jsxs")
+            && matches!(primitive, Primitive::Pjsx(_))
             && a.list(args)
                 .first()
                 .is_some_and(|f| matches!(a.as_prim(*f), Some((Primitive::Pfield(_, _), _, _))))
@@ -258,6 +277,15 @@ impl Simplifier<'_, '_> {
                 let v = a.as_var(x).expect("checked variable");
                 match self.ident_tbl.get(&v) {
                     Some(IdKind::OptionalBlock(l, _)) => *l,
+                    // `v` bound to `Some(l)`: unwrapping gives back `l`,
+                    // whether or not it was nested. Only substitute forms
+                    // that are safe to repeat.
+                    Some(IdKind::NormalOptional(l)) if a.as_var(*l).is_some() => *l,
+                    Some(IdKind::NormalOptional(l))
+                        if a.as_const(*l).is_some_and(|c| !c.is_allocating()) =>
+                    {
+                        *l
+                    }
                     _ if not_nest => x,
                     _ => lam,
                 }
@@ -266,8 +294,17 @@ impl Simplifier<'_, '_> {
         }
     }
 
+    /// The simplifier's tables, as the beta reduction reads and updates them.
+    fn beta_reduce_env(&mut self) -> BetaReduceEnv<'_> {
+        BetaReduceEnv {
+            ident_tbl: &mut *self.ident_tbl,
+            id_gen: self.id_gen,
+            assignable: self.assignable,
+        }
+    }
+
     fn beta(&mut self, a: &mut LamArena, params: &[Ident], body: Lam, args: &[Lam]) -> Lam {
-        propagate_beta_reduce(a, self.ident_tbl, self.id_gen, params, body, args)
+        propagate_beta_reduce(a, self.beta_reduce_env(), params, body, args)
     }
 
     fn simpl_apply(
@@ -290,7 +327,6 @@ impl Simplifier<'_, '_> {
                 let reduced = self.beta(a, &f.params, body, &arg_list);
                 return self.simpl(a, reduced);
             }
-            // `Lambda.apply fn args' ap_info ?ap_transformed_jsx:None`.
             let nf = self.simpl(a, func);
             let (nargs, changed) = a.map_list(args, &mut |a, x| self.simpl(a, x));
             if nf == func && !changed {
@@ -298,7 +334,7 @@ impl Simplifier<'_, '_> {
             }
             let ap_info: ApInfo = a.apply_payload(info).info.clone();
             let nargs = a.list_vec(nargs);
-            return a.apply(nf, &nargs, ap_info, false);
+            return a.apply(nf, &nargs, ap_info);
         }
         match a.node(func) {
             Node::Var(v) => {
@@ -347,8 +383,7 @@ impl Simplifier<'_, '_> {
                 match rec_flag {
                     RecFlag::Rec => propagate_beta_reduce_with_map(
                         a,
-                        self.ident_tbl,
-                        self.id_gen,
+                        self.beta_reduce_env(),
                         &param_map,
                         &params,
                         body,
@@ -356,19 +391,25 @@ impl Simplifier<'_, '_> {
                     ),
                     RecFlag::SelfRec => normal(self, a),
                     RecFlag::NonRec => {
-                        if arg_list.iter().any(|x| hit_variable(a, &v, *x)) {
+                        if arg_list.iter().any(|x| hit_variable(a, &v, *x))
+                            || (self.inline_depth >= MAX_INLINE_DEPTH
+                                && a.func_payload(fi).attr.inline
+                                    != crate::lambda::InlineAttribute::Always)
+                        {
                             normal(self, a)
                         } else {
                             let reduced = propagate_beta_reduce_with_map(
                                 a,
-                                self.ident_tbl,
-                                self.id_gen,
+                                self.beta_reduce_env(),
                                 &param_map,
                                 &params,
                                 body,
                                 &arg_list,
                             );
-                            self.simpl(a, reduced)
+                            self.inline_depth += 1;
+                            let inlined = self.simpl(a, reduced);
+                            self.inline_depth -= 1;
+                            inlined
                         }
                     }
                 }

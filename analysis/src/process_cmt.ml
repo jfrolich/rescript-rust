@@ -530,8 +530,14 @@ let rec for_structure_item ~(env : Shared_types.Env.t) ~(exported : Exported.t)
               loc = declared.extent_loc;
             }
             :: !items)
+      | Tpat_dict entries ->
+        entries
+        |> List.iter (fun {Typedtree.tdp_pattern} ->
+            handle_pattern [] tdp_pattern)
       | Tpat_variant (_, Some p, _) -> handle_pattern [] p
-      | Tpat_variant (_, None, _) | Tpat_any | Tpat_constant _ -> ()
+      | Tpat_variant (_, None, _) | Tpat_any | Tpat_constant _ | Tpat_interval _
+        ->
+        ()
     in
     List.iter
       (fun {Typedtree.vb_pat; vb_attributes} ->
@@ -750,7 +756,6 @@ let file_for_cmt_infos ~module_name ~uri
   | Interface signature ->
     let structure = for_signature ~name:module_name ~env signature.sig_items in
     {uri; module_name = cmt_modname; stamps = env.stamps; structure}
-  | _ -> File.create module_name uri
 
 let file_for_cmt ~state ~module_name ~cmt ~uri =
   match Hashtbl.find_opt state.cmt_cache cmt with

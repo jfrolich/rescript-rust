@@ -373,7 +373,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
                         }
                     }
                 }
-                "-bs-jsx-mode" | "-pp" | "-ppxopt" => {
+                "-bs-jsx-mode" | "-ppxopt" => {
                     // Consume the next argument if present (value flags).
                     let _ = args.next();
                 }
@@ -654,6 +654,7 @@ fn compile_in_process(
     // warnings belong to the interface compile, so they are not printed.
     let interface_path = source_path.with_extension("resi");
     let has_interface = opts.read_cmi && interface_path.is_file();
+    let mut gentype_interface = None;
     if has_interface {
         let bytes = fs::read(&interface_path)
             .with_context(|| format!("Failed to read {}", interface_path.display()))?;
@@ -668,6 +669,7 @@ fn compile_in_process(
             &interface_options,
             &registry,
         )?;
+        gentype_interface = interface.gentype;
         if let Some(pers_struct) = interface.pers_struct {
             registry.register_module_arc(
                 &module_name,
@@ -718,12 +720,17 @@ fn compile_in_process(
         &options,
         &registry,
         has_interface,
+        gentype_interface,
     )?;
     eprint!("{}", result.warnings);
     // OCaml prints the requested dumps and still emits the JavaScript.
     print_dumps(&result.dumps);
     if targets.is_empty() {
         print!("{}", result.js_output);
+        print!(
+            "{}",
+            crate::driver::apply_gentype_outcome(result.gentype, "", &filename)?
+        );
         return Ok(());
     }
     for output in &result.js_outputs {
@@ -732,6 +739,10 @@ fn compile_in_process(
         }
         fs::write(&output.path, &output.code)?;
     }
+    print!(
+        "{}",
+        crate::driver::apply_gentype_outcome(result.gentype, "", &filename)?
+    );
     Ok(())
 }
 
@@ -897,23 +908,12 @@ fn read_ast_source_path(ast_path: &Path) -> Result<PathBuf> {
         return Err(anyhow!("Invalid .ast file: too small"));
     }
 
-    // Read the dependency section size (4 bytes, big-endian)
-    let dep_size = u32::from_be_bytes([content[0], content[1], content[2], content[3]]) as usize;
-
-    // Skip past the dependency section to get to the source path
-    let path_start = 4 + dep_size;
-    if path_start >= content.len() {
-        return Err(anyhow!("Invalid .ast file: missing source path"));
-    }
-
-    // Read until newline to get the source path
-    let path_end = content[path_start..]
-        .iter()
-        .position(|&b| b == b'\n')
-        .map(|pos| path_start + pos)
-        .unwrap_or(content.len());
-
-    let path_bytes = &content[path_start..path_end];
+    // `Binary_ast.read_header` (compiler/depends/binary_ast.ml): a header
+    // whose source path has no newline after it is damaged, as when a killed
+    // build cut the file short.
+    let header = crate::binary_ast::header::read_header(&content)
+        .ok_or_else(|| anyhow!("Invalid .ast file: missing source path"))?;
+    let path_bytes = crate::binary_ast::header::header_source(&content, &header);
     let path_str = String::from_utf8_lossy(path_bytes);
 
     if path_str.is_empty() {
@@ -1035,7 +1035,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
     // Cmt_format.read_cmt raises Cmt_format.Error(Not_a_typedtree _) when the
     // selected file contains a compiled interface without typedtree data.
     const CMT_MAGIC: &[u8; 12] = b"Caml1999T039";
-    const CMI_MAGIC: &[u8; 12] = b"Caml1999I035";
+    const CMI_MAGIC: &[u8] = crate::cmi::cmi_format::CMI_MAGIC;
 
     let data = fs::read(cmt_file).with_context(|| cmt_file.display().to_string())?;
     if data.len() < CMT_MAGIC.len() {
@@ -1047,7 +1047,7 @@ fn check_gentype_cmt_file(cmt_file: &Path) -> Result<()> {
         return Ok(());
     }
 
-    if magic == CMI_MAGIC {
+    if magic.starts_with(CMI_MAGIC) {
         let _ = io::stdout().flush();
         return Err(UserDiagnostic::new(
             "Fatal error: exception Cmt_format.Error(_)\n".to_string(),
@@ -1197,6 +1197,61 @@ fn package_output_path(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `bsc X.ast` takes the source path from the AST's header, read like
+    /// `Binary_ast.read_header`: a path without its newline is damaged, and
+    /// an empty one is not a source. Files are removed one by one, and the
+    /// directory only when empty.
+    #[test]
+    fn ast_input_source_path_follows_the_header_contract() {
+        let dir = std::env::temp_dir().join(format!("bsc-ast-header-{}", std::process::id()));
+        fs::create_dir(&dir).expect("fresh test directory");
+        let cases: [(&str, &[u8], Result<&str, &str>); 6] = [
+            (
+                "Whole.ast",
+                b"\x00\x00\x00\x09\nBelt\nJs\n/src/A.res\n\x84\x95",
+                Ok("/src/A.res"),
+            ),
+            (
+                "LastByte.ast",
+                b"\x00\x00\x00\x01\n/src/A.res\n",
+                Ok("/src/A.res"),
+            ),
+            (
+                "Unterminated.ast",
+                b"\x00\x00\x00\x01\n/src/A.res",
+                Err("missing source path"),
+            ),
+            (
+                "Negative.ast",
+                b"\xff\xff\xff\xff\nA\n/a.res\n",
+                Err("missing source path"),
+            ),
+            (
+                "Empty.ast",
+                b"\x00\x00\x00\x01\n\n",
+                Err("empty source path"),
+            ),
+            ("Short.ast", b"\x00\x00", Err("too small")),
+        ];
+        let mut outcomes = Vec::new();
+        for (name, contents, _) in &cases {
+            let path = dir.join(name);
+            fs::write(&path, contents).expect("write AST");
+            outcomes.push(read_ast_source_path(&path).map_err(|error| error.to_string()));
+            fs::remove_file(&path).expect("remove AST");
+        }
+        fs::remove_dir(&dir).expect("remove empty test directory");
+        for ((name, _, expected), outcome) in cases.iter().zip(outcomes) {
+            match (expected, outcome) {
+                (Ok(source), Ok(path)) => assert_eq!(path, PathBuf::from(source), "{name}"),
+                (Err(message), Err(error)) => {
+                    assert!(error.contains(message), "{name}: {error}")
+                }
+                (expected, outcome) => panic!("{name}: expected {expected:?}, got {outcome:?}"),
+            }
+        }
+    }
 
     #[test]
     fn package_outputs_preserve_source_case_and_strip_namespace_suffix() {

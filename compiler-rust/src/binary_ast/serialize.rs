@@ -173,6 +173,12 @@ impl PooledListItem for crate::parser::ast::Case {
     }
 }
 
+impl PooledListItem for crate::parser::ast::SpreadElement {
+    fn items(arena: &crate::parse_arena::ParseArena, list: ArenaList<Self>) -> &[Self] {
+        arena.spread_element_list(list)
+    }
+}
+
 impl<T: PooledListItem> Marshal for ArenaList<T> {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let arena = w.get_arena();

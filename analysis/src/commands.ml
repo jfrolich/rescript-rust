@@ -300,25 +300,33 @@ let format ~source ~kind_file =
     Lsp.Types.TextEdit.create ~newText:text ~range
   in
 
+  (* Keep a byte order mark, which the scanner skips *)
+  let byte_order_mark = Res_scanner.byte_order_mark source in
+
   let result =
     match kind_file with
     | Files.Res -> (
-      let {Res_driver.parsetree = structure; comments; diagnostics} =
+      let {Res_driver.parsetree = structure; comments; diagnostics; newline} =
         Res_driver.parsing_engine.parse_implementation_from_source ~source
       in
       match List.length diagnostics > 0 with
       | true -> Error "Document has syntax errors"
       | false ->
-        Ok (Res_printer.print_implementation ~comments structure |> create_range)
-      )
+        Ok
+          (byte_order_mark
+           ^ Res_printer.print_implementation ~newline ~comments structure
+          |> create_range))
     | Resi -> (
-      let {Res_driver.parsetree = signature; comments; diagnostics} =
+      let {Res_driver.parsetree = signature; comments; diagnostics; newline} =
         Res_driver.parsing_engine.parse_interface_from_source ~source
       in
       match List.length diagnostics > 0 with
       | true -> Error "Document has syntax errors"
       | false ->
-        Ok (Res_printer.print_interface ~comments signature |> create_range))
+        Ok
+          (byte_order_mark
+           ^ Res_printer.print_interface ~newline ~comments signature
+          |> create_range))
     | Other -> Error "Failed to format, file not supported"
   in
 

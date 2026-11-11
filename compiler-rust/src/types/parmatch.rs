@@ -20,7 +20,7 @@ use crate::parser::ast::ClosedFlag;
 use crate::types::MutableFlag;
 use crate::types::context::TypeContext;
 use crate::types::decl::{
-    ConstructorDescription, ConstructorKind, LabelDescription, same_constructor,
+    ConstructorDescription, ConstructorKind, LabelArrayRef, LabelDescription, same_constructor,
 };
 use crate::types::path::Path;
 use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
@@ -42,8 +42,6 @@ pub(crate) trait Oracle {
     /// constructors of the variant type, in declaration order.
     fn variant_constructors(&mut self, env: EnvRef, ty: TypeExprRef)
     -> Vec<ConstructorDescription>;
-    /// `lbl.lbl_all` for a label of the record type `record_ty`, in position order.
-    fn record_labels(&mut self, env: EnvRef, record_ty: TypeExprRef) -> Vec<LabelDescription>;
     /// The part of `pats_of_type` that needs `Env.find_type`
     /// (parmatch.ml:943-965).
     fn type_shape(&mut self, env: EnvRef, ty: TypeExprRef, always: bool) -> TypeShape;
@@ -80,15 +78,16 @@ pub(crate) trait Oracle {
     fn placeholder_lid(&self) -> LidentIdx;
     /// `Ctype.none`.
     fn none_type(&mut self) -> TypeExprRef;
-    /// Whether pattern attributes include `res.dictPattern`.
-    fn has_dict_pattern_attribute(&self, attrs: &crate::parser::ast::Attributes) -> bool;
+    /// `(Ctype.expand_head env ty).desc` is the predefined `dict` type.
+    fn is_dict_type(&mut self, env: EnvRef, ty: TypeExprRef) -> bool {
+        let ty = self.expand_head(env, ty);
+        matches!(
+            &*self.ctx().get_desc(self.ctx().repr(ty)),
+            TypeDesc::Tconstr { path, .. } if path.same(&crate::types::predef::path_dict())
+        )
+    }
     /// Whether pattern attributes include `res.patFromVariantSpread`.
     fn is_pat_from_variant_spread(&self, attrs: &crate::parser::ast::Attributes) -> bool;
-    /// Whether `lid` is `Ldot (Lident "*predef*", "Some")`.
-    fn is_predef_some_lid(&self, lid: LidentIdx) -> bool;
-    /// Whether a constructor's runtime representation is a block whose
-    /// `block_type` cannot be `undefined` (parmatch.ml:554-562).
-    fn is_block_that_cannot_be_undefined(&self, cstr: &ConstructorDescription) -> bool;
     /// `Variant_runtime.length (Variant_runtime.get_layout variant)`.
     fn variant_length(&self, cstr: &ConstructorDescription) -> usize;
     /// `get_type_path ty tenv` (parmatch.ml:334-338).
@@ -103,8 +102,10 @@ pub(crate) enum ParmatchWarning {
     AllClausesGuarded,
     PartialMatch(String),
     FragileMatch(String),
-    UnusedMatch,
-    UnusedPat,
+    /// `Unused_match reason`; the reason is empty for an ordinary unused case.
+    UnusedMatch(String),
+    /// `Unused_pat reason`.
+    UnusedPat(String),
     UnreachableCase,
     AmbiguousPattern(Vec<String>),
 }
@@ -170,6 +171,8 @@ pub(crate) enum Desc<'a> {
     Var(VarKind),
     Alias(P),
     Constant(Cow<'a, Constant>),
+    /// `Tpat_interval (lo, hi)`: an int or char range.
+    Interval(Constant, Constant),
     Tuple(Vec<P>),
     Construct {
         lid: Option<crate::parse_arena::Located<LidentIdx>>,
@@ -319,6 +322,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
             PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import(ta.pattern(*inner))),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Borrowed(c)),
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.constant(), hi.constant()),
             PatternDesc::Tpat_tuple(items) => {
                 Desc::Tuple(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
@@ -347,6 +351,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_array(items) => {
                 Desc::Array(ta.patterns(*items).map(|item| self.import(item)).collect())
             }
+            // Callers lower dict patterns to records first (`Dict_pattern`).
+            PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
             PatternDesc::Tpat_or(left, right, _) => Desc::Or(
                 self.import(ta.pattern(*left)),
                 self.import(ta.pattern(*right)),
@@ -398,27 +404,108 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
     }
 
+    /// `lbl.lbl_all`: every label carries the array its record's labels were
+    /// described with (or `Dict_pattern` built).
+    fn lbl_all(&mut self, lbl_all: LabelArrayRef) -> Vec<LabelDescription> {
+        self.oracle
+            .ctx()
+            .label_all(lbl_all)
+            .unwrap_or_else(|| panic!("a pattern label carries no lbl_all array ({lbl_all:?})"))
+    }
+
+    /// `int_range p`: the values matched by an int or char constant or
+    /// interval, as bounds.
+    fn int_range(&self, p: P) -> Option<(i64, i64)> {
+        match self.desc(p) {
+            Desc::Constant(c) => int_of_constant(c).map(|i| (i, i)),
+            Desc::Interval(lo, hi) => Some((int_of_constant(lo)?, int_of_constant(hi)?)),
+            _ => None,
+        }
+    }
+
+    /// `make_int_range p lo hi`: a constant or interval for `lo .. hi`, of
+    /// the same kind as `p`: chars when `p` starts with a char and the bounds
+    /// can be written as char literals.
+    fn make_int_range(&mut self, p: P, lo: i64, hi: i64) -> P {
+        let starts_with_char = match self.desc(p) {
+            Desc::Constant(c) => matches!(**c, Constant::Char(_)),
+            Desc::Interval(lo, _) => matches!(lo, Constant::Char(_)),
+            _ => false,
+        };
+        let chars = is_valid_uchar(lo) && is_valid_uchar(hi) && starts_with_char;
+        let konst = |i: i64| {
+            if chars {
+                Constant::Char(i as i32)
+            } else {
+                Constant::Int(i)
+            }
+        };
+        let desc = if lo == hi {
+            Desc::Constant(Cow::Owned(konst(lo)))
+        } else {
+            Desc::Interval(konst(lo), konst(hi))
+        };
+        self.with_desc(p, desc)
+    }
+
+    /// `split_int_range q column`: splits interval `q` at the bounds of the
+    /// ranges in `column`, so that each piece is either inside or outside
+    /// each of them. A constant is one piece.
+    fn split_int_range(&mut self, q: P, column: &[P]) -> Vec<P> {
+        let (Desc::Interval(..), Some((lo, hi))) = (self.desc(q), self.int_range(q)) else {
+            return vec![q];
+        };
+        let mut cuts = Vec::new();
+        for &p in column {
+            if let Some((a, b)) = self.int_range(p) {
+                if lo < a && a <= hi {
+                    cuts.push(a);
+                }
+                if b < hi && lo <= b {
+                    cuts.push(b + 1);
+                }
+            }
+        }
+        cuts.sort_unstable();
+        cuts.dedup();
+        let mut pieces = Vec::with_capacity(cuts.len() + 1);
+        let mut start = lo;
+        for c in cuts {
+            pieces.push(self.make_int_range(q, start, c - 1));
+            start = c;
+        }
+        pieces.push(self.make_int_range(q, start, hi));
+        pieces
+    }
+
     fn coherent_heads(&mut self, hp1: P, hp2: P) -> bool {
         enum Check {
             Done(bool),
             HeadPaths,
-            RecordLabelCounts(TypeExprRef, TypeExprRef),
+            RecordLabelCounts((LabelArrayRef, TypeExprRef), (LabelArrayRef, TypeExprRef)),
         }
         let check = match (self.desc(hp1), self.desc(hp2)) {
             (Desc::Construct { .. }, Desc::Construct { .. }) => Check::HeadPaths,
             (Desc::Constant(c1), Desc::Constant(c2)) => Check::Done(matches!(
                 (&**c1, &**c2),
-                (Constant::Char(_), Constant::Char(_))
-                    | (Constant::Int(_), Constant::Int(_))
-                    | (Constant::BigInt(..), Constant::BigInt(..))
+                (
+                    Constant::Char(_) | Constant::Int(_),
+                    Constant::Char(_) | Constant::Int(_)
+                ) | (Constant::BigInt(..), Constant::BigInt(..))
                     | (Constant::Float(_), Constant::Float(_))
                     | (Constant::String(..), Constant::String(..))
             )),
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                Check::Done(self.int_range(hp1).is_some() && self.int_range(hp2).is_some())
+            }
             (Desc::Tuple(l1), Desc::Tuple(l2)) => Check::Done(l1.len() == l2.len()),
             (Desc::Record { fields: f1, .. }, Desc::Record { fields: f2, .. })
                 if !f1.is_empty() && !f2.is_empty() =>
             {
-                Check::RecordLabelCounts(f1[0].lbl.lbl_res, f2[0].lbl.lbl_res)
+                Check::RecordLabelCounts(
+                    (f1[0].lbl.lbl_all, f1[0].lbl.lbl_res),
+                    (f2[0].lbl.lbl_all, f2[0].lbl.lbl_res),
+                )
             }
             (Desc::Any, _)
             | (_, Desc::Any)
@@ -433,11 +520,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 (Some(path1), Some(path2)) => path1.same(&path2),
                 _ => false,
             },
-            Check::RecordLabelCounts(res1, res2) => {
-                let env1 = self.node(hp1).env;
-                let env2 = self.node(hp2).env;
-                self.oracle.record_labels(env1, res1).len()
-                    == self.oracle.record_labels(env2, res2).len()
+            Check::RecordLabelCounts(lbl1, lbl2) => {
+                self.lbl_all(lbl1.0).len() == self.lbl_all(lbl2.0).len()
             }
         }
     }
@@ -541,6 +625,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 const_compare(c1, c2) == std::cmp::Ordering::Equal
             }
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                match (self.int_range(p), self.int_range(q)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= hi2 && lo2 <= hi1,
+                    _ => false,
+                }
+            }
             (Desc::Tuple(ps), Desc::Tuple(qs)) => self.compats(ps, qs),
             (Desc::Record { fields: l1, .. }, Desc::Record { fields: l2, .. }) => {
                 let (ps, qs) = self.records_args(l1, l2);
@@ -576,8 +666,64 @@ pub(crate) fn const_compare(x: &Constant, y: &Constant) -> std::cmp::Ordering {
             bigint_compare((*s1, b1), (*s2, b2))
         }
         (Constant::String(s1), Constant::String(s2)) => s1.as_bytes().cmp(s2.as_bytes()),
+        // `char` is an alias of `int`.
+        (Constant::Char(_) | Constant::Int(_), Constant::Char(_) | Constant::Int(_)) => {
+            int_of_constant(x).cmp(&int_of_constant(y))
+        }
         _ => constant_structural_compare(x, y),
     }
+}
+
+/// The value of an int or char constant.
+pub(crate) fn int_of_constant(c: &Constant) -> Option<i64> {
+    match c {
+        Constant::Int(i) => Some(*i),
+        Constant::Char(c) => Some(i64::from(*c)),
+        Constant::String(_) | Constant::Float(_) | Constant::BigInt(..) => None,
+    }
+}
+
+/// OCaml `Uchar.is_valid`.
+fn is_valid_uchar(i: i64) -> bool {
+    (0..=0xD7FF).contains(&i) || (0xE000..=0x10FFFF).contains(&i)
+}
+
+/// `Parmatch.int_range` on a typed pattern: the values matched by an int or
+/// char constant or interval, as bounds.
+pub(crate) fn int_range(p: &Pattern) -> Option<(i64, i64)> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_constant(c) => int_of_constant(c).map(|i| (i, i)),
+        PatternDesc::Tpat_interval(lo, hi) => Some((int_of_constant(&lo.constant())?, int_of_constant(&hi.constant())?)),
+        _ => None,
+    }
+}
+
+/// `Parmatch.make_int_range` on a typed pattern: a constant or interval for
+/// `lo .. hi`, of the same kind as `p`, as `{p with pat_desc; pat_extra = []}`.
+/// The pattern keeps `p`'s cold side data: its attributes, as in OCaml, and
+/// its `pat_extra`, which the typed arena holds immutably here; match
+/// compilation, the only caller, never reads `pat_extra`.
+pub(crate) fn make_int_range(p: &Pattern, lo: i64, hi: i64) -> Pattern {
+    let starts_with_char = matches!(
+        &p.pat_desc,
+        PatternDesc::Tpat_constant(Constant::Char(_))
+            | PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::Char(_), _)
+    );
+    let chars = is_valid_uchar(lo) && is_valid_uchar(hi) && starts_with_char;
+    let konst = |i: i64| {
+        if chars {
+            Constant::Char(i as i32)
+        } else {
+            Constant::Int(i)
+        }
+    };
+    let mut q = p.clone();
+    q.pat_desc = if lo == hi {
+        PatternDesc::Tpat_constant(konst(lo))
+    } else {
+        PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::from_constant(konst(lo)), crate::types::typedtree::IntervalBound::from_constant(konst(hi)))
+    };
+    q
 }
 
 /// OCaml `float_of_string` for the float literals kept in the typed tree.
@@ -675,6 +821,14 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 const_compare(c1, c2) == std::cmp::Ordering::Equal
             }
+            // `p1` is a piece of a column split by `split_int_range`, so it
+            // is either inside or outside `p2`.
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                match (self.int_range(p1), self.int_range(p2)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo2 <= lo1 && hi1 <= hi2,
+                    _ => false,
+                }
+            }
             (Desc::Record { .. }, Desc::Record { .. }) => true,
             (Desc::Tuple(a), Desc::Tuple(b)) | (Desc::Array(a), Desc::Array(b)) => {
                 a.len() == b.len()
@@ -708,14 +862,13 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `all_record_args lbls` (parmatch.ml:538-573).
     fn all_record_args(
         &mut self,
-        env: crate::types::typedtree::EnvRef,
         lbls: &[Field<'a>],
     ) -> Vec<Field<'a>> {
         let Some(first) = lbls.first() else {
             return Vec::new();
         };
         let opt = first.opt;
-        let lbl_all = self.oracle.record_labels(env, first.lbl.lbl_res);
+        let lbl_all = self.lbl_all(first.lbl.lbl_all);
         let mut table: Vec<Field<'a>> = lbl_all
             .into_iter()
             .map(|lbl| Field {
@@ -726,35 +879,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             })
             .collect();
         for field in lbls {
-            let lbl_is_optional = !matches!(
-                field.lbl.lbl_repres,
-                crate::types::decl::RecordRepresentation::RecordInlined { .. }
-            ) && field.lbl.lbl_optional;
-            let mut chosen = field.clone();
-            if lbl_is_optional
-                && let Desc::Construct {
-                    lid: Some(lid),
-                    args,
-                    ..
-                } = self.desc(field.pat)
-                && self.oracle.is_predef_some_lid(lid.txt)
-                && let [inner] = args.as_slice()
-            {
-                let inner = *inner;
-                match self.desc(inner) {
-                    Desc::Constant(_) => chosen.pat = inner,
-                    Desc::Construct { cstr, .. }
-                        if matches!(cstr.cstr_kind, ConstructorKind::Ordinary(_))
-                            && self.oracle.is_block_that_cannot_be_undefined(cstr) =>
-                    {
-                        chosen.pat = inner;
-                    }
-                    _ => {}
-                }
-            }
             let pos = field.lbl.lbl_pos as usize;
             if pos < table.len() {
-                table[pos] = chosen;
+                table[pos] = field.clone();
             }
         }
         table
@@ -782,7 +909,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
     /// `normalize_pat q` (parmatch.ml:599-622).
     fn normalize_pat(&mut self, q: P) -> P {
         match self.desc(q).clone() {
-            Desc::Any | Desc::Constant(_) => q,
+            Desc::Any | Desc::Constant(_) | Desc::Interval(..) => q,
             Desc::Var(_) => self.make_pat_like(Desc::Any, q),
             Desc::Alias(p) => self.normalize_pat(p),
             Desc::Tuple(args) => {
@@ -943,7 +1070,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 let (args, rest) = Self::read_args(omegas.len(), r);
                 (self.make_pat_like(Desc::Array(args), q), rest)
             }
-            Desc::Constant(_) | Desc::Any => (q, r.to_vec()),
+            Desc::Constant(_) | Desc::Interval(..) | Desc::Any => (q, r.to_vec()),
             _ => crate::misc::fatal_error("Parmatch.set_args"),
         };
         let mut result = vec![head];
@@ -1005,6 +1132,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         out
     }
 
+    /// `filter_all`'s `same_head`: int and char ranges are grouped by equal
+    /// bounds, not by containment as `simple_match` does, so that
+    /// `build_other` sees every range.
+    fn same_head(&self, q0: P, q: P) -> bool {
+        match (self.int_range(q0), self.int_range(q)) {
+            (Some(r0), Some(r)) => r0 == r,
+            _ => self.simple_match(q0, q),
+        }
+    }
+
     /// `filter_all pat0 pss` (parmatch.ml:770-822).
     fn filter_all(&mut self, pat0: P, pss: &[Row]) -> Vec<(P, Vec<Row>)> {
         // Each group's rows are kept newest-first, like OCaml's `::`.
@@ -1029,8 +1166,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 Desc::Any | Desc::Var(_) => {}
                 _ => {
-                    // insert p ps env
-                    if let Some(group) = env.iter().position(|(q0, _)| self.simple_match(*q0, p)) {
+                    // insert p ps: the row goes to the group whose head
+                    // matches it; there is at most one such group, since a
+                    // group is only created when no other matches.
+                    let group = env.iter().position(|(q0, _)| self.same_head(*q0, p));
+                    if let Some(group) = group {
                         let q0 = env[group].0;
                         let mut new_row = self.simple_match_args(q0, p);
                         new_row.extend_from_slice(ps);
@@ -1151,7 +1291,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                         })
                 }
             }
-            Desc::Constant(_) => false,
+            Desc::Constant(_) | Desc::Interval(..) => false,
             Desc::Tuple(_) | Desc::Record { .. } => true,
             Desc::Array(_) => false,
             _ => panic!("Parmatch.full_match"),
@@ -1176,6 +1316,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 ConstructorKind::Extension(_) => false,
             },
             Desc::Constant(_)
+            | Desc::Interval(..)
             | Desc::Tuple(_)
             | Desc::Variant { .. }
             | Desc::Record { .. }
@@ -1367,41 +1508,46 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     }
                 }
             }
+            // Int and char constants and intervals can share a column; the
+            // example is the least value from 0 up that no range covers, else
+            // the greatest one below 0, of the kind of the first pattern.
+            // Ranges sorted by a bound are skipped in one pass.
+            Desc::Constant(_) | Desc::Interval(..) if self.int_range(p).is_some() => {
+                let ranges: Vec<(i64, i64)> =
+                    env.iter().filter_map(|(q, _)| self.int_range(*q)).collect();
+                let mut by_lo = ranges.clone();
+                by_lo.sort_by_key(|&(lo, _)| lo);
+                let up = by_lo.iter().fold(
+                    0i64,
+                    |i, &(lo, hi)| {
+                        if lo <= i && i <= hi { hi + 1 } else { i }
+                    },
+                );
+                let int32_max = i64::from(i32::MAX);
+                let int32_min = i64::from(i32::MIN);
+                if up <= int32_max {
+                    Ok(self.make_int_range(p, up, up))
+                } else {
+                    let mut by_hi = ranges;
+                    by_hi.sort_by(|(_, hi1), (_, hi2)| hi2.cmp(hi1));
+                    let other =
+                        by_hi.iter().fold(
+                            -1i64,
+                            |i, &(lo, hi)| {
+                                if lo <= i && i <= hi { lo - 1 } else { i }
+                            },
+                        );
+                    // Every int is covered; ints are never matched
+                    // exhaustively.
+                    if other < int32_min {
+                        Ok(self.omega)
+                    } else {
+                        Ok(self.make_int_range(p, other, other))
+                    }
+                }
+            }
             Desc::Constant(c) => Ok(match c.as_ref() {
-                Constant::Int(_) => {
-                    let all: Vec<i64> = env
-                        .iter()
-                        .filter_map(|(q, _)| match self.desc(*q) {
-                            Desc::Constant(c) => match c.as_ref() {
-                                Constant::Int(i) => Some(*i),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .collect();
-                    let mut i = 0i64;
-                    while all.contains(&i) {
-                        i += 1;
-                    }
-                    self.make_pat_like(Desc::Constant(Cow::Owned(Constant::Int(i))), p)
-                }
-                Constant::Char(_) => {
-                    let all: Vec<i32> = env
-                        .iter()
-                        .filter_map(|(q, _)| match self.desc(*q) {
-                            Desc::Constant(c) => match c.as_ref() {
-                                Constant::Char(i) => Some(*i),
-                                _ => None,
-                            },
-                            _ => None,
-                        })
-                        .collect();
-                    let mut i = 0i32;
-                    while all.contains(&i) {
-                        i += 1;
-                    }
-                    self.make_pat_like(Desc::Constant(Cow::Owned(Constant::Char(i))), p)
-                }
+                Constant::Int(_) | Constant::Char(_) => unreachable!("int ranges"),
                 Constant::BigInt(..) => {
                     let all: Vec<usize> = env
                         .iter()
@@ -1517,7 +1663,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                     }
                 }
             }
-            Desc::Any | Desc::Var(_) | Desc::Constant(_) => true,
+            Desc::Any | Desc::Var(_) | Desc::Constant(_) | Desc::Interval(..) => true,
             Desc::Alias(p) => self.has_instance(p),
             Desc::Or(p1, p2) => self.has_instance(p1) || self.has_instance(p2),
             Desc::Construct { args: ps, .. } | Desc::Tuple(ps) | Desc::Array(ps) => {
@@ -1587,10 +1733,15 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads = Self::heads(pss);
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one(q0, pss);
-                let mut row = self.simple_match_args(q0, q);
-                row.extend_from_slice(qs_rest);
-                self.satisfiable(&filtered, &row)
+                for q0 in self.split_int_range(q0, &column[1..]) {
+                    let filtered = self.filter_one(q0, pss);
+                    let mut row = self.simple_match_args(q0, q);
+                    row.extend_from_slice(qs_rest);
+                    if self.satisfiable(&filtered, &row) {
+                        return true;
+                    }
+                }
+                false
             }
         }
     }
@@ -1650,11 +1801,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads = Self::heads(pss);
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one(q0, pss);
-                let mut row = self.simple_match_args(q0, q);
-                row.extend_from_slice(qs_rest);
-                let results = self.satisfiables(&filtered, &row);
-                results.into_iter().map(|r| self.set_args(q0, &r)).collect()
+                let mut results = Vec::new();
+                for q0 in self.split_int_range(q0, &column[1..]) {
+                    let filtered = self.filter_one(q0, pss);
+                    let mut row = self.simple_match_args(q0, q);
+                    row.extend_from_slice(qs_rest);
+                    for r in self.satisfiables(&filtered, &row) {
+                        results.push(self.set_args(q0, &r));
+                    }
+                }
+                results
             }
         }
     }
@@ -1896,6 +2052,37 @@ fn make_row(ps: Vec<P>) -> URow {
 }
 
 /// `union_res r1 r2`.
+/// `pieces_res rs`: an interval split into pieces is used when one of its
+/// pieces is. An or-pattern below it is unused when every used piece reports
+/// it unused.
+fn pieces_res(rs: Vec<Answer>) -> Answer {
+    let used: Vec<Answer> = rs
+        .into_iter()
+        .filter(|r| !matches!(r, Answer::Unused))
+        .collect();
+    if used.is_empty() {
+        return Answer::Unused;
+    }
+    if used.iter().any(|r| matches!(r, Answer::Used)) {
+        return Answer::Used;
+    }
+    let mut partials = used.into_iter().map(|r| match r {
+        Answer::Upartial(u) => u,
+        _ => Vec::new(),
+    });
+    match partials.next() {
+        None => Answer::Used,
+        Some(u) => {
+            let us: Vec<Vec<P>> = partials.collect();
+            Answer::Upartial(
+                u.into_iter()
+                    .filter(|p| us.iter().all(|u| u.contains(p)))
+                    .collect(),
+            )
+        }
+    }
+}
+
 fn union_res(r1: Answer, r2: Answer) -> Answer {
     match (r1, r2) {
         (Answer::Unused, _) | (_, Answer::Unused) => Answer::Unused,
@@ -2101,16 +2288,25 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
                 let heads: Vec<P> = pss.iter().map(|r| r.active[0]).collect();
                 let q0 = self.discr_pat(q, &heads);
-                let filtered = self.filter_one_rows(q0, pss);
-                let mut active = self.simple_match_args(q0, q);
-                active.extend_from_slice(rem);
-                self.every_satisfiables(
-                    &filtered,
-                    &URow {
-                        active,
-                        ..qs.clone()
-                    },
-                )
+                let piece = |this: &mut Self, q0: P| {
+                    let filtered = this.filter_one_rows(q0, pss);
+                    let mut active = this.simple_match_args(q0, q);
+                    active.extend_from_slice(rem);
+                    this.every_satisfiables(
+                        &filtered,
+                        &URow {
+                            active,
+                            ..qs.clone()
+                        },
+                    )
+                };
+                match self.split_int_range(q0, &column[1..]).as_slice() {
+                    [q0] => piece(self, *q0),
+                    q0s => {
+                        let rs = q0s.iter().map(|q0| piece(self, *q0)).collect();
+                        pieces_res(rs)
+                    }
+                }
             }
         }
     }
@@ -2171,6 +2367,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             (_, Desc::Alias(q)) => Step::Pat(p, *q),
             (Desc::Constant(c1), Desc::Constant(c2)) => {
                 Step::Done(const_compare(c1, c2) == std::cmp::Ordering::Equal)
+            }
+            (Desc::Constant(_) | Desc::Interval(..), Desc::Constant(_) | Desc::Interval(..)) => {
+                Step::Done(match (self.int_range(p), self.int_range(q)) {
+                    (Some((lo1, hi1)), Some((lo2, hi2))) => lo1 <= lo2 && hi2 <= hi1,
+                    _ => false,
+                })
             }
             (
                 Desc::Construct {
@@ -2241,7 +2443,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         ps.iter().zip(qs).all(|(p, q)| self.le_pat(*p, *q))
     }
 
-    /// `get_mins le_pats ps` (parmatch.ml:1779-1787).
+    /// `get_mins le_pats ps` (parmatch.ml `get_mins`).
     fn get_mins(&mut self, ps: Vec<Row>) -> Vec<Row> {
         let once = self.select_rec(ps);
         self.select_rec(once)
@@ -2279,6 +2481,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_var(_, _) => Desc::Var(VarKind::Source),
             PatternDesc::Tpat_alias(inner, _, _) => Desc::Alias(self.import_scratch(*inner)),
             PatternDesc::Tpat_constant(c) => Desc::Constant(Cow::Owned(c.clone())),
+            PatternDesc::Tpat_interval(lo, hi) => Desc::Interval(lo.constant(), hi.constant()),
             PatternDesc::Tpat_tuple(items) => Desc::Tuple(self.import_scratch_list(*items)),
             PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
                 lid: Some(*lid),
@@ -2303,6 +2506,8 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 has_rest: rest.is_some(),
             },
             PatternDesc::Tpat_array(items) => Desc::Array(self.import_scratch_list(*items)),
+            // Callers lower dict patterns to records first (`Dict_pattern`).
+            PatternDesc::Tpat_dict(_) => crate::misc::fatal_error("Parmatch.import: dict pattern"),
             PatternDesc::Tpat_or(left, right, _) => {
                 Desc::Or(self.import_scratch(*left), self.import_scratch(*right))
             }
@@ -2361,6 +2566,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 _ => return self.export(inner),
             },
             Desc::Constant(c) => PatternDesc::Tpat_constant(c.into_owned()),
+            Desc::Interval(lo, hi) => PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::from_constant(lo), crate::types::typedtree::IntervalBound::from_constant(hi)),
             Desc::Tuple(items) => PatternDesc::Tpat_tuple(self.export_list(items)),
             Desc::Construct { lid, cstr, args } => {
                 let lid = lid.unwrap_or_else(|| crate::parse_arena::Located {
@@ -2429,7 +2635,9 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         casel
             .iter()
             .filter(|case| !case.guarded)
-            .map(|case| vec![self.import(case.lhs)])
+            // `check_partial_gadt` maps `with_bool_payload_overlaps` over the
+            // cases.
+            .map(|case| vec![self.import_with_bool_payload_overlaps(case.lhs)])
             .collect()
     }
 
@@ -2501,7 +2709,12 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         }
         let pss: Vec<(Row, LocIdx)> = casel
             .iter()
-            .map(|case| (vec![self.import(case.lhs)], case.lhs.pat_loc))
+            .map(|case| {
+                (
+                    vec![self.import_with_bool_payload_overlaps(case.lhs)],
+                    case.lhs.pat_loc,
+                )
+            })
             .collect();
         let v = self.import_owned(v);
         self.do_match(pss, &[v])
@@ -2578,6 +2791,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_any
             | PatternDesc::Tpat_var(..)
             | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
             | PatternDesc::Tpat_variant(_, None, _) => {}
             PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
                 for p in ta.patterns(*ps) {
@@ -2587,6 +2801,11 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             PatternDesc::Tpat_record(fields, _, _) => {
                 for (_, _, p, _) in fields {
                     self.collect_paths_from_pat(r, ta.pattern(*p));
+                }
+            }
+            PatternDesc::Tpat_dict(entries) => {
+                for entry in entries {
+                    self.collect_paths_from_pat(r, ta.pattern(entry.tdp_pattern));
                 }
             }
             PatternDesc::Tpat_variant(_, Some(p), _) | PatternDesc::Tpat_alias(p, _, _) => {
@@ -2638,15 +2857,16 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         total
     }
 
-    fn node_has_dict_pattern(&self, p: P) -> bool {
-        self.node(p).src.is_some_and(|src| {
-            self.oracle
-                .has_dict_pattern_attribute(self.ta.pat_attributes(src))
-        })
+    /// `is_dict_pattern` (parmatch.ml): a lowered dict pattern, a record
+    /// pattern of the `dict` type.
+    fn node_has_dict_pattern(&mut self, p: P) -> bool {
+        let node = self.node(p);
+        let (is_record, ty, env) = (matches!(node.desc, Desc::Record { .. }), node.ty, node.env);
+        is_record && ty.is_some_and(|ty| self.oracle.is_dict_type(env, ty))
     }
 
     /// `contains_dict_pattern` (parmatch.ml:1960-1968) on a node.
-    fn contains_dict_pattern(&self, p: P) -> bool {
+    fn contains_dict_pattern(&mut self, p: P) -> bool {
         if self.node_has_dict_pattern(p) {
             return true;
         }
@@ -2657,7 +2877,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     fn children(&self, p: P) -> Vec<P> {
         match self.desc(p) {
-            Desc::Any | Desc::Var(_) | Desc::Constant(_) => Vec::new(),
+            Desc::Any | Desc::Var(_) | Desc::Constant(_) | Desc::Interval(..) => Vec::new(),
             Desc::Alias(p) => vec![*p],
             Desc::Tuple(ps) | Desc::Array(ps) => ps.clone(),
             Desc::Construct { args, .. } => args.clone(),
@@ -2740,7 +2960,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             let ty = node.ty.or(enclosing);
             match &node.desc {
                 Desc::Any | Desc::Var(_) => wildcard_types.push(ty),
-                Desc::Constant(_) => {}
+                Desc::Constant(_) | Desc::Interval(_, _) => {}
                 Desc::Alias(p) => todo.push((*p, ty)),
                 Desc::Tuple(ps) | Desc::Array(ps) => todo.extend(ps.iter().map(|p| (*p, ty))),
                 Desc::Or(p1, p2) => todo.extend([(*p1, ty), (*p2, ty)]),
@@ -2775,12 +2995,30 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
 
     /// `check_unused pred casel` (parmatch.ml:2159-2232).
     pub fn check_unused(&mut self, casel: &[CaseRef<'a>]) {
-        if !self.oracle.is_active(&ParmatchWarning::UnusedMatch) {
+        let unused_match = self
+            .oracle
+            .is_active(&ParmatchWarning::UnusedMatch(String::new()));
+        // Shadowed payloads are reported as warning 11 or 12, so they are
+        // checked when either is active; the usefulness analysis below only
+        // when 11 is.
+        if !unused_match
+            && !self
+                .oracle
+                .is_active(&ParmatchWarning::UnusedPat(String::new()))
+        {
+            return;
+        }
+        let (dead_cases, already_reported) = self.check_shadowed_payloads(casel);
+        if !unused_match {
             return;
         }
         // `pref` is built with `::`, newest case first.
         let mut pref: Vec<Row> = Vec::new();
-        for case in casel {
+        for (index, case) in casel.iter().enumerate() {
+            // A case that matches nothing cannot make later cases unused.
+            if dead_cases.contains(&index) {
+                continue;
+            }
             let q = self.import(case.lhs);
             let qs = vec![q];
             let compatible: Vec<Row> = pref
@@ -2836,19 +3074,20 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 }
             }
             match r {
-                Answer::Unused => self
-                    .oracle
-                    .warn(case.lhs.pat_loc, ParmatchWarning::UnusedMatch),
+                Answer::Unused => self.oracle.warn(
+                    case.lhs.pat_loc,
+                    ParmatchWarning::UnusedMatch(String::new()),
+                ),
                 Answer::Upartial(ps) => {
                     for p in ps {
                         let node = self.node(p);
-                        let from_spread = node.src.is_some_and(|src| {
+                        let from_spread = node
+                            .src
+                            .is_some_and(|src| self.oracle.is_pat_from_variant_spread(self.ta.pat_attributes(src)));
+                        let loc = node.loc;
+                        if !from_spread && !already_reported.contains(&loc) {
                             self.oracle
-                                .is_pat_from_variant_spread(self.ta.pat_attributes(src))
-                        });
-                        if !from_spread {
-                            let loc = node.loc;
-                            self.oracle.warn(loc, ParmatchWarning::UnusedPat);
+                                .warn(loc, ParmatchWarning::UnusedPat(String::new()));
                         }
                     }
                 }
@@ -2866,13 +3105,17 @@ pub(crate) fn contains_extension(ta: &TypedArena, pat: &Pattern) -> bool {
     let sub = |p: &TPatIdx| contains_extension(ta, ta.pattern(*p));
     match &pat.pat_desc {
         PatternDesc::Tpat_var(_, name) if name.txt == "*extension*" => true,
-        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_constant(_) => false,
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => false,
         PatternDesc::Tpat_alias(p, _, _) => sub(p),
         PatternDesc::Tpat_tuple(ps)
         | PatternDesc::Tpat_array(ps)
         | PatternDesc::Tpat_construct(_, _, ps) => ta.pattern_list(*ps).iter().any(sub),
         PatternDesc::Tpat_variant(_, arg, _) => arg.as_ref().is_some_and(sub),
         PatternDesc::Tpat_record(fields, _, _) => fields.iter().any(|(_, _, p, _)| sub(p)),
+        PatternDesc::Tpat_dict(entries) => entries.iter().any(|entry| sub(&entry.tdp_pattern)),
         PatternDesc::Tpat_or(p1, p2, _) => sub(p1) || sub(p2),
     }
 }
@@ -2995,8 +3238,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
             has_rest,
         } = self.desc(p).clone()
         {
-            let env = self.node(p).env;
-            let fields = self.all_record_args(env, &fields);
+            let fields = self.all_record_args(&fields);
             let q = self.with_desc(
                 p,
                 Desc::Record {
@@ -3169,7 +3411,12 @@ fn pat_bound_idents(ta: &TypedArena, pat: &Pattern, out: &mut IdSet) {
                 pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
-        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) => {}
+        PatternDesc::Tpat_dict(entries) => {
+            for entry in entries {
+                pat_bound_idents(ta, ta.pattern(entry.tdp_pattern), out);
+            }
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => {}
         PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => {
             for p in ta.pattern_list(*ps) {
                 pat_bound_idents(ta, ta.pattern(*p), out);
@@ -3185,5 +3432,503 @@ fn pat_bound_idents(ta: &TypedArena, pat: &Pattern, out: &mut IdSet) {
                 pat_bound_idents(ta, ta.pattern(*p), out);
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Payloads shadowed by untagged literals (parmatch.ml)
+// ---------------------------------------------------------------------------
+//
+// An untagged variant tests its literal cases before its payload cases, so in
+// `@as("a") A | S(string)` the value "a" is always matched as `A`. A payload
+// pattern can therefore never match a value that is also the runtime value of
+// a literal case, wherever it appears in the match: `S("a")` is dead.
+
+use crate::types::variant_runtime::{
+    Block as RuntimeBlock, BlockType as RuntimeBlockType, ConstructorCase as RuntimeCase,
+    LiteralTag,
+};
+
+/// parmatch.ml `shadowed_payload`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ShadowedPayload {
+    payload_constructor: String,
+    value: LiteralTag,
+    literal_constructor: String,
+}
+
+/// OCaml's polymorphic `compare` on `Variant_runtime.literal_tag`: the
+/// constant constructors are immediates, ordered before the blocks, which are
+/// ordered by tag and then by their field.
+fn compare_literal_tag(a: &LiteralTag, b: &LiteralTag) -> std::cmp::Ordering {
+    fn rank(tag: &LiteralTag) -> (u8, u8) {
+        match tag {
+            LiteralTag::Null => (0, 0),
+            LiteralTag::Undefined => (0, 1),
+            LiteralTag::String(_) => (1, 0),
+            LiteralTag::Int(_) => (1, 1),
+            LiteralTag::Float(_) => (1, 2),
+            LiteralTag::BigInt(_) => (1, 3),
+            LiteralTag::Bool(_) => (1, 4),
+        }
+    }
+    rank(a).cmp(&rank(b)).then_with(|| match (a, b) {
+        (LiteralTag::String(x), LiteralTag::String(y))
+        | (LiteralTag::Float(x), LiteralTag::Float(y))
+        | (LiteralTag::BigInt(x), LiteralTag::BigInt(y)) => x.as_bytes().cmp(y.as_bytes()),
+        (LiteralTag::Int(x), LiteralTag::Int(y)) => x.cmp(y),
+        (LiteralTag::Bool(x), LiteralTag::Bool(y)) => x.cmp(y),
+        _ => std::cmp::Ordering::Equal,
+    })
+}
+
+fn compare_shadowed(a: &ShadowedPayload, b: &ShadowedPayload) -> std::cmp::Ordering {
+    a.payload_constructor
+        .as_bytes()
+        .cmp(b.payload_constructor.as_bytes())
+        .then_with(|| compare_literal_tag(&a.value, &b.value))
+        .then_with(|| {
+            a.literal_constructor
+                .as_bytes()
+                .cmp(b.literal_constructor.as_bytes())
+        })
+}
+
+/// parmatch.ml `payload_liveness`.
+pub(crate) enum PayloadLiveness<'p> {
+    NeverMatches(Vec<ShadowedPayload>),
+    /// The pattern can match, except for these dead or-pattern alternatives.
+    Matches(Vec<(&'p Pattern, Vec<ShadowedPayload>)>),
+}
+
+fn is_type_path(ctx: &TypeContext, path: &Path, ty: TypeExprRef) -> bool {
+    matches!(&*ctx.get_desc(ctx.repr(ty)), TypeDesc::Tconstr { path: p, .. } if p.same(path))
+}
+
+/// parmatch.ml `pattern_literal`: the runtime value of the only value `p`
+/// matches, when it is a literal.
+fn pattern_literal(ctx: &TypeContext, ta: &TypedArena, p: &Pattern) -> Option<LiteralTag> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_constant(Constant::String(s)) => Some(LiteralTag::String(s.clone())),
+        PatternDesc::Tpat_constant(Constant::Int(i)) => Some(LiteralTag::Int(*i)),
+        PatternDesc::Tpat_constant(Constant::Char(i)) => Some(LiteralTag::Int(i64::from(*i))),
+        PatternDesc::Tpat_constant(Constant::Float(f)) => Some(LiteralTag::Float(f.clone())),
+        PatternDesc::Tpat_constant(Constant::BigInt(sign, digits)) => {
+            // `Bigint_utils.to_string sign digits`.
+            Some(LiteralTag::BigInt(if *sign {
+                digits.clone()
+            } else {
+                format!("-{digits}")
+            }))
+        }
+        PatternDesc::Tpat_alias(p, _, _) => pattern_literal(ctx, ta, ta.pattern(*p)),
+        PatternDesc::Tpat_variant(label, None, _) => {
+            // A polymorphic variant is its name, or the number its name
+            // spells, as in `Lambda.const_polyvar`.
+            if is_valid_hash_number(label) {
+                // `Ext_string.hash_number_as_i32_exn` is `Int32.of_string`.
+                label
+                    .parse::<i32>()
+                    .ok()
+                    .map(|i| LiteralTag::Int(i64::from(i)))
+            } else {
+                Some(LiteralTag::String(label.clone()))
+            }
+        }
+        PatternDesc::Tpat_construct(_, cstr, args)
+            if args.is_empty()
+                && is_type_path(ctx, &crate::types::predef::path_bool(), cstr.cstr_res) =>
+        {
+            Some(LiteralTag::Bool(cstr.cstr_name == "true"))
+        }
+        PatternDesc::Tpat_construct(_, cstr, _)
+            if [
+                crate::types::predef::path_unit(),
+                crate::types::predef::path_list(),
+                crate::types::predef::path_option(),
+            ]
+            .iter()
+            .any(|path| is_type_path(ctx, path, cstr.cstr_res)) =>
+        {
+            None
+        }
+        PatternDesc::Tpat_construct(_, cstr, args) => match &cstr.cstr_kind {
+            ConstructorKind::Ordinary(r) => match (r.representation(ctx), ta.pattern_list(*args)) {
+                (RuntimeCase::Constant(tag), []) => Some(tag.literal),
+                // An untagged payload is represented by the payload itself.
+                (RuntimeCase::Block(RuntimeBlock::Untagged { .. }), [arg]) => {
+                    pattern_literal(ctx, ta, ta.pattern(*arg))
+                }
+                _ => None,
+            },
+            ConstructorKind::Extension(_) => None,
+        },
+        _ => None,
+    }
+}
+
+/// `Ext_string.is_valid_hash_number`.
+fn is_valid_hash_number(value: &str) -> bool {
+    match value.as_bytes() {
+        [] => false,
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit),
+        _ => false,
+    }
+}
+
+fn is_untagged_payload(ctx: &TypeContext, cd: &ConstructorDescription) -> bool {
+    match &cd.cstr_kind {
+        ConstructorKind::Ordinary(r) => matches!(
+            r.representation(ctx),
+            RuntimeCase::Block(RuntimeBlock::Untagged { .. })
+        ),
+        ConstructorKind::Extension(_) => false,
+    }
+}
+
+/// parmatch.ml `shadowing_literal_cases`: the literal cases that take
+/// precedence over an untagged payload constructor.
+fn shadowing_literal_cases(ctx: &TypeContext, cd: &ConstructorDescription) -> Vec<ShadowedPayload> {
+    match &cd.cstr_kind {
+        ConstructorKind::Ordinary(r) if is_untagged_payload(ctx, cd) => {
+            ctx.with_variant_layout(r.variant, |layout| {
+                layout
+                    .constructors
+                    .iter()
+                    .filter_map(|case| match case {
+                        RuntimeCase::Constant(tag) => Some(ShadowedPayload {
+                            payload_constructor: cd.cstr_name.clone(),
+                            value: tag.literal.clone(),
+                            literal_constructor: tag.name.to_string(),
+                        }),
+                        RuntimeCase::Block(_) => None,
+                    })
+                    .collect()
+            })
+        }
+        _ => Vec::new(),
+    }
+}
+
+fn or_liveness<'p>(
+    liveness: impl Fn(&'p Pattern) -> PayloadLiveness<'p>,
+    p1: &'p Pattern,
+    p2: &'p Pattern,
+) -> PayloadLiveness<'p> {
+    use PayloadLiveness::{Matches, NeverMatches};
+    match (liveness(p1), liveness(p2)) {
+        (NeverMatches(mut s1), NeverMatches(s2)) => {
+            s1.extend(s2);
+            NeverMatches(s1)
+        }
+        (Matches(mut d1), NeverMatches(s2)) => {
+            d1.push((p2, s2));
+            Matches(d1)
+        }
+        (NeverMatches(s1), Matches(d2)) => {
+            let mut d = vec![(p1, s1)];
+            d.extend(d2);
+            Matches(d)
+        }
+        (Matches(mut d1), Matches(d2)) => {
+            d1.extend(d2);
+            Matches(d1)
+        }
+    }
+}
+
+/// parmatch.ml `payload_liveness`.
+pub(crate) fn payload_liveness<'p>(ctx: &TypeContext, ta: &'p TypedArena, p: &'p Pattern) -> PayloadLiveness<'p> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => or_liveness(|p| payload_liveness(ctx, ta, p), ta.pattern(*p1), ta.pattern(*p2)),
+        PatternDesc::Tpat_construct(_, cd, args) if args.len() == 1 => {
+            let shadowing = shadowing_literal_cases(ctx, cd);
+            if shadowing.is_empty() {
+                subpatterns_liveness(ctx, ta, p)
+            } else {
+                shadowed_argument_liveness(ctx, ta, &shadowing, ta.pattern(ta.pattern_list(*args)[0]))
+            }
+        }
+        _ => subpatterns_liveness(ctx, ta, p),
+    }
+}
+
+/// `Typedtree.iter_pattern_desc`'s children, in its order.
+fn pattern_children<'p>(ta: &'p TypedArena, p: &'p Pattern) -> Vec<&'p Pattern> {
+    match &p.pat_desc {
+        PatternDesc::Tpat_alias(p, _, _) => vec![ta.pattern(*p)],
+        PatternDesc::Tpat_tuple(ps) | PatternDesc::Tpat_array(ps) => ta.patterns(*ps).collect(),
+        PatternDesc::Tpat_construct(_, _, ps) => ta.patterns(*ps).collect(),
+        PatternDesc::Tpat_variant(_, arg, _) => arg.iter().map(|p| ta.pattern(*p)).collect(),
+        PatternDesc::Tpat_record(fields, _, _) => fields.iter().map(|(_, _, p, _)| ta.pattern(*p)).collect(),
+        PatternDesc::Tpat_dict(entries) => entries.iter().map(|e| ta.pattern(e.tdp_pattern)).collect(),
+        PatternDesc::Tpat_or(p1, p2, _) => vec![ta.pattern(*p1), ta.pattern(*p2)],
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(..)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(..) => vec![],
+    }
+}
+
+/// A pattern that is not an or-pattern matches nothing as soon as one of its
+/// subpatterns matches nothing.
+fn subpatterns_liveness<'p>(ctx: &TypeContext, ta: &'p TypedArena, p: &'p Pattern) -> PayloadLiveness<'p> {
+    let mut result = PayloadLiveness::Matches(Vec::new());
+    for sub in pattern_children(ta, p) {
+        if let PayloadLiveness::NeverMatches(_) = result {
+            continue;
+        }
+        match payload_liveness(ctx, ta, sub) {
+            dead @ PayloadLiveness::NeverMatches(_) => result = dead,
+            PayloadLiveness::Matches(d2) => {
+                if let PayloadLiveness::Matches(d1) = &mut result {
+                    d1.extend(d2);
+                }
+            }
+        }
+    }
+    result
+}
+
+/// `shadowing` lists the literal cases that take precedence over the value
+/// `arg` matches, outermost first.
+fn shadowed_argument_liveness<'p>(
+    ctx: &TypeContext,
+    ta: &'p TypedArena,
+    shadowing: &[ShadowedPayload],
+    arg: &'p Pattern,
+) -> PayloadLiveness<'p> {
+    match &arg.pat_desc {
+        PatternDesc::Tpat_or(p1, p2, _) => {
+            or_liveness(|p| shadowed_argument_liveness(ctx, ta, shadowing, p), ta.pattern(*p1), ta.pattern(*p2))
+        }
+        PatternDesc::Tpat_alias(p, _, _) => shadowed_argument_liveness(ctx, ta, shadowing, ta.pattern(*p)),
+        PatternDesc::Tpat_construct(_, cd, inner)
+            if inner.len() == 1 && is_untagged_payload(ctx, cd) =>
+        {
+            // An untagged payload is the value itself, so the literal cases
+            // around it still take precedence, before its own.
+            let mut shadowing = shadowing.to_vec();
+            shadowing.extend(shadowing_literal_cases(ctx, cd));
+            shadowed_argument_liveness(ctx, ta, &shadowing, ta.pattern(ta.pattern_list(*inner)[0]))
+        }
+        _ => {
+            let shadowing_case = pattern_literal(ctx, ta, arg).and_then(|value| {
+                shadowing.iter().find(|shadowed| {
+                    crate::types::variant_runtime::same_literal_value(&value, &shadowed.value)
+                })
+            });
+            match shadowing_case {
+                Some(shadowed) => PayloadLiveness::NeverMatches(vec![shadowed.clone()]),
+                None => payload_liveness(ctx, ta, arg),
+            }
+        }
+    }
+}
+
+/// parmatch.ml `literal_to_string`.
+fn literal_to_string(value: &LiteralTag) -> String {
+    match value {
+        LiteralTag::String(s) => format!("\"{s}\""),
+        LiteralTag::Int(i) => i.to_string(),
+        LiteralTag::Float(f) => f.clone(),
+        LiteralTag::BigInt(b) => format!("{b}n"),
+        LiteralTag::Bool(b) => b.to_string(),
+        LiteralTag::Null => "null".to_string(),
+        LiteralTag::Undefined => "undefined".to_string(),
+    }
+}
+
+/// parmatch.ml `shadowed_payload_reason`.
+fn shadowed_payload_reason(shadowed: &[ShadowedPayload]) -> String {
+    let mut shadowed = shadowed.to_vec();
+    shadowed.sort_by(compare_shadowed);
+    shadowed.dedup_by(|a, b| compare_shadowed(a, b) == std::cmp::Ordering::Equal);
+    shadowed
+        .iter()
+        .map(|s| {
+            format!(
+                "{} is the runtime value of constructor {}, so it is always matched as {}, never as {}.",
+                literal_to_string(&s.value),
+                s.literal_constructor,
+                s.literal_constructor,
+                s.payload_constructor
+            )
+        })
+        .collect::<Vec<_>>()
+        // OCaml joins with "\n  "; the Rust warning printer indents every
+        // line of a message itself (see `Warning::PartialMatch`).
+        .join("\n")
+}
+
+/// Whether `payload_liveness` reports anything for the pattern, so the
+/// unused-case check cannot be skipped as trivial.
+pub(crate) fn has_shadowed_payloads(ctx: &TypeContext, ta: &TypedArena, p: &Pattern) -> bool {
+    !matches!(payload_liveness(ctx, ta, p), PayloadLiveness::Matches(d) if d.is_empty())
+}
+
+impl<'a, O: Oracle> Parmatch<'a, O> {
+    /// parmatch.ml `check_shadowed_payloads`: report cases and or-pattern
+    /// alternatives that can never match because of `payload_liveness`.
+    /// Returns the indices of the cases that match nothing, and the
+    /// locations of the reported sub-patterns.
+    fn check_shadowed_payloads(&mut self, casel: &[CaseRef<'a>]) -> (Vec<usize>, Vec<LocIdx>) {
+        let mut reported = Vec::new();
+        let mut dead_cases = Vec::new();
+        for (index, case) in casel.iter().enumerate() {
+            let liveness = payload_liveness(self.oracle.ctx(), self.ta, case.lhs);
+            match liveness {
+                PayloadLiveness::NeverMatches(shadowed) => {
+                    let reason = shadowed_payload_reason(&shadowed);
+                    self.oracle
+                        .warn(case.lhs.pat_loc, ParmatchWarning::UnusedMatch(reason));
+                    dead_cases.push(index);
+                }
+                PayloadLiveness::Matches(dead_alternatives) => {
+                    for (p, shadowed) in dead_alternatives {
+                        reported.push(p.pat_loc);
+                        let reason = shadowed_payload_reason(&shadowed);
+                        self.oracle
+                            .warn(p.pat_loc, ParmatchWarning::UnusedPat(reason));
+                    }
+                }
+            }
+        }
+        (dead_cases, reported)
+    }
+
+    /// parmatch.ml `with_bool_payload_overlaps`, applied while importing a
+    /// case for the exhaustiveness check: a literal case of an untagged
+    /// variant also covers the payload values equal to its runtime value.
+    /// This matters for a bool payload, whose values can all be covered, as
+    /// in `@as(true) Yes | Ans(bool)` where `Yes | Ans(false)` is exhaustive.
+    fn import_with_bool_payload_overlaps(&mut self, pat: &'a Pattern) -> P {
+        let ta = self.ta;
+        if let PatternDesc::Tpat_construct(_, cstr, args) = &pat.pat_desc
+            && args.is_empty()
+            && let ConstructorKind::Ordinary(r) = &cstr.cstr_kind
+        {
+            let representation = r.representation(self.oracle.ctx());
+            let p = self.import(pat);
+            if let RuntimeCase::Constant(tag) = representation
+                && let LiteralTag::Bool(b) = tag.literal
+            {
+                let (env, ty) = (pat.pat_env, pat.pat_type);
+                let constructors = self.oracle.variant_constructors(env, ty);
+                // The payload type must be `bool` itself: a
+                // `@typeOf("boolean")` type has boolean values, but no `true`
+                // and `false` patterns.
+                let payload_cd = constructors.into_iter().find(|cd| {
+                    let (ConstructorKind::Ordinary(r), [arg]) =
+                        (&cd.cstr_kind, cd.cstr_args.as_slice())
+                    else {
+                        return false;
+                    };
+                    let is_boolean_payload = matches!(
+                        r.representation(self.oracle.ctx()),
+                        RuntimeCase::Block(RuntimeBlock::Untagged {
+                            block_type: RuntimeBlockType::Boolean,
+                            ..
+                        })
+                    );
+                    is_boolean_payload && {
+                        let expanded = self.oracle.expand_head(env, *arg);
+                        is_type_path(
+                            self.oracle.ctx(),
+                            &crate::types::predef::path_bool(),
+                            expanded,
+                        )
+                    }
+                });
+                if let Some(payload_cd) = payload_cd {
+                    let bool_ty = self.oracle.ctx().predef_bool();
+                    let name = if b { "true" } else { "false" };
+                    let bool_cd = self
+                        .oracle
+                        .variant_constructors(env, bool_ty)
+                        .into_iter()
+                        .find(|cd| cd.cstr_name == name)
+                        .expect("Parmatch.with_bool_payload_overlaps: bool constructor");
+                    let bool_pat = self.make_pat(
+                        Desc::Construct {
+                            lid: None,
+                            cstr: std::sync::Arc::new(bool_cd),
+                            args: vec![],
+                        },
+                        Some(bool_ty),
+                        env,
+                    );
+                    let payload_pat = self.make_pat(
+                        Desc::Construct {
+                            lid: None,
+                            cstr: std::sync::Arc::new(payload_cd),
+                            args: vec![bool_pat],
+                        },
+                        Some(ty),
+                        env,
+                    );
+                    return self.orify(p, payload_pat);
+                }
+            }
+            return p;
+        }
+        // `{p with pat_desc = Typedtree.map_pattern_desc ...}`.
+        let desc = match &pat.pat_desc {
+            PatternDesc::Tpat_alias(inner, _, _) => {
+                Desc::Alias(self.import_with_bool_payload_overlaps(ta.pattern(*inner)))
+            }
+            PatternDesc::Tpat_tuple(items) => Desc::Tuple(
+                ta.patterns(*items)
+                    .map(|item| self.import_with_bool_payload_overlaps(item))
+                    .collect(),
+            ),
+            PatternDesc::Tpat_construct(lid, cstr, args) => Desc::Construct {
+                lid: Some(*lid),
+                cstr: std::sync::Arc::clone(cstr),
+                args: ta.patterns(*args)
+                    .map(|arg| self.import_with_bool_payload_overlaps(arg))
+                    .collect(),
+            },
+            PatternDesc::Tpat_variant(label, arg, _) => Desc::Variant {
+                label: Cow::Borrowed(label.as_str()),
+                arg: arg.as_ref().map(|arg| ta.pattern(*arg))
+                    .map(|arg| self.import_with_bool_payload_overlaps(arg)),
+            },
+            PatternDesc::Tpat_record(fields, closed, rest) => Desc::Record {
+                fields: fields
+                    .iter()
+                    .map(|(lid, lbl, p, opt)| Field {
+                        lid: Some(*lid),
+                        lbl: Cow::Borrowed(lbl),
+                        pat: self.import_with_bool_payload_overlaps(ta.pattern(*p)),
+                        opt: *opt,
+                    })
+                    .collect(),
+                closed: *closed,
+                has_rest: rest.is_some(),
+            },
+            PatternDesc::Tpat_array(items) => Desc::Array(
+                ta.patterns(*items)
+                    .map(|item| self.import_with_bool_payload_overlaps(item))
+                    .collect(),
+            ),
+            PatternDesc::Tpat_or(left, right, _) => Desc::Or(
+                self.import_with_bool_payload_overlaps(ta.pattern(*left)),
+                self.import_with_bool_payload_overlaps(ta.pattern(*right)),
+            ),
+            PatternDesc::Tpat_any
+            | PatternDesc::Tpat_var(..)
+            | PatternDesc::Tpat_constant(_)
+            | PatternDesc::Tpat_interval(..)
+            | PatternDesc::Tpat_dict(_) => return self.import(pat),
+        };
+        self.push(
+            desc,
+            Some(pat.pat_type),
+            pat.pat_env,
+            pat.pat_loc,
+            Some(pat),
+        )
     }
 }

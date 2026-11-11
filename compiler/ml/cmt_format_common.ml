@@ -13,14 +13,14 @@
 (*                                                                        *)
 (**************************************************************************)
 
-(* Shared CMT reading and collection logic. Persistence is supplied by the
-   selected Cmt_format implementation so the playground does not retain the
-   native writer and its transitive dependencies. *)
+(* Shared CMT reading and collection logic. Persistence is supplied by
+   Cmt_format_persistence, which compiler/ml/dune copies from platform/native
+   or platform/playground according to the profile, so the playground does
+   not retain the native writer and its transitive dependencies. *)
 
 open Typedtree
 
 type binary_annots =
-  | Packed of Types.signature * string list
   | Implementation of structure
   | Interface of signature
   | Partial_implementation of binary_part array
@@ -31,7 +31,6 @@ and binary_part =
   | Partial_structure_item of structure_item
   | Partial_expression of expression
   | Partial_pattern of pattern
-  | Partial_class_expr of unit
   | Partial_signature of signature
   | Partial_signature_item of signature_item
   | Partial_module_type of module_type
@@ -49,7 +48,6 @@ type cmt_infos = {
   cmt_source_digest: Digest.t option;
   cmt_initial_env: Env.t;
   cmt_imports: (string * Digest.t option) list;
-  cmt_interface_digest: Digest.t option;
   cmt_use_summaries: bool;
   cmt_extra_info: Cmt_utils.cmt_extra_info;
 }
@@ -85,7 +83,6 @@ let clear_part = function
     Partial_structure_item (cenv.structure_item cenv s)
   | Partial_expression e -> Partial_expression (cenv.expr cenv e)
   | Partial_pattern p -> Partial_pattern (cenv.pat cenv p)
-  | Partial_class_expr () -> assert false
   | Partial_signature s -> Partial_signature (cenv.signature cenv s)
   | Partial_signature_item s ->
     Partial_signature_item (cenv.signature_item cenv s)
@@ -96,7 +93,6 @@ let clear_env binary_annots =
     match binary_annots with
     | Implementation s -> Implementation (cenv.structure cenv s)
     | Interface s -> Interface (cenv.signature cenv s)
-    | Packed _ -> binary_annots
     | Partial_implementation array ->
       Partial_implementation (Array.map clear_part array)
     | Partial_interface array -> Partial_interface (Array.map clear_part array)
@@ -106,25 +102,17 @@ exception Error of error
 
 let input_cmt ic = (input_value ic : cmt_infos)
 
+(** [read filename] reads a .cmi file as its cmi_infos, or a .cmt or .cmti
+    file as its cmt_infos. *)
 let read filename =
   (*  Printf.fprintf stderr "Cmt_format.read %s\n%!" filename; *)
-  let ic = open_in_bin filename in
+  let ic = open_in_bin (Compiler_request_state.resolve_path filename) in
   try
     let magic_number = read_magic_number ic in
     let cmi, cmt =
       if magic_number = Config.cmt_magic_number then (None, Some (input_cmt ic))
       else if magic_number = Config.cmi_magic_number then
-        let cmi = Cmi_format.input_cmi ic in
-        let cmt =
-          try
-            let magic_number = read_magic_number ic in
-            if magic_number = Config.cmt_magic_number then
-              let cmt = input_cmt ic in
-              Some cmt
-            else None
-          with _ -> None
-        in
-        (Some cmi, cmt)
+        (Some (Cmi_format.input_cmi ic), None)
       else raise (Cmi_format.Error (Cmi_format.Not_an_interface filename))
     in
     close_in ic;
@@ -144,28 +132,41 @@ let read_cmi filename =
   | None, _ -> raise (Cmi_format.Error (Cmi_format.Not_an_interface filename))
   | Some cmi, _ -> cmi
 
-let saved_types : binary_part list ref = ref []
+(* These typed values cannot live in Compiler_request_state without a module
+   dependency cycle. Keep their accumulator together in domain-local storage;
+   the Cmt_utils callback below is shared initialization and only forwards to
+   this domain's accumulator. *)
+type accumulators = {
+  mutable saved_types: binary_part list;
+  mutable value_deps: (Types.value_description * Types.value_description) list;
+  mutable deprecated_used: Cmt_utils.deprecated_used list;
+}
 
-let value_deps : (Types.value_description * Types.value_description) list ref =
-  ref []
+let accumulators =
+  Request_local.new_key (fun () ->
+      {saved_types = []; value_deps = []; deprecated_used = []})
 
-let deprecated_used : Cmt_utils.deprecated_used list ref = ref []
-
-let value_dependencies () = !value_deps
-let deprecated_uses () = !deprecated_used
+let current_accumulators () = Domain.DLS.get accumulators
+let value_dependencies () = (current_accumulators ()).value_deps
+let deprecated_uses () = (current_accumulators ()).deprecated_used
 
 let clear () =
-  saved_types := [];
-  value_deps := [];
-  deprecated_used := []
+  let state = current_accumulators () in
+  state.saved_types <- [];
+  state.value_deps <- [];
+  state.deprecated_used <- []
 
-let add_saved_type b = saved_types := b :: !saved_types
-let get_saved_types () = !saved_types
-let set_saved_types l = saved_types := l
+let add_saved_type b =
+  let state = current_accumulators () in
+  state.saved_types <- b :: state.saved_types
+
+let get_saved_types () = (current_accumulators ()).saved_types
+let set_saved_types l = (current_accumulators ()).saved_types <- l
 
 let record_deprecated_used ?deprecated_context ?migration_template
     ?migration_in_pipe_chain_template source_loc deprecated_text =
-  deprecated_used :=
+  let state = current_accumulators () in
+  state.deprecated_used <-
     {
       Cmt_utils.source_loc;
       deprecated_text;
@@ -173,10 +174,11 @@ let record_deprecated_used ?deprecated_context ?migration_template
       migration_in_pipe_chain_template;
       context = deprecated_context;
     }
-    :: !deprecated_used
+    :: state.deprecated_used
 
 let _ = Cmt_utils.record_deprecated_used := record_deprecated_used
 
 let record_value_dependency vd1 vd2 =
   if vd1.Types.val_loc <> vd2.Types.val_loc then
-    value_deps := (vd1, vd2) :: !value_deps
+    let state = current_accumulators () in
+    state.value_deps <- (vd1, vd2) :: state.value_deps

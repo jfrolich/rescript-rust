@@ -19,7 +19,6 @@
 
 use super::context::TypeNodes;
 use super::decl::Signature;
-use super::path::Path;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
@@ -77,14 +76,6 @@ struct PersEntry {
     ps: Arc<PersStruct>,
 }
 
-/// Store-built label descriptions of one record type, their summary, and the
-/// replay record of building them.
-pub(crate) type SharedRecordLabels = (
-    Arc<Vec<crate::types::decl::LabelDescription>>,
-    Arc<crate::types::context::RecordLabelDescriptionSummary>,
-    Rc<crate::types::context::StorePiece>,
-);
-
 /// A persistent-rooted component view and the replay record of building it.
 type SharedComponents = (
     Rc<crate::types::env_lazy::QualifiedModuleComponents>,
@@ -118,9 +109,8 @@ pub(crate) struct ThreadTypeStore {
     shared_components: RefCell<
         HashMap<crate::types::context::QualifiedModuleComponentsCacheKey, SharedComponents>,
     >,
-    /// Label descriptions of large regular records of dependency types,
-    /// built as store builds (see `typecore::build_record_label_descriptions_info`).
-    record_labels: RefCell<HashMap<Path, SharedRecordLabels>>,
+    /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
+    label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
     /// The predefined environment built as a store build, with its replay
     /// record (see `env::initial_env`).
     initial_env: RefCell<
@@ -140,6 +130,8 @@ pub(crate) struct ThreadTypeStore {
 }
 
 impl ThreadTypeStore {
+
+
     fn new() -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
@@ -155,7 +147,7 @@ impl ThreadTypeStore {
             shared_signatures: RefCell::new(HashSet::new()),
             signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
-            record_labels: RefCell::new(HashMap::new()),
+            label_families: RefCell::new(Vec::new()),
             initial_env: RefCell::new(None),
             generation,
             shared: super::shared_store::pool_for(generation),
@@ -163,6 +155,16 @@ impl ThreadTypeStore {
             decl_loc_owner: super::decl_loc::next_table_owner(),
         }
     }
+
+
+
+
+
+
+
+
+
+
 
     /// Store handle for a declaration location built into the store.
     pub(crate) fn intern_decl_loc(&self, loc: crate::location::Location) -> super::DeclLoc {
@@ -176,18 +178,43 @@ impl ThreadTypeStore {
         )
     }
 
-    /// Append an imported portable location table, returning the mapping of
-    /// its handles into this store.
-    pub(crate) fn import_decl_locs<'a>(
+    pub(crate) fn intern_decl_loc_with_identity(
         &self,
-        locations: impl IntoIterator<Item = crate::location::Location>,
-        files: &'a dyn Fn(StrIdx) -> StrIdx,
+        loc: crate::location::Location,
+        identity: super::decl_loc::LocationIdentity,
+    ) -> super::DeclLoc {
+        super::DeclLoc::table(
+            super::decl_loc::DeclLocKind::Store,
+            self.decl_loc_owner,
+            self.decl_locs.intern_with_identity(loc, identity),
+        )
+    }
+
+    /// Allocation identity of a location owned by this store.
+    pub(crate) fn decl_loc_identity(
+        &self,
+        loc: super::DeclLoc,
+    ) -> Option<super::decl_loc::LocationIdentity> {
+        assert_eq!(loc.owner(), self.decl_loc_owner);
+        self.decl_locs.identity(loc.index())
+    }
+
+    /// Import coordinates and allocation identities into a fresh namespace.
+    pub(crate) fn import_portable_decl_locs<'a>(
+        &self,
+        table: &super::decl_loc::DeclLocTable,
+        files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
     ) -> super::decl_loc::DeclLocImport<'a> {
+        let mut table = table.clone();
+        let scopes = table.remap_for_import(files);
+        let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Store,
             owner: self.decl_loc_owner,
-            base: self.decl_locs.append(locations),
+            base,
+            instances,
             files,
+            scopes,
         }
     }
 
@@ -272,15 +299,26 @@ impl ThreadTypeStore {
             .or_insert((components, piece));
     }
 
-    pub(crate) fn cached_record_labels(&self, record_path: &Path) -> Option<SharedRecordLabels> {
-        self.record_labels.borrow().get(record_path).cloned()
+    /// Store a label array built during a store build; its index for
+    /// `LabelArrayRef::store`.
+    pub(crate) fn push_label_family(
+        &self,
+        labels: Arc<Vec<crate::types::decl::LabelDescription>>,
+    ) -> usize {
+        let mut families = self.label_families.borrow_mut();
+        families.push(labels);
+        families.len() - 1
     }
 
-    pub(crate) fn publish_record_labels(&self, record_path: Path, labels: SharedRecordLabels) {
-        self.record_labels
-            .borrow_mut()
-            .entry(record_path)
-            .or_insert(labels);
+    pub(crate) fn label_family(
+        &self,
+        idx: usize,
+    ) -> Option<Arc<Vec<crate::types::decl::LabelDescription>>> {
+        self.label_families.borrow().get(idx).cloned()
+    }
+
+    pub(crate) fn label_family_count(&self) -> usize {
+        self.label_families.borrow().len()
     }
 
     pub(crate) fn cached_initial_env(

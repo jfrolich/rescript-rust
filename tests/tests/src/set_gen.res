@@ -114,6 +114,7 @@ let max_int3 = (a: int, b, c) =>
   } else {
     c
   }
+
 let max_int_2 = (a: int, b) =>
   if a >= b {
     a
@@ -143,6 +144,7 @@ let rec check_height_and_diff = x =>
   }
 
 let check = tree => ignore(check_height_and_diff(tree))
+
 /*
     Invariants: 
     1. {[ l < v < r]}
@@ -324,7 +326,7 @@ let internal_bal = (l, v, r) => {
 
 let rec remove_min_elt = x =>
   switch x {
-  | Empty => invalid_arg("Set.remove_min_elt")
+  | Empty => throw(Invalid_argument("Set.remove_min_elt"))
   | Node(Empty, v, r, _) => r
   | Node(l, v, r, _) => internal_bal(remove_min_elt(l), v, r)
   }

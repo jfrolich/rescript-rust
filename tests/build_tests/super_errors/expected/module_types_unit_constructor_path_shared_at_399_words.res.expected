@@ -1,0 +1,20 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/module_types_unit_constructor_path_shared_at_399_words.res[0m:[2m7:5-12:1[0m
+
+   5 [2m│[0m   let u1: unit
+   6 [2m│[0m   let v: string
+   [1;31m7[0m [2m│[0m } = [1;31m{[0m
+   [1;31m8[0m [2m│[0m [1;31m  type z<'a0>[0m
+   [2m.[0m [2m│[0m [2m...[0m
+  [1;31m11[0m [2m│[0m [1;31m  let v = 1[0m
+  [1;31m12[0m [2m│[0m [1;31m}[0m
+  13 [2m│[0m 
+
+  Signature mismatch:
+  
+  Actual declaration ([36m/.../fixtures/module_types_unit_constructor_path_shared_at_399_words.res[0m:[2m11:7[0m):
+    let v: int
+  
+  Expected declaration ([36m/.../fixtures/module_types_unit_constructor_path_shared_at_399_words.res[0m:[2m6:3-15[0m):
+    let v: string

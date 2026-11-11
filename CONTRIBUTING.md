@@ -32,7 +32,7 @@ algorithm and representation invariants belong beside their implementation.
 
 > Most of our contributors are working on Apple machines, so all our instructions are currently macOS / Linux centric. Contributions for Windows development welcome!
 
-- [Node.js](https://nodejs.org/) v22.x or newer
+- [Node.js](https://nodejs.org/) v26.x or newer (the version in `.nvmrc`)
 - [Yarn CLI](https://yarnpkg.com/getting-started/install) (can be installed with `corepack`, Homebrew, etc)
 - C compiler toolchain (usually installed with `xcode` on Mac)
 - Rust toolchain (required to build rewatch; follow the instructions at https://www.rust-lang.org/tools/install and `rustup` then installs the toolchain pinned in `rust-toolchain.toml` on the first build)
@@ -51,6 +51,8 @@ git clone --depth 1 https://github.com/rescript-lang/rescript.git
 
 This will only consume less than 50MB.
 
+[.gitattributes](.gitattributes) checks out every text file with LF line endings, which the committed snapshots and formatters expect on every platform. It also marks the Yarn release and the copied test dependencies in `tests/dependencies` as vendored, which leaves them out of GitHub's language statistics.
+
 ## Installation
 
 ### A. Manual installation
@@ -66,9 +68,9 @@ opam init
 
 # Any recent OCaml version works as a development compiler
 # Can also create local switch with opam switch create
-# If you get "No compiler matching `5.5.1' found" error,
+# If you get "No compiler matching `5.5.2' found" error,
 # then you need to run `opam update && opam upgrade` first
-opam switch create 5.5.1
+opam switch create 5.5.2
 
 # Install dev dependencies from OPAM
 opam install . --deps-only --with-test --with-dev-setup -y
@@ -283,6 +285,10 @@ npm install
 npm link rescript
 ```
 
+#### Use Local BSC with Existing ReScript Installation
+
+Both build systems have a compiler built in: `rescript` (Rust) links the Rust compiler, and `rescript-ocaml` compiles in-process with the OCaml compiler. To test a local compiler change, link the local package as shown above.
+
 ### Running Automatic Tests
 
 We provide different test suites for different levels of the compiler and build system infrastructure. Always make sure to locally build your compiler before running any tests.
@@ -337,7 +343,7 @@ Below we will discuss on how to write, build and run these test files.
 ### 1) Write a Mocha Test File
 
 - Create a file `tests/tests/src/feature_abc_test.res`. Make sure to end the file name with `_test.res`.
-- Inside the file, add a mocha test suite. The mocha bindings are defined in `tests/tests/src/mt.res`. To get you started, here is a simple scaffold for a test suite with multiple test cases:
+- Inside the file, add a mocha test suite. The mocha bindings are defined in `tests/tests/src/mocha.res`, the assertion helpers in `tests/tests/src/test_utils.res`. To get you started, here is a simple scaffold for a test suite with multiple test cases:
 
   ```rescript
   open Mocha
@@ -366,8 +372,8 @@ Below we will discuss on how to write, build and run these test files.
 This is usually the file you want to create to test certain compile behavior without running the JS code formally as a test, i.e., when you just want to check that the ReScript code compiles and produces the expected JS code.
 
 - Create your test file `tests/tests/src/my_file_test.res`. Make sure to end the file name with `_test.res`.
-- Build the `.js` artifact: `node scripts/test.js -mocha`.
-- Verify the output, check in the `tests/tests/src/my_file_test.res` and `tests/tests/src/my_file_test.js` to version control. The checked in `.js` file is essential for verifying regressions later on.
+- Build the `.mjs` artifact: `node scripts/test.js -mocha`.
+- Verify the output, check in the `tests/tests/src/my_file_test.res` and `tests/tests/src/my_file_test.mjs` to version control. The checked in `.mjs` file is essential for verifying regressions later on.
 - Eventually check in other relevant files changed during the rebuild (depends on your compiler changes).
 
 ## Contribute to the ReScript Playground Bundle
@@ -408,7 +414,7 @@ After a successful compilation, you will find following files in your project:
 - `packages/playground/packages/@rescript/belt` -> The Belt cmij, packaged separately from the compiler built-ins
 - `packages/playground/packages/*` -> Contains third party deps with cmij.js files (as defined in `packages/playground/rescript.json`)
 
-You can now use the `compiler.js` file either directly by using a `<script src="/path/to/compiler.js"/>` and `<script src="/path/to/packages/compilerCmij.js"/>` inside a html file, use a browser bundler infrastructure to optimize it, or use `nodejs` to run it on a command line:
+You can now use the `compiler.js` file either directly by using a `<script src="/path/to/compiler.js"/>` and `<script src="/path/to/packages/compiler-builtins/cmij.js"/>` inside a html file, use a browser bundler infrastructure to optimize it, or use `nodejs` to run it on a command line:
 
 ```
 $ node
@@ -418,6 +424,18 @@ $ node
 > let result = rescript.compile(`Console.log(${rescript.version})`);
 > eval(result.js_code);
 ```
+
+### Lambda debug outputs
+
+`comp.rescript.compileWithDebug(source)` returns `lambda` before the backend's
+Lambda optimization passes and `lambda_optimized` after the whole-term passes,
+before export grouping and JavaScript lowering. Both use the same Lambda printer
+so their text can be compared directly. JavaScript lowering performs further
+transformations; this snapshot is not the final JavaScript IR.
+
+Regular `comp.rescript.compile(source)` does not capture these debug outputs.
+Older bundles do not provide `lambda_optimized`; detect this optional field's
+presence rather than inferring support from the API version.
 
 ### Testing the Playground bundle
 
@@ -501,7 +519,7 @@ Adding a new entry there requires re-running the analysis tests. Follow these st
 
 (If a `make` command fails, consider using the [DevContainer](#b-devcontainer).)
 
-Finally, add a line to [CHANGELOG.md](CHANGELOG.md), using the `#### :nail_care: Polish` section.
+Finally, add a `changes/<description>.polish.md` fragment following [the changelog instructions](changes/README.md).
 
 ## Code structure
 
@@ -549,6 +567,21 @@ Javascript Code
 
 Note that there is one design goal to keep in mind, never introduce any meaningless symbol unless necessary, we do optimizations, however, it should also compile readable output code.
 
+## Commit messages
+
+Every commit message has a subject, a description and a sign-off. The description says why the commit is made, as a line or two of prose or a `Why:` section; this applies to small follow-up commits too, such as adding a changelog fragment. Pull requests are squash-merged with their commit messages, so these descriptions end up in `master`'s history.
+
+    Warn about unused open statements
+
+    An open whose module contributes no name silently widens the scope;
+    the new warning points at it.
+
+    Signed-off-by: Random J. Developer <random@developer.example.org>
+
+The Semantic Diff workflow draws each pull request's commit messages as a review page and comments them on the pull request. It fails if a commit has no description and names that commit; add one with `git rebase -i`, marking the commit `reword`, and force-push. Run the same check locally with `node scripts/commitRecords.js --check origin/master..HEAD`.
+
+A message can also show what the commit changes, such as the parse tree, generated JavaScript or an error message, Before and After; [`.agents/skills/records/SKILL.md`](.agents/skills/records/SKILL.md) describes the format.
+
 ## PR target branch
 
 Target branch `master` for development of new (breaking) features (v12).
@@ -563,7 +596,7 @@ The repository's `npm-release` GitHub environment should have required reviewers
 To build a new version and release it on NPM, follow these steps:
 
 1. Verify that the version number is already set correctly for the release. (It should have been incremented after releasing the previous version.)
-1. Create a PR to update `CHANGELOG.md`, removing the "(Unreleased)" for the version to be released.
+1. Run `yarn changelog:preview` to review pending notes, then `yarn changelog:release` to collect fragments into `CHANGELOG.md`, remove "(Unreleased)", and delete consumed fragments. It also bumps the `.cmi`, `.cmt` and `.ast` magic numbers in `compiler/ext/config.ml` when their sources changed since the previous release tag, so fetch the tags first (`git fetch --tags`). Create a PR containing these changes, review the combined release notes, and apply the `changelog:release` label. Existing unreleased entries are preserved. If more fragments are merged before publishing, the `Publish` workflow refuses to run; repeat this step to add them to the same version. Don't run `yarn changelog:release` while a `Publish` run is in progress: it could add notes for changes that the run is not publishing.
 1. Once that PR is merged and built successfully, run the `Publish` workflow from the GitHub Actions tab. Use the "Run workflow" branch dropdown to select the release branch (normally `master`, or the relevant maintenance branch) and indicate whether this is the current stable release. The version is read from that branch's `package.json`, and the npm tag is derived automatically:
    - A current stable release is published as `latest`.
    - A stable maintenance release for an older major is published as `latest-<major>`, for example `latest-12`.
@@ -576,7 +609,7 @@ To build a new version and release it on NPM, follow these steps:
 1. Create a PR with the following changes to prepare for development of the next version:
    - Increment the `EXPECTED_VERSION` number in `yarn.config.cjs` for the next version.
    - Run `yarn constraints --fix` to take that version number over into other files.
-   - Update `CHANGELOG.md` and add an entry for the next version, e.g., "10.0.0-beta.2 (Unreleased)"
+   - Run `yarn changelog:open` to add the empty "(Unreleased)" section for the next version to `CHANGELOG.md`, and apply the `changelog:release` label to the PR.
 
 ## Debugging issues from CI builds
 
@@ -602,10 +635,8 @@ Then attempt to rebuild your project as you would normally.
 
 ## Contribution Licensing
 
-Since ReScript is distributed under the terms of the [LGPL Version 3](LICENSE), contributions that you make are licensed under the same terms. In order for us to be able to accept your contributions, we will need explicit confirmation from you that you are able and willing to provide them under these terms, and the mechanism we use to do this is called a Developer's Certificate of Origin [DCO](DCO.md). This is very similar to the process used by the Linux(R) kernel, Samba, and many other major open source projects.
+ReScript is distributed under the [LGPL Version 3](LICENSE), and contributions are licensed under the same terms. To confirm that you can contribute under these terms, sign off every commit to certify the [Developer Certificate of Origin](https://developercertificate.org), as the Linux kernel and many other projects do:
 
-To participate under these terms, all that you must do is include a line like the following as the last line of the commit message for each commit in your contribution:
+    Signed-off-by: Random J. Developer <random@developer.example.org>
 
-    Signed-Off-By: Random J. Developer <random@developer.example.org>
-
-You must use your real name (sorry, no pseudonyms, and no anonymous contributions).
+`git commit -s` adds this line. Use your real name. The DCO check on each PR fails if a commit lacks a sign-off; fix it with `git rebase --signoff HEAD~N`, where N is the number of commits in the PR, and force-push.

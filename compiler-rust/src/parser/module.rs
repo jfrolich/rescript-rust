@@ -11,7 +11,10 @@ use crate::parse_arena::{CoreTypeIdx, LidentIdx, LocIdx, Located, PosIdx, StrIdx
 // Import Location as alias to LocIdx from ast
 use super::ast::Location;
 use super::ast::*;
-use super::core::{error_messages, is_es6_arrow_functor, mknoloc, recover, with_loc};
+use super::core::{
+    error_messages, is_bar_or_doc_comment_then_bar, is_es6_arrow_functor, mknoloc,
+    parse_doc_comments, recover, with_loc,
+};
 use super::diagnostics::DiagnosticCategory;
 use super::expr;
 use super::grammar;
@@ -353,10 +356,24 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             let payload = parse_payload_region(p);
             let payload = raw_source_extension_payload(p, &id, payload);
             parse_newline_or_semicolon_structure(p);
-            Some(StructureItemDesc::Pstr_extension(Box::new((
-                (id, payload),
-                attrs,
-            ))))
+            // res_core.ml parse_structure_item_region: `%%raw` with a plain
+            // string or template payload is a raw node.
+            let source = if p.arena().get_string(id.txt) == "raw" {
+                crate::ast_raw::of_payload(p.arena_mut(), &payload)
+            } else {
+                None
+            };
+            match source {
+                Some(source) => Some(StructureItemDesc::Pstr_raw(Box::new(PstrRaw {
+                    name_loc: id.loc,
+                    source,
+                    attrs,
+                }))),
+                None => Some(StructureItemDesc::Pstr_extension(Box::new((
+                    (id, payload),
+                    attrs,
+                )))),
+            }
         }
         _ => {
             // Could be an expression
@@ -892,37 +909,18 @@ pub fn parse_signature_item(p: &mut Parser<'_>) -> Option<SignatureItem> {
 
 /// Parse a module expression.
 pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
-    // Handle await keyword
-    // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
-    // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
-    let await_loc = if p.token == Token::Await {
+    // res_core.ml `parse_module_expr`: an optional `await`, whose start is
+    // the start of the await node.
+    let await_start = if p.token == Token::Await {
         let await_start_idx = p.start_pos_idx();
         p.next();
-        // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
-        let await_end_idx = p.end_pos_idx();
-        Some(p.mk_loc_idx(await_start_idx, await_end_idx))
+        Some(await_start_idx)
     } else {
         None
     };
 
     // Parse attributes (e.g., @functorAttr)
-    let mut attrs = parse_attributes(p);
-
-    // Add await attribute if present
-    // OCaml line 6632: make_await_attr loc_await
-    if let Some(loc) = await_loc {
-        let await_idx = p.arena_mut().intern("res.await");
-        attrs.insert(
-            0,
-            (
-                Located {
-                    txt: await_idx,
-                    loc,
-                },
-                Payload::PStr(Box::default()),
-            ),
-        );
-    }
+    let attrs = parse_attributes(p);
 
     // Check if this is a functor: (args) => body or (args) : type => body
     // For primary expressions, capture start_pos for location override (OCaml line 6503)
@@ -940,6 +938,19 @@ pub fn parse_module_expr(p: &mut Parser<'_>) -> ModuleExpr {
     // Override the outermost location after module application processing
     if let Some(primary_start_idx) = primary_start_pos_idx {
         expr.pmod_loc = p.mk_loc_idx_to_prev_end(primary_start_idx);
+    }
+
+    // The attributes after `await` belong to the await, like those of
+    // `@attr (await M)`, and the module keeps its own: `await @b (@a M)`.
+    if let Some(await_start_idx) = await_start {
+        let end_idx = p.arena().loc_end_idx(expr.pmod_loc);
+        let loc = p.mk_loc_idx(await_start_idx, end_idx);
+        let inner = p.arena_mut().push_mod_expr(expr);
+        return ModuleExpr {
+            pmod_desc: ModuleExprDesc::Pmod_await(inner),
+            pmod_loc: loc,
+            pmod_attributes: attrs,
+        };
     }
 
     // Attach attributes to the module expression
@@ -987,37 +998,18 @@ fn parse_constrained_mod_expr_region(p: &mut Parser<'_>) -> Option<ModuleExpr> {
 pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     let _start_pos_idx = p.start_pos_idx();
 
-    // Handle await keyword
-    // OCaml lines 6622-6629: capture await start_pos BEFORE consuming, end_pos AFTER consuming
-    // NOTE: OCaml uses p.end_pos after consuming await, which is the end of the NEXT token
-    let await_loc = if p.token == Token::Await {
+    // res_core.ml `parse_module_expr`: an optional `await`, whose start is
+    // the start of the await node.
+    let await_start = if p.token == Token::Await {
         let await_start_idx = p.start_pos_idx();
         p.next();
-        // OCaml: let end_pos = p.end_pos in - this is the end of the token AFTER await
-        let await_end_idx = p.end_pos_idx();
-        Some(p.mk_loc_idx(await_start_idx, await_end_idx))
+        Some(await_start_idx)
     } else {
         None
     };
 
     // Parse attributes (e.g., @functorAttr)
-    let mut attrs = parse_attributes(p);
-
-    // Add await attribute if present
-    // OCaml line 6632: make_await_attr loc_await
-    if let Some(loc) = await_loc {
-        let await_idx = p.arena_mut().intern("res.await");
-        attrs.insert(
-            0,
-            (
-                Located {
-                    txt: await_idx,
-                    loc,
-                },
-                Payload::PStr(Box::default()),
-            ),
-        );
-    }
+    let attrs = parse_attributes(p);
 
     // Check if this is a functor: (args) => body or (args) : type => body
     // For primary expressions, capture start_pos for location override (OCaml line 6503)
@@ -1038,6 +1030,19 @@ pub fn parse_module_expr_without_constraint(p: &mut Parser<'_>) -> ModuleExpr {
     }
 
     // NOTE: We intentionally DON'T handle `: type` constraint here
+
+    // The attributes after `await` belong to the await, like those of
+    // `@attr (await M)`, and the module keeps its own: `await @b (@a M)`.
+    if let Some(await_start_idx) = await_start {
+        let end_idx = p.arena().loc_end_idx(expr.pmod_loc);
+        let loc = p.mk_loc_idx(await_start_idx, end_idx);
+        let inner = p.arena_mut().push_mod_expr(expr);
+        return ModuleExpr {
+            pmod_desc: ModuleExprDesc::Pmod_await(inner),
+            pmod_loc: loc,
+            pmod_attributes: attrs,
+        };
+    }
 
     // Attach attributes to the module expression
     if attrs.is_empty() {
@@ -2155,9 +2160,12 @@ fn parse_let_binding_body(
         p.arena_mut()
             .set_value_constraint(pat_idx, value_constraint, expr_idx, vb_loc);
     }
+    // `Ast_helper.Vb.mk` takes the JSX component annotation out of `attrs`.
+    let (pvb_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     let binding = ValueBinding {
         pvb_pat: pat_idx,
         pvb_expr: expr_idx,
+        pvb_jsx_component,
         pvb_attributes: attrs,
         pvb_loc: vb_loc,
     };
@@ -2195,10 +2203,14 @@ fn parse_type_declaration_body(
 
     // Parse optional manifest and/or kind (and ReScript's `type t = T = ...` equation form).
     // OCaml: if token is Bar, call expect Equal to generate "Did you forget a `=` here?" error
-    let (manifest, kind, private) =
+    let (manifest, kind, private, repr_attrs) =
         parse_type_equation_and_representation(p, inline_ctx, &current_type_name_path);
 
     let cstrs = parse_type_constraints(p);
+    // res_core.ml:6195-6196, 6246-6247: attributes in front of a record or
+    // open representation go on the declaration, after its own attributes.
+    let mut attrs = attrs;
+    attrs.extend(repr_attrs);
 
     // Use decl_start_idx for the start position to enable sharing with structure_item
     let loc = p.mk_loc_idx_to_prev_end(decl_start_idx);
@@ -2217,15 +2229,24 @@ fn parse_type_declaration_body(
 
 type TypeEquation = (Option<CoreTypeIdx>, TypeKind, PrivateFlag);
 
+/// A [`TypeEquation`] and the attributes found in front of a record or open
+/// representation, which belong to the type declaration.
+type TypeEquationAttrs = (Option<CoreTypeIdx>, TypeKind, PrivateFlag, Attributes);
+
 /// OCaml `parse_type_equation_and_representation`
-/// (compiler/syntax/src/res_core.ml:6320-6395).
+/// (compiler/syntax/src/res_core.ml:6088-6175).
 fn parse_type_equation_and_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
+) -> TypeEquationAttrs {
     if !matches!(p.token, Token::Equal | Token::Bar) {
-        return (None, TypeKind::Ptype_abstract, PrivateFlag::Public);
+        return (
+            None,
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+            Attributes::new(),
+        );
     }
     if p.token == Token::Bar {
         p.expect(Token::Equal);
@@ -2234,40 +2255,24 @@ fn parse_type_equation_and_representation(
     match p.token {
         Token::Uident(_) => parse_type_equation_or_constr_decl(p),
         Token::Lbrace => {
-            parse_record_or_object_decl(p, inline_ctx, inline_ctx.map(|_| current_type_name_path))
+            let (manifest, kind, private) = parse_record_or_object_decl(
+                p,
+                inline_ctx,
+                inline_ctx.map(|_| current_type_name_path),
+            );
+            (manifest, kind, private, Attributes::new())
         }
         Token::Private => parse_private_eq_or_repr(p),
-        Token::Bar | Token::DotDot | Token::DocComment { .. } => {
-            let (private, kind) = parse_type_representation(p, None, None);
-            (None, kind, private)
+        Token::Bar | Token::DotDot => {
+            let (private, kind, attrs) =
+                parse_type_representation(p, inline_ctx, Some(current_type_name_path));
+            (None, kind, private, attrs)
         }
-        Token::At => {
-            // Look past the attributes (and doc comments): a representation-like
-            // token means a representation, anything else a manifest.
-            let is_representation_after_attrs = p.lookahead(|state| {
-                parse_attributes(state);
-                super::core::skip_doc_comments(state);
-                match state.token {
-                    Token::Lbrace => {
-                        state.next();
-                        parse_attributes(state);
-                        super::core::skip_doc_comments(state);
-                        !matches!(
-                            state.token,
-                            Token::String(_) | Token::Dot | Token::DotDot | Token::DotDotDot
-                        )
-                    }
-                    Token::Bar | Token::DotDot | Token::DocComment { .. } => true,
-                    Token::Uident(_) => {
-                        state.next();
-                        state.token != Token::Dot
-                    }
-                    _ => false,
-                }
-            });
-            if is_representation_after_attrs {
-                let (private, kind) = parse_type_representation(p, None, None);
-                (None, kind, private)
+        Token::At | Token::DocComment { .. } => {
+            if is_representation_after_attrs(p) {
+                let (private, kind, attrs) =
+                    parse_type_representation(p, inline_ctx, Some(current_type_name_path));
+                (None, kind, private, attrs)
             } else {
                 parse_manifest_and_representation(p, inline_ctx, current_type_name_path)
             }
@@ -2276,27 +2281,77 @@ fn parse_type_equation_and_representation(
     }
 }
 
+/// OCaml `is_representation_after_attrs` (res_core.ml:6027-6074).
+/// Attributes and doc comments after `=` (or `= private`) can start a
+/// representation (variant/record/open variant) or a manifest. Look ahead past
+/// them: if a representation-like token follows, it is a representation;
+/// otherwise a manifest type expression.
+fn is_representation_after_attrs(p: &mut Parser<'_>) -> bool {
+    let starts_with_doc_comment = matches!(p.token, Token::DocComment { .. });
+    p.lookahead(|state| {
+        parse_attributes(state);
+        // Optionally skip a run of doc comments before deciding.
+        super::core::skip_doc_comments(state);
+        match state.token {
+            Token::Lbrace => {
+                // Disambiguate a record declaration from an object type: a
+                // string, `.` or `..` inside the braces is an object type, a
+                // manifest.
+                state.next();
+                parse_attributes(state);
+                super::core::skip_doc_comments(state);
+                match state.token {
+                    Token::String(_) | Token::Dot | Token::DotDot => false,
+                    // A spread (`{...base, y: int}`) after a leading doc
+                    // comment has always been parsed as a record declaration,
+                    // and after a leading attribute as an object type.
+                    Token::DotDotDot => starts_with_doc_comment,
+                    _ => true,
+                }
+            }
+            // A variant constructor list, or an extensible variant `..`.
+            Token::Bar | Token::DotDot => true,
+            // A variant spread (`...base | C`) after a leading doc comment has
+            // always been parsed as a constructor list.
+            Token::DotDotDot => starts_with_doc_comment,
+            // A constructor, or a module-qualified manifest `M.t`.
+            Token::Uident(_) => {
+                state.next();
+                state.token != Token::Dot
+            }
+            // A doc comment before a constructor list.
+            Token::DocComment { .. } => true,
+            _ => false,
+        }
+    })
+}
+
 /// The manifest fallback of `parse_type_equation_and_representation`: a type
 /// expression, optionally followed by `= representation`.
 fn parse_manifest_and_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: &Vec<StrIdx>,
-) -> TypeEquation {
+) -> TypeEquationAttrs {
     let typ = typ::parse_typ_expr(p);
     let manifest = Some(p.arena_mut().push_core_type(typ));
     if p.token == Token::Equal {
         p.next();
-        let (private, kind) =
+        let (private, kind, attrs) =
             parse_type_representation(p, inline_ctx, Some(current_type_name_path));
-        (manifest, kind, private)
+        (manifest, kind, private, attrs)
     } else {
-        (manifest, TypeKind::Ptype_abstract, PrivateFlag::Public)
+        (
+            manifest,
+            TypeKind::Ptype_abstract,
+            PrivateFlag::Public,
+            Attributes::new(),
+        )
     }
 }
 
-/// OCaml `parse_type_equation_or_constr_decl` (res_core.ml:5822-5874).
-fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
+/// OCaml `parse_type_equation_or_constr_decl` (res_core.ml:5605-5651).
+fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquationAttrs {
     let is_type_path = p.lookahead(|state| {
         state.next();
         state.token == Token::Dot
@@ -2306,6 +2361,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             None,
             TypeKind::Ptype_variant(parse_constructors_without_leading_bar(p)),
             PrivateFlag::Public,
+            Attributes::new(),
         );
     }
     let uident_start_pos_idx = p.start_pos_idx();
@@ -2319,8 +2375,13 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
     match p.token {
         Token::Equal => {
             p.next();
-            let (private, kind) = parse_type_representation(p, None, None);
-            (Some(p.arena_mut().push_core_type(typ)), kind, private)
+            let (private, kind, attrs) = parse_type_representation(p, None, None);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                kind,
+                private,
+                attrs,
+            )
         }
         Token::EqualGreater => {
             p.next();
@@ -2331,6 +2392,7 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
             let arrow = CoreType {
                 ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((
                     Box::new(TypeArg {
+                        fixed: None,
                         attrs: Attributes::new(),
                         lbl: ArgLabel::Nolabel,
                         typ: param_idx,
@@ -2346,31 +2408,49 @@ fn parse_type_equation_or_constr_decl(p: &mut Parser<'_>) -> TypeEquation {
                 Some(p.arena_mut().push_core_type(typ)),
                 TypeKind::Ptype_abstract,
                 PrivateFlag::Public,
+                Attributes::new(),
             )
         }
         _ => (
             Some(p.arena_mut().push_core_type(typ)),
             TypeKind::Ptype_abstract,
             PrivateFlag::Public,
+            Attributes::new(),
         ),
     }
 }
 
-/// OCaml `parse_private_eq_or_repr` (res_core.ml:6081-6097).
-fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquation {
+/// OCaml `parse_private_eq_or_repr` (res_core.ml:5788-5812).
+fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquationAttrs {
     p.expect(Token::Private);
+    // The guard of the `At | DocComment` arm, which only those tokens reach.
+    let representation_after_attrs =
+        matches!(p.token, Token::At | Token::DocComment { .. }) && is_representation_after_attrs(p);
     match p.token {
         Token::Lbrace => {
             let (manifest, kind, _) = parse_record_or_object_decl(p, None, None);
-            (manifest, kind, PrivateFlag::Private)
+            (manifest, kind, PrivateFlag::Private, Attributes::new())
         }
         Token::Uident(_) => {
-            let (manifest, kind, _) = parse_type_equation_or_constr_decl(p);
-            (manifest, kind, PrivateFlag::Private)
+            let (manifest, kind, _, attrs) = parse_type_equation_or_constr_decl(p);
+            (manifest, kind, PrivateFlag::Private, attrs)
         }
         Token::Bar | Token::DotDot => {
-            let (_, kind) = parse_type_representation(p, None, None);
-            (None, kind, PrivateFlag::Private)
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
+        }
+        Token::At | Token::DocComment { .. } if representation_after_attrs => {
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
+        }
+        Token::DocComment { .. } => {
+            let typ = typ::parse_typ_expr(p);
+            (
+                Some(p.arena_mut().push_core_type(typ)),
+                TypeKind::Ptype_abstract,
+                PrivateFlag::Private,
+                Attributes::new(),
+            )
         }
         ref t if grammar::is_typ_expr_start(t) => {
             let typ = typ::parse_typ_expr(p);
@@ -2378,32 +2458,34 @@ fn parse_private_eq_or_repr(p: &mut Parser<'_>) -> TypeEquation {
                 Some(p.arena_mut().push_core_type(typ)),
                 TypeKind::Ptype_abstract,
                 PrivateFlag::Private,
+                Attributes::new(),
             )
         }
         _ => {
-            let (_, kind) = parse_type_representation(p, None, None);
-            (None, kind, PrivateFlag::Private)
+            let (_, kind, attrs) = parse_type_representation(p, None, None);
+            (None, kind, PrivateFlag::Private, attrs)
         }
     }
 }
 
-/// OCaml `parse_type_representation` (res_core.ml:5640-5692).
+/// OCaml `parse_type_representation` (res_core.ml:5413-5468). Attributes
+/// and doc comments in front of a record or `..` have no node of their own:
+/// they are returned for the caller to put on the type declaration.
 fn parse_type_representation(
     p: &mut Parser<'_>,
     inline_ctx: Option<&RefCell<InlineTypesContext>>,
     current_type_name_path: Option<&Vec<StrIdx>>,
-) -> (PrivateFlag, TypeKind) {
+) -> (PrivateFlag, TypeKind, Attributes) {
     p.leave_breadcrumb(grammar::Grammar::TypeRepresentation);
     let private = if p.optional(&Token::Private) {
         PrivateFlag::Private
     } else {
         PrivateFlag::Public
     };
+    let mut attrs = Attributes::new();
     let kind = match p.token {
-        Token::Bar | Token::Uident(_) | Token::DocComment { .. } => {
-            TypeKind::Ptype_variant(parse_constructors(p))
-        }
-        Token::At => {
+        Token::Bar | Token::Uident(_) => TypeKind::Ptype_variant(parse_constructors(p)),
+        Token::At | Token::DocComment { .. } => {
             let after_attrs = p.lookahead(|state| {
                 parse_attributes(state);
                 super::core::skip_doc_comments(state);
@@ -2415,8 +2497,7 @@ fn parse_type_representation(
             });
             match after_attrs {
                 0 => {
-                    parse_attributes(p);
-                    super::core::skip_doc_comments(p);
+                    attrs = parse_attributes(p);
                     TypeKind::Ptype_record(parse_record_declaration(
                         p,
                         inline_ctx,
@@ -2424,11 +2505,11 @@ fn parse_type_representation(
                     ))
                 }
                 1 => {
-                    parse_attributes(p);
-                    super::core::skip_doc_comments(p);
+                    attrs = parse_attributes(p);
                     p.next();
                     TypeKind::Ptype_open
                 }
+                // Leave the attributes for the first constructor.
                 _ => TypeKind::Ptype_variant(parse_constructors(p)),
             }
         }
@@ -2447,7 +2528,7 @@ fn parse_type_representation(
         }
     };
     p.eat_breadcrumb();
-    (private, kind)
+    (private, kind, attrs)
 }
 
 /// OCaml `parse_type_param` (compiler/syntax/src/res_core.ml).
@@ -2508,20 +2589,8 @@ fn parse_constructors(p: &mut Parser<'_>) -> Vec<ConstructorDeclaration> {
     // - Remaining constructors: only if token is `|` or doc-comment-then-`|`
     let mut constructors = vec![];
 
-    // First constructor: optional leading doc comment attribute.
-    let first_doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-        let loc = *loc;
-        let content = content.clone();
-        p.next();
-        let loc = p.from_location(&loc);
-        vec![super::core::doc_comment_to_attribute(
-            p.arena_mut(),
-            loc,
-            content,
-        )]
-    } else {
-        vec![]
-    };
+    // First constructor: the doc comments before its optional leading bar.
+    let first_doc_attrs = parse_doc_comments(p);
 
     // First constructor (optional leading bar).
     let first_start_idx = p.start_pos_idx();
@@ -2553,19 +2622,7 @@ fn parse_constructor_declarations_with_bar(
             break;
         }
 
-        let doc_attrs = if let Token::DocComment { loc, content } = &p.token {
-            let loc = *loc;
-            let content = content.clone();
-            p.next();
-            let loc = p.from_location(&loc);
-            vec![super::core::doc_comment_to_attribute(
-                p.arena_mut(),
-                loc,
-                content,
-            )]
-        } else {
-            vec![]
-        };
+        let doc_attrs = parse_doc_comments(p);
 
         let bar_start_idx = p.start_pos_idx();
         p.next(); // consume `|`
@@ -2580,19 +2637,6 @@ fn parse_constructor_declarations_with_bar(
         }
     }
     p.eat_breadcrumb();
-}
-
-/// Check if current token is `|` or doc-comment followed by `|`.
-/// Matches OCaml's `is_bar_or_doc_comment_then_bar`.
-fn is_bar_or_doc_comment_then_bar(p: &mut Parser<'_>) -> bool {
-    match p.token {
-        Token::Bar => true,
-        Token::DocComment { .. } => p.lookahead(|state| {
-            state.next();
-            matches!(state.token, Token::Bar)
-        }),
-        _ => false,
-    }
 }
 
 /// The `Uident` constructor branch of OCaml `parse_type_equation_or_constr_decl`
@@ -3456,7 +3500,9 @@ fn parse_external_value_description(
     p.inline_types_params = vec![];
     p.inline_types_collect_free_type_vars = true;
 
-    let typ_ct = typ::parse_external_type_expr(p);
+    let mut typ_ct = typ::parse_external_type_expr(p);
+    // res_core.ml parse_external_def: `|> Ast_fixed_arg.normalize_external_type`.
+    crate::ast_fixed_arg::normalize_external_type(p.arena_mut(), &mut typ_ct);
     let inline_types_found = p.inline_types_found.take().unwrap_or_default();
 
     p.in_external = was_in_external;
@@ -3491,10 +3537,13 @@ fn parse_external_value_description(
     };
 
     let loc = p.mk_loc_idx_to_prev_end(loc_start_idx);
+    // `Ast_helper.Val.mk` takes the JSX component annotation out of `attrs`.
+    let (pval_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     let vd = ValueDescription {
         pval_name: name,
         pval_type: typ,
         pval_prim: prim,
+        pval_jsx_component,
         pval_attributes: attrs,
         pval_loc: loc,
     };
@@ -3528,10 +3577,13 @@ fn parse_sign_let_desc(p: &mut Parser<'_>, attrs: Attributes) -> ValueDescriptio
     let typ = typ::parse_poly_type_expr(p);
     let typ = p.arena_mut().push_core_type(typ);
     let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    // `Ast_helper.Val.mk` takes the JSX component annotation out of `attrs`.
+    let (pval_jsx_component, attrs) = crate::ast_jsx_component::take(p.arena(), attrs);
     ValueDescription {
         pval_name: name,
         pval_type: typ,
         pval_prim: None,
+        pval_jsx_component,
         pval_attributes: attrs,
         pval_loc: loc,
     }
@@ -3888,7 +3940,8 @@ fn parse_rec_module_declarations(
 
 /// Parse a module type declaration.
 /// `in_structure` indicates whether this is in a structure (.res) or signature (.resi).
-/// In structure context, OCaml passes ~loc, in signature context it doesn't (uses Location.none).
+/// Both span from the name to the end (res_core.ml `parse_module_type_impl`
+/// and `parse_module_type_declaration`).
 fn parse_module_type_declaration(
     p: &mut Parser<'_>,
     outer_attrs: Attributes,
@@ -3926,13 +3979,10 @@ fn parse_module_type_declaration(
         None
     };
 
-    // In structure context (parse_module_type_impl), OCaml passes ~loc:(mk_loc name_start p.prev_end_pos)
-    // In signature context (parse_module_type_declaration), OCaml doesn't pass ~loc, uses Location.none
-    let loc = if in_structure {
-        p.mk_loc_idx_to_prev_end(name_start_idx)
-    } else {
-        Location::none()
-    };
+    // `~loc:(mk_loc name_start p.prev_end_pos)` in a structure and
+    // `~loc:(mk_loc name_start (Parser.position p))`, the consumed position,
+    // in a signature.
+    let loc = p.mk_loc_idx_to_prev_end(name_start_idx);
 
     ModuleTypeDeclaration {
         pmtd_name: name,
@@ -4131,34 +4181,17 @@ pub(super) fn raw_source_extension_payload(
     id: &StringLoc,
     payload: Payload,
 ) -> Payload {
-    if p.arena().get_string(id.txt) == "re" {
+    // res_core.ml `parse_extension`: removed extensions are reported at the
+    // extension name, and the payload is still returned.
+    let removed = match p.arena().get_string(id.txt) {
+        "re" => Some("The %re extension has been removed. Use a regexp literal such as /abc/i."),
+        "debugger" => Some("The %debugger extension has been removed. Use debugger() instead."),
+        _ => None,
+    };
+    if let Some(message) = removed {
         let start = p.loc_start(id.loc);
         let end = p.loc_end(id.loc);
-        p.err_at(
-            start,
-            end,
-            DiagnosticCategory::message(
-                "The %re extension has been removed. Use a regexp literal such as /abc/i.",
-            ),
-        );
-    }
-    if !matches!(p.arena().get_string(id.txt), "raw" | "ffi") {
-        return payload;
-    }
-    if let Payload::PStr(items) = &payload
-        && let [item] = items.as_slice()
-        && let StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc
-    {
-        let expr_idx = eval.0;
-        if let ExpressionDesc::Pexp_constant(Constant::String(literal)) =
-            p.arena().get_expr(expr_idx).pexp_desc
-        {
-            let source = match literal {
-                StringConst::Valid { source, .. } | StringConst::InvalidSource(source) => source,
-            };
-            p.arena_mut().get_expr_mut(expr_idx).pexp_desc =
-                ExpressionDesc::Pexp_constant(Constant::RawSource(source));
-        }
+        p.err_at(start, end, DiagnosticCategory::message(message));
     }
     payload
 }
@@ -4174,6 +4207,93 @@ mod tests {
     /// Parse source code into a structure with a timeout.
     fn parse_with_timeout(source: &str) -> Structure {
         crate::parser::test_utils::parse_with_timeout(source, parse_structure)
+    }
+
+    /// The formatter prints every doc comment of a constructor, variant
+    /// spread or polymorphic variant tag on its own line before the `|`;
+    /// parsing that output keeps each doc comment, in source order
+    /// (res_core.ml `parse_doc_comments`).
+    #[test]
+    fn several_doc_comments_before_a_bar_parse_and_format_stably() {
+        let source = "type base = A
+type t =
+  | C
+  /** a */
+  /** b */
+  | ...base
+  /** c */
+  /** d */
+  | D
+type p = [
+  | #x
+  /** e */
+  /** f */
+  | #y
+]
+";
+        let mut parser = crate::parser::Parser::new("A.res", source);
+        let structure = parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{:?}", parser.diagnostics());
+        let arena = parser.into_arena();
+        let doc_texts = |attrs: &Attributes| -> Vec<String> {
+            attrs
+                .iter()
+                .filter(|attr| {
+                    crate::parser::parsetree_viewer::is_doc_comment_attribute(&arena, attr)
+                })
+                .map(|attr| {
+                    let Payload::PStr(items) = &attr.1 else {
+                        unreachable!()
+                    };
+                    let StructureItemDesc::Pstr_eval(eval) = &items[0].pstr_desc else {
+                        unreachable!()
+                    };
+                    let ExpressionDesc::Pexp_constant(c) = &arena.get_expr(eval.0).pexp_desc else {
+                        unreachable!()
+                    };
+                    let Constant::String(s) = c else {
+                        unreachable!()
+                    };
+                    s.source(&arena).to_string()
+                })
+                .collect()
+        };
+        let StructureItemDesc::Pstr_type(inner) = &structure[1].pstr_desc else {
+            panic!("expected a type declaration");
+        };
+        let TypeKind::Ptype_variant(constructors) = &inner.1[0].ptype_kind else {
+            panic!("expected a variant");
+        };
+        let docs: Vec<Vec<String>> = constructors
+            .iter()
+            .map(|c| doc_texts(&c.pcd_attributes))
+            .collect();
+        assert_eq!(
+            docs,
+            vec![
+                vec![],
+                vec![" a ".to_string(), " b ".to_string()],
+                vec![" c ".to_string(), " d ".to_string()]
+            ]
+        );
+        let StructureItemDesc::Pstr_type(inner) = &structure[2].pstr_desc else {
+            panic!("expected a type declaration");
+        };
+        let ptyp = inner.1[0].ptype_manifest.expect("a manifest");
+        let CoreTypeDesc::Ptyp_variant(variant) = &arena.get_core_type(ptyp).ptyp_desc else {
+            panic!("expected a polymorphic variant");
+        };
+        let RowField::Rtag(_, attrs, _, _) = &variant.0[1] else {
+            panic!("expected a tag");
+        };
+        assert_eq!(doc_texts(attrs), vec![" e ".to_string(), " f ".to_string()]);
+
+        let formatted = crate::driver::format_source(source.as_bytes(), "A.res").unwrap();
+        let reformatted = crate::driver::format_source(&formatted, "A.res").unwrap();
+        assert_eq!(
+            String::from_utf8(reformatted).unwrap(),
+            String::from_utf8(formatted).unwrap()
+        );
     }
 
     #[test]
@@ -4281,5 +4401,35 @@ mod tests {
         fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Structure>();
         assert_send_sync::<Signature>();
+    }
+
+    /// res_core.ml `parse_extension`: `%debugger` (expression, with a payload,
+    /// and item `%%debugger`) is reported at the extension's `%`-prefixed name
+    /// after its payload is parsed, and parsing goes on with the extension.
+    #[test]
+    fn removed_debugger_extension_is_a_syntax_error_at_its_name() {
+        let source =
+            "let f = x => {\n  %debugger\n  x\n}\nlet g = %debugger(1)\n%%debugger\nlet h = %foo\n";
+        let mut parser = Parser::new("debugger.res", source);
+        let structure = parse_structure(&mut parser);
+        assert_eq!(structure.len(), 4);
+        let spans: Vec<(&str, String)> = parser
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| {
+                let start = diagnostic.start_pos().cnum as usize;
+                let end = diagnostic.end_pos().cnum as usize;
+                (&source[start..end], diagnostic.explain())
+            })
+            .collect();
+        let message = "The %debugger extension has been removed. Use debugger() instead.";
+        assert_eq!(
+            spans,
+            vec![
+                ("%debugger", message.to_string()),
+                ("%debugger", message.to_string()),
+                ("%%debugger", message.to_string()),
+            ]
+        );
     }
 }

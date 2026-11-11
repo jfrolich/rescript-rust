@@ -3,26 +3,11 @@ We've found a bug for you!
 
   The implementation /.../fixtures/Iface_modtype_infos/Foo.res
   does not match the interface /.../fixtures/Iface_modtype_infos/Foo.resi:
-  Module type declarations do not match:
-    module type T = {
-  let v: string
-}
-  does not match
-    module type T = {
-  let v: int
-}
-  At position module type T = <here>
-  Modules do not match:
-    {
-  let v: string
-}
-  is not included in
-    {
-  let v: int
-}
-  At position module type T = <here>
-  Values do not match: let v: string is not included in let v: int
-  /.../fixtures/Iface_modtype_infos/Foo.resi:2:3-12:
-    Expected declaration
-  /.../fixtures/Iface_modtype_infos/Foo.res:2:3-15:
-    Actual declaration
+  
+  In module type T:
+  
+  Actual declaration (/.../fixtures/Iface_modtype_infos/Foo.res:2:3-15):
+    let v: string
+  
+  Expected declaration (/.../fixtures/Iface_modtype_infos/Foo.resi:2:3-12):
+    let v: int

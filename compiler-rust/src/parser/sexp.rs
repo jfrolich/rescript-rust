@@ -240,6 +240,14 @@ pub(crate) fn quote_string(s: &str) -> String {
     quote_string_literal(unwrap_uppercase_exotic(s))
 }
 
+/// The constructor name of a `spread_kind`.
+pub(crate) fn spread_kind(kind: SpreadKind) -> &'static str {
+    match kind {
+        SpreadKind::Spread_array => "Spread_array",
+        SpreadKind::Spread_list => "Spread_list",
+    }
+}
+
 pub(crate) fn map_empty<T, F>(items: &[T], f: F) -> Vec<Sexp>
 where
     F: Fn(&T) -> Sexp,
@@ -381,14 +389,6 @@ fn constant_inner(c: &Constant, arena: &ParseArena) -> Sexp {
             Sexp::atom(&quote_string(payload.source(arena))),
             Sexp::atom(&quote_string(payload.semantic(arena))),
         ]),
-        Constant::Json(source) => Sexp::list(vec![
-            Sexp::atom("Pconst_json"),
-            Sexp::atom(&quote_string(arena.get_string(*source))),
-        ]),
-        Constant::RawSource(source) => Sexp::list(vec![
-            Sexp::atom("Pconst_raw_source"),
-            Sexp::atom(&quote_string(arena.get_string(*source))),
-        ]),
         Constant::Float(txt, tag) => Sexp::list(vec![
             Sexp::atom("Pconst_float"),
             Sexp::atom(&quote_string(arena.get_string(*txt))),
@@ -474,11 +474,16 @@ fn core_type(arena: &ParseArena, typ: &CoreType) -> Sexp {
             let params = arena
                 .nary_arrow_args(arg, *arity)
                 .iter()
-                .map(|param| {
-                    Sexp::list(vec![
+                .map(|param| match &param.fixed {
+                    None => Sexp::list(vec![
                         arg_label(arena, &param.lbl),
                         core_type(arena, arena.get_core_type(param.typ)),
-                    ])
+                    ]),
+                    Some(fixed) => Sexp::list(vec![
+                        Sexp::atom("Parg_fixed"),
+                        arg_label(arena, &param.lbl),
+                        fixed_value(arena, &fixed.value),
+                    ]),
                 })
                 .collect();
             Sexp::list(vec![
@@ -695,6 +700,20 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
                 pattern(arena, arena.get_pat(*p))
             })),
         ]),
+        PatternDesc::Ppat_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Ppat_dict"),
+            Sexp::list(map_empty(entries, |entry| {
+                Sexp::list(vec![
+                    Sexp::atom(&quote_string(arena.get_string(entry.pdp_key.txt))),
+                    Sexp::atom(if entry.pdp_optional {
+                        "optional"
+                    } else {
+                        "required"
+                    }),
+                    pattern(arena, arena.get_pat(entry.pdp_pattern)),
+                ])
+            })),
+        ]),
         PatternDesc::Ppat_or(p1, p2) => Sexp::list(vec![
             Sexp::atom("Ppat_or"),
             pattern(arena, arena.get_pat(*p1)),
@@ -711,6 +730,10 @@ fn pattern(arena: &ParseArena, p: &Pattern) -> Sexp {
         PatternDesc::Ppat_type(lid) => {
             Sexp::list(vec![Sexp::atom("Ppat_type"), longident_idx(arena, lid.txt)])
         }
+        PatternDesc::Ppat_variant_spread(lid) => Sexp::list(vec![
+            Sexp::atom("Ppat_variant_spread"),
+            longident_idx(arena, lid.txt),
+        ]),
         PatternDesc::Ppat_unpack(name) => Sexp::list(vec![
             Sexp::atom("Ppat_unpack"),
             Sexp::atom(&quote_string(arena.get_string(name.txt))),
@@ -820,11 +843,17 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             ])
         }
         ExpressionDesc::Pexp_try(inner) => {
-            let (ref body, ref cases) = *inner;
+            let (ref body, ref cases, ref finally) = *inner;
             Sexp::list(vec![
                 Sexp::atom("Pexp_try"),
                 expression(arena, arena.get_expr(*body)),
                 Sexp::list(map_empty(arena.case_list(*cases), |c| case(arena, c))),
+                match finally {
+                    None => Sexp::atom("None"),
+                    Some(e) => {
+                        Sexp::list(vec![Sexp::atom("Some"), expression(arena, arena.get_expr(*e))])
+                    }
+                },
             ])
         }
         ExpressionDesc::Pexp_tuple(exprs) => Sexp::list(vec![
@@ -888,6 +917,37 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
             Sexp::list(map_empty(arena.expr_list(*exprs), |e| {
                 expression(arena, arena.get_expr(*e))
             })),
+        ]),
+        ExpressionDesc::Pexp_dict(entries) => Sexp::list(vec![
+            Sexp::atom("Pexp_dict"),
+            Sexp::list(map_empty(entries, |entry| match entry {
+                DictEntry::Pdict_entry(key, e) => Sexp::list(vec![
+                    Sexp::atom("Pdict_entry"),
+                    Sexp::atom(&quote_string(arena.get_string(key.txt))),
+                    expression(arena, arena.get_expr(*e)),
+                ]),
+                DictEntry::Pdict_spread(e) => Sexp::list(vec![
+                    Sexp::atom("Pdict_spread"),
+                    expression(arena, arena.get_expr(*e)),
+                ]),
+            })),
+        ]),
+        ExpressionDesc::Pexp_spread(kind, elements) => Sexp::list(vec![
+            Sexp::atom("Pexp_spread"),
+            Sexp::atom(spread_kind(*kind)),
+            Sexp::list(map_empty(
+                arena.spread_element_list(*elements),
+                |element| match element {
+                    SpreadElement::Pspread_item(e) => Sexp::list(vec![
+                        Sexp::atom("Pspread_item"),
+                        expression(arena, arena.get_expr(*e)),
+                    ]),
+                    SpreadElement::Pspread(e) => Sexp::list(vec![
+                        Sexp::atom("Pspread"),
+                        expression(arena, arena.get_expr(*e)),
+                    ]),
+                },
+            )),
         ]),
         ExpressionDesc::Pexp_ifthenelse(inner) => {
             let (ref cond, ref then_e, ref opt_else) = **inner;
@@ -1054,6 +1114,22 @@ fn expression(arena: &ParseArena, expr: &Expression) -> Sexp {
         ExpressionDesc::Pexp_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pexp_extension"), extension(arena, ext)])
         }
+        ExpressionDesc::Pexp_raw(raw) => Sexp::list(vec![
+            Sexp::atom("Pexp_raw"),
+            raw_kind(raw.kind),
+            raw_source(arena, &raw.source),
+        ]),
+        // res_ast_debugger.ml: `name_loc` is left out, as for `Pexp_raw`.
+        ExpressionDesc::Pexp_todo(todo) => Sexp::list(vec![
+            Sexp::atom("Pexp_todo"),
+            match todo.message {
+                None => Sexp::atom("None"),
+                Some(message) => Sexp::list(vec![
+                    Sexp::atom("Some"),
+                    expression(arena, arena.get_expr(message)),
+                ]),
+            },
+        ]),
         ExpressionDesc::Pexp_template(template) => Sexp::list(vec![
             Sexp::atom("Pexp_template"),
             Sexp::list(
@@ -1172,13 +1248,18 @@ fn value_binding(arena: &ParseArena, vb: &ValueBinding) -> Sexp {
             ])
         },
     );
-    Sexp::list(vec![
-        Sexp::atom("value_binding"),
-        pattern(arena, arena.get_pat(vb.pvb_pat)),
-        constraint,
-        expression(arena, arena.get_expr(vb.pvb_expr)),
-        attributes(arena, &vb.pvb_attributes),
-    ])
+    Sexp::list(
+        vec![
+            Sexp::atom("value_binding"),
+            pattern(arena, arena.get_pat(vb.pvb_pat)),
+            constraint,
+            expression(arena, arena.get_expr(vb.pvb_expr)),
+            attributes(arena, &vb.pvb_attributes),
+        ]
+        .into_iter()
+        .chain(jsx_component(arena, vb.pvb_jsx_component.as_deref()))
+        .collect(),
+    )
 }
 
 // ============================================================================
@@ -1359,28 +1440,33 @@ fn type_extension(arena: &ParseArena, te: &TypeExtension) -> Sexp {
 // ============================================================================
 
 fn value_description(arena: &ParseArena, vd: &ValueDescription) -> Sexp {
-    Sexp::list(vec![
-        Sexp::atom("value_description"),
-        Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
-        core_type(arena, arena.get_core_type(vd.pval_type)),
-        // res_ast_debugger.ml `Sexp_ast.value_description` (lines 412-422):
-        // a plain list, so a non-external prints `()`. Only the parsetree0
-        // printer (line 1491) uses `map_empty`.
-        Sexp::list(
-            match &vd.pval_prim {
-                None => vec![],
-                Some(PrimitiveRepr::PrimName(s)) => vec![arena.get_string(*s).to_string()],
-                Some(PrimitiveRepr::PrimFfi { name, .. }) => {
-                    vec![name.clone(), "<ffi spec>".to_string()]
+    Sexp::list(
+        vec![
+            Sexp::atom("value_description"),
+            Sexp::atom(&quote_string(arena.get_string(vd.pval_name.txt))),
+            core_type(arena, arena.get_core_type(vd.pval_type)),
+            // res_ast_debugger.ml `Sexp_ast.value_description` (lines 412-422):
+            // a plain list, so a non-external prints `()`. Only the parsetree0
+            // printer (line 1491) uses `map_empty`.
+            Sexp::list(
+                match &vd.pval_prim {
+                    None => vec![],
+                    Some(PrimitiveRepr::PrimName(s)) => vec![arena.get_string(*s).to_string()],
+                    Some(PrimitiveRepr::PrimFfi { name, .. }) => {
+                        vec![name.clone(), "<ffi spec>".to_string()]
+                    }
+                    Some(PrimitiveRepr::PrimInlineConst(_)) => vec!["<inline const>".to_string()],
                 }
-                Some(PrimitiveRepr::PrimInlineConst(_)) => vec!["<inline const>".to_string()],
-            }
-            .iter()
-            .map(|s| Sexp::atom(&quote_string(s)))
-            .collect(),
-        ),
-        attributes(arena, &vd.pval_attributes),
-    ])
+                .iter()
+                .map(|s| Sexp::atom(&quote_string(s)))
+                .collect(),
+            ),
+            attributes(arena, &vd.pval_attributes),
+        ]
+        .into_iter()
+        .chain(jsx_component(arena, vd.pval_jsx_component.as_deref()))
+        .collect(),
+    )
 }
 
 // ============================================================================
@@ -1429,6 +1515,10 @@ fn module_expression(arena: &ParseArena, me: &ModuleExpr) -> Sexp {
         ModuleExprDesc::Pmod_extension(ext) => {
             Sexp::list(vec![Sexp::atom("Pmod_extension"), extension(arena, ext)])
         }
+        ModuleExprDesc::Pmod_await(m) => Sexp::list(vec![
+            Sexp::atom("Pmod_await"),
+            module_expression(arena, arena.get_mod_expr(*m)),
+        ]),
     };
     Sexp::list(vec![
         Sexp::atom("module_expr"),
@@ -1647,6 +1737,11 @@ fn structure_item(arena: &ParseArena, si: &StructureItem) -> Sexp {
         StructureItemDesc::Pstr_attribute(attr) => {
             Sexp::list(vec![Sexp::atom("Pstr_attribute"), attribute(arena, attr)])
         }
+        StructureItemDesc::Pstr_raw(raw) => Sexp::list(vec![
+            Sexp::atom("Pstr_raw"),
+            raw_source(arena, &raw.source),
+            attributes(arena, &raw.attrs),
+        ]),
         StructureItemDesc::Pstr_extension(inner) => {
             let (ref ext, ref attrs) = **inner;
             Sexp::list(vec![
@@ -1751,4 +1846,77 @@ pub fn print_signature(arena: &ParseArena, items: &[SignatureItem], out: &mut im
     let sexp = signature(arena, items);
     // Output as Latin-1 bytes to match OCaml's byte-based string handling
     let _ = out.write_all(&string_to_latin1_bytes(&sexp.to_string()));
+}
+
+/// res_ast_debugger.ml `Sexp_ast.fixed_value`.
+fn fixed_value(arena: &ParseArena, value: &crate::parser::ast::FixedValue) -> Sexp {
+    use crate::parser::ast::FixedValue;
+    let source = |name: &str, txt: crate::parse_arena::StrIdx| {
+        Sexp::list(vec![
+            Sexp::atom(name),
+            Sexp::atom(&quote_string(arena.get_string(txt))),
+        ])
+    };
+    match value {
+        FixedValue::Int(s) => source("Pfixed_int", s.txt),
+        FixedValue::String(payload) => Sexp::list(vec![
+            Sexp::atom("Pfixed_string"),
+            Sexp::atom(&quote_string(payload.source())),
+            Sexp::atom(&quote_string(payload.semantic())),
+        ]),
+        FixedValue::Template(s) => source("Pfixed_template", s.txt),
+        FixedValue::Json(s) => source("Pfixed_json", s.txt),
+    }
+}
+
+/// res_ast_debugger.ml `Sexp_ast.raw_kind`.
+pub(crate) fn raw_kind(kind: RawKind) -> Sexp {
+    Sexp::atom(match kind {
+        RawKind::Expression => "Raw_expression",
+        RawKind::Function => "Raw_function",
+    })
+}
+
+/// res_ast_debugger.ml `Sexp_ast.raw_source`.
+fn raw_source(arena: &ParseArena, source: &RawSource) -> Sexp {
+    let (name, s) = match source {
+        RawSource::String(s) => ("Raw_string", s),
+        RawSource::Template(s) => ("Raw_template", s),
+    };
+    Sexp::list(vec![
+        Sexp::atom(name),
+        Sexp::atom(&quote_string(arena.get_string(s.txt))),
+    ])
+}
+
+/// res_ast_debugger.ml `Sexp_ast.jsx_component`.
+fn jsx_component(arena: &ParseArena, component: Option<&JsxComponent>) -> Option<Sexp> {
+    let component = component?;
+    Some(Sexp::list(vec![
+        Sexp::atom("jsx_component"),
+        jsx_component_kind(&component.pjc_kind, |t| {
+            core_type(arena, arena.get_core_type(t))
+        }),
+        jsx_component_namespace(component.pjc_namespace),
+    ]))
+}
+
+pub(crate) fn jsx_component_kind(
+    kind: &JsxComponentKind,
+    core_type: impl Fn(crate::parse_arena::CoreTypeIdx) -> Sexp,
+) -> Sexp {
+    match kind {
+        JsxComponentKind::Labelled(None) => Sexp::atom("Pjc_labelled"),
+        JsxComponentKind::Labelled(Some(t)) => {
+            Sexp::list(vec![Sexp::atom("Pjc_labelled"), core_type(*t)])
+        }
+        JsxComponentKind::WithProps => Sexp::atom("Pjc_with_props"),
+    }
+}
+
+pub(crate) fn jsx_component_namespace(namespace: JsxComponentNamespace) -> Sexp {
+    Sexp::atom(match namespace {
+        JsxComponentNamespace::React => "Pjc_react",
+        JsxComponentNamespace::Jsx => "Pjc_jsx",
+    })
 }

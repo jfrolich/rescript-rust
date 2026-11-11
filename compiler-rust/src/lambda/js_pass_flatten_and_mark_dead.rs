@@ -187,6 +187,43 @@ impl Mapper for Substitute<'_> {
                 }
                 j.rekind_expr(expr, ExprKind::StaticIndex(target, field, pos))
             }
+            // In JSX preserve mode, keep a JSX tag like `M.make` as it is: the
+            // field's value may be a variable with a lowercase name, which JSX
+            // reads as an intrinsic element, so the printer would have to print
+            // the call instead (#7432).
+            ExprKind::Jsx(id)
+                if self.jsx_preserve
+                    && matches!(
+                        j.ek(j.jsx(id).tag),
+                        ExprKind::StaticIndex(..) | ExprKind::ArrayIndex(..)
+                    ) =>
+            {
+                let jsx = j.jsx(id);
+                let callee = self.expression(j, jsx.callee);
+                let spread = jsx.spread.map(|e| self.expression(j, e));
+                let props: Vec<_> = j.props(jsx.props).to_vec();
+                let props: Vec<_> = props
+                    .into_iter()
+                    .map(|(name, value)| (name, self.expression(j, value)))
+                    .collect();
+                let props = j.prop_list(&props);
+                let children = jsx.children.map(|c| {
+                    let items = j.expr_vec(c);
+                    let items: Vec<_> = items.into_iter().map(|e| self.expression(j, e)).collect();
+                    j.expr_list(&items)
+                });
+                let key = jsx.key.map(|e| self.expression(j, e));
+                let mapped = crate::js_ir::arena::JsxInfo {
+                    callee,
+                    spread,
+                    props,
+                    children,
+                    key,
+                    ..jsx
+                };
+                let id = j.jsx_id(mapped);
+                j.rekind_expr(expr, ExprKind::Jsx(id))
+            }
             _ => map_expression_children(self, j, expr),
         }
     }
@@ -221,14 +258,7 @@ impl Substitute<'_> {
         index: i32,
     ) -> Option<Expr> {
         let expression = *self.substitution.get(id)?;
-        // js_pass_flatten_and_mark_dead.ml:266-270 (7432): in JSX preserve mode a
-        // block item that is the variable `make` stays a projection, so the
-        // dumper prints `<Foo.make />`.
-        let substitutable = |item: Expr| {
-            is_simple_substituted_index_value(j, item)
-                && !(self.jsx_preserve
-                    && matches!(j.ek(item), ExprKind::Var(id) if j.ident(id).name() == "make"))
-        };
+        let substitutable = |item: Expr| is_simple_substituted_index_value(j, item);
         let ExprKind::CamlBlock(items, MutableFlag::Immutable, tag_info) = j.ek(expression) else {
             return None;
         };
@@ -562,7 +592,6 @@ fn expression_children(a: &JsArena, expr: Expr, out: &mut ExprStack) -> Option<S
         | ExprKind::Seq(left, right)
         | ExprKind::Bin(_, left, right)
         | ExprKind::FlatCall(left, right)
-        | ExprKind::StringIndex(left, right)
         | ExprKind::ArrayIndex(left, right) => {
             out.push(left);
             out.push(right);
@@ -585,8 +614,8 @@ fn expression_children(a: &JsArena, expr: Expr, out: &mut ExprStack) -> Option<S
         ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             out.extend_from_slice(a.exprs(items))
         }
-        ExprKind::Object(dup, props) => {
-            out.extend(dup);
+        ExprKind::Jsx(id) => out.extend(a.jsx(id).expressions(a)),
+        ExprKind::Object(props) => {
             out.extend(a.props(props).iter().map(|(_, value)| *value));
         }
     }
@@ -817,15 +846,39 @@ impl Mapper for Flatten {
                     // js_pass_flatten.ml:54-61 / 79-86 take the condition
                     // expression's `source_loc`. OCaml keeps the conditional
                     // predicate untouched here; only the consequent/alternate
-                    // are re-entered as statements.
-                    let c = S::exp(consequent, j);
-                    let c = self.statement(j, c);
-                    let a = S::exp(alternate, j);
-                    let a = self.statement(j, a);
-                    let (c, a) = (j.stmt_list(&[c]), j.stmt_list(&[a]));
+                    // are re-entered as statements. A branch whose value is
+                    // pure leaves nothing to run.
+                    let branch = |this: &mut Self, j: &mut JsArena, e: Expr| {
+                        if crate::js_ir::build::expression_has_no_side_effects(j, e) {
+                            vec![]
+                        } else {
+                            let s = S::exp(e, j);
+                            vec![this.statement(j, s)]
+                        }
+                    };
+                    let ifso = branch(self, j, consequent);
+                    let ifnot = branch(self, j, alternate);
+                    let kind = match (ifso.is_empty(), ifnot.is_empty()) {
+                        (true, true) => {
+                            if crate::js_ir::build::expression_has_no_side_effects(j, test) {
+                                StmtKind::Block(j.empty_block())
+                            } else {
+                                StmtKind::Exp(test)
+                            }
+                        }
+                        (true, false) => {
+                            let not = E::not(test, j);
+                            let (t, e) = (j.stmt_list(&ifnot), j.empty_block());
+                            StmtKind::If(not, t, e)
+                        }
+                        (false, _) => {
+                            let (t, e) = (j.stmt_list(&ifso), j.stmt_list(&ifnot));
+                            StmtKind::If(test, t, e)
+                        }
+                    };
                     let loc = j.expr_loc(expr);
                     j.stmt_with(
-                        StmtKind::If(test, c, a),
+                        kind,
                         crate::js_ir::arena::Cold {
                             comment: cold.comment,
                             source_loc: loc,

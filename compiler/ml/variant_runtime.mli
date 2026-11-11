@@ -1,42 +1,46 @@
 module Instance : sig
-  type t =
-    | Array
-    | ArrayBuffer
-    | BigInt64Array
-    | BigUint64Array
-    | Blob
-    | DataView
-    | Date
-    | File
-    | Float32Array
-    | Float64Array
-    | Int16Array
-    | Int32Array
-    | Int8Array
-    | Promise
-    | RegExp
-    | Uint16Array
-    | Uint32Array
-    | Uint8Array
-    | Uint8ClampedArray
-    | Set
-    | Map
-    | WeakSet
-    | WeakMap
+  (** A JavaScript class whose instances a value is recognized by:
+      [name] is the global constructor's path, such as ["Date"] or
+      ["Intl.Locale"], and [ancestors] are the paths of its superclasses that
+      are declared too, nearest first. Arrays are recognized by
+      [Array.isArray] instead. *)
+  type t = Array | Class of {name: string; ancestors: string list}
 
   val to_string : t -> string
+
+  val is_subclass : t -> of_:t -> bool
+  (** Whether every instance of the first is an instance of [of_] too, without
+      the two being the same class. *)
 end
 
 type block_type =
-  | IntType
+  | NumberType  (** [int] and [float] alike *)
   | StringType
-  | FloatType
   | BigintType
   | BooleanType
   | InstanceType of Instance.t
+  | SymbolType
   | FunctionType
   | ObjectType
   | UnknownType
+
+val typeof_name : block_type -> string option
+(** What [typeof] returns for values of a kind it recognizes; [None] for
+    instances, which are recognized by their class, and unknown payloads. *)
+
+val block_type_of_typeof : string -> block_type option
+
+(** What a type declaration states about its values at run time, through
+    [@notUndefined], [@instanceOf] or [@typeOf]. Each level implies the one
+    before: a value recognized as a class instance or [typeof] kind is never
+    [undefined]. *)
+type value_shape =
+  | Unstated
+      (** Nothing: an abbreviation has the shape of the type it abbreviates *)
+  | Never_undefined  (** [@notUndefined] *)
+  | Recognized_as of block_type
+      (** [@instanceOf] or [@typeOf]: a payload of this kind, with the class's
+          declared superclasses *)
 
 (** The literal value a constructor is represented by: what [@as] states, or
     the constructor's own name when it states nothing. Unlike [tag_type], this
@@ -50,17 +54,21 @@ type literal_tag =
   | Null
   | Undefined
 
+val literal_value_key : literal_tag -> string
+(** A key that two literals share exactly when they are the same JavaScript
+    value, as [===] compares them: ints are emitted as 32-bit numbers, so
+    [1], [1.0] and [4294967297] share one, while [1n] is a bigint. *)
+
+val same_literal_value : literal_tag -> literal_tag -> bool
+
 (** Information used to recognize a constructor during matching. A literal
     identifies a constant or an object's tag; a payload shape identifies a
     value represented directly by its payload. *)
 type tag_type = Literal of literal_tag | Payload_shape of block_type
 
-type tag = {name: string; literal: literal_tag option}
-(** A constructor's name and optional explicitly declared runtime literal. *)
-
-type matchable_tag = {name: string; tag_type: tag_type option}
-(** A constructor tag widened for matching, where an untagged payload shape
-    can participate alongside declared literals. *)
+type tag = {name: string; literal: literal_tag}
+(** A constructor's name and its runtime literal: what [@as] states, or the
+    name itself *)
 
 type tagged_block = {tag: tag; tag_name: string option}
 
@@ -71,10 +79,6 @@ type block =
   | Untagged of {tag: tag; block_type: block_type}
 
 type constructor_case = Constant of tag | Block of block
-
-val to_matchable_tag : tag -> matchable_tag
-(** Widen a tag as stated by a declaration into one a match can compare
-    against, which also covers an untagged payload's shape. *)
 
 type configuration = {
   unboxed: bool;
@@ -90,9 +94,6 @@ type matching_facts = {
   tag_name: string option;
   block_types: block_type list;
   literal_tags: literal_tag list;
-  has_null: bool;
-  has_undefined: bool;
-  has_other_literal: bool;
 }
 
 type layout
@@ -108,7 +109,10 @@ val get_layout : layout_ref -> layout
 val matching_facts : layout -> matching_facts
 val configuration : layout -> configuration
 val constructor_at : layout -> int -> constructor_case
-val constructor_tag : layout -> int -> literal_tag option
+
+val constructor_tag : layout -> int -> literal_tag
+(** The literal of a constant constructor, or of the tag of a tagged one *)
+
 val representation : constructor_reference -> constructor_case
 val length : layout -> int
 val num_constants : layout -> int

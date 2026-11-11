@@ -5,7 +5,7 @@ build:
 
 # In-process builds write no .cmt files: reanalyze reads them from a watcher.
 test: build node_modules/.bin/rescript
-	../../with-watcher.sh ./test.sh
+	../../with-watcher.sh bash ./test.sh
 
 # Order-independence test for reanalyze - not run by default (takes longer)
 # Verifies that processing files in different orders produces identical results

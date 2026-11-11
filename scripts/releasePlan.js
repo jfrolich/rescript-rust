@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 
 import fs from "node:fs/promises";
+import path from "node:path";
 import process from "node:process";
+import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import semver from "semver";
 
@@ -35,6 +37,7 @@ export function createReleasePlan(version, currentStable = false) {
     currentStable,
     npmTag,
     publishTag: currentStable ? null : npmTag,
+    websiteBranch: `v${parsedVersion.major}`,
   };
 }
 
@@ -46,6 +49,19 @@ export function findFirstReleasedVersion(changelog) {
     }
   }
   return null;
+}
+
+// Fragments left in changes/ were merged after release preparation, so
+// publishing would ship their changes without release notes.
+export async function findPendingFragments(root = ".") {
+  let names;
+  try {
+    names = await fs.readdir(path.join(root, "changes"));
+  } catch (error) {
+    if (error.code === "ENOENT") return [];
+    throw error;
+  }
+  return names.filter(name => name !== "README.md").sort();
 }
 
 export async function validateReleaseFiles(plan) {
@@ -61,6 +77,13 @@ export async function validateReleaseFiles(plan) {
   if (firstReleasedVersion !== plan.version) {
     throw new Error(
       `The first released changelog version is ${firstReleasedVersion ?? "missing"}, expected ${plan.version}.`,
+    );
+  }
+
+  const pendingFragments = await findPendingFragments();
+  if (pendingFragments.length > 0) {
+    throw new Error(
+      `Unreleased changelog fragments remain: ${pendingFragments.join(", ")}. Run yarn changelog:release to add them to ${plan.version} in a PR labelled changelog:release, merge it, and publish again.`,
     );
   }
 }
@@ -91,6 +114,7 @@ async function main() {
       `git-tag=${plan.gitTag}`,
       `npm-tag=${plan.npmTag}`,
       `publish-tag=${plan.publishTag ?? ""}`,
+      `website-branch=${plan.websiteBranch}`,
     ].join("\n");
     await fs.appendFile(values["github-output"], `${output}\n`);
   }
@@ -104,6 +128,7 @@ async function main() {
       `| Version | \`${plan.version}\` |`,
       `| Git tag | \`${plan.gitTag}\` |`,
       `| npm tag | \`${plan.npmTag}\` |`,
+      `| Website branch | \`${plan.websiteBranch}\` |`,
       `| Source commit | \`${process.env.GITHUB_SHA ?? "local"}\` |`,
       "",
       "The protected `npm-release` job publishes this plan after approval.",
@@ -115,7 +140,10 @@ async function main() {
   console.log(JSON.stringify(plan, null, 2));
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (
+  process.argv[1] &&
+  path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)
+) {
   main().catch(error => {
     console.error(error.message || error);
     process.exitCode = 1;

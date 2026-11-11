@@ -19,20 +19,6 @@ result == "Caught exception: Out of milk"
 */
 external throw: exn => 'a = "%raise"
 
-@deprecated({
-  reason: "`raise` has been renamed to `throw` to align with JavaScript vocabulary. Please use `throw` instead",
-  migrate: throw(),
-})
-external raise: exn => 'a = "%raise"
-
-@deprecated("Use custom exception instead")
-let failwith = s => throw(Failure(s))
-
-@deprecated("Use custom exception instead")
-let invalid_arg = s => throw(Invalid_argument(s))
-
-@deprecated("Use custom exception instead") exception Exit
-
 /* Debugging */
 
 external __LOC__: string = "%loc_LOC"
@@ -44,6 +30,23 @@ external __POS__: (string, int, int, int) = "%loc_POS"
 external __LOC_OF__: 'a => (string, 'a) = "%loc_LOC"
 external __LINE_OF__: 'a => (int, 'a) = "%loc_LINE"
 external __POS_OF__: 'a => ((string, int, int, int), 'a) = "%loc_POS"
+
+/**
+`debugger()` compiles to a JavaScript `debugger` statement, which pauses
+execution in the caller when a debugger is attached.
+
+See [`debugger`](https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Statements/debugger) on MDN.
+
+## Examples
+
+```rescript
+let add = (a, b) => {
+  debugger()
+  a + b
+}
+```
+*/
+external debugger: unit => unit = "%debugger"
 
 /* Unified operations */
 

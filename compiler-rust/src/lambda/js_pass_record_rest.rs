@@ -50,7 +50,9 @@ impl crate::js_ir::walk::Visitor for RecordRestFinder {
 }
 
 fn field_ident_name(index: usize, label: &str) -> String {
-    if crate::js_ir::printer::is_valid_js_ident(label) {
+    // `Js_dump_property.property_key (Lit label) = label`: a `__proto__` key
+    // prints as a computed key.
+    if label != "__proto__" && crate::js_ir::printer::is_valid_js_ident(label) {
         label.to_string()
     } else {
         format!("__rest_field{index}")
@@ -226,14 +228,13 @@ fn map_statement(
                 ExprKind::StaticIndex(map_expr(j, inner, f), name, pos)
             }
             ExprKind::Array(items, mutable) => ExprKind::Array(list(j, items, f), mutable),
-            ExprKind::Object(proto, fields) => {
-                let proto = proto.map(|inner| map_expr(j, inner, f));
+            ExprKind::Object(fields) => {
                 let items = j.props(fields).to_vec();
                 let items: Vec<_> = items
                     .into_iter()
                     .map(|(name, value)| (name, map_expr(j, value, f)))
                     .collect();
-                ExprKind::Object(proto, j.prop_list(&items))
+                ExprKind::Object(j.prop_list(&items))
             }
             ExprKind::Call(func, args, info) => {
                 let func = map_expr(j, func, f);

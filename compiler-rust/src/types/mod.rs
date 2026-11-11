@@ -37,9 +37,11 @@ pub mod context;
 pub mod ctype;
 pub mod decl;
 pub mod decl_loc;
+pub mod dict_pattern;
 pub mod env;
 pub(crate) mod env_lazy;
 pub mod external_ffi_types;
+pub mod includecore;
 pub mod includemod;
 pub(crate) mod parmatch;
 pub mod path;
@@ -60,6 +62,7 @@ pub mod unit_reads;
 pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
+pub(crate) mod variant_layout;
 
 // Re-exports for convenience
 pub use asttypes::{ArgLabel, Label, Located, MutableFlag, PrivateFlag};
@@ -84,8 +87,8 @@ pub use variant_runtime::{
     Block as VariantBlock, BlockType as VariantBlockType, Configuration as VariantConfiguration,
     ConstructorCase as VariantConstructorCase, ConstructorReference, Instance as VariantInstance,
     Layout as VariantLayout, LayoutRef as VariantLayoutRef, LiteralTag as VariantLiteralTag,
-    MatchableTag as VariantMatchableTag, MatchingFacts as VariantMatchingFacts, Tag as VariantTag,
-    TagType as VariantTagType, TaggedBlock,
+    MatchingFacts as VariantMatchingFacts, Tag as VariantTag, TagType as VariantTagType,
+    ClassBlocks, RecognizedShape, ShapeAllocation, ShapeBlocks, ShapeString, TaggedBlock, ValueShape,
 };
 
 // btype exports

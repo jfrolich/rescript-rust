@@ -26,7 +26,7 @@ let fmt_position with_name f l =
     fprintf f "%s[%d,%d+%d]" fname l.pos_lnum l.pos_bol (l.pos_cnum - l.pos_bol)
 
 let fmt_location f loc =
-  if !Clflags.dump_location then (
+  if !((Clflags.current ()).dump_location) then (
     let p_2nd_name = loc.loc_start.pos_fname <> loc.loc_end.pos_fname in
     fprintf f "(%a..%a)" (fmt_position true) loc.loc_start
       (fmt_position p_2nd_name) loc.loc_end;
@@ -66,8 +66,6 @@ let fmt_constant f x =
     fprintf f "PConst_string (source=%S, semantic=%S)"
       (String_literal.string_source payload)
       (String_literal.string_semantic payload)
-  | Pconst_json source -> fprintf f "PConst_json %S" source
-  | Pconst_raw_source source -> fprintf f "PConst_raw_source %S" source
   | Pconst_float (s, m) -> fprintf f "PConst_float (%s,%a)" s fmt_char_option m
 
 let fmt_mutable_flag f x =
@@ -128,6 +126,26 @@ let arg_label_loc i ppf = function
   | Optional {txt = s} -> line i ppf "Optional \"%s\"\n" s
   | Labelled {txt = s} -> line i ppf "Labelled \"%s\"\n" s
 
+let fixed_value i ppf (x : fixed_value) =
+  match x with
+  | Pfixed_int source ->
+    line i ppf "Pfixed_int %s %a\n" source.txt fmt_location source.loc
+  | Pfixed_string payload ->
+    line i ppf "Pfixed_string (source=%S, semantic=%S)\n"
+      (String_literal.string_source payload)
+      (String_literal.string_semantic payload)
+  | Pfixed_template source ->
+    line i ppf "Pfixed_template %S %a\n" source.txt fmt_location source.loc
+  | Pfixed_json source ->
+    line i ppf "Pfixed_json %S %a\n" source.txt fmt_location source.loc
+
+let raw_source i ppf (source : raw_source) =
+  match source with
+  | Raw_string {txt; loc} ->
+    line i ppf "Raw_string %S %a\n" txt fmt_location loc
+  | Raw_template {txt; loc} ->
+    line i ppf "Raw_template %S %a\n" txt fmt_location loc
+
 let rec core_type i ppf x =
   line i ppf "core_type %a\n" fmt_location x.ptyp_loc;
   attributes i ppf x.ptyp_attributes;
@@ -139,10 +157,17 @@ let rec core_type i ppf x =
     line i ppf "Ptyp_arrow\n";
     line i ppf "arity = %d\n" (List.length params);
     List.iter
-      (fun (arg : Parsetree.arg) ->
-        arg_label_loc i ppf arg.lbl;
-        attributes i ppf arg.attrs;
-        core_type i ppf arg.typ)
+      (function
+        | Parsetree.Parg_type {attrs; lbl; typ} ->
+          arg_label_loc i ppf lbl;
+          attributes i ppf attrs;
+          core_type i ppf typ
+        | Parsetree.Parg_fixed {attrs; lbl; value; loc} ->
+          arg_label_loc i ppf lbl;
+          attributes i ppf attrs;
+          line i ppf "Parg_fixed %a\n" fmt_location loc;
+          line (i + 1) ppf "value %a\n" fmt_location value.loc;
+          fixed_value (i + 2) ppf value.txt)
       params;
     core_type i ppf ret
   | Ptyp_tuple l ->
@@ -220,6 +245,9 @@ and pattern i ppf x =
   | Ppat_array l ->
     line i ppf "Ppat_array\n";
     list i pattern ppf l
+  | Ppat_dict l ->
+    line i ppf "Ppat_dict\n";
+    list i dict_pattern_entry ppf l
   | Ppat_or (p1, p2) ->
     line i ppf "Ppat_or\n";
     pattern i ppf p1;
@@ -230,6 +258,9 @@ and pattern i ppf x =
     core_type i ppf ct
   | Ppat_type li ->
     line i ppf "Ppat_type\n";
+    longident_loc i ppf li
+  | Ppat_variant_spread li ->
+    line i ppf "Ppat_variant_spread\n";
     longident_loc i ppf li
   | Ppat_unpack s -> line i ppf "Ppat_unpack %a\n" fmt_string_loc s
   | Ppat_exception p ->
@@ -288,10 +319,11 @@ and expression i ppf x =
     line i ppf "Pexp_match\n";
     expression i ppf e;
     list i case ppf l
-  | Pexp_try (e, l) ->
+  | Pexp_try (e, l, finally) ->
     line i ppf "Pexp_try\n";
     expression i ppf e;
-    list i case ppf l
+    list i case ppf l;
+    option i expression ppf finally
   | Pexp_tuple l ->
     line i ppf "Pexp_tuple\n";
     list i expression ppf l
@@ -317,6 +349,15 @@ and expression i ppf x =
   | Pexp_array l ->
     line i ppf "Pexp_array\n";
     list i expression ppf l
+  | Pexp_dict l ->
+    line i ppf "Pexp_dict\n";
+    list i dict_entry ppf l
+  | Pexp_spread (kind, l) ->
+    line i ppf "Pexp_spread %s\n"
+      (match kind with
+      | Spread_array -> "array"
+      | Spread_list -> "list");
+    list i spread_element ppf l
   | Pexp_ifthenelse (e1, e2, eo) ->
     line i ppf "Pexp_ifthenelse\n";
     expression i ppf e1;
@@ -357,7 +398,7 @@ and expression i ppf x =
     line i ppf "Pexp_constraint\n";
     expression i ppf e;
     core_type i ppf ct
-  | Pexp_coerce (e, (), cto2) ->
+  | Pexp_coerce (e, cto2) ->
     line i ppf "Pexp_coerce\n";
     expression i ppf e;
     core_type i ppf cto2
@@ -385,6 +426,14 @@ and expression i ppf x =
   | Pexp_open (ovf, m, e) ->
     line i ppf "Pexp_open %a \"%a\"\n" fmt_override_flag ovf fmt_longident_loc m;
     expression i ppf e
+  | Pexp_raw {kind; name_loc; source} ->
+    line i ppf "Pexp_raw \"%s\" %a\n"
+      (Ast_raw.extension_name kind)
+      fmt_location name_loc;
+    raw_source i ppf source
+  | Pexp_todo {name_loc; message} ->
+    line i ppf "Pexp_todo %a\n" fmt_location name_loc;
+    option i expression ppf message
   | Pexp_extension (s, arg) ->
     line i ppf "Pexp_extension \"%s\"\n" s.txt;
     payload i ppf arg
@@ -426,13 +475,30 @@ and expression i ppf x =
          }) -> (
     line i ppf "Pexp_jsx_container_element %a\n" fmt_jsx_tag_name name;
     jsx_props i ppf props;
-    if !Clflags.dump_location then line i ppf "> %a\n" (fmt_position false) gt;
+    if !((Clflags.current ()).dump_location) then
+      line i ppf "> %a\n" (fmt_position false) gt;
     jsx_children i ppf children;
     match closing_tag with
     | None -> ()
     | Some closing_tag ->
       line i ppf "closing_tag =%a\n" fmt_jsx_tag_name
         closing_tag.jsx_closing_container_tag_name)
+
+and dict_entry i ppf = function
+  | Pdict_entry (key, e) ->
+    line i ppf "Pdict_entry %a\n" fmt_string_loc key;
+    expression (i + 1) ppf e
+  | Pdict_spread e ->
+    line i ppf "Pdict_spread\n";
+    expression (i + 1) ppf e
+
+and spread_element i ppf = function
+  | Pspread_item e ->
+    line i ppf "Pspread_item\n";
+    expression (i + 1) ppf e
+  | Pspread e ->
+    line i ppf "Pspread\n";
+    expression (i + 1) ppf e
 
 and jsx_children i ppf children =
   line i ppf "jsx_children =\n";
@@ -456,7 +522,7 @@ and jsx_props i ppf xs =
 and value_description i ppf x =
   line i ppf "value_description %a %a\n" fmt_string_loc x.pval_name fmt_location
     x.pval_loc;
-  attributes i ppf x.pval_attributes;
+  attributes i ppf (Ast_helper.Val.description_attributes x);
   core_type (i + 1) ppf x.pval_type;
   match x.pval_prim with
   | None -> ()
@@ -662,6 +728,9 @@ and module_expr i ppf x =
   | Pmod_extension (s, arg) ->
     line i ppf "Pmod_extension \"%s\"\n" s.txt;
     payload i ppf arg
+  | Pmod_await me ->
+    line i ppf "Pmod_await\n";
+    module_expr i ppf me
 
 and structure i ppf x = list i structure_item ppf x
 
@@ -706,6 +775,10 @@ and structure_item i ppf x =
     line i ppf "Pstr_include";
     attributes i ppf incl.pincl_attributes;
     module_expr i ppf incl.pincl_mod
+  | Pstr_raw {name_loc; source; attrs} ->
+    line i ppf "Pstr_raw %a\n" fmt_location name_loc;
+    attributes i ppf attrs;
+    raw_source i ppf source
   | Pstr_extension ((s, arg), attrs) ->
     line i ppf "Pstr_extension \"%s\"\n" s.txt;
     attributes i ppf attrs;
@@ -747,6 +820,10 @@ and label_decl i ppf ({pld_name; pld_mutable; pld_type; pld_loc} as ld) =
   line (i + 1) ppf "%a" fmt_string_loc pld_name;
   core_type (i + 1) ppf pld_type
 
+and dict_pattern_entry i ppf {pdp_key; pdp_pattern; pdp_optional} =
+  line i ppf "%a%s\n" fmt_string_loc pdp_key (if pdp_optional then "?" else "");
+  pattern (i + 1) ppf pdp_pattern
+
 and longident_x_pattern i ppf {lid = li; x = p; opt} =
   line i ppf "%a%s\n" fmt_longident_loc li (if opt then "?" else "");
   pattern (i + 1) ppf p
@@ -765,7 +842,7 @@ and case i ppf {pc_bar; pc_lhs; pc_guard; pc_rhs} =
 
 and value_binding i ppf x =
   line i ppf "<def>\n";
-  attributes (i + 1) ppf x.pvb_attributes;
+  attributes (i + 1) ppf (Ast_helper.Vb.binding_attributes x);
   pattern (i + 1) ppf x.pvb_pat;
   (match x.pvb_constraint with
   | None -> ()

@@ -100,7 +100,6 @@ let extra_for_cmt ~(iterator : Tast_iterator.iterator)
         | Partial_signature_item str -> iterator.signature_item iterator str
         | Partial_expression expression -> iterator.expr iterator expression
         | Partial_pattern pattern -> iterator.pat iterator pattern
-        | Partial_class_expr _ -> ()
         | Partial_module_type module_type ->
           iterator.module_type iterator module_type
         | Partial_structure _ | Partial_structure_item _ -> ())
@@ -135,7 +134,6 @@ let extra_for_cmt ~(iterator : Tast_iterator.iterator)
     in
     extra_for_signature_items ~iterator items;
     extra_for_parts parts
-  | _ -> extra_for_structure_items ~iterator []
 
 let add_for_path ~env ~extra path lident loc typ tip =
   let ident_name = Longident.last lident in
@@ -436,10 +434,8 @@ let expr ~env ~(extra : extra) (iter : Tast_iterator.iterator)
   | Texp_record {fields} ->
     add_for_record ~env ~extra ~record_type:expression.exp_type
       (fields |> Array.to_list
-      |> Utils.filter_map (fun (desc, item, opt) ->
-          match item with
-          | Typedtree.Overridden (loc, _) -> Some (loc, desc, (), opt)
-          | _ -> None))
+      |> List.map (fun (desc, (loc : Longident.t Location.loc), _) ->
+          (loc, desc, (), false)))
   | Texp_constant constant ->
     add_loc_item extra expression.exp_loc (Constant constant)
   (* Skip unit and list literals *)

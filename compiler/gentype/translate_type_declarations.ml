@@ -40,35 +40,19 @@ let create_polyvariant_case (label, attributes) =
       | _ -> if is_number label then IntLabel label else StringLabel label);
   }
 
-let create_variant_case label = function
-  | Some (Variant_runtime.String label) ->
+let create_variant_case = function
+  | Variant_runtime.String label ->
     {label_js = StringLabel (Emit_text.escape_string_contents label)}
-  | Some (Variant_runtime.Int label) ->
-    {label_js = IntLabel (string_of_int label)}
-  | Some (Variant_runtime.Float label) -> {label_js = FloatLabel label}
-  | Some (Variant_runtime.BigInt label) -> {label_js = IntLabel label}
-  | Some (Variant_runtime.Bool label) -> {label_js = BoolLabel label}
-  | Some Variant_runtime.Null -> {label_js = NullLabel}
-  | Some Variant_runtime.Undefined -> {label_js = UndefinedLabel}
-  | None -> {label_js = StringLabel label}
+  | Variant_runtime.Int label -> {label_js = IntLabel (string_of_int label)}
+  | Variant_runtime.Float label -> {label_js = FloatLabel label}
+  | Variant_runtime.BigInt label -> {label_js = IntLabel label}
+  | Variant_runtime.Bool label -> {label_js = BoolLabel label}
+  | Variant_runtime.Null -> {label_js = NullLabel}
+  | Variant_runtime.Undefined -> {label_js = UndefinedLabel}
 
-(**
- * Rename record fields.
- * If @genType.as is used, perform renaming conversion.
- * If @as is used (with records-as-objects active), escape and quote if
- * the identifier contains characters which are invalid as JS property names.
- * For escaped identifiers like \"foo-bar", strip the surrounding \"..."
- * since they are part of the ReScript syntax, not the actual field name.
- * The resulting name will be quoted later in EmitType if needed.
-*)
-let rename_record_field ~attributes ~name =
-  attributes |> Annotation.check_unsupported_gentype_as_renaming;
-  match attributes |> Annotation.get_as_string with
-  | Some s -> Emit_text.escape_string_contents s
-  | None -> name |> Ext_ident.unwrap_uppercase_exotic
-
-(* A declared field carries its runtime name; only the renaming that reaches
-   gentype through an expression's attributes still has to be read off one. *)
+(* The JS name of a declared record field: its runtime name (set by @as),
+   escaped as string contents, or else its identifier with the \"..." of an
+   exotic name removed. *)
 let declared_field_name (ld : Types.label_declaration) =
   ld.ld_attributes |> Annotation.check_unsupported_gentype_as_renaming;
   match ld.ld_runtime_name with
@@ -243,8 +227,8 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
     let unboxed =
       match representation with
       | Record_unboxed _ -> true
-      | Record_regular | Record_inlined _ | Record_extension -> false
-      | Record_float_unused -> assert false
+      | Record_regular | Record_array | Record_inlined _ | Record_extension ->
+        false
     in
     let {Translate_type_expr_from_types.dependencies; type_} =
       label_declarations |> translate_label_declarations ~unboxed
@@ -270,7 +254,6 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
       constructor_declarations
       |> List.mapi (fun position constructor_declaration ->
           let constructor_args = constructor_declaration.Types.cd_args in
-          let name = constructor_declaration.cd_id |> Ident.name in
           let tag = Variant_runtime.constructor_tag layout position in
           let args_translation =
             match constructor_args with
@@ -297,25 +280,25 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
             |> Translation.translate_dependencies ~config ~output_file_relative
                  ~resolver
           in
-          (name, tag, arg_types, import_types))
+          (tag, arg_types, import_types))
     in
     let variants_no_payload, variants_with_payload =
-      variants |> List.partition (fun (_, _, arg_types, _) -> arg_types = [])
+      variants |> List.partition (fun (_, arg_types, _) -> arg_types = [])
     in
     let no_payloads =
       variants_no_payload
-      |> List.map (fun (name, tag, _argTypes, _importTypes) ->
-          create_variant_case name tag)
+      |> List.map (fun (tag, _argTypes, _importTypes) ->
+          create_variant_case tag)
     in
     let payloads =
       variants_with_payload
-      |> List.map (fun (name, tag, arg_types, _importTypes) ->
+      |> List.map (fun (tag, arg_types, _importTypes) ->
           let type_ =
             match arg_types with
             | [type_] -> type_
             | _ -> Tuple arg_types
           in
-          {case = create_variant_case name tag; t = type_})
+          {case = create_variant_case tag; t = type_})
     in
     let variant_typ =
       let unboxed =
@@ -346,7 +329,7 @@ let traslate_declaration_kind ~config ~loc ~output_file_relative ~resolver
     in
     let import_types =
       variants
-      |> List.map (fun (_, _, _, import_types) -> import_types)
+      |> List.map (fun (_, _, import_types) -> import_types)
       |> List.concat
     in
     {Code_item.export_from_type_declaration; import_types}
@@ -361,7 +344,7 @@ let has_some_gadt_leaf constructor_declarations =
 let translate_type_declaration ~config ~output_file_relative ~resolver ~type_env
     ({typ_attributes; typ_id; typ_loc; typ_manifest; typ_params; typ_type} :
       Typedtree.type_declaration) : Code_item.type_declaration list =
-  if !Debug.translation then
+  if !(Debug.translation ()) then
     Log_.item "Translate Type Declaration %s\n" (typ_id |> Ident.name);
 
   let type_name = Ident.name typ_id in

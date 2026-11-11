@@ -39,7 +39,11 @@ fn coerce_toplevel_exports_reuses_existing_undefined_binding() {
                 JE::var(other, &mut compiler.j),
             ],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
 
     assert_eq!(exports, vec![alias, other]);
@@ -81,7 +85,11 @@ fn coerce_toplevel_exports_keeps_undefined_rebound_after_later_effects() {
             exports: vec![alias],
             values: vec![JE::undefined(false, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
 
     expect_dump!(
@@ -110,7 +118,11 @@ fn coerce_toplevel_exports_skips_unreachable_undefined_placeholder_after_throw()
             exports: vec![exported],
             values: vec![JE::undefined(false, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::True,
+        )
     };
 
     assert_eq!(exports, vec![exported]);
@@ -173,7 +185,11 @@ fn coerce_and_resolve_keep_declared_same_name_function_export_aliases_with_multi
             exports: vec![exported],
             values: vec![JE::var(target, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -206,7 +222,11 @@ fn coerce_toplevel_exports_reuses_existing_same_name_alias_binding_for_matching_
             exports: vec![exported],
             values: vec![JE::var(target, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -274,7 +294,11 @@ fn coerce_toplevel_exports_moves_same_name_recursive_function_alias_to_tail_with
             exports: vec![exported],
             values: vec![JE::var(fib, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -369,7 +393,11 @@ fn coerce_toplevel_exports_moves_same_name_export_strict_module_field_binding_to
             exports: vec![exported],
             values: vec![JE::var(declared_alias, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -423,7 +451,11 @@ fn coerce_toplevel_exports_keeps_same_name_literal_binding_used_by_later_functio
             exports: vec![exported],
             values: vec![JE::var(exported, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -484,7 +516,11 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_alias_before_later_function
             exports: vec![exported],
             values: vec![JE::var(exported, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -537,7 +573,11 @@ fn coerce_toplevel_exports_keeps_same_name_module_field_binding_before_later_eff
             exports: vec![exported],
             values: vec![JE::var(declared, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -590,7 +630,11 @@ fn coerce_toplevel_exports_keeps_same_name_runtime_module_field_alias_before_unu
             exports: vec![exported],
             values: vec![JE::var(exported, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -647,7 +691,11 @@ fn coerce_toplevel_exports_keeps_distinct_import_alias_for_late_export_tail() {
             exports: vec![exported],
             values: vec![JE::var(bar, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -717,7 +765,11 @@ fn coerce_toplevel_exports_keeps_same_name_export_alias_binding_used_by_later_to
                 JE::var(y, &mut compiler.j),
             ],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -761,7 +813,11 @@ fn coerce_toplevel_exports_keeps_same_name_import_alias_binding_before_top_level
             exports: vec![exported],
             values: vec![JE::var(exported, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -812,7 +868,11 @@ fn coerce_toplevel_exports_keeps_same_name_local_value_alias_binding_for_non_fun
             exports: vec![exported],
             values: vec![JE::var(exported, &mut compiler.j)],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 
@@ -877,7 +937,11 @@ fn coerce_toplevel_exports_keeps_same_name_qualified_value_alias_binding_before_
                 &mut compiler.j,
             )],
         };
-        compiler.coerce_toplevel_exports_lam(a0, a1)
+        compiler.coerce_toplevel_exports_lam(
+            a0,
+            a1,
+            crate::lambda::lam_compile::OutputFinished::False,
+        )
     };
     let exports = resolve_export_aliases(&mut compiler.j, &block, exports);
 

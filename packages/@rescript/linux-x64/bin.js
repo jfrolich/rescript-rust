@@ -1,5 +1,8 @@
 // @ts-check
 
+// rescript/cli/bins computes these paths itself; they are exported for tools
+// that import this file directly, such as rescript-vscode.
+
 import * as path from "node:path";
 
 export const binDir = path.join(import.meta.dirname, "bin");
@@ -12,4 +15,5 @@ export const binPaths = {
     "rescript-editor-analysis.exe",
   ),
   rescript_exe: path.join(binDir, "rescript.exe"),
+  rescript_ocaml_exe: path.join(binDir, "rescript-ocaml.exe"),
 };

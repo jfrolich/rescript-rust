@@ -18,6 +18,11 @@
 #
 # Parser warning output parity:
 # 5. parser-warning-snapshots - Warning/text output parity for curated fixtures
+# 6. parse-error-streams - For the files that do not parse
+#    (syntax_tests/data/parsing/{errors,infiniteLoops,recovery}), the exit
+#    status, stdout and stderr of `-print ml` and `-recover -print ml`,
+#    compared separately: res_cli prints the syntax error report on stderr
+#    and the recovered tree on stdout
 #
 # REGRESSION TRACKING:
 # The script maintains baseline files in tests/parity_baselines/ for each test type.
@@ -25,10 +30,26 @@
 # - If a file in the baseline fails, it's flagged as a REGRESSION
 # - Regressions cause the test to fail, preventing parity from decreasing
 #
+# STAGE FAILURES:
+# A command that exits non-zero or times out leaves its comparison undone.
+# Each one is reported with its file, stage, side and reason, the file passes
+# no baseline, and the script exits 2, so a failed command can never shrink a
+# difference list unnoticed. At sexp-locs-ppx and bsc-ast the OCaml reference
+# rejects some files (an error raised by the builtin PPX or the compiler);
+# when Rust rejects them too with the same exit status and the same stdout
+# (and, where the rule compares it, the same stderr; see
+# classify_reference_stage), both reasons are listed as "both reject", and
+# otherwise it is a difference. A both-reject is not a claim of identical
+# diagnostics where the listing says stderr was not compared. Exit 1 means every
+# comparison ran and some differ (or regressed); exit 0 means full parity.
+# OCAML_PARSER, RUST_PARSER, OCAML_BSC, RUST_BSC, SPICE_TEST_DIR,
+# PARSER_WARNING_DIR, PARSE_ERROR_DIRS and INSPECT_SCRIPT may name other
+# tools or fixtures.
+#
 # NOTE: Printer parity (res/ml output) is tested by test_syntax.sh
 # NOTE: Parsetree0/PPX parity is tested by test_parser_ast0_parity.sh
 #
-# Uses test files from tests/syntax_tests/data/{idempotency,printer,ppx,conversion,ast-mapping}
+# Uses test files from tests/syntax_tests/data/{printer,ppx,conversion,ast-mapping}
 # and tests/ppx_spice/src for spice parity.
 # External Tella files are opt-in via --with-external and require TELLA_REVISION.
 #
@@ -189,18 +210,22 @@ DUNE_BIN_DIR="$PROJECT_ROOT/_build/install/default/bin"
 
 # Parser executables (for sexp output - readable diffs)
 RUST_TARGET="${RUST_TARGET:-debug}"
-RUST_PARSER="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust"
+RUST_PARSER="${RUST_PARSER:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/res_parser_rust}"
 "$PROJECT_ROOT/scripts/rust_compiler_shims.sh" "$RUST_TARGET"
-OCAML_PARSER="$DUNE_BIN_DIR/res_parser"
+OCAML_PARSER="${OCAML_PARSER:-$DUNE_BIN_DIR/res_parser}"
 
 # Compiler executables (for bsc -bs-ast output - production format)
-RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
-OCAML_BSC="$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)/bin/bsc.exe"
+RUST_BSC="${RUST_BSC:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc}"
+OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$($PROJECT_ROOT/scripts/platform.sh)/bin/bsc.exe}"
 
 # Spice PPX parity configuration
 SPICE_PPX="${SPICE_PPX:-$PROJECT_ROOT/node_modules/@jfrolich/ppx-spice/ppx}"
-SPICE_TEST_DIR="$PROJECT_ROOT/tests/ppx_spice/src"
-INSPECT_SCRIPT="$PROJECT_ROOT/scripts/inspect_binary_ast.py"
+SPICE_TEST_DIR="${SPICE_TEST_DIR:-$PROJECT_ROOT/tests/ppx_spice/src}"
+INSPECT_SCRIPT="${INSPECT_SCRIPT:-$PROJECT_ROOT/scripts/inspect_binary_ast.py}"
+# Parser warning snapshot fixtures, relative to tests/
+PARSER_WARNING_DIR="${PARSER_WARNING_DIR:-syntax_tests/data/ppx/react/warnings}"
+# Directories of files that do not parse, relative to tests/ (space separated)
+PARSE_ERROR_DIRS="${PARSE_ERROR_DIRS:-syntax_tests/data/parsing/errors syntax_tests/data/parsing/infiniteLoops syntax_tests/data/parsing/recovery}"
 
 # Colors for output
 RED='\033[0;31m'
@@ -295,13 +320,13 @@ if [[ -n "$FILE_ARG" ]]; then
         # Treat as a pattern and use find with -path
         # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
         # Also exclude specific files where both OCaml and Rust parsers fail
-        find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
+        find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | grep -E "$FILE_ARG" | sort > "$TEMP_DIR/files.txt" || true
     fi
 else
     # Find all test files
     # Exclude: errors (syntax errors), recovery (error recovery tests), infiniteLoops (stress tests that may hang/fail both parsers)
     # Also exclude specific files where both OCaml and Rust parsers fail
-    find syntax_tests/data/idempotency syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
+    find syntax_tests/data/printer syntax_tests/data/ppx syntax_tests/data/conversion syntax_tests/data/ast-mapping syntax_tests/data/parsing \( -name "*.res" -o -name "*.resi" \) -not -path "*/errors/*" -not -path "*/recovery/*" -not -path "*/infiniteLoops/*" -not -path "*/ffi/export.res" -not -path "*/parsing/other/gentype.res" 2>/dev/null | sort > "$TEMP_DIR/files.txt"
 fi
 
 # Include an explicitly pinned external corpus by reference (no file copying).
@@ -402,15 +427,145 @@ mkdir -p "$TEMP_DIR/spice_ppx"
 mkdir -p "$TEMP_DIR/spice_ppx_diffs"
 mkdir -p "$TEMP_DIR/parser_warning"
 mkdir -p "$TEMP_DIR/parser_warning_diffs"
+mkdir -p "$TEMP_DIR/parse_error"
+mkdir -p "$TEMP_DIR/parse_error_diffs"
+
+mkdir -p "$TEMP_DIR/stage_failures"
+mkdir -p "$TEMP_DIR/reference_rejects"
 
 # Export variables for parallel execution
 export OCAML_PARSER RUST_PARSER OCAML_BSC RUST_BSC SPICE_PPX TELLA_DIR TIMEOUT_SECONDS TEMP_DIR QUICK_MODE VERBOSE INSPECT_SCRIPT
+
+# The reason a command with exit status $1 failed, with the first line of
+# the stderr file $2 when it has one.
+command_failure_reason() {
+    local status="$1" err="$2"
+    local reason="exit $status"
+    [[ $status -eq 124 ]] && reason="timed out after ${TIMEOUT_SECONDS}s (exit 124)"
+    # The first line with text, without colors or indentation (a compiler
+    # error report starts with a blank line).
+    local detail=""
+    [[ -f "$err" ]] && detail=$(sed $'s/\x1b\[[0-9;]*m//g' "$err" | grep -m1 -v '^[[:space:]]*$' | sed 's/^[[:space:]]*//' | tr '\t' ' ' | cut -c1-200)
+    [[ -n "$detail" ]] && reason="$reason: $detail"
+    echo "$reason"
+}
+
+# Record a failed comparison as "file<TAB>stage<TAB>side<TAB>reason" in the
+# caller's $stage_fail_file.
+record_stage_failure() {
+    printf '%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" >> "$stage_fail_file"
+}
+
+# Run one command of a stage, writing its stdout to $out and its stderr to
+# $out.err. A non-zero exit or a timeout is recorded as a stage failure and
+# returns 1, so the comparison is counted as failed instead of skipped.
+run_stage() {
+    local stage="$1" side="$2" out="$3"
+    shift 3
+    local status=0
+    timeout "$TIMEOUT_SECONDS" "$@" > "$out" 2> "$out.err" || status=$?
+    [[ $status -eq 0 ]] && return 0
+    record_stage_failure "$file" "$stage" "$side" "$(command_failure_reason "$status" "$out.err")"
+    return 1
+}
+
+# Classify a stage whose OCaml reference may reject the file. $1 is the
+# stage, $2/$3 the OCaml and Rust exit statuses, $4/$5 their stderr files,
+# $6/$7 their stdout files and $8 the stderr rule of a rejection: "exact"
+# (bsc, whose diagnostics Rust reproduces) or "report" (res_parser: stderr is
+# compared for status 1, res_cli's own report and exit; an uncaught exception
+# ends with the OCaml runtime's "Fatal error: exception ..." text, which Rust
+# does not reproduce, so it is not compared and the listing says so).
+# Prints "compare" when both succeeded, "reject" when both rejected the file
+# with the same exit status and the streams the rule compares are identical
+# (listed as a reference rejection), "differ" when the OCaml reference
+# rejected a file Rust accepted, both rejected it with different exit
+# statuses or different compared streams (the reason is written to
+# $file_temp/$stage.differ), and "failed" when a command timed out, was
+# killed, or Rust failed where OCaml succeeded (the failure is recorded).
+classify_reference_stage() {
+    local stage="$1" ocaml_status="$2" rust_status="$3" ocaml_err="$4" rust_err="$5"
+    local ocaml_out="$6" rust_out="$7" stderr_rule="$8"
+    local differ_file="$file_temp/$stage.differ"
+    rm -f "$differ_file"
+    local failed=false
+    # 124 is timeout's status, and 125 and above mean the command could
+    # not run or was killed by a signal.
+    if [[ $ocaml_status -eq 124 || $ocaml_status -ge 125 ]]; then
+        record_stage_failure "$file" "$stage" ocaml "$(command_failure_reason "$ocaml_status" "$ocaml_err")"
+        failed=true
+    fi
+    if [[ $rust_status -eq 124 || $rust_status -ge 125 ]]; then
+        record_stage_failure "$file" "$stage" rust "$(command_failure_reason "$rust_status" "$rust_err")"
+        failed=true
+    fi
+    if $failed; then
+        echo failed
+    elif [[ $ocaml_status -eq 0 && $rust_status -eq 0 ]]; then
+        echo compare
+    elif [[ $ocaml_status -eq 0 ]]; then
+        record_stage_failure "$file" "$stage" rust "$(command_failure_reason "$rust_status" "$rust_err") (the OCaml reference succeeded)"
+        echo failed
+    elif [[ $rust_status -eq 0 || $rust_status -ne $ocaml_status ]]; then
+        {
+            echo "The OCaml reference rejected the file and Rust accepted it or exited differently."
+            echo "OCaml: $(command_failure_reason "$ocaml_status" "$ocaml_err")"
+            echo "Rust:  $(command_failure_reason "$rust_status" "$rust_err")"
+        } > "$differ_file"
+        echo differ
+    else
+        local stderr_note
+        if [[ $stderr_rule == exact || $ocaml_status -eq 1 ]]; then
+            stderr_note="stderr identical"
+        else
+            stderr_note="stderr not compared (uncaught exception)"
+        fi
+        if ! cmp -s "$ocaml_out" "$rust_out"; then
+            {
+                echo "Both rejected the file with exit $ocaml_status, but their stdout differs."
+                diff -u --text "$ocaml_out" "$rust_out" || true
+            } > "$differ_file"
+            echo differ
+        elif [[ $stderr_note == "stderr identical" ]] && ! cmp -s "$ocaml_err" "$rust_err"; then
+            {
+                echo "Both rejected the file with exit $ocaml_status, but their stderr differs."
+                diff -u --text "$ocaml_err" "$rust_err" || true
+            } > "$differ_file"
+            echo differ
+        else
+            printf '%s\t%s\tocaml %s\trust %s\t%s\n' "$file" "$stage" \
+                "$(command_failure_reason "$ocaml_status" "$ocaml_err")" \
+                "$(command_failure_reason "$rust_status" "$rust_err")" \
+                "stdout identical, $stderr_note" >> "$TEMP_DIR/reference_rejects/$safe_name.tsv"
+            echo reject
+        fi
+    fi
+}
+
+# Compare two binary ASTs by value. same-values exits 1 with its differences
+# on stdout; any other status, or output on stderr, means the comparison
+# itself failed, which is recorded. Returns 0 on equal values, 1 on a
+# difference and 2 on a failed comparison.
+compare_ast_values() {
+    local stage="$1" ocaml_file="$2" rust_file="$3" values="$4"
+    local compare_status=0
+    python3 "$INSPECT_SCRIPT" same-values "$ocaml_file" "$rust_file" > "$values" 2> "$values.err" || compare_status=$?
+    if [[ $compare_status -eq 0 && ! -s "$values.err" ]]; then
+        return 0
+    elif [[ $compare_status -eq 1 && ! -s "$values.err" ]]; then
+        return 1
+    fi
+    record_stage_failure "$file" "$stage" inspect_binary_ast.py \
+        "exit $compare_status: $(tail -1 "$values.err" | tr '\t' ' ' | cut -c1-200)"
+    return 2
+}
 
 # Function to test a single file - writes results to a file
 test_single_file() {
     local file="$1"
     local safe_name=$(echo "$file" | tr '/' '_')
     local result_file="$RESULTS_DIR/$safe_name.result"
+    local stage_fail_file="$TEMP_DIR/stage_failures/$safe_name.tsv"
 
     # Initialize result
     local locs_pass=0 locs_diff=0
@@ -455,17 +610,16 @@ test_single_file() {
         skip_sexp_locs_ppx=true
     fi
 
-    # Run OCaml parser with sexp-locs (primary test - includes all attributes)
+    # Run both parsers with sexp-locs (primary test - includes all attributes)
     local ocaml_success=false
-    if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs "$file" > "$file_temp/ocaml.sexp-locs" 2>/dev/null; then
+    if run_stage sexp-locs ocaml "$file_temp/ocaml.sexp-locs" "$OCAML_PARSER" $intf_flag -print sexp-locs "$file"; then
         ocaml_success=true
     else
         ocaml_fail=1
     fi
 
-    # Run Rust parser with sexp-locs
     local rust_success=false
-    if timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs "$file" > "$file_temp/rust.sexp-locs" 2>/dev/null; then
+    if run_stage sexp-locs rust "$file_temp/rust.sexp-locs" "$RUST_PARSER" $intf_flag -print sexp-locs "$file"; then
         rust_success=true
     else
         rust_fail=1
@@ -480,20 +634,30 @@ test_single_file() {
             diff -u "$file_temp/ocaml.sexp-locs" "$file_temp/rust.sexp-locs" > "$TEMP_DIR/locs_diffs/$safe_name.diff" 2>&1 || true
         fi
 
-        # Test sexp-locs-ppx parity (post-PPX sexp with locations)
+        local ocaml_status rust_status verdict
+
+        # Test sexp-locs-ppx parity (post-PPX sexp with locations). The OCaml
+        # reference rejects some files here (an error raised by the builtin
+        # PPX); Rust must reject them too.
         if ! $skip_sexp_locs_ppx; then
-            if timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/ocaml.sexp-locs-ppx" 2>/dev/null; then
-                sexp_locs_ppx_checked=1
-                if timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/rust.sexp-locs-ppx" 2>/dev/null; then
+            ocaml_status=0; rust_status=0
+            timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/ocaml.sexp-locs-ppx" 2> "$file_temp/ocaml.sexp-locs-ppx.err" || ocaml_status=$?
+            timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" $intf_flag -print sexp-locs-ppx "$file" > "$file_temp/rust.sexp-locs-ppx" 2> "$file_temp/rust.sexp-locs-ppx.err" || rust_status=$?
+            verdict=$(classify_reference_stage sexp-locs-ppx "$ocaml_status" "$rust_status" "$file_temp/ocaml.sexp-locs-ppx.err" "$file_temp/rust.sexp-locs-ppx.err" "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" report)
+            case "$verdict" in
+                compare)
+                    sexp_locs_ppx_checked=1
                     if ! diff -q "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > /dev/null 2>&1; then
                         sexp_locs_ppx_diff=1
                         diff -u --text "$file_temp/ocaml.sexp-locs-ppx" "$file_temp/rust.sexp-locs-ppx" > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff" 2>&1 || true
                     fi
-                else
+                    ;;
+                differ)
+                    sexp_locs_ppx_checked=1
                     sexp_locs_ppx_diff=1
-                    echo "Rust parser failed to produce required sexp-locs-ppx output." > "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff"
-                fi
-            fi
+                    cp "$file_temp/sexp-locs-ppx.differ" "$TEMP_DIR/sexp_locs_ppx_diffs/$safe_name.diff"
+                    ;;
+            esac
         fi
 
         # Test bsc -bs-ast parity (full compiler binary AST output with dependencies)
@@ -515,77 +679,105 @@ test_single_file() {
             rust_bsc_cmd+=(-ppx "$SPICE_PPX")
         fi
         if $use_spice_structural_bsc; then
-            sexp_locs_ppx_spice_checked=1
             local ocaml_spice_sexp="$file_temp/ocaml.sexp-with-locs-ppx-and-spice"
             local rust_spice_sexp="$file_temp/rust.sexp-with-locs-ppx-and-spice"
 
-            if timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$ocaml_ast_file" > /dev/null 2> "$ocaml_spice_sexp" && \
-               timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$rust_ast_file" > /dev/null 2> "$rust_spice_sexp"; then
-                if ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
+            # bsc prints the sexp on stderr, so the stderr file is the output.
+            ocaml_status=0; rust_status=0
+            timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$ocaml_ast_file" > "$file_temp/ocaml.spice.out" 2> "$ocaml_spice_sexp" || ocaml_status=$?
+            timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast -dparsetree-sexp-locs "$file" -o "$rust_ast_file" > "$file_temp/rust.spice.out" 2> "$rust_spice_sexp" || rust_status=$?
+            verdict=$(classify_reference_stage sexp-with-locs-ppx-and-spice "$ocaml_status" "$rust_status" "$ocaml_spice_sexp" "$rust_spice_sexp" "$file_temp/ocaml.spice.out" "$file_temp/rust.spice.out" exact)
+            case "$verdict" in
+                compare)
+                    sexp_locs_ppx_spice_checked=1
+                    if ! diff -q "$ocaml_spice_sexp" "$rust_spice_sexp" > /dev/null 2>&1; then
+                        sexp_locs_ppx_spice_diff=1
+                        {
+                            echo "Category: sexp-with-locs-ppx-and-spice"
+                            echo "Comparison type: post-PPX sexp-with-locs (not byte-level bsc-ast)"
+                            echo ""
+                            diff -u --text "$ocaml_spice_sexp" "$rust_spice_sexp" || true
+                        } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
+                    fi
+                    ;;
+                differ)
+                    sexp_locs_ppx_spice_checked=1
                     sexp_locs_ppx_spice_diff=1
                     {
-                        echo "Category: sexp-with-locs-ppx-and-spice"
-                        echo "Comparison type: post-PPX sexp-with-locs (not byte-level bsc-ast)"
+                        cat "$file_temp/sexp-with-locs-ppx-and-spice.differ"
                         echo ""
-                        diff -u --text "$ocaml_spice_sexp" "$rust_spice_sexp" || true
+                        echo "--- OCaml stderr ---"
+                        cat "$ocaml_spice_sexp" 2>/dev/null || true
                     } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
-                fi
-            else
-                sexp_locs_ppx_spice_diff=1
-                {
-                    echo "Failed to produce sexp-with-locs-ppx-and-spice output via bsc."
-                    echo ""
-                    echo "--- OCaml stderr ---"
-                    cat "$ocaml_spice_sexp" 2>/dev/null || true
-                    echo ""
-                    echo "--- Rust stderr ---"
-                    cat "$rust_spice_sexp" 2>/dev/null || true
-                } > "$TEMP_DIR/sexp_locs_ppx_spice_diffs/$safe_name.diff" 2>&1
-            fi
-        elif timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" 2>/dev/null; then
-            bsc_ast_checked=1
-            if timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast "$file" -o "$rust_ast_file" 2>/dev/null; then
-                # Both compilers create .iast for .resi files (regardless of -o), so check for that.
-                if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
-                    ocaml_ast_file="$ocaml_iast_file"
-                fi
-                if [[ -f "$rust_iast_file" && ! -f "$rust_ast_file" ]]; then
-                    rust_ast_file="$rust_iast_file"
-                fi
-                if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
-                    # Compare decoded values: the encoders may share repeated
-                    # strings differently, which a reader cannot observe.
-                    if ! python3 "$INSPECT_SCRIPT" same-values "$ocaml_ast_file" "$rust_ast_file" > "$file_temp/bsc-ast.values" 2>&1; then
-                        bsc_ast_diff=1
-                        {
-                            cat "$file_temp/bsc-ast.values"
-                            echo ""
-                            echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
-                            echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
-                            echo ""
-                            echo "First differing bytes (hex dump):"
-                            diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
-                        } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                    ;;
+            esac
+        else
+            ocaml_status=0; rust_status=0
+            timeout "$TIMEOUT_SECONDS" "${ocaml_bsc_cmd[@]}" -bs-ast "$file" -o "$ocaml_ast_file" > "$file_temp/ocaml.bsc.out" 2> "$file_temp/ocaml.bsc.err" || ocaml_status=$?
+            timeout "$TIMEOUT_SECONDS" "${rust_bsc_cmd[@]}" -bs-ast "$file" -o "$rust_ast_file" > "$file_temp/rust.bsc.out" 2> "$file_temp/rust.bsc.err" || rust_status=$?
+            verdict=$(classify_reference_stage bsc-ast "$ocaml_status" "$rust_status" "$file_temp/ocaml.bsc.err" "$file_temp/rust.bsc.err" "$file_temp/ocaml.bsc.out" "$file_temp/rust.bsc.out" exact)
+            case "$verdict" in
+                compare)
+                    bsc_ast_checked=1
+                    # Both compilers create .iast for .resi files (regardless of -o), so check for that.
+                    if [[ -f "$ocaml_iast_file" && ! -f "$ocaml_ast_file" ]]; then
+                        ocaml_ast_file="$ocaml_iast_file"
                     fi
-                else
+                    if [[ -f "$rust_iast_file" && ! -f "$rust_ast_file" ]]; then
+                        rust_ast_file="$rust_iast_file"
+                    fi
+                    local missing_side
+                    for missing_side in ocaml rust; do
+                        local side_file="$ocaml_ast_file"
+                        [[ $missing_side == rust ]] && side_file="$rust_ast_file"
+                        if [[ ! -f "$side_file" ]]; then
+                            record_stage_failure "$file" bsc-ast "$missing_side" "exit 0 without writing the AST file"
+                        fi
+                    done
+                    if [[ -f "$ocaml_ast_file" && -f "$rust_ast_file" ]]; then
+                        # Compare decoded values: the encoders may share repeated
+                        # strings differently, which a reader cannot observe.
+                        local compare_result=0
+                        compare_ast_values bsc-ast-compare "$ocaml_ast_file" "$rust_ast_file" "$file_temp/bsc-ast.values" || compare_result=$?
+                        if [[ $compare_result -eq 1 ]]; then
+                            bsc_ast_diff=1
+                            {
+                                cat "$file_temp/bsc-ast.values"
+                                echo ""
+                                echo "OCaml bsc-ast size: $(wc -c < "$ocaml_ast_file") bytes"
+                                echo "Rust bsc-ast size:  $(wc -c < "$rust_ast_file") bytes"
+                                echo ""
+                                echo "First differing bytes (hex dump):"
+                                diff <(xxd "$ocaml_ast_file" | head -50) <(xxd "$rust_ast_file" | head -50) || true
+                            } > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff" 2>&1
+                        fi
+                    fi
+                    ;;
+                differ)
+                    bsc_ast_checked=1
                     bsc_ast_diff=1
-                    echo "bsc succeeded without producing both expected AST files." > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
-                fi
-            else
-                bsc_ast_diff=1
-                echo "Rust bsc failed after the OCaml reference succeeded." > "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
-            fi
+                    cp "$file_temp/bsc-ast.differ" "$TEMP_DIR/bsc_ast_parity_diffs/$safe_name.diff"
+                    ;;
+            esac
         fi
     fi
 
+    local stage_failed=0
+    [[ -s "$stage_fail_file" ]] && stage_failed=1
+
     # Write results
-    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_checked:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_checked:$bsc_ast_diff:$ocaml_fail:$rust_fail" > "$result_file"
+    echo "$file:$locs_pass:$locs_diff:$sexp_locs_ppx_checked:$sexp_locs_ppx_diff:$sexp_locs_ppx_spice_checked:$sexp_locs_ppx_spice_diff:$bsc_ast_checked:$bsc_ast_diff:$ocaml_fail:$rust_fail:$stage_failed" > "$result_file"
 
     # Clean up per-file temp
     cleanup_dir_tree "$file_temp"
 }
 
 export -f test_single_file
+export -f command_failure_reason
+export -f record_stage_failure
+export -f run_stage
+export -f classify_reference_stage
+export -f compare_ast_values
 export -f cleanup_dir_tree
 export RESULTS_DIR
 
@@ -602,6 +794,7 @@ echo ""
 mkdir -p "$TEMP_DIR/work"
 
 # Run tests
+stopped_early=false
 if $QUICK_MODE; then
     # Sequential mode with early exit
     while read -r file; do
@@ -614,7 +807,16 @@ if $QUICK_MODE; then
         # Check result
         safe_name=$(echo "$file" | tr '/' '_')
         result=$(cat "$RESULTS_DIR/$safe_name.result")
-        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+        IFS=':' read -r _ locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail stage_failed <<< "$result"
+
+        if [[ "$stage_failed" -eq 1 ]]; then
+            echo -e "${RED}FAIL:${RESET} $file (a command failed; not compared)"
+            cat "$TEMP_DIR/stage_failures/$safe_name.tsv"
+            echo ""
+            echo -e "${YELLOW}Quick mode: stopping on first failure${RESET}"
+            stopped_early=true
+            break
+        fi
 
         if [[ "$locs_diff" -eq 1 || "$sexp_locs_ppx_diff" -eq 1 || "$sexp_locs_ppx_spice_diff" -eq 1 || "$bsc_ast_diff" -eq 1 || "$ocaml_fail" -eq 1 || "$rust_fail" -eq 1 ]]; then
             echo -e "${RED}FAIL:${RESET} $file (parser, PPX, or bsc parity failure)"
@@ -629,6 +831,7 @@ if $QUICK_MODE; then
             done
             echo ""
             echo -e "${YELLOW}Quick mode: stopping on first failure${RESET}"
+            stopped_early=true
             break
         fi
     done < "$TEMP_DIR/files.txt"
@@ -652,6 +855,17 @@ else
         wait $pid
         printf "\r  Progress: %d / %d files... done\n" "$total" "$total"
     fi
+fi
+
+# A file without a result never finished test_single_file; count it as a
+# failed comparison rather than leaving it out of every list.
+if ! $stopped_early; then
+    while read -r file; do
+        safe_name=$(echo "$file" | tr '/' '_')
+        if [[ ! -f "$RESULTS_DIR/$safe_name.result" ]]; then
+            printf '%s\tharness\t-\tno result written\n' "$file" >> "$TEMP_DIR/stage_failures/$safe_name.tsv"
+        fi
+    done < "$TEMP_DIR/files.txt"
 fi
 
 # Aggregate results
@@ -678,7 +892,7 @@ rust_fail_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail stage_failed <<< "$result"
 
     locs_pass_count=$((locs_pass_count + locs_pass))
     locs_diff_count=$((locs_diff_count + locs_diff))
@@ -717,12 +931,13 @@ bsc_ast_pass_files=""
 for result_file in "$RESULTS_DIR"/*.result; do
     [[ -f "$result_file" ]] || continue
     result=$(cat "$result_file")
-    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail <<< "$result"
+    IFS=':' read -r file locs_pass locs_diff sexp_locs_ppx_checked sexp_locs_ppx_diff sexp_locs_ppx_spice_checked sexp_locs_ppx_spice_diff bsc_ast_checked bsc_ast_diff ocaml_fail rust_fail stage_failed <<< "$result"
 
     # Track all tested files
     all_tested_files="$all_tested_files$file\n"
 
-    # A file passes if it didn't fail and didn't have a diff
+    # A file passes if every command succeeded and it had no diff
+    [[ "$stage_failed" -eq 1 ]] && continue
     if [[ "$locs_pass" -eq 1 && "$locs_diff" -eq 0 ]]; then
         sexp_locs_pass_files="$sexp_locs_pass_files$file\n"
     fi
@@ -813,7 +1028,7 @@ run_parser_warning_snapshot_parity() {
     local files=()
     while IFS= read -r line; do
         files+=("$line")
-    done < <(find syntax_tests/data/ppx/react/warnings \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort)
+    done < <(find "$PARSER_WARNING_DIR" \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort)
 
     local file_count=${#files[@]}
     parser_warning_total=$file_count
@@ -839,31 +1054,27 @@ run_parser_warning_snapshot_parity() {
         timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" -jsx-version 4 "$file" > "$ocaml_out" 2>&1 || ocaml_exit=$?
         timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" -jsx-version 4 "$file" > "$rust_out" 2>&1 || rust_exit=$?
 
+        # A parser that exits non-zero or times out is a failed comparison,
+        # listed with the stage failures. The output holds both streams, so
+        # its first line gives the reason.
+        local stage_fail_file="$TEMP_DIR/stage_failures/warning_${safe_name}.tsv"
+        if [[ $ocaml_exit -ne 0 ]]; then
+            record_stage_failure "$file" parser-warning ocaml "$(command_failure_reason "$ocaml_exit" "$ocaml_out")"
+        fi
+        if [[ $rust_exit -ne 0 ]]; then
+            record_stage_failure "$file" parser-warning rust "$(command_failure_reason "$rust_exit" "$rust_out")"
+        fi
+
         if [[ ! -f "$expected" ]]; then
             fail_reason="missing expected file"
             {
                 echo "Missing expected snapshot: $expected"
             } > "$diff_out"
-        elif [[ $ocaml_exit -eq 124 || $rust_exit -eq 124 ]]; then
-            fail_reason="timeout"
+        elif [[ $ocaml_exit -ne 0 || $rust_exit -ne 0 ]]; then
+            fail_reason="a parser command failed; not compared"
             {
-                echo "Timeout while running parser warning snapshot check."
                 echo "OCaml exit: $ocaml_exit"
                 echo "Rust exit:  $rust_exit"
-            } > "$diff_out"
-        elif [[ $ocaml_exit -ne 0 ]]; then
-            fail_reason="OCaml parser failed"
-            {
-                echo "OCaml parser exited with $ocaml_exit"
-                echo ""
-                cat "$ocaml_out" 2>/dev/null || true
-            } > "$diff_out"
-        elif [[ $rust_exit -ne 0 ]]; then
-            fail_reason="Rust parser failed"
-            {
-                echo "Rust parser exited with $rust_exit"
-                echo ""
-                cat "$rust_out" 2>/dev/null || true
             } > "$diff_out"
         elif ! diff -q "$ocaml_out" "$rust_out" > /dev/null 2>&1; then
             fail_reason="OCaml and Rust outputs differ"
@@ -879,6 +1090,80 @@ run_parser_warning_snapshot_parity() {
         else
             parser_warning_pass_count=$((parser_warning_pass_count + 1))
         fi
+    done
+}
+
+# Parse error stream parity. For a file that does not parse, res_cli prints
+# the syntax error report with Res_diagnostics.print_report, which writes to
+# stderr, then exits 1, or with -recover prints the recovered tree on stdout
+# and exits 0 (res_cli.ml:105-110, 139-144). test_syntax.sh merges the two
+# streams, so compare each one separately here, with the exit status.
+run_parse_error_stream_parity() {
+    echo ""
+    echo -e "${BOLD}Running parse error stream parity...${RESET}"
+
+    local files=() dir line
+    for dir in $PARSE_ERROR_DIRS; do
+        while IFS= read -r line; do
+            files+=("$line")
+        done < <(find "$dir" \( -name "*.res" -o -name "*.resi" \) 2>/dev/null | sort)
+    done
+    parse_error_total=${#files[@]}
+    if [[ $parse_error_total -eq 0 ]]; then
+        echo -e "${RED}No parse error fixtures found in: $PARSE_ERROR_DIRS${RESET}"
+        parse_error_missing=true
+        return
+    fi
+    echo "Parse error fixtures: $parse_error_total files, each with -print ml and -recover -print ml"
+
+    local file mode
+    for file in "${files[@]}"; do
+        local safe_name
+        safe_name=$(echo "$file" | tr '/' '_')
+        local stage_fail_file="$TEMP_DIR/stage_failures/parse_error_${safe_name}.tsv"
+        for mode in plain recover; do
+            local args=(-print ml)
+            [[ $mode == recover ]] && args=(-recover -print ml)
+            local stage="parse-error-$mode"
+            local base="$TEMP_DIR/parse_error/${safe_name}.$mode"
+            local ocaml_exit=0 rust_exit=0
+            timeout "$TIMEOUT_SECONDS" "$OCAML_PARSER" "${args[@]}" "$file" > "$base.ocaml.out" 2> "$base.ocaml.err" || ocaml_exit=$?
+            timeout "$TIMEOUT_SECONDS" "$RUST_PARSER" "${args[@]}" "$file" > "$base.rust.out" 2> "$base.rust.err" || rust_exit=$?
+
+            # 124 is timeout's status, and 125 and above mean the command
+            # could not run or was killed by a signal.
+            local failed=false
+            if [[ $ocaml_exit -eq 124 || $ocaml_exit -ge 125 ]]; then
+                record_stage_failure "$file" "$stage" ocaml "$(command_failure_reason "$ocaml_exit" "$base.ocaml.err")"
+                failed=true
+            fi
+            if [[ $rust_exit -eq 124 || $rust_exit -ge 125 ]]; then
+                record_stage_failure "$file" "$stage" rust "$(command_failure_reason "$rust_exit" "$base.rust.err")"
+                failed=true
+            fi
+            $failed && continue
+
+            parse_error_checks=$((parse_error_checks + 1))
+            local reasons=()
+            [[ $ocaml_exit -ne $rust_exit ]] && reasons+=("exit $ocaml_exit vs $rust_exit")
+            cmp -s "$base.ocaml.out" "$base.rust.out" || reasons+=("stdout differs")
+            cmp -s "$base.ocaml.err" "$base.rust.err" || reasons+=("stderr differs")
+            if [[ ${#reasons[@]} -eq 0 ]]; then
+                parse_error_pass_count=$((parse_error_pass_count + 1))
+            else
+                local reason
+                reason=$(IFS=,; echo "${reasons[*]}")
+                parse_error_diff_count=$((parse_error_diff_count + 1))
+                parse_error_failed_files="$parse_error_failed_files$file ($stage: $reason)\n"
+                {
+                    echo "Exit status: OCaml $ocaml_exit, Rust $rust_exit"
+                    echo "--- stdout"
+                    diff -u --text "$base.ocaml.out" "$base.rust.out" || true
+                    echo "--- stderr"
+                    diff -u --text "$base.ocaml.err" "$base.rust.err" || true
+                } > "$TEMP_DIR/parse_error_diffs/${safe_name}.$mode.diff" 2>&1
+            fi
+        done
     done
 }
 
@@ -925,45 +1210,39 @@ run_spice_ppx_parity() {
         local ocaml_out="$TEMP_DIR/spice_ppx/ocaml_${safe_name}.ast"
         local rust_out="$TEMP_DIR/spice_ppx/rust_${safe_name}.ast"
 
-        local ocaml_exit=0
-        timeout "$TIMEOUT_SECONDS" "$OCAML_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$ocaml_out" > /dev/null 2>&1 || ocaml_exit=$?
-        if [[ $ocaml_exit -ne 0 ]]; then
-            spice_ocaml_error_count=$((spice_ocaml_error_count + 1))
-            spice_failed_files="$spice_failed_files$file (OCaml compile error)\n"
+        local stage_fail_file="$TEMP_DIR/stage_failures/spice_${safe_name}.tsv"
+        local ocaml_ok=true rust_ok=true
+        # Both compilers always run, so each side that fails is reported.
+        run_stage spice-ppx ocaml "$ocaml_out.stdout" "$OCAML_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$ocaml_out" || ocaml_ok=false
+        run_stage spice-ppx rust "$rust_out.stdout" "$RUST_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$rust_out" || rust_ok=false
+
+        # A .resi file is written as .iast whatever -o says.
+        if $ocaml_ok && [[ ! -s "$ocaml_out" && -s "${ocaml_out%.ast}.iast" ]]; then
+            ocaml_out="${ocaml_out%.ast}.iast"
+        fi
+        if $rust_ok && [[ ! -s "$rust_out" && -s "${rust_out%.ast}.iast" ]]; then
+            rust_out="${rust_out%.ast}.iast"
+        fi
+        if $ocaml_ok && [[ ! -s "$ocaml_out" ]]; then
+            record_stage_failure "$file" spice-ppx ocaml "exit 0 without writing the AST file"
+            ocaml_ok=false
+        fi
+        if $rust_ok && [[ ! -s "$rust_out" ]]; then
+            record_stage_failure "$file" spice-ppx rust "exit 0 without writing the AST file"
+            rust_ok=false
+        fi
+        $ocaml_ok || spice_ocaml_error_count=$((spice_ocaml_error_count + 1))
+        $rust_ok || spice_rust_error_count=$((spice_rust_error_count + 1))
+        if ! $ocaml_ok || ! $rust_ok; then
+            spice_failed_files="$spice_failed_files$file (a command failed; not compared)\n"
             continue
         fi
 
-        if [[ ! -s "$ocaml_out" ]]; then
-            local alt="${ocaml_out%.ast}.iast"
-            if [[ -s "$alt" ]]; then
-                ocaml_out="$alt"
-            else
-                spice_ocaml_error_count=$((spice_ocaml_error_count + 1))
-                spice_failed_files="$spice_failed_files$file (OCaml output missing)\n"
-                continue
-            fi
-        fi
-
-        local rust_exit=0
-        timeout "$TIMEOUT_SECONDS" "$RUST_BSC" -ppx "$SPICE_PPX" -bs-ast "$file" -o "$rust_out" > /dev/null 2>&1 || rust_exit=$?
-        if [[ $rust_exit -ne 0 ]]; then
-            spice_rust_error_count=$((spice_rust_error_count + 1))
-            spice_failed_files="$spice_failed_files$file (Rust compile error)\n"
-            continue
-        fi
-
-        if [[ ! -s "$rust_out" ]]; then
-            local alt="${rust_out%.ast}.iast"
-            if [[ -s "$alt" ]]; then
-                rust_out="$alt"
-            else
-                spice_rust_error_count=$((spice_rust_error_count + 1))
-                spice_failed_files="$spice_failed_files$file (Rust output missing)\n"
-                continue
-            fi
-        fi
-
-        if python3 - "$INSPECT_SCRIPT" "$ocaml_out" "$rust_out" <<'PY' > /dev/null 2>&1
+        # The comparison exits 1 when the values differ; any other status, or
+        # output on stderr, means the comparison itself failed.
+        local compare_err="$TEMP_DIR/spice_ppx/compare_${safe_name}.err"
+        local compare_status=0
+        python3 - "$INSPECT_SCRIPT" "$ocaml_out" "$rust_out" <<'PY' > /dev/null 2> "$compare_err" || compare_status=$?
 import importlib.util
 import sys
 
@@ -979,16 +1258,21 @@ root_b, dec_b = ast_b.decode_ast()
 diffs = mod.compare_value_trees(root_a, root_b, dec_a, dec_b)
 sys.exit(1 if diffs else 0)
 PY
-        then
+        if [[ $compare_status -eq 0 && ! -s "$compare_err" ]]; then
             spice_pass_count=$((spice_pass_count + 1))
-        else
+        elif [[ $compare_status -eq 1 && ! -s "$compare_err" ]]; then
             spice_diff_count=$((spice_diff_count + 1))
             spice_failed_files="$spice_failed_files$file (AST differs)\n"
             python3 "$INSPECT_SCRIPT" compare "$ocaml_out" "$rust_out" > "$TEMP_DIR/spice_ppx_diffs/spice_${safe_name}.diff" 2>&1 || true
+        else
+            record_stage_failure "$file" spice-ppx-compare inspect_binary_ast.py \
+                "exit $compare_status: $(tail -1 "$compare_err" | tr '\t' ' ' | cut -c1-200)"
+            spice_compare_error_count=$((spice_compare_error_count + 1))
+            spice_failed_files="$spice_failed_files$file (comparison failed)\n"
         fi
     done
 
-    spice_total=$((spice_pass_count + spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+    spice_total=$file_count
 }
 
 echo ""
@@ -1012,6 +1296,7 @@ spice_pass_count=0
 spice_diff_count=0
 spice_ocaml_error_count=0
 spice_rust_error_count=0
+spice_compare_error_count=0
 spice_failed_files=""
 spice_missing=false
 run_spice_ppx_parity
@@ -1022,6 +1307,34 @@ parser_warning_pass_count=0
 parser_warning_diff_count=0
 parser_warning_failed_files=""
 run_parser_warning_snapshot_parity
+
+# Run parse error stream parity
+parse_error_total=0
+parse_error_checks=0
+parse_error_pass_count=0
+parse_error_diff_count=0
+parse_error_failed_files=""
+parse_error_missing=false
+run_parse_error_stream_parity
+
+# Every failed command, one "file<TAB>stage<TAB>side<TAB>reason" line
+stage_failure_lines=$(cat "$TEMP_DIR/stage_failures/"*.tsv 2>/dev/null | LC_ALL=C sort || true)
+stage_failure_count=0
+stage_failure_file_count=0
+if [[ -n "$stage_failure_lines" ]]; then
+    stage_failure_count=$(echo "$stage_failure_lines" | wc -l | tr -d ' ')
+    stage_failure_file_count=$(echo "$stage_failure_lines" | cut -f1 | sort -u | wc -l | tr -d ' ')
+fi
+
+# Files both sides rejected at a stage where the OCaml reference may reject
+reference_reject_lines=$(cat "$TEMP_DIR/reference_rejects/"*.tsv 2>/dev/null | LC_ALL=C sort || true)
+count_reference_rejects() {
+    [[ -n "$reference_reject_lines" ]] || { echo 0; return; }
+    echo "$reference_reject_lines" | awk -F'\t' -v stage="$1" '$2 == stage' | wc -l | tr -d ' '
+}
+sexp_locs_ppx_reject_count=$(count_reference_rejects sexp-locs-ppx)
+bsc_ast_reject_count=$(count_reference_rejects bsc-ast)
+spice_sexp_reject_count=$(count_reference_rejects sexp-with-locs-ppx-and-spice)
 
 echo ""
 echo ""
@@ -1051,19 +1364,25 @@ echo "  ${BOLD}Parser parity (sexp output for debugging):${RESET}"
 echo "    sexp-locs matches:        $locs_pass_count"
 echo "    sexp-locs differences:    $locs_diff_count"
 echo "    sexp-locs-ppx checks:     $sexp_locs_ppx_checked_count"
-echo "    sexp-locs-ppx reference skips: $((TOTAL_FILES - sexp_locs_ppx_checked_count - sexp_locs_ppx_spice_checked_count))"
+echo "    sexp-locs-ppx both reject: $sexp_locs_ppx_reject_count"
 echo "    sexp-locs-ppx differences: $sexp_locs_ppx_diff_count"
 echo "    sexp-with-locs-ppx-and-spice checks: $sexp_locs_ppx_spice_checked_count"
+echo "    sexp-with-locs-ppx-and-spice both reject: $spice_sexp_reject_count"
 echo "    sexp-with-locs-ppx-and-spice differences: $sexp_locs_ppx_spice_diff_count"
 echo ""
 echo "  ${BOLD}bsc-ast Byte Parity:${RESET}"
 echo "    bsc-ast byte checks:      $bsc_ast_byte_checked_count"
-echo "    bsc-ast reference skips:  $((TOTAL_FILES - bsc_ast_checked_count - sexp_locs_ppx_spice_checked_count))"
+echo "    bsc-ast both reject:      $bsc_ast_reject_count"
 echo "    bsc-ast value differences: $bsc_ast_byte_diff_count"
 echo ""
 echo "  ${BOLD}Parse failures:${RESET}"
 echo "    OCaml failures:           $ocaml_fail_count"
 echo "    Rust failures:            $rust_fail_count"
+echo ""
+
+echo "  ${BOLD}Failed comparisons (a command failed or timed out):${RESET}"
+echo "    Stage failures:           $stage_failure_count"
+echo "    Files affected:           $stage_failure_file_count"
 echo ""
 
 echo "  ${BOLD}Spice PPX parity:${RESET}"
@@ -1074,6 +1393,7 @@ else
     echo "    spice differences:        $spice_diff_count"
     echo "    spice OCaml errors:       $spice_ocaml_error_count"
     echo "    spice Rust errors:        $spice_rust_error_count"
+    echo "    spice comparison errors:  $spice_compare_error_count"
 fi
 echo ""
 
@@ -1082,6 +1402,33 @@ echo "    warning fixtures:         $parser_warning_total"
 echo "    warning passes:           $parser_warning_pass_count"
 echo "    warning differences:      $parser_warning_diff_count"
 echo ""
+
+echo "  ${BOLD}Parse Error Streams:${RESET}"
+echo "    parse error fixtures:     $parse_error_total"
+echo "    parse error checks:       $parse_error_checks"
+echo "    parse error passes:       $parse_error_pass_count"
+echo "    parse error differences:  $parse_error_diff_count"
+echo ""
+
+# Show every stage failure: these comparisons did not run
+if [[ $stage_failure_count -gt 0 ]]; then
+    echo -e "${BOLD}${RED}Stage failures ($stage_failure_count in $stage_failure_file_count files):${RESET}"
+    echo "  (file / stage / side / reason; these files were not compared at that stage)"
+    echo "$stage_failure_lines" | while IFS=$'\t' read -r sf_file sf_stage sf_side sf_reason; do
+        echo "  $sf_file / $sf_stage / $sf_side / $sf_reason"
+    done
+    echo ""
+fi
+
+# Show every file both sides rejected where the OCaml reference may reject
+if [[ -n "$reference_reject_lines" ]]; then
+    echo -e "${BOLD}Rejected by both the OCaml reference and Rust ($(echo "$reference_reject_lines" | wc -l | tr -d ' ')):${RESET}"
+    echo "  (file / stage / OCaml reason / Rust reason / streams compared)"
+    echo "$reference_reject_lines" | while IFS=$'\t' read -r rr_file rr_stage rr_ocaml rr_rust rr_streams; do
+        echo "  $rr_file / $rr_stage / $rr_ocaml / $rr_rust / $rr_streams"
+    done
+    echo ""
+fi
 
 # Show sexp-locs mismatches
 if [[ $locs_diff_count -gt 0 ]]; then
@@ -1210,7 +1557,7 @@ fi
 
 # Show spice PPX failures
 if ! $spice_missing && [[ $spice_total -gt 0 ]]; then
-    local_spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+    local_spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count + spice_compare_error_count))
     if [[ $local_spice_failures -gt 0 ]]; then
         echo -e "${BOLD}${YELLOW}Spice PPX failures ($local_spice_failures):${RESET}"
         echo -e "$spice_failed_files" | grep -v "^$" | head -20 | while read line; do
@@ -1222,6 +1569,18 @@ if ! $spice_missing && [[ $spice_total -gt 0 ]]; then
         fi
         echo ""
     fi
+fi
+
+if [[ $parse_error_diff_count -gt 0 ]]; then
+    echo -e "${BOLD}${YELLOW}Parse error stream differences ($parse_error_diff_count):${RESET}"
+    echo -e "$parse_error_failed_files" | grep -v "^$" | head -20 | while read line; do
+        echo "  $line"
+    done
+    echo ""
+    echo -e "${BOLD}Example parse error stream diff (first):${RESET}"
+    first_parse_error_diff=$(ls "$TEMP_DIR/parse_error_diffs/"*.diff 2>/dev/null | head -1)
+    [[ -n "$first_parse_error_diff" ]] && head -40 "$first_parse_error_diff"
+    echo ""
 fi
 
 if [[ $parser_warning_diff_count -gt 0 ]]; then
@@ -1261,7 +1620,7 @@ fi
 if [[ $ocaml_fail_count -gt 0 || $rust_fail_count -gt 0 ]]; then
     echo -e "${RED}${BOLD}FAILED: parser commands failed (OCaml: $ocaml_fail_count, Rust: $rust_fail_count)${RESET}"
     all_pass=false
-    exit_code=1
+    [[ $exit_code -eq 0 ]] && exit_code=1
 fi
 
 if [[ $locs_diff_count -gt 0 ]]; then
@@ -1294,7 +1653,7 @@ if $spice_missing; then
     all_pass=false
     exit_code=1
 elif [[ $spice_total -gt 0 ]]; then
-    spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count))
+    spice_failures=$((spice_diff_count + spice_ocaml_error_count + spice_rust_error_count + spice_compare_error_count))
     if [[ $spice_failures -gt 0 ]]; then
         echo -e "${RED}${BOLD}FAILED: Spice PPX parity has $spice_failures failure(s)${RESET}"
         all_pass=false
@@ -1308,9 +1667,25 @@ if [[ $parser_warning_diff_count -gt 0 ]]; then
     exit_code=1
 fi
 
+if $parse_error_missing; then
+    echo -e "${RED}${BOLD}FAILED: Parse error stream parity could not run (no fixtures)${RESET}"
+    all_pass=false
+    exit_code=1
+elif [[ $parse_error_diff_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: Parse error streams have $parse_error_diff_count difference(s)${RESET}"
+    all_pass=false
+    exit_code=1
+fi
+
+if [[ $stage_failure_count -gt 0 ]]; then
+    echo -e "${RED}${BOLD}FAILED: $stage_failure_count command(s) in $stage_failure_file_count file(s) failed or timed out; those comparisons did not run${RESET}"
+    all_pass=false
+    exit_code=2
+fi
+
 if [[ $locs_pass_count -eq 0 ]]; then
     echo -e "${RED}${BOLD}ERROR: No files could be compared${RESET}"
-    exit 1
+    exit $(( exit_code == 2 ? 2 : 1 ))
 fi
 
 if $all_pass; then

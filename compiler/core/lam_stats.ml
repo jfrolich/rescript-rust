@@ -46,13 +46,18 @@ type t = {
       (** we don't need count arities for all identifiers, for identifiers
       for sure it's not a function, there is no need to count them
   *)
+  awaited_units: Set_ident.t;
+  assignable: Set_ident.t;
+      (** The variables some [Lassign] assigns. [Lam_compile] never delays
+          reading one of them past other code. *)
 }
 
 let pp = Format.fprintf
 
 let pp_ident_tbl fmt (ident_tbl : ident_tbl) =
-  Hash_ident.iter ident_tbl (fun k v ->
-      pp fmt "@[%a -> %a@]@." Ident.print k Lam_id_kind.print v)
+  Hash_ident.iter
+    (fun k v -> pp fmt "@[%a -> %a@]@." Ident.print k Lam_id_kind.print v)
+    ident_tbl
 
 let print fmt (v : t) =
   pp fmt "@[Ident table:@ @[%a@]@]" pp_ident_tbl v.ident_tbl;
@@ -65,4 +70,6 @@ let make ~export_idents ~export_ident_sets : t =
     ident_tbl = Hash_ident.create 31;
     exports = export_idents;
     export_idents = export_ident_sets;
+    awaited_units = Set_ident.empty;
+    assignable = Set_ident.empty;
   }

@@ -4,25 +4,46 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{ocaml_typeof_expr, raw_typeof_comparison};
-use super::js_stmt_make::{block_terminates, strict_single_return_expr};
-use super::lam_coercion::push_s_exp;
+use super::lam_coercion::push_s_if_empty;
 use super::lam_compile::{
-    Compiled, GroupedSwitchDefault, LambdaCompiler, StrSw, Sw, TailLoopState,
-    trailing_return_expression,
+    Compiled, LambdaCompiler, OutputFinished, StrSw, Sw, TailLoopState, return_case_needs_break,
 };
 use crate::ident::Ident;
 use crate::js_ir::arena::{
     Block, Clause, Expr, ExprKind, JsArena, Stmt, StmtKind, StringClauseInfo, VarDecl,
 };
-use crate::js_ir::build::{
-    exp as JE, expression_has_no_side_effects, ocaml_eq_expression, stmt as JS,
-};
+use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
 use crate::js_ir::op::{IdentInfo, Number};
 use crate::js_ir::{BinOp, CallInfo};
 use crate::lambda::arena::{Lam, LamArena, SwitchPayload, View};
 use crate::lambda::lam_compat::LetKind;
+use crate::lambda::untagged_dispatch::{
+    Clause as UntaggedClause, Plan, Test as UntaggedTest, TestId, Tree, TreeId,
+};
 use crate::lambda::{SwitchCaseTag, SwitchDispatch, SwitchKey};
-use crate::types::VariantBlockType;
+
+#[derive(Clone, Copy)]
+pub(crate) enum UntaggedMode<'r> {
+    Assign(&'r Ident),
+    Return,
+    TailLoopReturn,
+    Effect,
+}
+pub(crate) struct UntaggedEmit<'m, 'e> {
+    mode: UntaggedMode<'m>,
+    scrut: Expr,
+    fallback: Option<Lam>,
+    plan: &'e Plan<Lam>,
+    fallback_blocks: Vec<(bool, Block)>,
+}
+type TailLoop<'t> = Option<&'t mut TailLoopState>;
+
+fn block_last_is_return_throw_or_continue(j: &JsArena, block: &[Stmt]) -> bool {
+    matches!(
+        block.last().map(|stmt| j.sk(*stmt)),
+        Some(StmtKind::Return(_) | StmtKind::Throw(_) | StmtKind::Continue(_) | StmtKind::Break(_))
+    )
+}
 
 pub(crate) fn empty_switch_case_clause() -> Clause {
     Clause {
@@ -31,6 +52,52 @@ pub(crate) fn empty_switch_case_clause() -> Clause {
         should_break: false,
         comment: None,
     }
+}
+
+fn named_payload_switch(
+    payload: &SwitchPayload,
+    const_keys: &[SwitchKey],
+    block_keys: &[SwitchKey],
+) -> bool {
+    matches!(payload.dispatch, SwitchDispatch::Variant(_))
+        && !untagged_switch(
+            &payload.dispatch,
+            payload.consts_full,
+            const_keys.iter(),
+            payload.blocks_full,
+            block_keys.iter(),
+        )
+}
+
+/// lambda.ml `untagged_plan`'s precondition: a switch on an untagged
+/// variant (one with payload kinds) whose dispatch is not on literals
+/// only, with literal constants and untagged payload cases.
+fn untagged_switch<'k>(
+    dispatch: &SwitchDispatch,
+    consts_full: bool,
+    mut const_keys: impl ExactSizeIterator<Item = &'k SwitchKey>,
+    blocks_full: bool,
+    mut block_keys: impl ExactSizeIterator<Item = &'k SwitchKey>,
+) -> bool {
+    let SwitchDispatch::Variant(facts) = dispatch else {
+        return false;
+    };
+    !facts.block_types.is_empty()
+        && ((consts_full && const_keys.len() == 0) || !(blocks_full && block_keys.len() == 0))
+        && const_keys.all(|key| {
+            matches!(
+                key,
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Constant(_))
+            )
+        })
+        && block_keys.all(|key| {
+            matches!(
+                key,
+                SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+                    crate::types::VariantBlock::Untagged { .. }
+                ))
+            )
+        })
 }
 
 /// A switch node decoded for compilation: its keys paired with their
@@ -42,6 +109,19 @@ pub(crate) struct LamSwitch {
     pub(crate) sw_blocks: Vec<(SwitchKey, Lam)>,
     pub(crate) sw_failaction: Option<Lam>,
     pub(crate) sw_dispatch: SwitchDispatch,
+}
+
+impl LamSwitch {
+    fn is_named(&self) -> bool {
+        matches!(self.sw_dispatch, SwitchDispatch::Variant(_))
+            && !untagged_switch(
+                &self.sw_dispatch,
+                self.sw_consts_full,
+                self.sw_consts.iter().map(|(key, _)| key),
+                self.sw_blocks_full,
+                self.sw_blocks.iter().map(|(key, _)| key),
+            )
+    }
 }
 
 impl Sw {
@@ -56,14 +136,6 @@ impl Sw {
             sw_dispatch: p.dispatch.clone(),
         }
     }
-}
-
-fn untagged_dispatch(dispatch: &SwitchDispatch) -> bool {
-    matches!(dispatch, SwitchDispatch::Variant(facts) if !facts.block_types.is_empty())
-}
-
-fn named_dispatch(dispatch: &SwitchDispatch) -> bool {
-    matches!(dispatch, SwitchDispatch::Variant(_)) && !untagged_dispatch(dispatch)
 }
 
 /// Whether a named-variant switch reuses its scrutinee across const and
@@ -145,14 +217,415 @@ where
 }
 
 impl LambdaCompiler {
+    fn class_constructor(&mut self, name: &str) -> Expr {
+        let mut parts = name.split('.');
+        let global = parts.next().expect("class path has global");
+        let mut expr = JE::var(Ident::create_persistent(global), &mut self.j);
+        for property in parts {
+            expr = self.static_index(expr, property);
+        }
+        expr
+    }
+
+    fn is_instance_of(&mut self, instance: &crate::types::VariantInstance, expr: Expr) -> Expr {
+        match instance {
+            crate::types::VariantInstance::Array(_) => {
+                let array = JE::var(Ident::create_persistent("Array"), &mut self.j);
+                let callee = self.static_index(array, "isArray");
+                JE::call(callee, &[expr], CallInfo::default(), &mut self.j)
+            }
+            crate::types::VariantInstance::Class { name, .. } => {
+                let class = self.class_constructor(name);
+                JE::bin(BinOp::InstanceOf, expr, class, &mut self.j)
+            }
+        }
+    }
+
+    fn is_int_tag(&mut self, literal_tags: &[crate::types::VariantLiteralTag], expr: Expr) -> Expr {
+        use crate::types::VariantLiteralTag as L;
+        let has_null = literal_tags.iter().any(|tag| matches!(tag, L::Null));
+        let has_undefined = literal_tags.iter().any(|tag| matches!(tag, L::Undefined));
+        let has_other = literal_tags
+            .iter()
+            .any(|tag| !matches!(tag, L::Null | L::Undefined));
+        let is_null = |j: &mut JsArena| {
+            let null = JE::null(j);
+            JE::bin(BinOp::EqEqEq, expr, null, j)
+        };
+        let is_undefined = |j: &mut JsArena| {
+            let undef = JE::undefined(false, j);
+            JE::bin(BinOp::EqEqEq, expr, undef, j)
+        };
+        let not_object = |j: &mut JsArena| raw_typeof_comparison(expr, BinOp::NotEqEq, "object", j);
+        match (has_null, has_undefined, has_other) {
+            (true, false, false) => is_null(&mut self.j),
+            (true, true, false) => {
+                let l = is_null(&mut self.j);
+                let r = is_undefined(&mut self.j);
+                JE::bin(BinOp::Or, l, r, &mut self.j)
+            }
+            (false, true, false) => is_undefined(&mut self.j),
+            (true, _, true) => {
+                let l = is_null(&mut self.j);
+                let r = not_object(&mut self.j);
+                JE::bin(BinOp::Or, l, r, &mut self.j)
+            }
+            (false, _, _) => not_object(&mut self.j),
+        }
+    }
+
+    fn untagged_typeof_expr(
+        &mut self,
+        scrut: Expr,
+        block_type: &crate::types::VariantBlockType,
+    ) -> Expr {
+        raw_typeof_comparison(
+            scrut,
+            BinOp::EqEqEq,
+            block_type.typeof_name().expect("typeof test kind"),
+            &mut self.j,
+        )
+    }
+
+    fn untagged_test_expr(&mut self, plan: &Plan<Lam>, scrut: Expr, test: TestId) -> Expr {
+        match plan.test(test) {
+            UntaggedTest::Equals(literal) => {
+                let value = self.switch_case_expr(&Self::literal_tag_value(literal));
+                JE::bin(BinOp::EqEqEq, scrut, value, &mut self.j)
+            }
+            UntaggedTest::Typeof(kind) => self.untagged_typeof_expr(scrut, kind),
+            UntaggedTest::Instance(instance) => self.is_instance_of(instance, scrut),
+            UntaggedTest::NotNull => {
+                let test = self.is_null_expr(scrut);
+                JE::not(test, &mut self.j)
+            }
+            UntaggedTest::Not(test) => {
+                let test = self.untagged_test_expr(plan, scrut, *test);
+                JE::not(test, &mut self.j)
+            }
+            UntaggedTest::And(l, r) | UntaggedTest::Or(l, r) => {
+                let op = if matches!(plan.test(test), UntaggedTest::And(..)) {
+                    BinOp::And
+                } else {
+                    BinOp::Or
+                };
+                let l = self.untagged_test_expr(plan, scrut, *l);
+                let r = self.untagged_test_expr(plan, scrut, *r);
+                JE::bin(op, l, r, &mut self.j)
+            }
+        }
+    }
+
+    fn untagged_if(
+        &mut self,
+        mode: UntaggedMode<'_>,
+        cond: Expr,
+        then_: Block,
+        else_: Block,
+    ) -> Block {
+        match mode {
+            UntaggedMode::Return | UntaggedMode::TailLoopReturn => {
+                self.normalized_if_block(cond, then_, else_)
+            }
+            UntaggedMode::Assign(_) | UntaggedMode::Effect => {
+                vec![JS::if_(cond, &then_, &else_, &mut self.j)]
+            }
+        }
+    }
+
+    fn emit_untagged_tree(
+        &mut self,
+        a: &mut LamArena,
+        emit: &mut UntaggedEmit<'_, '_>,
+        tail_loop: &mut TailLoop<'_>,
+        tree: TreeId,
+    ) -> Block {
+        let plan = emit.plan;
+        match plan.tree(tree) {
+            Tree::Run(lam) => self.untagged_output_block(a, emit.mode, tail_loop, *lam),
+            Tree::Fallback => self.untagged_fallback_block(a, emit, tail_loop),
+            Tree::Skip => vec![],
+            Tree::If(test, then_, else_) => {
+                let then_ = self.emit_untagged_tree(a, emit, tail_loop, *then_);
+                let else_ = self.emit_untagged_tree(a, emit, tail_loop, *else_);
+                let cond = self.untagged_test_expr(plan, emit.scrut, *test);
+                self.untagged_if(emit.mode, cond, then_, else_)
+            }
+            Tree::Block(inner) => {
+                let block = self.emit_untagged_tree(a, emit, tail_loop, *inner);
+                vec![JS::block(&block, &mut self.j)]
+            }
+            Tree::SwitchValue(clauses, default) => self.with_switch_depth(|this| {
+                let default = this.emit_untagged_tree(a, emit, tail_loop, *default);
+                let default = (!default.is_empty()).then(|| this.j.stmt_list(&default));
+                let clauses = plan
+                    .value_clauses(*clauses)
+                    .iter()
+                    .map(|(literal, clause)| StringClauseInfo {
+                        tag_type: Self::literal_tag_value(literal),
+                        clause: this.emit_untagged_clause(a, emit, tail_loop, clause),
+                    })
+                    .collect();
+                vec![JS::string_switch(emit.scrut, clauses, default, &mut this.j)]
+            }),
+            Tree::SwitchTypeof(clauses, default)
+                if clauses.len() == 1
+                    && matches!(plan.typeof_clauses(*clauses)[0].1, UntaggedClause::Body(_)) =>
+            {
+                let (kind, clause) = &plan.typeof_clauses(*clauses)[0];
+                let clause = self.emit_untagged_clause(a, emit, tail_loop, clause);
+                let default = self.emit_untagged_tree(a, emit, tail_loop, *default);
+                let cond = self.untagged_typeof_expr(emit.scrut, kind);
+                self.untagged_if(emit.mode, cond, self.j.block_vec(clause.body), default)
+            }
+            Tree::SwitchTypeof(clauses, default) => self.with_switch_depth(|this| {
+                let default = this.emit_untagged_tree(a, emit, tail_loop, *default);
+                let clauses = plan
+                    .typeof_clauses(*clauses)
+                    .iter()
+                    .map(|(kind, clause)| StringClauseInfo {
+                        tag_type: SwitchCaseTag::String(
+                            kind.typeof_name().expect("typeof switch kind").to_string(),
+                        ),
+                        clause: this.emit_untagged_clause(a, emit, tail_loop, clause),
+                    })
+                    .collect();
+                let expr = ocaml_typeof_expr(emit.scrut, &mut this.j);
+                let default = this.j.stmt_list(&default);
+                vec![JS::string_switch(expr, clauses, Some(default), &mut this.j)]
+            }),
+        }
+    }
+
+    fn emit_untagged_clause(
+        &mut self,
+        a: &mut LamArena,
+        emit: &mut UntaggedEmit<'_, '_>,
+        tail_loop: &mut TailLoop<'_>,
+        clause: &UntaggedClause<Lam>,
+    ) -> Clause {
+        let body = match clause {
+            UntaggedClause::FallsThrough(lam) => {
+                return Clause {
+                    source_loc: lam.and_then(|lam| self.source_loc_of_lam(a, lam)),
+                    ..empty_switch_case_clause()
+                };
+            }
+            UntaggedClause::Body(body) => emit.plan.tree(*body),
+        };
+        match body {
+            Tree::Run(lam) => {
+                let lam = *lam;
+                let (body, should_break) = match emit.mode {
+                    UntaggedMode::Assign(result) => {
+                        let output = self.compile_assign_to_target_output(a, result, lam);
+                        (output.block, output.finished != OutputFinished::True)
+                    }
+                    UntaggedMode::Return => {
+                        let output = self.compile_return_output(a, lam);
+                        (
+                            output.block,
+                            return_case_needs_break(a, lam, output.finished),
+                        )
+                    }
+                    UntaggedMode::TailLoopReturn => {
+                        let output = self.compile_tail_loop_return_output(
+                            a,
+                            lam,
+                            tail_loop.as_deref_mut().expect("tail loop"),
+                        );
+                        (
+                            output.block,
+                            return_case_needs_break(a, lam, output.finished),
+                        )
+                    }
+                    UntaggedMode::Effect => {
+                        let output = self.compile_effect_block_output(a, lam);
+                        (output.block, output.finished != OutputFinished::True)
+                    }
+                };
+                let body = self.with_block_source_loc(a, lam, body);
+                Clause {
+                    source_loc: self.source_loc_of_lam(a, lam),
+                    body: self.j.stmt_list(&body),
+                    should_break,
+                    comment: None,
+                }
+            }
+            Tree::Fallback => {
+                let block = self.untagged_fallback_block(a, emit, tail_loop);
+                Clause {
+                    should_break: !block_last_is_return_throw_or_continue(&self.j, &block),
+                    body: self.j.stmt_list(&block),
+                    source_loc: None,
+                    comment: None,
+                }
+            }
+            _ => unreachable!("clause body is Run or Fallback"),
+        }
+    }
+
     pub(crate) fn compile_switch(&mut self, a: &mut LamArena, scrut: Lam, sw: Sw) -> Compiled {
-        let switch = &sw.decode(a);
         // OCaml's `compile_switch` builds `switch_cxt = enter_switch cxt`
         // and threads it into every case body and the default branch
         // (compiler/core/lam_compile.ml). Wrap the whole switch with
         // `with_switch_depth` so any nested `Lbreak`/`Lcontinue` knows it
         // must use a labeled JS break/continue to escape the loop.
+        //
+        // An untagged plan enters the switch context only for the bodies of
+        // its `switch` statements (lam_compile.ml `compile_untagged_plan`).
+        if let Some(plan) = sw.untagged_plan(a) {
+            // lam_compile.ml: the `NeedValue` temp is made before the
+            // scrutinee is compiled.
+            let tmp = self.fresh_tmp_ident();
+            let mut prelude = vec![JS::define(tmp, None, LetKind::Strict, &mut self.j)];
+            prelude.extend(self.compile_untagged_switch(
+                a,
+                UntaggedMode::Assign(&tmp),
+                None,
+                scrut,
+                sw,
+                &plan,
+            ));
+            return Compiled {
+                prelude,
+                expr: JE::var(tmp, &mut self.j),
+                finished: OutputFinished::False,
+            };
+        }
+        let switch = &sw.decode(a);
         self.with_switch_depth(|this| this.compile_switch_inner(a, scrut, switch))
+    }
+
+    fn untagged_fallback_block(
+        &mut self,
+        a: &mut LamArena,
+        emit: &mut UntaggedEmit<'_, '_>,
+        tail_loop: &mut TailLoop<'_>,
+    ) -> Block {
+        let in_switch = self.switch_depth > 0;
+        if let Some((_, block)) = emit
+            .fallback_blocks
+            .iter()
+            .find(|(key, _)| *key == in_switch)
+        {
+            return block.clone();
+        }
+        let lam = emit
+            .fallback
+            .expect("a plan reaches the fallback only when the switch has one");
+        let block = self.untagged_output_block(a, emit.mode, tail_loop, lam);
+        emit.fallback_blocks.push((in_switch, block.clone()));
+        block
+    }
+
+    /// `compile_lambda cxt lam |> Js_output.output_as_block |>
+    /// with_block_source_loc lam` in the continuation of `mode`.
+    fn untagged_output_block(
+        &mut self,
+        a: &mut LamArena,
+        mode: UntaggedMode<'_>,
+        tail_loop: &mut TailLoop<'_>,
+        lam: Lam,
+    ) -> Block {
+        let block = match mode {
+            UntaggedMode::Assign(result) => self.compile_assign_to_target_block(a, result, lam),
+            UntaggedMode::Return => self.compile_return_block(a, lam),
+            UntaggedMode::TailLoopReturn => self.compile_tail_loop_return_block(
+                a,
+                lam,
+                tail_loop.as_deref_mut().expect("a tail loop"),
+            ),
+            UntaggedMode::Effect => self.compile_effect_block(a, lam),
+        };
+        self.with_block_source_loc(a, lam, block)
+    }
+
+    /// lam_compile.ml `compile_untagged_plan`: prints the plan, each node one
+    /// statement. A body in a `switch` statement is compiled in a `switch`
+    /// context, a body of an `if` is not.
+    pub(crate) fn compile_untagged_plan(
+        &mut self,
+        a: &mut LamArena,
+        mode: UntaggedMode<'_>,
+        tail_loop: &mut TailLoop<'_>,
+        scrut: Expr,
+        fallback: Option<Lam>,
+        plan: &Plan<Lam>,
+    ) -> Block {
+        // The default action is compiled once and shared by every path to it,
+        // per whether it is printed inside a `switch`.
+        let mut emit = UntaggedEmit {
+            mode,
+            scrut,
+            fallback,
+            plan,
+            fallback_blocks: Vec::new(),
+        };
+        self.emit_untagged_tree(a, &mut emit, tail_loop, plan.root())
+    }
+
+    /// lam_compile.ml `compile_switch`, the `Lambda.untagged_plan sw =
+    /// Some plan` branch: compile the scrutinee in the outer context, bind it
+    /// to a variable unless only payloads are dispatched, and print the plan.
+    pub(crate) fn compile_untagged_switch(
+        &mut self,
+        a: &mut LamArena,
+        mode: UntaggedMode<'_>,
+        mut tail_loop: TailLoop<'_>,
+        scrut: Lam,
+        sw: Sw,
+        plan: &Plan<Lam>,
+    ) -> Block {
+        let payload = sw.payload(a);
+        let payload_only = payload.consts_full && payload.n_consts() == 0;
+        let fallback = sw.fail(a);
+        let scrut_compiled = self.compile_expr(a, scrut);
+        let (mut block, scrut_expr) = if payload_only {
+            (scrut_compiled.prelude, scrut_compiled.expr)
+        } else {
+            self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr)
+        };
+        block.extend(self.compile_untagged_plan(
+            a,
+            mode,
+            &mut tail_loop,
+            scrut_expr,
+            fallback,
+            plan,
+        ));
+        block
+    }
+
+    fn switch_literal_tags<'a>(
+        &self,
+        switch: &'a LamSwitch,
+    ) -> &'a [crate::types::VariantLiteralTag] {
+        match &switch.sw_dispatch {
+            SwitchDispatch::Variant(facts) => &facts.literal_tags,
+            SwitchDispatch::Direct => &[],
+        }
+    }
+
+    pub(crate) fn uses_named_variant_view(
+        &self,
+        switch: &crate::lambda::arena::SwitchView<'_>,
+    ) -> bool {
+        named_payload_switch(switch.payload, switch.const_keys, switch.block_keys)
+    }
+
+    /// [`untagged_switch`] of a switch view.
+    pub(crate) fn uses_untagged_variant_view(
+        &self,
+        switch: &crate::lambda::arena::SwitchView<'_>,
+    ) -> bool {
+        untagged_switch(
+            &switch.payload.dispatch,
+            switch.payload.consts_full,
+            switch.const_keys.iter(),
+            switch.payload.blocks_full,
+            switch.block_keys.iter(),
+        )
     }
 
     fn compile_switch_inner(
@@ -169,22 +642,7 @@ impl LambdaCompiler {
         let tmp = self.fresh_tmp_ident();
         let tmp_declaration = |j: &mut JsArena| JS::define(tmp, None, LetKind::Strict, j);
 
-        if untagged_dispatch(&switch.sw_dispatch) {
-            let scrut_compiled = self.compile_expr(a, scrut);
-            let (scrut_prelude, scrut_expr) =
-                self.bind_switch_scrutinee_once(scrut_compiled.prelude, scrut_compiled.expr);
-            let mut prelude = vec![tmp_declaration(&mut self.j)];
-            prelude.extend(scrut_prelude);
-            prelude.extend(self.compile_untagged_variant_switch_assignment_statements(
-                a, &tmp, scrut_expr, switch,
-            ));
-            return Compiled {
-                prelude,
-                expr: JE::var(tmp, &mut self.j),
-            };
-        }
-
-        if named_dispatch(&switch.sw_dispatch) {
+        if switch.is_named() {
             let scrut_compiled = self.compile_expr(a, scrut);
             let (scrut_prelude, scrut_expr) = if Self::decoded_switch_needs_bound_scrutinee(switch)
             {
@@ -203,6 +661,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: JE::var(tmp, &mut self.j),
+                finished: OutputFinished::False,
             };
         }
 
@@ -262,6 +721,7 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: JE::var(tmp, &mut self.j),
+            finished: OutputFinished::False,
         }
     }
 
@@ -332,6 +792,7 @@ impl LambdaCompiler {
             return Compiled {
                 prelude,
                 expr: JE::var(tmp, &mut self.j),
+                finished: OutputFinished::False,
             };
         }
 
@@ -392,23 +853,16 @@ impl LambdaCompiler {
         Compiled {
             prelude,
             expr: JE::var(tmp, &mut self.j),
+            finished: OutputFinished::False,
         }
     }
 
-    pub(crate) fn uses_untagged_variant_dispatch(&self, payload: &SwitchPayload) -> bool {
-        untagged_dispatch(&payload.dispatch)
-    }
-
-    pub(crate) fn uses_named_variant_dispatch(&self, payload: &SwitchPayload) -> bool {
-        named_dispatch(&payload.dispatch)
-    }
-
-    pub(crate) fn uses_untagged_variant_switch(&self, a: &LamArena, sw: Sw) -> bool {
-        untagged_dispatch(&sw.payload(a).dispatch)
-    }
-
     pub(crate) fn uses_named_variant_switch(&self, a: &LamArena, sw: Sw) -> bool {
-        named_dispatch(&sw.payload(a).dispatch)
+        named_payload_switch(
+            sw.payload(a),
+            a.switch_const_keys(sw.info),
+            a.switch_block_keys(sw.info),
+        )
     }
 
     fn literal_tag_value(tag: &crate::types::VariantLiteralTag) -> SwitchCaseTag {
@@ -426,181 +880,7 @@ impl LambdaCompiler {
     }
 
     fn switch_tag_value(tag: &crate::types::VariantTag) -> SwitchCaseTag {
-        tag.literal
-            .as_ref()
-            .map(Self::literal_tag_value)
-            .unwrap_or_else(|| SwitchCaseTag::String(tag.name.to_string()))
-    }
-
-    fn literal_cases(&self, switch: &LamSwitch) -> Option<Vec<SwitchCaseTag>> {
-        let SwitchDispatch::Variant(facts) = &switch.sw_dispatch else {
-            return None;
-        };
-        Some(
-            facts
-                .literal_tags
-                .iter()
-                .map(Self::literal_tag_value)
-                .collect(),
-        )
-    }
-
-    /// Whether the variant has a `@as(null)` literal constructor.
-    fn has_null_literal(&self, switch: &LamSwitch) -> bool {
-        matches!(&switch.sw_dispatch, SwitchDispatch::Variant(facts)
-            if facts.literal_tags.iter().any(|tag| matches!(tag, crate::types::VariantLiteralTag::Null)))
-    }
-
-    fn untagged_block_types<'a>(&self, switch: &'a LamSwitch) -> &'a [VariantBlockType] {
-        match &switch.sw_dispatch {
-            SwitchDispatch::Variant(facts) => &facts.block_types,
-            SwitchDispatch::Direct => &[],
-        }
-    }
-
-    fn block_type_switch_tag(block_type: &VariantBlockType) -> Option<SwitchCaseTag> {
-        match block_type {
-            VariantBlockType::String => Some(SwitchCaseTag::String("string".to_string())),
-            VariantBlockType::Int | VariantBlockType::Float => {
-                Some(SwitchCaseTag::String("number".to_string()))
-            }
-            VariantBlockType::Bigint => Some(SwitchCaseTag::String("bigint".to_string())),
-            VariantBlockType::Boolean => Some(SwitchCaseTag::String("boolean".to_string())),
-            VariantBlockType::Function => Some(SwitchCaseTag::String("function".to_string())),
-            VariantBlockType::Object => Some(SwitchCaseTag::String("object".to_string())),
-            VariantBlockType::Instance(_) | VariantBlockType::Unknown => None,
-        }
-    }
-
-    fn literal_case_dispatch_test(&mut self, expr: Expr, switch: &LamSwitch) -> Option<Expr> {
-        let literal_cases = self.literal_cases(switch)?;
-        let block_cases = self.untagged_block_types(switch);
-        if literal_cases.is_empty() || block_cases.is_empty() {
-            return None;
-        }
-
-        fn bin(
-            c: &mut LambdaCompiler,
-            op: BinOp,
-            lhs: (Expr, usize),
-            rhs: (Expr, usize),
-        ) -> (Expr, usize) {
-            (JE::bin(op, lhs.0, rhs.0, &mut c.j), 1 + lhs.1 + rhs.1)
-        }
-
-        fn ocaml_literal_case_or(
-            compiler: &mut LambdaCompiler,
-            expr: Expr,
-            cases: &[&SwitchCaseTag],
-        ) -> (Expr, usize) {
-            let mut reversed = cases.iter().rev().copied();
-            let current_case = reversed.next().expect("literal cases are non-empty");
-            let rest: Vec<_> = reversed.collect();
-            let current = (compiler.switch_case_test(expr, current_case), 3usize);
-            if rest.is_empty() {
-                current
-            } else {
-                let rest = ocaml_literal_case_or(compiler, expr, &rest);
-                bin(compiler, BinOp::Or, current, rest)
-            }
-        }
-
-        fn ocaml_literal_fold_right_or(
-            compiler: &mut LambdaCompiler,
-            expr: Expr,
-            cases: &[SwitchCaseTag],
-        ) -> (Expr, usize) {
-            let (first, others) = cases.split_first().expect("literal cases are non-empty");
-            let mut acc = (compiler.switch_case_test(expr, first), 3usize);
-            for literal in others.iter().rev() {
-                let test = (compiler.switch_case_test(expr, literal), 3usize);
-                acc = bin(compiler, BinOp::Or, test, acc);
-            }
-            acc
-        }
-
-        let literals_overlap_with_string = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::String(_)));
-        let literals_overlap_with_number = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Int(_) | SwitchCaseTag::Float(_)));
-        let literals_overlap_with_bigint = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::BigInt(_)));
-        let literals_overlap_with_boolean = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Bool(_)));
-        let literals_overlap_with_object = literal_cases
-            .iter()
-            .any(|tag| matches!(tag, SwitchCaseTag::Null));
-
-        let with_literal_cases = {
-            let literal_cases: Vec<_> = literal_cases.iter().collect();
-            ocaml_literal_case_or(self, expr, &literal_cases)
-        };
-        let typeof_neq = |c: &mut LambdaCompiler, type_name: &str| {
-            (
-                raw_typeof_comparison(expr, BinOp::NotEqEq, type_name, &mut c.j),
-                4usize,
-            )
-        };
-
-        let is_not_block_case = |c: &mut LambdaCompiler,
-                                 block_type: &VariantBlockType|
-         -> (Expr, usize) {
-            match block_type {
-                VariantBlockType::String if !literals_overlap_with_string => {
-                    typeof_neq(c, "string")
-                }
-                VariantBlockType::Int | VariantBlockType::Float
-                    if !literals_overlap_with_number =>
-                {
-                    typeof_neq(c, "number")
-                }
-                VariantBlockType::Bigint if !literals_overlap_with_bigint => {
-                    typeof_neq(c, "bigint")
-                }
-                VariantBlockType::Boolean if !literals_overlap_with_boolean => {
-                    typeof_neq(c, "boolean")
-                }
-                VariantBlockType::Function => typeof_neq(c, "function"),
-                VariantBlockType::Instance(name) => {
-                    let instance_test = c.builtin_untagged_instance_test(expr, *name);
-                    (JE::not(instance_test, &mut c.j), 3usize)
-                }
-                VariantBlockType::Object if !literals_overlap_with_object => {
-                    typeof_neq(c, "object")
-                }
-                VariantBlockType::Object => {
-                    let null_case = (c.switch_case_test(expr, &SwitchCaseTag::Null), 3usize);
-                    let object = typeof_neq(c, "object");
-                    bin(c, BinOp::Or, null_case, object)
-                }
-                VariantBlockType::String
-                | VariantBlockType::Int
-                | VariantBlockType::Float
-                | VariantBlockType::Bigint
-                | VariantBlockType::Boolean
-                | VariantBlockType::Unknown => ocaml_literal_fold_right_or(c, expr, &literal_cases),
-            }
-        };
-
-        let without_literal_cases = {
-            let (last, rest) = block_cases.split_last().expect("block cases are non-empty");
-            let mut acc = is_not_block_case(self, last);
-            for block_case in rest.iter().rev() {
-                let case = is_not_block_case(self, block_case);
-                acc = bin(self, BinOp::And, case, acc);
-            }
-            acc
-        };
-
-        Some(if with_literal_cases.1 <= without_literal_cases.1 {
-            with_literal_cases.0
-        } else {
-            without_literal_cases.0
-        })
+        Self::literal_tag_value(&tag.literal)
     }
 
     fn named_const_cases(&self, switch: &LamSwitch) -> Option<Vec<(SwitchCaseTag, Lam)>> {
@@ -623,22 +903,6 @@ impl LambdaCompiler {
             .map(|(key, body)| match key {
                 SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
                     Some((Self::switch_tag_value(block.tag()), *body))
-                }
-                SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
-            })
-            .collect()
-    }
-
-    fn untagged_block_cases<'a>(
-        &self,
-        switch: &'a LamSwitch,
-    ) -> Option<Vec<(&'a crate::types::VariantBlock, Lam)>> {
-        switch
-            .sw_blocks
-            .iter()
-            .map(|(key, body)| match key {
-                SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(block)) => {
-                    Some((block, *body))
                 }
                 SwitchKey::Int(_) | SwitchKey::Constructor(_) => None,
             })
@@ -669,950 +933,12 @@ impl LambdaCompiler {
         switch.sw_blocks_full || switch.sw_failaction.is_none()
     }
 
-    fn untagged_literal_and_block_defaults_match(&self, a: &LamArena, switch: &LamSwitch) -> bool {
-        let failaction = switch.sw_failaction;
-        let const_default = self.grouped_switch_default(switch.sw_consts_full, failaction);
-        let block_default = self.grouped_switch_default(switch.sw_blocks_full, failaction);
-        match (const_default, block_default) {
-            (GroupedSwitchDefault::Complete, GroupedSwitchDefault::Complete)
-            | (GroupedSwitchDefault::NonComplete, GroupedSwitchDefault::NonComplete) => true,
-            (GroupedSwitchDefault::Default(lhs), GroupedSwitchDefault::Default(rhs)) => {
-                a.eq_approx(lhs, rhs)
-            }
-            _ => false,
-        }
-    }
-
     fn variant_tag_name(&self, switch: &LamSwitch) -> String {
         match &switch.sw_dispatch {
             SwitchDispatch::Variant(facts) => facts.tag_name.clone(),
             SwitchDispatch::Direct => None,
         }
         .unwrap_or_else(|| "TAG".to_string())
-    }
-
-    fn builtin_untagged_typeof_test(&mut self, expr: Expr, type_name: &str) -> Expr {
-        raw_typeof_comparison(expr, BinOp::EqEqEq, type_name, &mut self.j)
-    }
-
-    fn builtin_untagged_instance_test(
-        &mut self,
-        expr: Expr,
-        instance: crate::types::VariantInstance,
-    ) -> Expr {
-        match instance {
-            crate::types::VariantInstance::Array => {
-                let array = JE::var(Ident::create_persistent("Array"), &mut self.j);
-                let is_array = self.static_index(array, "isArray");
-                JE::call(is_array, &[expr], CallInfo::default(), &mut self.j)
-            }
-            _ => JE::bin(
-                BinOp::InstanceOf,
-                expr,
-                JE::var(Ident::create_persistent(instance.as_str()), &mut self.j),
-                &mut self.j,
-            ),
-        }
-    }
-
-    fn builtin_untagged_block_test(
-        &mut self,
-        expr: Expr,
-        case: &crate::types::VariantBlock,
-        all_block_types: &[VariantBlockType],
-        has_null_case: bool,
-    ) -> Option<Expr> {
-        let test = match case.block_type()? {
-            VariantBlockType::String => self.builtin_untagged_typeof_test(expr, "string"),
-            VariantBlockType::Int | VariantBlockType::Float => {
-                self.builtin_untagged_typeof_test(expr, "number")
-            }
-            VariantBlockType::Bigint => self.builtin_untagged_typeof_test(expr, "bigint"),
-            VariantBlockType::Boolean => self.builtin_untagged_typeof_test(expr, "boolean"),
-            VariantBlockType::Function => self.builtin_untagged_typeof_test(expr, "function"),
-            VariantBlockType::Instance(name) => self.builtin_untagged_instance_test(expr, *name),
-            VariantBlockType::Object => {
-                let mut test = self.builtin_untagged_typeof_test(expr, "object");
-                if has_null_case {
-                    test = JE::bin(
-                        BinOp::And,
-                        test,
-                        JE::bin(BinOp::NotEqEq, expr, JE::null(&mut self.j), &mut self.j),
-                        &mut self.j,
-                    );
-                }
-                for other in all_block_types {
-                    let VariantBlockType::Instance(name) = other else {
-                        continue;
-                    };
-                    let instance_test = self.builtin_untagged_instance_test(expr, *name);
-                    test = JE::bin(
-                        BinOp::And,
-                        test,
-                        JE::not(instance_test, &mut self.j),
-                        &mut self.j,
-                    );
-                }
-                test
-            }
-            VariantBlockType::Unknown => return None,
-        };
-        Some(test)
-    }
-
-    /// Compute the null/array guard expression for an untagged-variant typeof
-    /// switch (mirrors OCaml `lam_compile.ml` switch helper after upstream
-    /// PRs ebed19abd / fbe7a7391 / ccdec51fc — #8251).
-    ///
-    /// When a typeof switch has an `"object"` case (because some variant arm
-    /// is `VariantBlockType::Object`), null and arrays would otherwise match
-    /// that case too (`typeof null === typeof [] === "object"`). Returns a
-    /// guard expression that should be wrapped around the typeof switch to
-    /// route null / array values to the default body instead.
-    fn untagged_typeof_object_guard(
-        &mut self,
-        scrut: Expr,
-        typeof_cases: &[(SwitchCaseTag, Lam)],
-        runtime_test_cases: &[(&crate::types::VariantBlock, Lam)],
-        all_block_types: &[VariantBlockType],
-        has_null_case: bool,
-    ) -> Option<Expr> {
-        let has_object_typeof = typeof_cases
-            .iter()
-            .any(|(tag, _)| matches!(tag, SwitchCaseTag::String(s) if s == "object"));
-        if !has_object_typeof {
-            return None;
-        }
-        let clauses_have_array_case = runtime_test_cases.iter().any(|(case, _)| {
-            matches!(
-                case.block_type(),
-                Some(VariantBlockType::Instance(
-                    crate::types::VariantInstance::Array
-                ))
-            )
-        });
-        let type_has_array_case = all_block_types.iter().any(|t| {
-            matches!(
-                t,
-                VariantBlockType::Instance(crate::types::VariantInstance::Array)
-            )
-        });
-        let needs_null_guard = has_null_case;
-        let needs_array_guard = type_has_array_case && !clauses_have_array_case;
-
-        let null_check = |c: &mut LambdaCompiler| c.is_null_expr(scrut);
-        let array_check = |c: &mut LambdaCompiler| {
-            c.builtin_untagged_instance_test(scrut, crate::types::VariantInstance::Array)
-        };
-
-        match (needs_null_guard, needs_array_guard) {
-            (true, true) => {
-                let null = null_check(self);
-                let array = array_check(self);
-                Some(JE::bin(BinOp::Or, null, array, &mut self.j))
-            }
-            (true, false) => Some(null_check(self)),
-            (false, true) => Some(array_check(self)),
-            (false, false) => None,
-        }
-    }
-
-    fn compile_untagged_block_switch_assignment_statements(
-        &mut self,
-        a: &mut LamArena,
-        result: &Ident,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        has_null_case: bool,
-    ) -> Block {
-        let Some(block_cases) = self.untagged_block_cases(switch) else {
-            return self
-                .block_switch_default(switch)
-                .map(|fallback| {
-                    let block = self.compile_assign_to_target_block(a, result, fallback);
-                    self.with_block_source_loc(a, fallback, block)
-                })
-                .unwrap_or_default();
-        };
-        if let Some(block) = self.compile_small_untagged_block_switch_assignment(
-            a,
-            result,
-            scrut_expr,
-            switch,
-            &block_cases,
-            has_null_case,
-        ) {
-            return block;
-        }
-        let all_block_types = self.untagged_block_types(switch);
-        if let Some((_, body)) = block_cases
-            .iter()
-            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
-        {
-            return self.compile_assign_to_target_block(a, result, *body);
-        }
-        if block_cases.len() == 1 && self.block_switch_complete(switch) {
-            return self.compile_assign_to_target_block(a, result, block_cases[0].1);
-        }
-
-        let has_unfiltered_runtime_test_cases = block_cases
-            .iter()
-            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
-        let filtered_block_cases =
-            self.filtered_switch_case_refs(a, &block_cases, self.block_switch_default(switch));
-        let mut runtime_test_cases = Vec::new();
-        let mut typeof_cases = Vec::new();
-        for (case, body) in filtered_block_cases {
-            match case.block_type() {
-                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
-                Some(block_type) => {
-                    if let Some(tag) = Self::block_type_switch_tag(block_type) {
-                        typeof_cases.push((tag, body));
-                    }
-                }
-                None => {}
-            }
-        }
-        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
-
-        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
-        // runtime-instance chain with a `typeof_switch` tail. That tail is
-        // still emitted when default filtering leaves zero typeof clauses,
-        // because `compile_general_cases` filters cases only after selecting
-        // the general switch path (compiler/core/lam_compile.ml:567-630).
-        let typeof_scrut = ocaml_typeof_expr(scrut_expr, &mut self.j);
-        let typeof_default = self.block_switch_default(switch);
-        let typeof_complete = self.block_switch_complete(switch);
-        let small_tail = if allow_small_typeof_tail && !typeof_cases.is_empty() {
-            self.compile_small_string_switch_assignment(
-                a,
-                result,
-                typeof_scrut,
-                &typeof_cases,
-                typeof_default,
-                typeof_complete,
-            )
-        } else {
-            None
-        };
-        let mut tail = match small_tail {
-            Some(block) => block,
-            None => self.compile_named_string_switch_assignment_general(
-                a,
-                result,
-                typeof_scrut,
-                &typeof_cases,
-                typeof_default,
-            ),
-        };
-
-        // #8251: guard typeof "object" against null / arrays
-        if !typeof_cases.is_empty()
-            && let Some(guard) = self.untagged_typeof_object_guard(
-                scrut_expr,
-                &typeof_cases,
-                &runtime_test_cases,
-                all_block_types,
-                has_null_case,
-            )
-        {
-            let default_body = self.block_switch_default(switch).map(|fallback| {
-                let block = self.compile_assign_to_target_block(a, result, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            });
-            tail = match default_body {
-                Some(default_block) => vec![JS::if_(guard, &default_block, &tail, &mut self.j)],
-                None => vec![JS::if_(
-                    JE::not(guard, &mut self.j),
-                    &tail,
-                    &Vec::new(),
-                    &mut self.j,
-                )],
-            };
-        }
-
-        for (case, body) in runtime_test_cases.into_iter().rev() {
-            let test = self
-                .builtin_untagged_block_test(scrut_expr, case, all_block_types, has_null_case)
-                .expect("instance cases stay supported");
-            tail = vec![JS::if_(
-                test,
-                &self.compile_assign_to_target_block(a, result, body),
-                &tail,
-                &mut self.j,
-            )];
-        }
-
-        tail
-    }
-
-    fn compile_small_untagged_block_switch_assignment(
-        &mut self,
-        a: &mut LamArena,
-        result: &Ident,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        block_cases: &[(&crate::types::VariantBlock, Lam)],
-        has_null_case: bool,
-    ) -> Option<Block> {
-        let all_block_types = self.untagged_block_types(switch);
-        let default = self.block_switch_default(switch);
-
-        match block_cases {
-            [] => Some(
-                default
-                    .map(|fallback| {
-                        let block = self.compile_assign_to_target_block(a, result, fallback);
-                        self.with_block_source_loc(a, fallback, block)
-                    })
-                    .unwrap_or_default(),
-            ),
-            [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
-                Some(self.compile_assign_to_target_block(a, result, *body))
-            }
-            [(case, body)] => {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                Some(vec![JS::if_(
-                    cond,
-                    &self.compile_assign_to_target_block(a, result, *body),
-                    &default
-                        .map(|fallback| {
-                            let block = self.compile_assign_to_target_block(a, result, fallback);
-                            self.with_block_source_loc(a, fallback, block)
-                        })
-                        .unwrap_or_default(),
-                    &mut self.j,
-                )])
-            }
-            [(case, then_body), (_, else_body)]
-                if self.block_switch_complete(switch) && default.is_none() =>
-            {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                Some(vec![JS::if_(
-                    cond,
-                    &self.compile_assign_to_target_block(a, result, *then_body),
-                    &self.compile_assign_to_target_block(a, result, *else_body),
-                    &mut self.j,
-                )])
-            }
-            _ => None,
-        }
-    }
-
-    fn compile_untagged_block_switch_return_statements(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        has_null_case: bool,
-    ) -> Block {
-        let Some(block_cases) = self.untagged_block_cases(switch) else {
-            return self
-                .block_switch_default(switch)
-                .map(|fallback| self.compile_return_block(a, fallback))
-                .unwrap_or_default();
-        };
-        if let Some(block) = self.compile_small_untagged_block_switch_return(
-            a,
-            scrut_expr,
-            switch,
-            &block_cases,
-            has_null_case,
-        ) {
-            return block;
-        }
-        let all_block_types = self.untagged_block_types(switch);
-        if let Some((_, body)) = block_cases
-            .iter()
-            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
-        {
-            return self.compile_return_block(a, *body);
-        }
-        if block_cases.len() == 1 && self.block_switch_complete(switch) {
-            return self.compile_return_block(a, block_cases[0].1);
-        }
-
-        let has_unfiltered_runtime_test_cases = block_cases
-            .iter()
-            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
-        let filtered_block_cases =
-            self.filtered_switch_case_refs(a, &block_cases, self.block_switch_default(switch));
-        let mut runtime_test_cases = Vec::new();
-        let mut typeof_cases = Vec::new();
-        for (case, body) in filtered_block_cases {
-            match case.block_type() {
-                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
-                Some(block_type) => {
-                    if let Some(tag) = Self::block_type_switch_tag(block_type) {
-                        typeof_cases.push((tag, body));
-                    }
-                }
-                None => {}
-            }
-        }
-        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
-
-        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
-        // runtime-instance chain with a `typeof_switch` tail. That tail is
-        // still emitted when default filtering leaves zero typeof clauses,
-        // because `compile_general_cases` filters cases only after selecting
-        // the general switch path (compiler/core/lam_compile.ml:567-630).
-        let typeof_scrut = ocaml_typeof_expr(scrut_expr, &mut self.j);
-        let mut tail = self.compile_named_string_switch_return_with_strategy(
-            a,
-            typeof_scrut,
-            &typeof_cases,
-            self.block_switch_default(switch),
-            self.block_switch_complete(switch),
-            allow_small_typeof_tail && !typeof_cases.is_empty(),
-        );
-
-        // #8251: guard typeof "object" against null / arrays
-        if !typeof_cases.is_empty()
-            && let Some(guard) = self.untagged_typeof_object_guard(
-                scrut_expr,
-                &typeof_cases,
-                &runtime_test_cases,
-                all_block_types,
-                has_null_case,
-            )
-        {
-            let default_body = self
-                .block_switch_default(switch)
-                .map(|fallback| self.compile_return_block(a, fallback));
-            tail = match default_body {
-                Some(default_block)
-                    if self.return_unit_stack.last().copied() == Some(true)
-                        && (default_block.is_empty()
-                            || self.is_unit_undefined_return_block(&default_block)) =>
-                {
-                    let mut block = vec![JS::new(
-                        StmtKind::If(
-                            guard,
-                            JS::list(
-                                &[JS::return_(JE::undefined(true, &mut self.j), &mut self.j)],
-                                &mut self.j,
-                            ),
-                            self.j.empty_block(),
-                        ),
-                        &mut self.j,
-                    )];
-                    block.extend(tail);
-                    block
-                }
-                Some(default_block) => self.normalized_if_block(guard, default_block, tail),
-                None => {
-                    let ret = self.return_unit_block();
-                    self.normalized_if_block(guard, ret, tail)
-                }
-            };
-        }
-
-        for (case, body) in runtime_test_cases.into_iter().rev() {
-            let test = self
-                .builtin_untagged_block_test(scrut_expr, case, all_block_types, has_null_case)
-                .expect("instance cases stay supported");
-            let body = self.compile_return_block(a, body);
-            let body = self.normalize_runtime_test_return_body(body);
-            tail = self.normalized_if_block(test, body, tail);
-        }
-
-        tail
-    }
-
-    fn is_unit_undefined_return_block(&mut self, block: &Block) -> bool {
-        let block = self.peel_single_block(block);
-        strict_single_return_expr(&self.j, &block)
-            .is_some_and(|e| matches!(self.j.ek(e), ExprKind::Undefined { is_unit: true }))
-    }
-
-    /// `[return undefined]` for a unit-returning function.
-    pub(crate) fn return_unit_block(&mut self) -> Block {
-        let undefined = JE::undefined(true, &mut self.j);
-        vec![JS::return_(undefined, &mut self.j)]
-    }
-
-    fn compile_small_untagged_block_switch_return(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        block_cases: &[(&crate::types::VariantBlock, Lam)],
-        has_null_case: bool,
-    ) -> Option<Block> {
-        let all_block_types = self.untagged_block_types(switch);
-        let default = self.block_switch_default(switch);
-
-        match block_cases {
-            [] => Some(
-                default
-                    .map(|fallback| self.compile_return_block(a, fallback))
-                    .unwrap_or_default(),
-            ),
-            [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
-                Some(self.compile_return_block(a, *body))
-            }
-            [(case, body)] => {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                let then_block = self.compile_return_block(a, *body);
-                let then_block = self.normalize_runtime_test_return_body(then_block);
-                let else_block = default
-                    .map(|fallback| self.compile_return_block(a, fallback))
-                    .unwrap_or_default();
-                Some(self.normalized_if_block(cond, then_block, else_block))
-            }
-            [(case, then_body), (_, else_body)]
-                if self.block_switch_complete(switch) && default.is_none() =>
-            {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                let then_block = self.compile_return_block(a, *then_body);
-                let then_block = self.normalize_runtime_test_return_body(then_block);
-                let else_block = self.compile_return_block(a, *else_body);
-                Some(self.normalized_if_block(cond, then_block, else_block))
-            }
-            _ => None,
-        }
-    }
-
-    fn compile_untagged_block_switch_effect_statements(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        has_null_case: bool,
-    ) -> Block {
-        let Some(block_cases) = self.untagged_block_cases(switch) else {
-            return self
-                .block_switch_default(switch)
-                .map(|fallback| {
-                    let block = self.compile_effect_block(a, fallback);
-                    self.with_block_source_loc(a, fallback, block)
-                })
-                .unwrap_or_default();
-        };
-        let all_block_types = self.untagged_block_types(switch);
-        if let Some((_, body)) = block_cases
-            .iter()
-            .find(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Unknown)))
-        {
-            return self.compile_effect_block(a, *body);
-        }
-        if block_cases.len() == 1 && self.block_switch_complete(switch) {
-            return self.compile_effect_block(a, block_cases[0].1);
-        }
-        if let Some(block) = self.compile_small_untagged_block_switch_effect(
-            a,
-            scrut_expr,
-            switch,
-            &block_cases,
-            has_null_case,
-        ) {
-            return block;
-        }
-
-        let has_unfiltered_runtime_test_cases = block_cases
-            .iter()
-            .any(|(case, _)| matches!(case.block_type(), Some(VariantBlockType::Instance(_))));
-        let filtered_block_cases =
-            self.filtered_switch_case_refs(a, &block_cases, self.block_switch_default(switch));
-        let mut runtime_test_cases = Vec::new();
-        let mut typeof_cases = Vec::new();
-        for (case, body) in filtered_block_cases {
-            match case.block_type() {
-                Some(VariantBlockType::Instance(_)) => runtime_test_cases.push((case, body)),
-                Some(block_type) => {
-                    if let Some(tag) = Self::block_type_switch_tag(block_type) {
-                        typeof_cases.push((tag, body));
-                    }
-                }
-                None => {}
-            }
-        }
-        let allow_small_typeof_tail = !has_unfiltered_runtime_test_cases;
-
-        // OCaml reference: compiler/core/lam_compile.ml:800-887 builds the
-        // runtime-instance chain with a `typeof_switch` tail. That tail is
-        // still emitted when default filtering leaves zero typeof clauses,
-        // because `compile_general_cases` filters cases only after selecting
-        // the general switch path (compiler/core/lam_compile.ml:567-630).
-        let typeof_scrut = ocaml_typeof_expr(scrut_expr, &mut self.j);
-        let mut tail = self.compile_named_string_switch_effect_with_strategy(
-            a,
-            typeof_scrut,
-            &typeof_cases,
-            self.block_switch_default(switch),
-            self.block_switch_complete(switch),
-            allow_small_typeof_tail && !typeof_cases.is_empty(),
-        );
-
-        // #8251: guard typeof "object" against null / arrays
-        if !typeof_cases.is_empty()
-            && let Some(guard) = self.untagged_typeof_object_guard(
-                scrut_expr,
-                &typeof_cases,
-                &runtime_test_cases,
-                all_block_types,
-                has_null_case,
-            )
-        {
-            let default_body = self.block_switch_default(switch).map(|fallback| {
-                let block = self.compile_effect_block(a, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            });
-            tail = match default_body {
-                Some(default_block) => vec![JS::if_(guard, &default_block, &tail, &mut self.j)],
-                None if self.return_unit_stack.last().copied() == Some(true) => {
-                    let ret = self.return_unit_block();
-                    self.normalized_if_block(guard, ret, tail)
-                }
-                None => vec![JS::if_(
-                    JE::not(guard, &mut self.j),
-                    &tail,
-                    &Vec::new(),
-                    &mut self.j,
-                )],
-            };
-        }
-
-        for (case, body) in runtime_test_cases.into_iter().rev() {
-            let test = self
-                .builtin_untagged_block_test(scrut_expr, case, all_block_types, has_null_case)
-                .expect("instance cases stay supported");
-            let body_block = self.compile_effect_block(a, body);
-            tail = self.compile_effect_if(test, body_block, tail);
-        }
-
-        tail
-    }
-
-    fn compile_small_untagged_block_switch_effect(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-        block_cases: &[(&crate::types::VariantBlock, Lam)],
-        has_null_case: bool,
-    ) -> Option<Block> {
-        let all_block_types = self.untagged_block_types(switch);
-        let default = self.block_switch_default(switch);
-
-        match block_cases {
-            [] => Some(
-                default
-                    .map(|fallback| {
-                        let block = self.compile_effect_block(a, fallback);
-                        self.with_block_source_loc(a, fallback, block)
-                    })
-                    .unwrap_or_default(),
-            ),
-            [(_, body)] if self.block_switch_complete(switch) && default.is_none() => {
-                Some(self.compile_effect_block(a, *body))
-            }
-            [(case, body)] => {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                let then_block = self.compile_effect_block(a, *body);
-                let else_block = default
-                    .map(|fallback| {
-                        let block = self.compile_effect_block(a, fallback);
-                        self.with_block_source_loc(a, fallback, block)
-                    })
-                    .unwrap_or_default();
-                Some(self.compile_effect_if(cond, then_block, else_block))
-            }
-            [(case, then_body), (_, else_body)]
-                if self.block_switch_complete(switch) && default.is_none() =>
-            {
-                let cond = self.builtin_untagged_block_test(
-                    scrut_expr,
-                    case,
-                    all_block_types,
-                    has_null_case,
-                )?;
-                let then_block = self.compile_effect_block(a, *then_body);
-                let else_block = self.compile_effect_block(a, *else_body);
-                Some(self.compile_effect_if(cond, then_block, else_block))
-            }
-            _ => None,
-        }
-    }
-
-    pub(crate) fn compile_untagged_variant_switch_assignment_statements(
-        &mut self,
-        a: &mut LamArena,
-        result: &Ident,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-    ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(a, switch)
-        {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_assignment_statements(
-                a,
-                result,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_consts_full && switch.sw_consts.is_empty() {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_assignment_statements(
-                a,
-                result,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_blocks_full && switch.sw_blocks.is_empty() {
-            let const_cases = self.named_const_cases(switch).unwrap_or_default();
-            return self.compile_named_string_switch_assignment(
-                a,
-                result,
-                scrut_expr,
-                &const_cases,
-                self.const_switch_default(switch),
-                self.const_switch_complete(switch),
-            );
-        }
-
-        let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let const_complete = self.const_switch_complete(switch);
-        let const_default = self.const_switch_default(switch);
-        let const_branch = if const_cases.is_empty() {
-            const_default
-                .map(|fallback| {
-                    let block = self.compile_assign_to_target_block(a, result, fallback);
-                    self.with_block_source_loc(a, fallback, block)
-                })
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_assignment(
-                a,
-                result,
-                scrut_expr,
-                &const_cases,
-                const_default,
-                const_complete,
-            )
-        };
-        // Mixed path (const cases + block cases): null is dispatched by the
-        // outer const_branch, so when we fall into block_branch, x cannot be
-        // null. Match OCaml's `compile_cases` default `has_null_case = false`
-        // in the else branch of lam_compile.ml:755.
-        let block_branch = self.compile_untagged_block_switch_assignment_statements(
-            a, result, scrut_expr, switch, false,
-        );
-
-        let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr, switch) else {
-            return block_branch;
-        };
-
-        if const_branch.is_empty() {
-            vec![JS::if_(
-                JE::not(dispatch_test, &mut self.j),
-                &block_branch,
-                &[],
-                &mut self.j,
-            )]
-        } else if block_branch.is_empty() {
-            vec![JS::if_(dispatch_test, &const_branch, &[], &mut self.j)]
-        } else {
-            vec![JS::if_(
-                dispatch_test,
-                &const_branch,
-                &block_branch,
-                &mut self.j,
-            )]
-        }
-    }
-
-    pub(crate) fn compile_untagged_variant_switch_return_statements(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-    ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(a, switch)
-        {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_return_statements(
-                a,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_consts_full && switch.sw_consts.is_empty() {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_return_statements(
-                a,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_blocks_full && switch.sw_blocks.is_empty() {
-            let const_cases = self.named_const_cases(switch).unwrap_or_default();
-            return self.compile_named_string_switch_return(
-                a,
-                scrut_expr,
-                &const_cases,
-                self.const_switch_default(switch),
-                self.const_switch_complete(switch),
-            );
-        }
-
-        let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let const_complete = self.const_switch_complete(switch);
-        let const_default = self.const_switch_default(switch);
-        let const_branch = if const_cases.is_empty() {
-            const_default
-                .map(|fallback| self.compile_return_block(a, fallback))
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_return(
-                a,
-                scrut_expr,
-                &const_cases,
-                const_default,
-                const_complete,
-            )
-        };
-        // Mixed path: null handled by const_branch; block_branch sees non-null x.
-        let block_branch =
-            self.compile_untagged_block_switch_return_statements(a, scrut_expr, switch, false);
-
-        let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr, switch) else {
-            return block_branch;
-        };
-
-        if const_branch.is_empty() {
-            if self.return_unit_stack.last().copied() == Some(true) {
-                let ret = self.return_unit_block();
-                self.normalized_if_block(dispatch_test, ret, block_branch)
-            } else {
-                vec![JS::if_(
-                    JE::not(dispatch_test, &mut self.j),
-                    &block_branch,
-                    &[],
-                    &mut self.j,
-                )]
-            }
-        } else if block_branch.is_empty() {
-            vec![JS::if_(dispatch_test, &const_branch, &[], &mut self.j)]
-        } else {
-            vec![JS::if_(
-                dispatch_test,
-                &const_branch,
-                &block_branch,
-                &mut self.j,
-            )]
-        }
-    }
-
-    pub(crate) fn compile_untagged_variant_switch_effect_statements(
-        &mut self,
-        a: &mut LamArena,
-        scrut_expr: Expr,
-        switch: &LamSwitch,
-    ) -> Block {
-        if switch.sw_consts.is_empty() && self.untagged_literal_and_block_defaults_match(a, switch)
-        {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_effect_statements(
-                a,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_consts_full && switch.sw_consts.is_empty() {
-            let has_null_case = self.has_null_literal(switch);
-            return self.compile_untagged_block_switch_effect_statements(
-                a,
-                scrut_expr,
-                switch,
-                has_null_case,
-            );
-        }
-
-        if switch.sw_blocks_full && switch.sw_blocks.is_empty() {
-            let const_cases = self.named_const_cases(switch).unwrap_or_default();
-            return self.compile_named_string_switch_effect(
-                a,
-                scrut_expr,
-                &const_cases,
-                self.const_switch_default(switch),
-                self.const_switch_complete(switch),
-            );
-        }
-
-        let const_cases = self.named_const_cases(switch).unwrap_or_default();
-        let const_complete = self.const_switch_complete(switch);
-        let const_default = self.const_switch_default(switch);
-        let const_branch = if const_cases.is_empty() {
-            const_default
-                .map(|fallback| {
-                    let block = self.compile_effect_block(a, fallback);
-                    self.with_block_source_loc(a, fallback, block)
-                })
-                .unwrap_or_default()
-        } else {
-            self.compile_named_string_switch_effect(
-                a,
-                scrut_expr,
-                &const_cases,
-                const_default,
-                const_complete,
-            )
-        };
-        // Mixed path: null handled by const_branch; block_branch sees non-null x.
-        let block_branch =
-            self.compile_untagged_block_switch_effect_statements(a, scrut_expr, switch, false);
-
-        let Some(dispatch_test) = self.literal_case_dispatch_test(scrut_expr, switch) else {
-            return block_branch;
-        };
-
-        // An empty branch still needs the dispatch test around the other one:
-        // `S.if_ test const_branch block_branch` (js_stmt_make.ml:248-262)
-        // turns `if (test) {} else {b}` into `if (!test) {b}`.
-        if const_branch.is_empty() && block_branch.is_empty() {
-            Vec::new()
-        } else {
-            self.compile_effect_if(dispatch_test, const_branch, block_branch)
-        }
     }
 
     pub(crate) fn bind_switch_scrutinee_once(
@@ -1656,37 +982,24 @@ impl LambdaCompiler {
         )
     }
 
-    fn variant_object_test(&mut self, expr: Expr) -> Expr {
-        raw_typeof_comparison(expr, BinOp::EqEqEq, "object", &mut self.j)
-    }
-
-    fn variant_non_object_test(&mut self, expr: Expr) -> Expr {
-        raw_typeof_comparison(expr, BinOp::NotEqEq, "object", &mut self.j)
-    }
-
+    /// lam_compile.ml `compile_switch`: `S.if_ (E.is_int_tag ~literal_tags
+    /// e) consts ~else_:blocks`, with `S.if_`'s empty-branch rules.
     fn dispatch_named_variant_branches(
         &mut self,
+        switch: &LamSwitch,
         scrut_expr: Expr,
         const_branch: Block,
         block_branch: Block,
     ) -> Block {
+        let is_int_tag = self.is_int_tag(self.switch_literal_tags(switch), scrut_expr);
         if const_branch.is_empty() {
-            vec![JS::if_(
-                self.variant_object_test(scrut_expr),
-                &block_branch,
-                &[],
-                &mut self.j,
-            )]
+            let test = JE::not(is_int_tag, &mut self.j);
+            vec![JS::if_(test, &block_branch, &[], &mut self.j)]
         } else if block_branch.is_empty() {
-            vec![JS::if_(
-                self.variant_non_object_test(scrut_expr),
-                &const_branch,
-                &[],
-                &mut self.j,
-            )]
+            vec![JS::if_(is_int_tag, &const_branch, &[], &mut self.j)]
         } else {
             vec![JS::if_(
-                self.variant_non_object_test(scrut_expr),
+                is_int_tag,
                 &const_branch,
                 &block_branch,
                 &mut self.j,
@@ -1815,12 +1128,12 @@ impl LambdaCompiler {
     ) -> Block {
         if then_block.is_empty() {
             if else_block.is_empty() {
-                // OCaml's `S.if_ cond [] []` collapses to `S.exp cond`
-                // (js_stmt_make.ml:242 + 45-53). Preserves bare comparisons
-                // like `tmp === null;` that come from a switch where every
-                // dispatched arm falls through to the same continuation.
+                // OCaml's `S.if_ cond [] []` keeps only a condition with side
+                // effects (js_stmt_make.ml `if_`), so a switch where every
+                // dispatched arm falls through to the same continuation
+                // leaves no bare comparison like `tmp === null;`.
                 let mut block = vec![];
-                push_s_exp(&mut self.j, &mut block, cond);
+                push_s_if_empty(&mut self.j, &mut block, cond);
                 block
             } else {
                 vec![JS::if_(
@@ -1843,55 +1156,6 @@ impl LambdaCompiler {
             StmtKind::Block(block) => self.j.block_vec(block),
             kind => vec![JS::new(kind, &mut self.j)],
         }
-    }
-
-    fn peel_single_block(&self, block: &[Stmt]) -> Block {
-        match block {
-            [stmt] => match self.j.sk(*stmt) {
-                StmtKind::Block(inner) => self.peel_single_block(self.j.stmts(inner)),
-                _ => block.to_vec(),
-            },
-            _ => block.to_vec(),
-        }
-    }
-
-    pub(crate) fn normalize_runtime_test_return_body(&mut self, block: Block) -> Block {
-        let block = self.peel_single_block(&block);
-        self.shared_trailing_return_guard_block(&block)
-            .unwrap_or(block)
-    }
-
-    fn shared_trailing_return_guard_block(&mut self, block: &Block) -> Option<Block> {
-        let (first, rest) = block.split_first()?;
-        let StmtKind::If(cond, then_block, else_block) = self.j.sk(*first) else {
-            return None;
-        };
-        if !self.j.stmts(else_block).is_empty() || rest.is_empty() {
-            return None;
-        }
-
-        let then_block = self.j.block_vec(then_block);
-        let then_return = trailing_return_expression(&self.j, &then_block)?;
-        let else_return = trailing_return_expression(&self.j, rest)?;
-        if !ocaml_eq_expression(&self.j, then_return, else_return) {
-            return None;
-        }
-        if then_block.len() != 2 || rest.len() != 2 {
-            return None;
-        }
-
-        let then_block = then_block[..then_block.len() - 1].to_vec();
-        let else_block = rest[..rest.len() - 1].to_vec();
-        if then_block.is_empty() || else_block.is_empty() {
-            return None;
-        }
-
-        let then_list = JS::list(&then_block, &mut self.j);
-        let else_list = JS::list(&else_block, &mut self.j);
-        Some(vec![
-            JS::new(StmtKind::If(cond, then_list, else_list), &mut self.j),
-            JS::return_(then_return, &mut self.j),
-        ])
     }
 
     pub(crate) fn compile_small_string_switch_effect(
@@ -2055,7 +1319,7 @@ impl LambdaCompiler {
                 {
                     let test_expr = self.switch_case_test(test, &cases[0].0);
                     let mut prefix = vec![];
-                    push_s_exp(&mut self.j, &mut prefix, test_expr);
+                    push_s_if_empty(&mut self.j, &mut prefix, test_expr);
                     prefix.extend(body);
                     return prefix;
                 }
@@ -2099,12 +1363,14 @@ impl LambdaCompiler {
                 }
 
                 let (_, body, _) = &grouped_cases[group_end];
-                let compiled_body = self.compile_hoisted_named_string_return_tail(a, *body);
+                let compiled_output = self.compile_hoisted_named_string_return_tail(a, *body);
+                let compiled_finished = compiled_output.finished;
+                let compiled_body = compiled_output.block;
                 let hoist_shared_tail = group_start != group_end
                     && group_end + 1 == grouped_cases.len()
                     && self.should_hoist_grouped_named_string_return_tail(a, *body)
                     && !compiled_body.is_empty()
-                    && block_terminates(&self.j, &compiled_body);
+                    && compiled_finished == OutputFinished::True;
 
                 for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                     clauses.push(StringClauseInfo {
@@ -2128,8 +1394,7 @@ impl LambdaCompiler {
                         // (compiler/core/lam_compile.ml:610-624) and
                         // `Js_output.to_break_block`
                         // (compiler/core/js_output.ml:88-100).
-                        let should_break =
-                            self.return_case_needs_break_like_ocaml(a, *body, &compiled_body);
+                        let should_break = return_case_needs_break(a, *body, compiled_finished);
                         Clause {
                             source_loc: self.source_loc_of_lam(a, *body),
                             body: {
@@ -2236,12 +1501,14 @@ impl LambdaCompiler {
             }
 
             let (_, body, _) = &grouped_cases[group_end];
-            let compiled_body = self.compile_tail_loop_return_block(a, *body, tail_loop);
+            let compiled_output = self.compile_tail_loop_return_output(a, *body, tail_loop);
+            let compiled_finished = compiled_output.finished;
+            let compiled_body = compiled_output.block;
             let group_falls_through = compiled_body.is_empty();
             // Mirror `compile_general_cases` + `Js_output.to_break_block`
             // (compiler/core/lam_compile.ml:610-624;
             // compiler/core/js_output.ml:88-100).
-            let should_break = self.return_case_needs_break_like_ocaml(a, *body, &compiled_body);
+            let should_break = return_case_needs_break(a, *body, compiled_finished);
 
             for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
                 clauses.push((
@@ -2343,11 +1610,13 @@ impl LambdaCompiler {
             .map(|(tag, body, is_last)| {
                 let clause = if is_last {
                     let source_loc = self.source_loc_of_lam(a, body);
-                    let body_block = self.compile_effect_block(a, body);
-                    let body = self.with_block_source_loc(a, body, body_block);
+                    // `Js_output.to_break_block` (js_output.ml:88-100).
+                    let body_output = self.compile_effect_block_output(a, body);
+                    let should_break = body_output.finished != OutputFinished::True;
+                    let body = self.with_block_source_loc(a, body, body_output.block);
                     Clause {
                         source_loc,
-                        should_break: !block_terminates(&self.j, &body),
+                        should_break,
                         body: JS::list(&body, &mut self.j),
                         comment: None,
                     }
@@ -2462,7 +1731,7 @@ impl LambdaCompiler {
         } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
-            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
+            self.dispatch_named_variant_branches(switch, scrut_expr, const_branch, block_branch)
         }
     }
 
@@ -2528,7 +1797,7 @@ impl LambdaCompiler {
         } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
-            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
+            self.dispatch_named_variant_branches(switch, scrut_expr, const_branch, block_branch)
         }
     }
 
@@ -2597,7 +1866,7 @@ impl LambdaCompiler {
         } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
-            self.dispatch_named_variant_branches(scrut_expr, const_branch, block_branch)
+            self.dispatch_named_variant_branches(switch, scrut_expr, const_branch, block_branch)
         }
     }
 
@@ -2672,7 +1941,7 @@ impl LambdaCompiler {
         } else if block_cases.is_empty() && switch.sw_blocks_full {
             const_branch
         } else {
-            let test = self.variant_non_object_test(scrut_expr);
+            let test = self.is_int_tag(self.switch_literal_tags(switch), scrut_expr);
             self.compile_effect_if(test, const_branch, block_branch)
         }
     }

@@ -114,8 +114,7 @@ pub(crate) fn expression_has_no_side_effects(a: &JsArena, expr: Expr) -> bool {
         | ExprKind::TemplateLiteral(_) => true,
         ExprKind::InterpolatedTemplate(_, values) => a.exprs(values).iter().all(|v| pure(*v)),
         ExprKind::StaticIndex(target, _, _) => pure(target),
-        ExprKind::StringIndex(left, right)
-        | ExprKind::ArrayIndex(left, right)
+        ExprKind::ArrayIndex(left, right)
         | ExprKind::In(left, right)
         | ExprKind::StringAppend(left, right)
         | ExprKind::Seq(left, right) => pure(left) && pure(right),
@@ -129,9 +128,13 @@ pub(crate) fn expression_has_no_side_effects(a: &JsArena, expr: Expr) -> bool {
         ExprKind::Array(items, _) | ExprKind::CamlBlock(items, _, _) => {
             a.exprs(items).iter().all(|v| pure(*v))
         }
-        ExprKind::Object(dup, props) => {
-            dup.is_none_or(pure) && a.props(props).iter().all(|(_, value)| pure(*value))
-        }
+        // A `Spread` entry may run getters or proxy traps; a record spread
+        // reads plain data.
+        ExprKind::Object(props) => a
+            .props(props)
+            .iter()
+            .all(|&(name, value)| name != PropName::Spread && pure(value)),
+        ExprKind::Jsx(_) => false,
         ExprKind::Cond(test, consequent, alternate) => {
             pure(test) && pure(consequent) && pure(alternate)
         }
@@ -154,13 +157,61 @@ pub(crate) fn expression_has_no_side_effects(a: &JsArena, expr: Expr) -> bool {
     }
 }
 
-fn is_array_is_array_callee(a: &JsArena, expr: Expr) -> bool {
+/// js_analyzer.ml `is_array_function`: `Array.isArray` on the JavaScript
+/// global `Array` (`Ext_ident.is_js`; Rust creates JS globals as persistent
+/// idents).
+pub(crate) fn is_array_is_array_callee(a: &JsArena, expr: Expr) -> bool {
     matches!(
         a.ek(expr),
-        ExprKind::StaticIndex(target, field, _)
-            if a.text(field) == "isArray"
-                && matches!(a.ek(target), ExprKind::Var(id) if a.ident(id).name() == "Array")
+        ExprKind::StaticIndex(target, field, pos)
+            if pos == FieldPos::NONE && a.text(field) == "isArray"
+                && matches!(a.ek(target), ExprKind::Var(id)
+                    if a.ident(id).name() == "Array"
+                        && (a.ident(id).is_js()
+                            || (a.ident(id).is_global() && a.ident(id).stamp() == 0)))
     )
+}
+
+/// js_analyzer.ml `number_value`: the value of a number literal as
+/// JavaScript sees it, so that `1` and `1.0` are the same number; `None` for
+/// a bigint, which is never `===` to a number.
+fn js_number_value(n: &Number) -> Option<f64> {
+    match n {
+        Number::Int { i, .. } => Some(f64::from(*i)),
+        Number::Float(super::op::FloatLit { f }) => crate::ocaml_float::float_of_string(f),
+        Number::BigInt(_) => None,
+    }
+}
+
+/// js_analyzer.ml `eq_literal`: whether two literals are the same value under
+/// JavaScript `===`; `None` when either is not a literal.
+pub(crate) fn js_eq_literal(a: &JsArena, x: Expr, y: Expr) -> Option<bool> {
+    use ExprKind as D;
+    let is_literal = |e: Expr| {
+        matches!(
+            a.ek(e),
+            D::Bool(_) | D::Null | D::Undefined { .. } | D::Number(_) | D::Str(_)
+        )
+    };
+    match (a.ek(x), a.ek(y)) {
+        (D::Number(n0), D::Number(n1)) => match (a.number(n0), a.number(n1)) {
+            (Number::BigInt(b0), Number::BigInt(b1)) => {
+                Some(b0.positive == b1.positive && b0.value == b1.value)
+            }
+            (Number::BigInt(_), _) | (_, Number::BigInt(_)) => Some(false),
+            (n0, n1) => match (js_number_value(n0), js_number_value(n1)) {
+                // f64 `==` is IEEE equality like `===`: NaN differs from
+                // itself, and `0.` equals `-0.`.
+                (Some(f0), Some(f1)) => Some(f0 == f1),
+                _ => None,
+            },
+        },
+        (D::Bool(b0), D::Bool(b1)) => Some(b0 == b1),
+        (D::Str(s0), D::Str(s1)) => Some(a.text(s0) == a.text(s1)),
+        (D::Null, D::Null) | (D::Undefined { .. }, D::Undefined { .. }) => Some(true),
+        _ if is_literal(x) && is_literal(y) => Some(false),
+        _ => None,
+    }
 }
 
 pub(crate) fn ocaml_eq_block(a: &JsArena, left: &[Stmt], right: &[Stmt]) -> bool {
@@ -197,8 +248,7 @@ pub(crate) fn ocaml_eq_expression(a: &JsArena, left: Expr, right: Expr) -> bool 
             (Number::BigInt(l), Number::BigInt(r)) => l == r,
             _ => false,
         },
-        (ExprKind::StringIndex(lo, li), ExprKind::StringIndex(ro, ri))
-        | (ExprKind::ArrayIndex(lo, li), ExprKind::ArrayIndex(ro, ri)) => eq(lo, ro) && eq(li, ri),
+        (ExprKind::ArrayIndex(lo, li), ExprKind::ArrayIndex(ro, ri)) => eq(lo, ro) && eq(li, ri),
         (ExprKind::Call(lf, la, _), ExprKind::Call(rf, ra, _)) => eq(lf, rf) && eq_list(la, ra),
         (ExprKind::Var(_) | ExprKind::Qualified(_), ExprKind::Var(_) | ExprKind::Qualified(_)) => {
             same_vident(
@@ -584,13 +634,8 @@ pub mod exp {
         let cold = j.expr_cold(expr);
         match j.ek(expr) {
             ExprKind::JsNot(inner) => Some(inner),
-            ExprKind::Bool(value) => Some(j.expr_with(
-                ExprKind::Bool(!value),
-                Cold {
-                    comment: cold.comment,
-                    source_loc: None,
-                },
-            )),
+            // `bool (not b)`: a fresh literal.
+            ExprKind::Bool(value) => Some(j.expr(ExprKind::Bool(!value))),
             ExprKind::Bin(BinOp::EqEqEq, left, right) => {
                 Some(j.expr_with(ExprKind::Bin(BinOp::NotEqEq, left, right), cold))
             }
@@ -809,373 +854,52 @@ pub mod exp {
             .unwrap_or_else(|| raw_bin(BinOp::Or, left, right, j))
     }
 
+    /// js_exp_make.ml `simplify_and`.
     fn simplify_and_if_no_side_effects(left: Expr, right: Expr, j: &mut JsArena) -> Option<Expr> {
         if expression_has_no_side_effects(j, left) && expression_has_no_side_effects(j, right) {
-            simplify_and_with_depth(left, right, 0, true, j)
+            simplify_and_(0, left, right, j)
         } else {
             None
         }
     }
 
+    /// js_exp_make.ml `simplify_or`.
     fn simplify_or_if_no_side_effects(left: Expr, right: Expr, j: &mut JsArena) -> Option<Expr> {
         if expression_has_no_side_effects(j, left) && expression_has_no_side_effects(j, right) {
-            simplify_or_with_depth(left, right, 0, true, j)
+            simplify_or_(0, left, right, j)
         } else {
             None
         }
     }
 
-    /// `pure` is true when both operands are already known to have no side
-    /// effects. Sub-expressions of pure `&&`/`||` operands, their negations
-    /// and conjunctions of them are pure as well, so recursive calls on those
-    /// pass it on instead of walking the operands again (for long `||`
-    /// chains that walk made each step linear and whole-chain construction
-    /// quadratic).
-    fn simplify_and_with_depth(
-        left: Expr,
-        right: Expr,
-        depth: usize,
-        pure: bool,
-        j: &mut JsArena,
-    ) -> Option<Expr> {
-        if depth > JS_SIMPLIFY_MAX_DEPTH {
-            return None;
-        }
-
-        match (j.ek(left), j.ek(right)) {
-            (ExprKind::Bool(false), _) | (_, ExprKind::Bool(false)) => {
-                return Some(bool(false, j));
-            }
-            (ExprKind::Bool(true), _) => return Some(right),
-            (_, ExprKind::Bool(true)) => return Some(left),
-            _ => {}
-        }
-
-        if pure
-            || (expression_has_no_side_effects(j, left) && expression_has_no_side_effects(j, right))
-        {
-            match (j.ek(left), j.ek(right)) {
-                (ExprKind::Bin(BinOp::And, left_a, left_b), _) => {
-                    let simplified_left_a =
-                        simplify_and_with_depth(left_a, right, depth + 1, true, j);
-                    let simplified_left_b =
-                        simplify_and_with_depth(left_b, right, depth + 1, true, j);
-                    return match (simplified_left_a, simplified_left_b) {
-                        (None, None) => simplify_and_with_depth(left_a, left_b, depth + 1, true, j)
-                            .and_then(|expr| simplify_and_force(expr, right, depth + 1, j)),
-                        (Some(left_a), None) => simplify_and_force(left_a, left_b, depth + 1, j),
-                        (None, Some(left_b)) => simplify_and_force(left_a, left_b, depth + 1, j),
-                        (Some(left_a), Some(left_b)) => {
-                            simplify_and_force(left_a, left_b, depth + 1, j)
-                        }
-                    };
-                }
-                (_, ExprKind::Bin(BinOp::And, right_a, right_b)) => {
-                    let combined = raw_bin(BinOp::And, left, right_a, j);
-                    return simplify_and_with_depth(combined, right_b, depth + 1, true, j);
-                }
-                (ExprKind::Bin(BinOp::Or, left_a, left_b), _) => {
-                    let simplified_left_a =
-                        simplify_and_with_depth(left_a, right, depth + 1, true, j);
-                    let simplified_left_b =
-                        simplify_and_with_depth(left_b, right, depth + 1, true, j);
-                    return match (simplified_left_a, simplified_left_b) {
-                        (Some(expr), None) if matches!(j.ek(expr), ExprKind::Bool(false)) => {
-                            Some(raw_bin(BinOp::And, left_b, right, j))
-                        }
-                        (None, Some(expr)) if matches!(j.ek(expr), ExprKind::Bool(false)) => {
-                            Some(raw_bin(BinOp::And, left_a, right, j))
-                        }
-                        (None, _) | (_, None) => {
-                            simplify_or_with_depth(left_a, left_b, depth + 1, true, j)
-                                .and_then(|expr| simplify_and_force(expr, right, depth + 1, j))
-                        }
-                        (Some(left_a), Some(left_b)) => {
-                            simplify_or_force(left_a, left_b, depth + 1, j)
-                        }
-                    };
-                }
-                _ => {}
-            }
-        }
-
-        if ocaml_eq_expression(j, left, right) {
-            return Some(left);
-        }
-
-        if (pure || expression_has_no_side_effects(j, left))
-            && disjunction_contains_expression(j, left, right)
-        {
-            return Some(right);
-        }
-        if (pure || expression_has_no_side_effects(j, right))
-            && disjunction_contains_expression(j, right, left)
-        {
-            return Some(left);
-        }
-
-        if let Some(expr) = simplify_typeof_and_literal_and(left, right, j) {
-            return Some(expr);
-        }
-        if let Some(expr) = simplify_typeof_and_literal_and(right, left, j) {
-            return Some(expr);
-        }
-
-        if let Some(expr) = simplify_array_is_array_and_literal_and(left, right, j) {
-            return Some(expr);
-        }
-        if let Some(expr) = simplify_array_is_array_and_literal_and(right, left, j) {
-            return Some(expr);
-        }
-
-        if let Some(expr) = simplify_same_var_literal_and(left, right, j) {
-            return Some(expr);
-        }
-
-        None
-    }
-
-    /// See `simplify_and_with_depth` for `pure`.
-    fn simplify_or_with_depth(
-        left: Expr,
-        right: Expr,
-        depth: usize,
-        pure: bool,
-        j: &mut JsArena,
-    ) -> Option<Expr> {
-        if depth > JS_SIMPLIFY_MAX_DEPTH {
-            return None;
-        }
-
-        match (j.ek(left), j.ek(right)) {
-            (ExprKind::Bool(true), _) | (_, ExprKind::Bool(true)) => {
-                return Some(bool(true, j));
-            }
-            (ExprKind::Bool(false), _) => return Some(right),
-            (_, ExprKind::Bool(false)) => return Some(left),
-            _ => {}
-        }
-
-        if (pure || expression_has_no_side_effects(j, left))
-            && conjunction_contains_expression(j, left, right)
-        {
-            return Some(right);
-        }
-        if (pure || expression_has_no_side_effects(j, right))
-            && conjunction_contains_expression(j, right, left)
-        {
-            return Some(left);
-        }
-
-        let left_not = push_negation(left, j)?;
-        let right_not = push_negation(right, j)?;
-        // Negation keeps operands pure.
-        let simplified = simplify_and_with_depth(left_not, right_not, depth + 1, pure, j)?;
-        push_negation(simplified, j)
-    }
-
-    fn simplify_and_force(left: Expr, right: Expr, depth: usize, j: &mut JsArena) -> Option<Expr> {
-        simplify_and_with_depth(left, right, depth, false, j)
-            .or_else(|| Some(raw_bin(BinOp::And, left, right, j)))
-    }
-
-    fn simplify_or_force(left: Expr, right: Expr, depth: usize, j: &mut JsArena) -> Option<Expr> {
-        simplify_or_with_depth(left, right, depth, false, j)
-            .or_else(|| Some(raw_bin(BinOp::Or, left, right, j)))
-    }
-
-    /// A fresh variable node referring to the same variable as `var`.
-    fn fresh_var(var: Expr, j: &mut JsArena) -> Expr {
-        let kind = j.ek(var);
-        j.expr(kind)
-    }
-
-    fn simplify_typeof_and_literal_and(
-        typeof_expr: Expr,
-        other: Expr,
-        j: &mut JsArena,
-    ) -> Option<Expr> {
-        let (var_expr, type_name) = typeof_var_type_test(j, typeof_expr)?;
-        let type_name = type_name.to_string();
-        let type_name = type_name.as_str();
-        let typeof_vident_matches = |j: &JsArena, e: Expr| {
-            let (Some(v), Some(o)) = (vident(j, var_expr), vident(j, e)) else {
-                return false;
-            };
-            same_vident(v, o)
-        };
-
-        match j.ek(other) {
-            ExprKind::Var(_) | ExprKind::Qualified(_)
-                if type_name == "boolean" && typeof_vident_matches(j, other) =>
-            {
-                let v = fresh_var(other, j);
-                let t = bool(true, j);
-                return Some(bin(BinOp::EqEqEq, v, t, j));
-            }
-            ExprKind::JsNot(inner)
-                if type_name == "boolean"
-                    && matches!(j.ek(inner), ExprKind::Var(_) | ExprKind::Qualified(_))
-                    && typeof_vident_matches(j, inner) =>
-            {
-                let v = fresh_var(inner, j);
-                let f = bool(false, j);
-                return Some(bin(BinOp::EqEqEq, v, f, j));
-            }
-            _ => {}
-        }
-
-        let (op, other_var, literal) = strict_var_literal_comparison(j, other)?;
-        if !typeof_vident_matches(j, other_var) {
-            return None;
-        }
-
-        if op == BinOp::EqEqEq {
-            if literal_matches_type_name(j, literal, type_name) {
-                return Some(other);
-            }
-            if matches!(type_name, "boolean" | "string" | "number")
-                && is_scalar_nullish_literal(j, literal)
-            {
-                return Some(bool(false, j));
-            }
-            return None;
-        }
-
-        if type_name == "boolean"
-            && let ExprKind::Bool(value) = j.ek(literal)
-        {
-            return Some(bool(!value, j));
-        }
-
-        if matches!(type_name, "string" | "number")
-            && literal_matches_type_name(j, literal, type_name)
-        {
-            return None;
-        }
-
-        if type_name == "object" && matches!(j.ek(literal), ExprKind::Null) {
-            return None;
-        }
-
-        if matches!(type_name, "boolean" | "string" | "number" | "object")
-            && is_scalar_nullish_literal(j, literal)
-        {
-            return Some(typeof_expr);
-        }
-
-        None
-    }
-
-    fn simplify_array_is_array_and_literal_and(
-        array_test: Expr,
-        other: Expr,
-        j: &mut JsArena,
-    ) -> Option<Expr> {
-        let var_expr = array_is_array_var(j, array_test)?;
-        let (op, other_var, literal) = strict_var_literal_comparison(j, other)?;
-        let same = match (vident(j, var_expr), vident(j, other_var)) {
-            (Some(l), Some(r)) => same_vident(l, r),
-            _ => false,
-        };
-        if !same || !is_scalar_nullish_literal(j, literal) {
-            return None;
-        }
-        match op {
-            BinOp::EqEqEq => Some(bool(false, j)),
-            BinOp::NotEqEq => Some(array_test),
-            _ => None,
-        }
-    }
-
-    fn simplify_same_var_literal_and(left: Expr, right: Expr, j: &mut JsArena) -> Option<Expr> {
-        let (left_op, left_var, left_literal) = strict_var_literal_comparison(j, left)?;
-        let (right_op, right_var, right_literal) = strict_var_literal_comparison(j, right)?;
-        let same = match (vident(j, left_var), vident(j, right_var)) {
-            (Some(l), Some(r)) => same_vident(l, r),
-            _ => false,
-        };
-        if !same {
-            return None;
-        }
-
-        if left_op == right_op {
-            if ocaml_eq_expression(j, left_literal, right_literal) {
-                return Some(left);
-            }
-            if matches!(left_op, BinOp::EqEqEq) {
-                return Some(bool(false, j));
-            }
-            return None;
-        }
-
-        if ocaml_eq_expression(j, left_literal, right_literal) {
-            return Some(bool(false, j));
-        }
-
-        if matches!(left_op, BinOp::EqEqEq) {
-            return Some(left);
-        }
-
-        Some(right)
-    }
-
-    /// `typeof v === "name"`: the variable expression and the type name.
-    fn typeof_var_type_test(j: &JsArena, expr: Expr) -> Option<(Expr, &str)> {
+    /// `typeof x === "name"` with `x` a variable: `x` and the type name.
+    fn typeof_test(j: &JsArena, expr: Expr) -> Option<(Expr, &str)> {
         let ExprKind::Bin(BinOp::EqEqEq, left, right) = j.ek(expr) else {
             return None;
         };
         let ExprKind::Typeof(value) = j.ek(left) else {
             return None;
         };
-        if !matches!(j.ek(value), ExprKind::Var(_) | ExprKind::Qualified(_)) {
-            return None;
-        }
+        vident(j, value)?;
         let ExprKind::Str(txt) = j.ek(right) else {
             return None;
         };
         Some((value, j.text(txt)))
     }
 
-    /// `v === lit` / `v !== lit`: the operator, variable expression and literal.
-    fn strict_var_literal_comparison(j: &JsArena, expr: Expr) -> Option<(BinOp, Expr, Expr)> {
+    /// `x === v` or `x !== v` with `x` a variable: the operator, `x` and `v`.
+    fn var_comparison(j: &JsArena, expr: Expr) -> Option<(BinOp, Expr, Expr)> {
         let ExprKind::Bin(op @ (BinOp::EqEqEq | BinOp::NotEqEq), left, right) = j.ek(expr) else {
             return None;
         };
-        if !matches!(j.ek(left), ExprKind::Var(_) | ExprKind::Qualified(_)) {
-            return None;
-        }
-        if !is_scalar_nullish_literal(j, right) {
-            return None;
-        }
+        vident(j, left)?;
         Some((op, left, right))
     }
 
-    fn array_is_array_var(j: &JsArena, expr: Expr) -> Option<Expr> {
-        let ExprKind::Call(func, args, _) = j.ek(expr) else {
-            return None;
-        };
-        if !is_array_is_array_callee(j, func) {
-            return None;
-        }
-        let [arg] = j.exprs(args) else {
-            return None;
-        };
-        matches!(j.ek(*arg), ExprKind::Var(_) | ExprKind::Qualified(_)).then_some(*arg)
-    }
-
-    fn literal_matches_type_name(j: &JsArena, literal: Expr, type_name: &str) -> bool {
+    /// `Bool _ | Null | Undefined _ | Number _ | Str _`.
+    fn is_literal(j: &JsArena, e: Expr) -> bool {
         matches!(
-            (j.ek(literal), type_name),
-            (ExprKind::Bool(_), "boolean")
-                | (ExprKind::Str(_), "string")
-                | (ExprKind::Number(_), "number")
-        )
-    }
-
-    fn is_scalar_nullish_literal(j: &JsArena, expr: Expr) -> bool {
-        matches!(
-            j.ek(expr),
+            j.ek(e),
             ExprKind::Bool(_)
                 | ExprKind::Null
                 | ExprKind::Undefined { .. }
@@ -1184,20 +908,268 @@ pub mod exp {
         )
     }
 
-    fn disjunction_contains_expression(j: &JsArena, disjunction: Expr, needle: Expr) -> bool {
-        if ocaml_eq_expression(j, disjunction, needle) {
-            return true;
-        }
-        match j.ek(disjunction) {
-            ExprKind::Bin(BinOp::Or, left, right) => {
-                disjunction_contains_expression(j, left, needle)
-                    || disjunction_contains_expression(j, right, needle)
-            }
-            _ => false,
+    /// `Array.isArray(x)` with `x` a variable: `x`.
+    fn array_is_array_test(j: &JsArena, expr: Expr) -> Option<Expr> {
+        let ExprKind::Call(func, args, _) = j.ek(expr) else {
+            return None;
+        };
+        let [arg] = j.exprs(args) else {
+            return None;
+        };
+        vident(j, *arg)?;
+        is_array_is_array_callee(j, func).then_some(*arg)
+    }
+
+    fn same_var(j: &JsArena, x: Expr, y: Expr) -> bool {
+        matches!((vident(j, x), vident(j, y)), (Some(x), Some(y)) if same_vident(x, y))
+    }
+
+    /// The operand for which `is_test` holds, the other operand, and whether
+    /// the test is the first one, for a symmetric or-pattern.
+    fn either_order(
+        j: &JsArena,
+        e1: Expr,
+        e2: Expr,
+        is_test: impl Fn(&JsArena, Expr) -> bool,
+    ) -> Option<(Expr, Expr, bool)> {
+        if is_test(j, e1) {
+            Some((e1, e2, true))
+        } else if is_test(j, e2) {
+            Some((e2, e1, false))
+        } else {
+            None
         }
     }
 
-    pub(crate) fn conjunction_contains_expression(j: &JsArena, conjunction: Expr, needle: Expr) -> bool {
+    fn is_typeof_test_of(j: &JsArena, expr: Expr, names: &[&str]) -> bool {
+        typeof_test(j, expr).is_some_and(|(_, name)| names.contains(&name))
+    }
+
+    /// Whether `test` is `typeof x === _` of the variable `other`.
+    fn same_var_typeof(j: &JsArena, test: Expr, other: Expr) -> bool {
+        typeof_test(j, test).is_some_and(|(x, _)| same_var(j, x, other))
+    }
+
+    /// js_exp_make.ml `simplify_and_`. The rules are tried in the order of
+    /// the OCaml match; a rule that matches decides the result, also when it
+    /// is `None`.
+    fn simplify_and_(n: usize, e1: Expr, e2: Expr, j: &mut JsArena) -> Option<Expr> {
+        use ExprKind as D;
+        if n > JS_SIMPLIFY_MAX_DEPTH {
+            return None;
+        }
+        match (j.ek(e1), j.ek(e2)) {
+            (D::Bool(false), _) | (_, D::Bool(false)) => return Some(bool(false, j)),
+            (D::Bool(true), _) => return Some(e2),
+            (_, D::Bool(true)) => return Some(e1),
+            (D::Bin(BinOp::And, a, b), _) => {
+                let ao = simplify_and_(n + 1, a, e2, j);
+                let bo = simplify_and_(n + 1, b, e2, j);
+                return match (ao, bo) {
+                    (None, None) => simplify_and_(n + 1, a, b, j)
+                        .and_then(|e| simplify_and_force(n + 1, e, e2, j)),
+                    (Some(a_), None) => simplify_and_force(n + 1, a_, b, j),
+                    (None, Some(b_)) => simplify_and_force(n + 1, a, b_, j),
+                    (Some(a_), Some(b_)) => simplify_and_force(n + 1, a_, b_, j),
+                };
+            }
+            (_, D::Bin(BinOp::And, a, b)) => {
+                let e1_a = raw_bin(BinOp::And, e1, a, j);
+                return simplify_and_(n + 1, e1_a, b, j);
+            }
+            (D::Bin(BinOp::Or, a, b), _) => {
+                let ao = simplify_and_(n + 1, a, e2, j);
+                let bo = simplify_and_(n + 1, b, e2, j);
+                let is_false = |j: &JsArena, e: Option<Expr>| {
+                    e.is_some_and(|e| matches!(j.ek(e), D::Bool(false)))
+                };
+                return match (ao, bo) {
+                    (ao, None) if is_false(j, ao) => Some(raw_bin(BinOp::And, b, e2, j)),
+                    (None, bo) if is_false(j, bo) => Some(raw_bin(BinOp::And, a, e2, j)),
+                    (None, _) | (_, None) => simplify_or_(n + 1, a, b, j)
+                        .and_then(|e| simplify_and_force(n + 1, e, e2, j)),
+                    (Some(a_), Some(b_)) => simplify_or_force(n + 1, a_, b_, j),
+                };
+            }
+            _ => {}
+        }
+
+        // `typeof x === "boolean" | "string" | "number"` with `x === <literal
+        // of that type>`: the comparison.
+        for (type_name, literal_of_type) in [
+            ("boolean", (|k: D| matches!(k, D::Bool(_))) as fn(D) -> bool),
+            ("string", |k: D| matches!(k, D::Str(_))),
+            ("number", |k: D| matches!(k, D::Number(_))),
+        ] {
+            if let Some((test, cmp, _)) =
+                either_order(j, e1, e2, |j, e| is_typeof_test_of(j, e, &[type_name]))
+                && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(j, cmp)
+                && literal_of_type(j.ek(v))
+                && same_var_typeof(j, test, ib)
+            {
+                return Some(j.expr(j.ek(cmp)));
+            }
+        }
+
+        // `typeof x === "boolean" | "string" | "number"` with `x === <literal>`
+        // of another type: false.
+        if let Some((test, cmp, _)) = either_order(j, e1, e2, |j, e| {
+            is_typeof_test_of(j, e, &["boolean", "string", "number"])
+        }) && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(j, cmp)
+            && is_literal(j, v)
+            && same_var_typeof(j, test, ib)
+        {
+            return Some(bool(false, j));
+        }
+
+        // `Array.isArray(x)` with `x === <literal>`: false.
+        if let Some((test, cmp, _)) =
+            either_order(j, e1, e2, |j, e| array_is_array_test(j, e).is_some())
+            && let Some((BinOp::EqEqEq, ib, v)) = var_comparison(j, cmp)
+            && is_literal(j, v)
+            && array_is_array_test(j, test).is_some_and(|ia| same_var(j, ia, ib))
+        {
+            return Some(bool(false, j));
+        }
+
+        // `typeof x === "boolean"` with `x`: `x === true`; with `!x`:
+        // `x === false`; with `x !== b`: `x === !b`.
+        if let Some((test, other, _)) =
+            either_order(j, e1, e2, |j, e| is_typeof_test_of(j, e, &["boolean"]))
+        {
+            let target = match j.ek(other) {
+                D::Var(_) | D::Qualified(_) if same_var_typeof(j, test, other) => {
+                    Some((other, true))
+                }
+                D::JsNot(inner)
+                    if vident(j, inner).is_some() && same_var_typeof(j, test, inner) =>
+                {
+                    Some((inner, false))
+                }
+                _ => match var_comparison(j, other) {
+                    Some((BinOp::NotEqEq, ib, v)) if same_var_typeof(j, test, ib) => {
+                        match j.ek(v) {
+                            D::Bool(b) => Some((ib, !b)),
+                            _ => None,
+                        }
+                    }
+                    _ => None,
+                },
+            };
+            if let Some((var, value)) = target {
+                let var = j.expr(j.ek(var));
+                let value = bool(value, j);
+                return Some(raw_bin(BinOp::EqEqEq, var, value, j));
+            }
+        }
+
+        // `typeof x === "string"` with `x !== "s"`, `typeof x === "number"`
+        // with `x !== n` and `typeof x === "object"` with `x !== null`:
+        // unchanged.
+        for (type_name, literal_of_type) in [
+            ("string", (|k: D| matches!(k, D::Str(_))) as fn(D) -> bool),
+            ("number", |k: D| matches!(k, D::Number(_))),
+            ("object", |k: D| matches!(k, D::Null)),
+        ] {
+            if let Some((test, cmp, _)) =
+                either_order(j, e1, e2, |j, e| is_typeof_test_of(j, e, &[type_name]))
+                && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(j, cmp)
+                && literal_of_type(j.ek(v))
+                && same_var_typeof(j, test, ib)
+            {
+                return None;
+            }
+        }
+
+        // `typeof x === "boolean" | "string" | "number" | "object"` with
+        // `x !== <literal>`: the typeof test. With the typeof test second,
+        // only the literals `Bool _ | Null | Undefined _` take this rule.
+        let typeof_any = ["boolean", "string", "number", "object"];
+        if let Some((test, cmp, test_first)) =
+            either_order(j, e1, e2, |j, e| is_typeof_test_of(j, e, &typeof_any))
+            && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(j, cmp)
+            && if test_first {
+                is_literal(j, v)
+            } else {
+                matches!(j.ek(v), D::Bool(_) | D::Null | D::Undefined { .. })
+            }
+            && same_var_typeof(j, test, ib)
+        {
+            return Some(j.expr(j.ek(test)));
+        }
+
+        // `Array.isArray(x)` with `x !== <literal>`: the `Array.isArray` test.
+        if let Some((test, cmp, _)) =
+            either_order(j, e1, e2, |j, e| array_is_array_test(j, e).is_some())
+            && let Some((BinOp::NotEqEq, ib, v)) = var_comparison(j, cmp)
+            && is_literal(j, v)
+            && array_is_array_test(j, test).is_some_and(|ia| same_var(j, ia, ib))
+        {
+            return Some(j.expr(j.ek(test)));
+        }
+
+        if ocaml_eq_expression(j, e1, e2) {
+            return Some(e1);
+        }
+
+        // `x === c1 && x === c2`, `x === c1 && x !== c2` and `x !== c1 &&
+        // x === c2` decide by the JavaScript values of the literals.
+        if let (Some((op1, ia, v1)), Some((op2, ib, v2))) =
+            (var_comparison(j, e1), var_comparison(j, e2))
+            && is_literal(j, v1)
+            && is_literal(j, v2)
+            && same_var(j, ia, ib)
+        {
+            if op1 == BinOp::EqEqEq && op2 == BinOp::EqEqEq {
+                return match js_eq_literal(j, v1, v2) {
+                    Some(true) => Some(e1),
+                    Some(false) => Some(bool(false, j)),
+                    None => None,
+                };
+            }
+            if op1 != op2 {
+                return match js_eq_literal(j, v1, v2) {
+                    Some(true) => Some(bool(false, j)),
+                    Some(false) => Some(if op1 == BinOp::EqEqEq { e1 } else { e2 }),
+                    None => None,
+                };
+            }
+        }
+
+        None
+    }
+
+    /// js_exp_make.ml `simplify_and_force`.
+    fn simplify_and_force(n: usize, e1: Expr, e2: Expr, j: &mut JsArena) -> Option<Expr> {
+        simplify_and_(n, e1, e2, j).or_else(|| Some(raw_bin(BinOp::And, e1, e2, j)))
+    }
+
+    /// js_exp_make.ml `simplify_or_`: `e1 || e2` is `!(!e1 && !e2)`.
+    fn simplify_or_(n: usize, e1: Expr, e2: Expr, j: &mut JsArena) -> Option<Expr> {
+        match (j.ek(e1), j.ek(e2)) {
+            (ExprKind::Bool(true), _) | (_, ExprKind::Bool(true)) => Some(bool(true, j)),
+            (ExprKind::Bool(false), _) => Some(e2),
+            (_, ExprKind::Bool(false)) => Some(e1),
+            _ => match (push_negation(e1, j), push_negation(e2, j)) {
+                (Some(e1_), Some(e2_)) => {
+                    simplify_and_(n + 1, e1_, e2_, j).and_then(|e| push_negation(e, j))
+                }
+                _ => None,
+            },
+        }
+    }
+
+    /// js_exp_make.ml `simplify_or_force`.
+    fn simplify_or_force(n: usize, e1: Expr, e2: Expr, j: &mut JsArena) -> Option<Expr> {
+        simplify_or_(n, e1, e2, j).or_else(|| Some(raw_bin(BinOp::Or, e1, e2, j)))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn conjunction_contains_expression(
+        j: &JsArena,
+        conjunction: Expr,
+        needle: Expr,
+    ) -> bool {
         if ocaml_eq_expression(j, conjunction, needle) {
             return true;
         }
@@ -1556,8 +1528,7 @@ pub mod stmt {
             (ExprKind::StaticIndex(lo, lf, lp), ExprKind::StaticIndex(ro, rf, rp)) => {
                 j.text(lf) == j.text(rf) && lp == rp && same_assignment_target(j, lo, ro)
             }
-            (ExprKind::ArrayIndex(lo, li), ExprKind::ArrayIndex(ro, ri))
-            | (ExprKind::StringIndex(lo, li), ExprKind::StringIndex(ro, ri)) => {
+            (ExprKind::ArrayIndex(lo, li), ExprKind::ArrayIndex(ro, ri)) => {
                 same_assignment_target(j, lo, ro) && same_assignment_target(j, li, ri)
             }
             _ => false,
@@ -1601,7 +1572,17 @@ pub mod stmt {
         }
     }
 
-    fn simplify_if(cond: Expr, then_: Vec<Stmt>, else_: Vec<Stmt>, j: &mut JsArena) -> Stmt {
+    fn simplify_if(
+        cond: Expr,
+        mut then_: Vec<Stmt>,
+        mut else_: Vec<Stmt>,
+        j: &mut JsArena,
+    ) -> Stmt {
+        // js_stmt_make.ml `if_`: an empty block, such as a dropped condition
+        // of a nested `if`, leaves its branch empty.
+        let is_not_empty = |j: &JsArena, s: &Stmt| !matches!(j.sk(*s), StmtKind::Block(b) if j.stmts(b).is_empty());
+        then_.retain(|s| is_not_empty(j, s));
+        else_.retain(|s| is_not_empty(j, s));
         match j.ek(cond) {
             ExprKind::Bool(value) => {
                 return block(if value { &then_ } else { &else_ }, j);
@@ -1614,7 +1595,13 @@ pub mod stmt {
 
         if then_.is_empty() {
             if else_.is_empty() {
-                return exp(cond, j);
+                // Both branches are empty: only a condition with side
+                // effects needs to be kept.
+                return if expression_has_no_side_effects(j, cond) {
+                    block(&[], j)
+                } else {
+                    exp(cond, j)
+                };
             }
             let negated = E::not(cond, j);
             return simplify_if(negated, else_, vec![], j);

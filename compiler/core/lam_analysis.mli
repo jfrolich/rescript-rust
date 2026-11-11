@@ -27,9 +27,14 @@
 val no_side_effects : Lambda.t -> bool
 (** No side effect, but it might depend on data store *)
 
-val size : Lambda.t -> int
+val delay_safe : assignable:Set_ident.t -> Lambda.t -> bool
+(** No side effect, and does not depend on data store: evaluating it later,
+    after other code, gives the same value. [assignable] are the variables
+    some [Lassign] assigns. *)
 
-val lfunction_can_be_inlined : Lambda.lfunction -> bool
+val size_upto : limit:int -> Lambda.t -> int
+(** The size of a lambda for inlining decisions if it is below [limit],
+    [limit] otherwise. [limit] must be at most 1000. *)
 
 val ok_to_inline_fun_when_app : Lambda.lfunction -> Lambda.t list -> bool
 

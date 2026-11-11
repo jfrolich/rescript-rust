@@ -16,27 +16,13 @@ let Xx = {
 };
 
 function compilerBug(a, b, c, f) {
-  let exit = 0;
-  if (a !== "x") {
-    exit = 2;
-  }
-  if (exit === 2) {
-    if (b === undefined) {
-      if (c) {
-        result.contents = "No x, c is true";
-      } else {
-        result.contents = "No x, c is false";
-      }
-      return;
+  if (a !== "x" && b !== "x") {
+    if (c) {
+      result.contents = "No x, c is true";
+    } else {
+      result.contents = "No x, c is false";
     }
-    if (b !== "x") {
-      if (c) {
-        result.contents = "No x, c is true";
-      } else {
-        result.contents = "No x, c is false";
-      }
-      return;
-    }
+    return;
   }
   if (f()) {
     result.contents = "Some x, f returns true";
@@ -48,7 +34,7 @@ function compilerBug(a, b, c, f) {
 Mocha.describe("Gpr_3875_test", () => {
   Mocha.test("compiler bug pattern matching", () => {
     compilerBug("x", undefined, true, () => true);
-    Test_utils.eq("File \"gpr_3875_test.res\", line 35, characters 7-14", result.contents, "Some x, f returns true");
+    Test_utils.eq("File \"gpr_3875_test.res\", line 36, characters 7-14", result.contents, "Some x, f returns true");
   });
 });
 

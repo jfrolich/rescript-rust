@@ -20,7 +20,7 @@ use crate::parser::ast::{
     ExtensionConstructor, ExtensionConstructorKind, IncludeDeclaration, IncludeDescription,
     LabelDeclaration, ModuleBinding, ModuleDeclaration, ModuleExpr, ModuleExprDesc, ModuleType,
     ModuleTypeDeclaration, ModuleTypeDesc, ObjectField, OpenDescription, Pattern, PatternDesc,
-    Payload, RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
+    RowField, SignatureItem, SignatureItemDesc, StructureItem, StructureItemDesc,
     TypeDeclaration, TypeExtension, TypeKind, ValueDescription, WithConstraint,
 };
 use crate::parser::ast::{PexpApply, PexpFun};
@@ -96,9 +96,7 @@ impl<'a> DependencyCollector<'a> {
 
     /// OCaml `Depend.handle_extension` (depend.ml:92-96).
     fn handle_extension(&mut self, ext: &Extension) {
-        if self.error_extension.is_none()
-            && matches!(self.arena.get_string(ext.0.txt), "error" | "ocaml.error")
-        {
+        if self.error_extension.is_none() && self.arena.get_string(ext.0.txt) == "error" {
             self.error_extension = Some(ext.clone());
         }
     }
@@ -177,11 +175,21 @@ impl<'a> DependencyCollector<'a> {
     fn add_longident_full(&mut self, lid: &Longident) {
         // Get the root module name (the head of `Longident.flatten`, where an
         // application contributes its functor path).
+        // `second` is the component right after the head when the path is a
+        // plain dotted path (depend.ml `add_path`'s `m :: _`).
         let mut head = lid;
+        let mut second = None;
         let first = loop {
             match head {
                 Longident::Lident(s) => break *s,
-                Longident::Ldot(prefix, _) | Longident::Lapply(prefix, _) => head = prefix,
+                Longident::Ldot(prefix, s) => {
+                    second = Some(*s);
+                    head = prefix;
+                }
+                Longident::Lapply(prefix, _) => {
+                    second = None;
+                    head = prefix;
+                }
             }
         };
         {
@@ -195,9 +203,19 @@ impl<'a> DependencyCollector<'a> {
                 .next()
                 .is_some_and(|c| c.is_ascii_uppercase())
                 && !self.bound_modules.contains(first_str)
-                && !self.deps.contains(first_str)
             {
-                self.deps.insert(first_str.to_string());
+                if !self.deps.contains(first_str) {
+                    self.deps.insert(first_str.to_string());
+                }
+                // depend.ml `add_path`: also record `S.M` for a qualified free
+                // path, so a build system can resolve `M` when `S` is the
+                // module's own namespace.
+                if let Some(second) = second {
+                    let qualified = format!("{}.{}", first_str, self.arena.get_string(second));
+                    if !self.deps.contains(&qualified) {
+                        self.deps.insert(qualified);
+                    }
+                }
             }
         }
 
@@ -355,8 +373,8 @@ impl<'a> DependencyCollector<'a> {
             StructureItemDesc::Pstr_include(incl) => {
                 self.add_include_declaration(incl);
             }
-            StructureItemDesc::Pstr_attribute(_attr) => {
-                // Attributes don't contribute dependencies
+            StructureItemDesc::Pstr_attribute(_) | StructureItemDesc::Pstr_raw(_) => {
+                // Attributes and raw JavaScript don't contribute dependencies
             }
             StructureItemDesc::Pstr_extension(inner) => {
                 self.handle_extension(&inner.0);
@@ -545,18 +563,39 @@ impl<'a> DependencyCollector<'a> {
                     self.add_expr_idx(*value);
                 }
             }
-            ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                let (ref expr, ref cases) = *inner;
-                // expr is ExprIdx
-                let expr = *expr;
-                self.add_expr_idx(expr);
+            ExpressionDesc::Pexp_match((expr, cases)) => {
+                self.add_expr_idx(*expr);
                 for case in self.arena.case_list(*cases) {
                     self.add_case(case);
+                }
+            }
+            // depend.ml: `add_expr bv e; add_cases bv pel; add_opt add_expr bv finally`.
+            ExpressionDesc::Pexp_try((expr, cases, finally)) => {
+                self.add_expr_idx(*expr);
+                for case in self.arena.case_list(*cases) {
+                    self.add_case(case);
+                }
+                if let Some(finally) = finally {
+                    self.add_expr_idx(*finally);
                 }
             }
             ExpressionDesc::Pexp_tuple(exprs) | ExpressionDesc::Pexp_array(exprs) => {
                 for expr in self.arena.expr_list(*exprs) {
                     self.add_expr_idx(*expr);
+                }
+            }
+            ExpressionDesc::Pexp_dict(entries) => {
+                for entry in &**entries {
+                    match entry {
+                        crate::parser::ast::DictEntry::Pdict_entry(_, e)
+                        | crate::parser::ast::DictEntry::Pdict_spread(e) => self.add_expr_idx(*e),
+                    }
+                }
+            }
+            // compiler/ml/depend.ml Pexp_spread.
+            ExpressionDesc::Pexp_spread(_, elements) => {
+                for element in self.arena.spread_element_list(*elements) {
+                    self.add_expr_idx(element.expr());
                 }
             }
             ExpressionDesc::Pexp_construct(lid, args) => {
@@ -728,38 +767,9 @@ impl<'a> DependencyCollector<'a> {
                     self.bound_modules.shift_remove(name);
                 }
             }
-            ExpressionDesc::Pexp_extension(ext) => {
-                // depend.ml:292-298: `[%extension_constructor C]` depends on
-                // the constructor path.
-                let constructor = match &ext.1 {
-                    Payload::PStr(items)
-                        if items.len() == 1
-                            && matches!(
-                                self.arena.get_string(ext.0.txt),
-                                "ocaml.extension_constructor" | "extension_constructor"
-                            ) =>
-                    {
-                        match &items[0].pstr_desc {
-                            StructureItemDesc::Pstr_eval(inner) => {
-                                match &self.arena.get_expr(inner.0).pexp_desc {
-                                    ExpressionDesc::Pexp_construct(c, args)
-                                        if args.txt.is_empty() =>
-                                    {
-                                        Some(c.txt)
-                                    }
-                                    _ => None,
-                                }
-                            }
-                            _ => None,
-                        }
-                    }
-                    _ => None,
-                };
-                match constructor {
-                    Some(c) => self.add_lident_idx(c),
-                    None => self.handle_extension(ext),
-                }
-            }
+            // depend.ml `Pexp_raw _ | Pexp_todo _ -> ()`.
+            ExpressionDesc::Pexp_raw(_) | ExpressionDesc::Pexp_todo(_) => {}
+            ExpressionDesc::Pexp_extension(ext) => self.handle_extension(ext),
             ExpressionDesc::Pexp_await(expr) => {
                 // expr is ExprIdx
                 let expr = *expr;
@@ -860,6 +870,11 @@ impl<'a> DependencyCollector<'a> {
                     self.add_pat_idx_inner(*pat, unpack_names);
                 }
             }
+            PatternDesc::Ppat_dict(entries) => {
+                for entry in &**entries {
+                    self.add_pat_idx_inner(entry.pdp_pattern, unpack_names);
+                }
+            }
             PatternDesc::Ppat_construct(lid, args) => {
                 self.add_lident_idx(lid.txt);
                 for arg in self.arena.pat_list(args.txt) {
@@ -901,7 +916,7 @@ impl<'a> DependencyCollector<'a> {
                 self.add_pat_idx_inner(pat_idx, unpack_names);
                 self.add_core_type_idx(*ty);
             }
-            PatternDesc::Ppat_type(lid) => {
+            PatternDesc::Ppat_type(lid) | PatternDesc::Ppat_variant_spread(lid) => {
                 self.add_lident_idx(lid.txt);
             }
             PatternDesc::Ppat_unpack(name) => {
@@ -1060,6 +1075,10 @@ impl<'a> DependencyCollector<'a> {
             }
             ModuleExprDesc::Pmod_extension(ext) => {
                 self.handle_extension(ext);
+            }
+            ModuleExprDesc::Pmod_await(me) => {
+                let me = *me;
+                self.add_mod_expr_idx(me);
             }
         }
     }
@@ -1332,15 +1351,17 @@ mod tests {
 
     #[test]
     fn test_nested_module_reference() {
-        // Test: Belt.Array.map extracts "Belt"
+        // Test: Belt.Array.map extracts "Belt" and, like depend.ml
+        // `add_path` for a qualified free path, "Belt.Array".
         let mut arena = ParseArena::default();
         let lid = parse_longident(&mut arena, "Belt.Array.map");
         let expr_idx = make_ident_expr(&mut arena, lid);
         let structure = vec![make_eval_item(expr_idx)];
 
         let deps = extract_structure_deps(&arena, &structure);
-        assert_eq!(deps.len(), 1);
+        assert_eq!(deps.len(), 2);
         assert!(deps.contains("Belt"));
+        assert!(deps.contains("Belt.Array"));
     }
 
     #[test]
@@ -1387,9 +1408,10 @@ mod tests {
         let structure = vec![make_eval_item(e1), make_eval_item(e2), make_eval_item(e3)];
 
         let deps = extract_structure_deps(&arena, &structure);
-        assert_eq!(deps.len(), 3);
+        assert_eq!(deps.len(), 4);
         assert!(deps.contains("Array"));
         assert!(deps.contains("Belt"));
+        assert!(deps.contains("Belt.Array"));
         assert!(deps.contains("Js"));
     }
 

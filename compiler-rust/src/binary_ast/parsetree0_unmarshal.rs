@@ -99,7 +99,7 @@ impl<'a> Decoder<'a> {
 
     fn string(&self, v: &OcamlValue) -> R<String> {
         match v {
-            OcamlValue::String(s) => Ok(s.clone()),
+            OcamlValue::String(s) => Ok(s.to_string()),
             _ => err("string", v),
         }
     }
@@ -979,5 +979,8 @@ pub fn read_ppx_output(data: &[u8], magic: &[u8]) -> Result<PpxOutput, DecodeErr
     let OcamlValue::String(input_name) = input_name else {
         return Err(DecodeError("expected the input file name".to_string()));
     };
-    Ok(PpxOutput { input_name, ast })
+    Ok(PpxOutput {
+        input_name: input_name.to_string(),
+        ast,
+    })
 }

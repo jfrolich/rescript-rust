@@ -30,6 +30,14 @@
    (and :with-test (= 0.29.0)))
   (yojson
    (= 3.0.0))
+  (spawn
+   (= v0.17.0))
+  (cmdliner
+   (= 2.1.1))
+  (luv
+   (= 0.5.14+rescript.1))
+  (re
+   (= 1.14.0))
   (ounit2
    (and :with-test (= 2.2.7)))
   (odoc :with-doc)
@@ -39,12 +47,12 @@
    (and
     (<> :os "win32")
     :with-test
-    (= 6.4.1)))
+    (= 6.5.0)))
   (wasm_of_ocaml-compiler
    (and
     (<> :os "win32")
     :with-test
-    (= 6.4.1)))))
+    (= 6.5.0)))))
 
 (package
  (name analysis)

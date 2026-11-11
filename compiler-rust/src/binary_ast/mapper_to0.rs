@@ -24,6 +24,55 @@ use crate::parser::longident::Longident;
 
 use super::parsetree0 as pt0;
 
+/// `Ast_mapper_to0.spread_marker`: the attribute on the `spread` of the
+/// call encoding a literal with spreads.
+pub const SPREAD_MARKER: &str = "res.spread";
+
+/// `Ast_mapper_to0.spread_call`: v0 has no array or list literals with
+/// spreads, `Pexp_spread`: they're the calls of `Primitive_array.spread` and
+/// `Primitive_list.spread` they used to be parsed into, whose `spread` carries
+/// the `res.spread` marker. The argument is an array of the
+/// `Ast_spread.parts`; `Ast_mapper_from0` decodes the parts with ghost
+/// locations back into the items.
+pub fn spread_call(
+    arena: &mut ParseArena,
+    loc: LocIdx,
+    attrs: current::Attributes,
+    kind: current::SpreadKind,
+    elements: &[current::SpreadElement],
+) -> current::Expression {
+    let marker = arena.intern(SPREAD_MARKER);
+    let module = arena.intern(crate::parser::ast_spread::module_name(kind));
+    let spread = arena.intern("spread");
+    let lid = arena.push_longident(Longident::Ldot(Box::new(Longident::Lident(module)), spread));
+    let funct = arena.push_expr(current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_ident(Located::new(lid, loc)),
+        pexp_loc: loc,
+        pexp_attributes: current::Attributes::from_vec(vec![(
+            crate::parser::core::mknoloc(marker),
+            current::Payload::PStr(Box::default()),
+        )]),
+    });
+    let parts = crate::parser::ast_spread::parts(&mut &mut *arena, kind, elements);
+    let parts = arena.push_expr_list(&parts);
+    let array = arena.push_expr(current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_array(parts),
+        pexp_loc: loc,
+        pexp_attributes: current::Attributes::new(),
+    });
+    let args = arena.push_apply_args(&[(current::ArgLabel::Nolabel, array)]);
+    current::Expression {
+        pexp_desc: current::ExpressionDesc::Pexp_apply(PexpApply {
+            funct,
+            args,
+            partial: false,
+            transformed_jsx: false,
+        }),
+        pexp_loc: loc,
+        pexp_attributes: attrs,
+    }
+}
+
 // ========== Public API ==========
 
 /// Convert a structure from current parsetree to parsetree0
@@ -223,8 +272,8 @@ impl<'a> Mapper<'a> {
 
     // ========== Helper functions ==========
 
-    fn mk_await_attr(&mut self) -> pt0::Attribute {
-        let loc = self.arena.none_loc();
+    /// The `res.await` marker, carrying the await node's location.
+    fn mk_await_attr(&mut self, loc: LocIdx) -> pt0::Attribute {
         (
             OldLocated::new("res.await".to_string(), self.loc(loc)),
             pt0::Payload::PStr(vec![]),
@@ -450,12 +499,6 @@ impl<'a> Mapper<'a> {
             current::Constant::String(payload) => {
                 pt0::Constant::String(payload.source(arena).to_string(), Some("js".to_string()))
             }
-            current::Constant::RawSource(s) => {
-                pt0::Constant::String(arena.get_string(s).to_string(), Some("js".to_string()))
-            }
-            current::Constant::Json(s) => {
-                pt0::Constant::String(arena.get_string(s).to_string(), Some("json".to_string()))
-            }
             current::Constant::Float(s, opt) => {
                 pt0::Constant::Float(arena.get_string(s).to_string(), opt)
             }
@@ -541,6 +584,48 @@ impl<'a> Mapper<'a> {
         }
     }
 
+    /// ast_mapper_to0.ml T.map `Parg_fixed`: v0 spells a fixed argument
+    /// `_ [@as value]`, with `json` as a `json`-delimited string, as before
+    /// `json` was an ordinary tagged template. `@as` and `_` get their own
+    /// locations, from which `Ast_fixed_arg` restores the argument's. `typ`
+    /// is the argument's `_`, already located at the underscore.
+    fn map_fixed_arg(&mut self, fixed: &current::FixedArg, typ: CoreTypeIdx) -> pt0::CoreType {
+        let as_loc = crate::ast_fixed_arg::as_name_loc(self.arena, fixed.loc);
+        let as_attr = match &fixed.value {
+            current::FixedValue::Json(source) => {
+                let name_loc = self.loc(as_loc);
+                let item_loc = self.loc(fixed.value_loc);
+                let source_loc = self.loc(source.loc);
+                let source = self.arena.get_string(source.txt).to_string();
+                (
+                    OldLocated::new("as".to_string(), name_loc),
+                    pt0::Payload::PStr(vec![pt0::StructureItem {
+                        pstr_desc: pt0::StructureItemDesc::Eval(
+                            pt0::Expression {
+                                pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                                    source,
+                                    Some("json".to_string()),
+                                )),
+                                pexp_loc: source_loc,
+                                pexp_attributes: vec![],
+                            },
+                            vec![],
+                        ),
+                        pstr_loc: item_loc,
+                    }]),
+                )
+            }
+            value => {
+                let attr =
+                    crate::ast_fixed_arg::to_attribute(self.arena, value, fixed.value_loc, as_loc);
+                self.map_attribute(&attr)
+            }
+        };
+        let mut typ = self.map_core_type_idx(typ);
+        typ.ptyp_attributes = vec![as_attr];
+        typ
+    }
+
     fn build_arrow_chain(
         &mut self,
         params: &[current::TypeArg],
@@ -561,7 +646,10 @@ impl<'a> Mapper<'a> {
             attrs.extend(arg_attrs);
             attrs
         };
-        let arg_typ = self.map_core_type_idx(arg.typ);
+        let arg_typ = match &arg.fixed {
+            None => self.map_core_type_idx(arg.typ),
+            Some(fixed) => self.map_fixed_arg(fixed, arg.typ),
+        };
         let arrow_loc = if is_head {
             *loc
         } else {
@@ -746,7 +834,51 @@ impl<'a> Mapper<'a> {
 
     /// Map a pattern to parsetree0.
     pub fn map_pattern(&mut self, pat: &current::Pattern) -> pt0::Pattern {
+        if let current::PatternDesc::Ppat_dict(entries) = &pat.ppat_desc {
+            // ast_mapper_to0.ml P.map Ppat_dict: v0 has no dict patterns,
+            // they're open record patterns with a `res.dictPattern` marker.
+            let fields = entries
+                .iter()
+                .map(|entry| current::PatternRecordField {
+                    lid: current::Loc {
+                        txt: self.arena.push_lident_from_idx(entry.pdp_key.txt),
+                        loc: entry.pdp_key.loc,
+                    },
+                    pat: entry.pdp_pattern,
+                    opt: entry.pdp_optional,
+                })
+                .collect::<Vec<_>>();
+            let fields = self.arena.push_pat_field_list(&fields);
+            let marker = self.arena.intern("res.dictPattern");
+            let mut attrs = vec![(
+                crate::parser::core::mknoloc(marker),
+                current::Payload::PStr(Box::default()),
+            )];
+            attrs.extend(pat.ppat_attributes.iter().cloned());
+            let record = current::Pattern {
+                ppat_desc: current::PatternDesc::Ppat_record(Box::new((
+                    fields,
+                    current::ClosedFlag::Open,
+                    None,
+                ))),
+                ppat_loc: pat.ppat_loc,
+                ppat_attributes: current::Attributes::from_vec(attrs),
+            };
+            return self.map_pattern(&record);
+        }
         let mut attrs = self.map_attributes(&pat.ppat_attributes);
+        // ast_mapper_to0.ml P.map Ppat_variant_spread: v0 has no variant
+        // spread pattern, it is `#...t` with a `res.patVariantSpread` marker.
+        if let current::PatternDesc::Ppat_variant_spread(_) = &pat.ppat_desc {
+            let noloc = self.noloc();
+            attrs.insert(
+                0,
+                (
+                    OldLocated::new("res.patVariantSpread".to_string(), noloc),
+                    pt0::Payload::PStr(vec![]),
+                ),
+            );
+        }
         // ast_mapper_to0.ml P.map Ppat_record: the rest row travels as an
         // internal `_res.record_rest` attribute carrying `rest` or
         // `(rest: t)`.
@@ -1126,6 +1258,9 @@ impl<'a> Mapper<'a> {
                     self.map_closed_flag(*flag),
                 )
             }
+            current::PatternDesc::Ppat_dict(_) => {
+                unreachable!("dict patterns are encoded by map_pattern")
+            }
             current::PatternDesc::Ppat_array(pats) => pt0::PatternDesc::Array(
                 self.arena
                     .pat_list(*pats)
@@ -1146,6 +1281,11 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::PatternDesc::Ppat_type(lid) => {
+                pt0::PatternDesc::Type(self.map_longident_loc(lid))
+            }
+            // v0 has no variant spread pattern: it's `#...t` with a
+            // `res.patVariantSpread` marker, added by `map_pattern`.
+            current::PatternDesc::Ppat_variant_spread(lid) => {
                 pt0::PatternDesc::Type(self.map_longident_loc(lid))
             }
             current::PatternDesc::Ppat_unpack(s) => {
@@ -1175,10 +1315,11 @@ impl<'a> Mapper<'a> {
         if let current::ExpressionDesc::Pexp_await(inner_idx) = &expr.pexp_desc {
             // ast_mapper_to0.ml Pexp_await: one v0 attribute slot for two
             // nodes, the await node's own attributes in front of the
-            // `res.await` marker and the inner expression's after it.
+            // `res.await` marker and the inner expression's after it. The
+            // marker carries the await node's location.
             let mut attrs = self.map_attributes(&expr.pexp_attributes);
             let mut inner = self.map_expr_idx(*inner_idx);
-            attrs.push(self.mk_await_attr());
+            attrs.push(self.mk_await_attr(expr.pexp_loc));
             attrs.append(&mut inner.pexp_attributes);
             inner.pexp_attributes = attrs;
             return inner;
@@ -1197,6 +1338,30 @@ impl<'a> Mapper<'a> {
             attrs.append(&mut inner.pexp_attributes);
             inner.pexp_attributes = attrs;
             return inner;
+        }
+        if let current::ExpressionDesc::Pexp_spread(kind, elements) = &expr.pexp_desc {
+            // ast_mapper_to0.ml Pexp_spread: v0 has no spread literals,
+            // they're the calls they used to be parsed into.
+            let elements = self.arena.spread_element_list(*elements).to_vec();
+            let call = spread_call(
+                self.arena,
+                expr.pexp_loc,
+                expr.pexp_attributes.clone(),
+                *kind,
+                &elements,
+            );
+            return self.map_expression(&call);
+        }
+        if let current::ExpressionDesc::Pexp_dict(entries) = &expr.pexp_desc {
+            // ast_mapper_to0.ml Pexp_dict: v0 has no dict literals, they're
+            // the calls they used to be parsed into.
+            let calls = super::ast_dict::to_calls(
+                self.arena,
+                expr.pexp_loc,
+                expr.pexp_attributes.clone(),
+                entries,
+            );
+            return self.map_expression(&calls);
         }
         if let current::ExpressionDesc::Pexp_fun(fun) = &expr.pexp_desc {
             return self.map_fun(expr, fun, owner_idx);
@@ -1233,6 +1398,17 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_for_await_of(inner) => {
                 let (_pat, iterable_idx, _body) = inner.as_ref();
                 let attr = self.mk_for_of_attr("_res.for_await_of", expr.pexp_loc, *iterable_idx);
+                attrs.insert(0, attr);
+            }
+            // ast_mapper_to0.ml Pexp_try: the finally expression travels in a
+            // `_res.finally` attribute located at the finally expression.
+            current::ExpressionDesc::Pexp_try((_, _, Some(finally_idx))) => {
+                let finally_loc = self.arena.get_expr(*finally_idx).pexp_loc;
+                let attr = self.mk_for_of_attr(
+                    crate::binary_ast::mapper_from0::FINALLY_ATTR_NAME,
+                    finally_loc,
+                    *finally_idx,
+                );
                 attrs.insert(0, attr);
             }
             _ => {}
@@ -1296,9 +1472,17 @@ impl<'a> Mapper<'a> {
                 parts.push(self.map_expr_idx(*value));
             }
         }
+        let single = parts.len() == 1;
         let mut parts = parts.into_iter();
         let first = parts.next().expect("a template has at least one segment");
         let mut expression = first;
+        if single {
+            // ast_mapper_to0.ml `[only]`: the constant stands for the whole
+            // template, so it takes the template's location, which includes
+            // the closing backquote. `Ast_mapper_from0` derives the segment's
+            // location from it.
+            expression.pexp_loc = loc;
+        }
         for rhs in parts {
             let template_attr = self.internal_attr("res.template");
             let caret = self.intern("^");
@@ -1378,8 +1562,9 @@ impl<'a> Mapper<'a> {
         }
     }
 
-    /// Build the `_res.for_of` / `_res.for_await_of` attribute used to encode
-    /// `for ... of` / `for await ... of` in the legacy parsetree0 format.
+    /// Build the `_res.for_of` / `_res.for_await_of` / `_res.finally`
+    /// attribute used to encode `for ... of` / `for await ... of` and a try's
+    /// finally block in the legacy parsetree0 format: `PPat (Pat.any (), Some e)`.
     fn mk_for_of_attr(
         &mut self,
         name: &str,
@@ -1516,7 +1701,7 @@ impl<'a> Mapper<'a> {
                 )
             }
             current::ExpressionDesc::Pexp_try(inner) => {
-                let (ref e_idx, ref cases) = *inner;
+                let (ref e_idx, ref cases, _) = *inner;
                 pt0::ExpressionDesc::Try(
                     Box::new(self.map_expr_idx(*e_idx)),
                     self.arena
@@ -1580,6 +1765,12 @@ impl<'a> Mapper<'a> {
                     self.map_longident_loc(lid),
                     Box::new(self.map_expr_idx(*e2_idx)),
                 )
+            }
+            current::ExpressionDesc::Pexp_dict(_) => {
+                unreachable!("dict literals are encoded by map_expression_with_owner")
+            }
+            current::ExpressionDesc::Pexp_spread(..) => {
+                unreachable!("spread literals are encoded by map_expression_with_owner")
             }
             current::ExpressionDesc::Pexp_array(exprs) => pt0::ExpressionDesc::Array(
                 self.arena
@@ -1809,6 +2000,19 @@ impl<'a> Mapper<'a> {
             current::ExpressionDesc::Pexp_extension(ext) => {
                 pt0::ExpressionDesc::Extension(self.map_extension(ext))
             }
+            current::ExpressionDesc::Pexp_raw(raw) => {
+                pt0::ExpressionDesc::Extension(self.map_raw_extension(
+                    crate::ast_raw::extension_name(raw.kind),
+                    raw.name_loc,
+                    &raw.source,
+                ))
+            }
+            // ast_mapper_to0.ml `Pexp_todo`: the extension as parsed.
+            current::ExpressionDesc::Pexp_todo(todo) => {
+                let extension =
+                    crate::ast_todo::to_extension(self.arena, todo.name_loc, todo.message);
+                pt0::ExpressionDesc::Extension(self.map_extension(&extension))
+            }
             current::ExpressionDesc::Pexp_await(e_idx) => {
                 // The complete inner expression receives [@res.await] in
                 // map_expression_with_owner, matching OCaml's mapper.
@@ -1908,7 +2112,11 @@ impl<'a> Mapper<'a> {
         pt0::ValueBinding {
             pvb_pat,
             pvb_expr,
-            pvb_attributes: self.map_attributes(&vb.pvb_attributes),
+            // v0 has no component node: PPXs see the `@react.component`
+            // attribute.
+            pvb_attributes: self.map_attributes(&crate::ast_jsx_component::binding_attributes(
+                self.arena, vb,
+            )),
             pvb_loc: self.loc(vb.pvb_loc),
         }
     }
@@ -2143,6 +2351,17 @@ impl<'a> Mapper<'a> {
     // ========== Module expressions ==========
 
     fn map_module_expr(&mut self, me: &current::ModuleExpr) -> pt0::ModuleExpr {
+        if let current::ModuleExprDesc::Pmod_await(inner_idx) = &me.pmod_desc {
+            // ast_mapper_to0.ml Pmod_await: one v0 attribute slot for two
+            // nodes, in the order of the legacy attribute encoding: the inner
+            // module's attributes, the `res.await` marker (carrying the await
+            // node's location), then the await node's own attributes.
+            let attrs = self.map_attributes(&me.pmod_attributes);
+            let mut inner = self.map_mod_expr_idx(*inner_idx);
+            inner.pmod_attributes.push(self.mk_await_attr(me.pmod_loc));
+            inner.pmod_attributes.extend(attrs);
+            return inner;
+        }
         pt0::ModuleExpr {
             pmod_desc: self.map_module_expr_desc(&me.pmod_desc),
             pmod_loc: self.loc(me.pmod_loc),
@@ -2183,6 +2402,9 @@ impl<'a> Mapper<'a> {
             }
             current::ModuleExprDesc::Pmod_extension(ext) => {
                 pt0::ModuleExprDesc::Extension(self.map_extension(ext))
+            }
+            current::ModuleExprDesc::Pmod_await(_) => {
+                unreachable!("Pmod_await is folded into its operand by map_module_expr")
             }
         }
     }
@@ -2270,7 +2492,9 @@ impl<'a> Mapper<'a> {
                     )
                 }
             },
-            pval_attributes: self.map_attributes(&vd.pval_attributes),
+            pval_attributes: self.map_attributes(
+                &crate::ast_jsx_component::description_attributes(self.arena, vd),
+            ),
             pval_loc: self.loc(vd.pval_loc),
         }
     }
@@ -2349,7 +2573,42 @@ impl<'a> Mapper<'a> {
                     self.map_attributes(attrs),
                 )
             }
+            current::StructureItemDesc::Pstr_raw(raw) => pt0::StructureItemDesc::Extension(
+                self.map_raw_extension("raw", raw.name_loc, &raw.source),
+                self.map_attributes(&raw.attrs),
+            ),
         }
+    }
+
+    /// ast_mapper_to0.ml `raw_extension`: v0 spells raw JavaScript as the
+    /// extension it is written as, with the source in a `js`-delimited
+    /// string.
+    fn map_raw_extension(
+        &mut self,
+        name: &str,
+        name_loc: LocIdx,
+        source: &current::RawSource,
+    ) -> pt0::Extension {
+        let (s, attrs) = match source {
+            current::RawSource::String(s) => (s, vec![]),
+            current::RawSource::Template(s) => (s, vec![self.internal_attr("res.template")]),
+        };
+        let expression = pt0::Expression {
+            pexp_desc: pt0::ExpressionDesc::Constant(pt0::Constant::String(
+                self.arena.get_string(s.txt).to_string(),
+                Some("js".to_string()),
+            )),
+            pexp_loc: self.loc(s.loc),
+            pexp_attributes: attrs,
+        };
+        let payload_loc = crate::ast_raw::payload_loc(self.arena, source);
+        (
+            OldLocated::new(name.to_string(), self.loc(name_loc)),
+            pt0::Payload::PStr(vec![pt0::StructureItem {
+                pstr_desc: pt0::StructureItemDesc::Eval(expression, vec![]),
+                pstr_loc: self.loc(payload_loc),
+            }]),
+        )
     }
 
     // ========== Signature items ==========
@@ -2490,7 +2749,6 @@ mod tests {
         let char = arena.char_constant(65);
         let literal = crate::string_literal::string_from_source("a\\n").expect("valid string");
         let string = current::Constant::String(arena.push_string_literal(&literal));
-        let json = current::Constant::Json(arena.intern_string("{}"));
         let mut mapper = Mapper::new(&mut arena);
 
         let c1 = mapper.map_constant(&integer);
@@ -2503,7 +2761,5 @@ mod tests {
         // under the `js` delimiter, `json` under `json`.
         let c3 = mapper.map_constant(&string);
         assert!(matches!(c3, pt0::Constant::String(s, Some(d)) if s == "a\\n" && d == "js"));
-        let c4 = mapper.map_constant(&json);
-        assert!(matches!(c4, pt0::Constant::String(s, Some(d)) if s == "{}" && d == "json"));
     }
 }

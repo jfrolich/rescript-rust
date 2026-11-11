@@ -43,12 +43,6 @@ let rec struct_const ppf = function
   | Const_js_false -> fprintf ppf "false"
   | Const_js_true -> fprintf ppf "true"
 
-(* let field_kind = function
-   | Pgenval -> "*"
-   | Pintval -> "int"
-   | Pfloatval -> "float"
-   | Pboxedintval bi -> boxed_integer_name bi *)
-
 (* let block_shape ppf shape = match shape with
    | None | Some [] -> ()
    | Some l when List.for_all ((=) Pgenval) l -> ()
@@ -82,8 +76,10 @@ let print_taginfo ppf = function
   | Blk_constructor {name; num_nonconst} ->
     fprintf ppf "%s/%i" name num_nonconst
   | Blk_poly_var -> fprintf ppf "polyvar"
-  | Blk_record {fields = ss} ->
-    fprintf ppf "[%s]" (String.concat ";" (List.map fst (Array.to_list ss)))
+  | Blk_record {fields = ss; array} ->
+    fprintf ppf "%s[%s]"
+      (if array then "array" else "")
+      (String.concat ";" (List.map fst (Array.to_list ss)))
   | Blk_module ss -> fprintf ppf "[%s]" (String.concat ";" ss)
   | Blk_module_export _ -> fprintf ppf "module/exports"
   | Blk_record_inlined {fields = ss} ->
@@ -120,6 +116,16 @@ let primitive ppf = function
   | Precord_rest excluded ->
     fprintf ppf "record_rest(%s)" (String.concat ", " excluded)
   | Pjs_call {prim_name} -> fprintf ppf "js_call[%s]" prim_name
+  | Pjsx {jsx_name; jsx_multi; jsx_fragment; jsx_spread; jsx_props; jsx_key} ->
+    fprintf ppf "jsx[%s%s%s%s%s%s]" jsx_name
+      (if jsx_multi then " multi" else "")
+      (if jsx_fragment then " fragment" else "")
+      (if jsx_spread then " spread" else "")
+      (String.concat ""
+         (List.map
+            (fun (name, optional) -> " " ^ name ^ if optional then "?" else "")
+            jsx_props))
+      (if jsx_key then " key" else "")
   | Pjs_object_create _ -> fprintf ppf "js_obj_create"
   | Pjs_object_get name -> fprintf ppf "js_object_get[%s]" name
   | Pjs_object_set name -> fprintf ppf "js_object_set[%s]" name
@@ -198,11 +204,12 @@ let primitive ppf = function
   | Parrayrefu -> fprintf ppf "array.unsafe_get"
   | Parraysetu -> fprintf ppf "array.unsafe_set"
   | Parrayrefs -> fprintf ppf "array.get"
-  | Parraysets -> fprintf ppf "array.set"
   | Pmakelist -> fprintf ppf "makelist"
   | Pmakedict -> fprintf ppf "makedict"
+  | Pdict_spread -> fprintf ppf "dict.spread"
+  | Parray_spread -> fprintf ppf "array.spread"
+  | Plist_spread -> fprintf ppf "list.spread"
   | Pdict_has -> fprintf ppf "dict.has"
-  | Pisint -> fprintf ppf "isint"
   | Pis_null -> fprintf ppf "is_null"
   | Pis_undefined -> fprintf ppf "is_undefined"
   | Pis_null_undefined -> fprintf ppf "isnullable"
@@ -239,19 +246,13 @@ let function_attribute ppf {inline; is_a_functor; return_unit} =
   | Always_inline -> fprintf ppf "always_inline@ "
   | Never_inline -> fprintf ppf "never_inline@ "
 
-let apply_inlined_attribute ppf = function
-  | Default_inline -> ()
-  | Always_inline -> fprintf ppf " always_inline"
-  | Never_inline -> fprintf ppf " never_inline"
-
 let rec lam ppf = function
   | Lvar id -> Ident.print ppf id
   | Lglobal_module id -> fprintf ppf "global %a" Ident.print id
   | Lconst cst -> struct_const ppf cst
   | Lapply ap ->
     let lams ppf largs = List.iter (fun l -> fprintf ppf "@ %a" lam l) largs in
-    fprintf ppf "@[<2>(apply@ %a%a%a)@]" lam ap.ap_func lams ap.ap_args
-      apply_inlined_attribute ap.ap_info.ap_inlined
+    fprintf ppf "@[<2>(apply@ %a%a)@]" lam ap.ap_func lams ap.ap_args
   | Lfunction {params; body; attr} ->
     let pr_params ppf params =
       List.iter (fun param -> fprintf ppf "@ %a" Ident.print param) params
@@ -352,6 +353,8 @@ let rec lam ppf = function
   | Ltrywith (lbody, param, lhandler) ->
     fprintf ppf "@[<2>(try@ %a@;<1 -1>with %a@ %a)@]" lam lbody Ident.print
       param lam lhandler
+  | Ltryfinally (lbody, lfinally) ->
+    fprintf ppf "@[<2>(try@ %a@;<1 -1>finally@ %a)@]" lam lbody lam lfinally
   | Lifthenelse (lcond, lif, lelse) ->
     fprintf ppf "@[<2>(if@ %a@ %a@ %a)@]" lam lcond lam lif lam lelse
   | Lsequence (l1, l2) -> fprintf ppf "@[<2>(seq@ %a@ %a)@]" lam l1 sequence l2
@@ -378,8 +381,6 @@ and sequence ppf = function
   | Lsequence (l1, l2) -> fprintf ppf "%a@ %a" sequence l1 sequence l2
   | l -> lam ppf l
 
-let structured_constant = struct_const
-
 let lambda = lam
 
 let serialize (filename : string) (l : Lambda.t) : unit =
@@ -392,4 +393,4 @@ let serialize (filename : string) (l : Lambda.t) : unit =
   close_out ou;
   Format.set_margin old
 
-let lambda_to_string = Format.asprintf "%a" lambda
+let lambda_to_string l = Format.asprintf "%a" lambda l

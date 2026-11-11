@@ -431,7 +431,19 @@ impl KeyEncode for crate::lambda::lam_primitive::JsCall {
         self.prim_name.encode(out);
         self.arg_types.encode(out);
         self.ffi.encode(out);
-        self.transformed_jsx.encode(out);
+    }
+}
+
+impl KeyEncode for crate::lambda::lam_primitive::JsxElement {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        self.jsx_name.encode(out);
+        self.jsx_ffi.encode(out);
+        self.jsx_multi.encode(out);
+        self.jsx_fragment.encode(out);
+        self.jsx_spread.encode(out);
+        self.jsx_props.encode(out);
+        self.jsx_children.encode(out);
+        self.jsx_key.encode(out);
     }
 }
 
@@ -510,7 +522,6 @@ impl KeyEncode for crate::lambda::lam_primitive::Primitive {
             Self::Pboolorder => out.tag(20),
             Self::Pboolmin => out.tag(21),
             Self::Pboolmax => out.tag(22),
-            Self::Pisint => out.tag(23),
             Self::Pnegint => out.tag(24),
             Self::Paddint => out.tag(25),
             Self::Psubint => out.tag(26),
@@ -584,10 +595,16 @@ impl KeyEncode for crate::lambda::lam_primitive::Primitive {
             Self::Parrayrefu => out.tag(82),
             Self::Parraysetu => out.tag(83),
             Self::Parrayrefs => out.tag(84),
-            Self::Parraysets => out.tag(85),
             Self::Pmakelist => out.tag(86),
             Self::Pmakedict => out.tag(87),
             Self::PdictHas => out.tag(88),
+            Self::Pjsx(f0) => {
+                out.tag(121);
+                f0.encode(out);
+            }
+            Self::PdictSpread => out.tag(122),
+            Self::ParraySpread => out.tag(123),
+            Self::PlistSpread => out.tag(124),
             Self::Pawait => out.tag(89),
             Self::Pidentity => out.tag(90),
             Self::Pignore => out.tag(91),
@@ -949,9 +966,8 @@ impl KeyEncode for crate::types::variant_runtime::Block {
 impl KeyEncode for crate::types::variant_runtime::BlockType {
     fn encode(&self, out: &mut KeyOut<'_>) {
         match self {
-            Self::Int => out.tag(0),
+            Self::Number => out.tag(0),
             Self::String => out.tag(1),
-            Self::Float => out.tag(2),
             Self::Bigint => out.tag(3),
             Self::Boolean => out.tag(4),
             Self::Instance(f0) => {
@@ -961,36 +977,24 @@ impl KeyEncode for crate::types::variant_runtime::BlockType {
             Self::Function => out.tag(6),
             Self::Object => out.tag(7),
             Self::Unknown => out.tag(8),
+            Self::Symbol => out.tag(9),
         }
     }
 }
 
+/// Encodes what `Instance`'s equality compares: an array's shape
+/// allocation and a class's blocks are not part of the value.
 impl KeyEncode for crate::types::variant_runtime::Instance {
     fn encode(&self, out: &mut KeyOut<'_>) {
         match self {
-            Self::Array => out.tag(0),
-            Self::ArrayBuffer => out.tag(1),
-            Self::BigInt64Array => out.tag(2),
-            Self::BigUint64Array => out.tag(3),
-            Self::Blob => out.tag(4),
-            Self::DataView => out.tag(5),
-            Self::Date => out.tag(6),
-            Self::File => out.tag(7),
-            Self::Float32Array => out.tag(8),
-            Self::Float64Array => out.tag(9),
-            Self::Int16Array => out.tag(10),
-            Self::Int32Array => out.tag(11),
-            Self::Int8Array => out.tag(12),
-            Self::Promise => out.tag(13),
-            Self::RegExp => out.tag(14),
-            Self::Uint16Array => out.tag(15),
-            Self::Uint32Array => out.tag(16),
-            Self::Uint8Array => out.tag(17),
-            Self::Uint8ClampedArray => out.tag(18),
-            Self::Set => out.tag(19),
-            Self::Map => out.tag(20),
-            Self::WeakSet => out.tag(21),
-            Self::WeakMap => out.tag(22),
+            Self::Array(_) => out.tag(0),
+            Self::Class {
+                name, ancestors, ..
+            } => {
+                out.tag(1);
+                name.encode(out);
+                ancestors.encode(out);
+            }
         }
     }
 }
@@ -1029,9 +1033,6 @@ impl KeyEncode for crate::types::variant_runtime::MatchingFacts {
         self.tag_name.encode(out);
         self.block_types.encode(out);
         self.literal_tags.encode(out);
-        self.has_null.encode(out);
-        self.has_undefined.encode(out);
-        self.has_other_literal.encode(out);
     }
 }
 

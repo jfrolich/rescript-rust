@@ -188,7 +188,7 @@ end = struct
     | Tpat_any -> ()
     | Tpat_var _ -> ()
     | Tpat_alias (pat1, _, _) -> iter_pattern pat1
-    | Tpat_constant _ -> ()
+    | Tpat_constant _ | Tpat_interval _ -> ()
     | Tpat_tuple list -> List.iter iter_pattern list
     | Tpat_construct (_, _, args) -> List.iter iter_pattern args
     | Tpat_variant (_, pato, _) -> (
@@ -197,6 +197,8 @@ end = struct
       | Some pat -> iter_pattern pat)
     | Tpat_record (list, _closed, _rest) ->
       List.iter (fun (_, _, pat, _) -> iter_pattern pat) list
+    | Tpat_dict entries ->
+      List.iter (fun {tdp_pattern} -> iter_pattern tdp_pattern) entries
     | Tpat_array list -> List.iter iter_pattern list
     | Tpat_or (p1, p2, _) ->
       iter_pattern p1;
@@ -239,9 +241,10 @@ end = struct
       iter_expression exp;
       iter_cases list1;
       iter_cases list2
-    | Texp_try (exp, list) ->
+    | Texp_try (exp, list, finally) ->
       iter_expression exp;
-      iter_cases list
+      iter_cases list;
+      Option.iter iter_expression finally
     | Texp_tuple list -> List.iter iter_expression list
     | Texp_construct (_, _, args) -> List.iter iter_expression args
     | Texp_variant (_label, expo) -> (
@@ -249,11 +252,7 @@ end = struct
       | None -> ()
       | Some exp -> iter_expression exp)
     | Texp_record {fields; extended_expression; _} -> (
-      Array.iter
-        (function
-          | _, Kept _, _ -> ()
-          | _, Overridden (_, exp), _ -> iter_expression exp)
-        fields;
+      Array.iter (fun (_, _, exp) -> iter_expression exp) fields;
       match extended_expression with
       | None -> ()
       | Some exp -> iter_expression exp)
@@ -262,6 +261,12 @@ end = struct
       iter_expression exp1;
       iter_expression exp2
     | Texp_array list -> List.iter iter_expression list
+    | Texp_dict entries ->
+      List.iter
+        (function
+          | Tdict_entry (_, exp) | Tdict_spread exp -> iter_expression exp)
+        entries
+    | Texp_spread (_, parts) -> List.iter iter_expression parts
     | Texp_ifthenelse (exp1, exp2, expo) -> (
       iter_expression exp1;
       iter_expression exp2;
@@ -302,8 +307,7 @@ end = struct
       iter_extension_constructor cd;
       iter_expression exp
     | Texp_assert exp -> iter_expression exp
-    | Texp_pack mexpr -> iter_module_expr mexpr
-    | Texp_extension_constructor _ -> ());
+    | Texp_pack mexpr -> iter_module_expr mexpr);
     Iter.leave_expression exp
 
   and iter_package_type pack =
