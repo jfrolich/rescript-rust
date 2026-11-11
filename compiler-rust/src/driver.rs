@@ -7488,7 +7488,7 @@ fn build_name_based_coercion(
                 {
                     ModuleCoercion::Tcoerce_alias(
                         EnvRef(0),
-                        crate::types::Path::clone(impl_path),
+                        **impl_path,
                         Box::new(ModuleCoercion::Tcoerce_none),
                     )
                 } else {
@@ -7504,7 +7504,7 @@ fn build_name_based_coercion(
                 // coercion at the same boundary.
                 ModuleCoercion::Tcoerce_alias(
                     EnvRef(0),
-                    crate::types::Path::clone(impl_path),
+                    **impl_path,
                     Box::new(ModuleCoercion::Tcoerce_none),
                 )
             }
@@ -11969,8 +11969,10 @@ mod tests {
     #[test]
     fn finally_block_that_always_throws_has_no_nonreturning_warning() {
         let compile = |source: &str| {
-            let mut options = super::CompilerOptions::default();
-            options.nopervasives = true;
+            let options = super::CompilerOptions {
+                nopervasives: true,
+                ..Default::default()
+            };
             super::compile_source_in_process(
                 &format!(
                     "external throw: exn => 'a = \"%raise\"\nexternal log: int => unit = \"log\"\nexception B\n{source}"
@@ -12003,8 +12005,10 @@ mod tests {
     #[test]
     fn record_literal_missing_labels_with_optional_labels() {
         let compile = |source: &str| {
-            let mut options = super::CompilerOptions::default();
-            options.nopervasives = true;
+            let options = super::CompilerOptions {
+                nopervasives: true,
+                ..Default::default()
+            };
             super::compile_source_in_process(
                 source,
                 "Missing.res",
@@ -12032,8 +12036,10 @@ mod tests {
     #[test]
     fn variant_coercion_explains_inline_record_fields() {
         let compile = |source: &str| {
-            let mut options = super::CompilerOptions::default();
-            options.nopervasives = true;
+            let options = super::CompilerOptions {
+                nopervasives: true,
+                ..Default::default()
+            };
             super::compile_source_in_process(
                 source,
                 "Coerce.res",
@@ -12169,17 +12175,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!("gentype-deferred-{}", std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         let filename = root.join("src/Deferred.res");
-        let mut options = super::CompilerOptions::default();
-        options.gentype_config = Some(std::sync::Arc::new(
-            crate::gentype::config::build_config_from_cli_args(
-                None,
-                &[
-                    "-bs-project-root".to_string(),
-                    root.to_string_lossy().into_owned(),
-                    "-bs-gentype".to_string(),
-                ],
-            ),
-        ));
+        let options = super::CompilerOptions {
+            gentype_config: Some(std::sync::Arc::new(
+                crate::gentype::config::build_config_from_cli_args(
+                    None,
+                    &[
+                        "-bs-project-root".to_string(),
+                        root.to_string_lossy().into_owned(),
+                        "-bs-gentype".to_string(),
+                    ],
+                ),
+            )),
+            ..Default::default()
+        };
         let result = super::compile_source_in_process(
             "@genType(`x`) let x = 1\n",
             &filename.to_string_lossy(),
@@ -12209,17 +12217,19 @@ mod tests {
         let root = std::env::temp_dir().join(format!("gentype-unlocated-{}", std::process::id()));
         std::fs::create_dir_all(root.join("src")).unwrap();
         let filename = root.join("src/Unlocated.res").to_string_lossy().into_owned();
-        let mut options = super::CompilerOptions::default();
-        options.gentype_config = Some(std::sync::Arc::new(
-            crate::gentype::config::build_config_from_cli_args(
-                None,
-                &[
-                    "-bs-project-root".to_string(),
-                    root.to_string_lossy().into_owned(),
-                    "-bs-gentype".to_string(),
-                ],
-            ),
-        ));
+        let options = super::CompilerOptions {
+            gentype_config: Some(std::sync::Arc::new(
+                crate::gentype::config::build_config_from_cli_args(
+                    None,
+                    &[
+                        "-bs-project-root".to_string(),
+                        root.to_string_lossy().into_owned(),
+                        "-bs-gentype".to_string(),
+                    ],
+                ),
+            )),
+            ..Default::default()
+        };
         let registry = crate::cmi::persistent_env::ModuleRegistry::new();
         let compile = |source: &str| {
             let mut parser =
