@@ -9748,6 +9748,17 @@ fn with_deferred_ppx_error<T>(result: PpxResult<T>, arena: &mut ParseArena) -> P
 /// are mapped after the rest of the structure; `let` items and `@res.await`
 /// module aliases bind their mapped item first, and a run of `%%private`
 /// items maps its payload before the rest.
+/// Whether `structure_mapper` maps `item` before the rest of its structure:
+/// a `%%private` run, a `let` item or an `await` module alias
+/// (bs_builtin_ppx.ml:747-829); it maps every other item after the rest.
+fn structure_mapper_maps_head_first(item: &StructureItem, arena: &ParseArena) -> bool {
+    match &item.pstr_desc {
+        StructureItemDesc::Pstr_value(_) => true,
+        StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
+        _ => is_private_extension(item, arena),
+    }
+}
+
 fn structure_mapper_order(structure: &[StructureItem], arena: &ParseArena) -> Vec<usize> {
     let mut order = std::collections::VecDeque::with_capacity(structure.len());
     let mut units = Vec::new();
@@ -9765,13 +9776,7 @@ fn structure_mapper_order(structure: &[StructureItem], arena: &ParseArena) -> Ve
         }
     }
     for &(start, end, private) in units.iter().rev() {
-        let head_first = !private
-            && match &structure[start].pstr_desc {
-                StructureItemDesc::Pstr_value(_) => true,
-                StructureItemDesc::Pstr_module(mb) => is_await_module_alias(mb, arena),
-                _ => false,
-            };
-        if private || head_first {
+        if private || structure_mapper_maps_head_first(&structure[start], arena) {
             for index in (start..end).rev() {
                 order.push_front(index);
             }
@@ -11399,6 +11404,59 @@ let e = () =>
             column("type t = {\n  @foo(let a = %raw(1)) x: @bar(let b = %raw(2)) int,\n}\n"),
             40
         );
+    }
+
+    /// bs_builtin_ppx.ml:883-903 and 770-777: a functor body is not in an
+    /// async context, whatever the context around the functor, and the
+    /// context around it comes back after it; `module M = await List` in a
+    /// structure is checked against the context, before the items of that
+    /// structure mapped after the rest of it.
+    #[test]
+    fn builtin_mapper_gives_a_functor_body_no_async_context() {
+        let check = |source: &str| -> Option<(i32, i32)> {
+            let (mut arena, structure) = parse_structure(source);
+            match rewrite_structure(&structure, &mut arena, false) {
+                Ok(_) => None,
+                Err(error) => {
+                    assert_eq!(
+                        error.message_text(),
+                        AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+                        "{source}"
+                    );
+                    let start = arena.loc_start(error.loc().expect("the error has a location"));
+                    Some((start.line, start.cnum - start.bol))
+                }
+            }
+        };
+        let functor = "module type S = {\n  let p: promise<int>\n}\n";
+        let accepted = [
+            format!("{functor}module F = (X: S) => {{\n  let f = async () => await X.p\n}}\n"),
+            format!(
+                "{functor}module F = (X: S) => {{\n  let x = 1\n}}\nlet v = await Promise.resolve(1)\n"
+            ),
+            "module M = await List\n".to_string(),
+            "let f = async () => {\n  module M = {\n    module L = await List\n  }\n  ()\n}\n"
+                .to_string(),
+        ];
+        for source in &accepted {
+            assert_eq!(check(source), None, "{source}");
+        }
+        let rejected = [
+            (format!("{functor}module F = (X: S) => {{\n  let v = await X.p\n}}\n"), (5, 10)),
+            (
+                format!("{functor}let f = async p => {{\n  module F = (X: S) => {{\n    let v = await X.p\n  }}\n  1\n}}\n"),
+                (6, 12),
+            ),
+            (format!("{functor}module F = (X: S) => {{\n  module L = await List\n}}\n"), (5, 13)),
+            (
+                "let f = values => {\n  module M = {\n    module L = await List\n  }\n  values\n}\n"
+                    .to_string(),
+                (3, 15),
+            ),
+        ];
+        for (source, at) in &rejected {
+            assert_eq!(check(source), Some(*at), "{source}");
+        }
     }
 
     /// bs_builtin_ppx.ml:165-171: a `Pexp_fun` holds all parameters of one

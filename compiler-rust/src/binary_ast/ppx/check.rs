@@ -46,7 +46,32 @@ impl<'a> Checker<'a> {
 
     /// `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:677-810).
     pub(super) fn structure(&mut self, items: &[StructureItem]) -> PpxResult<()> {
+        // bs_builtin_ppx.ml:770-777: `module M = await List` may be in a
+        // functor body or a module in a function, so `structure_mapper`
+        // checks it against the async context when it reaches the item,
+        // which is constant over the structure. That is after the items
+        // before it that are mapped head first, and before every other item.
+        let awaited = if self.async_context {
+            None
+        } else {
+            items.iter().position(|item| {
+                matches!(&item.pstr_desc, StructureItemDesc::Pstr_module(mb)
+                    if awaited_module_path_kind(self.arena.get_mod_expr(mb.pmb_expr), self.arena)
+                        .is_some())
+            })
+        };
         for index in structure_mapper_order(items, self.arena) {
+            if let Some(awaited) = awaited
+                && !(index < awaited && structure_mapper_maps_head_first(&items[index], self.arena))
+            {
+                let StructureItemDesc::Pstr_module(mb) = &items[awaited].pstr_desc else {
+                    unreachable!("the awaited item is a module binding")
+                };
+                return Err(PpxError::at_loc(
+                    self.arena.get_mod_expr(mb.pmb_expr).pmod_loc,
+                    AWAIT_NOT_ASYNC_CONTEXT_ERROR,
+                ));
+            }
             self.structure_mapper_item(&items[index])?;
         }
         Ok(())
@@ -514,12 +539,19 @@ impl<'a> Checker<'a> {
             ModuleExprDesc::Pmod_ident(_) => Ok(()),
             ModuleExprDesc::Pmod_structure(items) => self.structure(items),
             ModuleExprDesc::Pmod_functor(inner) => {
+                // bs_builtin_ppx.ml:886-903: a functor compiles to a JS
+                // function that is not async, so its body is not in an async
+                // context, whatever the context around it. The parameter's
+                // module type is mapped first and keeps the context.
                 let (_name, arg_type, body) = &**inner;
-                self.module_expr(*body)?;
                 if let Some(arg_type) = arg_type {
                     self.module_type(*arg_type)?;
                 }
-                Ok(())
+                let async_saved = self.async_context;
+                self.async_context = false;
+                let result = self.module_expr(*body);
+                self.async_context = async_saved;
+                result
             }
             ModuleExprDesc::Pmod_apply(left, right) => {
                 self.module_expr(*right)?;
