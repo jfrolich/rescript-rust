@@ -5,10 +5,13 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setup } from "#dev/process";
+import { buildRuntimeCopy } from "#dev/runtime";
 
 const root = import.meta.dirname;
 const { bsc } = setup(root);
 const outputDir = path.join(root, "lib");
+/** @type {string} */
+let runtimePath;
 
 /**
  * @param {string} directory
@@ -21,6 +24,8 @@ async function compile(directory, source, includes, extraFlags = []) {
   const stem = path.basename(source, path.extname(source));
   await fs.mkdir(output, { recursive: true });
   const result = await bsc([
+    "-runtime-path",
+    runtimePath,
     "-bs-project-root",
     root,
     "-bs-package-name",
@@ -39,6 +44,7 @@ async function compile(directory, source, includes, extraFlags = []) {
 await fs.rm(outputDir, { recursive: true, force: true });
 
 try {
+  runtimePath = await buildRuntimeCopy(outputDir);
   await compile("dep", "A.resi", ["dep"]);
   await compile("dep", "A.res", ["dep"], ["-bs-read-cmi"]);
   await compile("facade", "Facade.res", ["dep", "facade"]);

@@ -5,6 +5,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { setup } from "#dev/process";
+import { buildRuntimeCopy } from "#dev/runtime";
 
 const { bsc } = setup(import.meta.dirname);
 const formatted = await bsc(["-format", "Main.res"]);
@@ -14,6 +15,7 @@ const generatedDir = await fs.mkdtemp(
   path.join(import.meta.dirname, "generated-"),
 );
 try {
+  const runtimePath = await buildRuntimeCopy(generatedDir);
   const source = path.join(generatedDir, "Main.res");
   await fs.writeFile(source, formatted.stdout);
   const reformatted = await bsc(["-format", source]);
@@ -22,6 +24,8 @@ try {
 
   const compiled = await bsc([
     "-check-lam",
+    "-runtime-path",
+    runtimePath,
     "-bs-project-root",
     import.meta.dirname,
     "-bs-package-name",
