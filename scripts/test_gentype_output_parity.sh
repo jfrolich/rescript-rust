@@ -7,6 +7,9 @@
 # .gen.ts/.gen.tsx files that correspond to local .res/.resi source artifacts
 # from the OCaml compiler against the Rust in-process compiler. Do not add
 # normalization or repo-selection options here.
+#
+# The one exception is GENTYPE_PARITY_WITHOUT_TELLA=1, for CI, which has no
+# Tella checkout: it runs the in-repo suites only and says so in the summary.
 
 set -uo pipefail
 
@@ -28,6 +31,7 @@ REWATCH_BIN="${REWATCH_BIN:-$PROJECT_ROOT/rewatch/target/$REWATCH_TARGET/rescrip
 RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/packages/@rescript/$("$script_dir/platform.sh")/bin/rescript.exe}"
 RESCRIPT_RUNTIME="${RESCRIPT_RUNTIME:-$PROJECT_ROOT/packages/@rescript/runtime}"
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
+WITHOUT_TELLA="${GENTYPE_PARITY_WITHOUT_TELLA:-}"
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/gentype-output"
 export RESCRIPT_RUNTIME
 
@@ -73,7 +77,7 @@ check_prerequisites() {
         missing=true
     fi
 
-    if [[ ! -d "$TELLA_DIR" ]]; then
+    if [[ "$WITHOUT_TELLA" != "1" && ! -d "$TELLA_DIR" ]]; then
         echo -e "${RED}Error: Tella checkout not found at $TELLA_DIR${RESET}" >&2
         echo "This script always includes Tella; set TELLA_DIR to the local checkout before running." >&2
         missing=true
@@ -599,7 +603,11 @@ echo "Cache:          $CACHE_DIR"
 
 run_suite "typescript-react-example" "$PROJECT_ROOT/tests/gentype_tests/typescript-react-example"
 run_suite "stdlib-no-shims" "$PROJECT_ROOT/tests/gentype_tests/stdlib-no-shims"
-run_suite "tella" "$TELLA_DIR"
+if [[ "$WITHOUT_TELLA" == "1" ]]; then
+    echo -e "${YELLOW}Skipping the Tella suite (GENTYPE_PARITY_WITHOUT_TELLA=1)${RESET}"
+else
+    run_suite "tella" "$TELLA_DIR"
+fi
 
 echo ""
 echo -e "${BOLD}GenType parity summary${RESET}"
