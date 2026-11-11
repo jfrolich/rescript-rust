@@ -113,10 +113,10 @@ for file in "${files[@]}"; do
   $RES_PARSER $file &> $(out $file) & maybeWait
 done
 
-# printing with ast conversion
-listFiles syntax_tests/data/ast-mapping
+# printing with JSX v4
+listFiles syntax_tests/data/printer-jsx4
 for file in "${files[@]}"; do
-  $RES_PARSER -test-ast-conversion -jsx-version 4 $file &> $(out $file) & maybeWait
+  $RES_PARSER -jsx-version 4 $file &> $(out $file) & maybeWait
 done
 
 # printing with ppx

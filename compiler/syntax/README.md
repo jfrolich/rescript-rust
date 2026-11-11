@@ -70,10 +70,11 @@ A syntax change can affect more than the grammar. Check each relevant layer:
    construct;
 6. parser, round-trip, type-error, and end-to-end tests.
 
-Do not modify `compiler/ml/parsetree0.ml`. It is the frozen input/output shape
-for existing PPX integrations. When the current parsetree changes, define an
-explicit compatibility mapping in both directions; do not use a wildcard to
-discard a new construct.
+`compiler/ml/parsetree0.ml` is no longer a frozen PPX contract: PPX is not
+supported going forward. External `-ppx` flags and the builtin Spice mapper
+still round-trip through it, so when the current parsetree changes, map the new
+construct in both directions (or change `parsetree0`); do not use a wildcard to
+discard it.
 
 Parser tests should cover valid input, recovery from invalid input, printing,
 and comment placement where applicable. Run the round-trip suite whenever a

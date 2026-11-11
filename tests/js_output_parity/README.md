@@ -25,7 +25,7 @@ Run the broader local JS output gate, which includes these fixtures first and
 then the 660 snapshot files:
 
 ```bash
-./scripts/test_js_output_parity.sh --skip-spice-ppx
+./scripts/test_js_output_parity.sh
 ```
 
 Each source listed in `cases.tsv` is compiled in these fixture modes:
