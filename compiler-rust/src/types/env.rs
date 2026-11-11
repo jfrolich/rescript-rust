@@ -490,6 +490,83 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
+/// The persistent map of one layer of an Env table. It allocates nothing
+/// until its first insertion: every `open` starts a new layer in each of the
+/// environment's tables, most layers never get a binding of their own, and
+/// an empty persistent map still owns a root node and a hasher.
+#[derive(Clone)]
+struct LayerMap<K, V>(Option<PersistentHashMap<K, V>>);
+
+impl<K, V> std::fmt::Debug for LayerMap<K, V>
+where
+    K: std::fmt::Debug + std::hash::Hash + Eq,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(map) => map.fmt(f),
+            None => f.write_str("{}"),
+        }
+    }
+}
+
+impl<K, V> Default for LayerMap<K, V> {
+    fn default() -> Self {
+        LayerMap(None)
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> LayerMap<K, V> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.0.as_ref().is_none_or(|map| map.is_empty())
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |map| map.len())
+    }
+
+    #[inline]
+    fn get(&self, key: &K) -> Option<&V> {
+        self.0.as_ref()?.get(key)
+    }
+
+    #[inline]
+    fn contains_key(&self, key: &K) -> bool {
+        self.0.as_ref().is_some_and(|map| map.contains_key(key))
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.0.as_mut()?.get_mut(key)
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.0.get_or_insert_with(Default::default).insert(key, value);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().flat_map(|map| map.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+
+    /// Whether both are the same map, sharing every node.
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => left.ptr_eq(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Same-name bindings in an Env table, oldest first. Most names are bound
 /// once, so a single binding is stored inline; a name bound again moves its
 /// bindings to a shared vector, so copying a persistent-map node on insert
@@ -571,7 +648,7 @@ fn recent_name_bit(name: Name) -> u64 {
 /// map is copied once per batch. Every reader looks in the list first.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
+    current: LayerMap<Name, IdBucket<T>>,
     recent: Option<std::rc::Rc<Recent<T>>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
@@ -579,7 +656,7 @@ pub struct IdTbl<T> {
 impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
+            current: LayerMap::default(),
             recent: None,
             opened: None,
         }
@@ -676,7 +753,7 @@ impl<T: Clone> IdTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
+            current: LayerMap::default(),
             recent: None,
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
@@ -998,18 +1075,18 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
+    current: LayerMap<Name, IdBucket<T>>,
     /// Order in which each name of `current` was first added: the `Ident.add`
     /// sequence that shapes OCaml's AVL tree (compiler/ext/ident.ml:144-150).
-    current_first_add: PersistentHashMap<Name, i32>,
+    current_first_add: LayerMap<Name, i32>,
     opened: Option<Arc<TycompOpened<T>>>,
 }
 
 impl<T: Clone> TycompTbl<T> {
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
             opened: None,
         }
     }
@@ -1042,8 +1119,8 @@ impl<T: Clone> TycompTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
             opened: Some(Arc::new(TycompOpened {
                 components,
                 next: Arc::new(next),
@@ -3214,6 +3291,45 @@ mod tests {
         assert_eq!(tbl.find_all("x"), vec![&2, &1]);
         assert_eq!(snapshot.find_all("x"), vec![&1]);
         assert_eq!(snapshot.find_by_name("z"), None);
+    }
+
+    #[test]
+    fn a_table_layer_has_no_map_until_a_binding_is_moved_into_it() {
+        let mut values: IdTbl<i32> = IdTbl::new();
+        assert!(values.current.0.is_none());
+        let first = Ident::create_local("x");
+        values.add(first, 1);
+        assert!(
+            values.current.0.is_none(),
+            "a recent binding needs no map"
+        );
+        for n in 1..RECENT_LIMIT {
+            values.add(Ident::create_local("y"), n as i32);
+        }
+        assert!(values.current.0.is_some());
+        assert_eq!(values.current.len(), 2);
+
+        // An open starts a new layer, which again has no map; the layer
+        // below keeps its own.
+        let root = Path::pident(Ident::create_persistent("Opened"));
+        values.add_open_layer(root, vec![(Ident::create_persistent("z"), 7, 0)], None);
+        assert!(values.current.0.is_none() && values.current.is_empty());
+        assert_eq!(values.find_by_name("x"), Some(&1));
+        assert_eq!(values.find_by_ident(&first), Some(&1));
+        assert_eq!(values.find_by_name("z"), Some(&7));
+        // Every binding of both layers: `x`, each `y` and the opened `z`.
+        assert_eq!(values.iter().count(), RECENT_LIMIT as usize + 1);
+
+        let mut labels: TycompTbl<i32> = TycompTbl::new();
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), None);
+        assert!(labels.fold_name_order().is_empty());
+        labels.add(Ident::create_local("l"), 1);
+        assert!(labels.current.0.is_some() && labels.current_first_add.0.is_some());
+        labels.add_open_layer(vec![(Ident::create_persistent("m"), 2)], None);
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), Some(&1));
+        assert_eq!(labels.find_all("m"), vec![&2]);
     }
 
     #[test]
