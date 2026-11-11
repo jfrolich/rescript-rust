@@ -1682,7 +1682,17 @@ impl PersistentEnv {
             // Preparing a module is an effect on this compilation; later users
             // of the shared data replay it (`StoreEffect::PreparePers`).
             ctx.record_store_effect(crate::types::context::StoreEffect::PreparePers(name.into()));
-            return ctx.suspend_store_build(|| self.find_pers_struct(name, ctx));
+            let ps = ctx.suspend_store_build(|| self.find_pers_struct(name, ctx));
+            // A unit type checked from source belongs to this compilation,
+            // not to the worker store: what is being built from it must not
+            // be shared with the next compilation on this thread.
+            if ps
+                .as_ref()
+                .is_some_and(|ps| !ctx.thread_store().owns_signature(&ps.ps_sig))
+            {
+                ctx.poison_store_build_for("find_pers_struct:local-unit");
+            }
+            return ps;
         }
         let ps = self.find_pers_struct_unrecorded(name, ctx)?;
         self.record_import(&ps);
