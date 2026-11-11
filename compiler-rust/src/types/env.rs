@@ -530,14 +530,49 @@ impl<T> std::ops::Deref for IdBucket<T> {
     }
 }
 
+/// A binding added to an `IdTbl` since its map was last extended, heading
+/// the list of the bindings added before it.
+#[derive(Debug)]
+struct Recent<T> {
+    id: Ident,
+    value: T,
+    next: Option<std::rc::Rc<Recent<T>>>,
+    /// Bindings in the list headed by this one.
+    len: u32,
+    /// One bit per name bound in the list headed by this one (see
+    /// `recent_name_bit`): a lookup of a name whose bit is clear skips the
+    /// list.
+    names: u64,
+}
+
+/// How many bindings an `IdTbl` keeps in its recent list before moving them
+/// into its map. Larger batches copy the map less often but make every
+/// lookup of a listed name walk further; 16 measured best of 8 to 64 on a
+/// 3,735-module application.
+const RECENT_LIMIT: u32 = 16;
+
+#[inline]
+fn recent_name_bit(name: Name) -> u64 {
+    1 << (name.content_hash() & 63)
+}
+
 /// A table of bindings indexed by identifier.
 ///
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
 /// open is represented symbolically as an `opened` layer rather than flattening
 /// every opened binding into the same name map with an origin boolean.
+///
+/// The local bindings are a persistent map plus the list of the bindings
+/// added since the map was last extended, newest first. Every snapshot of an
+/// environment keeps its version of the table alive, and adding to a shared
+/// map copies whole map nodes, which the snapshot then holds until the module
+/// is torn down. Adding to the list allocates one small node instead; the
+/// list is moved into the map once it holds `RECENT_LIMIT` bindings, so the
+/// map is copied once per batch. Every reader looks in the list first.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
     current: PersistentHashMap<Name, IdBucket<T>>,
+    recent: Option<std::rc::Rc<Recent<T>>>,
     opened: Option<Arc<IdOpened<T>>>,
 }
 
@@ -545,11 +580,69 @@ impl<T: Clone> IdTbl<T> {
     pub fn new() -> Self {
         Self {
             current: PersistentHashMap::default(),
+            recent: None,
             opened: None,
         }
     }
 
     pub fn add(&mut self, id: Ident, value: T) {
+        let (len, names) = self
+            .recent
+            .as_ref()
+            .map_or((0, 0), |recent| (recent.len, recent.names));
+        self.recent = Some(std::rc::Rc::new(Recent {
+            names: names | recent_name_bit(id.name_atom()),
+            len: len + 1,
+            id,
+            value,
+            next: self.recent.take(),
+        }));
+        if len + 1 >= RECENT_LIMIT {
+            self.move_recent_to_map();
+        }
+    }
+
+    /// Move the recent bindings into the map, oldest first.
+    fn move_recent_to_map(&mut self) {
+        let mut next = self.recent.take();
+        let mut newest_first = Vec::with_capacity(next.as_ref().map_or(0, |r| r.len as usize));
+        while let Some(node) = next {
+            // A snapshot may still hold the list; then copy the binding out.
+            match std::rc::Rc::try_unwrap(node) {
+                Ok(node) => {
+                    newest_first.push((node.id, node.value));
+                    next = node.next;
+                }
+                Err(node) => {
+                    newest_first.push((node.id, node.value.clone()));
+                    next = node.next.clone();
+                }
+            }
+        }
+        for (id, value) in newest_first.into_iter().rev() {
+            self.add_to_map(id, value);
+        }
+    }
+
+    /// The recent bindings of `key`, newest first.
+    #[inline]
+    fn recent_named(&self, key: Name) -> impl Iterator<Item = (&Ident, &T)> {
+        let bit = recent_name_bit(key);
+        let has_name = move |node: &&Recent<T>| node.names & bit != 0;
+        std::iter::successors(self.recent.as_deref().filter(has_name), move |node| {
+            node.next.as_deref().filter(has_name)
+        })
+        .filter(move |node| node.id.name_atom() == key)
+        .map(|node| (&node.id, &node.value))
+    }
+
+    /// Every recent binding, newest first.
+    fn recent_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
+        std::iter::successors(self.recent.as_deref(), |node| node.next.as_deref())
+            .map(|node| (&node.id, &node.value))
+    }
+
+    fn add_to_map(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         // `get_mut` copies the shared map path even when the key is absent,
         // so probe first: most added names are new.
@@ -584,6 +677,7 @@ impl<T: Clone> IdTbl<T> {
         let next = std::mem::take(self);
         *self = Self {
             current: PersistentHashMap::default(),
+            recent: None,
             opened: Some(Arc::new(IdOpened {
                 root: Some(root),
                 components,
@@ -602,10 +696,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
-        if self
-            .current
-            .get(&key)
-            .is_some_and(|entries| !entries.is_empty())
+        if self.recent_named(key).next().is_some()
+            || self
+                .current
+                .get(&key)
+                .is_some_and(|entries| !entries.is_empty())
         {
             return None;
         }
@@ -620,23 +715,30 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
+        let stamp = id.stamp();
+        let is_id = |entry_id: &Ident| {
+            if stamp == 0 {
+                entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
+            } else {
+                entry_id.same(id) && entry_id.name_atom() == id.name_atom()
+            }
+        };
+        if let Some((_, value)) = self
+            .recent_named(id.name_atom())
+            .find(|(entry_id, _)| is_id(entry_id))
+        {
+            return Some(value);
+        }
         // Opening a module starts a fresh, usually empty, local layer; skip
         // hashing the name for those.
         if self.current.is_empty() {
             return None;
         }
-        let stamp = id.stamp();
         self.current.get(&id.name_atom()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
-                .find(|(entry_id, _)| {
-                    if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
-                    } else {
-                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
-                    }
-                })
+                .find(|(entry_id, _)| is_id(entry_id))
                 .map(|(_, value)| value)
         })
     }
@@ -646,6 +748,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
+        if let Some(found) = self.recent_named(key).next() {
+            return Some(found);
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -675,6 +780,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
+        if let Some((id, value)) = self.recent_named(key).next() {
+            return Some((Path::pident(*id), value));
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -727,6 +835,10 @@ impl<T: Clone> IdTbl<T> {
     where
         F: FnMut(&T) -> T,
     {
+        // The map holds the bindings that can be changed in place.
+        if self.recent_named(key).next().is_some() {
+            self.move_recent_to_map();
+        }
         if self.current.contains_key(&key)
             && let Some(entries) = self.current.get_mut(&key)
             && let Some((id, value)) = entries.last_mut()
@@ -758,6 +870,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
+        items.extend(self.recent_named(key).map(|(_, value)| value));
         if let Some(entries) = self.current.get(&key) {
             items.extend(entries.iter().rev().map(|(_, value)| value));
         }
@@ -780,6 +893,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
+        items.extend(self.recent_entries());
         for entries in self.current.values() {
             items.extend(entries.iter().map(|(id, value)| (id, value)));
         }
@@ -799,7 +913,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
-        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
+        // Read the local layer as one map, so the names come out in the
+        // order they would without a recent list.
+        let mut local = self.clone();
+        local.move_recent_to_map();
+        names.extend(ident_tbl_fold_name_order(local.current.iter().map(
             |(name, entries)| {
                 (
                     name.as_str(),
@@ -834,12 +952,18 @@ impl<T: Clone> IdTbl<T> {
         shadowing_opens: &mut Vec<&'a OpenedMap<(Ident, T, i32)>>,
         items: &mut Vec<(&'a Ident, &'a T)>,
     ) {
-        for (name, entries) in self.current.iter() {
+        // Newest first, so the first binding seen for a name is its latest.
+        let recent = self.recent_entries();
+        let mapped = self
+            .current
+            .values()
+            .filter_map(|entries| entries.last().map(|(id, value)| (id, value)));
+        for (id, value) in recent.chain(mapped) {
+            let name = id.name_atom();
             if !shadowing_opens
                 .iter()
-                .any(|opened| opened.contains_key(name))
-                && seen.insert(*name)
-                && let Some((id, value)) = entries.last()
+                .any(|opened| opened.contains_key(&name))
+                && seen.insert(name)
             {
                 items.push((id, value));
             }
@@ -2992,6 +3116,119 @@ mod tests {
                 "predef declarations live in the worker store"
             );
         }
+    }
+
+    /// Everything a reader can ask an `IdTbl`, in a comparable form.
+    fn id_tbl_readings(tbl: &IdTbl<i32>, names: &[&str], ids: &[Ident]) -> Vec<String> {
+        let mut readings = Vec::new();
+        for name in names {
+            readings.push(format!(
+                "{name}: {:?} {:?} {:?} {:?}",
+                tbl.find_by_name_with_id(*name),
+                tbl.find_by_name_with_path(*name),
+                tbl.find_all(*name),
+                tbl.open_slot_use(*name),
+            ));
+        }
+        for id in ids {
+            readings.push(format!("{id:?}: {:?}", tbl.find_by_ident(id)));
+        }
+        let mut all: Vec<_> = tbl.iter().map(|(id, value)| (id.stamp(), *value)).collect();
+        all.sort_unstable();
+        readings.push(format!("all: {all:?}"));
+        let mut visible: Vec<_> = tbl
+            .visible_local_entries()
+            .map(|(id, value)| (id.stamp(), *value))
+            .collect();
+        visible.sort_unstable();
+        readings.push(format!("visible: {visible:?}"));
+        readings.push(format!("fold order: {:?}", tbl.fold_name_order()));
+        readings
+    }
+
+    #[test]
+    fn recent_bindings_read_like_map_bindings() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "opened", "missing"];
+        // `listed` adds through the recent list, `mapped` straight to the map.
+        let mut listed = IdTbl::new();
+        let mut mapped = IdTbl::new();
+        let mut ids = vec![Ident::create_local("missing")];
+        let steps = 3 * RECENT_LIMIT as usize + 5;
+        for step in 0..steps {
+            if step == RECENT_LIMIT as usize + 3 {
+                // An open in the middle of a batch: the bindings before it
+                // stay readable below the opened layer.
+                let root = Path::pident(Ident::create_persistent("Opened"));
+                for tbl in [&mut listed, &mut mapped] {
+                    let components = vec![
+                        (Ident::create_persistent("opened"), -1, 0),
+                        (Ident::create_persistent("a"), -2, 1),
+                    ];
+                    tbl.add_open_layer(root, components, Some(7));
+                }
+            }
+            // Rebind a few names many times, in an irregular order.
+            let id = Ident::create_local(names[(step * 5 + step / 4) % 7]);
+            ids.push(id);
+            listed.add(id, step as i32);
+            mapped.add_to_map(id, step as i32);
+            assert_eq!(
+                id_tbl_readings(&listed, &names, &ids),
+                id_tbl_readings(&mapped, &names, &ids),
+                "after {} additions",
+                step + 1
+            );
+        }
+        assert!(
+            mapped.recent.is_none() && listed.recent.is_some(),
+            "the comparison must end with bindings still in the list"
+        );
+    }
+
+    #[test]
+    fn adding_to_a_table_leaves_a_snapshot_and_its_map_alone() {
+        let mut tbl = IdTbl::new();
+        let first = Ident::create_local("x");
+        tbl.add(first, 1);
+        tbl.move_recent_to_map();
+        let snapshot = tbl.clone();
+
+        let second = Ident::create_local("x");
+        tbl.add(second, 2);
+        tbl.add(Ident::create_local("y"), 3);
+        assert!(
+            tbl.current.ptr_eq(&snapshot.current),
+            "a binding added after a snapshot must not copy the map"
+        );
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_by_ident(&first), Some(&1));
+        assert_eq!(snapshot.find_by_name_with_id("x"), Some((&first, &1)));
+        assert_eq!(snapshot.find_by_name("y"), None);
+
+        // Filling the batch moves it into the table's own copy of the map.
+        for n in 0..RECENT_LIMIT {
+            tbl.add(Ident::create_local("z"), 10 + n as i32);
+        }
+        assert!(!tbl.current.ptr_eq(&snapshot.current));
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_all("x"), vec![&2, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&1]);
+        assert_eq!(snapshot.find_by_name("z"), None);
+    }
+
+    #[test]
+    fn updating_a_recent_binding_leaves_a_snapshot_alone() {
+        let mut tbl = IdTbl::new();
+        tbl.add(Ident::create_local("x"), 1);
+        let id = Ident::create_local("x");
+        tbl.add(id, 2);
+        let snapshot = tbl.clone();
+
+        let updated = tbl.update_by_name("x", &mut |value| value * 10);
+        assert_eq!(updated, Some((id, 20)));
+        assert_eq!(tbl.find_all("x"), vec![&20, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&2, &1]);
+        assert_eq!(tbl.update_by_name("unbound", &mut |value| *value), None);
     }
 
     #[test]
