@@ -28,6 +28,13 @@ compiler. Read that first.
   `res.hole` with the expression as payload, where an expression, a type or
   a pattern is expected. The scanner did not accept `$` outside template
   strings before, so no existing source changes meaning.
+- `${...expr}` is a splice hole, the extension `res.hole.splice`. It parses
+  where a hole does, and in two places of its own: as a row of a record
+  (`{a: 1, ${...rest}}`, a field named `res.hole.splice` whose value is the
+  extension) and as a case of a switch (a case without a bar, with the
+  pattern `_` and the extension as its right-hand side). A block does not continue into a splice
+  hole, so one after a case is the next case and not an expression of that
+  case's body.
 - `%code(...)` has the ordinary payload of an extension: an expression or
   structure items. `%type(...)` takes a type and `%pat(...)` a pattern.
 - An extension whose name starts with an uppercase letter takes
@@ -144,6 +151,27 @@ expression check as `code<'a>`, `typ` or `pat`; `__holeItem` is for a hole
 that stands where a whole declaration does. A quote of declarations lowers
 to `__quoteDecls`. At run time a quote is string concatenation, with
 parentheses around each filled hole except a declaration.
+
+A splice hole is lowered by the list it is an item of, which the scan of a
+quote records for each one (`SplicePlace`):
+
+| The list | The hole becomes | Its argument |
+| --- | --- | --- |
+| Arguments of a call or a constructor, items of an array or a tuple | `Macro.__spliceItems(items, trailing)` | `array<code<'a>>` |
+| Fields of a record | `Macro.__spliceEntries(entries, trailing)` | `array<Code.entry>` |
+| Cases of a switch | `Macro.__spliceCases(cases)` | `array<(pat, code<'a>)>` |
+
+The operands of an operator are an application as well, and are not a list:
+`1 + ${...xs}` is not a place for a splice. The comma after a hole of items
+or entries belongs to the hole (`trailing`), which writes it when it has
+items: a hole with none leaves no comma in the text. A splice hole in any
+other place is left in the lowered code, where `quote::stray_splice` finds
+it and expansion reports it at its position, as it does for one outside a
+quote.
+
+A record value is built from entries (`Code.entry`, `Code.entryOf`,
+`Code.spread`): `Code.record` and a splice hole in a record both take them,
+and both put a spread before the fields, where the syntax wants it.
 
 While it copies a piece, the lowering puts the file's module name in front
 of the top-level value and module names of the macro's own file, so that

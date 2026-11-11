@@ -84,6 +84,9 @@ code. `%type(...)` and `%pat(...)` quote a type and a pattern.
 A quote is checked for syntax where it is written. Its types are checked
 where the macro is used, after the holes are filled.
 
+A hole stands for one thing. `${...items}` is a splice hole: it stands for
+any number of items of a list. See [Lists in a quote](#lists-in-a-quote).
+
 <!-- example: debug -->
 
 ```rescript
@@ -276,10 +279,9 @@ let fromJson = (json: code<JSON.t>): code<'a> =>
     )
   | Record({fields}) =>
     Code.record(
-      fields->Array.map(f => (
-        f.name,
-        %code((fromJson(field(${json}, ${Code.string(f.jsName)})): ${f.typ})),
-      )),
+      fields->Array.map(f =>
+        Code.entryOf(f, %code((fromJson(field(${json}, ${Code.string(f.jsName)})): ${f.typ})))
+      ),
     )
   // ...
   }
@@ -289,6 +291,10 @@ let user: user = Decode.fromJson(json)
 ```
 
 <!-- /example -->
+
+`Code.entryOf(f, value)` is the field `f` of a record value. The next
+sections are about it: [a record built from data](#a-record-built-from-data)
+and [optional fields](#optional-fields).
 
 The same idea gives a value for every type:
 
@@ -322,6 +328,90 @@ let equal = (a: code<'a>, b: code<'a>): code<bool> =>
 
 <!-- /example -->
 
+### A record built from data
+
+A quote has the shape it is written with. A record whose fields are known
+only when the macro runs is built from entries, one per field.
+`Code.entry(name, value)` is `name: value` and `Code.spread(value)` is
+`...value`. The values can have different types: the record is type checked
+where the macro is used.
+
+<!-- example: record -->
+
+```rescript
+// Convert.res: a record of the expected type, from the fields of another
+@generic
+let to = (value: code<'a>): code<'b> =>
+  switch (Type.info(typeOf(value)), Type.info(expected())) {
+  | (Record({fields: sources}), Record({fields: targets})) =>
+    Code.record(
+      targets->Array.filterMap(target => {
+        let read = value->Code.field(target.name)
+        switch sources->Array.find(source => source.name == target.name) {
+        | Some({optional: false}) => Some(Code.entry(target.name, read))
+        | Some(_) if target.optional => Some(Code.entry(target.name, read, ~optional=true))
+        | None if target.optional => None
+        // ... the other two are errors at the call
+        }
+      }),
+    )
+  | _ => error("Convert.to converts a record to a record")
+  }
+
+// Main.res
+let shown: publicUser = Convert.to(ada)
+```
+
+<!-- /example -->
+
+`~optional=true` writes `name: ?value`: the value is an option, and `None`
+leaves the field out of the record.
+
+### Lists in a quote
+
+`${...items}` is a splice hole. It stands for any number of items of a list
+in a quote, and the rest of the quote stays ordinary code. What it takes
+follows from the list it is in:
+
+| The list | The hole takes | |
+| --- | --- | --- |
+| Arguments of a call or a constructor, items of an array or a tuple | `array<code<'a>>` | `f(${...args})`, `[first, ${...rest}]` |
+| Fields of a record | `array<Code.entry>` | `{id: 1, ${...fields}}` |
+| Cases of a switch | `array<(pat, code<'a>)>` | `switch x { ${...cases} }` |
+
+<!-- example: splice -->
+
+```rescript
+// Fields of a record, after fields the quote writes itself.
+@generic
+let withKey = (value: code<'a>, key: code<string>): code<'b> =>
+  switch Type.info(typeOf(value)) {
+  | Record({fields}) =>
+    let rest = fields->Array.map(f => Code.entryOf(f, value->Code.field(f.name)))
+    %code({key: ${key}, version: 1, ${...rest}})
+  | _ => error("Splice.withKey needs a record")
+  }
+
+// Cases of a switch, before a case of the quote.
+let cases = constructors->Array.map(c => (
+  Pat.string(String.toLowerCase(c.name)),
+  %code(Some(${Code.ident(c.name)})),
+))
+%code(
+  switch String.toLowerCase(${text}) {
+  ${...cases}
+  | _ => None
+  }
+)
+```
+
+<!-- /example -->
+
+A splice hole with no items leaves nothing behind, the comma after it
+included. Items of different types go in one array as `Code.untyped(item)`.
+A splice hole that is not in one of these lists is an error where it is
+written.
+
 ### Declarations from a type
 
 A macro attached to a type receives the declaration and returns
@@ -335,17 +425,18 @@ let derive = (t: Type.decl): decls =>
   switch Type.info(t.typ) {
   | Variant({constructors}) =>
     let label = (c: Type.constructor) => c.attrs->Attr.string("Enum.label")->Option.getOr(c.jsName)
-    let toString = Code.switch_(
-      %code(value),
-      constructors->Array.map(c => {
-        let (pattern, _) = Pat.constructor(c)
-        (pattern, Code.string(label(c)))
-      }),
-    )
+    // One case per constructor: a pattern and the code of the case.
+    let names = constructors->Array.map(c => {
+      let (pattern, _) = Pat.constructor(c)
+      (pattern, Code.string(label(c)))
+    })
     %code(
-      let ${Pat.var(t.name ++ "ToString")} = (value: ${t.typ}): string => ${toString}
+      let ${Pat.var(t.name ++ "ToString")} = (value: ${t.typ}): string =>
+        switch value {
+        ${...names}
+        }
       let ${Pat.var(t.name ++ "Values")}: array<${t.typ}> =
-        ${Code.array(constructors->Array.map(c => Code.ident(c.name)))}
+        [${...constructors->Array.map(c => Code.ident(c.name))}]
     )
   | _ => error("Enum.derive needs a variant type")
   }
@@ -386,7 +477,7 @@ A macro in a type position takes types and returns a type.
 @macro
 let t = (source: typ): typ =>
   switch Type.info(source) {
-  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | Record({fields}) => Type.record(fields->Array.map(Type.optional))
   | _ => error(`Partial.t needs a record type, and ${Type.name(source)} is not one`)
   }
 
@@ -395,6 +486,89 @@ type userPatch = %Partial.t(user)
 ```
 
 <!-- /example -->
+
+### Optional fields
+
+The `typ` of a field is the type of `value.field`. For `nickname?: string`
+that is `option<string>`, and `optional` is true. Everything that reads,
+writes, binds or declares a field agrees with that type:
+
+| | For `nickname?: string` |
+| --- | --- |
+| `value->Code.field(f.name)` | Code of type `option<string>`. |
+| `Code.entryOf(f, value)` | `nickname: ?value`, for a value of type `option<string>`. `None` leaves the field out. |
+| `Pat.constructor(c)` | Binds the field of an inline record as an `option<string>`. |
+| `Type.record([f])` | Declares `nickname?: string`. |
+| `Type.optional(f)`, `Type.required(f)` | `age?: int` from `age: int`, and back. The `typ` follows. |
+
+A macro that treats every field the same is right for optional fields
+without a special case. It looks at `f.optional` when it wants to do
+something else for them.
+
+<!-- example: optional -->
+
+```rescript
+// %Patch.t(user): every field optional
+@macro
+let t = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(Type.optional))
+  | _ => error(`Patch.t needs a record type, and ${Type.name(source)} is not one`)
+  }
+
+// Patch.apply(value, patch): the fields of the patch that have a value
+@generic
+let apply = (value: code<'a>, patch: code<'p>): code<'a> =>
+  switch Type.info(typeOf(value)) {
+  | Record({fields}) =>
+    Code.record(
+      fields->Array.map(f => {
+        let current = value->Code.field(f.name)
+        let change = patch->Code.field(f.name)
+        Code.entryOf(
+          f,
+          f.optional ? %code(Option.orElse(${change}, ${current})) : %code(Option.getOr(${change}, ${current})),
+        )
+      }),
+    )
+  | _ => error("Patch.apply needs a record")
+  }
+```
+
+<!-- /example -->
+
+A field that is made optional by hand, `{...f, optional: true}`, keeps a
+`typ` that is not an option. `Type.record` reports that and names
+`Type.optional`.
+
+### Attributes on generated code
+
+An attribute belongs to an expression, and generated code is an expression:
+a quote writes the attribute in front of it. A field of a record value has
+no place for an attribute, so it goes on the value of the field, or on the
+whole record.
+
+<!-- example: attrs -->
+
+```rescript
+// Mock.make(): a record of functions that fail when they are called. Their
+// parameters are not used, and the user of the macro gets no warning for it.
+| Function({params}) =>
+  let named = params->Array.mapWithIndex((typ, i) => Code.param("arg" ++ Int.toString(i + 1), typ))
+  let stub = Code.fn(named, %code(throw(Failure(${Code.string(f.name ++ " is not mocked")}))))
+  Code.entryOf(f, %code(@warning("-27") ${stub}))
+
+// An attribute the macro computes: `@warning("-27") value`
+@macro
+let allow = (warning: int, value: code<'a>): code<'a> =>
+  Code.withAttr(value, "warning", ~payload=Code.string("-" ++ Int.toString(warning)))
+```
+
+<!-- /example -->
+
+A hole cannot stand in an attribute: `Code.withAttr` is for a name or a
+payload that is computed. The attributes of a field of a record type are
+data, the `attrs` and the `jsName` of a `Type.field`.
 
 ### Patterns and checked literals
 
@@ -571,7 +745,7 @@ it is in the expanded source. So is generated code that does not parse:
 
 ## Reference
 
-### The seven forms
+### The forms
 
 | Form | Where | Meaning |
 | --- | --- | --- |
@@ -581,6 +755,7 @@ it is in the expanded source. So is generated code that does not parse:
 | `%type(...)` | expression | A quoted type. |
 | `%pat(...)` | expression | A quoted pattern. |
 | `${...}` | inside a quote | A hole: an expression of type `code`, `typ` or `pat`, by its position. |
+| `${...items}` | in a list of a quote | A splice hole: an array of the items of the list. The three dots are written. |
 | `%comptime(expr)` | expression | The value of `expr`, computed while compiling. |
 
 Everything else is the module `Macro` of the standard library
@@ -627,9 +802,14 @@ compile-time parameter has to be called directly.
 | `Type.name(t)` | The type as source text: `array<string>`. |
 | `Type.companion(t, name)` | The value `name` in the module that defines `t`, as code. |
 | `Type.record(fields)`, `Type.variant(constructors)`, `Type.field`, `Type.constructor` | Build a type. |
+| `Type.option(t)` | `option<t>`. |
+| `Type.optional(field)`, `Type.required(field)` | The field as `age?: int`, and as `age: int`. |
 | `Code.string`, `int`, `float`, `bool`, `unit` | Literals. |
 | `Code.ident(name)` | A name that is resolved where the macro is used. |
 | `Code.field`, `array`, `tuple`, `record`, `call`, `switch_`, `fn` | Build code whose shape depends on data: a field access, a switch with one arm per constructor, a function with one parameter per name. |
+| `Code.entry(name, value, ~optional=?)`, `Code.entryOf(field, value)`, `Code.spread(value)` | The entries `Code.record` and a splice hole in a record take: `name: value`, `name: ?value`, `...value`. |
+| `Code.withAttr(value, name, ~payload=?)` | `@name(payload) value`. |
+| `Code.untyped(code)` | The same code as `code<unknown>`, to put code of different types in one array. |
 | `Code.print(code)` | The source text of a piece of code. |
 | `Code.raw(text)` | Code from source text. Nothing checks it until the macro's result is compiled. |
 | `Code.decls(items)` | Several declarations in a row. |
@@ -653,8 +833,9 @@ type info =
   | Unknown                    // inference has not settled it
 ```
 
-A `field` has `name`, `jsName` (the `@as` name), `typ`, `optional`,
-`mutable_` and `attrs`. A `constructor` has `name`, `jsName`, `args`,
+A `field` has `name`, `jsName` (the `@as` name), `typ` (the type of
+`value.name`: an option for an optional field), `optional`, `mutable_` and
+`attrs`. A `constructor` has `name`, `jsName`, `args`,
 `fields` (of an inline record) and `attrs`.
 
 ### Rules
@@ -782,6 +963,9 @@ implemented:
 - **A quote is checked where it is used.** An error in generated code names
   the place in the quote, but only once a use expands it: a macro whose
   quote cannot have the type the macro declares compiles until then.
+- **Splice holes in patterns and types.** `${...items}` stands in lists of
+  expressions. The fields of a record type are built with `Type.record`,
+  and the arguments of a constructor pattern with `Pat.constructor`.
 - **Attribute payloads beyond one string.** `@Json.key("user_age")` reaches
   the macro; `@Json.codec({strict: true})` does not yet pass its argument.
 - **Parametric types.** `Type.info` of `result<a, b>` or a record with type
