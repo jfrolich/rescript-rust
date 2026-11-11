@@ -37,6 +37,8 @@ jobs:
         uses: ./.github/actions/build-rewatch
         with:
           cache-target: ${{ env.RUST_TARGET }}
+          # Coverage is of the OCaml sources; a plain build is enough.
+          profile-guided: "false"
 
       - name: Setup OCaml ${{ env.OCAML_COMPILER }}
         id: setup_ocaml

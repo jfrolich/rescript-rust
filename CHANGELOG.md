@@ -99,6 +99,11 @@
 - Remove the obsolete `res.ternary` and `JSX` attributes from the formatter's internal attribute filters and merge the filters into one. https://github.com/rescript-lang/rescript/pull/8740
 - Represent `await` on module expressions with a dedicated `Pmod_await` parsetree node instead of a `res.await` attribute, which remains only in the PPX wire representation. https://github.com/rescript-lang/rescript/pull/8738
 - Remove dead compiler code: warning 24, the `J.String_index` JS IR node, the `Pisint` and `Parraysets` Lambda primitives, unread `Clflags` fields (`-unsafe` stays accepted as an explicit no-op), and the unused `unit` slot of `Pexp_coerce`. https://github.com/rescript-lang/rescript/pull/8731
+- CI: share caches between validation runs and build the Rust compiler once less per run. https://github.com/jfrolich/rescript-rust/pull/79
+- Pin the Rust nightly toolchain and enable parallel frontend compilation for development builds. https://github.com/jfrolich/rescript-rust/pull/78
+- Parallelize ordinary Rust release code generation while preserving the profile-guided release configuration. https://github.com/jfrolich/rescript-rust/pull/77
+
+- Build the `rescript` binaries of the Linux and macOS platform packages with profile-guided optimization. https://github.com/jfrolich/rescript-rust/pull/75
 - Retain location-free parsed ASTs in ordinary Rust builds instead of parsing every module twice; retry with location side tables for diagnostics and location-dependent output. https://github.com/jfrolich/rescript-rust/pull/38
 
 - Represent inline record definitions with an explicit parsetree origin while retaining the existing PPX wire representation. https://github.com/rescript-lang/rescript/pull/8686

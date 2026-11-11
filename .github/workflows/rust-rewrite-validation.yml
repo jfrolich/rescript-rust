@@ -3,13 +3,19 @@ name: Rust rewrite validation
 on:
   # Every pull request, including ones stacked on another PR's branch.
   pull_request:
+  # The trunk as well. A cache saved by a pull request run is visible to that
+  # pull request alone, so the trunk runs are what save the OPAM, package and
+  # Rust caches that pull requests start from.
+  push:
+    branches: [ocaml-to-rust-rewrite]
 
 permissions:
   contents: read
 
 concurrency:
   group: rust-rewrite-validation-${{ github.ref }}
-  cancel-in-progress: true
+  # A trunk run is left to finish, so that it saves its caches.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   release-parity:
@@ -28,10 +34,13 @@ jobs:
           python3 scripts/test_parser_ast_parity_exit.py
           python3 scripts/test_error_output_parity_exit.py
 
-      # This is the toolchain used by the release parity measurements. The
-      # crate's minimum supported version is not the validation toolchain.
-      - uses: dtolnay/rust-toolchain@1.93.1
+      # rust-toolchain.toml pins the toolchain of every Rust build here.
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
 
+      # Saved by trunk runs only (see the end of the job). Cargo rebuilds this
+      # repository's crates after a fresh checkout whatever is restored, so
+      # what a run gets from it is the compiled dependencies.
       - uses: actions/cache/restore@v5
         id: rust-cache
         with:
@@ -40,12 +49,21 @@ jobs:
             ~/.cargo/git
             compiler-rust/target
             rewatch/target
-          key: rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          key: rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            rewrite-release-${{ runner.os }}-${{ hashFiles('compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
+            rewrite-release-v2-${{ runner.os }}-${{ hashFiles('rust-toolchain.toml', 'compiler-rust/Cargo.lock', 'rewatch/Cargo.lock') }}-
 
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/setup-linux-dependencies
+
+      # The compiler crate is not built on its own here: the build system
+      # links it, and the compiler test step below compiles it standalone.
+      - name: Build release Rust compiler and build system
+        id: rust-build
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          ./scripts/rust_compiler_shims.sh release
+
       - uses: ./.github/actions/setup-ocaml
         with:
           compiler: "5.3.0"
@@ -53,14 +71,8 @@ jobs:
           cache-prefix: opam-rewrite-validation-v1
 
       - name: Build native reference compiler and libraries
+        # Finds the rescript executable built above up to date.
         run: opam exec -- make lib
-
-      - name: Build release Rust compiler and build system
-        id: rust-build
-        run: |
-          cargo build --release --locked --manifest-path compiler-rust/Cargo.toml
-          cargo build --release --locked --manifest-path rewatch/Cargo.toml
-          ./scripts/rust_compiler_shims.sh release
 
       - name: Compare exact CLI output filenames and marshal debug output
         run: |
@@ -77,7 +89,11 @@ jobs:
 
       # The suite includes subprocess timing assertions. Run tests serially so
       # those benchmarks do not compete with one another for CPU time.
+      # This step builds only the test binary, which nothing ships from, so it
+      # skips link-time optimization: that is most of the build's time.
       - name: Test release Rust compiler
+        env:
+          CARGO_PROFILE_RELEASE_LTO: "off"
         run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
 
       - name: Test release build system
@@ -114,7 +130,7 @@ jobs:
       # Keep successful build artifacts even when a later assertion fails.
       # The job still fails; this only avoids rebuilding unchanged code.
       - uses: actions/cache/save@v5
-        if: ${{ !cancelled() && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.rust-build.outcome == 'success' && steps.rust-cache.outputs.cache-hit != 'true' }}
         with:
           path: |
             ~/.cargo/registry

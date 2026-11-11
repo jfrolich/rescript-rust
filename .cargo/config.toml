@@ -1,0 +1,9 @@
+# Run the compiler's frontend (parsing, type checking, borrow checking) on
+# eight threads. `compiler-rust` is one large crate, and its frontend
+# otherwise keeps a clean build on a single core for half a minute.
+#
+# The RUSTFLAGS environment variable replaces these flags, so builds that set
+# it (such as the release workflow and scripts/build_rewatch_pgo.sh) use
+# the serial frontend. Callers can also override the thread count this way.
+[build]
+rustflags = ["-Zthreads=8"]

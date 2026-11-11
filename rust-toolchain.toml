@@ -1,0 +1,10 @@
+# The toolchain every Rust build in this repository uses; rustup installs it
+# on first use. It is a nightly for two reasons: its compiler builds this
+# code faster and into a faster binary than the stable one, and the parallel
+# frontend (`-Zthreads`, see .cargo/config.toml) is only accepted on nightly.
+# Move the date forward deliberately, with the tests and the output parity
+# suites as the gate.
+[toolchain]
+channel = "nightly-2026-11-10"
+# llvm-tools has the llvm-profdata that scripts/build_rewatch_pgo.sh needs.
+components = ["clippy", "rustfmt", "llvm-tools"]

@@ -40,9 +40,9 @@ jobs:
         id: rust-version
         shell: bash
         run: |
-          version="$(awk -F '"' '/^rust-version[[:space:]]*=/ { print $2; exit }' compiler-rust/Cargo.toml)"
+          version="$(awk -F '"' '/^channel[[:space:]]*=/ { print $2; exit }' rust-toolchain.toml)"
           if [ -z "$version" ]; then
-            echo "rust-version missing in compiler-rust/Cargo.toml" >&2
+            echo "channel missing in rust-toolchain.toml" >&2
             exit 1
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"

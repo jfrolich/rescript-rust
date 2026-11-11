@@ -1046,6 +1046,56 @@ pub struct PatternState {
     /// `Typetexp.transl_simple_type_delayed` for pattern constraints, in
     /// registration order.
     globalize_forces: Vec<GlobalizeForce>,
+    /// OCaml `type_pat`'s `constrs <> None`: the pattern is a counter-example
+    /// Parmatch built, typed again by `partial_pred` (typecore.ml:1788-1798).
+    /// Its exploded wildcards are typed with `~constrs` too
+    /// (typecore.ml:1270-1288), and `explode > 0` only comes from
+    /// `partial_pred`, so this holds for the whole pattern.
+    counter_example: bool,
+    /// The alternatives the split or-patterns of a counter-example take.
+    or_splits: OrSplits,
+}
+
+/// The alternative each split or-pattern of a counter-example takes, in the
+/// order typing reaches the or-patterns.
+///
+/// OCaml's `type_pat` is in continuation-passing style: a split or-pattern
+/// types its first alternative and then the rest of the whole pattern, and a
+/// type error anywhere in that makes it go back and take its second
+/// alternative (typecore.ml:1713-1720). Rust's pattern typing returns, so
+/// `partial_pred` runs the same search from the outside: after an error it
+/// types the counter-example again, with the last or-pattern that took its
+/// first alternative taking its second.
+#[derive(Default)]
+struct OrSplits {
+    /// Whether the nth split takes its second alternative.
+    second: Vec<bool>,
+    /// How many splits this typing of the counter-example has reached.
+    reached: usize,
+}
+
+impl OrSplits {
+    /// Whether the or-pattern split now takes its second alternative.
+    fn take_second(&mut self) -> bool {
+        if self.reached == self.second.len() {
+            self.second.push(false);
+        }
+        self.reached += 1;
+        self.second[self.reached - 1]
+    }
+
+    /// After a type error, move to the next combination of alternatives.
+    /// Returns false once all of them have been tried.
+    fn backtrack(&mut self) -> bool {
+        self.reached = 0;
+        while let Some(second) = self.second.pop() {
+            if !second {
+                self.second.push(true);
+                return true;
+            }
+        }
+        false
+    }
 }
 
 /// One deferred unification of `Typetexp.globalize_used_variables`'s force
@@ -1088,6 +1138,17 @@ impl PatternState {
             module_variables: Vec::new(),
             deferred_type_path_forces: Vec::new(),
             globalize_forces: Vec::new(),
+            counter_example: false,
+            or_splits: OrSplits::default(),
+        }
+    }
+
+    /// The state for typing a counter-example in `partial_pred`.
+    fn for_counter_example(or_splits: OrSplits) -> Self {
+        PatternState {
+            counter_example: true,
+            or_splits,
+            ..PatternState::new()
         }
     }
 
@@ -1275,10 +1336,6 @@ pub struct TypeCheckContext<'a> {
     conv_name_counter: u32,
     generated_pattern_constructors: Vec<(crate::name::Name, Arc<crate::types::ConstructorDescription>)>,
     generated_pattern_labels: Vec<(crate::name::Name, Arc<crate::types::LabelDescription>)>,
-    /// OCaml `type_pat`'s `constrs <> None` (typecore.ml:1330-1331): the
-    /// pattern being typed comes from parmatch, through `partial_pred` or an
-    /// exploded wildcard (typecore.ml:1361-1371).
-    pattern_constrs_given: bool,
     /// Whether a wildcard of the type at each path can turn into a GADT
     /// constructor when typed again (see [`wildcard_may_reach_gadt`]).
     wildcard_reaches_gadt: HashMap<Path, bool>,
@@ -1472,7 +1529,6 @@ impl<'a> TypeCheckContext<'a> {
             conv_name_counter: 0,
             generated_pattern_constructors: Vec::new(),
             generated_pattern_labels: Vec::new(),
-            pattern_constrs_given: false,
             wildcard_reaches_gadt: HashMap::default(),
             warning_config: WarningConfig::new(),
             loop_depth: 0,
@@ -4445,7 +4501,7 @@ fn type_pattern_with_existentials_at_level(
     // type_cases rather than the level current when the queue is flushed.
     let old_newtype_level = tctx.newtype_level;
     tctx.newtype_level = Some(level);
-    let result = type_pattern_inner(
+    let mut result = type_pattern_inner(
         tctx,
         env,
         pat,
@@ -4455,6 +4511,13 @@ fn type_pattern_with_existentials_at_level(
         state,
         explode,
     );
+    if let Ok(typed) = &mut result {
+        let outer_env = tctx.type_ctx.store_typed_env(env);
+        let final_env = pattern_env_ref(tctx, env);
+        if final_env != outer_env {
+            set_pattern_envs(&mut tctx.typed, typed, final_env);
+        }
+    }
     if result.is_ok() {
         for field_ty in state.take_deferred_type_path_forces() {
             // OCaml compiler/ml/typecore.ml:1192-1198 resolves and sorts record
@@ -4489,6 +4552,14 @@ fn type_pattern_inner(
 ) -> TypeCoreResult<Pattern> {
     use crate::parser::ast::PatternDesc as PD;
     let pat_env_ref = tctx.type_ctx.store_typed_env(env);
+    // OCaml's `mode'` (typecore.ml:1257): `Splitting_or` makes an or-pattern
+    // split itself, and everything below this node is typed in `Normal` mode.
+    let split_or = matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr);
+    let mode = if mode == PatternMode::SplittingOr {
+        PatternMode::Normal
+    } else {
+        mode
+    };
 
     let expanded_pat = maybe_expand_variant_spread_in_pattern(tctx, env, pat, expected_ty)?;
     let pat = expanded_pat.as_ref().unwrap_or(pat);
@@ -4516,26 +4587,16 @@ fn type_pattern_inner(
                     } else {
                         explode - 1
                     };
-                    let next_mode = if mode == PatternMode::SplittingOr {
-                        PatternMode::Normal
-                    } else {
-                        mode
-                    };
-                    // `type_pat ~constrs:(Some constrs) ~labels:(Some labels)`
-                    // (typecore.ml:1371).
-                    let old_constrs_given =
-                        std::mem::replace(&mut tctx.pattern_constrs_given, true);
                     let result = type_pattern_inner(
                         tctx,
                         env,
                         tctx.arena.get_pat(generated),
                         expected_ty,
-                        next_mode,
+                        mode,
                         allow_existentials,
                         state,
                         next_explode,
                     );
-                    tctx.pattern_constrs_given = old_constrs_given;
                     tctx.generated_pattern_constructors
                         .truncate(constructor_checkpoint);
                     tctx.generated_pattern_labels.truncate(label_checkpoint);
@@ -4705,15 +4766,12 @@ fn type_pattern_inner(
 
         PD::Ppat_or(p1_idx, p2_idx) => {
             // Or-pattern: P1 | P2
-            let or_entry_state = state.checkpoint();
-            let backtrack_state = if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr)
-            {
-                Some(save_pattern_backtrack_state(tctx, state))
-            } else {
-                None
-            };
+            // `save_state env` (typecore.ml:1677), kept where the or-pattern
+            // can be split: in a counter-example, outside `Inside_or`.
+            let split_state = (state.counter_example && mode != PatternMode::InsideOr)
+                .then(|| save_pattern_backtrack_state(tctx, state));
             let typed_or_result = (|| -> TypeCoreResult<Pattern> {
-                if matches!(mode, PatternMode::SplitOr | PatternMode::SplittingOr) {
+                if split_or {
                     return Err(TypeCoreError::NeedBacktrack);
                 }
 
@@ -4820,50 +4878,34 @@ fn type_pattern_inner(
                 }
             })();
 
-            match typed_or_result {
-                Ok(pat) => Ok(pat),
-                Err(err) if is_need_backtrack(&err) && mode != PatternMode::InsideOr => {
-                    if let Some(backtrack_state) = backtrack_state {
-                        restore_pattern_backtrack_state(tctx, state, backtrack_state);
+            match (typed_or_result, split_state) {
+                (Err(TypeCoreError::NeedBacktrack), Some(entry_state)) => {
+                    // typecore.ml:1713-1720: back at the entry state, type
+                    // one alternative on its own. `OrSplits` stands in for
+                    // the `with Error _` that moves on to the second one.
+                    restore_pattern_backtrack_state(tctx, state, entry_state);
+                    let alternative = if state.or_splits.take_second() {
+                        *p2_idx
                     } else {
-                        state.restore_checkpoint(or_entry_state);
-                    }
+                        *p1_idx
+                    };
                     let split_mode = if mode == PatternMode::SplitOr {
                         PatternMode::SplitOr
                     } else {
                         PatternMode::SplittingOr
                     };
-                    let split_retry_state = save_pattern_backtrack_state(tctx, state);
-                    let p1 = tctx.arena.get_pat(*p1_idx);
-                    match type_pattern_inner(
+                    type_pattern_inner(
                         tctx,
                         env,
-                        p1,
+                        tctx.arena.get_pat(alternative),
                         expected_ty,
                         split_mode,
                         allow_existentials,
                         state,
                         explode,
-                    ) {
-                        Ok(pat) => Ok(pat),
-                        Err(err) if !is_need_backtrack(&err) => {
-                            restore_pattern_backtrack_state(tctx, state, split_retry_state);
-                            let p2 = tctx.arena.get_pat(*p2_idx);
-                            type_pattern_inner(
-                                tctx,
-                                env,
-                                p2,
-                                expected_ty,
-                                split_mode,
-                                allow_existentials,
-                                state,
-                                explode,
-                            )
-                        }
-                        Err(err) => Err(err),
-                    }
+                    )
                 }
-                Err(err) => Err(err),
+                (result, _) => result,
             }
         }
 
@@ -5170,6 +5212,74 @@ fn unify_pattern_types(
                 .env()
                 .map(|env| tctx.type_ctx.store_typed_env(env)),
         }),
+    }
+}
+
+/// Add the local constraints (GADT equations) of `from` that `env` lacks.
+/// Returns whether any were added.
+fn add_missing_local_constraints(env: &mut Env, from: &Env) -> bool {
+    let missing: Vec<_> = from
+        .iter_local_constraints()
+        .filter(|(path, _)| env.find_local_constraint(path).is_none())
+        .map(|(path, decl)| (*path, decl.clone()))
+        .collect();
+    let added = !missing.is_empty();
+    for (path, decl) in missing {
+        env.add_local_constraint(path, decl);
+    }
+    added
+}
+
+/// OCaml's `!env` while a pattern is typed: the outer `env` plus the GADT
+/// equations `unify_pat_types_gadt` has added so far. OCaml types a pattern
+/// through one `env ref` (typecore.ml:1248-1720); Rust passes the outer `env`
+/// down and keeps those equations in the unify state's env.
+fn pattern_env_ref(tctx: &mut TypeCheckContext<'_>, env: &Env) -> EnvRef {
+    if let Some(unify_env) = tctx.unify_state.env()
+        && unify_env.id() != env.id()
+        && unify_env.has_local_constraints()
+    {
+        let mut refined = env.clone_preserve_id();
+        if add_missing_local_constraints(&mut refined, unify_env) {
+            return tctx.type_ctx.store_typed_env(&refined);
+        }
+    }
+    tctx.type_ctx.store_typed_env(env)
+}
+
+/// `iter_pattern (fun p -> p.pat_env <- !env) r` (typecore.ml:1779): once
+/// the whole pattern is typed, every node gets the final env, so a node typed
+/// before a GADT constructor sees its equations too.
+fn set_pattern_envs(ta: &mut TypedArena, pat: &mut Pattern, env: EnvRef) {
+    pat.pat_env = env;
+    let mut todo: Vec<TPatIdx> = Vec::new();
+    pattern_children(ta, pat, &mut todo);
+    while let Some(idx) = todo.pop() {
+        ta.pattern_mut(idx).pat_env = env;
+        pattern_children(ta, ta.pattern(idx), &mut todo);
+    }
+}
+
+fn pattern_children(ta: &TypedArena, pat: &Pattern, out: &mut Vec<TPatIdx>) {
+    match &pat.pat_desc {
+        PatternDesc::Tpat_variant(_, arg, _) => out.extend(*arg),
+        PatternDesc::Tpat_alias(inner, _, _) => out.push(*inner),
+        PatternDesc::Tpat_or(left, right, _) => out.extend([*left, *right]),
+        PatternDesc::Tpat_tuple(items)
+        | PatternDesc::Tpat_array(items)
+        | PatternDesc::Tpat_construct(_, _, items) => {
+            out.extend_from_slice(ta.pattern_list(*items))
+        }
+        PatternDesc::Tpat_record(fields, _, _) => {
+            out.extend(fields.iter().map(|(_, _, field_pat, _)| *field_pat))
+        }
+        PatternDesc::Tpat_dict(entries) => {
+            out.extend(entries.iter().map(|entry| entry.tdp_pattern))
+        }
+        PatternDesc::Tpat_any
+        | PatternDesc::Tpat_var(_, _)
+        | PatternDesc::Tpat_constant(_)
+        | PatternDesc::Tpat_interval(_, _) => {}
     }
 }
 
@@ -5784,9 +5894,10 @@ fn type_pattern_construct(
     // env.ml:1197-1206), then typecore.ml:1392: `Env.mark_constructor
     // Env.Pattern !env (Longident.last lid.txt) constr`.
     mark_type_path_of(tctx.type_ctx, env, cstr_desc.cstr_res);
-    // typecore.ml:1539-1540: a generalized constructor of a counter-example
-    // inside an or-pattern makes the or-pattern split.
-    if cstr_desc.cstr_generalized && tctx.pattern_constrs_given && mode == PatternMode::InsideOr {
+    // typecore.ml:1444-1445: a generalized constructor of a counter-example
+    // typed `Inside_or` splits the or-pattern, so each alternative is typed
+    // on its own with GADT unification.
+    if cstr_desc.cstr_generalized && state.counter_example && mode == PatternMode::InsideOr {
         return Err(TypeCoreError::NeedBacktrack);
     }
     mark_constructor(
@@ -10371,6 +10482,8 @@ fn materialize_pattern_of_type(
 ) -> Option<crate::parse_arena::PatIdx> {
     // The exported pattern's sub-patterns go to a scratch arena (see
     // [`PatCase`]).
+    // `Parmatch.ppat_of_type !env expected_ty` (typecore.ml:1278).
+    let pat_env = pattern_env_ref(tctx, env);
     let ta = std::mem::take(&mut tctx.typed);
     let oracle = TypecoreParmatchOracle {
         tctx: &mut *tctx,
@@ -10381,7 +10494,7 @@ fn materialize_pattern_of_type(
         none_type: None,
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
-    let pats = pm.pats_of_type(false, EnvRef(0), expected_ty);
+    let pats = pm.pats_of_type(false, pat_env, expected_ty);
     let result = if let [p] = pats.as_slice()
         && pm.is_any(*p)
     {
@@ -11001,6 +11114,7 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     let Some(first) = patl.first() else {
         return;
     };
+    let tdefs = tctx.type_ctx.store_typed_env(env);
     let expected_ty = first.pat_type;
     let mut ta = std::mem::take(&mut tctx.typed);
     let lowering = crate::types::dict_pattern::Lowering::new(tctx.type_ctx, &ta, patl);
@@ -11018,7 +11132,7 @@ fn parmatch_pressure_variants(tctx: &mut TypeCheckContext<'_>, env: &Env, patl: 
     };
     let mut pm = crate::types::parmatch::Parmatch::new(oracle, &ta);
     let imported: Vec<_> = lowered.iter().map(|pat| pm.import(ta.pattern(*pat))).collect();
-    pm.pressure_variants(EnvRef(0), &imported);
+    pm.pressure_variants(tdefs, &imported);
     drop(pm);
     tctx.typed = ta;
 }
@@ -28343,6 +28457,26 @@ mod tests {
     }
 
     #[test]
+    fn counter_example_splits_retry_in_depth_first_order() {
+        let mut splits = OrSplits::default();
+        let mut paths = Vec::new();
+        loop {
+            let outer_second = splits.take_second();
+            let mut path = vec![outer_second];
+            // Only the first outer alternative contains another split.
+            if !outer_second {
+                path.push(splits.take_second());
+            }
+            paths.push(path);
+            if !splits.backtrack() {
+                break;
+            }
+        }
+        assert_eq!(paths, vec![vec![false, false], vec![false, true], vec![true]]);
+        assert!(!OrSplits::default().backtrack());
+    }
+
+    #[test]
     fn value_usage_marks_all_declarations_with_the_same_key() {
         let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let arena = ParseArena::new();
@@ -28934,6 +29068,16 @@ fn pm_variant_length(ctx: &TypeContext, cstr: &crate::types::ConstructorDescript
 }
 
 /// `get_type_path ty tenv` (parmatch.ml:334-338).
+/// The `pat_env` of a pattern the checks inspect. Unlike the match env, it
+/// holds the GADT equations of constructors matched earlier in the same
+/// pattern, and Parmatch reads pattern types in it: `get_type_path p.pat_type
+/// p.pat_env` (parmatch.ml:350-354, 906, 1019), `row_of_pat`
+/// (parmatch.ml:844-847), `Ctype.expand_head p.pat_env` (parmatch.ml:149).
+fn pm_pattern_env(ctx: &TypeContext, env: EnvRef) -> Arc<Env> {
+    ctx.get_typed_env(env)
+        .expect("Parmatch: pattern env is stored in the type context")
+}
+
 fn pm_type_path(ctx: &TypeContext, env: &Env, ty: TypeExprRef) -> Path {
     let ty = ctx.repr(crate::types::ctype::expand_head(ctx, env, ty));
     match &*ctx.get_desc(ty) {
@@ -28966,19 +29110,21 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         self.tctx.type_ctx
     }
 
-    fn expand_head(&mut self, _env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
+    fn expand_head(&mut self, env: EnvRef, ty: TypeExprRef) -> TypeExprRef {
         let ctx = self.tctx.type_ctx;
-        ctx.repr(crate::types::ctype::expand_head(ctx, self.env, ty))
+        let env = pm_pattern_env(ctx, env);
+        ctx.repr(crate::types::ctype::expand_head(ctx, &env, ty))
     }
 
     fn variant_constructors(
         &mut self,
-        _env: EnvRef,
+        env: EnvRef,
         ty: TypeExprRef,
     ) -> Vec<crate::types::ConstructorDescription> {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
         pm_variant_constructors(
             self.tctx.type_ctx,
-            self.env,
+            &env,
             &mut self.tctx.persistent_env,
             ty,
         )
@@ -28986,13 +29132,14 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
 
     fn type_shape(
         &mut self,
-        _env: EnvRef,
+        env: EnvRef,
         ty: TypeExprRef,
         always: bool,
     ) -> crate::types::parmatch::TypeShape {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
         pm_type_shape(
             self.tctx.type_ctx,
-            self.env,
+            &env,
             &mut self.tctx.persistent_env,
             ty,
             always,
@@ -29076,12 +29223,14 @@ impl crate::types::parmatch::Oracle for TypecoreParmatchOracle<'_, '_> {
         pm_variant_length(self.tctx.type_ctx, cstr)
     }
 
-    fn type_path(&mut self, _env: EnvRef, ty: TypeExprRef) -> Path {
-        pm_type_path(self.tctx.type_ctx, self.env, ty)
+    fn type_path(&mut self, env: EnvRef, ty: TypeExprRef) -> Path {
+        let pat_env = pm_pattern_env(self.tctx.type_ctx, env);
+        pm_type_path(self.tctx.type_ctx, &pat_env, ty)
     }
 
-    fn row_of(&mut self, _env: EnvRef, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
-        pm_row_of(self.tctx.type_ctx, self.env, ty)
+    fn row_of(&mut self, env: EnvRef, ty: TypeExprRef) -> crate::types::type_expr::RowDesc {
+        let env = pm_pattern_env(self.tctx.type_ctx, env);
+        pm_row_of(self.tctx.type_ctx, &env, ty)
     }
 }
 
@@ -29269,7 +29418,7 @@ fn pattern_contains_or(ta: &TypedArena, p: &Pattern) -> bool {
 }
 
 /// `partial_pred ~lev ?mode ?explode env expected_ty constrs labels p`
-/// (typecore.ml:1743-1759) applied to `Conv.conv u` (parmatch.ml:1961-2001).
+/// (typecore.ml:1788-1803) applied to `Conv.conv u` (parmatch.ml:1961-2001).
 #[allow(clippy::too_many_arguments)]
 fn partial_pred(
     tctx: &mut TypeCheckContext<'_>,
@@ -29284,17 +29433,13 @@ fn partial_pred(
     let ctx = tctx.type_ctx;
     let old_constructors = std::mem::take(&mut tctx.generated_pattern_constructors);
     // `type_pat ~constrs ~labels` (typecore.ml:1915): Conv's tables.
-    let old_constrs_given = std::mem::replace(&mut tctx.pattern_constrs_given, true);
     let old_labels = std::mem::take(&mut tctx.generated_pattern_labels);
     let parsed = conv_counter_example(tctx, u, loc);
-    let type_snapshot = ctx.snapshot_type_state();
     // Everything below is backtracked, so the module's unified pairs need not
-    // be copied into the snapshot.
+    // be copied into the snapshots.
     let unified_pairs = tctx.unify_state.take_unified_pairs();
-    let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
     let diagnostic_len = tctx.diagnostics.len();
-    let mut state = PatternState::new();
-    // `let env = ref env` (typecore.ml:1744): GADT equations added while
+    // `let env = ref env` (typecore.ml:1789): GADT equations added while
     // typing the counter-example go to a fresh env, not one left behind by
     // earlier pattern typing.
     let saved_unify_env = tctx
@@ -29304,17 +29449,30 @@ fn partial_pred(
     tctx.unify_state.set_env(env);
     // Ctype.with_passive_variants (ctype.ml:2061-2072).
     let passive = ctx.set_passive_variants(true);
-    let result = type_pattern_with_existentials_at_level(
-        tctx,
-        env,
-        tctx.arena.get_pat(parsed),
-        expected_ty,
-        mode,
-        true,
-        &mut state,
-        level,
-        explode,
-    );
+    let mut or_splits = OrSplits::default();
+    let result = loop {
+        let type_snapshot = ctx.snapshot_type_state();
+        let unify_snapshot = tctx.unify_state.snapshot_backtrack_state();
+        let mut state = PatternState::for_counter_example(or_splits);
+        let result = type_pattern_with_existentials_at_level(
+            tctx,
+            env,
+            tctx.arena.get_pat(parsed),
+            expected_ty,
+            mode,
+            true,
+            &mut state,
+            level,
+            explode,
+        );
+        ctx.restore_type_state(type_snapshot);
+        tctx.unify_state.restore_backtrack_state(unify_snapshot);
+        tctx.diagnostics.truncate(diagnostic_len);
+        or_splits = state.or_splits;
+        if result.is_ok() || !or_splits.backtrack() {
+            break result;
+        }
+    };
     ctx.set_passive_variants(passive);
     match saved_unify_env {
         Some(saved) => tctx.unify_state.set_env(&saved),
@@ -29322,12 +29480,8 @@ fn partial_pred(
             tctx.unify_state.take_env();
         }
     }
-    ctx.restore_type_state(type_snapshot);
-    tctx.unify_state.restore_backtrack_state(unify_snapshot);
     tctx.unify_state.put_back_unified_pairs(unified_pairs);
-    tctx.diagnostics.truncate(diagnostic_len);
     tctx.generated_pattern_constructors = old_constructors;
-    tctx.pattern_constrs_given = old_constrs_given;
     tctx.generated_pattern_labels = old_labels;
     result.ok()
 }

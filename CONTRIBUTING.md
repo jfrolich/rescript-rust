@@ -35,7 +35,7 @@ algorithm and representation invariants belong beside their implementation.
 - [Node.js](https://nodejs.org/) v26.x or newer (the version in `.nvmrc`)
 - [Yarn CLI](https://yarnpkg.com/getting-started/install) (can be installed with `corepack`, Homebrew, etc)
 - C compiler toolchain (usually installed with `xcode` on Mac)
-- Rust toolchain (required to build rewatch; follow the instructions at https://www.rust-lang.org/tools/install and install the version listed as `rust-version` in `rewatch/Cargo.toml`)
+- Rust toolchain (required to build rewatch; follow the instructions at https://www.rust-lang.org/tools/install and `rustup` then installs the toolchain pinned in `rust-toolchain.toml` on the first build)
 - `opam` (OCaml Package Manager) v2.2.0 or newer
 - VSCode (+ [OCaml Platform Extension](https://marketplace.visualstudio.com/items?itemName=ocamllabs.ocaml-platform))
 
@@ -105,11 +105,13 @@ Run `yarn install`. This will install the npm dependencies required for the buil
 
 #### rustup install
 
-[Rewatch](./rewatch/) is built with rust. Make sure you have [rustup](https://rustup.rs/) installed to manage rust versions.
+The compiler and [Rewatch](./rewatch/) are built with Rust. Make sure you have [rustup](https://rustup.rs/) installed; it uses the toolchain pinned in `rust-toolchain.toml`.
 
 ```sh
-rustup toolchain install 1.91
-rustup override set 1.91
+# Installs the pinned toolchain (rustup also does this on the first build).
+rustup toolchain install
+# Only if you set a directory override for this checkout before: it wins over the pin.
+rustup override unset
 ```
 
 ### B. Devcontainer
