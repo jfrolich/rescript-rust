@@ -570,7 +570,7 @@ pub fn jsx_prop_expr(arena: &ParseArena, expr: &Expression) -> ParenKind {
             match &expr.pexp_desc {
                 ExpressionDesc::Pexp_constant(c)
                     if expr.pexp_attributes.is_empty()
-                        && matches!(&*c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(arena.get_string(*x))) =>
+                        && matches!(c, Constant::Integer(x, _) | Constant::Float(x, _) if starts_with_minus(arena.get_string(*x))) =>
                 {
                     ParenKind::Parenthesized
                 }
@@ -703,8 +703,8 @@ pub fn mod_apply_callee(callee: &ModuleExpr) -> bool {
 
 /// Check if module expression needs parentheses.
 /// OCaml logic:
-/// - Pmod_constraint(Pmod_structure, Pmty_signature(Box::new([Psig_module]))) -> false
-/// - Pmod_constraint(_, Pmty_signature(Box::new([Psig_module]))) -> true
+/// - `Pmod_constraint(Pmod_structure, Pmty_signature(Box::new([Psig_module])))` -> false
+/// - `Pmod_constraint(_, Pmty_signature(Box::new([Psig_module])))` -> true
 /// - Otherwise -> false
 pub fn mod_expr_parens(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.pmod_desc {

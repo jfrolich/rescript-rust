@@ -11,6 +11,7 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::types::typecore::ComponentLookupApi;
 
+#[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static VALUE_HITS: AtomicU64 = AtomicU64::new(0);

@@ -71,6 +71,7 @@ pub enum Grammar {
     PatternOcamlList,
     /// Record pattern
     PatternRecord,
+    /// Dict pattern
     PatternDict,
     /// Type definition
     TypeDef,

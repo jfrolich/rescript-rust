@@ -28,11 +28,19 @@
 
 #### :house: Internal
 
+- Normalize a type's path through its module prefix only, without first looking the type's name up as a module. https://github.com/jfrolich/rescript-rust/pull/101
+- Skip the walk that collects a program's assigned variables when it contains no assignment; the walk ran for every optimization pass and every inlined call. https://github.com/jfrolich/rescript-rust/pull/94
 - Load a compiled module's interface into its first dependent without decoding it again, and keep the syntax tree nodes the built-in frontend pass leaves unchanged instead of copying them. https://github.com/jfrolich/rescript-rust/pull/89 https://github.com/jfrolich/rescript-rust/pull/85
 - Compute the item digests and item references of a compiled module's interface once, when it is published, instead of decoding the stored interface again for each. https://github.com/jfrolich/rescript-rust/pull/87
+- Print the path of a value or type for a deprecation warning only when the item is deprecated, instead of on every use. https://github.com/jfrolich/rescript-rust/pull/98
+- Keep the bindings most recently added to a type-checking environment in a short list in front of its map, so a `let` no longer copies map nodes that every recorded environment then holds until the module is done. https://github.com/jfrolich/rescript-rust/pull/91
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
+- Allocate the map of an environment table layer on its first binding, so an `open` no longer creates and drops empty maps in every table. https://github.com/jfrolich/rescript-rust/pull/93
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
+- Collect the JavaScript global names a renamed local must avoid only for a program that uses a global named like one (`x$1`), instead of walking every program before printing it. https://github.com/jfrolich/rescript-rust/pull/102
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
+- Compile the arguments of a primitive or call into inline buffers and read the primitive from the Lambda arena without copying it. https://github.com/jfrolich/rescript-rust/pull/104
+- Compute the module alias rewrites of a loaded unit once and share them between compilations, instead of collecting the standard library's aliases again for every module compiled. https://github.com/jfrolich/rescript-rust/pull/92
 - CI: share caches between validation runs and build the Rust compiler once less per run. https://github.com/jfrolich/rescript-rust/pull/79
 - Pin the Rust nightly toolchain and enable parallel frontend compilation for development builds. https://github.com/jfrolich/rescript-rust/pull/78
 - Parallelize ordinary Rust release code generation while preserving the profile-guided release configuration. https://github.com/jfrolich/rescript-rust/pull/77

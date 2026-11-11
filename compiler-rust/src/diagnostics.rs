@@ -864,8 +864,6 @@ mod tests {
         let mut config = WarningConfig::new();
         config.parse("-1..10").unwrap();
 
-        for i in 1..=10 {
-            assert!(!config.active[i]);
-        }
+        assert!(config.active[1..=10].iter().all(|active| !active));
     }
 }

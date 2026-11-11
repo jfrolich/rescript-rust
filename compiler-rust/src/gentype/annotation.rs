@@ -10,19 +10,29 @@ use crate::types::typedtree::{
     TypedSignature, TypedSignatureItem, TypedSignatureItemDesc,
 };
 
+/// Where a `@genType.import` value or type comes from.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Import {
+    /// The path it is imported from.
     pub import_path: crate::gentype::import_path::T,
 }
 
+/// An attribute's payload, as far as gentype reads it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AttributePayload {
+    /// A boolean.
     BoolPayload(bool),
+    /// A number literal, as written.
     FloatPayload(String),
+    /// An identifier.
     IdentPayload(Longident),
+    /// An integer literal, as written.
     IntPayload(String),
+    /// A string.
     StringPayload(String),
+    /// A tuple of payloads.
     TuplePayload(Vec<AttributePayload>),
+    /// Any other payload, or none.
     UnrecognizedPayload,
 }
 
@@ -32,20 +42,27 @@ pub enum AttributePayload {
 /// genType catches the raise: it ends genType and fails the compile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InvalidEscape {
+    /// In the artifact's parse tree, at this location.
     Parsed(LocIdx),
+    /// In a declaration's attribute, at this location.
     Decl(crate::types::DeclLoc),
 }
 
 /// A genType reader's result: `Err` where the OCaml reader raises.
 pub type Read<T> = Result<T, InvalidEscape>;
 
+/// Whether, and how, an item is exported to TypeScript.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum T {
+    /// Exported (`@genType`).
     GenType,
+    /// Exported as an opaque type (`@genType.opaque`).
     GenTypeOpaque,
+    /// Not exported.
     NoGenType,
 }
 
+/// The annotation's name, for debug output.
 pub fn to_string(annotation: T) -> &'static str {
     match annotation {
         T::GenType => "GenType",
@@ -54,34 +71,43 @@ pub fn to_string(annotation: T) -> &'static str {
     }
 }
 
+/// Whether `s` names `@genType`.
 pub fn tag_is_gentype(s: &str) -> bool {
     s == "genType" || s == "gentype"
 }
 
+/// Whether `s` names `@genType.as`.
 pub fn tag_is_gentype_as(s: &str) -> bool {
     s == "genType.as" || s == "gentype.as"
 }
 
+/// Whether `s` names `@as`.
 pub fn tag_is_as(s: &str) -> bool {
     s == "as"
 }
 
+/// Whether `s` names `@int`.
 pub fn tag_is_int(s: &str) -> bool {
     s == "int"
 }
 
+/// Whether `s` names `@string`.
 pub fn tag_is_string(s: &str) -> bool {
     s == "string"
 }
 
+/// Whether `s` names `@genType.import`.
 pub fn tag_is_gentype_import(s: &str) -> bool {
     s == "genType.import" || s == "gentype.import"
 }
 
+/// Whether `s` names `@genType.opaque`.
 pub fn tag_is_gentype_opaque(s: &str) -> bool {
     s == "genType.opaque" || s == "gentype.opaque"
 }
 
+/// Whether `s` names `@genType`, `@genType.as`, `@genType.import` or
+/// `@genType.opaque`.
 pub fn tag_is_one_of_the_gentype_annotations(s: &str) -> bool {
     tag_is_gentype(s)
         || tag_is_gentype_as(s)
@@ -89,14 +115,17 @@ pub fn tag_is_one_of_the_gentype_annotations(s: &str) -> bool {
         || tag_is_gentype_opaque(s)
 }
 
+/// Whether `s` names `@genType.ignoreInterface`.
 pub fn tag_is_gentype_ignore_interface(s: &str) -> bool {
     s == "genType.ignoreInterface" || s == "gentype.ignoreInterface"
 }
 
+/// Whether `s` names the doc comment attribute.
 pub fn tag_is_doc(s: &str) -> bool {
     s == "res.doc"
 }
 
+/// Whether `s` names `@internal.local`, which marks a `let private` module.
 pub fn tag_is_intern_local(s: &str) -> bool {
     s == "internal.local"
 }
@@ -147,6 +176,8 @@ fn from_expr(arena: &ParseArena, expr: &Expression) -> Read<Option<AttributePayl
     )
 }
 
+/// The location and payload of the first of `attributes` whose name
+/// `check_text` accepts.
 pub fn get_attribute_payload(
     arena: &ParseArena,
     check_text: impl Fn(&str) -> bool + Copy,
@@ -176,6 +207,7 @@ pub fn get_attribute_payload(
     Ok(None)
 }
 
+/// The name given by `@genType.as("name")`, or else by `@genType("name")`.
 pub fn get_gentype_as_renaming(
     arena: &ParseArena,
     attributes: &Attributes,
@@ -241,6 +273,8 @@ fn warn_gentype_as_renaming(notes: &crate::gentype::log_::Notes, arena: &ParseAr
     );
 }
 
+/// Warn about `@genType.as` or `@genType` on a record field, which no longer
+/// renames it.
 pub fn check_unsupported_gentype_as_renaming(
     arena: &ParseArena,
     notes: &crate::gentype::log_::Notes,
@@ -257,6 +291,7 @@ pub fn check_unsupported_gentype_as_renaming(
     Ok(())
 }
 
+/// The string payload of `@as`.
 pub fn get_as_string(arena: &ParseArena, attributes: &Attributes) -> Read<Option<String>> {
     Ok(match get_attribute_payload(arena, tag_is_as, attributes)? {
         Some((_, AttributePayload::StringPayload(s))) => Some(s),
@@ -264,6 +299,7 @@ pub fn get_as_string(arena: &ParseArena, attributes: &Attributes) -> Read<Option
     })
 }
 
+/// The integer payload of `@as`.
 pub fn get_as_int(arena: &ParseArena, attributes: &Attributes) -> Read<Option<i32>> {
     Ok(match get_attribute_payload(arena, tag_is_as, attributes)? {
         Some((_, AttributePayload::IntPayload(s))) => s.parse().ok(),
@@ -271,6 +307,9 @@ pub fn get_as_int(arena: &ParseArena, attributes: &Attributes) -> Read<Option<i3
     })
 }
 
+/// The source of a `@genType.import`, and the name it is imported as: the
+/// second string of a `("source", "name")` payload, or else the
+/// `@genType.as` renaming.
 pub fn get_attribute_import_renaming(
     arena: &ParseArena,
     attributes: &Attributes,
@@ -293,6 +332,7 @@ pub fn get_attribute_import_renaming(
     })
 }
 
+/// The text of a non-empty doc comment attribute.
 pub fn get_doc_payload(arena: &ParseArena, attributes: &Attributes) -> Read<Option<String>> {
     Ok(
         match get_attribute_payload(arena, tag_is_doc, attributes)? {
@@ -304,6 +344,7 @@ pub fn get_doc_payload(arena: &ParseArena, attributes: &Attributes) -> Read<Opti
     )
 }
 
+/// The doc comment `attributes` carry.
 pub fn doc_string_from_attrs(
     arena: &ParseArena,
     attributes: &Attributes,
@@ -311,6 +352,7 @@ pub fn doc_string_from_attrs(
     get_doc_payload(arena, attributes)
 }
 
+/// Whether one of `attributes` has a name `check_text` accepts.
 pub fn has_attribute(
     arena: &ParseArena,
     check_text: impl Fn(&str) -> bool + Copy,
@@ -319,6 +361,9 @@ pub fn has_attribute(
     Ok(get_attribute_payload(arena, check_text, attributes)?.is_some())
 }
 
+/// `Annotation.from_attributes`: how the item carrying `attributes` is
+/// exported; items without an annotation are exported when the config says
+/// everything is. Warns at `loc` about an ignored `@genType` payload.
 pub fn from_attributes(
     arena: &ParseArena,
     config: &crate::gentype::config::T,
@@ -372,6 +417,7 @@ where
     Ok(false)
 }
 
+/// Whether the module type contains an item `check_annotation` accepts.
 pub fn module_type_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -391,6 +437,8 @@ pub fn module_type_check_annotation(
     }
 }
 
+/// Whether the module type declaration contains an item `check_annotation`
+/// accepts.
 pub fn module_type_declaration_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -412,6 +460,8 @@ pub fn module_type_declaration_check_annotation(
     })
 }
 
+/// Whether the module declaration contains an item `check_annotation`
+/// accepts.
 pub fn module_declaration_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -430,6 +480,8 @@ pub fn module_declaration_check_annotation(
     )
 }
 
+/// Whether the signature item, or an item nested in it, is accepted by
+/// `check_annotation`.
 pub fn signature_item_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -470,6 +522,7 @@ pub fn signature_item_check_annotation(
     }
 }
 
+/// Whether the signature contains an item `check_annotation` accepts.
 pub fn signature_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -482,6 +535,8 @@ pub fn signature_check_annotation(
     })
 }
 
+/// Whether the structure item, or an item nested in it, is accepted by
+/// `check_annotation`.
 pub fn structure_item_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -539,6 +594,8 @@ pub fn structure_item_check_annotation(
     }
 }
 
+/// Whether the module expression contains an item `check_annotation`
+/// accepts.
 pub fn module_expr_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -571,6 +628,7 @@ pub fn module_expr_check_annotation(
     }
 }
 
+/// Whether the module binding contains an item `check_annotation` accepts.
 pub fn module_binding_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -589,6 +647,7 @@ pub fn module_binding_check_annotation(
     )
 }
 
+/// Whether the structure contains an item `check_annotation` accepts.
 pub fn structure_check_annotation(
     arena: &ParseArena,
     ta: &crate::types::typedtree::TypedArena,
@@ -601,6 +660,7 @@ pub fn structure_check_annotation(
     })
 }
 
+/// The import a `@genType.import` string describes.
 pub fn import_from_string(import_string: &str) -> Import {
     // Mirrors compiler/gentype/Annotation.ml:288-290.
     Import {
@@ -608,6 +668,8 @@ pub fn import_from_string(import_string: &str) -> Import {
     }
 }
 
+/// The configuration for a module's items: a `@genType` module exports
+/// everything in it. Borrows `config` when the attributes do not change it.
 pub fn update_config_for_module<'c>(
     arena: &ParseArena,
     config: &'c crate::gentype::config::T,
@@ -667,6 +729,8 @@ fn find_decl_attribute(
     Ok(Some(attribute))
 }
 
+/// The payload of the first declaration attribute whose name `check_text`
+/// accepts.
 pub fn get_decl_attribute_payload(
     check_text: impl Fn(&str) -> bool + Copy,
     attributes: &[crate::types::decl::Attribute],
@@ -677,6 +741,7 @@ pub fn get_decl_attribute_payload(
     Ok(find_decl_attribute(check_text, attributes)?.map(|attribute| &attribute.attr_payload))
 }
 
+/// [`get_gentype_as_renaming`] for declaration attributes.
 pub fn get_decl_gentype_as_renaming(
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<Option<String>> {
@@ -691,27 +756,32 @@ pub fn get_decl_gentype_as_renaming(
     )
 }
 
+/// [`get_as_string`] for declaration attributes.
 pub fn get_decl_as_string(attributes: &[crate::types::decl::Attribute]) -> Read<Option<String>> {
     Ok(get_decl_attribute_payload(tag_is_as, attributes)?
         .and_then(decl_attribute_payload_as_string))
 }
 
+/// [`get_as_int`] for declaration attributes.
 pub fn get_decl_as_int(attributes: &[crate::types::decl::Attribute]) -> Read<Option<i32>> {
     Ok(get_decl_attribute_payload(tag_is_as, attributes)?.and_then(decl_attribute_payload_as_int))
 }
 
+/// [`get_doc_payload`] for declaration attributes.
 pub fn get_decl_doc_payload(attributes: &[crate::types::decl::Attribute]) -> Read<Option<String>> {
     Ok(get_decl_attribute_payload(tag_is_doc, attributes)?
         .and_then(decl_attribute_payload_as_string)
         .filter(|doc_string| !doc_string.is_empty()))
 }
 
+/// [`doc_string_from_attrs`] for declaration attributes.
 pub fn doc_string_from_decl_attrs(
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<crate::gentype::gen_type_common::doc_string::T> {
     get_decl_doc_payload(attributes)
 }
 
+/// [`has_attribute`] for declaration attributes.
 pub fn has_decl_attribute(
     check_text: impl Fn(&str) -> bool + Copy,
     attributes: &[crate::types::decl::Attribute],
@@ -719,6 +789,7 @@ pub fn has_decl_attribute(
     Ok(get_decl_attribute_payload(check_text, attributes)?.is_some())
 }
 
+/// [`get_attribute_import_renaming`] for declaration attributes.
 pub fn get_decl_attribute_import_renaming(
     attributes: &[crate::types::decl::Attribute],
 ) -> Read<(Option<String>, Option<String>)> {
@@ -740,6 +811,7 @@ pub fn get_decl_attribute_import_renaming(
     })
 }
 
+/// [`check_unsupported_gentype_as_renaming`] for declaration attributes.
 pub fn check_unsupported_decl_gentype_as_renaming(
     ctx: &crate::types::context::TypeContext,
     arena: &ParseArena,
@@ -764,6 +836,8 @@ pub fn check_unsupported_decl_gentype_as_renaming(
     Ok(())
 }
 
+/// [`from_attributes`] for declaration attributes, which carry their
+/// location as `loc`.
 pub fn from_decl_attributes(
     config: &crate::gentype::config::T,
     notes: &crate::gentype::log_::Notes,

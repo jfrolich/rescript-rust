@@ -4,7 +4,6 @@
 
 use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
-use crate::lambda::LamLoc;
 use crate::lambda::LetKind;
 use crate::lambda::arena::{LamArena, View};
 use crate::raw_lambda::{RawArena, RawLambda};
@@ -156,6 +155,7 @@ pub(crate) fn bind_rec(b: &RawArena, groups: Bindings, body: RawLambda) -> RawLa
 mod tests {
     use super::*;
     use crate::lambda::FunctionAttribute;
+    use crate::lambda::LamLoc;
 
     fn function(b: &RawArena, param: &str, body: RawLambda) -> RawLambda {
         b.function_(

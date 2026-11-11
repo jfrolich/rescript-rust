@@ -13,39 +13,61 @@ use crate::parser::formatter::Formatter;
 /// `Includecore.type_mismatch` (includecore.ml).
 #[derive(Debug, Clone, PartialEq)]
 pub enum TypeMismatch {
+    /// The declarations have different arities.
     Arity,
+    /// A private type would be revealed.
     Privacy,
+    /// Their kinds differ.
     Kind,
+    /// Their constraints differ.
     Constraint,
+    /// Their manifests differ; reported without a message of its own.
     Manifest,
+    /// Their variances do not agree.
     Variance,
+    /// The types of the field differ.
     FieldType(Ident),
+    /// The mutability of the field differs.
     FieldMutable(Ident),
+    /// The optional attribute of the field differs.
     FieldOptional(Ident),
     /// A field of the first declaration, named the second way in the
     /// second.
     FieldRenamed(String, String),
     /// A field and its runtime names in the two declarations.
     FieldRuntimeName(Ident, String, String),
+    /// A field only one declaration has: the second one when `true`.
     FieldMissing(bool, Ident),
     /// The names in both declarations, in the second one's order.
     FieldOrder(Vec<String>),
+    /// The types of the constructor differ.
     ConstructorType(Ident),
+    /// The arities of the constructor differ.
     ConstructorArity(Ident),
+    /// A constructor of the first declaration, named the second way in the
+    /// second.
     ConstructorRenamed(String, String),
+    /// A constructor only one declaration has: the second one when `true`.
     ConstructorMissing(bool, Ident),
+    /// The names in both declarations, in the second one's order.
     ConstructorOrder(Vec<String>),
     /// The differences of a constructor's inline records.
     ConstructorRecord(Ident, Vec<TypeMismatch>),
+    /// Their record representations differ.
     RecordRepresentation,
     /// `true` means the second declaration is unboxed.
     UnboxedRepresentation(bool),
+    /// The first declaration is not an immediate type.
     Immediate,
+    /// Their `@tag` annotations differ.
     TagName,
+    /// The runtime representations of the case differ.
     VariantRepresentation(Ident),
     /// What each declaration states about its values at run time
     /// (`Ast_untagged_variants.describe_declared_values`).
     RuntimeAnnotation(String, String),
+    /// The second declaration is `@notUndefined`, the first can hold
+    /// `undefined`.
     NotUndefined,
 }
 

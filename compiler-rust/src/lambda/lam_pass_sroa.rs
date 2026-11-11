@@ -125,7 +125,7 @@ fn fields_for_block(
     if field_count == 1 {
         return vec![*block];
     }
-    let named = |name: &str| id_gen.create(&format!("{}_{}", block.name(), name));
+    let named = |name: &str| id_gen.create(format!("{}_{}", block.name(), name));
     match info {
         TagInfo::Record(_) | TagInfo::RecordInlined(_)
             if info.record_fields().map(<[_]>::len) == Some(field_count) =>

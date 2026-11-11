@@ -134,7 +134,9 @@ fn constant_expression(loc: LocIdx, constant: Constant) -> Expression {
 /// a shared arena, while attributes that become part of the AST go into the
 /// ordinary expression storage.
 pub enum PayloadArena<'a> {
+    /// Borrow shared storage for printer-only payloads.
     Shared(&'a ParseArena),
+    /// Append payloads to the mutable syntax tree.
     Owned(&'a mut ParseArena),
 }
 

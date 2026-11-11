@@ -17,17 +17,24 @@ pub trait Session {
 /// `resolution`.
 #[derive(Debug, Clone)]
 pub enum Resolution {
+    /// A name exported by the module `env` describes.
     Exported(QueryEnv, String),
+    /// A path into another module: that module's name and the path within it.
     Global(String, ModulePathList),
+    /// A whole other module, by name.
     GlobalMod(String),
+    /// The path could not be resolved.
     NotFound,
+    /// A declaration in this file, by stamp.
     Stamp(i32),
 }
 
 /// What a path inside a module resolves to (OCaml's polymorphic variants).
 #[derive(Debug, Clone)]
 pub enum Found {
+    /// The last name of the path, exported by the module `env` describes.
     Local(QueryEnv, String),
+    /// A path into another module: that module's name and the full path within it.
     Global(String, ModulePathList),
 }
 

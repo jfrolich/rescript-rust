@@ -618,6 +618,7 @@ pub fn size_upto(a: &LamArena, limit: i32, lam: Lam) -> i32 {
     }
 }
 
+/// Whether every argument is a constant node.
 pub fn args_all_const(a: &LamArena, args: &[Lam]) -> bool {
     args.iter().all(|x| a.is_const(*x))
 }

@@ -9,6 +9,7 @@ use super::js_exp_make::{
     runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
+use super::lam_compile_arguments::HeldArgs;
 use crate::ident::Ident;
 use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
@@ -240,13 +241,9 @@ impl LambdaCompiler {
     /// lam_compile_external_call.ml `hold_args`: `hold_external_arg` for
     /// the compiled arguments of a call, paired with the specs as in
     /// `assemble_external_args_no_splice`.
-    pub(crate) fn hold_external_args(
-        &mut self,
-        arg_types: &[Param],
-        args: Vec<(Block, Expr)>,
-    ) -> Vec<(Block, Expr)> {
+    pub(crate) fn hold_external_args(&mut self, arg_types: &[Param], args: HeldArgs) -> HeldArgs {
         let mut args = args.into_iter();
-        let mut held = Vec::with_capacity(args.len());
+        let mut held = HeldArgs::with_capacity(args.len());
         for spec in arg_types {
             if matches!(spec.arg_type, Attr::ArgCst(_)) {
                 continue;
@@ -264,10 +261,10 @@ impl LambdaCompiler {
     pub(crate) fn hold_external_obj_args(
         &mut self,
         obj_params: &[ObjParam],
-        args: Vec<(Block, Expr)>,
-    ) -> Vec<(Block, Expr)> {
+        args: HeldArgs,
+    ) -> HeldArgs {
         let mut args = args.into_iter();
-        let mut held = Vec::with_capacity(args.len());
+        let mut held = HeldArgs::with_capacity(args.len());
         for param in obj_params {
             let arg_label = match &param.obj_arg_label {
                 Label::ObjLabel { .. } | Label::ObjEmpty
@@ -445,9 +442,12 @@ impl LambdaCompiler {
 
         loop {
             match a.view(cursor) {
-                View::Let(kind, alias_id, value, body)
-                    if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt) =>
-                {
+                View::Let(
+                    LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
+                    alias_id,
+                    value,
+                    body,
+                ) => {
                     let (primitive, args, _) = a.as_prim(value)?;
                     let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = primitive else {
                         return None;
@@ -457,7 +457,7 @@ impl LambdaCompiler {
                     }
                     note_target(*args.first()?)?;
 
-                    alias_chain.push((alias_id, *index, name.clone()));
+                    alias_chain.push((alias_id, *index, *name));
                     cursor = body;
                 }
                 View::Prim(primitive, args, _) => {
@@ -478,12 +478,9 @@ impl LambdaCompiler {
                         let expected_field = &fields[position];
                         match a.view(*arg) {
                             View::Var(arg_id) => {
-                                let Some((_, field_index, field_name)) = alias_chain
+                                let (_, field_index, field_name) = alias_chain
                                     .iter()
-                                    .find(|(alias_id, _, _)| alias_id.same(&arg_id))
-                                else {
-                                    return None;
-                                };
+                                    .find(|(alias_id, _, _)| alias_id.same(&arg_id))?;
                                 if *field_index != position as i32 || field_name != expected_field {
                                     return None;
                                 }
@@ -541,7 +538,7 @@ impl LambdaCompiler {
         let id = *self
             .external_module_ids
             .entry(key)
-            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)));
+            .or_insert_with(|| self.id_gen.create(external_module_ident_name(module_name)));
 
         ModuleId {
             id,
@@ -627,7 +624,7 @@ impl LambdaCompiler {
     pub(crate) fn null_undefined_to_opt_expr(&mut self, expr: Expr) -> Expr {
         if self.can_inline_null_to_opt(expr) {
             JE::cond(
-                self.is_null_or_undefined_expr(expr.clone()),
+                self.is_null_or_undefined_expr(expr),
                 JE::undefined(false, &mut self.j),
                 self.optional_block(expr, false),
                 &mut self.j,
@@ -738,7 +735,7 @@ impl LambdaCompiler {
             matches!(arg_type, Attr::Unwrap) && matches!(arg_label, LabelNoname::ArgOptional);
         let (arg, raw_arg) = match arg_label {
             LabelNoname::ArgOptional => {
-                let raw_copy = keep_raw.then(|| raw_arg.clone());
+                let raw_copy = keep_raw.then_some(raw_arg);
                 (self.external_optional_to_undefined_expr(raw_arg), raw_copy)
             }
             LabelNoname::ArgLabel | LabelNoname::ArgEmpty => (raw_arg, None),
@@ -1052,9 +1049,9 @@ impl LambdaCompiler {
             };
 
             let value_arg = if pending.for_sure_no_nested_option {
-                prepared.clone()
+                prepared
             } else {
-                self.val_from_option_expr(prepared.clone())
+                self.val_from_option_expr(prepared)
             };
             let (value, effect) = self.lower_object_external_arg_value_and_effect(
                 value_arg,
@@ -1156,7 +1153,6 @@ impl LambdaCompiler {
     }
 
     /// `Lam_compile_external_call.translate_ffi`.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_js_call(
         &mut self,
         prim_name: &str,

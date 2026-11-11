@@ -1585,6 +1585,7 @@ fn include_description(id: &IncludeDescription, arena: &ParseArena) -> Sexp {
 // Structure
 // ============================================================================
 
+/// The sexp, with locations, of an implementation's structure.
 pub fn structure(items: &[StructureItem], arena: &ParseArena) -> Sexp {
     let mut parts = vec![Sexp::atom("structure")];
     parts.extend(items.iter().map(|si| structure_item(si, arena)));
@@ -1679,6 +1680,7 @@ fn structure_item(si: &StructureItem, arena: &ParseArena) -> Sexp {
 // Signature
 // ============================================================================
 
+/// The sexp, with locations, of an interface's signature.
 pub fn signature(items: &[SignatureItem], arena: &ParseArena) -> Sexp {
     let mut parts = vec![Sexp::atom("signature")];
     parts.extend(items.iter().map(|si| signature_item(si, arena)));
@@ -1747,11 +1749,13 @@ fn signature_item(si: &SignatureItem, arena: &ParseArena) -> Sexp {
 // Public API
 // ============================================================================
 
+/// Write the sexp, with locations, of a structure to `out`.
 pub fn print_structure(items: &[StructureItem], arena: &ParseArena, out: &mut impl Write) {
     let sexp = structure(items, arena);
     let _ = out.write_all(&string_to_latin1_bytes(&sexp.to_string()));
 }
 
+/// Write the sexp, with locations, of a signature to `out`.
 pub fn print_signature(items: &[SignatureItem], arena: &ParseArena, out: &mut impl Write) {
     let sexp = signature(items, arena);
     let _ = out.write_all(&string_to_latin1_bytes(&sexp.to_string()));

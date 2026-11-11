@@ -47,12 +47,15 @@ const TYPE_OF: &str = "typeOf";
 /// `@instanceOf` path is still not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedClass {
+    /// The path starts with `globalThis.`, which the compiler adds itself.
     ThroughGlobalThis,
     /// Names the `@typeOf` that says the same.
     EveryValueOf(&'static str),
     /// Names the `@typeOf` of the wrapped primitive.
     WrapperOf(&'static str),
+    /// `Array`, whose instances `Array.isArray` recognizes.
     ArrayClass,
+    /// A global that is not a class.
     NotAClass,
 }
 
@@ -349,7 +352,7 @@ pub(crate) fn value_shape(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Value
     loop {
         let t_repr = ctx.repr(t);
         let path = match &*ctx.get_desc(t_repr) {
-            TypeDesc::Tconstr { path, .. } if fuel > 0 => path.clone(),
+            TypeDesc::Tconstr { path, .. } if fuel > 0 => *path,
             _ => return ValueShape::Unstated,
         };
         if let Some(decl) = find_type(ctx, env, &path)
@@ -394,7 +397,7 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
         }
         TypeDesc::Tarrow { .. } => return Some(BlockType::Function),
         TypeDesc::Tobject { .. } => return Some(BlockType::Object),
-        TypeDesc::Tconstr { path, .. } => path.clone(),
+        TypeDesc::Tconstr { path, .. } => *path,
         _ => return None,
     };
     match find_type(ctx, env, &path)

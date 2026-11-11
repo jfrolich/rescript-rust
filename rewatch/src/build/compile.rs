@@ -3452,7 +3452,6 @@ fn compile_runtime_module_from_source(
         &options,
         &local_registry,
         has_runtime_interface,
-        None,
     )
     .map_err(|err| {
         anyhow!(

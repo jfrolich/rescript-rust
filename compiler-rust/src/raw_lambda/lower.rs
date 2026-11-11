@@ -745,8 +745,7 @@ fn collapse_module_alias(a: &LamArena, fields: &[String], args: &[Lam]) -> Optio
     if field_name != first_field || first_index != 0 {
         return None;
     }
-    let mut expected_index = 1i32;
-    for (field, arg) in rest_fields.iter().zip(rest_args) {
+    for (expected_index, (field, arg)) in (1i32..).zip(rest_fields.iter().zip(rest_args)) {
         let (field_name, arg_index, arg_module_value) = module_field_access(a, *arg)?;
         if field_name != field
             || arg_index != expected_index
@@ -754,7 +753,6 @@ fn collapse_module_alias(a: &LamArena, fields: &[String], args: &[Lam]) -> Optio
         {
             return None;
         }
-        expected_index += 1;
     }
     if rest_fields.len() != rest_args.len() {
         return None;
@@ -878,10 +876,7 @@ mod tests {
         });
 
         assert!(matches!(
-            {
-                let raw = raw;
-                lower_to_lambda(b.into_inner(), raw)
-            },
+            lower_to_lambda(b.into_inner(), raw),
             Lambda::Lconst(Constant::JsUndefined { is_unit: true })
         ));
     }
@@ -900,10 +895,7 @@ mod tests {
             },
         );
 
-        let lowered = {
-            let raw = raw;
-            lower_to_lambda(b.into_inner(), raw)
-        };
+        let lowered = lower_to_lambda(b.into_inner(), raw);
         let Lambda::Lapply(apply) = lowered else {
             panic!("expected Lapply");
         };
@@ -936,10 +928,7 @@ mod tests {
             },
         );
 
-        let lowered = {
-            let raw = raw;
-            lower_to_lambda(b.into_inner(), raw)
-        };
+        let lowered = lower_to_lambda(b.into_inner(), raw);
         let Lambda::Lprim(info) = lowered else {
             panic!("expected primitive application");
         };
@@ -1002,10 +991,7 @@ mod tests {
         });
 
         assert!(matches!(
-            {
-                let raw = raw;
-                lower_to_lambda(b.into_inner(), raw)
-            },
+            lower_to_lambda(b.into_inner(), raw),
             Lambda::Lconst(Constant::JsUndefined { is_unit: false })
         ));
     }
@@ -1024,10 +1010,7 @@ mod tests {
         });
 
         assert!(matches!(
-            {
-            let raw = raw;
-            lower_to_lambda(b.into_inner(), raw)
-        },
+            lower_to_lambda(b.into_inner(), raw),
             Lambda::Lconst(Constant::Int {
                 i: 0,
                 comment: Some(comment),
@@ -1071,10 +1054,7 @@ mod tests {
         let alias = Ident::create_local("alias");
         let raw = b.let_(LetKind::Alias, alias, b.var(source), b.var(alias));
 
-        let lowered = {
-            let raw = raw;
-            lower_to_lambda(b.into_inner(), raw)
-        };
+        let lowered = lower_to_lambda(b.into_inner(), raw);
         let Lambda::Lvar(id) = lowered else {
             panic!("expected alias to collapse");
         };
@@ -1097,10 +1077,7 @@ mod tests {
             ),
         );
 
-        let lowered = {
-            let raw = raw;
-            lower_to_lambda(b.into_inner(), raw)
-        };
+        let lowered = lower_to_lambda(b.into_inner(), raw);
         let Lambda::Llet(LetKind::Alias, kept_alias, value, body) = lowered else {
             panic!("expected exported alias let to remain");
         };

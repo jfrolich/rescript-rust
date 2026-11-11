@@ -22,7 +22,9 @@ use crate::raw_lambda::{RawArena, RawLambda, RawLambdaSwitch};
 /// Whether an action is shared (used by multiple cases) or single.
 #[derive(Debug, Clone)]
 pub enum Shared<A> {
+    /// An action used by several cases.
     Shared(A),
+    /// An action used by one case.
     Single(A),
 }
 

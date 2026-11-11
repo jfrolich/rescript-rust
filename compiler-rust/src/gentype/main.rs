@@ -114,28 +114,43 @@ struct InProcessTypeDeclarationsTables {
 
 type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
 
+/// The typed tree of an artifact (`Cmt_format.binary_annots`).
 pub enum TypedArtifactAnnots<'a> {
+    /// A `.res` file's typed structure.
     Implementation(&'a Structure),
+    /// A `.resi` file's typed signature.
     Interface(&'a TypedSignature),
+    /// A packed module, which gentype does not translate.
     Packed,
+    /// The partial structure of a `.res` file with type errors.
     PartialImplementation,
+    /// The partial signature of a `.resi` file with type errors.
     PartialInterface,
 }
 
+/// A type-checked module, as the compiler hands it to gentype.
 pub struct TypedArtifact<'a> {
+    /// The module's typed tree.
     pub annots: TypedArtifactAnnots<'a>,
+    /// The parse arena the typed tree's attributes and locations point into.
     pub arena: &'a ParseArena,
     /// Node storage of the typed tree in `annots`.
     pub ta: &'a crate::types::typedtree::TypedArena,
+    /// The type state the typed tree's types live in.
     pub ctx: &'a TypeContext,
+    /// The source file's path, when known.
     pub source_file: Option<&'a str>,
+    /// The module's name as the compiler knows it.
     pub compiler_module_name: crate::gentype::module_name::T,
+    /// The module name gentype derives from the source file's path.
     pub file_name: crate::gentype::module_name::T,
+    /// Whether the artifact is an interface.
     pub is_interface: bool,
     /// Only register the artifact's type declarations, for modules that
     /// import its types; generate no output (a module compiled only for its
     /// interface).
     pub declarations_only: bool,
+    /// Renders an invalid string escape read in the artifact's file.
     pub render_escape: &'a RenderEscape<'a>,
 }
 
@@ -304,6 +319,8 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     })
 }
 
+/// `GenTypeMain.signature_check_annotations` / `structure_check_annotations`:
+/// whether any item of the artifact is accepted by `check_annotation`.
 pub fn typed_artifact_check_annotations(
     check_annotation: &impl Fn(
         &ParseArena,
@@ -337,6 +354,7 @@ pub fn typed_artifact_check_annotations(
     }
 }
 
+/// Whether the artifact is the partial tree of a module with type errors.
 pub fn typed_artifact_has_type_errors(artifact: &TypedArtifact<'_>) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:11-14 for the in-memory path.
     matches!(
@@ -345,6 +363,26 @@ pub fn typed_artifact_has_type_errors(artifact: &TypedArtifact<'_>) -> bool {
     )
 }
 
+impl TypedArtifact<'_> {
+    /// The artifact's trees as a translation reads them, with imports
+    /// resolved for `output_file_relative`.
+    fn translation_input<'s>(
+        &'s self,
+        output_file_relative: &'s str,
+        resolver: &'s crate::gentype::module_resolver::Resolver,
+    ) -> crate::gentype::translation::Input<'s> {
+        crate::gentype::translation::Input {
+            ta: self.ta,
+            ctx: self.ctx,
+            arena: self.arena,
+            output_file_relative,
+            resolver,
+        }
+    }
+}
+
+/// Whether a structure item declares types or modules, whose type
+/// declarations importers may need.
 pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:16-20.
     matches!(
@@ -355,6 +393,8 @@ pub fn structure_item_is_declaration(struct_item: &StructureItem) -> bool {
     )
 }
 
+/// Whether a signature item declares types or module types, whose type
+/// declarations importers may need.
 pub fn signature_item_is_declaration(signature_item: &TypedSignatureItem) -> bool {
     // Mirrors compiler/gentype/GenTypeMain.ml:21-24.
     matches!(
@@ -363,6 +403,8 @@ pub fn signature_item_is_declaration(signature_item: &TypedSignatureItem) -> boo
     )
 }
 
+/// `GenTypeMain.translateCMT`: translate the artifact for the generated file
+/// at `output_file_relative`.
 pub fn translate_typed_artifact(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -371,6 +413,7 @@ pub fn translate_typed_artifact(
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/GenTypeMain.ml:53-70 for in-memory artifacts.
+    let input = artifact.translation_input(output_file_relative, resolver);
     let type_env = crate::gentype::type_env::root_for_current_module_names(
         current_module_names_for_typed_artifact(artifact),
     );
@@ -378,24 +421,13 @@ pub fn translate_typed_artifact(
     let translations = match artifact.annots {
         TypedArtifactAnnots::Implementation(structure) => {
             crate::gentype::translate_structure::translate_structure(
-                artifact.ctx,
-                artifact.arena,
-                artifact.ta,
-                config,
-                output_file_relative,
-                resolver,
-                &type_env,
-                structure,
+                input, config, &type_env, structure,
             )?
         }
         TypedArtifactAnnots::Interface(signature) => {
             crate::gentype::translate_signature::translate_signature(
-                artifact.ctx,
-                artifact.arena,
-                artifact.ta,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 &type_env,
                 artifact.ta.signature_items(signature.sig_items),
             )?
@@ -446,6 +478,8 @@ fn current_module_names_for_typed_artifact(artifact: &TypedArtifact<'_>) -> Vec<
     names
 }
 
+/// Translate only the type declarations of the artifact, as importers of its
+/// types need them.
 pub fn typed_artifact_translate_type_declarations(
     config: &crate::gentype::config::T,
     output_file_relative: &str,
@@ -457,6 +491,7 @@ pub fn typed_artifact_translate_type_declarations(
     // typedtree path. OCaml reopens the imported CMT at EmitJs.ml:437-453;
     // Rust already has the typed artifact here, so cache the same declaration
     // translation under the CMT path before EmitJs asks for it recursively.
+    let input = artifact.translation_input(output_file_relative, resolver);
     let type_env = crate::gentype::type_env::root();
     type_env.borrow_mut().notes = notes.clone();
     let translations = match artifact.annots {
@@ -467,14 +502,7 @@ pub fn typed_artifact_translate_type_declarations(
             .filter(|item| structure_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_structure::translate_structure_item(
-                    artifact.ctx,
-                    artifact.arena,
-                    artifact.ta,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
+                    input, config, &type_env, item,
                 )
             })
             .collect::<crate::gentype::annotation::Read<_>>()?,
@@ -485,14 +513,7 @@ pub fn typed_artifact_translate_type_declarations(
             .filter(|item| signature_item_is_declaration(item))
             .map(|item| {
                 crate::gentype::translate_signature::translate_signature_item(
-                    artifact.ctx,
-                    artifact.arena,
-                    artifact.ta,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    item,
+                    input, config, &type_env, item,
                 )
             })
             .collect::<crate::gentype::annotation::Read<_>>()?,
@@ -510,6 +531,9 @@ pub fn typed_artifact_translate_type_declarations(
     )
 }
 
+/// The type declarations translated from the `.cmt` file `cmt_file`, from
+/// the registry of artifacts this process has translated; reading a `.cmt`
+/// from disk is a fatal error.
 pub fn input_cmt_translate_type_declarations(
     notes: &crate::gentype::log_::Notes,
     _config: &mut crate::gentype::config::T,
@@ -535,30 +559,16 @@ pub fn input_cmt_translate_type_declarations(
 
 /// The generated file's contents, or the report of the exception emitting
 /// raised (an imported module's declarations, `InProcessTypeDeclarations`).
-#[allow(clippy::too_many_arguments)]
 pub fn emit_translation_contents(
     locs: &dyn crate::types::DeclLocs,
-    notes: &crate::gentype::emit_js::EmitNotes<'_>,
     config: &mut crate::gentype::config::T,
-    file_name: &crate::gentype::module_name::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
-    get_cmt_file: &crate::gentype::emit_js::GetCmtFile<'_>,
+    target: crate::gentype::emit_js::EmitTarget<'_>,
     source_file: &str,
     translation: &crate::gentype::translation::T,
 ) -> Result<String, String> {
     // Mirrors compiler/gentype/GenTypeMain.ml:72-83, up to the write.
-    let code_text = crate::gentype::emit_js::emit_translation_as_string(
-        locs,
-        notes,
-        config,
-        file_name,
-        get_cmt_file,
-        &input_cmt_translate_type_declarations,
-        output_file_relative,
-        resolver,
-        translation,
-    )?;
+    let code_text =
+        crate::gentype::emit_js::emit_translation_as_string(target, locs, config, translation)?;
     let source_file = Path::new(source_file)
         .file_name()
         .and_then(|s| s.to_str())
@@ -608,13 +618,21 @@ fn read_cmt(cmt_file: &str) -> ! {
 pub enum Output {
     /// Write `contents` unless the file already has them.
     Write {
+        /// The generated file's path.
         output_file: String,
+        /// The generated file's contents.
         contents: String,
     },
     /// The artifact has type errors: log, keep the file.
-    TypeError { output_file: String },
+    TypeError {
+        /// The generated file's path.
+        output_file: String,
+    },
     /// No annotations: log and remove the file.
-    NoMatch { output_file: String },
+    NoMatch {
+        /// The generated file's path.
+        output_file: String,
+    },
 }
 
 impl Output {
@@ -654,9 +672,13 @@ impl Output {
 #[derive(Debug, Clone)]
 pub enum InterfaceRead {
     /// Only the type declarations were registered (`declarations_only`).
-    DeclarationsOnly { needs_locations: bool },
+    DeclarationsOnly {
+        /// Notes were rendered from a location-free parse of the interface.
+        needs_locations: bool,
+    },
     /// The report of the exception the annotation walk raised.
     Raised(String),
+    /// The annotation walk read the interface.
     Read {
         /// `@genType.ignoreInterface` seen by the walk, which stops at the
         /// first annotated item.
@@ -799,12 +821,15 @@ fn plan_output(
         let mut config = config.clone();
         let contents = emit_translation_contents(
             artifact.ctx,
-            &emit_notes,
             &mut config,
-            &artifact.file_name,
-            &prepared.output_file_relative,
-            resolver,
-            &get_cmt_file,
+            crate::gentype::emit_js::EmitTarget {
+                notes: &emit_notes,
+                file_name: &artifact.file_name,
+                output_file_relative: &prepared.output_file_relative,
+                resolver,
+                get_cmt_file: &get_cmt_file,
+                input_cmt_translate_type_declarations: &input_cmt_translate_type_declarations,
+            },
             &prepared.source_file,
             &translation,
         )?;

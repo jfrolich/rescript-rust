@@ -161,11 +161,15 @@ const ANSI_WARN: &str = "\x1b[1;33m";
 const ANSI_FILENAME: &str = "\x1b[36m";
 const ANSI_RESET: &str = "\x1b[0m";
 
+/// When diagnostics use ANSI colors (`bsc -color`).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum ColorMode {
+    /// Color when stderr is a terminal and `TERM` is set and not `dumb`.
     #[default]
     Auto = 0,
+    /// Always color.
     Always = 1,
+    /// Never color.
     Never = 2,
 }
 
@@ -217,6 +221,7 @@ pub fn apply_message_styles(message: &str) -> std::borrow::Cow<'_, str> {
     std::borrow::Cow::Owned(out)
 }
 
+/// Parse a `-color` argument (`auto`, `always` or `never`).
 pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
     match value {
         "auto" => Some(ColorMode::Auto),
@@ -226,6 +231,7 @@ pub fn parse_color_mode(value: &str) -> Option<ColorMode> {
     }
 }
 
+/// Set the process-wide color mode used by `should_enable_color`.
 pub fn set_color_mode(mode: ColorMode) {
     COLOR_MODE.store(mode as u8, Ordering::Relaxed);
 }
@@ -238,6 +244,7 @@ fn color_mode() -> ColorMode {
     }
 }
 
+/// Whether diagnostics should be colored under the current color mode.
 pub fn should_enable_color() -> bool {
     // OCaml compiler/bsc/rescript_compiler_main.ml:349-358 parses `-color`,
     // rescript_compiler_main.ml:494 makes `bsc` default to `always`, and
@@ -255,6 +262,8 @@ fn should_auto_enable_color() -> bool {
     term != "dumb" && !term.is_empty() && std::io::stderr().is_terminal()
 }
 
+/// Color a diagnostic's `Error`/`Warning` intro, red for errors and yellow
+/// for warnings, when colors are enabled.
 pub fn colorize_intro(intro: &str, is_error: bool) -> String {
     if !should_enable_color() {
         return intro.to_string();
@@ -271,6 +280,8 @@ pub fn colorize_filename(file: &str) -> String {
     format!("{ANSI_FILENAME}{file}{ANSI_RESET}")
 }
 
+/// Color a `file:line:col` location: the file in cyan and the rest dimmed,
+/// when colors are enabled.
 pub fn colorize_location(location: &str) -> String {
     if !should_enable_color() {
         return location.to_string();

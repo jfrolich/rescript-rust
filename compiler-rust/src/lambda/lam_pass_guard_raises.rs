@@ -8,6 +8,7 @@
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_primitive::Primitive;
 
+/// Applies the rewrite described in the module docs to `lam`.
 pub fn guard_raises(a: &mut LamArena, lam: Lam) -> Lam {
     if let Node::If { cond, then_, else_ } = a.node(lam)
         && matches!(a.as_prim(then_), Some((Primitive::Praise, _, _)))

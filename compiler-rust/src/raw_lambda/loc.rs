@@ -23,6 +23,8 @@ pub struct LamLocBuilder {
 }
 
 impl LamLocBuilder {
+    /// A builder for the locations of `arena`; it records coordinates only
+    /// when the arena stores locations.
     pub fn new(arena: &ParseArena) -> Self {
         Self {
             table: RefCell::new(if arena.stores_locations() {
@@ -34,6 +36,7 @@ impl LamLocBuilder {
         }
     }
 
+    /// Whether handles resolve to source coordinates.
     pub fn is_located(&self) -> bool {
         self.table.borrow().is_located()
     }
@@ -84,13 +87,16 @@ impl LamLocBuilder {
 /// `Matching` where OCaml reads `pat.pat_loc` and attaches it to nodes.
 #[derive(Clone, Copy)]
 pub struct LocArena<'a> {
+    /// The parse arena locations are read from.
     pub arena: &'a ParseArena,
+    /// The builder location handles are recorded in.
     pub locs: &'a LamLocBuilder,
     /// The raw Lambda arena the conversion builds into.
     pub b: &'a crate::raw_lambda::RawArena,
 }
 
 impl<'a> LocArena<'a> {
+    /// Bundles the conversion's arenas and location builder.
     pub fn new(
         arena: &'a ParseArena,
         locs: &'a LamLocBuilder,

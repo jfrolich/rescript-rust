@@ -417,6 +417,8 @@ pub fn collect_info(a: &LamArena, meta: &mut LamStats, lam: Lam) {
     .collect(a, lam);
 }
 
+/// [`collect_info`], answering arity queries on external module fields
+/// through `resolver`.
 pub fn collect_info_with_external_arity(
     a: &LamArena,
     meta: &mut LamStats,

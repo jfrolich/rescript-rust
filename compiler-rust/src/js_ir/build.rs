@@ -14,7 +14,9 @@ use crate::lambda::SwitchCaseTag;
 /// A variable reference viewed through the arena (`J.vident`).
 #[derive(Clone, Copy)]
 pub enum VRef<'a> {
+    /// A local identifier.
     Id(Ident),
+    /// A module, or a member of it when the name is `Some`.
     Qualified(&'a ModuleId, Option<&'a str>),
 }
 
@@ -30,6 +32,8 @@ pub fn vident(a: &JsArena, e: Expr) -> Option<VRef<'_>> {
     }
 }
 
+/// `Js_op_util.same_vident`: whether two references name the same variable,
+/// comparing identifiers with [`Ident::same`] and externals by module name only.
 pub fn same_vident(left: VRef<'_>, right: VRef<'_>) -> bool {
     match (left, right) {
         (VRef::Id(left_id), VRef::Id(right_id)) => left_id.same(&right_id),
@@ -90,6 +94,7 @@ pub fn string_literal_semantic(a: &JsArena, e: Expr) -> Option<&str> {
     }
 }
 
+/// Whether `e` is an `undefined` literal (unit or not).
 pub fn is_undefined(a: &JsArena, e: Expr) -> bool {
     matches!(a.ek(e), ExprKind::Undefined { .. })
 }
@@ -279,6 +284,7 @@ pub(crate) fn ocaml_eq_expression(a: &JsArena, left: Expr, right: Expr) -> bool 
 pub mod exp {
     use super::*;
 
+    /// An expression node of the given kind with no comment.
     pub fn new(kind: ExprKind, j: &mut JsArena) -> Expr {
         j.expr(kind)
     }
@@ -293,19 +299,23 @@ pub mod exp {
         j.str(s)
     }
 
+    /// An expression node of the given kind carrying `comment`.
     pub fn with_comment(kind: ExprKind, comment: &str, j: &mut JsArena) -> Expr {
         j.expr_commented(kind, comment)
     }
 
+    /// A boolean literal.
     pub fn bool(value: bool, j: &mut JsArena) -> Expr {
         j.expr(ExprKind::Bool(value))
     }
 
+    /// A reference to a local identifier.
     pub fn var(id: Ident, j: &mut JsArena) -> Expr {
         let id = j.ident_id(id);
         j.expr(ExprKind::Var(id))
     }
 
+    /// A reference to a module, or to `member` of it.
     pub fn qualified(module: ModuleId, member: Option<String>, j: &mut JsArena) -> Expr {
         let q = j.qual_id(module, member);
         j.expr(ExprKind::Qualified(q))
@@ -317,39 +327,47 @@ pub mod exp {
         j.expr(ExprKind::Str(s))
     }
 
+    /// An `undefined` literal; `is_unit` marks one that stands for `()`.
     pub fn undefined(is_unit: bool, j: &mut JsArena) -> Expr {
         j.expr(ExprKind::Undefined { is_unit })
     }
 
+    /// The `null` literal.
     pub fn null(j: &mut JsArena) -> Expr {
         j.expr(ExprKind::Null)
     }
 
+    /// A number literal.
     pub fn number(n: Number, j: &mut JsArena) -> Expr {
         let n = j.number_id(n);
         j.expr(ExprKind::Number(n))
     }
 
+    /// An integer literal.
     pub fn int(i: i32, j: &mut JsArena) -> Expr {
         number(Number::int(i), j)
     }
 
+    /// An array literal of `elements`.
     pub fn array(elements: &[Expr], mutable_flag: MutableFlag, j: &mut JsArena) -> Expr {
         let l = j.expr_list(elements);
         j.expr(ExprKind::Array(l, mutable_flag))
     }
 
+    /// A call of `func` with `args`, without folding.
     pub fn call(func: Expr, args: &[Expr], info: CallInfo, j: &mut JsArena) -> Expr {
         let args = j.expr_list(args);
         let info = j.call_id(info);
         j.expr(ExprKind::Call(func, args, info))
     }
 
+    /// A `target.field` access; `pos` is the field's position in its record, if known.
     pub fn static_index(target: Expr, field: &str, pos: Option<i32>, j: &mut JsArena) -> Expr {
         let field = j.str(field);
         j.expr(ExprKind::StaticIndex(target, field, FieldPos::new(pos)))
     }
 
+    /// A block (record, variant or tuple) of `items` with the given tag.
     pub fn caml_block(
         items: &[Expr],
         flag: MutableFlag,
@@ -361,10 +379,12 @@ pub mod exp {
         j.expr(ExprKind::CamlBlock(items, flag, tag))
     }
 
+    /// A binary operation with no folding.
     pub fn raw_bin(op: BinOp, left: Expr, right: Expr, j: &mut JsArena) -> Expr {
         j.expr(ExprKind::Bin(op, left, right))
     }
 
+    /// A comma expression `left, right` with no folding.
     pub fn seq(left: Expr, right: Expr, j: &mut JsArena) -> Expr {
         j.expr(ExprKind::Seq(left, right))
     }
@@ -1302,12 +1322,15 @@ pub mod stmt {
         new(StmtKind::If(cond, then_, else_), j)
     }
 
+    /// A `while (cond) body` loop, optionally labelled.
     pub fn while_(label: Option<&str>, cond: Expr, body: &[Stmt], j: &mut JsArena) -> Stmt {
         let label = label.map(|l| j.str(l));
         let body = j.stmt_list(body);
         new(StmtKind::While(label, cond, body), j)
     }
 
+    /// A `for` loop over an integer range (`Js_stmt_make.for_`); `init` is `None`
+    /// when `ident` is already declared.
     pub fn for_range(
         label: Option<&str>,
         init: Option<Expr>,
@@ -1365,24 +1388,29 @@ pub mod stmt {
         new(StmtKind::Return(expr), j)
     }
 
+    /// A `throw expr` statement.
     pub fn throw(expr: Expr, j: &mut JsArena) -> Stmt {
         new(StmtKind::Throw(expr), j)
     }
 
+    /// A `break` statement, optionally to a label.
     pub fn break_(label: Option<&str>, j: &mut JsArena) -> Stmt {
         let label = label.map(|l| j.str(l));
         new(StmtKind::Break(label), j)
     }
 
+    /// A `continue` statement, optionally to a label.
     pub fn continue_(label: Option<&str>, j: &mut JsArena) -> Stmt {
         let label = label.map(|l| j.str(l));
         new(StmtKind::Continue(label), j)
     }
 
+    /// A `debugger` statement.
     pub fn debugger(j: &mut JsArena) -> Stmt {
         new(StmtKind::Debugger, j)
     }
 
+    /// A variable declaration.
     pub fn variable(decl: VarDecl, j: &mut JsArena) -> Stmt {
         let v = j.var_id(decl);
         new(StmtKind::Variable(v), j)
@@ -1406,6 +1434,7 @@ pub mod stmt {
         )
     }
 
+    /// A `switch` over integer cases (`Js_stmt_make.int_switch`) with no folding.
     pub fn int_switch(
         e: Expr,
         clauses: Vec<(i32, Clause)>,
@@ -1416,6 +1445,7 @@ pub mod stmt {
         new(StmtKind::IntSwitch(e, id), j)
     }
 
+    /// A `switch` over string cases with no folding.
     pub fn string_switch(
         e: Expr,
         clauses: Vec<StringClauseInfo>,
@@ -1426,6 +1456,7 @@ pub mod stmt {
         new(StmtKind::StringSwitch(e, id), j)
     }
 
+    /// A `try` statement with an optional `catch (id)` and `finally` block.
     pub fn try_(
         body: &[Stmt],
         catch: Option<(Ident, &[Stmt])>,

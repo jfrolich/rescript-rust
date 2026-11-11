@@ -869,8 +869,9 @@ fn dynamic_import_only_possible_required_modules_still_mark_effects_like_ocaml()
 #[test]
 fn required_modules_skip_dead_pure_external_bindings_like_printer() {
     let mut compiler = LambdaCompiler::new();
-    let mut dead_info = IdentInfo::default();
-    dead_info.used_stats = UsedStats::DeadPure;
+    let dead_info = IdentInfo {
+        used_stats: UsedStats::DeadPure,
+    };
     let block = vec![JS::variable(
         VarDecl {
             ident: Ident::create_local("dead_external"),

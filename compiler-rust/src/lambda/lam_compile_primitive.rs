@@ -26,7 +26,7 @@ use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_primitive::{Mutable, Primitive};
 
 /// Compiled primitive arguments; primitives take at most a few.
-pub(crate) type PrimArgs = smallvec::SmallVec<[Expr; 4]>;
+pub(crate) type PrimArgs = super::lam_compile_arguments::ArgValues;
 
 impl LambdaCompiler {
     pub(crate) fn compile_primitive(
@@ -40,26 +40,28 @@ impl LambdaCompiler {
         }
 
         let p = a.prim_payload(info);
-        let (prim, loc) = (p.primitive.clone(), p.loc);
-        if matches!(prim, Primitive::Pdebugger) {
+        if matches!(p.primitive, Primitive::Pdebugger) {
+            let loc = p.loc;
             return self.compile_debugger(a, args, &loc);
         }
-        if let (Primitive::PjsObjectGet(property), [obj]) = (&prim, a.list(args)) {
-            return self.compile_js_object_get(a, property, *obj);
+        if let (Primitive::PjsObjectGet(property), [obj]) = (&p.primitive, a.list(args)) {
+            let (property, obj) = (property.clone(), *obj);
+            return self.compile_js_object_get(a, &property, obj);
         }
+        // The arguments are compiled before the primitive is read again, so
+        // that it can be borrowed from the arena instead of copied.
         let args = a.list_small(args);
-        let (prelude, compiled_args) = match &prim {
-            Primitive::PjsCall(call) => self.compile_arguments_held(a, false, args, |c, args| {
-                c.hold_external_args(&call.arg_types, args)
-            }),
+        let compiled = self.compile_each_argument(a, args);
+        let p = a.prim_payload(info);
+        let compiled = match &p.primitive {
+            Primitive::PjsCall(call) => self.hold_external_args(&call.arg_types, compiled),
             Primitive::PjsObjectCreate(obj_params) => {
-                self.compile_arguments_held(a, false, args, |c, args| {
-                    c.hold_external_obj_args(obj_params, args)
-                })
+                self.hold_external_obj_args(obj_params, compiled)
             }
-            _ => self.compile_arguments(a, false, args),
+            _ => compiled,
         };
-        self.compile_primitive_js(&prim, compiled_args.into(), prelude, &loc)
+        let (prelude, compiled_args) = self.sequence_arguments(false, compiled);
+        self.compile_primitive_js(&p.primitive, compiled_args, prelude, &p.loc)
     }
 
     /// Evaluate debugger's unit argument for effects before emitting the statement.
@@ -938,11 +940,7 @@ impl LambdaCompiler {
         // the RHS is the integer literal 0, so compare(x, y) > 0 lowers to x > y.
         if int_literal(&self.j, right) == Some(0) {
             if let Some((compare_left, compare_right)) = runtime_compare_call_args(&self.j, left) {
-                return self.compile_int_comparison(
-                    cmp,
-                    compare_left.clone(),
-                    compare_right.clone(),
-                );
+                return self.compile_int_comparison(cmp, compare_left, compare_right);
             }
         }
 

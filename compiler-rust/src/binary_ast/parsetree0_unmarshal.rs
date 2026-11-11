@@ -3,8 +3,9 @@
 //! An external `-ppx` rewriter returns its result in the binary protocol of
 //! `compiler/core/cmd_ppx_apply.ml`: the magic string, the marshaled input
 //! name, then the marshaled `Parsetree0.structure` / `signature`. This module
-//! decodes the generic [`OcamlValue`] tree into [`parsetree0`] values; it is
-//! the inverse of `parsetree0_marshal.rs` and follows the constructor order of
+//! decodes the generic [`OcamlValue`] tree into
+//! [`parsetree0`](super::parsetree0) values; it is the inverse of
+//! `parsetree0_marshal.rs` and follows the constructor order of
 //! `compiler/ml/parsetree0.ml`.
 
 use crate::cmi::marshal_reader::OcamlValue;
@@ -63,6 +64,7 @@ pub struct Decoder<'a> {
 }
 
 impl<'a> Decoder<'a> {
+    /// A decoder that interns strings into `arena`.
     pub fn new(arena: &'a mut ParseArena) -> Self {
         Self { arena }
     }
@@ -569,7 +571,7 @@ impl<'a> Decoder<'a> {
                 self.boxed(f.at(2)?)?,
             ),
             26 => ExpressionDesc::Letexception(
-                self.extension_constructor(f.at(0)?)?,
+                Box::new(self.extension_constructor(f.at(0)?)?),
                 self.boxed(f.at(1)?)?,
             ),
             27 => ExpressionDesc::Assert(self.boxed(f.at(0)?)?),
@@ -777,6 +779,7 @@ impl<'a> Decoder<'a> {
 
     // ========== Signatures ==========
 
+    /// Decode a `Parsetree0.signature`.
     pub fn signature(&mut self, v: &OcamlValue) -> R<Signature> {
         self.list(v, |d, item| d.signature_item(item))
     }
@@ -895,6 +898,7 @@ impl<'a> Decoder<'a> {
 
     // ========== Structures ==========
 
+    /// Decode a `Parsetree0.structure`.
     pub fn structure(&mut self, v: &OcamlValue) -> R<Structure> {
         self.list(v, |d, item| d.structure_item(item))
     }
@@ -953,7 +957,9 @@ impl<'a> Decoder<'a> {
 /// An external PPX's output file (`cmd_ppx_apply.ml` `read_ast`): the magic,
 /// the marshaled input name, then the marshaled Parsetree0 AST.
 pub struct PpxOutput {
+    /// The source file name the rewriter was given.
     pub input_name: String,
+    /// The marshaled structure or signature, not yet decoded.
     pub ast: OcamlValue,
 }
 

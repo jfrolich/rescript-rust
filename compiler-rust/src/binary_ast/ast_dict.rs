@@ -35,13 +35,17 @@ fn marker_attributes(arena: &mut ParseArena, marker: &str) -> Attributes {
 
 /// `Ast_dict.part`: consecutive rows, or a spread.
 pub enum Part<R, S> {
+    /// Rows between spreads, in source order.
     Rows(Vec<R>),
+    /// A spread dict.
     Spread(S),
 }
 
 /// `Ast_dict.entries`: a row or a spread, in source order.
 pub enum Entry<R, S> {
+    /// A `key: value` row.
     Row(R),
+    /// A `...dict` spread.
     Spread(S),
 }
 
@@ -69,10 +73,15 @@ pub fn group<R, S>(entries: Vec<Entry<R, S>>) -> Vec<Part<R, S>> {
 /// `Ast_dict.target_and_sources`: the rows of a dict without spreads, or the
 /// target and the sources it's built from.
 pub enum TargetAndSources<R, S> {
+    /// A dict without spreads: all its rows.
     Rows(Vec<R>),
+    /// A dict with spreads: the rows before the first spread, which build the
+    /// target, and the parts after them.
     Spread(Vec<R>, Vec<Part<R, S>>),
 }
 
+/// Split grouped parts into the rows of a dict without spreads, or the target
+/// rows and the sources assigned into it.
 pub fn target_and_sources<R, S>(parts: Vec<Part<R, S>>) -> TargetAndSources<R, S> {
     let mut iter = parts.into_iter();
     match iter.next() {

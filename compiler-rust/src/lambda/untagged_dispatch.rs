@@ -1053,8 +1053,11 @@ mod tests {
             cases
                 .iter()
                 .filter_map(|case| {
-                    (rng.int(5) < 3)
-                        .then(|| (case.clone(), ["b0", "b1", "b2"][rng.int(3) as usize]))
+                    if rng.int(5) < 3 {
+                        Some((case.clone(), ["b0", "b1", "b2"][rng.int(3) as usize]))
+                    } else {
+                        None
+                    }
                 })
                 .collect()
         }

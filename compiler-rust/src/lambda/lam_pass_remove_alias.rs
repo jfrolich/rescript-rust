@@ -6,7 +6,9 @@ use crate::ident::Ident;
 use crate::lambda::LamLoc;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_analysis::{lfunction_can_be_inlined, ok_to_inline_fun_when_app};
-use crate::lambda::lam_beta_reduce::{propagate_beta_reduce, propagate_beta_reduce_with_map};
+use crate::lambda::lam_beta_reduce::{
+    BetaReduceEnv, propagate_beta_reduce, propagate_beta_reduce_with_map,
+};
 use crate::lambda::lam_closure::is_closed_with_map;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
 use crate::lambda::lam_compile_context::{BoxedNullable, RecFlag};
@@ -25,9 +27,9 @@ pub type ExternalInlineResolver<'a> = dyn FnMut(&Ident, &str) -> Option<Lambda> 
 /// `Lam_pass_remove_alias.outcome` (lam_pass_remove_alias.ml:25).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Outcome {
-    EvalFalse,
-    EvalTrue,
-    EvalUnknown,
+    False,
+    True,
+    Unknown,
 }
 
 /// `id_is_for_sure_true_in_boolean` (lam_pass_remove_alias.ml:27-42).
@@ -39,20 +41,20 @@ fn id_is_for_sure_true_in_boolean(a: &LamArena, tbl: &IdentTable, id: &Ident) ->
         )
     };
     match tbl.get(id) {
-        Some(IdKind::NormalOptional(l)) if a.as_const(*l).is_some_and(falsy) => Outcome::EvalFalse,
+        Some(IdKind::NormalOptional(l)) if a.as_const(*l).is_some_and(falsy) => Outcome::False,
         Some(IdKind::Constant(c)) => match a.constant(*c) {
-            Constant::JsTrue => Outcome::EvalTrue,
+            Constant::JsTrue => Outcome::True,
             Constant::Int { i, .. } => {
                 if *i == 0 {
-                    Outcome::EvalFalse
+                    Outcome::False
                 } else {
-                    Outcome::EvalTrue
+                    Outcome::True
                 }
             }
-            c if falsy(c) => Outcome::EvalFalse,
-            _ => Outcome::EvalUnknown,
+            c if falsy(c) => Outcome::False,
+            _ => Outcome::Unknown,
         },
-        _ => Outcome::EvalUnknown,
+        _ => Outcome::Unknown,
     }
 }
 
@@ -190,9 +192,9 @@ impl Simplifier<'_, '_> {
                 }
                 if let Some(id) = a.as_var(cond) {
                     return match id_is_for_sure_true_in_boolean(a, self.ident_tbl, &id) {
-                        Outcome::EvalTrue => self.simpl(a, then_),
-                        Outcome::EvalFalse => self.simpl(a, else_),
-                        Outcome::EvalUnknown => self.simpl_children(a, lam),
+                        Outcome::True => self.simpl(a, then_),
+                        Outcome::False => self.simpl(a, else_),
+                        Outcome::Unknown => self.simpl_children(a, lam),
                     };
                 }
                 self.simpl_children(a, lam)
@@ -292,16 +294,17 @@ impl Simplifier<'_, '_> {
         }
     }
 
+    /// The simplifier's tables, as the beta reduction reads and updates them.
+    fn beta_reduce_env(&mut self) -> BetaReduceEnv<'_> {
+        BetaReduceEnv {
+            ident_tbl: &mut *self.ident_tbl,
+            id_gen: self.id_gen,
+            assignable: self.assignable,
+        }
+    }
+
     fn beta(&mut self, a: &mut LamArena, params: &[Ident], body: Lam, args: &[Lam]) -> Lam {
-        propagate_beta_reduce(
-            a,
-            self.ident_tbl,
-            self.id_gen,
-            self.assignable,
-            params,
-            body,
-            args,
-        )
+        propagate_beta_reduce(a, self.beta_reduce_env(), params, body, args)
     }
 
     fn simpl_apply(
@@ -380,9 +383,7 @@ impl Simplifier<'_, '_> {
                 match rec_flag {
                     RecFlag::Rec => propagate_beta_reduce_with_map(
                         a,
-                        self.ident_tbl,
-                        self.id_gen,
-                        self.assignable,
+                        self.beta_reduce_env(),
                         &param_map,
                         &params,
                         body,
@@ -399,9 +400,7 @@ impl Simplifier<'_, '_> {
                         } else {
                             let reduced = propagate_beta_reduce_with_map(
                                 a,
-                                self.ident_tbl,
-                                self.id_gen,
-                                self.assignable,
+                                self.beta_reduce_env(),
                                 &param_map,
                                 &params,
                                 body,

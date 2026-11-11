@@ -1,15 +1,17 @@
 // Port of compiler/gentype/TranslateStructure.ml:1-366.
 
 use crate::gentype::gen_type_common::{ArgType, StringSet, Type};
+use crate::gentype::translation::Input;
 use crate::parse_arena::ParseArena;
 use crate::types::decl::ModuleType as DeclModuleType;
 use crate::types::path::PathView;
 use crate::types::typedtree::{
-    ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint,
-    Pattern, PatternDesc, Structure, StructureItem, StructureItemDesc, TExprIdx, TypedArena,
-    ValueBinding,
+    ExpressionDesc, FunctionParam, ModuleBinding, ModuleExprDesc, ModuleTypeConstraint, Pattern,
+    PatternDesc, Structure, StructureItem, StructureItemDesc, TExprIdx, TypedArena, ValueBinding,
 };
 
+/// Name the argument types after the function's parameters, continuing into
+/// the body of a function that returns a function.
 #[allow(non_snake_case)]
 pub fn addAnnotationsToTypes_(
     arena: &ParseArena,
@@ -47,10 +49,11 @@ pub fn addAnnotationsToTypes_(
     }
 }
 
+/// Name the argument types after the parameters of function `expr`,
+/// numbering them when more than one would be called `param`.
 pub fn add_annotations_to_types(
     arena: &ParseArena,
     ta: &TypedArena,
-    config: &crate::gentype::config::T,
     expr: TExprIdx,
     arg_types: &[ArgType],
 ) -> Vec<ArgType> {
@@ -75,10 +78,11 @@ pub fn add_annotations_to_types(
     }
 }
 
+/// Rename the fields after the `@as` attributes of `expr`, and name the
+/// argument types as [`add_annotations_to_types`] does.
 pub fn add_annotations_to_fields(
     arena: &ParseArena,
     ta: &TypedArena,
-    config: &crate::gentype::config::T,
     notes: &crate::gentype::log_::Notes,
     expr: TExprIdx,
     fields: &[crate::gentype::gen_type_common::Field],
@@ -86,13 +90,10 @@ pub fn add_annotations_to_fields(
 ) -> crate::gentype::annotation::Read<(Vec<crate::gentype::gen_type_common::Field>, Vec<ArgType>)> {
     // Mirrors compiler/gentype/translate_structure.ml:41-53.
     let Some((field, next_fields)) = fields.split_first() else {
-        return Ok((
-            vec![],
-            add_annotations_to_types(arena, ta, config, expr, arg_types),
-        ));
+        return Ok((vec![], add_annotations_to_types(arena, ta, expr, arg_types)));
     };
     let (next_fields1, types1) =
-        add_annotations_to_fields(arena, ta, config, notes, expr, next_fields, arg_types)?;
+        add_annotations_to_fields(arena, ta, notes, expr, next_fields, arg_types)?;
     let mut field = field.clone();
     field.name_js = crate::gentype::translate_type_declarations::rename_record_field(
         arena,
@@ -105,35 +106,33 @@ pub fn add_annotations_to_fields(
     Ok((fields, types1))
 }
 
+/// Name the argument types of a function type after the parameters of
+/// `expr`.
 pub fn add_annotations_to_function_type(
     arena: &ParseArena,
     ta: &TypedArena,
-    config: &crate::gentype::config::T,
     expr: TExprIdx,
     type_: Type,
 ) -> Type {
     // Mirrors compiler/gentype/TranslateStructure.ml:64-73.
     match type_ {
         Type::Function(mut function_) => {
-            function_.arg_types =
-                add_annotations_to_types(arena, ta, config, expr, &function_.arg_types);
+            function_.arg_types = add_annotations_to_types(arena, ta, expr, &function_.arg_types);
             Type::Function(function_)
         }
         _ => type_,
     }
 }
 
+/// Translate a `let` binding of a variable, when it is exported.
 pub fn translate_value_binding(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
-    ta: &TypedArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     value_binding: &ValueBinding,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/TranslateStructure.ml:103-123.
+    let Input { arena, ta, .. } = input;
     let id = match value_binding_id(ta, ta.pattern(value_binding.vb_pat)) {
         None => return Ok(crate::gentype::translation::empty()),
         Some(id) => id,
@@ -153,16 +152,12 @@ pub fn translate_value_binding(
     )? == crate::gentype::annotation::T::GenType
     {
         crate::gentype::translation::translate_value(
-            ctx,
-            arena,
+            input,
             &value_binding.vb_attributes,
             config,
-            crate::gentype::annotation::doc_string_from_attrs(arena, &value_binding.vb_attributes)?,
-            output_file_relative,
-            resolver,
             type_env,
             ta.pattern(value_binding.vb_pat).pat_type,
-            |t| add_annotations_to_function_type(arena, ta, config, value_binding.vb_expr, t),
+            |t| add_annotations_to_function_type(arena, ta, value_binding.vb_expr, t),
             &name,
         )
     } else {
@@ -170,17 +165,15 @@ pub fn translate_value_binding(
     }
 }
 
+/// Translate a submodule.
 pub fn translate_module_binding(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
-    ta: &TypedArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     module_binding: &ModuleBinding,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/TranslateStructure.ml:161-270.
+    let Input { ctx, arena, ta, .. } = input;
     let name = module_binding.mb_id.name();
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item(&format!("Translate Module Binding {name}\n"));
@@ -214,13 +207,7 @@ pub fn translate_module_binding(
             match module_type {
                 DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                     crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                        ctx,
-                        arena,
-                        &config,
-                        output_file_relative,
-                        resolver,
-                        &type_env,
-                        signature,
+                        input, &config, &type_env, signature,
                     )?,
                 ),
                 DeclModuleType::MtyAlias(_, _)
@@ -238,43 +225,26 @@ pub fn translate_module_binding(
                 crate::gentype::translation::empty()
             } else {
                 crate::gentype::translation::combine(translate_structure(
-                    ctx,
-                    arena,
-                    ta,
-                    &config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    structure,
+                    input, &config, &type_env, structure,
                 )?)
             }
         }
-        ModuleExprDesc::Tmod_apply(_, _, _) => match &ta.module_expr(module_binding.mb_expr).mod_type {
-            DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
-                crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                    ctx,
-                    arena,
-                    &config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    signature,
-                )?,
-            ),
-            DeclModuleType::MtyIdent(_) => not_implemented("Mty_ident"),
-            DeclModuleType::MtyFunctor { .. } => not_implemented("Mty_functor"),
-            DeclModuleType::MtyAlias(_, _) => not_implemented("Mty_alias"),
-        },
+        ModuleExprDesc::Tmod_apply(_, _, _) => {
+            match &ta.module_expr(module_binding.mb_expr).mod_type {
+                DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
+                    crate::gentype::translate_signature_from_types::translate_signature_from_types(
+                        input, &config, &type_env, signature,
+                    )?,
+                ),
+                DeclModuleType::MtyIdent(_) => not_implemented("Mty_ident"),
+                DeclModuleType::MtyFunctor { .. } => not_implemented("Mty_functor"),
+                DeclModuleType::MtyAlias(_, _) => not_implemented("Mty_alias"),
+            }
+        }
         ModuleExprDesc::Tmod_unpack(_, module_type) => match module_type {
             DeclModuleType::MtySignature(signature) => crate::gentype::translation::combine(
                 crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                    ctx,
-                    arena,
-                    &config,
-                    output_file_relative,
-                    resolver,
-                    &type_env,
-                    signature,
+                    input, &config, &type_env, signature,
                 )?,
             ),
             DeclModuleType::MtyIdent(path) => {
@@ -282,12 +252,8 @@ pub fn translate_module_binding(
                     None => crate::gentype::translation::empty(),
                     Some((signature, _, type_env)) => crate::gentype::translation::combine(
                         crate::gentype::translate_signature::translate_signature(
-                            ctx,
-                            arena,
-                            ta,
+                            input,
                             &config,
-                            output_file_relative,
-                            resolver,
                             &type_env,
                             ta.signature_items(signature.sig_items),
                         )?,
@@ -304,12 +270,8 @@ pub fn translate_module_binding(
             module_type_constraint,
             coercion,
         ) => translate_module_constraint(
-            ctx,
-            arena,
-            ta,
+            input,
             &config,
-            output_file_relative,
-            resolver,
             &type_env,
             ta.module_expr(*module_expr),
             module_type,
@@ -319,17 +281,15 @@ pub fn translate_module_binding(
     })
 }
 
+/// Translate one structure item.
 pub fn translate_structure_item(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
-    ta: &TypedArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     struct_item: &StructureItem,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
     // Mirrors compiler/gentype/TranslateStructure.ml:272-357.
+    let Input { ta, .. } = input;
     Ok(match &struct_item.str_desc {
         StructureItemDesc::Tstr_type(rec_flag, type_declarations) => {
             crate::gentype::translation::T {
@@ -337,13 +297,9 @@ pub fn translate_structure_item(
                 code_items: vec![],
                 type_declarations:
                     crate::gentype::translate_type_declarations::translate_type_declarations(
-                        ta,
-                        ctx,
-                        arena,
+                        input,
                         config,
-                        output_file_relative,
                         matches!(rec_flag, crate::parser::ast::RecFlag::Recursive),
-                        resolver,
                         type_env,
                         type_declarations,
                     )?,
@@ -353,49 +309,25 @@ pub fn translate_structure_item(
             ta.value_bindings(*value_bindings)
                 .iter()
                 .map(|value_binding| {
-                    translate_value_binding(
-                        ctx,
-                        arena,
-                        ta,
-                        config,
-                        output_file_relative,
-                        resolver,
-                        type_env,
-                        value_binding,
-                    )
+                    translate_value_binding(input, config, type_env, value_binding)
                 })
                 .collect::<crate::gentype::annotation::Read<Vec<_>>>()?,
         ),
         StructureItemDesc::Tstr_primitive(value_description) => {
             crate::gentype::translation::translate_primitive(
-                ta,
-                ctx,
-                arena,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 type_env,
                 ta.value_description(*value_description),
             )?
         }
-        StructureItemDesc::Tstr_module(module_binding) => translate_module_binding(
-            ctx,
-            arena,
-            ta,
-            config,
-            output_file_relative,
-            resolver,
-            type_env,
-            module_binding,
-        )?,
+        StructureItemDesc::Tstr_module(module_binding) => {
+            translate_module_binding(input, config, type_env, module_binding)?
+        }
         StructureItemDesc::Tstr_modtype(module_type_declaration) => {
             crate::gentype::translate_signature::translate_module_type_declaration(
-                ctx,
-                arena,
-                ta,
+                input,
                 config,
-                output_file_relative,
-                resolver,
                 type_env,
                 module_type_declaration,
             )?
@@ -404,16 +336,7 @@ pub fn translate_structure_item(
             module_bindings
                 .iter()
                 .map(|module_binding| {
-                    translate_module_binding(
-                        ctx,
-                        arena,
-                        ta,
-                        config,
-                        output_file_relative,
-                        resolver,
-                        type_env,
-                        module_binding,
-                    )
+                    translate_module_binding(input, config, type_env, module_binding)
                 })
                 .collect::<crate::gentype::annotation::Read<Vec<_>>>()?,
         ),
@@ -429,27 +352,15 @@ pub fn translate_structure_item(
                 {
                     if let [struct_item1] = ta.structure_items(structure.str_items) {
                         if matches!(struct_item1.str_desc, StructureItemDesc::Tstr_primitive(_)) {
-                            return translate_structure_item(
-                                ctx,
-                                arena,
-                                ta,
-                                config,
-                                output_file_relative,
-                                resolver,
-                                type_env,
-                                struct_item1,
-                            );
+                            return translate_structure_item(input, config, type_env, struct_item1);
                         }
                     }
                 }
             }
             crate::gentype::translation::combine(
                 crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                    ctx,
-                    arena,
+                    input,
                     config,
-                    output_file_relative,
-                    resolver,
                     type_env,
                     &include_declaration.incl_type,
                 )?,
@@ -463,19 +374,18 @@ pub fn translate_structure_item(
     })
 }
 
+/// `TranslateStructure.translateStructure`: translate each structure item;
+/// of several bindings of one name, only the last is exported.
 pub fn translate_structure(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
-    ta: &TypedArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     structure: &Structure,
 ) -> crate::gentype::annotation::Read<Vec<crate::gentype::translation::T>> {
     // Mirrors compiler/gentype/TranslateStructure.ml:75-102 and 359-366.
     // OCaml rebuilds list cells while retaining immutable typedtree items. Keep
     // the same last-binding-wins traversal without cloning Rust's owned trees.
+    let Input { ta, .. } = input;
     if crate::gentype::debug::translation.load(std::sync::atomic::Ordering::Relaxed) {
         crate::gentype::log_::item("Translate Structure\n");
     }
@@ -507,31 +417,11 @@ pub fn translate_structure(
         .into_iter()
         .rev()
         .map(|item| match item {
-            Item::Borrowed(item) => translate_structure_item(
-                ctx,
-                arena,
-                ta,
-                config,
-                output_file_relative,
-                resolver,
-                type_env,
-                item,
-            ),
+            Item::Borrowed(item) => translate_structure_item(input, config, type_env, item),
             Item::Values(bindings) => Ok(crate::gentype::translation::combine(
                 bindings
                     .into_iter()
-                    .map(|binding| {
-                        translate_value_binding(
-                            ctx,
-                            arena,
-                            ta,
-                            config,
-                            output_file_relative,
-                            resolver,
-                            type_env,
-                            binding,
-                        )
-                    })
+                    .map(|binding| translate_value_binding(input, config, type_env, binding))
                     .collect::<crate::gentype::annotation::Read<Vec<_>>>()?,
             )),
         })
@@ -539,18 +429,15 @@ pub fn translate_structure(
 }
 
 fn translate_module_constraint(
-    ctx: &crate::types::context::TypeContext,
-    arena: &ParseArena,
-    ta: &TypedArena,
+    input: Input<'_>,
     config: &crate::gentype::config::T,
-    output_file_relative: &str,
-    resolver: &crate::gentype::module_resolver::Resolver,
     type_env: &crate::gentype::type_env::T,
     module_expr: &crate::types::typedtree::ModuleExpr,
     module_type: &DeclModuleType,
     module_type_constraint: &ModuleTypeConstraint,
     coercion: &crate::types::typedtree::ModuleCoercion,
 ) -> crate::gentype::annotation::Read<crate::gentype::translation::T> {
+    let Input { ta, .. } = input;
     if let (
         ModuleExprDesc::Tmod_structure(structure),
         ModuleTypeConstraint::Tmodtype_implicit,
@@ -562,14 +449,7 @@ fn translate_module_constraint(
         // are translated from the inner structure after the OCaml duplicate
         // value-binding pass.
         return Ok(crate::gentype::translation::combine(translate_structure(
-            ctx,
-            arena,
-            ta,
-            config,
-            output_file_relative,
-            resolver,
-            type_env,
-            structure,
+            input, config, type_env, structure,
         )?));
     }
 
@@ -586,12 +466,8 @@ fn translate_module_constraint(
                 None => crate::gentype::translation::empty(),
                 Some((signature, _, type_env)) => crate::gentype::translation::combine(
                     crate::gentype::translate_signature::translate_signature(
-                        ctx,
-                        arena,
-                        ta,
+                        input,
                         config,
-                        output_file_relative,
-                        resolver,
                         &type_env,
                         ta.signature_items(signature.sig_items),
                     )?,
@@ -609,13 +485,7 @@ fn translate_module_constraint(
             // so attributes from the explicit signature are preserved.
             crate::gentype::translation::combine(
                 crate::gentype::translate_signature_from_types::translate_signature_from_types(
-                    ctx,
-                    arena,
-                    config,
-                    output_file_relative,
-                    resolver,
-                    type_env,
-                    signature,
+                    input, config, type_env, signature,
                 )?,
             )
         }
@@ -630,12 +500,8 @@ fn translate_module_constraint(
             {
                 crate::gentype::translation::combine(
                     crate::gentype::translate_signature::translate_signature(
-                        ctx,
-                        arena,
-                        ta,
+                        input,
                         config,
-                        output_file_relative,
-                        resolver,
                         type_env,
                         ta.signature_items(signature.sig_items),
                     )?,

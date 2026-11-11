@@ -2,6 +2,8 @@
 
 use crate::gentype::gen_type_common::{ArgType, Label, Type};
 
+/// `NamedArgs.group`: the arguments of a function type, optional ones
+/// wrapped in an option type. A function taking only `unit` has none.
 pub fn group(labeled_types: Vec<(Label, Type)>) -> Vec<ArgType> {
     // Mirrors compiler/gentype/NamedArgs.ml:3-14.
     let types = labeled_types

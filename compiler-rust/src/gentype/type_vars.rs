@@ -7,6 +7,7 @@ use crate::types::context::TypeContext;
 use crate::types::type_expr::{TypeDesc, TypeExpr, TypeExprRef};
 use crate::types::typedtree::{TypedCoreType, TypedCoreTypeDesc};
 
+/// The names of the named type variables among `type_params`.
 pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
     let mut so_far = Vec::new();
 
@@ -26,6 +27,8 @@ pub fn extract_from_type_expr(type_params: &[TypeExpr]) -> Vec<String> {
     so_far
 }
 
+/// The names of the named type variables among `type_params`, read in
+/// `ctx`.
 pub fn extract_from_type_expr_refs(ctx: &TypeContext, type_params: &[TypeExprRef]) -> Vec<String> {
     // Mirrors compiler/gentype/TypeVars.ml:3-13 at the Types.type_expr
     // boundary. Rust reads the descriptor through TypeContext because
@@ -45,6 +48,7 @@ pub fn extract_from_type_expr_refs(ctx: &TypeContext, type_params: &[TypeExprRef
     so_far
 }
 
+/// The names of the named type variables among the declared `type_params`.
 pub fn extract_from_core_type(type_params: &[&TypedCoreType]) -> Vec<String> {
     let mut so_far = Vec::new();
 
@@ -58,6 +62,7 @@ pub fn extract_from_core_type(type_params: &[&TypedCoreType]) -> Vec<String> {
     so_far
 }
 
+/// `type0` with each type variable that `f` maps replaced.
 pub fn substitute<F>(type0: &Type, f: &F) -> Type
 where
     F: Fn(&str) -> Option<Type>,
@@ -122,6 +127,8 @@ where
     }
 }
 
+/// The type variables free in `type0`, not bound by a function's type
+/// parameters.
 pub fn free_(type0: &Type) -> BTreeSet<String> {
     match type0 {
         Type::Array(t, _) => free_(t),
@@ -169,6 +176,7 @@ pub fn free_(type0: &Type) -> BTreeSet<String> {
     }
 }
 
+/// The type variables free in the argument types.
 #[allow(non_snake_case)]
 pub fn freeOfList_(types: &[ArgType]) -> BTreeSet<String> {
     types
@@ -179,6 +187,7 @@ pub fn freeOfList_(types: &[ArgType]) -> BTreeSet<String> {
         })
 }
 
+/// The type variables free in `type_`, sorted.
 pub fn free(type_: &Type) -> Vec<String> {
     free_(type_).into_iter().collect()
 }

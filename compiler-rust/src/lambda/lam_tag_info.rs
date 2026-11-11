@@ -43,7 +43,9 @@ pub enum TagInfo {
 
     /// Record extension block
     RecordExt {
+        /// The extension's field names.
         fields: Vec<String>,
+        /// Whether the block may be mutated.
         mutable_flag: MutableFlag,
     },
 }
@@ -54,7 +56,9 @@ pub enum TagInfo {
 /// [`TagInfo::Constructor`] payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConstructorTag {
+    /// The constructor name.
     pub name: String,
+    /// Number of non-constant constructors of the variant.
     pub num_nonconst: i32,
     /// Untagged scalar constructors are erased during typedtree
     /// translation; they cannot form Lambda or JavaScript blocks.
@@ -64,12 +68,18 @@ pub struct ConstructorTag {
 /// [`TagInfo::RecordInlined`] payload.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RecordInlinedTag {
+    /// The constructor name.
     pub name: String,
+    /// Number of non-constant constructors of the variant.
     pub num_nonconst: i32,
     /// `(name, optional)` per field.
     pub fields: Vec<(String, bool)>,
+    /// Field count of the record type when `fields` lists only some of them;
+    /// `None` when `fields` is complete.
     pub logical_field_count: Option<usize>,
+    /// Whether the block may be mutated.
     pub mutable_flag: MutableFlag,
+    /// How the constructor's block is represented at runtime.
     pub runtime: Box<crate::types::VariantBlock>,
 }
 
@@ -78,7 +88,10 @@ pub struct RecordInlinedTag {
 pub struct RecordTag {
     /// `(name, optional)` per field.
     pub fields: Vec<(String, bool)>,
+    /// Field count of the record type when `fields` lists only some of them;
+    /// `None` when `fields` is complete.
     pub logical_field_count: Option<usize>,
+    /// Whether the block may be mutated.
     pub mutable_flag: MutableFlag,
     /// `RecordArray`: the fields are the elements of a JavaScript array.
     pub array: bool,

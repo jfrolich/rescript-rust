@@ -376,12 +376,9 @@ fn extract_string_constant(ctx: &TypeContext, text: &str) -> Option<String> {
         return None;
     };
     match &arena.get_expr(eval.0).pexp_desc {
-        crate::parser::ast::ExpressionDesc::Pexp_constant(c) => match &*c {
-            crate::parser::ast::Constant::String(payload) => {
-                Some(payload.semantic(&arena).to_string())
-            }
-            _ => None,
-        },
+        crate::parser::ast::ExpressionDesc::Pexp_constant(
+            crate::parser::ast::Constant::String(payload),
+        ) => Some(payload.semantic(&arena).to_string()),
         _ => None,
     }
 }
@@ -443,7 +440,7 @@ fn print_extra_type_clash_help(
     trace: &[TracePair],
     context: &Option<TypeClashContext>,
 ) {
-    let desc = |t: TypeExprRef| (*ctx.get_desc(t));
+    let desc = |t: TypeExprRef| *ctx.get_desc(t);
     let bottom_paths = bottom.map(|(a, e)| (head_path(ctx, a), head_path(ctx, e)));
     match context {
         Some(TypeClashContext::MathOperator {
@@ -924,7 +921,7 @@ fn print_extra_type_clash_help_by_types(
             let crate::parser::ast::ExpressionDesc::Pexp_array(items) = &exp.pexp_desc else {
                 return None;
             };
-            let items = items.clone();
+            let items = *items;
             Some(crate::parser::ast::Expression {
                 pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_tuple(items),
                 ..exp
@@ -1113,7 +1110,7 @@ fn print_extra_type_clash_help_by_types(
                 let crate::parser::ast::ExpressionDesc::Pexp_constant(c) = &exp.pexp_desc else {
                     return None;
                 };
-                let crate::parser::ast::Constant::String(payload) = &*c else {
+                let crate::parser::ast::Constant::String(payload) = c else {
                     return None;
                 };
                 // The constant was re-parsed into `a`; its string index means
@@ -1163,7 +1160,7 @@ fn print_extra_type_clash_help_by_types(
             if let Some(constructor_name) = matching {
                 let reprinted = reprint_expr_at_loc(ctx, arena, source, loc, |a, exp| {
                     if !matches!(&exp.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_constant(c)
-                        if matches!(&*c, crate::parser::ast::Constant::String(..)))
+                        if matches!(c, crate::parser::ast::Constant::String(..)))
                     {
                         return None;
                     }
@@ -1694,7 +1691,7 @@ fn typecore_type_expr(ppf: &mut Ppf<'_>, printer: &mut Printtyp<'_>, ty: TypeExp
 pub(super) fn print_apply_non_function(ppf: &mut Ppf<'_>, ctx: &TypeContext, typ: TypeExprRef) {
     let mut printer = Printtyp::new(ctx);
     let repr = ctx.repr(typ);
-    let desc = (*ctx.get_desc(repr));
+    let desc = *ctx.get_desc(repr);
     match desc {
         TypeDesc::Tarrow { args, ret } => {
             let mut count = args.len();

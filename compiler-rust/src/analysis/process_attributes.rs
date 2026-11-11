@@ -14,7 +14,9 @@ use crate::types::decl;
 /// Attributes in either of their Rust forms.
 #[derive(Clone, Copy)]
 pub enum Attrs<'a> {
+    /// Parse-tree attributes, with the arena their names and payloads live in.
     Parsed(&'a [Attribute], &'a ParseArena),
+    /// The attributes stored on a type declaration.
     Decl(&'a [decl::Attribute]),
 }
 
@@ -23,7 +25,9 @@ pub enum Attrs<'a> {
 /// (ast_payload.ml:39-51): in the parse tree or a declaration's attribute.
 #[derive(Debug, Clone, Copy)]
 pub enum InvalidEscape {
+    /// The template is in the parse tree.
     Parsed(crate::parse_arena::LocIdx),
+    /// The template is in a declaration's attribute.
     Decl(crate::types::DeclLoc),
 }
 
@@ -51,6 +55,29 @@ impl Raised {
     pub fn get(&self) -> Option<InvalidEscape> {
         self.0.get()
     }
+
+    /// The docstring and deprecation of a declaration with `attributes`.
+    pub fn declared_attributes(&self, attributes: Attrs<'_>) -> DeclaredAttributes {
+        // process_attributes.ml:41-52: ocamlopt builds the record right to
+        // left, reading the docstring first.
+        let docstring = self
+            .read(find_doc_attribute(attributes))
+            .into_iter()
+            .collect();
+        let deprecated = self.read(reversed_deprecated(attributes));
+        DeclaredAttributes {
+            docstring,
+            deprecated,
+        }
+    }
+}
+
+/// What a declaration's attributes say about it, as `Declared` records it.
+pub struct DeclaredAttributes {
+    /// Its `@doc` comments.
+    pub docstring: Vec<String>,
+    /// Its `@deprecated` message.
+    pub deprecated: Option<String>,
 }
 
 /// `Ast_payload.semantic_string_of_expression`.
@@ -257,16 +284,12 @@ pub fn new_declared<T>(
     stamp: i32,
     module_path: ModulePath,
     is_exported: bool,
-    attributes: Attrs<'_>,
-    raised: &Raised,
+    attributes: DeclaredAttributes,
 ) -> Declared<T> {
-    // process_attributes.ml:41-52: ocamlopt builds the record right to
-    // left, reading the docstring first.
-    let docstring = raised
-        .read(find_doc_attribute(attributes))
-        .into_iter()
-        .collect();
-    let deprecated = raised.read(reversed_deprecated(attributes));
+    let DeclaredAttributes {
+        docstring,
+        deprecated,
+    } = attributes;
     Declared {
         name,
         stamp,

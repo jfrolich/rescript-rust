@@ -5,6 +5,7 @@
 //!
 //! Uses the same single-dash CLI format as the OCaml parser for compatibility.
 //!
+//! ```text
 //! Usage:
 //!   res_parser_rust [options] <file>
 //!
@@ -16,6 +17,7 @@
 //!   -jsx-version <n>        JSX version (3 or 4)
 //!   -jsx-module <mod>       JSX module (default: react)
 //!   -test-ast-conversion    Test AST conversion roundtrip (parsetree -> parsetree0 -> parsetree)
+//! ```
 
 use crate::binary_ast::{Marshal, MarshalWriter, mapper_from0, mapper_to0, ppx};
 use crate::location::Position;
