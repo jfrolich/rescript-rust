@@ -1008,18 +1008,14 @@ fn gentype_cmt_file_for_output_prefix(output_prefix: &Path) -> Option<PathBuf> {
     let path_cmti = output_prefix.with_extension("cmti");
     let path_cmti_lower_case = path_cmt_lower_case.with_extension("cmti");
 
-    for candidate in [
+    [
         path_cmti_lower_case,
         path_cmti,
         path_cmt_lower_case,
         path_cmt,
-    ] {
-        if candidate.exists() {
-            return Some(candidate);
-        }
-    }
-
-    None
+    ]
+    .into_iter()
+    .find(|candidate| candidate.exists())
 }
 
 fn maybe_process_gentype(source_path: &Path, opts: &Options) -> Result<()> {

@@ -113,6 +113,7 @@ impl IdentFlags {
         self.0 & Self::PREDEF_EXN.0 != 0
     }
 
+    /// Whether this identifier denotes a JavaScript binding.
     #[inline]
     pub fn is_js(self) -> bool {
         self.0 & Self::JS.0 != 0
@@ -310,11 +311,13 @@ impl Ident {
         self.flags.is_predef_exn()
     }
 
+    /// Whether this identifier denotes a JavaScript binding.
     #[inline]
     pub fn is_js(&self) -> bool {
         self.flags.is_js()
     }
 
+    /// Create an unstamped JavaScript identifier with the JS flag.
     pub fn create_js(name: impl Into<Name>) -> Self {
         Self::new(name, 0, IdentFlags::JS)
     }
@@ -587,7 +590,7 @@ mod tests {
             handles.push(thread::spawn(move || {
                 let mut ids = vec![];
                 for i in 0..100 {
-                    ids.push(id_gen.create(&format!("var{}", i)));
+                    ids.push(id_gen.create(format!("var{}", i)));
                 }
                 ids
             }));

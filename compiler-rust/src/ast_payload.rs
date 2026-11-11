@@ -37,7 +37,9 @@ pub fn unwrapped_payload_expression<'a>(
 /// An error raised by these helpers (OCaml `Location.raise_errorf ~loc`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PayloadError {
+    /// Source span of the invalid payload.
     pub loc: LocIdx,
+    /// Diagnostic explaining why the payload was rejected.
     pub message: &'static str,
 }
 
@@ -49,7 +51,7 @@ pub fn reject_json_literal_payload(
 ) -> Result<(), PayloadError> {
     if let Some(expression) = unwrapped_payload_expression(arena, payload) {
         if let ExpressionDesc::Pexp_constant(constant) = &expression.pexp_desc
-            && let Constant::Json(_) = &*constant
+            && let Constant::Json(_) = constant
         {
             return Err(PayloadError {
                 loc: expression.pexp_loc,
@@ -68,10 +70,9 @@ pub fn semantic_string_of_expression(
 ) -> Result<Option<String>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
     match &expression.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &*constant {
-            Constant::String(payload) => Ok(Some(payload.semantic(arena).to_string())),
-            _ => Ok(None),
-        },
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => {
+            Ok(Some(payload.semantic(arena).to_string()))
+        }
         ExpressionDesc::Pexp_template(_) => template_semantic(arena, expression),
         _ => Ok(None),
     }
@@ -119,10 +120,9 @@ pub fn string_literal_of_expression(
 ) -> Result<Option<crate::string_literal::StringLiteral>, PayloadError> {
     let expression = unwrap_braces(arena, expression);
     match &expression.pexp_desc {
-        ExpressionDesc::Pexp_constant(constant) => match &*constant {
-            Constant::String(payload) => Ok(Some(payload.to_literal(arena))),
-            _ => Ok(None),
-        },
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => {
+            Ok(Some(payload.to_literal(arena)))
+        }
         ExpressionDesc::Pexp_template(_) => Ok(template_semantic(arena, expression)?
             .map(|semantic| crate::string_literal::string_from_semantic(&semantic))),
         _ => Ok(None),
@@ -154,22 +154,6 @@ pub fn single_int_source(arena: &ParseArena, payload: &Payload) -> Option<String
         Constant::Integer(name, suffix) if *suffix != Some('n') => {
             Some(arena.get_string(*name).to_string())
         }
-        _ => None,
-    }
-}
-
-/// OCaml `Ast_payload.is_single_float`.
-fn is_single_float(arena: &ParseArena, payload: &Payload) -> Option<String> {
-    match single_constant(arena, payload)? {
-        Constant::Float(name, _) => Some(arena.get_string(*name).to_string()),
-        _ => None,
-    }
-}
-
-/// OCaml `Ast_payload.is_single_bigint`.
-fn is_single_bigint(arena: &ParseArena, payload: &Payload) -> Option<String> {
-    match single_constant(arena, payload)? {
-        Constant::Integer(name, Some('n')) => Some(arena.get_string(*name).to_string()),
         _ => None,
     }
 }

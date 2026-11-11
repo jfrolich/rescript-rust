@@ -353,12 +353,19 @@ pub struct StaticArrayLidents {
 /// across `@this` callback rewrites.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticPpxLidents {
+    /// Shared `Js` module identifier.
     pub js_lident: LidentIdx,
+    /// Shared `Js.typeof` primitive path.
     pub js_typeof: LidentIdx,
+    /// Shared `Js.undefinedToOption` helper path.
     pub js_undefined_to_option: LidentIdx,
+    /// Shared `Js.Undefined` module path.
     pub js_undefined: LidentIdx,
+    /// Shared `Js.Undefined.empty` value path.
     pub js_undefined_empty: LidentIdx,
+    /// Shared `Primitive_js_extern` module path.
     pub js_oo_lident: LidentIdx,
+    /// Shared `Primitive_js_extern.Callback` type path.
     pub js_oo_callback: LidentIdx,
 }
 
@@ -368,11 +375,17 @@ pub struct StaticPpxLidents {
 /// core types. Reusing one arena index per type mirrors that pointer identity.
 #[derive(Debug, Clone, Copy)]
 pub struct StaticAstLiteralTypes {
+    /// Shared location-free `string` type node.
     pub type_string: CoreTypeIdx,
+    /// Shared location-free `int` type node.
     pub type_int: CoreTypeIdx,
+    /// Shared location-free `bool` type node.
     pub type_bool: CoreTypeIdx,
+    /// Shared location-free `float` type node.
     pub type_float: CoreTypeIdx,
 }
+
+type FunDefaultBinding = (FunParam, Option<crate::parser::ast::ValueBinding>);
 
 #[derive(Clone, Copy, Debug)]
 enum SpiceStringKey {
@@ -537,7 +550,7 @@ pub struct ParseArena {
     /// release builds. Keep the OCaml-shaped synthetic AST here, constructed
     /// while the arena is still exclusively borrowed.
     nary_fun_default_bindings_by_first_pattern:
-        HashMap<PatIdx, Box<[(FunParam, Option<crate::parser::ast::ValueBinding>)]>>,
+        HashMap<PatIdx, Box<[FunDefaultBinding]>>,
     /// Ghost copies of character-interval pattern locations
     /// (typecore.ml:1337 `{loc with loc_ghost = true}`), allocated before
     /// type checking for the same aliasing reason.
@@ -1165,11 +1178,13 @@ impl ParseArena {
         arena
     }
 
+    /// Set the source filename used by positions, including location-free placeholders.
     pub fn set_source_file(&mut self, file_name: StrIdx) {
         self.absent_position.file_name = file_name;
         self.record_position_file_name(file_name);
     }
 
+    /// Whether this arena stores complete source coordinates.
     pub fn stores_locations(&self) -> bool {
         self.store_locations
     }
@@ -1183,6 +1198,7 @@ impl ParseArena {
         }
     }
 
+    /// Whether a semantic consumer requested a retry with full source coordinates.
     pub fn locations_required(&self) -> bool {
         self.locations_required
             .load(std::sync::atomic::Ordering::Relaxed)
@@ -1538,7 +1554,7 @@ impl ParseArena {
         if let Some(idx) = self.spice_cache.json_ctyp_lident {
             return idx;
         }
-        let json_idx = self.push_string("JSON".to_string());
+        let json_idx = self.push_string("JSON");
         let t_idx = self.strings.intern("t");
         let lid = Longident::Ldot(Box::new(Longident::Lident(json_idx)), t_idx);
         let lid_idx = self.longidents.push(lid);
@@ -2149,30 +2165,37 @@ impl ParseArena {
             || idx == self.static_ast_literal_type_float_lident
     }
 
+    /// Return the shared `Js` module identifier.
     pub fn ppx_js_lident(&self) -> LidentIdx {
         self.static_ppx_lidents.js_lident
     }
 
+    /// Return the shared `Js.typeof` path.
     pub fn ppx_js_typeof_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_typeof
     }
 
+    /// Return the shared `Js.undefinedToOption` path.
     pub fn ppx_js_undefined_to_option_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_undefined_to_option
     }
 
+    /// Return the shared `Js.Undefined` module path.
     pub fn ppx_js_undefined_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_undefined
     }
 
+    /// Return the shared `Js.Undefined.empty` path.
     pub fn ppx_js_undefined_empty_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_undefined_empty
     }
 
+    /// Return the shared `Primitive_js_extern` module path.
     pub fn ppx_js_oo_lident(&self) -> LidentIdx {
         self.static_ppx_lidents.js_oo_lident
     }
 
+    /// Return the shared `Primitive_js_extern.Callback` type path.
     pub fn ppx_js_oo_callback_lid(&self) -> LidentIdx {
         self.static_ppx_lidents.js_oo_callback
     }
@@ -2191,30 +2214,37 @@ impl ParseArena {
         self.prim_empty_js_mapper
     }
 
+    /// Return the cached primitive name for a raw JavaScript expression.
     pub fn prim_raw_expr(&self) -> StrIdx {
         self.prim_raw_expr
     }
 
+    /// Return the cached primitive name for a raw JavaScript statement.
     pub fn prim_raw_stmt(&self) -> StrIdx {
         self.prim_raw_stmt
     }
 
+    /// Return the shared equality operator spelling used by PPX rewrites.
     pub fn ppx_eq_str(&self) -> StrIdx {
         self.ppx_eq_str
     }
 
+    /// Return the shared `Js` module spelling used by PPX rewrites.
     pub fn ppx_js_str(&self) -> StrIdx {
         self.ppx_js_str
     }
 
+    /// Return the shared empty string used by PPX rewrites.
     pub fn ppx_empty_str(&self) -> StrIdx {
         self.ppx_empty_str
     }
 
+    /// Return the shared `undefined` spelling used by PPX rewrites.
     pub fn ppx_undefined_str(&self) -> StrIdx {
         self.ppx_undefined_str
     }
 
+    /// Return the shared concatenation operator spelling for templates.
     pub fn template_concat_str(&self) -> StrIdx {
         self.template_concat_str
     }
@@ -2408,6 +2438,7 @@ impl ParseArena {
         Constant::Char { source, semantic }
     }
 
+    /// Intern a string, reusing the index of an equal existing spelling.
     pub fn intern_string(&mut self, s: &str) -> StrIdx {
         self.strings.intern(s)
     }
@@ -2575,8 +2606,8 @@ impl ParseArena {
     }
 
     /// Get an expression by index.
-    #[inline]
     /// Store an application's argument list.
+    #[inline]
     pub fn push_apply_args(&mut self, args: &[(ArgLabel, ExprIdx)]) -> ApplyArgs {
         self.apply_args.push(args)
     }
@@ -2591,6 +2622,7 @@ impl ParseArena {
         self.expr_lists.push_shared(items)
     }
 
+    /// Borrow the expression indices stored in a list handle.
     pub fn expr_list(&self, list: ExprList) -> &[ExprIdx] {
         self.expr_lists.get(list)
     }
@@ -2621,6 +2653,7 @@ impl ParseArena {
         self.pat_lists.push_shared(items)
     }
 
+    /// Borrow the pattern indices stored in a list handle.
     pub fn pat_list(&self, list: PatList) -> &[PatIdx] {
         self.pat_lists.get(list)
     }
@@ -2635,6 +2668,7 @@ impl ParseArena {
         self.type_lists.push_shared(items)
     }
 
+    /// Borrow the core-type indices stored in a list handle.
     pub fn type_list(&self, list: TypeList) -> &[CoreTypeIdx] {
         self.type_lists.get(list)
     }
@@ -2649,6 +2683,7 @@ impl ParseArena {
         self.vb_lists.push_shared(items)
     }
 
+    /// Borrow the value bindings stored in a list handle.
     pub fn vb_list(&self, list: VbList) -> &[ValueBinding] {
         self.vb_lists.get(list)
     }
@@ -2663,6 +2698,7 @@ impl ParseArena {
         self.expr_field_lists.push_shared(items)
     }
 
+    /// Borrow the record-expression fields stored in a list handle.
     pub fn expr_field_list(&self, list: ExprFieldList) -> &[ExpressionRecordField] {
         self.expr_field_lists.get(list)
     }
@@ -2677,6 +2713,7 @@ impl ParseArena {
         self.pat_field_lists.push_shared(items)
     }
 
+    /// Borrow the record-pattern fields stored in a list handle.
     pub fn pat_field_list(&self, list: PatFieldList) -> &[PatternRecordField] {
         self.pat_field_lists.get(list)
     }
@@ -2691,6 +2728,7 @@ impl ParseArena {
         self.case_lists.push_shared(items)
     }
 
+    /// Borrow the match cases stored in a list handle.
     pub fn case_list(&self, list: CaseList) -> &[Case] {
         self.case_lists.get(list)
     }
@@ -2700,6 +2738,7 @@ impl ParseArena {
         self.apply_args.get(args)
     }
 
+    /// Resolve an expression index from ordinary or shared synthetic storage.
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
         let raw = idx.0;
         if raw < SHARED_EXPRESSION_BASE {
@@ -2769,6 +2808,7 @@ impl ParseArena {
             .map(|args| self.nary_arrow_arg_lists.get(*args))
     }
 
+    /// Borrow recorded n-ary arrow arguments, or return the single-argument fallback.
     pub fn nary_arrow_args<'a>(
         &'a self,
         arg: &'a crate::parser::ast::TypeArg,
@@ -2857,6 +2897,7 @@ impl ParseArena {
         let _ = arity;
     }
 
+    /// Find the unknown-arity marker associated with a function parameter group.
     pub fn nary_fun_unknown_arity(&self, fun: &crate::parser::ast::PexpFun) -> ArityIdx {
         if self.get_arity(fun.arity).is_some() {
             self.nary_fun_unknown_arity_by_first_pattern
@@ -2933,6 +2974,7 @@ impl ParseArena {
         self.builtin_spice_disabled = !enabled;
     }
 
+    /// Whether built-in Spice deriving is enabled for this parse.
     pub fn builtin_spice_enabled(&self) -> bool {
         !self.builtin_spice_disabled
     }
@@ -2988,6 +3030,7 @@ impl ParseArena {
             .unwrap_or(&[])
     }
 
+    /// Borrow recorded n-ary parameters, or reconstruct the single-parameter fallback.
     pub fn nary_fun_params<'a>(
         &'a self,
         fun: &'a crate::parser::ast::PexpFun,
@@ -3082,7 +3125,7 @@ impl ParseArena {
             .flatten()
             .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_match(inner) | ExpressionDesc::Pexp_try(inner) => {
-                    let (_, cases) = &*inner;
+                    let (_, cases) = inner;
                     self.case_list(*cases)
                         .get(case_index)
                         .and_then(|case| case.pc_guard)
@@ -3106,7 +3149,7 @@ impl ParseArena {
             .and_then(|o| o.record_spread)
             .or_else(|| match &self.get_expr(owner).pexp_desc {
                 ExpressionDesc::Pexp_record(inner) => {
-                    let (_, spread) = &*inner;
+                    let (_, spread) = inner;
                     *spread
                 }
                 _ => None,
@@ -3313,10 +3356,12 @@ impl<T> ArenaList<T> {
         _items: std::marker::PhantomData,
     };
 
+    /// Number of elements in this arena list.
     pub fn len(self) -> usize {
         self.len as usize
     }
 
+    /// Whether this arena list has no elements.
     pub fn is_empty(self) -> bool {
         self.len == 0
     }
@@ -3520,6 +3565,7 @@ impl<T: Clone> ListPool<T> {
     }
 }
 
+/// A syntax value paired with its source-location handle.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Located<T> {
     /// The value.
@@ -3595,7 +3641,7 @@ mod tests {
         let mut patterns = Vec::new();
         let mut longidents = Vec::new();
         for index in 0..2048 {
-            longidents.push(arena.push_typecheck_lident(&format!("Generated{index}")));
+            longidents.push(arena.push_typecheck_lident(format!("Generated{index}")));
             patterns.push(arena.push_typecheck_pattern(Pattern {
                 ppat_desc: PatternDesc::Ppat_any,
                 ppat_loc: LocIdx::none(),
@@ -3654,7 +3700,7 @@ mod tests {
         let b = arena.mk_loc(PosIdx(0), PosIdx(0));
         let attr = (
             Located::new(name, a),
-            crate::parser::ast::Payload::PStr(Box::new(vec![])),
+            crate::parser::ast::Payload::PStr(Box::default()),
         );
         arena.mark_used_attribute(&attr);
         assert!(arena.is_used_attribute(a));
