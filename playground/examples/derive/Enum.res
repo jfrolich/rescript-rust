@@ -14,20 +14,25 @@ let derive = (t: Type.decl): decls =>
     let label = (c: Type.constructor) => c.attrs->Attr.string("Enum.label")->Option.getOr(c.jsName)
     let value = (c: Type.constructor): code<unknown> => Code.ident(c.name)
 
-    let toString = Code.switch_(
-      %code(value),
-      constructors->Array.map(c => {
-        let (pattern, _) = Pat.constructor(c)
-        (pattern, Code.string(label(c)))
-      }),
-    )
+    // One case per constructor: a pattern and the code of the case.
+    let names = constructors->Array.map(c => {
+      let (pattern, _) = Pat.constructor(c)
+      (pattern, Code.string(label(c)))
+    })
     let known = constructors->Array.map(c => (Pat.string(label(c)), %code(Some(${value(c)}))))
-    let fromString = Code.switch_(%code(text), [...known, (Pat.any, %code(None))])
 
+    // `${...cases}` puts the cases in a switch of the quote.
     %code(
-      let ${Pat.var(t.name ++ "ToString")} = (value: ${t.typ}): string => ${toString}
-      let ${Pat.var(t.name ++ "FromString")} = (text: string): option<${t.typ}> => ${fromString}
-      let ${Pat.var(t.name ++ "Values")}: array<${t.typ}> = ${Code.array(constructors->Array.map(value))}
+      let ${Pat.var(t.name ++ "ToString")} = (value: ${t.typ}): string =>
+        switch value {
+        ${...names}
+        }
+      let ${Pat.var(t.name ++ "FromString")} = (text: string): option<${t.typ}> =>
+        switch text {
+        ${...known}
+        | _ => None
+        }
+      let ${Pat.var(t.name ++ "Values")}: array<${t.typ}> = [${...constructors->Array.map(value)}]
     )
   | _ => error("Enum.derive needs a variant type")
   }

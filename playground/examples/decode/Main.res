@@ -4,6 +4,7 @@ type user = {
   name: string,
   age: int,
   email: option<string>,
+  nickname?: string,
   addresses: array<address>,
 }
 

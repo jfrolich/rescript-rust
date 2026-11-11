@@ -28,9 +28,10 @@ type decls = code<declarations>
 /* The representation the compiler and the engine share: the source text,
    and for a type the compiler's handle of it. `m` says which parts of the
    text are text from elsewhere, an argument of the macro or a quote: the
-   compiler reports an error in generated code with it. */
+   compiler reports an error in generated code with it. `o`: the type
+   inside, for an option type a macro built with `Type.option`. */
 type span
-type rec node = {c: string, m?: array<span>, id?: int, t?: node, raw?: bool}
+type rec node = {c: string, m?: array<span>, id?: int, t?: node, raw?: bool, o?: node}
 
 external toNode: 'a => node = "%identity"
 external ofNode: node => 'a = "%identity"
@@ -146,6 +147,39 @@ let __quoteDecls = (pieces, holes, file): decls => ofNode(quote(pieces, holes, f
 let __quoteType = (pieces, holes, file): typ => ofNode(quote(pieces, holes, file))
 let __quotePat = (pieces, holes, file): pat => ofNode(quote(pieces, holes, file))
 
+/* Splice holes. `${...items}` in a list of a quote stands for any number
+   of its items; the compiler picks the function by the list. `trailing`:
+   a comma follows the hole. That comma is the hole's own, so that a hole
+   with no items leaves no comma behind. */
+let splice = (items: array<node>, trailing: bool): hole =>
+  ofNode({...cat([join(items, ", "), text(trailing && items->Array.length > 0 ? "," : "")]), raw: true})
+
+/** A field of a record value: see `Code.entry`. */
+type recordEntry
+
+/* The spread of a record comes before its fields. */
+let entryNodes = (entries: array<recordEntry>): array<node> => {
+  let nodes = entries->Array.map(toNode)
+  let isSpread = (node: node) => node.c->String.startsWith("...")
+  let spreads = nodes->Array.filter(isSpread)
+  if spreads->Array.length > 1 {
+    host->fail(
+      "A record can have one spread, and these fields have more: " ++ spreads->Array.map(node => node.c)->Array.join(", "),
+      None,
+    )
+  } else {
+    spreads->Array.concat(nodes->Array.filter(node => !isSpread(node)))
+  }
+}
+
+let caseNode = ((pattern, body): (pat, code<'a>)): node =>
+  cat([text("| "), toNode(pattern), text(" => "), toNode(body)])
+
+let __spliceItems = (items: array<code<'a>>, trailing: bool): hole => splice(items->Array.map(toNode), trailing)
+let __spliceEntries = (entries: array<recordEntry>, trailing: bool): hole => splice(entryNodes(entries), trailing)
+let __spliceCases = (cases: array<(pat, code<'a>)>): hole =>
+  ofNode({...join(cases->Array.map(caseNode), "\n"), raw: true})
+
 let isSimple: string => bool = %raw(`function (text) {
   return /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(text)
 }`)
@@ -179,7 +213,13 @@ module Type = {
     name: string,
     /** The name at run time: the `@as` name when there is one. */
     jsName: string,
+    /**
+    The type of `value.name`. For an optional field `age?: int` that is
+    `option<int>`: reading the field, `Code.entryOf` and `Pat.constructor`
+    all use this type.
+    */
     typ: typ,
+    /** `age?: int`. Change it with `Type.optional` and `Type.required`. */
     optional: bool,
     mutable_: bool,
     attrs: array<Attr.t>,
@@ -252,13 +292,53 @@ module Type = {
     )
     ->Array.join("")
 
+  /** `option<t>` */
+  let option = (t: typ): typ => ofNode({c: "option<" ++ source(t) ++ ">", o: toNode(t)})
+
+  /* The `t` of `option<t>`. */
+  let optionOf = (t: typ): option<typ> => {
+    let node = toNode(t)
+    switch (node.o, node.id) {
+    | (Some(inner), _) => Some(ofNode(inner))
+    | (None, Some(_)) =>
+      switch info(t) {
+      | Option(inner) => Some(inner)
+      | _ => None
+      }
+    | (None, None) => None
+    }
+  }
+
+  /* The type an optional field is declared with: `int` for `age?: int`,
+     where `typ` is `option<int>`. */
+  let declared = (field: field): typ =>
+    switch optionOf(field.typ) {
+    | Some(inner) => inner
+    | None =>
+      error(
+        "The optional field `" ++
+        field.name ++
+        "` has the type `" ++
+        source(field.typ) ++ "`, and the type of an optional field is an option. Type.optional makes a field optional.",
+      )
+    }
+
+  /**
+  The field as an optional one: `age?: int`. Its `typ` becomes
+  `option<int>`, the type of `value.age`. An optional field stays as it is.
+  */
+  let optional = (field: field): field =>
+    field.optional ? field : {...field, optional: true, typ: option(field.typ)}
+
+  /** The field as a required one: `age: int` for `age?: int`. */
+  let required = (field: field): field =>
+    field.optional ? {...field, optional: false, typ: declared(field)} : field
+
   let fieldText = (field: field): string =>
     attrText(field.attrs) ++
     (field.jsName != field.name ? "@as(" ++ JSON.stringify(JSON.Encode.string(field.jsName)) ++ ") " : "") ++
     (field.mutable_ ? "mutable " : "") ++
-    field.name ++
-    (field.optional ? "?: " : ": ") ++
-    source(field.typ)
+    field.name ++ (field.optional ? "?: " ++ source(declared(field)) : ": " ++ source(field.typ))
 
   /** A record type with these fields. */
   let record = (fields: array<field>): typ => make("{" ++ fields->Array.map(fieldText)->Array.join(", ") ++ "}")
@@ -333,13 +413,41 @@ module Code = {
   let tuple = (items: array<code<'a>>): code<'b> =>
     build([text("("), join(items->Array.map(toNode), ", "), text(")")])
 
-  /** `{name: value, ...}` */
-  let record = (fields: array<(string, code<'a>)>): code<'b> =>
+  /** The same code without its type, to put code of different types in one array. */
+  external untyped: code<'a> => code<unknown> = "%identity"
+
+  /** `@name value`, or `@name(payload) value`. */
+  let withAttr = (value: code<'a>, name: string, ~payload: option<code<'b>>=?): code<'a> =>
     build([
-      text("{"),
-      join(fields->Array.map(((name, value)) => cat([text(name ++ ": "), toNode(value)])), ", "),
-      text("}"),
+      text("@" ++ name),
+      switch payload {
+      | Some(payload) => cat([text("("), toNode(payload), text(") ")])
+      | None => text(" ")
+      },
+      atomNode(toNode(value)),
     ])
+
+  /** A field of a record value: `name: value`, `name: ?value` or `...value`. */
+  type entry = recordEntry
+
+  /**
+  `name: value`. With `~optional=true`, `name: ?value`: the value is an
+  option, and `None` leaves the field out.
+  */
+  let entry = (name: string, value: code<'a>, ~optional=false): entry =>
+    build([text(name ++ (optional ? ": ?" : ": ")), optional ? atomNode(toNode(value)) : toNode(value)])
+
+  /**
+  The entry of a field of a record type, for a value of the type `field.typ`:
+  `name: ?value` when the field is optional, `name: value` otherwise.
+  */
+  let entryOf = (field: Type.field, value: code<'a>): entry => entry(field.name, value, ~optional=field.optional)
+
+  /** `...value`: the fields of another record of the same type. */
+  let spread = (value: code<'a>): entry => build([text("..."), atomNode(toNode(value))])
+
+  /** `{name: value, ...}` */
+  let record = (entries: array<entry>): code<'a> => build([text("{"), join(entryNodes(entries), ", "), text("}")])
 
   /** `f(a, b)` */
   let call = (f: code<'a>, args: array<code<'b>>): code<'c> =>
@@ -347,16 +455,7 @@ module Code = {
 
   /** `switch value { | pattern => body ... }` */
   let switch_ = (value: code<'a>, arms: array<(pat, code<'b>)>): code<'b> =>
-    build([
-      text("switch "),
-      atomNode(toNode(value)),
-      text(" {\n"),
-      join(
-        arms->Array.map(((pattern, body)) => cat([text("| "), toNode(pattern), text(" => "), toNode(body)])),
-        "\n",
-      ),
-      text("\n}"),
-    ])
+    build([text("switch "), atomNode(toNode(value)), text(" {\n"), join(arms->Array.map(caseNode), "\n"), text("\n}")])
 
   /** A parameter of `fn`. */
   type param = string
@@ -400,7 +499,10 @@ module Pat = {
         make(
           c.name ++
           "({" ++
-          c.fields->Array.mapWithIndex((f, i) => f.name ++ ": " ++ names->Array.getUnsafe(i))->Array.join(", ") ++ "})",
+          c.fields
+          // `?`: the name is bound to the option of an optional field, absent or not.
+          ->Array.mapWithIndex((f, i) => f.name ++ (f.optional ? ": ?" : ": ") ++ names->Array.getUnsafe(i))
+          ->Array.join(", ") ++ "})",
         ),
         c.fields->Array.mapWithIndex((f, i) => typed(names->Array.getUnsafe(i), f.typ)),
       )

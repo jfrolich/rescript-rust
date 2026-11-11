@@ -224,7 +224,7 @@ open Macro
 @macro
 let t = (source: typ): typ =>
   switch Type.info(source) {
-  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | Record({fields}) => Type.record(fields->Array.map(Type.optional))
   | _ => error("Partial.t needs a record type")
   }
 "#,
@@ -649,7 +649,7 @@ let rec value = (_: code<unit>): code<'a> =>
   | Bool => %code(false)
   | Array(_) => %code([])
   | Option(_) => %code(None)
-  | Record({fields}) => Code.record(fields->Array.map(f => (f.name, %code(value()))))
+  | Record({fields}) => Code.record(fields->Array.map(f => Code.entryOf(f, %code(value()))))
   | _ => error(`Default.value: no default for ${Type.name(expected())}`)
   }
 "#,
@@ -664,4 +664,265 @@ let rec value = (_: code<unit>): code<'a> =>
     assert!(expanded.contains("value$array_string = "), "{expanded}");
     assert!(js.contains("retries: 0"), "{js}");
     assert!(js.contains("verbose: false"), "{js}");
+}
+
+const BUILD: &str = r#"
+open Macro
+
+// Entries of different types, a spread and an optional entry in one record.
+@macro
+let labelled = (base: code<'r>, x: code<int>, label: code<option<string>>): code<'r> =>
+  Code.record([Code.entry("x", x), Code.spread(base), Code.entry("label", label, ~optional=true)])
+
+// The fields of the record, with a field of the quote before them.
+@generic
+let withId = (value: code<'a>, id: code<int>): code<'a> =>
+  switch Type.info(typeOf(value)) {
+  | Record({fields}) =>
+    let rest =
+      fields->Array.filter(f => f.name != "id")->Array.map(f => Code.entryOf(f, value->Code.field(f.name)))
+    %code({id: ${id}, ${...rest}})
+  | _ => error("withId needs a record")
+  }
+
+// The fields of the record, after a spread.
+@generic
+let cleared = (value: code<'a>): code<'a> =>
+  switch Type.info(typeOf(value)) {
+  | Record({fields}) =>
+    let cleared = fields->Array.filter(f => f.optional)->Array.map(f => Code.entryOf(f, %code(None)))
+    %code({...${value}, ${...cleared}})
+  | _ => error("cleared needs a record")
+  }
+
+@macro
+let call = (f: code<'f>, a: code<'a>, b: code<'b>): code<'c> =>
+  %code(${f}(${...[Code.untyped(a), Code.untyped(b)]}))
+
+// Arguments of a constructor.
+@macro
+let twin = (a: code<int>): code<'p> => %code(Pair(${...[a, a]}))
+
+// Holes with no items at the start, in the middle and at the end of a list.
+@macro
+let items = (a: code<int>): code<(array<int>, (int, int, int), int)> => {
+  let none: array<code<int>> = []
+  let two = [a, a]
+  %code(([${...none}, 0, ${...two}, ${...none}, 9, ${...none}], (1, ${...two}), Math.Int.max(${...none}, ${...two})))
+}
+
+// Cases of a switch, between cases of the quote.
+@generic
+let name = (value: code<'a>): code<string> =>
+  switch Type.info(typeOf(value)) {
+  | Variant({constructors}) =>
+    let cases = constructors->Array.filterMap(c =>
+      c.name == "Unknown"
+        ? None
+        : {
+            let (pattern, _) = Pat.constructor(c)
+            Some((pattern, Code.string(String.toLowerCase(c.name))))
+          }
+    )
+    %code(
+      switch ${value} {
+      | Unknown => "?"
+      ${...cases}
+      }
+    )
+  | _ => error("name needs a variant")
+  }
+
+@macro
+let quiet = (value: code<'a>): code<'a> => Code.withAttr(value, "warning", ~payload=Code.string("-27"))
+"#;
+
+#[test]
+fn record_entries() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Build.res", BUILD);
+    let js = compile_ok(
+        &mut project,
+        "Points.res",
+        r#"
+type point = {x: int, y: int, label?: string}
+let origin: point = {x: 0, y: 0}
+let named = %Build.labelled(origin, 3, Some("three"))
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    // The spread comes first, as a record has it.
+    assert!(
+        expanded.contains(r#"{...origin, x: 3, label: ?(Some("three"))}"#),
+        "{expanded}"
+    );
+    assert!(js.contains("newrecord.label = \"three\""), "{js}");
+}
+
+#[test]
+fn splice_holes() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Build.res", BUILD);
+    let js = compile_ok(
+        &mut project,
+        "Splices.res",
+        r#"
+type user = {id: int, name: string, age?: int}
+let ada: user = {id: 1, name: "Ada", age: 36}
+let renumbered = Build.withId(ada, 2)
+let ageless = Build.cleared(ada)
+
+let pair = %Build.call((a, b) => (a, b), 1, "one")
+let (list, triple, most) = %Build.items(5)
+
+type pair = Pair(int, int)
+let twin = %Build.twin(4)
+
+type state = Unknown | Idle | Running
+let label = (state: state) => Build.name(state)
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    // An optional field is copied as an option, with `?`.
+    assert!(expanded.contains("{id: (b$), name: a$.name, age: ?a$.age}"), "{expanded}");
+    assert!(expanded.contains("{...(a$), age: ?None}"), "{expanded}");
+    assert!(expanded.contains(r#"((a, b) => (a, b))(1, "one")"#), "{expanded}");
+    // No items: no comma is left behind.
+    assert!(expanded.contains("[ 0, 5, 5,  9, ]"), "{expanded}");
+    assert!(expanded.contains("(1, 5, 5)"), "{expanded}");
+    assert!(expanded.contains("Math.Int.max( 5, 5)"), "{expanded}");
+    assert!(expanded.contains("Pair(4, 4)"), "{expanded}");
+    assert!(expanded.contains("| Idle => \"idle\"\n| Running => \"running\""), "{expanded}");
+    assert_eq!(project.warnings, "", "{}", project.warnings);
+    assert!(js.contains("\"running\""), "{js}");
+}
+
+#[test]
+fn splice_hole_out_of_place() {
+    let mut project = Project::new();
+    let error = compile_err(
+        &mut project,
+        "Wrong.res",
+        "open Macro\n@macro\nlet sum = (a: code<int>): code<int> => %code(1 + ${...[a]})\n",
+    );
+    assert!(error.contains("A splice `${...items}` stands for the items of a list"), "{error}");
+    assert!(error.contains("Wrong.res:3:"), "{error}");
+
+    let error = compile_err(&mut project, "Outside.res", "let xs = [1]\nlet ys = [0, ${...xs}]\n");
+    assert!(error.contains("A splice `${...items}` stands for the items of a list"), "{error}");
+}
+
+#[test]
+fn optional_fields() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Json.res", JSON);
+    compile_ok(
+        &mut project,
+        "Fields.res",
+        r#"
+open Macro
+
+@generic
+let describe = (value: code<'a>): code<string> =>
+  switch Type.info(typeOf(value)) {
+  | Record({fields}) =>
+    Code.string(
+      fields->Array.map(f => f.name ++ (f.optional ? "?" : "") ++ ": " ++ Type.name(f.typ))->Array.join(", "),
+    )
+  | _ => error("describe needs a record")
+  }
+
+@macro
+let same = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields)
+  | _ => error("same needs a record")
+  }
+
+@macro
+let partial = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(Type.optional))
+  | _ => error("partial needs a record")
+  }
+
+@macro
+let required = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(Type.required))
+  | _ => error("required needs a record")
+  }
+
+@macro
+let flagged = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | _ => error("flagged needs a record")
+  }
+
+@generic
+let default = (_: code<unit>): code<'a> =>
+  switch Type.info(expected()) {
+  | Int => %code(0)
+  | String => %code("")
+  | Option(_) => %code(None)
+  | Record({fields}) => Code.record(fields->Array.map(f => Code.entryOf(f, %code((default(): ${f.typ})))))
+  | _ => error("no default")
+  }
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "User.res",
+        r#"
+type user = {name: string, age?: int}
+let ada: user = {name: "Ada", age: 36}
+let fields = Fields.describe(ada)
+
+type copy = %Fields.same(user)
+let copy: copy = {name: "Ada", age: 36}
+
+type patch = %Fields.partial(user)
+let patch: patch = {age: 37}
+
+type full = %Fields.required(user)
+let full: full = {name: "Ada", age: 36}
+
+let empty: user = Fields.default()
+
+type shape = Circle({radius: float, label?: string}) | Dot
+let encode = (shape: shape) => Json.encode(shape)
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    // The type of an optional field is the type of `value.field`.
+    assert!(expanded.contains(r#""name: string, age?: option<int>""#), "{expanded}");
+    assert!(expanded.contains("type copy = {name: string, age?: int}"), "{expanded}");
+    assert!(expanded.contains("type patch = {name?: string, age?: int}"), "{expanded}");
+    assert!(expanded.contains("type full = {name: string, age: int}"), "{expanded}");
+    assert!(expanded.contains("age: ?((default$option_int(): (option<int>)))"), "{expanded}");
+    // The pattern of an inline record binds an optional field as an option:
+    // the switch has a case for a shape without a label.
+    assert!(expanded.contains("Circle({radius: radius$0, label: ?label$1})"), "{expanded}");
+    assert_eq!(project.warnings, "", "{}", project.warnings);
+    assert!(!js.contains("Match_failure"), "{js}");
+
+    let error = compile_err(
+        &mut project,
+        "Flagged.res",
+        "type user = {name: string}\ntype t = %Fields.flagged(user)\n",
+    );
+    assert!(error.contains("Type.optional makes a field optional"), "{error}");
+}
+
+#[test]
+fn attribute_on_generated_code() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Build.res", BUILD);
+    compile_ok(&mut project, "Loud.res", "let size = unused => 2\n");
+    assert!(project.warnings.contains("unused variable unused"), "{}", project.warnings);
+    compile_ok(&mut project, "Quiet.res", "let size = %Build.quiet(unused => 2)\n");
+    let expanded = project.expanded.clone().unwrap();
+    assert!(expanded.contains(r#"@warning("-27") (unused => 2)"#), "{expanded}");
+    assert_eq!(project.warnings, "", "{}", project.warnings);
 }

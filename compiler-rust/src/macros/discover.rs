@@ -23,7 +23,7 @@ use crate::parser::ast::{
     StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
 };
 use crate::parser::longident::Longident;
-use crate::parser::module::HOLE_EXTENSION;
+use crate::parser::module::{HOLE_EXTENSION, SPLICE_HOLE_EXTENSION};
 use crate::types::context::TypeContext;
 use crate::types::decl::ValueDescription;
 use crate::types::env::Env;
@@ -876,6 +876,11 @@ fn fail(tctx: &mut TypeCheckContext<'_>, loc: LocIdx, message: impl Into<String>
 const HOLE_OUTSIDE_QUOTE: &str =
     "A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).";
 
+/// `${...}` or `${...items}`: both belong in a quote.
+fn is_hole_name(name: &str) -> bool {
+    name == HOLE_EXTENSION || name == SPLICE_HOLE_EXTENSION
+}
+
 fn discovering(tctx: &TypeCheckContext<'_>) -> bool {
     matches!(tctx.macro_mode, MacroMode::Discover(_))
 }
@@ -1173,7 +1178,7 @@ pub(crate) fn expression_extension(
     expected_ty: TypeExprRef,
 ) -> Option<TypeCoreResult<Expression>> {
     let name = tctx.arena.get_string(extension.0.txt).to_string();
-    let is_hole = name == HOLE_EXTENSION;
+    let is_hole = is_hole_name(&name);
     if is_hole || quote::is_quote_name(&name) {
         // Quotes are lowered before a discovery pass; one that is left has
         // no payload.
@@ -1688,7 +1693,7 @@ pub(crate) fn pattern_extension(
     extension: &Extension,
 ) -> Option<TypeCoreError> {
     let name = tctx.arena.get_string(extension.0.txt).to_string();
-    if name == HOLE_EXTENSION {
+    if is_hole_name(&name) {
         return Some(if matches!(tctx.macro_mode, MacroMode::Off) {
             required(tctx, loc)
         } else {
@@ -1745,7 +1750,7 @@ pub(crate) fn type_extension(
     extension: &Extension,
 ) -> Option<TypeCoreError> {
     let name = tctx.arena.get_string(extension.0.txt).to_string();
-    if name == HOLE_EXTENSION {
+    if is_hole_name(&name) {
         return Some(if matches!(tctx.macro_mode, MacroMode::Off) {
             required(tctx, loc)
         } else {

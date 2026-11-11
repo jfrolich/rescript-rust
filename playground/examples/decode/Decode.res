@@ -51,11 +51,12 @@ let fromJson = (json: code<JSON.t>): code<'a> =>
       }
     )
   | Record({fields}) =>
+    // `entryOf` writes `name: value`, and `name: ?value` for an optional
+    // field: its type is an option, and a key that is missing leaves it out.
     Code.record(
-      fields->Array.map(f => (
-        f.name,
-        %code((fromJson(field(${json}, ${Code.string(f.jsName)})): ${f.typ})),
-      )),
+      fields->Array.map(f =>
+        Code.entryOf(f, %code((fromJson(field(${json}, ${Code.string(f.jsName)})): ${f.typ})))
+      ),
     )
   | _ => error(`Decode.fromJson cannot decode to ${Type.name(expected())}`)
   }

@@ -133,6 +133,55 @@ function __quotePat(pieces, holes, file) {
   return quote(pieces, holes, file);
 }
 
+function splice(items, trailing) {
+  return {
+    ...cat([
+      join(items, ", "),
+      text(trailing && items.length !== 0 ? "," : "")
+    ]),
+    raw: true
+  };
+}
+
+function entryNodes(entries) {
+  let nodes = entries.map(prim => prim);
+  let isSpread = node => node.c.startsWith("...");
+  let spreads = nodes.filter(isSpread);
+  if (spreads.length > 1) {
+    return __rescript_macro.fail("A record can have one spread, and these fields have more: " + spreads.map(node => node.c).join(", "), undefined);
+  } else {
+    return spreads.concat(nodes.filter(node => !node.c.startsWith("...")));
+  }
+}
+
+function caseNode(param) {
+  return cat([
+    {
+      c: "| "
+    },
+    param[0],
+    {
+      c: " => "
+    },
+    param[1]
+  ]);
+}
+
+function __spliceItems(items, trailing) {
+  return splice(items.map(prim => prim), trailing);
+}
+
+function __spliceEntries(entries, trailing) {
+  return splice(entryNodes(entries), trailing);
+}
+
+function __spliceCases(cases) {
+  return {
+    ...join(cases.map(caseNode), "\n"),
+    raw: true
+  };
+}
+
 let isSimple = (function (text) {
   return /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(text)
 });
@@ -214,14 +263,77 @@ function attrText(attrs) {
   }).join("");
 }
 
+function option(t) {
+  return {
+    c: "option<" + t.c + ">",
+    o: t
+  };
+}
+
+function optionOf(t) {
+  let match = t.o;
+  let match$1 = t.id;
+  if (match !== undefined) {
+    return Primitive_option.some(match);
+  }
+  if (match$1 === undefined) {
+    return;
+  }
+  let inner = info(t);
+  if (typeof inner !== "object" || inner.TAG !== "Option") {
+    return;
+  } else {
+    return Primitive_option.some(inner._0);
+  }
+}
+
+function declared(field) {
+  let inner = optionOf(field.typ);
+  if (inner !== undefined) {
+    return Primitive_option.valFromOption(inner);
+  } else {
+    return __rescript_macro.fail("The optional field `" + field.name + "` has the type `" + field.typ.c + "`, and the type of an optional field is an option. Type.optional makes a field optional.", undefined);
+  }
+}
+
+function optional(field) {
+  if (field.optional) {
+    return field;
+  } else {
+    return {
+      name: field.name,
+      jsName: field.jsName,
+      typ: option(field.typ),
+      optional: true,
+      mutable_: field.mutable_,
+      attrs: field.attrs
+    };
+  }
+}
+
+function required(field) {
+  if (field.optional) {
+    return {
+      name: field.name,
+      jsName: field.jsName,
+      typ: declared(field),
+      optional: false,
+      mutable_: field.mutable_,
+      attrs: field.attrs
+    };
+  } else {
+    return field;
+  }
+}
+
 function fieldText(field) {
   return attrText(field.attrs) + (
     field.jsName !== field.name ? "@as(" + JSON.stringify(field.jsName) + ") " : ""
   ) + (
     field.mutable_ ? "mutable " : ""
   ) + field.name + (
-    field.optional ? "?: " : ": "
-  ) + field.typ.c;
+    field.optional ? "?: " + declared(field).c : ": " + field.typ.c
+  );
 }
 
 function record(fields) {
@@ -266,6 +378,11 @@ let Type = {
   name: name,
   companion: companion,
   attrText: attrText,
+  option: option,
+  optionOf: optionOf,
+  declared: declared,
+  optional: optional,
+  required: required,
   fieldText: fieldText,
   record: record,
   variant: variant,
@@ -333,15 +450,53 @@ function tuple(items) {
   ]);
 }
 
-function record$1(fields) {
+function withAttr(value, name, payload) {
+  return cat([
+    text("@" + name),
+    payload !== undefined ? cat([
+        {
+          c: "("
+        },
+        Primitive_option.valFromOption(payload),
+        {
+          c: ") "
+        }
+      ]) : ({
+        c: " "
+      }),
+    atomNode(value)
+  ]);
+}
+
+function entry(name, value, optionalOpt) {
+  let optional = optionalOpt !== undefined ? optionalOpt : false;
+  return cat([
+    text(name + (
+      optional ? ": ?" : ": "
+    )),
+    optional ? atomNode(value) : value
+  ]);
+}
+
+function entryOf(field, value) {
+  return entry(field.name, value, field.optional);
+}
+
+function spread(value) {
+  return cat([
+    {
+      c: "..."
+    },
+    atomNode(value)
+  ]);
+}
+
+function record$1(entries) {
   return cat([
     {
       c: "{"
     },
-    join(fields.map(param => cat([
-      text(param[0] + ": "),
-      param[1]
-    ])), ", "),
+    join(entryNodes(entries), ", "),
     {
       c: "}"
     }
@@ -370,16 +525,7 @@ function switch_(value, arms) {
     {
       c: " {\n"
     },
-    join(arms.map(param => cat([
-      {
-        c: "| "
-      },
-      param[0],
-      {
-        c: " => "
-      },
-      param[1]
-    ])), "\n"),
+    join(arms.map(caseNode), "\n"),
     {
       c: "\n}"
     }
@@ -417,6 +563,10 @@ let Code = {
   field: field$1,
   array: array,
   tuple: tuple,
+  withAttr: withAttr,
+  entry: entry,
+  entryOf: entryOf,
+  spread: spread,
   record: record$1,
   call: call,
   switch_: switch_,
@@ -448,7 +598,9 @@ function constructor$1(c) {
   if (c.fields.length !== 0) {
     let names = c.fields.map((f, i) => f.name + "$" + i.toString());
     return [
-      make(c.name + "({" + c.fields.map((f, i) => f.name + ": " + names[i]).join(", ") + "})"),
+      make(c.name + "({" + c.fields.map((f, i) => f.name + (
+        f.optional ? ": ?" : ": "
+      ) + names[i]).join(", ") + "})"),
       c.fields.map((f, i) => typed(names[i], f.typ))
     ];
   }
@@ -494,6 +646,12 @@ export {
   __quoteDecls,
   __quoteType,
   __quotePat,
+  splice,
+  entryNodes,
+  caseNode,
+  __spliceItems,
+  __spliceEntries,
+  __spliceCases,
   isSimple,
   atom,
   atomNode,

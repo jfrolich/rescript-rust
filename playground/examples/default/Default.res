@@ -10,7 +10,7 @@ let value = (_: code<unit>): code<'a> =>
   | Bool => %code(false)
   | Array(_) => %code([])
   | Option(_) => %code(None)
-  | Record({fields}) => Code.record(fields->Array.map(f => (f.name, %code(value()))))
+  | Record({fields}) => Code.record(fields->Array.map(f => Code.entryOf(f, %code(value()))))
   | Variant({constructors}) =>
     switch constructors->Array.find(c => c.args->Array.length == 0 && c.fields->Array.length == 0) {
     | Some(c) => Code.ident(c.name)

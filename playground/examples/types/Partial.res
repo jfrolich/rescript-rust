@@ -4,6 +4,6 @@ open Macro
 @macro
 let t = (source: typ): typ =>
   switch Type.info(source) {
-  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | Record({fields}) => Type.record(fields->Array.map(Type.optional))
   | _ => error(`Partial.t needs a record type, and ${Type.name(source)} is not one`)
   }

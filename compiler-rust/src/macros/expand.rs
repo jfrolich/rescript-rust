@@ -156,6 +156,17 @@ pub fn expand_source(
             text = Arc::new(text.apply(quote_edits));
             continue;
         }
+        if let Some((start, end)) = quote::stray_splice(parser.arena(), &structure) {
+            return Err(diagnostic(
+                BUG,
+                source,
+                &text,
+                filename,
+                (start, end),
+                false,
+                quote::SPLICE_OUT_OF_PLACE,
+            ));
+        }
 
         let opens = top_level_opens(&parser, &structure, &text);
         let mut frontend_output = String::new();
