@@ -9,3 +9,5 @@ rescript/incremental/
 *.tmp
 *.takeover
 *.debug-ir
+rescript.sqlite*
+.*.lock.guard
