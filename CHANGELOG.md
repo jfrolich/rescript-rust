@@ -13,6 +13,8 @@
 
 #### :boom: Breaking Change
 
+- Remove external PPX rewriters: non-spice `ppx-flags` now fail configuration validation. Built-in spice derives remain supported and no longer round-trip through the frozen v0 AST. https://github.com/jfrolich/rescript-rust/pull/108
+
 - Remove the standalone `bsc` command (`npx bsc`, `cli/bsc.js` and the Rust `bsc` binary). Compile through `rescript build`, which runs the compiler in-process.
 - Remove rewatch's file-backed subprocess build (`RESCRIPT_SUBPROCESS_BUILD`, `RESCRIPT_BSC_EXE`) and the `--dump-typed-sexp` and hidden `--in-process` flags of `rescript build` and `rescript watch`.
 - `\"_"` is no longer allowed as a quoted identifier, as it couldn't be told apart from the `_` wildcard and placeholder. https://github.com/rescript-lang/rescript/pull/8795

@@ -1,0 +1,1 @@
+Remove external PPX rewriters. Non-spice `ppx-flags` now fail configuration validation; built-in spice derives remain supported without executable resolution or a frozen-v0 AST round trip. https://github.com/jfrolich/rescript-rust/pull/108
