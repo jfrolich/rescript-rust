@@ -7304,7 +7304,7 @@ fn compile_source_to_js_with_options_inner(
         Some(module_path_resolver),
         jsx_preserve,
         options.check_div_by_zero,
-        options.cross_module_inline,
+        file_config.cross_module_inline(options),
     );
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
@@ -8810,6 +8810,18 @@ pub struct FileConfigOverrides {
     pub jsx_module: Option<String>,
     /// `-w`/`-warn-error` specs in application order (`true` = `-warn-error`).
     pub warning_ops: Vec<(bool, String)>,
+    /// `-bs-cross-module-opt` (`Some(true)`) or `-bs-no-cross-module-opt`
+    /// (`Some(false)`), the last one given (`Js_config.cross_module_inline`).
+    pub cross_module_inline: Option<bool>,
+}
+
+impl FileConfigOverrides {
+    /// `Js_config.cross_module_inline` for this file: its `@@config` flags
+    /// win over the command line.
+    pub fn cross_module_inline(&self, options: &CompilerOptions) -> bool {
+        self.cross_module_inline
+            .unwrap_or(options.cross_module_inline)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -8927,6 +8939,11 @@ fn run_file_level_flags(
             return false;
         };
         let BscFlagArity::String = arity else {
+            match flag {
+                "-bs-cross-module-opt" => overrides.cross_module_inline = Some(true),
+                "-bs-no-cross-module-opt" => overrides.cross_module_inline = Some(false),
+                _ => {}
+            }
             continue;
         };
         let Some(arg) = flags.get(i) else {
@@ -9628,6 +9645,8 @@ pub struct InProcessPreJsCompileResult {
     pub file_directives: Vec<String>,
     pub debug: bool,
     pub jsx_preserve: bool,
+    /// `Js_config.cross_module_inline` for this file.
+    pub cross_module_inline: bool,
     pub signature: crate::types::decl::Signature,
     pub pers_struct: Option<PortablePersStruct>,
     /// Resolves the location handles of `lowered_lambda`; outlives the parse
@@ -10017,6 +10036,7 @@ fn js_backend_compiler(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    cross_module_inline: bool,
     lam_locs: crate::lambda::LamLocTable,
 ) -> LambdaCompiler {
     let mut module_path_resolver = ModulePathResolver::from_compile_options(
@@ -10042,7 +10062,7 @@ fn js_backend_compiler(
         Some(module_path_resolver),
         jsx_preserve,
         options.check_div_by_zero,
-        options.cross_module_inline,
+        cross_module_inline,
     );
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
@@ -10102,6 +10122,7 @@ fn compile_js_program_for_output(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    cross_module_inline: bool,
     lam_locs: &crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
@@ -10119,6 +10140,7 @@ fn compile_js_program_for_output(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        cross_module_inline,
         lam_locs.clone(),
     );
     // `possible_required_modules` already holds the modules of the lowered
@@ -10145,6 +10167,7 @@ fn compile_js_program_for_output_owned(
     output_module_format: Option<ModuleFormat>,
     persistent_env: Option<PersistentEnv>,
     jsx_preserve: bool,
+    cross_module_inline: bool,
     lam_locs: crate::lambda::LamLocTable,
 ) -> Result<JsBackendOutput> {
     let _span = info_span!(
@@ -10163,6 +10186,7 @@ fn compile_js_program_for_output_owned(
         output_module_format,
         persistent_env,
         jsx_preserve,
+        cross_module_inline,
         lam_locs,
     );
     let program = compiler.compile_deps_program_in_arena(
@@ -10442,6 +10466,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         )
     };
     let file_config = extract_file_config_from_structure(structure, arena);
+    let cross_module_inline = file_config.cross_module_inline(options);
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
@@ -11122,6 +11147,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         file_directives,
         debug,
         jsx_preserve,
+        cross_module_inline,
         signature: published_signature,
         pers_struct,
         lam_locs,
@@ -11212,6 +11238,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                pre_js.cross_module_inline,
                 &pre_js.lam_locs,
             )?
         } else {
@@ -11226,6 +11253,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
                 pre_js.jsx_preserve,
+                pre_js.cross_module_inline,
                 std::mem::take(&mut pre_js.lam_locs),
             )?
         }
@@ -11271,6 +11299,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     Some(target.module_format),
                     persistent_env_for_js.clone(),
                     pre_js.jsx_preserve,
+                    pre_js.cross_module_inline,
                     &pre_js.lam_locs,
                 )?;
             check_module_path_resolution_errors(
@@ -11637,6 +11666,29 @@ pub fn typecheck_preprocessed_signature_in_process(
 
 #[cfg(test)]
 mod tests {
+    /// `-bs-cross-module-opt` and `-bs-no-cross-module-opt` in `@@config`
+    /// set `Js_config.cross_module_inline` for the file, the last one given
+    /// winning, over the command line's.
+    #[test]
+    fn file_config_flags_set_cross_module_inline() {
+        let overrides = |source: &str| {
+            let mut parser = super::Parser::new("A.res", source);
+            let structure = super::module::parse_structure(&mut parser);
+            super::extract_file_config_from_structure(&structure, parser.arena())
+        };
+        let mut options = super::CompilerOptions::default();
+        assert!(!overrides("let x = 1\n").cross_module_inline(&options));
+        let on = overrides("@@config({flags: [\"-bs-cross-module-opt\"]})\nlet x = 1\n");
+        assert_eq!(on.cross_module_inline, Some(true));
+        assert!(on.cross_module_inline(&options));
+        let off = overrides(
+            "@@config({flags: [\"-bs-cross-module-opt\", \"-bs-no-cross-module-opt\"]})\nlet x = 1\n",
+        );
+        options.cross_module_inline = true;
+        assert!(!off.cross_module_inline(&options));
+        assert!(overrides("let x = 1\n").cross_module_inline(&options));
+    }
+
     /// tests/syntax_tests/res_test.ml:27-84: formatting keeps a file's line
     /// endings, also inside comments, template literals and raw JS, and
     /// formatting the result again changes nothing. The line breaks inside
