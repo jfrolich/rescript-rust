@@ -12,12 +12,14 @@ compiler. Read that first.
 | `compiler-rust/src/macros/discover.rs` | The type checker's hooks: recognizing macro uses, running the macro, recording edits, instances of generics. |
 | `compiler-rust/src/macros/quote.rs` | Lowering `%code`, `%type` and `%pat` in a macro's own file. |
 | `compiler-rust/src/macros/reflect.rs` | Answers about types: `Type.info`, printing a type as source, the literal shape of a `%comptime` value. |
-| `compiler-rust/src/macros/edit.rs` | `SourceText`: text with a map back to the original, and edits on it. |
+| `compiler-rust/src/macros/edit.rs` | `SourceText`: text that knows where each character comes from, and edits on it. |
+| `compiler-rust/src/macros/report.rs` | What a diagnostic says about generated code. |
 | `compiler-rust/src/macros/host.js` | The engine side: module loader, sandbox, call entry point. The same script in QuickJS and in the browser. |
 | `compiler-rust/src/macros/quickjs.rs` | The engine of native builds (feature `macro-quickjs`, part of `native`). |
 | `packages/@rescript/runtime/Macro.res` | The API macros are written against. |
 | `compiler-rust/src/parser` | `${...}` holes, the payloads of quotes, macro arguments. |
-| `compiler-rust/tests/macros.rs` | End-to-end tests: small projects compiled in memory. |
+| `compiler-rust/tests/macros.rs` | End-to-end tests: small projects, the JavaScript and the expanded source. |
+| `compiler-rust/tests/macro_errors.rs` | The diagnostics of broken programs, compared with `tests/macro_errors/*.txt`. |
 | `playground/` | The browser playground and its host. |
 
 ## Parsing
@@ -80,11 +82,41 @@ expanded file is a thing a person can read. Its cost is a type check of the
 file per pass. Changing it later does not change the language: the surface
 (`code<'a>`, quotes, `Macro`) does not say how code is represented.
 
-`SourceText` keeps, for every character, the offset in the original file it
-stands for: itself for text that was there, the start of the replaced range
-for generated text. `expand::remap_positions` rewrites every position in the
-parse arena of the expanded text through that map, so everything after
-parsing sees original positions.
+`SourceText` keeps, for every character, where it comes from:
+
+- a character of the file as written has its offset in that file, also when
+  it is an argument that a macro put in its result;
+- a generated character has the macro use it was generated for, and, when it
+  was written in a quote, the file, line and column of that quote. A
+  function generated for a `@generic` is generated for the call that needed
+  it and has a description, "`Json.encode` for `user`". Code generated
+  inside generated code belongs to the use in the file as written.
+
+`expand::remap_positions` rewrites every position in the parse arena of the
+expanded text through that map, so everything after parsing sees original
+positions. It goes by location: one that starts or ends in generated code
+covers the macro use, one inside an argument stays where the argument is.
+The arena keeps the expansion (`ParseArena::expansion`): the text, and the
+offset each position had in it.
+
+## Diagnostics
+
+A diagnostic in generated code is reported at the macro use. When the driver
+prints the frame of a location (`push_generated_code_note` in `driver.rs`,
+for errors and warnings), it asks the expansion what is at the location's
+offsets in the expanded text. For generated code, `report.rs` adds a note
+after the frame: the lines of the quote the code was written in, read from
+the macro's file, or, for code that is not from a quote (`Code.raw`, the
+builders), the lines of the expanded source.
+
+Errors of expansion itself (a macro that reports or raises, generated code
+that does not parse, passes that run out) go through `expand::diagnostic`,
+which places and annotates them the same way.
+
+The final compilation of an expanded file runs with
+`MacroMode::Expanded`. A macro use that is still there is typed by its
+declared type instead of stopping the compilation: it is there because
+something near it has an error, and that error is the one to report.
 
 ## Quotes
 
@@ -93,18 +125,28 @@ parsing sees original positions.
 ```rescript
 %code(JSON.Encode.string(${value}))
 // becomes
-(Macro.__quoteCode(["JSON.Encode.string(", ")"], [Macro.__holeCode(value)]))
+(Macro.__quoteCode(
+  [[("JSON.Encode.string(", 9, 20)], [(")", 9, 48)]],
+  [Macro.__holeCode(value)],
+  "Json.res",
+))
 ```
 
-The pieces are the source text around the holes. `__holeCode`, `__holeType`
+The pieces are the source text around the holes, each with the line and
+column it has in the macro's file. A code value is `{c: text, m: spans}`:
+`m` lists which parts of the text are a piece of a quote or an argument of
+the macro (an argument arrives with `$o`, the compiler's name for its range).
+`Macro` keeps the spans when it builds code from parts (`cat` in
+`Macro.res`), and the engine returns them with the code. That is how a
+character of the expanded text gets its origin. `__holeCode`, `__holeType`
 and `__holePat` are identity functions whose types make the hole's
 expression check as `code<'a>`, `typ` or `pat`; `__holeItem` is for a hole
 that stands where a whole declaration does. A quote of declarations lowers
 to `__quoteDecls`. At run time a quote is string concatenation, with
 parentheses around each filled hole except a declaration.
 
-While it copies a piece, the lowering qualifies the top-level value and
-module names of the macro's own file with the file's module name, so that
+While it copies a piece, the lowering puts the file's module name in front
+of the top-level value and module names of the macro's own file, so that
 `encode(v)` inside a quote in `Json.res` reads `Json.encode(v)` at the use.
 This is the only hygiene there is so far.
 
@@ -189,7 +231,8 @@ it, turning ES module output into CommonJS by text when needed.
  "answers": {"info:1": {"TAG": "Record", "name": "user", "fields": []}}}
 ```
 
-The response is `{"ok": "<code>"}`, `{"error": "...", "offset": n}` or
+The response is `{"ok": "<code>", "spans": [...]}`, `{"error": "..."}` (with
+`"exception": true` when the macro raised instead of reporting) or
 `{"need": "<question>"}`. A question is `info:<handle>`,
 `companion:<handle>:<name>`, `readFile:<path>` or `env:<name>`. On `need`
 the compiler adds the answer and calls again (`Discovery::run`). Answers
@@ -225,9 +268,11 @@ the runtime: they are checked with the runtime package's flags
 ## Tests
 
 `cargo test --manifest-path compiler-rust/Cargo.toml --test macros` compiles
-small projects in memory, with QuickJS as the engine, and checks the
-JavaScript and the expanded source. One test compiles every example of the
-playground. `playground/scripts/smoke.mjs` builds and runs the same examples
+small projects, with QuickJS as the engine, and checks the JavaScript and
+the expanded source. One test compiles every example of the playground.
+`--test macro_errors` compiles broken programs and compares what the
+compiler says with `tests/macro_errors/*.txt`; `UPDATE_EXPECTED=1` rewrites
+those files. `playground/scripts/smoke.mjs` builds and runs the same examples
 with the compiler in WebAssembly.
 
 ## Next steps
@@ -244,8 +289,10 @@ In the order that seems right:
    interfaces `Type.info` looked at as inputs of the module, next to the
    `reads` the build already tracks.
 3. **Hygiene.** Rename the binders a quote introduces per expansion.
-4. **Positions inside generated code**, using the quote's pieces to map an
-   offset in generated text to an offset in the macro's file.
+4. **Check a quote where it is written.** A quote is text until a use
+   expands it, so `%code(${e} + 1)` returned as `code<string>` is found at
+   the use, not in the macro's file. Typing a quote's content against its
+   holes at definition would catch it there.
 5. **`rescript expand <file>`** and the editor: show the expansion; hover
    and definitions inside macro arguments.
 6. **Port ppx-spice** to a library of macros, with the Rust port as the
