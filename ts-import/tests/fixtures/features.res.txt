@@ -62,15 +62,13 @@ module Features = {
   @unboxed type oneOrMany =
     | String(string)
     | Array(array<string>)
-  type looseObject = {
-    a: string,
-  }
-  type looseObject2 = {
-    b: float,
-  }
   @unboxed type loose =
-    | LooseObject(looseObject)
-    | LooseObject2(looseObject2)
+    | A({
+      a: string,
+    })
+    | B({
+      b: float,
+    })
   @unboxed type rec json =
     | Boolean(bool)
     | String(string)
@@ -153,38 +151,31 @@ module Features = {
     z: float,
   }
   type autocapitalize = string
-  type personObject = {
-    name: string,
-  }
-  type personObject2 = {
-    name: string,
-    age: float,
-  }
   @unboxed type person =
-    | PersonObject(personObject)
-    | PersonObject2(personObject2)
-  type readingObject = {
-    value: string,
-  }
-  type readingObject2 = {
-    value: float,
-  }
+    | Object({
+      name: string,
+    })
+    | Age({
+      name: string,
+      age: float,
+    })
   @unboxed type reading =
-    | ReadingObject(readingObject)
-    | ReadingObject2(readingObject2)
-  type headers2Object = {
-    name: string,
-    value: string,
-  }
+    | Object({
+      value: string,
+    })
+    | Object2({
+      value: float,
+    })
   @unboxed type headers2 =
     | Object(dict<string>)
-    | Headers2Object(headers2Object)
-  type typeCase = {
+    | Name({
+      name: string,
+      value: string,
+    })
+  type blurred = {
     x: float,
     y?: string,
   }
-  @unboxed type blurred =
-    | Type(typeCase)
   type spotA = {
     x: float,
     y: float,
@@ -193,13 +184,9 @@ module Features = {
     x: float,
     y: float,
   }
-  type spotACase = {
-    x: float,
-    y: float,
-  }
   @unboxed type spot =
     | String(string)
-    | SpotA(spotACase)
+    | SpotA(spotA)
   type readyState = [#"and" | #closed | #"in" | #"open" | #"true"]
   type dict2<'t> = dict<option<'t>>
   type ref2<'t> = {
@@ -354,16 +341,14 @@ module Features = {
     | Animal(animal)
     | Dog(dog)
     | @as(null) Null
-  type settleResultObject = {
-    result: string,
-  }
-  type settleResultObject2 = {
-    error: string,
-    code?: float,
-  }
   @unboxed type settleResult =
-    | SettleResultObject(settleResultObject)
-    | SettleResultObject2(settleResultObject2)
+    | Result({
+      result: string,
+    })
+    | Error({
+      error: string,
+      code?: float,
+    })
   type pickFrom<'t> = {
     items: array<'t>,
   }

@@ -2064,6 +2064,30 @@ impl<'a> Converter<'a> {
         let mut group_cases: HashMap<usize, (usize, Vec<P<Type>>)> = HashMap::new();
         // The fields of the object cases made so far.
         let mut seen_records: Vec<Vec<Field>> = Vec::new();
+        // The case name of each unnamed object member: its first required
+        // field that no other object member has.
+        let mut inline_names: HashMap<P<Type>, String> = HashMap::new();
+        if plain_objects.len() > 1 {
+            let shapes: Vec<ObjectShape> = plain_objects.iter().map(|&member| self.ts_object_shape(member)).collect();
+            for (index, &member) in plain_objects.iter().enumerate() {
+                if named_symbol(member).is_some() || group_of.contains_key(&member) {
+                    continue;
+                }
+                let ObjectShape::Closed(fields) = &shapes[index] else { continue };
+                let unique = fields.iter().filter(|field| field.required).find(|field| {
+                    shapes.iter().enumerate().all(|(other, shape)| {
+                        other == index
+                            || match shape {
+                                ObjectShape::Closed(others) => others.iter().all(|f| f.name != field.name),
+                                ObjectShape::Open => true,
+                            }
+                    })
+                });
+                if let Some(field) = unique {
+                    inline_names.insert(member, upper_ident(&field.name));
+                }
+            }
+        }
         // The TypeScript member of each case with a payload.
         let mut ctor_members: Vec<Option<P<Type>>> = Vec::new();
         // The TypeScript shape of each case made of several members.
@@ -2097,16 +2121,32 @@ impl<'a> Converter<'a> {
                     continue;
                 }
                 group_cases.insert(group, (ctors.len(), vec![member]));
-                let base = member
-                    .symbol()
-                    .map(|symbol| symbol.name())
-                    .filter(|name| !name.starts_with("__"))
-                    .map_or_else(|| "Object".to_string(), upper_ident);
+                let base = named_symbol(member).map_or_else(|| "Object".to_string(), |symbol| upper_ident(symbol.name()));
                 let name = unique_ctor(&ctors, &base);
                 ctors.push(Ctor { name, tag: None, payload: Payload::None });
                 ctor_members.resize(ctors.len() - 1, None);
                 ctor_members.push(Some(member));
                 continue;
+            }
+            // An unnamed object member is an inline record, named after a field
+            // only it has.
+            if base == "Object" && named_symbol(member).is_none() && self.c.get_index_infos_of_type(member).is_empty() {
+                let properties = self.visible_properties(member);
+                if !properties.is_empty() {
+                    let case = inline_names.get(&member).cloned().unwrap_or_else(|| "Object".to_string());
+                    let name = unique_ctor(&ctors, &case);
+                    self.path.push(name.clone());
+                    let fields = self.fields(&properties, None);
+                    self.path.pop();
+                    if seen_records.contains(&fields) {
+                        continue;
+                    }
+                    seen_records.push(fields.clone());
+                    ctors.push(Ctor { name, tag: None, payload: Payload::Record(fields) });
+                    ctor_members.resize(ctors.len() - 1, None);
+                    ctor_members.push(Some(member));
+                    continue;
+                }
             }
             self.path.push(base.to_string());
             let payload = self.convert(member);
@@ -2177,6 +2217,35 @@ impl<'a> Converter<'a> {
                 "merged {}",
                 grouped.iter().map(|member| member.to_bits().to_string()).collect::<Vec<_>>().join(" ")
             );
+            // All object members are one case and there is nothing else: the
+            // union is that record.
+            if ctors.len() == 1 && grouped.len() == members.len() && !whole_boolean {
+                self.path.push(ctors[index].name.clone());
+                let records: Vec<Vec<Field>> = grouped
+                    .iter()
+                    .map(|&member| {
+                        let properties = self.visible_properties(member);
+                        self.fields(&properties, None)
+                    })
+                    .collect();
+                self.path.pop();
+                let case = ctors[index].name.clone();
+                let fields = self.merge_fields(&case, &records);
+                self.free_vars = saved_free;
+                return Some(DeclKind::Record(fields));
+            }
+            // Members with the same properties at the same types: the case is
+            // the first named one of them.
+            if let Some(&same) = grouped.iter().find(|&&member| {
+                named_symbol(member).is_some() && grouped.iter().all(|&other| self.same_properties(member, other))
+            }) {
+                self.path.push(ctors[index].name.clone());
+                let payload = self.convert(same);
+                self.path.pop();
+                merged_shapes.insert(index, self.ts_object_shape(same));
+                ctors[index].payload = Payload::Ty(payload);
+                continue;
+            }
             let named = match self.state.by_shape.get(&key).cloned() {
                 Some(named) => named,
                 None => {
@@ -2308,6 +2377,23 @@ impl<'a> Converter<'a> {
             };
         }
         merged
+    }
+
+    /// Whether two object types have the same properties, each as optional
+    /// and at the same type.
+    fn same_properties(&mut self, a: P<Type>, b: P<Type>) -> bool {
+        if a == b {
+            return true;
+        }
+        let (pa, pb) = (self.visible_properties(a), self.visible_properties(b));
+        pa.len() == pb.len()
+            && pa.iter().all(|&x| {
+                pb.iter().any(|&y| {
+                    x.name() == y.name()
+                        && x.flags().intersects(SymbolFlags::Optional) == y.flags().intersects(SymbolFlags::Optional)
+                        && self.c.get_type_of_symbol(x) == self.c.get_type_of_symbol(y)
+                })
+            })
     }
 
     /// What the TypeScript type of a plain object member says about the
@@ -2999,4 +3085,13 @@ fn member_key(members: &[P<Type>]) -> Vec<usize> {
     let mut key: Vec<usize> = members.iter().map(|member| member.to_bits()).collect();
     key.sort_unstable();
     key
+}
+
+/// The symbol a type is declared by, unless TypeScript made one up for an
+/// object literal type.
+fn named_symbol(ty: P<Type>) -> Option<P<Symbol>> {
+    ty.symbol().filter(|symbol| {
+        let name = symbol.name();
+        !name.is_empty() && !name.starts_with(tsrs_ast::INTERNAL_SYMBOL_NAME_PREFIX) && !name.starts_with("__")
+    })
 }
