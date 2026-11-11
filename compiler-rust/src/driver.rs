@@ -502,16 +502,21 @@ pub enum DumpKind {
     Lambda,
     /// `-dlambda-sexp-locs`
     LambdaLocs,
+    /// The unit's exported signature in canonical form
+    /// (`types::canonical_sig`): for an interface file, and for an
+    /// implementation without one.
+    Sig,
 }
 
 impl DumpKind {
     /// Every dump kind.
-    pub const ALL: [DumpKind; 5] = [
+    pub const ALL: [DumpKind; 6] = [
         DumpKind::TypedTree,
         DumpKind::TypedTreeLocs,
         DumpKind::RawLambda,
         DumpKind::Lambda,
         DumpKind::LambdaLocs,
+        DumpKind::Sig,
     ];
 
     /// The name used on the command line and as the dump file extension.
@@ -522,6 +527,7 @@ impl DumpKind {
             DumpKind::RawLambda => "rawlambda",
             DumpKind::Lambda => "lambda",
             DumpKind::LambdaLocs => "lambda-locs",
+            DumpKind::Sig => "sig",
         }
     }
 
@@ -536,6 +542,37 @@ impl DumpKind {
             DumpKind::RawLambda | DumpKind::Lambda | DumpKind::LambdaLocs
         )
     }
+
+    /// Whether the dump prints source locations or text, so that the
+    /// compile needs a parse that stores them.
+    pub fn needs_locations(self) -> bool {
+        match self {
+            DumpKind::TypedTree
+            | DumpKind::TypedTreeLocs
+            | DumpKind::RawLambda
+            | DumpKind::Lambda
+            | DumpKind::LambdaLocs => true,
+            DumpKind::Sig => false,
+        }
+    }
+}
+
+/// The `DumpKind::Sig` dump of a unit's exported signature.
+fn canonical_signature_dump(
+    type_ctx: &TypeContext,
+    module_name: &str,
+    signature: &[crate::types::decl::SignatureItem],
+    deprecated: Option<&str>,
+    arena: &ParseArena,
+) -> (DumpKind, String) {
+    let text = crate::types::canonical_sig::canonical_signature(
+        type_ctx,
+        module_name,
+        signature,
+        deprecated,
+        Some(arena),
+    );
+    (DumpKind::Sig, latin1_dump(text.into_bytes()))
 }
 
 /// The dump's bytes, one `char` per byte. Dump printers write source text
@@ -10217,7 +10254,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
-            || !options.dumps.is_empty())
+            || options.dumps.iter().any(|kind| kind.needs_locations()))
     {
         return Err(LocationRetry::Output.into());
     }
@@ -10554,6 +10591,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     &tctx.warnings,
                 )
             })?;
+        if type_ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_exported_signature(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+            );
+        }
+        if options.dumps.contains(&DumpKind::Sig) {
+            dumps.push(canonical_signature_dump(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+                deprecated.as_deref(),
+                arena,
+            ));
+        }
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
@@ -11468,6 +11521,18 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &tctx.warnings,
             )
         })?;
+    if type_ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+    }
+    if options.dumps.contains(&DumpKind::Sig) {
+        dumps.push(canonical_signature_dump(
+            &type_ctx,
+            module_name,
+            &raw_signature,
+            deprecated.as_deref(),
+            arena,
+        ));
+    }
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
