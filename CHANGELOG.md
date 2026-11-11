@@ -19,6 +19,7 @@
 #### :rocket: New Feature
 
 - Declare a class on a private record with `@instanceOf`, name its superclass with `@extends(: parent)`, and import the class with `@module` beside `@instanceOf`; such records are untagged variant cases, tested subclass first, and upcast with `:>`. https://github.com/jfrolich/rescript-rust/pull/103
+- An `@unboxed` variant can have several cases whose payload is a record, and one open object case, when a field tells them apart: the compiler tests a field with `"f" in x`, `x.f === literal` or `typeof x.f`. Rust compiler only. https://github.com/jfrolich/rescript-rust/pull/103
 
 #### :bug: Bug fix
 

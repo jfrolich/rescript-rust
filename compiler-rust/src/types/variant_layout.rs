@@ -22,8 +22,9 @@ use crate::types::path::Path;
 use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typemod::{AstUntaggedVariantError, TypeModError, TypeModResult};
 use crate::types::variant_runtime::{
-    Block, BlockType, ClassBlocks, Configuration, ConstructorCase, Instance, Layout, LiteralTag,
-    ShapeAllocation, ShapeBlocks, ShapeString, Tag, TaggedBlock, ValueShape,
+    Block, BlockType, ClassBlocks, Configuration, ConstructorCase, FieldCheck, Instance, Layout,
+    LiteralTag, ObjectCase, ShapeAllocation, ShapeBlocks, ShapeString, Tag, TaggedBlock,
+    ValueShape, same_literal_value,
 };
 
 /// ast_untagged_variants.ml `runtime_annotation`: what `@notUndefined`,
@@ -661,11 +662,14 @@ fn at_most_one_of_kind(kind: &BlockType) -> String {
 
 /// variant_layout.ml `check_invariant`: the cases of a variant must be told
 /// apart at run time: nullary cases and tagged blocks by distinct literals,
-/// the untagged payloads of an `@unboxed` variant by distinct kinds.
+/// the untagged payloads of an `@unboxed` variant by distinct kinds. Object
+/// cases may share their kind when `objects_ordered`: their fields tell them
+/// apart ([`object_case_order`]).
 fn check_invariant(
     ctx: &TypeContext,
     consts: &[(crate::types::DeclLoc, &Tag)],
     blocks: &[(crate::types::DeclLoc, &Block)],
+    objects_ordered: bool,
 ) -> TypeModResult<()> {
     use std::collections::{HashMap, HashSet};
     let mut string_literals_consts: HashSet<String> = HashSet::new();
@@ -784,6 +788,9 @@ fn check_invariant(
                     ));
                 }
                 let key = kind_key(block_type);
+                if *block_type == BlockType::Object && objects_ordered {
+                    continue;
+                }
                 if kinds.contains(&key) {
                     return Err(invalid_untagged(ctx, *loc, at_most_one_of_kind(block_type)));
                 }
@@ -851,7 +858,16 @@ pub(crate) fn layout_from_type_variant(
                 ConstructorCase::Constant(_) => None,
             })
             .collect();
-        check_invariant(ctx, &consts, &blocks)?;
+        // Several object cases are told apart by their fields, when an order
+        // exists. Otherwise the second one is rejected as before.
+        let objects_ordered = configuration.unboxed
+            && blocks
+                .iter()
+                .filter(|(_, block)| block.block_type() == Some(&BlockType::Object))
+                .count()
+                > 1
+            && object_case_order(ctx, env, cstrs).is_some();
+        check_invariant(ctx, &consts, &blocks, objects_ordered)?;
     }
     Ok(Layout::new(
         configuration,
@@ -1038,4 +1054,313 @@ fn check_extends(
         Ok(()) => Ok(()),
         Err(_) => error(AstUntaggedVariantError::ExtendsFieldsMismatch(parent)),
     }
+}
+
+/// What the type of one field of an object case says about its values, for
+/// the checks that tell object cases apart.
+#[derive(Debug, Clone)]
+struct FieldShape {
+    /// The field's JavaScript name (`@as`).
+    name: String,
+    /// Every value of the case has the field.
+    required: bool,
+    /// The only values the field can have, when its type is a set of
+    /// literals.
+    literals: Option<Vec<LiteralTag>>,
+    /// The payload kind of the field's values (rule 4 of
+    /// `compiler/ml/UntaggedVariants.md`), when it is known.
+    kind: Option<BlockType>,
+}
+
+/// The payload of an object case.
+#[derive(Debug, Clone)]
+enum ObjectShape {
+    /// A record or an inline record: its fields are known.
+    Closed(Vec<FieldShape>),
+    /// A `dict`, an object type or a type declared `@typeOf("object")`.
+    Open,
+}
+
+/// The literals a field type stands for: those of a polymorphic variant
+/// without payloads, of a variant without payloads, and `true` and `false`
+/// for `bool`.
+fn field_literals(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Option<Vec<LiteralTag>> {
+    let expanded = crate::types::ctype::expand_head_opt(ctx, env, t);
+    match &*ctx.get_desc(expanded) {
+        TypeDesc::Tconstr { path, .. } => {
+            if path.same(&crate::types::predef::path_bool()) {
+                return Some(vec![LiteralTag::Bool(true), LiteralTag::Bool(false)]);
+            }
+            if crate::types::ctype::is_bool_or_unit(path) {
+                return None;
+            }
+            let decl = find_type(ctx, env, path)?;
+            let TypeKind::TypeVariant(cstrs, _) = &decl.type_kind else {
+                return None;
+            };
+            cstrs
+                .iter()
+                .map(|cstr| {
+                    matches!(&cstr.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty())
+                        .then(|| declared_tag(cstr).literal)
+                })
+                .collect::<Option<Vec<_>>>()
+                .filter(|literals| !literals.is_empty())
+        }
+        TypeDesc::Tvariant(row) => {
+            let row = crate::types::btype::row_repr(ctx, &ctx.row_desc(*row));
+            if !row.row_closed {
+                return None;
+            }
+            let mut literals = Vec::new();
+            for (label, field) in row.row_fields.iter() {
+                match crate::types::btype::row_field_repr(ctx, field) {
+                    crate::types::type_expr::RowField::Rpresent(None) => {}
+                    crate::types::type_expr::RowField::Reither {
+                        constant: true,
+                        types,
+                        ..
+                    } if types.is_empty() => {}
+                    crate::types::type_expr::RowField::Rabsent => continue,
+                    _ => return None,
+                }
+                literals.push(LiteralTag::String(label.to_string()));
+            }
+            (!literals.is_empty()).then_some(literals)
+        }
+        _ => None,
+    }
+}
+
+/// The kind all of these literals have, if they have one.
+fn literals_kind(literals: &[LiteralTag]) -> Option<BlockType> {
+    let kind = |literal: &LiteralTag| match literal {
+        LiteralTag::String(_) => Some(BlockType::String),
+        LiteralTag::Int(_) | LiteralTag::Float(_) => Some(BlockType::Number),
+        LiteralTag::BigInt(_) => Some(BlockType::Bigint),
+        LiteralTag::Bool(_) => Some(BlockType::Boolean),
+        LiteralTag::Null | LiteralTag::Undefined => None,
+    };
+    let first = kind(literals.first()?)?;
+    literals
+        .iter()
+        .all(|literal| kind(literal).as_ref() == Some(&first))
+        .then_some(first)
+}
+
+fn field_shape(
+    ctx: &TypeContext,
+    env: &Env,
+    field: &crate::types::decl::LabelDeclaration,
+    field_type: TypeExprRef,
+) -> FieldShape {
+    let literals = field_literals(ctx, env, field_type);
+    let kind = match &literals {
+        Some(literals) => literals_kind(literals),
+        None => payload_kind(ctx, env, field_type).filter(|kind| *kind != BlockType::Unknown),
+    };
+    FieldShape {
+        name: field.declaration_name().to_string(),
+        required: !field.ld_optional,
+        literals,
+        kind,
+    }
+}
+
+/// The shape of an object case's payload: the fields of an inline record or
+/// of a record type, or an open object.
+fn object_shape(ctx: &TypeContext, env: &Env, cstr: &ConstructorDeclaration) -> ObjectShape {
+    match &cstr.cd_args {
+        ConstructorArguments::CstrRecord(fields) => ObjectShape::Closed(
+            fields
+                .iter()
+                .map(|field| field_shape(ctx, env, field, field.ld_type))
+                .collect(),
+        ),
+        ConstructorArguments::CstrTuple(args) => {
+            let Some(payload) = args.first() else {
+                return ObjectShape::Open;
+            };
+            let expanded = crate::types::ctype::expand_head_opt(ctx, env, *payload);
+            let (path, args) = match &*ctx.get_desc(expanded) {
+                TypeDesc::Tconstr { path, args, .. } => (*path, ctx.type_list(*args).to_vec()),
+                _ => return ObjectShape::Open,
+            };
+            let Some(decl) = find_type(ctx, env, &path) else {
+                return ObjectShape::Open;
+            };
+            let TypeKind::TypeRecord(fields, _) = &decl.type_kind else {
+                return ObjectShape::Open;
+            };
+            // A field whose type is a parameter of the record has the type of
+            // the argument.
+            let field_type = |field: &crate::types::decl::LabelDeclaration| {
+                let field_type = ctx.repr(field.ld_type);
+                decl.type_params
+                    .iter()
+                    .position(|param| ctx.repr(*param) == field_type)
+                    .and_then(|index| args.get(index).copied())
+                    .unwrap_or(field.ld_type)
+            };
+            ObjectShape::Closed(
+                fields
+                    .iter()
+                    .map(|field| field_shape(ctx, env, field, field_type(field)))
+                    .collect(),
+            )
+        }
+    }
+}
+
+/// What `typeof` answers for the values of a kind.
+fn typeof_of_kind(kind: &BlockType) -> Option<&'static str> {
+    match kind {
+        BlockType::Instance(_) => Some("object"),
+        BlockType::Unknown => None,
+        kind => kind.typeof_name(),
+    }
+}
+
+/// No value of the case passes the check.
+fn fails(check: &FieldCheck, case: &ObjectShape) -> bool {
+    let ObjectShape::Closed(fields) = case else {
+        // An open case declares no fields.
+        return true;
+    };
+    let Some(field) = fields.iter().find(|field| field.name == check.field()) else {
+        return true;
+    };
+    match check {
+        FieldCheck::Present(_) => false,
+        FieldCheck::Literals(_, literals) => !literals.iter().any(|literal| {
+            match (&field.literals, field.kind.as_ref().and_then(typeof_of_kind)) {
+                (Some(own), _) => own.iter().any(|l| same_literal_value(l, literal)),
+                (None, Some(typeof_name)) => literals_kind(std::slice::from_ref(literal))
+                    .is_none_or(|kind| kind.typeof_name() == Some(typeof_name)),
+                (None, None) => true,
+            }
+        }),
+        FieldCheck::Kind(_, BlockType::Instance(Instance::Array(_))) => field
+            .kind
+            .as_ref()
+            .is_some_and(|kind| !matches!(kind, BlockType::Instance(Instance::Array(_)))),
+        FieldCheck::Kind(_, kind) => {
+            match (field.kind.as_ref().and_then(typeof_of_kind), kind.typeof_name()) {
+                (Some(own), Some(checked)) => own != checked,
+                _ => false,
+            }
+        }
+    }
+}
+
+/// The checks every value of a case passes, in the order they are preferred: a
+/// literal check, then a presence check, then a kind check, each in the
+/// order of the fields.
+fn candidate_checks(case: &ObjectShape) -> Vec<FieldCheck> {
+    let ObjectShape::Closed(fields) = case else {
+        return Vec::new();
+    };
+    let required = || fields.iter().filter(|field| field.required);
+    let literal = required().filter_map(|field| {
+        field
+            .literals
+            .clone()
+            .map(|literals| FieldCheck::Literals(field.name.clone(), literals))
+    });
+    let presence = required().map(|field| FieldCheck::Present(field.name.clone()));
+    let kind = required().filter_map(|field| match &field.kind {
+        Some(
+            kind @ (BlockType::String
+            | BlockType::Number
+            | BlockType::Bigint
+            | BlockType::Boolean
+            | BlockType::Function
+            | BlockType::Object
+            | BlockType::Instance(Instance::Array(_))),
+        ) => Some(FieldCheck::Kind(field.name.clone(), kind.clone())),
+        _ => None,
+    });
+    literal.chain(presence).chain(kind).collect()
+}
+
+/// A test the values of `case` pass and the values of every case of
+/// `others` fail: one check if one is enough, or several joined with `&&`.
+fn test_against(case: &ObjectShape, others: &[&ObjectShape]) -> Option<Vec<FieldCheck>> {
+    let checks = candidate_checks(case);
+    if let Some(check) = checks
+        .iter()
+        .find(|check| others.iter().all(|other| fails(check, other)))
+    {
+        return Some(vec![check.clone()]);
+    }
+    let mut uncovered: Vec<&ObjectShape> = others.to_vec();
+    let mut test = Vec::new();
+    for check in checks {
+        if uncovered.iter().any(|other| fails(&check, other)) {
+            uncovered.retain(|other| !fails(&check, other));
+            test.push(check);
+            if uncovered.is_empty() {
+                return Some(test);
+            }
+        }
+    }
+    None
+}
+
+/// The order the object cases of an `@unboxed` variant are tested in, each
+/// but the last with a test that every later case fails; `None` when there
+/// is no such order. The earliest case in the declaration that has a test
+/// goes first. An open case passes no check, so it is always last.
+fn order_object_cases(
+    cases: Vec<(crate::name::Name, ObjectShape)>,
+) -> Option<Vec<ObjectCase>> {
+    if cases
+        .iter()
+        .filter(|(_, shape)| matches!(shape, ObjectShape::Open))
+        .count()
+        > 1
+    {
+        return None;
+    }
+    let mut remaining = cases;
+    let mut ordered = Vec::with_capacity(remaining.len());
+    while remaining.len() > 1 {
+        let (index, test) = remaining.iter().enumerate().find_map(|(index, (_, case))| {
+            let others: Vec<&ObjectShape> = remaining
+                .iter()
+                .enumerate()
+                .filter(|(other, _)| *other != index)
+                .map(|(_, (_, shape))| shape)
+                .collect();
+            test_against(case, &others).map(|test| (index, test))
+        })?;
+        let (name, _) = remaining.remove(index);
+        ordered.push(ObjectCase { name, test });
+    }
+    ordered.extend(
+        remaining
+            .into_iter()
+            .map(|(name, _)| ObjectCase { name, test: Vec::new() }),
+    );
+    Some(ordered)
+}
+
+/// The object cases of an `@unboxed` variant with several, in the order they
+/// are tested, with their tests; `None` when they cannot be told apart. The
+/// tests follow from the declaration alone, so a match in any module derives
+/// the ones the declaration was checked with.
+pub(crate) fn object_case_order(
+    ctx: &TypeContext,
+    env: &Env,
+    cstrs: &[ConstructorDeclaration],
+) -> Option<Vec<ObjectCase>> {
+    let cases = cstrs
+        .iter()
+        .filter(|cstr| {
+            !matches!(&cstr.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty())
+                && matches!(get_block_type(ctx, env, cstr), Ok(BlockType::Object))
+        })
+        .map(|cstr| (cstr.cd_id.name_atom(), object_shape(ctx, env, cstr)))
+        .collect();
+    order_object_cases(cases)
 }

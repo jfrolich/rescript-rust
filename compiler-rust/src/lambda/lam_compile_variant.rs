@@ -311,6 +311,26 @@ impl LambdaCompiler {
                 let test = self.is_null_expr(scrut);
                 JE::not(test, &mut self.j)
             }
+            UntaggedTest::FieldIn(field) => {
+                let name = JE::string(field, &mut self.j);
+                JE::bin(BinOp::In, name, scrut, &mut self.j)
+            }
+            UntaggedTest::FieldEquals(field, literal) => {
+                let value = self.static_index(scrut, field);
+                let literal = self.switch_case_expr(&Self::literal_tag_value(literal));
+                JE::bin(BinOp::EqEqEq, value, literal, &mut self.j)
+            }
+            UntaggedTest::FieldTypeof(field, kind) => {
+                let value = self.static_index(scrut, field);
+                self.untagged_typeof_expr(value, kind)
+            }
+            UntaggedTest::FieldIsArray(field) => {
+                let value = self.static_index(scrut, field);
+                let array = crate::types::VariantInstance::Array(
+                    crate::types::ShapeAllocation::TUPLE_ARRAY,
+                );
+                self.is_instance_of(&array, value)
+            }
             UntaggedTest::Not(test) => {
                 let test = self.untagged_test_expr(plan, scrut, *test);
                 JE::not(test, &mut self.j)

@@ -272,21 +272,31 @@ pub(crate) fn untagged_plan_with<'s, A: Clone>(
             | SwitchKey::Int(_) => None,
         })
         .collect::<Option<Vec<_>>>()?;
-    let payload_arms = sw_blocks
-        .iter()
-        .map(|(key, action)| match key {
-            SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
-                crate::types::VariantBlock::Untagged { block_type, .. },
-            )) => Some((block_type.clone(), action.clone())),
-            _ => None,
-        })
-        .collect::<Option<Vec<_>>>()?;
+    let mut payload_arms = Vec::with_capacity(sw_blocks.len());
+    let mut object_arms = Vec::new();
+    for (key, action) in sw_blocks {
+        let SwitchKey::Constructor(crate::types::VariantConstructorCase::Block(
+            crate::types::VariantBlock::Untagged { tag, block_type },
+        )) = key
+        else {
+            return None;
+        };
+        // An object case of a variant with several is told apart by its
+        // fields.
+        match facts.object_cases.iter().position(|case| case.name == tag.name) {
+            Some(position) if *block_type == crate::types::VariantBlockType::Object => {
+                object_arms.push((position, action.clone()));
+            }
+            _ => payload_arms.push((block_type.clone(), action.clone())),
+        }
+    }
     Some(untagged_dispatch::plan(
         same,
         untagged_dispatch::Input {
             facts,
             literal_arms,
             payload_arms,
+            object_arms,
             literals_complete: sw_consts_full,
             payloads_complete: sw_blocks_full,
             fallback: sw_failaction,

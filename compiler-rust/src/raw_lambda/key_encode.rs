@@ -1033,6 +1033,35 @@ impl KeyEncode for crate::types::variant_runtime::MatchingFacts {
         self.tag_name.encode(out);
         self.block_types.encode(out);
         self.literal_tags.encode(out);
+        self.object_cases.encode(out);
+    }
+}
+
+impl KeyEncode for crate::types::variant_runtime::ObjectCase {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        self.name.encode(out);
+        self.test.encode(out);
+    }
+}
+
+impl KeyEncode for crate::types::variant_runtime::FieldCheck {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        match self {
+            Self::Present(field) => {
+                out.tag(0);
+                field.encode(out);
+            }
+            Self::Literals(field, literals) => {
+                out.tag(1);
+                field.encode(out);
+                literals.encode(out);
+            }
+            Self::Kind(field, kind) => {
+                out.tag(2);
+                field.encode(out);
+                kind.encode(out);
+            }
+        }
     }
 }
 

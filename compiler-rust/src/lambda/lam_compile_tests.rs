@@ -2886,6 +2886,7 @@ pub(super) fn single_complete_array_block_switch(
                 crate::types::VariantInstance::Array(crate::types::ShapeAllocation::fresh()),
             )],
             literal_tags: vec![crate::types::VariantLiteralTag::Undefined],
+            object_cases: Vec::new(),
         }),
     }
 }
@@ -2922,6 +2923,7 @@ pub(super) fn default_only_untagged_boolean_switch(
                 crate::types::VariantLiteralTag::Undefined,
                 crate::types::VariantLiteralTag::Null,
             ],
+            object_cases: Vec::new(),
         }),
     }
 }
@@ -6329,6 +6331,7 @@ fn recursive_named_variant_block_cases_reenter_tail_loops() {
                     literal_tags: vec![crate::types::VariantLiteralTag::String(
                         "Empty".to_string().clone(),
                     )],
+                    object_cases: Vec::new(),
                 },
             ),
         }),

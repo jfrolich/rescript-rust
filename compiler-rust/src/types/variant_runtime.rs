@@ -628,6 +628,39 @@ pub struct Configuration {
     pub tag_name: Option<String>,
 }
 
+/// One check on a field of a plain object, by the field's JavaScript name.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum FieldCheck {
+    /// `"f" in x`.
+    Present(String),
+    /// `x.f === l1 || x.f === l2 ...`.
+    Literals(String, Vec<LiteralTag>),
+    /// `typeof x.f === "k"`, or `Array.isArray(x.f)` for arrays.
+    Kind(String, BlockType),
+}
+
+impl FieldCheck {
+    /// The JavaScript name of the field checked.
+    pub fn field(&self) -> &str {
+        match self {
+            FieldCheck::Present(field)
+            | FieldCheck::Literals(field, _)
+            | FieldCheck::Kind(field, _) => field,
+        }
+    }
+}
+
+/// An object case of an untagged variant with several, in the order it is
+/// tested: the case and the checks, joined with `&&`, that its values pass
+/// and the values of every later case fail. The last case has no checks.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct ObjectCase {
+    /// The constructor's name.
+    pub name: crate::name::Name,
+    /// The test, empty for the last case.
+    pub test: Vec<FieldCheck>,
+}
+
 /// OCaml `Variant_runtime.matching_facts`: declaration-level facts needed
 /// when lowering a constructor match.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -639,6 +672,10 @@ pub struct MatchingFacts {
     pub block_types: Vec<BlockType>,
     /// Runtime values of all nullary constructors, in declaration order.
     pub literal_tags: Vec<LiteralTag>,
+    /// For an untagged variant with several object cases, the order they are
+    /// tested in. Empty otherwise, and in a declaration's layout: the match
+    /// derives it from the declaration (`variant_layout::object_case_order`).
+    pub object_cases: Vec<ObjectCase>,
 }
 
 /// OCaml `Variant_runtime.layout`: the completed runtime representation of
@@ -764,6 +801,7 @@ impl Layout {
                 tag_name: configuration.tag_name,
                 block_types,
                 literal_tags,
+                object_cases: Vec::new(),
             },
         }
     }
@@ -1007,6 +1045,7 @@ mod shape_import_tests {
                 tag_name: None,
                 block_types: vec![class("A", a.clone())],
                 literal_tags: Vec::new(),
+                object_cases: Vec::new(),
             },
         };
         let original = shapes.clone();
