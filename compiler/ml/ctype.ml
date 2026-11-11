@@ -88,6 +88,10 @@ type subtype_context =
       issues: Record_coercion.record_field_subtype_violation list;
     }
   | Coercion_into_private_type of {typename: Path.t}
+  | Record_array_mismatch of {
+      array_record_name: Path.t;
+      object_record_name: Path.t;
+    }
 
 exception Subtype of type_pairs * type_pairs * subtype_context option
 
@@ -901,20 +905,33 @@ let instance_list env schl =
       let env = gadt_env env in
       List.map (fun t -> copy ?env t) schl)
 
-let reified_var_counter_key = Request_local.new_key (fun () -> ref Vars.empty)
+(* The next index for each base name, and the names already given *)
+let reified_var_counter_key =
+  Request_local.new_key (fun () -> ref (Vars.empty, Misc.String_set.empty))
 let reified_var_counter () = Domain.DLS.get reified_var_counter_key
-let reset_reified_var_counter () = reified_var_counter () := Vars.empty
+let reset_reified_var_counter () =
+  reified_var_counter () := (Vars.empty, Misc.String_set.empty)
 
 (* names given to new type constructors.
    Used for existential types and
-   local constraints *)
+   local constraints. A numbered name can equal a base name ending in
+   digits, as [$a1] for the second ['a] and the first ['a1], so names
+   already given are skipped. *)
 let get_new_abstract_name s =
-  let index =
-    try Vars.find s !(reified_var_counter ()) + 1 with Not_found -> 0
+  let counters, used = !(reified_var_counter ()) in
+  let name index =
+    if index = 0 && s <> "" && s.[String.length s - 1] <> '$' then s
+    else Printf.sprintf "%s%d" s index
   in
-  reified_var_counter () := Vars.add s index !(reified_var_counter ());
-  if index = 0 && s <> "" && s.[String.length s - 1] <> '$' then s
-  else Printf.sprintf "%s%d" s index
+  let rec first_free index =
+    if Misc.String_set.mem (name index) used then first_free (index + 1)
+    else index
+  in
+  let index = first_free (try Vars.find s counters + 1 with Not_found -> 0) in
+  let name = name index in
+  reified_var_counter () :=
+    (Vars.add s index counters, Misc.String_set.add name used);
+  name
 
 let new_declaration newtype manifest =
   {
@@ -3863,7 +3880,10 @@ let rec subtype_rec env trace t1 t2 cstrs =
             (p2, _, {type_kind = Type_record (fields2, repr2)}) ) ->
           let same_repr =
             match (repr1, repr2) with
-            | Record_regular, Record_regular ->
+            (* Not between [Record_array] and [Record_regular]: an object is
+               no array, and an array coerced to an object record would
+               still pass for the array case of an untagged variant *)
+            | Record_regular, Record_regular | Record_array, Record_array ->
               true (* handled in the fields checks *)
             | Record_unboxed b1, Record_unboxed b2 -> b1 = b2
             | Record_inlined _, Record_inlined _ -> repr1 = repr2
@@ -3893,7 +3913,16 @@ let rec subtype_rec env trace t1 t2 cstrs =
               t1,
               t2,
               !(current_univar_pairs ()),
-              None (* TODO(subtype-errors) Record representation *) )
+              match (repr1, repr2) with
+              | Record_regular, Record_array ->
+                Some
+                  (Record_array_mismatch
+                     {array_record_name = p2; object_record_name = p1})
+              | Record_array, Record_regular ->
+                Some
+                  (Record_array_mismatch
+                     {array_record_name = p1; object_record_name = p2})
+              | _ -> None (* TODO(subtype-errors) Record representation *) )
             :: cstrs
         | (p1, _, {type_kind = tk1}), (p2, _, {type_kind = tk2}) ->
           ( trace,
