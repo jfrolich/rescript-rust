@@ -2062,6 +2062,8 @@ impl<'a> Converter<'a> {
         }
         // For each group, its case and its members.
         let mut group_cases: HashMap<usize, (usize, Vec<P<Type>>)> = HashMap::new();
+        // The fields of the object cases made so far.
+        let mut seen_records: Vec<Vec<Field>> = Vec::new();
         // The TypeScript member of each case with a payload.
         let mut ctor_members: Vec<Option<P<Type>>> = Vec::new();
         // The TypeScript shape of each case made of several members.
@@ -2087,6 +2089,25 @@ impl<'a> Converter<'a> {
                 ctors.push(Ctor { name, tag: Some(tag), payload: Payload::None });
                 continue;
             };
+            // A member merged with others is not converted on its own: the
+            // merged case reads the fields of all of them below.
+            if let Some(&group) = group_of.get(&member) {
+                if let Some((_, grouped)) = group_cases.get_mut(&group) {
+                    grouped.push(member);
+                    continue;
+                }
+                group_cases.insert(group, (ctors.len(), vec![member]));
+                let base = member
+                    .symbol()
+                    .map(|symbol| symbol.name())
+                    .filter(|name| !name.starts_with("__"))
+                    .map_or_else(|| "Object".to_string(), upper_ident);
+                let name = unique_ctor(&ctors, &base);
+                ctors.push(Ctor { name, tag: None, payload: Payload::None });
+                ctor_members.resize(ctors.len() - 1, None);
+                ctor_members.push(Some(member));
+                continue;
+            }
             self.path.push(base.to_string());
             let payload = self.convert(member);
             self.path.pop();
@@ -2117,27 +2138,21 @@ impl<'a> Converter<'a> {
                 (Ty::App(name, _), "TypedArray") => name.trim_end_matches(".t").to_string(),
                 _ => base.to_string(),
             };
-            if let Some(&group) = group_of.get(&member) {
-                if let Some((_, grouped)) = group_cases.get_mut(&group) {
-                    grouped.push(member);
-                    continue;
-                }
-                group_cases.insert(group, (ctors.len(), vec![member]));
-            }
             // A member of the same shape as an earlier one is that member.
+            // The fields of each object case are looked up once.
+            let fields = (expected == ["object", "instance"] && self.state.runtime_of(&payload, 0) == Some("object"))
+                .then(|| self.state.record_fields(&payload))
+                .flatten();
             if expected == ["object", "instance"]
-                && ctors.iter().any(|ctor| match &ctor.payload {
-                    Payload::Ty(other) => {
-                        *other == payload
-                            || self.state.runtime_of(other, 0) == Some("object")
-                                && self.state.record_fields(other).is_some_and(|fields| {
-                                    Some(fields) == self.state.record_fields(&payload)
-                                })
-                    }
-                    _ => false,
-                })
+                && ctors.iter().any(|ctor| matches!(&ctor.payload, Payload::Ty(other) if *other == payload))
             {
                 continue;
+            }
+            if let Some(fields) = fields {
+                if seen_records.contains(&fields) {
+                    continue;
+                }
+                seen_records.push(fields);
             }
             let name = unique_ctor(&ctors, &base);
             ctors.push(Ctor { name, tag: None, payload: Payload::Ty(payload) });
@@ -2774,36 +2789,74 @@ fn candidate_checks(shape: &ObjectShape) -> Vec<Check> {
     literal.chain(presence).chain(kind).collect()
 }
 
-/// Whether `shape` has a test, one check or several joined with `&&`, that
-/// every member of `others` fails.
-fn has_test(shape: &ObjectShape, others: &[&ObjectShape]) -> bool {
-    let mut uncovered: Vec<&ObjectShape> = others.to_vec();
-    for check in candidate_checks(shape) {
-        uncovered.retain(|other| !check_fails(&check, other));
-        if uncovered.is_empty() {
-            return true;
+/// A set of members by position, one bit each.
+type Members = Vec<u64>;
+
+fn member_bit(set: &mut Members, index: usize) {
+    set[index / 64] |= 1 << (index % 64);
+}
+
+/// For each shape, for each of its checks, the shapes that fail it. Each
+/// check is decided once; an order is then found with set operations.
+fn fail_sets(shapes: &[ObjectShape]) -> Vec<Vec<Members>> {
+    let words = shapes.len().div_ceil(64);
+    shapes
+        .iter()
+        .map(|shape| {
+            candidate_checks(shape)
+                .iter()
+                .map(|check| {
+                    let mut set = vec![0; words];
+                    for (index, other) in shapes.iter().enumerate() {
+                        if check_fails(check, other) {
+                            member_bit(&mut set, index);
+                        }
+                    }
+                    set
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Whether the checks of a member, with these fail sets, have a test that
+/// every member of `others` fails: each of them fails one of the checks.
+fn has_test_against(fails: &[Members], others: &Members) -> bool {
+    let mut uncovered = others.clone();
+    for set in fails {
+        if uncovered.iter().all(|word| *word == 0) {
+            break;
+        }
+        for (word, failing) in uncovered.iter_mut().zip(set) {
+            *word &= !failing;
         }
     }
-    false
+    uncovered.iter().all(|word| *word == 0)
 }
 
 /// Whether the compiler finds an order for these object members: it tests,
 /// one at a time, a member with a test every other remaining member fails.
 /// An open member has no test, so there is at most one, and it is last.
-fn objects_ordered(mut remaining: Vec<ObjectShape>) -> bool {
-    if remaining.iter().filter(|shape| matches!(shape, ObjectShape::Open)).count() > 1 {
+fn objects_ordered(shapes: Vec<ObjectShape>) -> bool {
+    if shapes.iter().filter(|shape| matches!(shape, ObjectShape::Open)).count() > 1 {
         return false;
     }
-    while remaining.len() > 1 {
-        let found = (0..remaining.len()).find(|&index| {
-            let others: Vec<&ObjectShape> =
-                remaining.iter().enumerate().filter(|(other, _)| *other != index).map(|(_, shape)| shape).collect();
-            has_test(&remaining[index], &others)
+    let fails = fail_sets(&shapes);
+    let mut remaining: Members = vec![0; shapes.len().div_ceil(64)];
+    for index in 0..shapes.len() {
+        member_bit(&mut remaining, index);
+    }
+    for _ in 1..shapes.len() {
+        let found = (0..shapes.len()).find(|&index| {
+            if remaining[index / 64] & (1 << (index % 64)) == 0 {
+                return false;
+            }
+            let mut others = remaining.clone();
+            others[index / 64] &= !(1 << (index % 64));
+            has_test_against(&fails[index], &others)
         });
         match found {
-            Some(index) => {
-                remaining.remove(index);
-            }
+            Some(index) => remaining[index / 64] &= !(1 << (index % 64)),
             None => return false,
         }
     }
@@ -2868,40 +2921,75 @@ fn merge_shapes(a: &ObjectShape, b: &ObjectShape) -> ObjectShape {
 /// members that no check tells apart, in either direction, are merged until
 /// none are left, as no order could test either first. `None` when the
 /// groups still have no order, or there is more than one open member.
+/// Members merged into one case: their positions, their merged shape and
+/// the checks its values pass.
+type Group = (Vec<usize>, ObjectShape, Vec<Check>);
+
 fn object_groups(shapes: Vec<ObjectShape>) -> Option<Vec<Vec<usize>>> {
     if shapes.iter().filter(|shape| matches!(shape, ObjectShape::Open)).count() > 1 {
         return None;
     }
-    let mut groups: Vec<(Vec<usize>, ObjectShape)> =
-        shapes.into_iter().enumerate().map(|(index, shape)| (vec![index], shape)).collect();
-    // A merged member can only become harder to tell apart from the others,
-    // so one pass that retries the pairs of each merged member is enough.
-    let mut i = 0;
-    while i < groups.len() {
-        let mut j = i + 1;
-        let mut merged = false;
-        while j < groups.len() {
-            let (a, b) = (&groups[i].1, &groups[j].1);
-            if !matches!(a, ObjectShape::Open)
-                && !matches!(b, ObjectShape::Open)
-                && !has_test(a, &[b])
-                && !has_test(b, &[a])
-            {
-                let (indices, shape) = groups.remove(j);
-                groups[i].1 = merge_shapes(&groups[i].1, &shape);
-                groups[i].0.extend(indices);
-                merged = true;
-            } else {
-                j += 1;
+    // Each group: its members, its shape and the checks its values pass.
+    let mut groups: Vec<Option<Group>> = shapes
+        .into_iter()
+        .enumerate()
+        .map(|(index, shape)| {
+            let checks = candidate_checks(&shape);
+            Some((vec![index], shape, checks))
+        })
+        .collect();
+    let apart = |a: &Group, b: &Group| {
+        matches!(a.1, ObjectShape::Open)
+            || matches!(b.1, ObjectShape::Open)
+            || a.2.iter().any(|check| check_fails(check, &b.1))
+            || b.2.iter().any(|check| check_fails(check, &a.1))
+    };
+    // Every pair is compared once; a group that absorbs another is compared
+    // with all the others again, as merging only makes it harder to tell
+    // apart. The earlier group keeps the merged members.
+    let mut changed: Vec<usize> = Vec::new();
+    for i in 0..groups.len() {
+        for j in i + 1..groups.len() {
+            let (Some(a), Some(b)) = (&groups[i], &groups[j]) else { continue };
+            if !apart(a, b) {
+                let (indices, shape, _) = groups[j].take().expect("a live group");
+                let (own, merged, checks) = groups[i].as_mut().expect("a live group");
+                own.extend(indices);
+                *merged = merge_shapes(merged, &shape);
+                *checks = candidate_checks(merged);
+                if !changed.contains(&i) {
+                    changed.push(i);
+                }
             }
         }
-        // The merged member is compared with the earlier ones again.
-        if merged && i > 0 {
-            i = 0;
-        } else {
-            i += 1;
+    }
+    while let Some(group) = changed.pop() {
+        for other in 0..groups.len() {
+            if other == group {
+                continue;
+            }
+            let (Some(a), Some(b)) = (&groups[group], &groups[other]) else { continue };
+            if !apart(a, b) {
+                let (keep, drop) = (group.min(other), group.max(other));
+                let (indices, shape, _) = groups[drop].take().expect("a live group");
+                let (own, merged, checks) = groups[keep].as_mut().expect("a live group");
+                own.extend(indices);
+                *merged = merge_shapes(merged, &shape);
+                *checks = candidate_checks(merged);
+                changed.retain(|index| *index != drop);
+                changed.push(keep);
+                break;
+            }
         }
     }
+    let groups: Vec<(Vec<usize>, ObjectShape)> = groups
+        .into_iter()
+        .flatten()
+        .map(|(mut indices, shape, _)| {
+            indices.sort_unstable();
+            (indices, shape)
+        })
+        .collect();
     objects_ordered(groups.iter().map(|(_, shape)| shape.clone()).collect())
         .then(|| groups.into_iter().map(|(indices, _)| indices).collect())
 }

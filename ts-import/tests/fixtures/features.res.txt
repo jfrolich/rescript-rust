@@ -179,19 +179,12 @@ module Features = {
   @unboxed type headers2 =
     | Object(dict<string>)
     | Headers2Object(headers2Object)
-  type blurredObject = {
-    x: float,
-  }
-  type blurredObject2 = {
-    x: float,
-    y?: string,
-  }
-  type blurredObjectCase = {
+  type typeCase = {
     x: float,
     y?: string,
   }
   @unboxed type blurred =
-    | BlurredObject(blurredObjectCase)
+    | Type(typeCase)
   type spotA = {
     x: float,
     y: float,

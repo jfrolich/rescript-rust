@@ -92,7 +92,7 @@ fn run() {
         100.0 * total.inexact.len() as f64 / declarations.max(1) as f64
     );
     let mut gaps: Vec<(&str, usize)> = total.gaps.iter().map(|(gap, subjects)| (*gap, subjects.len())).collect();
-    gaps.sort_by(|a, b| b.1.cmp(&a.1));
+    gaps.sort_by_key(|gap| std::cmp::Reverse(gap.1));
     println!("\ndeclarations affected, by kind of gap:");
     for (gap, n) in gaps {
         println!("{gap:<22} {n:>6} {:>5.1}%", 100.0 * n as f64 / declarations.max(1) as f64);
