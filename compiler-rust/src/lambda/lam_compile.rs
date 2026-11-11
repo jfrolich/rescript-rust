@@ -2344,6 +2344,11 @@ impl LambdaCompiler {
 
     fn recursive_dummy_object_expr(&mut self, tag_info: &TagInfo) -> Expr {
         match tag_info {
+            // An array record is filled by index like a tuple, so it starts
+            // as `[]` (compiler/core/js_exp_make.ml `dummy_obj`).
+            TagInfo::Record(record) if record.array => {
+                JE::array(&[], MutableFlag::Mutable, &mut self.j)
+            }
             TagInfo::Record(_)
             | TagInfo::Module(_)
             | TagInfo::Constructor(_)
