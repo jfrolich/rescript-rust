@@ -90,3 +90,34 @@ Put public Rust API contracts in source documentation, local algorithm or
 state invariants beside their implementation, and cross-module navigation in
 this guide. Update or remove focused documents when the implementation changes;
 do not preserve completed plans as descriptions of current behavior.
+
+### Check without generating code
+
+```sh
+rescript build --check-only
+rescript build path/to/project --check-only
+RESCRIPT_PHASE_TIMINGS=1 rescript build path/to/project --check-only
+```
+
+`--check-only` is available on `build`, not `watch`. It parses and type checks
+all source modules, using the normal dependency scheduler and worker parallelism.
+Interfaces are published in memory for dependent modules. It does not run Lambda
+conversion, JavaScript generation/printing or genType, and does not write build
+artifacts, logs, locks or incremental state. Existing build outputs are untouched.
+It cannot be combined with `--after-build` or intermediate-representation dumps.
+
+Parser, frontend and type-checker diagnostics retain their normal text, locations,
+ordering and error exit status. Diagnostics raised **while generating code** are
+not reported. These include polymorphic comparison (warning 102), unknown builtin
+or unrecognized intrinsic primitives, Lambda attribute warnings (duplicated or
+misplaced attributes and invalid attribute payloads), unsupported dynamic imports,
+flattened-export name collisions, unsafe recursive-module initialization and
+refutable top-level `let` patterns. genType and other backend diagnostics are also
+omitted: passing check-only does not guarantee a successful full build.
+
+`RESCRIPT_PHASE_TIMINGS=1` prints the existing aggregate compiler phase report on
+stderr for either build mode. Use `RESCRIPT_MODULE_TIMINGS=1` for per-module timings
+or `RESCRIPT_RUNTIME_TIMINGS=1` for runtime preparation timings. Check-only has no
+Lambda, codegen, printing or genType work. For a clean-build comparison, clean the
+normal build before each measurement; a normal incremental no-op is not comparable
+to check-only, which checks every module on every invocation.

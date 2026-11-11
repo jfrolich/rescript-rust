@@ -238,6 +238,13 @@ impl FeaturesArg {
 
 #[derive(Args, Debug, Clone)]
 pub struct BuildArgs {
+    /// Check without writing files or generating code. Omits code-generation diagnostics:
+    /// polymorphic comparison, unknown builtin/unrecognized intrinsic primitives,
+    /// Lambda attribute warnings, unsupported dynamic imports, flattened-export collisions,
+    /// unsafe recursive modules, refutable top-level let patterns, and genType diagnostics.
+    #[arg(long, conflicts_with_all = ["dump", "dump_dir", "after_build"])]
+    pub check_only: bool,
+
     #[command(flatten)]
     pub folder: FolderArg,
 
@@ -292,6 +299,15 @@ mod tests {
     fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
         let raw_args: Vec<OsString> = args.iter().map(OsString::from).collect();
         parse_with_default_from(&raw_args)
+    }
+
+    #[test]
+    fn check_only_is_build_only_and_opt_in() {
+        let cli = parse(&["rescript", "build", "--check-only"]).unwrap();
+        assert!(matches!(cli.command, Command::Build(args) if args.check_only));
+        let cli = parse(&["rescript", "build"]).unwrap();
+        assert!(matches!(cli.command, Command::Build(args) if !args.check_only));
+        assert!(parse(&["rescript", "watch", "--check-only"]).is_err());
     }
 
     // Default command behaviour.

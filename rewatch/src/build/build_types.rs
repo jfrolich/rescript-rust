@@ -247,6 +247,7 @@ impl Module {
 /// Used by commands that don't need command-line specific overrides (e.g., `clean`).
 #[derive(Debug)]
 pub struct BuildState {
+    pub check_only: bool,
     pub project_context: ProjectContext,
     pub modules: AHashMap<String, Module>,
     pub packages: AHashMap<String, Package>,
@@ -466,6 +467,7 @@ impl BuildState {
     ) -> Self {
         Self {
             project_context,
+            check_only: false,
             module_names: AHashSet::new(),
             modules: AHashMap::new(),
             packages,

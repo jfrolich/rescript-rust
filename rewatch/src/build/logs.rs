@@ -50,6 +50,9 @@ fn write_to_log_file(mut file: File, package_name: &str, content: &str) {
 
 pub fn initialize(packages: &AHashMap<String, Package>) {
     packages.par_iter().for_each(|(name, package)| {
+        if package.check_only {
+            return;
+        }
         let log_path = get_log_file_path(package, Location::Bs);
         if let Some(parent) = log_path.parent()
             && let Err(error) = fs::create_dir_all(parent)
@@ -68,6 +71,9 @@ pub fn initialize(packages: &AHashMap<String, Package>) {
 }
 
 pub fn append(package: &packages::Package, str: &str) {
+    if package.check_only {
+        return;
+    }
     let log_path = get_log_file_path(package, Location::Bs);
     if let Some(parent) = log_path.parent()
         && let Err(error) = fs::create_dir_all(parent)
@@ -86,6 +92,9 @@ pub fn append(package: &packages::Package, str: &str) {
 
 pub fn finalize(packages: &AHashMap<String, Package>) {
     packages.par_iter().for_each(|(name, package)| {
+        if package.check_only {
+            return;
+        }
         let bs_log_path = get_log_file_path(package, Location::Bs);
         let ocaml_log_path = get_log_file_path(package, Location::Ocaml);
         let _ = File::options()

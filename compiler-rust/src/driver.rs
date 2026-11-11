@@ -594,6 +594,8 @@ fn place_location_free_warnings(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Stop after typing and publish the interface without generating code.
+    pub check_only: bool,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
     pub dump_lambda: bool,
     /// Print the typed tree as sexp to stderr (like OCaml's -dtyped-sexp)
@@ -843,6 +845,7 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            check_only: false,
             dump_lambda: false,
             dump_typed_sexp: false,
             dump_typed_sexp_locs: false,
@@ -9673,6 +9676,7 @@ fn synchronize_lambda_start_stamp(type_ctx: &TypeContext) -> i32 {
 }
 
 /// Result of an in-process `.res` compilation.
+#[derive(Default)]
 pub struct InProcessCompileResult {
     /// The JavaScript when the compile has no output path, else empty.
     pub js_output: String,
@@ -9709,9 +9713,10 @@ pub struct InProcessCompileResult {
 
 /// Owned in-process compilation state after typechecking and Lambda lowering,
 /// before JS backend metadata from dependencies is required.
+#[derive(Default)]
 pub struct InProcessPreJsCompileResult {
-    /// The unit's Lambda program, ready for the JS backend.
-    pub lowered_lambda: crate::lambda::arena::LamProgram,
+    /// The unit's Lambda program, or None when compilation stopped after typing.
+    pub lowered_lambda: Option<crate::lambda::arena::LamProgram>,
     /// The modules the program references, whose `.cmj` metadata the JS
     /// backend may read.
     pub possible_required_modules: AHashSet<ModuleId>,
@@ -9865,6 +9870,9 @@ fn with_gentype_artifact<R>(
         crate::gentype::main::TypedArtifact<'_>,
     ) -> R,
 ) -> Option<R> {
+    if options.check_only {
+        return None;
+    }
     let config = options.gentype_config.as_ref()?;
     let GentypeUnit {
         annots,
@@ -10975,6 +10983,42 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     tctx.persistent_env = Some(persistent_env_after_signature);
 
+    if options.check_only {
+        if let Some(inclusion) = interface_inclusion {
+            report_compunit_inclusion_warnings(&mut tctx, inclusion.warnings);
+        }
+        if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings)
+        {
+            return Err(LocationRetry::Warning.into());
+        }
+        let warnings = format_type_warnings_lazy(
+            located_warnings.as_ref().unwrap_or(arena),
+            &source,
+            filename,
+            &tctx.warnings,
+        );
+        if type_warnings_have_errors(&tctx.warnings) {
+            return Err(UserDiagnostic::new(warnings, 2).into());
+        }
+        if !has_interface && let Some(hook) = signature_ready {
+            let _ = hook(InProcessSignatureReady {
+                pers_struct: pers_struct.take(),
+            })?;
+        }
+        return Ok(InProcessPreJsCompileResult {
+            signature: published_signature,
+            pers_struct,
+            warnings,
+            unit_reads,
+            loaded_units: tctx
+                .persistent_env
+                .as_ref()
+                .map(PersistentEnv::loaded_units)
+                .unwrap_or_default(),
+            ..Default::default()
+        });
+    }
+
     // Capture typed tree sexp for the playground (only if requested).
     let typed_tree_sexp = if options.capture_intermediates {
         let mut buf = Vec::new();
@@ -11281,7 +11325,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         })?;
     }
     Ok(InProcessPreJsCompileResult {
-        lowered_lambda,
+        lowered_lambda: Some(lowered_lambda),
         possible_required_modules,
         flat_make_paths,
         ident_stamp_at_js_boundary,
@@ -11328,6 +11372,14 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
     registry: &ModuleRegistry,
     metadata_ready: Option<&mut InProcessJsMetadataReadyHook<'_>>,
 ) -> Result<InProcessCompileResult> {
+    if options.check_only {
+        return Ok(InProcessCompileResult {
+            signature: pre_js.signature,
+            pers_struct: pre_js.pers_struct,
+            warnings: pre_js.warnings,
+            ..Default::default()
+        });
+    }
     let _span = info_span!(
         "compiler.in_process_js_finish",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -11358,7 +11410,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         .map(|target| target.module_format)
         .or(options.output_module_format);
     let compile_multiple_js_targets = !options.skip_js_render && js_targets.len() > 1;
-    let mut lowered_lambda = Some(pre_js.lowered_lambda);
+    let mut lowered_lambda = pre_js.lowered_lambda;
     let (
         program,
         module_path_resolver,
