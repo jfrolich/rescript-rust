@@ -1,0 +1,1 @@
+- Add an opt-in `--reformat` JavaScript parity mode while retaining exact comparison by default.
