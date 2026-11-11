@@ -11582,11 +11582,9 @@ let e = () =>
         }
         assert!(matches!(rewrite_child(apply, &mut arena), Rewritten::Same(idx) if idx == apply));
         // An expression with attributes still goes through the full mapper.
-        for other in [attributed] {
-            let rewritten = rewrite_child(other, &mut arena);
-            assert!(matches!(rewritten, Rewritten::New(_)));
-            assert_ne!(push_rewritten(&mut arena, rewritten), other);
-        }
+        let rewritten = rewrite_child(attributed, &mut arena);
+        assert!(matches!(rewritten, Rewritten::New(_)));
+        assert_ne!(push_rewritten(&mut arena, rewritten), attributed);
     }
 
     #[test]
