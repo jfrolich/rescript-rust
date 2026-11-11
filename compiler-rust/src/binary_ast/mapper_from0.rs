@@ -4,12 +4,12 @@
 //! parsetree types. This is the inverse of `mapper_to0`.
 //!
 //! Key transformations:
-//! - [@res.arity N] attribute + Function$ wrapper → function arity
+//! - `[@res.arity N]` attribute + Function$ wrapper → function arity
 //! - function$ type constructor → arrow type arity
-//! - [@res.async] attribute → async flag
-//! - [@res.await] attribute → Pexp_await
-//! - [@res.partial] attribute → partial flag
-//! - [@res.optional] attribute → optional record fields
+//! - `[@res.async]` attribute → async flag
+//! - `[@res.await]` attribute → Pexp_await
+//! - `[@res.partial]` attribute → partial flag
+//! - `[@res.optional]` attribute → optional record fields
 //!
 //! This mirrors `compiler/ml/ast_mapper_from0.ml`.
 
@@ -391,6 +391,7 @@ pub struct Mapper<'a> {
 }
 
 impl<'a> Mapper<'a> {
+    /// A mapper that stores the converted nodes in `arena`.
     pub fn new(arena: &'a mut ParseArena) -> Self {
         Self { arena, error: None }
     }

@@ -396,10 +396,9 @@ fn validate(tag: Option<&str>, cases: &[SerdeCase], arena: &mut ParseArena) -> S
                         Ok(Some(attr)) => {
                             let expr = get_expression_from_payload(attr, arena)?;
                             match &expr.pexp_desc {
-                                ExpressionDesc::Pexp_constant(c) => match c {
-                                    Constant::String(s) => s.semantic(arena).to_string(),
-                                    _ => txt,
-                                },
+                                ExpressionDesc::Pexp_constant(Constant::String(s)) => {
+                                    s.semantic(arena).to_string()
+                                }
                                 _ => txt,
                             }
                         }

@@ -309,7 +309,7 @@ fn should_share_empty_pstr(
     name: &StringLoc,
     w: &MarshalWriter<'_>,
 ) -> bool {
-    if kind != EmptyPayloadShareKind::ParserAttr {
+    if kind != EmptyPayloadShareKind::Parser {
         return true;
     }
 
@@ -340,8 +340,8 @@ fn should_share_attr_tuple(
 
     match w.get_arena().get_string(name.txt) {
         "res.await" => true,
-        "res.template" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::ParserAttr)),
-        "res.ternary" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::ParserAttr)),
+        "res.template" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::Parser)),
+        "res.ternary" => matches!(share_empty_pstr, Some(EmptyPayloadShareKind::Parser)),
         _ => false,
     }
 }
@@ -505,7 +505,7 @@ fn marshal_attributes(
     // sharing enabled in this scope even when the expression-level caller did
     // not request it explicitly.
     let share_empty_pstr = if raw_template_list && share_empty_pstr.is_none() {
-        Some(EmptyPayloadShareKind::ParserAttr)
+        Some(EmptyPayloadShareKind::Parser)
     } else {
         share_empty_pstr
     };
@@ -874,7 +874,7 @@ impl Marshal for TypeArg {
                 w,
                 false,
                 false,
-                Some(EmptyPayloadShareKind::ParserAttr),
+                Some(EmptyPayloadShareKind::Parser),
             );
         } else {
             self.attrs.marshal(w);
@@ -903,7 +903,7 @@ impl Marshal for FunParam {
 impl Marshal for CoreType {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
         let share_empty_pstr = match &self.ptyp_desc {
-            CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectTypeAttr),
+            CoreTypeDesc::Ptyp_object(_) => Some(EmptyPayloadShareKind::ObjectType),
             _ => None,
         };
 
@@ -1100,7 +1100,7 @@ impl Marshal for ObjectField {
                     w,
                     false,
                     false,
-                    Some(EmptyPayloadShareKind::ObjectFieldAttr),
+                    Some(EmptyPayloadShareKind::ObjectField),
                 );
                 ty.marshal(w);
             }
@@ -1348,7 +1348,7 @@ impl Marshal for Expression {
                 || (w.in_extension() && has_braces_or_ternary)
                 || (rewritten_await_letmodule && has_braces_or_ternary))
         {
-            Some(EmptyPayloadShareKind::ParserAttr)
+            Some(EmptyPayloadShareKind::Parser)
         } else {
             None
         };
@@ -1667,7 +1667,7 @@ impl Marshal for ExpressionDesc {
             }
             ExpressionDesc::Pexp_extension(ext) => {
                 w.write_block_header(30, 1);
-                marshal_extension(ext, w, Some(EmptyPayloadShareKind::ParserAttr));
+                marshal_extension(ext, w, Some(EmptyPayloadShareKind::Parser));
             }
             ExpressionDesc::Pexp_await(e) => {
                 w.write_block_header(31, 1);
@@ -1747,7 +1747,7 @@ impl Marshal for ValueBinding {
             .marshal(w);
         let share_empty_pstr = if has_attr(&self.pvb_attributes, w, &["res.braces", "res.ternary"])
         {
-            Some(EmptyPayloadShareKind::ParserAttr)
+            Some(EmptyPayloadShareKind::Parser)
         } else {
             None
         };
@@ -1877,7 +1877,7 @@ impl Marshal for ModuleExpr {
         let share_empty_pstr = if has_attr(&self.pmod_attributes, w, &["res.await"])
             && (w.in_letmodule_expr() || w.in_module_typeof())
         {
-            Some(EmptyPayloadShareKind::ParserAttr)
+            Some(EmptyPayloadShareKind::Parser)
         } else {
             None
         };
@@ -2274,7 +2274,7 @@ impl Marshal for StructureItemDesc {
                 w.write_block_header(0, 2);
                 e.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
-                    Some(EmptyPayloadShareKind::ParserAttr)
+                    Some(EmptyPayloadShareKind::Parser)
                 } else {
                     None
                 };
@@ -2333,7 +2333,7 @@ impl Marshal for StructureItemDesc {
                 w.write_block_header(12, 2);
                 ext.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
-                    Some(EmptyPayloadShareKind::ParserAttr)
+                    Some(EmptyPayloadShareKind::Parser)
                 } else {
                     None
                 };
@@ -2403,7 +2403,7 @@ impl Marshal for SignatureItemDesc {
                 w.write_block_header(10, 2);
                 ext.marshal(w);
                 let share_empty_pstr = if w.in_extension() {
-                    Some(EmptyPayloadShareKind::ParserAttr)
+                    Some(EmptyPayloadShareKind::Parser)
                 } else {
                     None
                 };
@@ -2422,7 +2422,6 @@ use crate::parser::ast::{
 
 impl Marshal for JsxElement {
     fn marshal(&self, w: &mut MarshalWriter<'_>) {
-        w.enter_jsx();
         match self {
             JsxElement::Fragment(frag) => {
                 w.write_block_header(0, 1);
@@ -2437,7 +2436,6 @@ impl Marshal for JsxElement {
                 elem.marshal(w);
             }
         }
-        w.exit_jsx();
     }
 }
 

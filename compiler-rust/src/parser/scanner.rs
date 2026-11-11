@@ -12,7 +12,7 @@
 //! Uses direct byte-level scanning on &[u8] for performance:
 //! - ASCII fast path (byte < 0x80) for all common token characters
 //! - UTF-8 slow path only for non-ASCII characters (comments, strings)
-//! - No upfront Vec<char> or Vec<usize> allocation
+//! - No upfront `Vec<char>` or `Vec<usize>` allocation
 
 use std::borrow::Cow;
 use std::fmt::Write as _;

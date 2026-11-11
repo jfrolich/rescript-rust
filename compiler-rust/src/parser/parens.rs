@@ -721,8 +721,8 @@ pub fn include_mod_expr(mod_expr: &ModuleExpr) -> bool {
 
 /// Check if module expression needs parentheses.
 /// OCaml logic:
-/// - Pmod_constraint(Pmod_structure, Pmty_signature(Box::new([Psig_module]))) -> false
-/// - Pmod_constraint(_, Pmty_signature(Box::new([Psig_module]))) -> true
+/// - `Pmod_constraint(Pmod_structure, Pmty_signature(Box::new([Psig_module])))` -> false
+/// - `Pmod_constraint(_, Pmty_signature(Box::new([Psig_module])))` -> true
 /// - Otherwise -> false
 pub fn mod_expr_parens(arena: &ParseArena, mod_expr: &ModuleExpr) -> bool {
     match &mod_expr.pmod_desc {

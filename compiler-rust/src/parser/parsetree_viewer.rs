@@ -468,6 +468,7 @@ pub fn is_unary_operator_idx(
 /// - Pexp_sequence, Pexp_open, Pexp_ifthenelse: inline
 /// - Pexp_for, Pexp_while, Pexp_try: inline
 /// - Pexp_array, Pexp_record: inline
+///
 /// Note: Pexp_match (switch) is NOT in this list, so it will NOT inline
 pub fn should_inline_rhs_binary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
@@ -733,15 +734,21 @@ pub fn collect_array_expressions<'a>(
 pub enum FunParam<'a> {
     /// Regular parameter with pattern
     Parameter {
+        /// Attributes on the parameter.
         attrs: &'a [Attribute],
+        /// Its label: none, `~label` or `~label=?`.
         label: &'a ArgLabel,
+        /// Default value of an optional labeled parameter.
         default_expr: Option<&'a Expression>,
+        /// The parameter pattern.
         pat: &'a Pattern,
     },
     /// Newtype parameter(s): (type t) or (type t u v)
     /// Multiple consecutive newtypes are combined into a single NewTypes variant.
     NewTypes {
+        /// Attributes on the `type` parameters.
         attrs: &'a [Attribute],
+        /// The introduced type names.
         names: Vec<&'a StringLoc>,
     },
 }
@@ -1433,6 +1440,7 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     )
 }
 
+/// Split attributes into doc comments and all others, keeping their order.
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a Attributes,

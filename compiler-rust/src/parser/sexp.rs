@@ -171,21 +171,27 @@ impl<'a> Doc<'a> {
 /// Pretty-printed sexp with proper indentation (matches OCaml Res_doc output)
 #[derive(Clone)]
 pub enum Sexp {
+    /// A bare atom.
     Atom(String),
+    /// A parenthesized list.
     List(Vec<Sexp>),
 }
 
+impl std::fmt::Display for Sexp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_doc().render())
+    }
+}
+
 impl Sexp {
+    /// An atom with the given text.
     pub fn atom(s: &str) -> Sexp {
         Sexp::Atom(s.to_string())
     }
 
+    /// A list of the given items.
     pub fn list(items: Vec<Sexp>) -> Sexp {
         Sexp::List(items)
-    }
-
-    pub fn to_string(&self) -> String {
-        self.to_doc().render()
     }
 
     /// Convert Sexp to Doc, matching OCaml's res_ast_debugger to_doc function
@@ -1569,6 +1575,7 @@ fn include_description(arena: &ParseArena, id: &IncludeDescription) -> Sexp {
 // Structure
 // ============================================================================
 
+/// The sexp of an implementation's structure.
 pub fn structure(arena: &ParseArena, items: &[StructureItem]) -> Sexp {
     structure_inner(arena, items)
 }
@@ -1656,6 +1663,7 @@ fn structure_item(arena: &ParseArena, si: &StructureItem) -> Sexp {
 // Signature
 // ============================================================================
 
+/// The sexp of an interface's signature.
 pub fn signature(arena: &ParseArena, items: &[SignatureItem]) -> Sexp {
     signature_inner(arena, items)
 }
@@ -1731,12 +1739,14 @@ pub fn string_to_latin1_bytes(s: &str) -> Vec<u8> {
     s.chars().map(|c| c as u8).collect()
 }
 
+/// Write the sexp of a structure to `out` (`res_parser -print sexp`).
 pub fn print_structure(arena: &ParseArena, items: &[StructureItem], out: &mut impl Write) {
     let sexp = structure(arena, items);
     // Output as Latin-1 bytes to match OCaml's byte-based string handling
     let _ = out.write_all(&string_to_latin1_bytes(&sexp.to_string()));
 }
 
+/// Write the sexp of a signature to `out` (`res_parser -print sexp`).
 pub fn print_signature(arena: &ParseArena, items: &[SignatureItem], out: &mut impl Write) {
     let sexp = signature(arena, items);
     // Output as Latin-1 bytes to match OCaml's byte-based string handling

@@ -1245,11 +1245,10 @@ pub fn print_expression(
             let (lhs, ref field, rhs) = **inner;
             print_set_field_expr(
                 state,
-                &e.pexp_attributes,
+                e,
                 arena.get_expr(lhs),
                 field,
                 arena.get_expr(rhs),
-                e.pexp_loc,
                 cmt_tbl,
                 arena,
             )
@@ -1317,23 +1316,7 @@ pub fn print_expression(
         }
         // Function application
         ExpressionDesc::Pexp_apply(inner) => {
-            let PexpApply {
-                ref funct,
-
-                ref partial,
-                ..
-            } = *inner;
-            let args = arena.apply_args(inner.args);
-            print_pexp_apply(
-                state,
-                e,
-                arena.get_expr(*funct),
-                args,
-                *partial,
-                force_pipe_breaks,
-                cmt_tbl,
-                arena,
-            )
+            print_pexp_apply(state, e, inner, force_pipe_breaks, cmt_tbl, arena)
         }
         // Constraint with pack: module(M: S)
         ExpressionDesc::Pexp_constraint(constraint_inner)
@@ -3130,48 +3113,43 @@ fn print_dict_rows(
                         let key_expr = arena.get_expr(arena.expr_list(*tuple_items)[0]);
                         let value_expr = arena.get_expr(arena.expr_list(*tuple_items)[1]);
                         // Key should be a string constant
-                        if let ExpressionDesc::Pexp_constant(c) = &key_expr.pexp_desc {
-                            if let Constant::String(payload) = c {
-                                let txt = payload.semantic(arena);
-                                // Create combined location from key to value (for row comments)
-                                let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
-                                    key_expr.pexp_loc,
-                                    value_expr.pexp_loc,
-                                    arena,
-                                );
+                        if let ExpressionDesc::Pexp_constant(Constant::String(payload)) =
+                            &key_expr.pexp_desc
+                        {
+                            let txt = payload.semantic(arena);
+                            // Create combined location from key to value (for row comments)
+                            let (cmt_pos_range, cmt_full_loc) = make_combined_pos_range(
+                                key_expr.pexp_loc,
+                                value_expr.pexp_loc,
+                                arena,
+                            );
 
-                                // Print key with its comments
-                                let key_doc = Doc::concat(vec![
-                                    Doc::text("\""),
-                                    Doc::text(txt),
-                                    Doc::text("\""),
-                                ]);
-                                let key_doc =
-                                    print_comments(key_doc, cmt_tbl, key_expr.pexp_loc, arena);
+                            // Print key with its comments
+                            let key_doc =
+                                Doc::concat(vec![Doc::text("\""), Doc::text(txt), Doc::text("\"")]);
+                            let key_doc =
+                                print_comments(key_doc, cmt_tbl, key_expr.pexp_loc, arena);
 
-                                // Print value with its comments
-                                let value_doc = print_expression_with_comments(
-                                    state, value_expr, cmt_tbl, arena,
-                                );
+                            // Print value with its comments
+                            let value_doc =
+                                print_expression_with_comments(state, value_expr, cmt_tbl, arena);
 
-                                // Combine key: value
-                                let row_doc =
-                                    Doc::concat(vec![key_doc, Doc::text(": "), value_doc]);
+                            // Combine key: value
+                            let row_doc = Doc::concat(vec![key_doc, Doc::text(": "), value_doc]);
 
-                                // Wrap with comments for the combined location (key to value)
-                                let row_doc = print_comments_by_pos(
-                                    row_doc,
-                                    cmt_tbl,
-                                    cmt_pos_range,
-                                    &cmt_full_loc,
-                                );
+                            // Wrap with comments for the combined location (key to value)
+                            let row_doc = print_comments_by_pos(
+                                row_doc,
+                                cmt_tbl,
+                                cmt_pos_range,
+                                &cmt_full_loc,
+                            );
 
-                                // Then wrap with comments for the tuple's location (entire entry)
-                                let row_doc =
-                                    print_comments(row_doc, cmt_tbl, tuple_expr.pexp_loc, arena);
+                            // Then wrap with comments for the tuple's location (entire entry)
+                            let row_doc =
+                                print_comments(row_doc, cmt_tbl, tuple_expr.pexp_loc, arena);
 
-                                return Some(row_doc);
-                            }
+                            return Some(row_doc);
                         }
                     }
                 }
@@ -4131,13 +4109,14 @@ fn print_object_get_doc(
 fn print_pexp_apply(
     state: &PrinterState,
     expr: &Expression,
-    funct: &Expression,
-    args: &[(ArgLabel, ExprIdx)],
-    partial: bool,
+    apply: &PexpApply,
     force_pipe_breaks: bool,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    let funct = arena.get_expr(apply.funct);
+    let args = arena.apply_args(apply.args);
+    let partial = apply.partial;
     // res_printer.ml:3632-3641 (print_expression's Pexp_apply dispatch).
     if parsetree_viewer::is_unary_expression(arena, expr) {
         let ExpressionDesc::Pexp_ident(ident) = &funct.pexp_desc else {
@@ -4288,14 +4267,21 @@ fn binary_expression_parts<'a>(
     ))
 }
 
+/// Layout flags that `print_binary_expression` threads unchanged through
+/// every operand of a binary expression.
+#[derive(Clone, Copy)]
+struct BinaryLayout {
+    force_pipe_breaks: bool,
+    is_multiline: bool,
+}
+
 /// `print_operand` / `flatten` of res_printer.ml:4174-4334.
 /// OCaml `print_operand` in `print_binary_expression`: a braced right-hand
 /// side of `:=` keeps its braces; everything else goes through `flatten`.
 fn print_binary_operand(
     state: &PrinterState,
-    force_pipe_breaks: bool,
+    layout: BinaryLayout,
     is_lhs: bool,
-    is_multiline: bool,
     expr: &Expression,
     parent_operator: &str,
     cmt_tbl: &mut CommentTable,
@@ -4309,24 +4295,14 @@ fn print_binary_operand(
             ParenKind::Nothing => doc,
         }
     } else {
-        print_binary_operand_flatten(
-            state,
-            force_pipe_breaks,
-            is_lhs,
-            is_multiline,
-            expr,
-            parent_operator,
-            cmt_tbl,
-            arena,
-        )
+        print_binary_operand_flatten(state, layout, is_lhs, expr, parent_operator, cmt_tbl, arena)
     }
 }
 
 fn print_binary_operand_flatten(
     state: &PrinterState,
-    force_pipe_breaks: bool,
+    layout: BinaryLayout,
     is_lhs: bool,
-    is_multiline: bool,
     expr: &Expression,
     parent_operator: &str,
     cmt_tbl: &mut CommentTable,
@@ -4338,16 +4314,8 @@ fn print_binary_operand_flatten(
         if parsetree_viewer::flattenable_operators(parent_operator, operator)
             && !parsetree_viewer::has_attributes(arena, &expr.pexp_attributes)
         {
-            let left_printed = print_binary_operand_flatten(
-                state,
-                force_pipe_breaks,
-                true,
-                is_multiline,
-                left,
-                operator,
-                cmt_tbl,
-                arena,
-            );
+            let left_printed =
+                print_binary_operand_flatten(state, layout, true, left, operator, cmt_tbl, arena);
             let right_printed = {
                 let (right_printeable_attrs, right_internal) =
                     with_internal_attributes(arena, right);
@@ -4379,7 +4347,7 @@ fn print_binary_operand_flatten(
                     if parens { Doc::rparen() } else { Doc::nil() },
                     Doc::rparen(),
                 ])
-            } else if operator == "->" && (is_multiline || force_pipe_breaks) {
+            } else if operator == "->" && (layout.is_multiline || layout.force_pipe_breaks) {
                 Doc::breakable_group(
                     Doc::concat(vec![
                         left_printed,
@@ -4424,11 +4392,10 @@ fn print_binary_operand_flatten(
                 let (lhs, ref field, rhs) = **inner;
                 let doc = print_set_field_expr(
                     state,
-                    &expr.pexp_attributes,
+                    expr,
                     arena.get_expr(lhs),
                     field,
                     arena.get_expr(rhs),
-                    expr.pexp_loc,
                     cmt_tbl,
                     arena,
                 );
@@ -4481,17 +4448,17 @@ fn is_nolabel_pair_apply(expr: &Expression, arena: &ParseArena) -> bool {
 }
 
 /// res_printer.ml:4013-4048
-#[allow(clippy::too_many_arguments)]
 fn print_set_field_expr(
     state: &PrinterState,
-    attrs: &Attributes,
+    expr: &Expression,
     lhs: &Expression,
     longident_loc: &crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
     rhs: &Expression,
-    loc: LocIdx,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    let attrs = &expr.pexp_attributes;
+    let loc = expr.pexp_loc;
     let rhs_doc = {
         let doc = print_expression_with_comments(state, rhs, cmt_tbl, arena);
         match parens::expr(arena, rhs) {
@@ -4545,31 +4512,17 @@ fn print_binary_expression(
             || parsetree_viewer::has_non_parsing_attrs(arena, expr.pexp_attributes.as_slice()))
     {
         let lhs_has_comment_below = has_comment_below(cmt_tbl, lhs.pexp_loc, arena);
-        let lhs_doc = print_binary_operand(
-            state,
+        let layout = BinaryLayout {
             force_pipe_breaks,
-            true,
-            false,
-            lhs,
-            operator,
-            cmt_tbl,
-            arena,
-        );
+            is_multiline: false,
+        };
+        let lhs_doc = print_binary_operand(state, layout, true, lhs, operator, cmt_tbl, arena);
         // For pipe RHS, use the pipe-specific rewrite that omits a redundant
         // first underscore.
         let rhs_doc = if parsetree_viewer::is_underscore_apply_sugar(arena, rhs) {
             print_underscore_apply_in_pipe(state, rhs, cmt_tbl, arena)
         } else {
-            print_binary_operand(
-                state,
-                force_pipe_breaks,
-                false,
-                false,
-                rhs,
-                operator,
-                cmt_tbl,
-                arena,
-            )
+            print_binary_operand(state, layout, false, rhs, operator, cmt_tbl, arena)
         };
         return Doc::group(Doc::concat(vec![
             print_attributes(state, &expr.pexp_attributes, cmt_tbl, arena),
@@ -4583,18 +4536,13 @@ fn print_binary_expression(
         ]));
     }
     let is_multiline = arena.loc_start(lhs.pexp_loc).line < arena.loc_start(rhs.pexp_loc).line;
+    let layout = BinaryLayout {
+        force_pipe_breaks,
+        is_multiline,
+    };
     let is_rhs_op = parsetree_viewer::is_rhs_binary_operator(operator);
     let right = {
-        let rhs_doc = print_binary_operand(
-            state,
-            force_pipe_breaks,
-            is_rhs_op,
-            is_multiline,
-            rhs,
-            operator,
-            cmt_tbl,
-            arena,
-        );
+        let rhs_doc = print_binary_operand(state, layout, is_rhs_op, rhs, operator, cmt_tbl, arena);
         if operator == ":=" {
             print_assignment_rhs(arena, " :=", rhs, rhs_doc)
         } else {
@@ -4614,16 +4562,7 @@ fn print_binary_expression(
     };
     let doc = Doc::breakable_group(
         Doc::concat(vec![
-            print_binary_operand(
-                state,
-                force_pipe_breaks,
-                !is_rhs_op,
-                is_multiline,
-                lhs,
-                operator,
-                cmt_tbl,
-                arena,
-            ),
+            print_binary_operand(state, layout, !is_rhs_op, lhs, operator, cmt_tbl, arena),
             right,
         ]),
         force_pipe_breaks && operator == "->",
@@ -7156,23 +7095,21 @@ fn print_module_type_functor(
     ]))
 }
 
+/// A functor parameter of a module type: its attributes, label and optional
+/// parameter type.
+type FunctorParam<'a> = (&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>);
+
 /// Extract functor parameters from a module type.
-/// Returns a list of (attributes, label, optional param type) and the return type.
+/// Returns the parameters and the return type.
 fn mod_type_functor<'a>(
     arena: &'a ParseArena,
     mty: &'a ModuleType,
-) -> (
-    Vec<(&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>)>,
-    &'a ModuleType,
-) {
+) -> (Vec<FunctorParam<'a>>, &'a ModuleType) {
     fn loop_functor<'a>(
         arena: &'a ParseArena,
-        acc: Vec<(&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>)>,
+        acc: Vec<FunctorParam<'a>>,
         mty: &'a ModuleType,
-    ) -> (
-        Vec<(&'a [Attribute], &'a StringLoc, Option<&'a ModuleType>)>,
-        &'a ModuleType,
-    ) {
+    ) -> (Vec<FunctorParam<'a>>, &'a ModuleType) {
         match &mty.pmty_desc {
             ModuleTypeDesc::Pmty_functor(inner) => {
                 let (ref lbl, ref mod_type_idx, ref return_mty_idx) = **inner;
@@ -8022,14 +7959,14 @@ fn print_attribute(
                 if let StructureItemDesc::Pstr_eval(eval_inner) = &single.pstr_desc {
                     let (ref expr_idx, _) = **eval_inner;
                     let expr = arena.get_expr(*expr_idx);
-                    if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-                        if let Constant::String(payload) = c {
-                            return Doc::concat(vec![
-                                Doc::text(if standalone { "/***" } else { "/**" }),
-                                Doc::text(payload.semantic(arena)),
-                                Doc::text("*/"),
-                            ]);
-                        }
+                    if let ExpressionDesc::Pexp_constant(Constant::String(payload)) =
+                        &expr.pexp_desc
+                    {
+                        return Doc::concat(vec![
+                            Doc::text(if standalone { "/***" } else { "/**" }),
+                            Doc::text(payload.semantic(arena)),
+                            Doc::text("*/"),
+                        ]);
                     }
                 }
             }
@@ -10117,15 +10054,19 @@ fn print_jsx_children(
 /// Print a container JSX tag: `<div>children</div>`.
 fn print_jsx_container_tag(
     state: &PrinterState,
-    tag_name: &Loc<JsxTagName>,
-    opening_greater_than: &crate::location::Position,
-    props: &[JsxProp],
-    children: &[ExprIdx],
-    closing_tag: &Option<JsxClosingTag>,
+    container: &JsxContainerElement,
     pexp_loc: LocIdx,
     cmt_tbl: &mut CommentTable,
     arena: &ParseArena,
 ) -> Doc {
+    let JsxContainerElement {
+        tag_name_start: tag_name,
+        opening_end,
+        props,
+        children,
+        closing_tag,
+    } = container;
+    let opening_greater_than = arena.get_position(*opening_end);
     let name = print_jsx_name(arena, &tag_name.txt);
     let opening_greater_than_pos_range = PosRange {
         start: opening_greater_than.cnum,
@@ -10307,17 +10248,9 @@ fn print_jsx_element(
             cmt_tbl,
             arena,
         ),
-        JsxElement::Container(container) => print_jsx_container_tag(
-            state,
-            &container.tag_name_start,
-            arena.get_position(container.opening_end),
-            &container.props,
-            &container.children,
-            &container.closing_tag,
-            expr_loc,
-            cmt_tbl,
-            arena,
-        ),
+        JsxElement::Container(container) => {
+            print_jsx_container_tag(state, container, expr_loc, cmt_tbl, arena)
+        }
     }
 }
 

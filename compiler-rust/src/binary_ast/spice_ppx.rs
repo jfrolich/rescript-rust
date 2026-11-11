@@ -5797,6 +5797,9 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
     signature_contains_spice_type_decl(signature, arena)
 }
 
+/// Expand the Spice codecs of one structure item. `mapper_active` tells
+/// whether the Spice mapper runs over the whole structure; see
+/// [`structure_uses_spice_mapper`].
 pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
@@ -5820,6 +5823,9 @@ fn map_structure_items_with_mapper(
     Ok(expanded)
 }
 
+/// Expand the Spice codecs of one signature item. `mapper_active` tells
+/// whether the Spice mapper runs over the whole signature; see
+/// [`signature_uses_spice_mapper`].
 pub fn expand_signature_item_with_mapper(
     item: &SignatureItem,
     arena: &mut ParseArena,

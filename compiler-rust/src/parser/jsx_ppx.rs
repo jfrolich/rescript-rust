@@ -20,9 +20,9 @@ use crate::parse_arena::{CoreTypeIdx, ExprIdx, LidentIdx, Located, ParseArena, S
 /// Component description type - mirrors OCaml's componentDescription
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum ComponentDescription {
-    LowercasedComponent,
-    UppercasedComponent,
-    FragmentComponent,
+    Lowercased,
+    Uppercased,
+    Fragment,
 }
 
 /// JSX configuration from @@jsxConfig attribute
@@ -114,22 +114,31 @@ struct NamedType {
 /// Warning emitted by JSX transformation, mapped to warning 22 (Preprocessor warning).
 #[derive(Debug, Clone)]
 pub struct JsxPreprocessorWarning {
+    /// Start of the warned-about source range.
     pub start_pos: crate::location::Position,
+    /// End of the warned-about source range.
     pub end_pos: crate::location::Position,
+    /// The warning text.
     pub message: String,
 }
 
 /// Fatal JSX PPX diagnostic.
 #[derive(Debug, Clone)]
 pub struct JsxPreprocessorError {
+    /// Where the error is reported.
     pub loc: Location,
+    /// The error text.
     pub message: String,
+    /// How the message lines are laid out in the error report.
     pub message_style: JsxPreprocessorMessageStyle,
 }
 
+/// How a JSX PPX error message is laid out under the report header.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum JsxPreprocessorMessageStyle {
+    /// The ordinary compiler error layout: every message line is indented.
     PrefixedLines,
+    /// Only the first message line is indented; later lines are printed as is.
     FirstLineOnlyPrefix,
 }
 
@@ -141,6 +150,7 @@ impl fmt::Display for JsxPreprocessorError {
 
 impl std::error::Error for JsxPreprocessorError {}
 
+/// Result of a JSX PPX transformation.
 pub type JsxPreprocessorResult<T> = Result<T, JsxPreprocessorError>;
 
 const DUPLICATE_REACT_COMPONENT_ATTR_MSG: &str =
@@ -586,8 +596,12 @@ fn transform_react_component_binding(
         .collect();
 
     // Extract labeled arguments from the function (use inner expression to handle forwardRef)
-    let (args, mut newtypes, _, jsx_warnings, named_args_error) =
-        recursively_extract_named_args(arena, &named_args_expr);
+    let NamedArgs {
+        args,
+        mut newtypes,
+        warnings: jsx_warnings,
+        error: named_args_error,
+    } = recursively_extract_named_args(arena, &named_args_expr);
     if let Some(constraint) = arena.value_constraint(binding.pvb_pat) {
         let mut constrained_newtypes = constraint
             .pvc_newtypes
@@ -821,7 +835,6 @@ fn transform_react_component_binding(
             arena,
             &fn_name,
             rec_flag,
-            config,
             has_props_constraint,
             has_forward_ref,
             is_async,
@@ -1326,7 +1339,6 @@ fn make_props_wrapper_expr_with_ref(
     arena: &mut ParseArena,
     fn_name: &str,
     rec_flag: RecFlag,
-    _config: &JsxConfig,
     has_props: bool,
     has_forward_ref: bool,
     is_async: bool,
@@ -3034,19 +3046,18 @@ fn empty_loc() -> Location {
     Location::none()
 }
 
+/// What `recursively_extract_named_args` collects from a component function.
+struct NamedArgs {
+    args: Vec<ExtractedArg>,
+    newtypes: Vec<(StringLoc, Attributes)>,
+    warnings: Vec<JsxPreprocessorWarning>,
+    /// The first error raised (key prop, non-plain ref argument).
+    error: Option<(Location, &'static str)>,
+}
+
 /// Recursively extract named arguments from a function expression
 /// OCaml `recursively_transform_named_args_for_make` (jsx_v4.ml:242-346).
-/// The first error it raises (key prop, non-plain ref argument) is returned.
-fn recursively_extract_named_args(
-    arena: &ParseArena,
-    expr: &Expression,
-) -> (
-    Vec<ExtractedArg>,
-    Vec<(StringLoc, Attributes)>,
-    Option<CoreType>,
-    Vec<JsxPreprocessorWarning>,
-    Option<(Location, &'static str)>,
-) {
+fn recursively_extract_named_args(arena: &ParseArena, expr: &Expression) -> NamedArgs {
     let mut args = vec![];
     let mut newtypes = vec![];
     let mut warnings = vec![];
@@ -3059,7 +3070,12 @@ fn recursively_extract_named_args(
         &mut warnings,
         &mut error,
     );
-    (args, newtypes, None, warnings, error)
+    NamedArgs {
+        args,
+        newtypes,
+        warnings,
+        error,
+    }
 }
 
 fn extract_args_rec(
@@ -3563,17 +3579,15 @@ fn update_config_from_attribute(arena: &ParseArena, attr: &Attribute, config: &m
                         let last_str = arena.get_string(last_idx);
                         match last_str {
                             "version" => {
-                                if let ExpressionDesc::Pexp_constant(c) =
+                                if let ExpressionDesc::Pexp_constant(Constant::Integer(s, _)) =
                                     &crate::ast_payload::unwrap_braces(
                                         arena,
                                         arena.get_expr(field.expr),
                                     )
                                     .pexp_desc
                                 {
-                                    if let Constant::Integer(s, _) = c {
-                                        if let Ok(v) = arena.get_string(*s).parse::<i32>() {
-                                            version_raw = Some(v);
-                                        }
+                                    if let Ok(v) = arena.get_string(*s).parse::<i32>() {
+                                        version_raw = Some(v);
                                     }
                                 }
                             }
@@ -3963,7 +3977,7 @@ fn transform_expression(
     }
     let new_desc = match expr.pexp_desc {
         ExpressionDesc::Pexp_jsx_element(jsx) => {
-            transform_jsx_element(*jsx, config, &expr.pexp_loc, &expr.pexp_attributes, arena)
+            transform_jsx_element(*jsx, config, &expr.pexp_loc, arena)
         }
         ExpressionDesc::Pexp_let(inner) => {
             let (rec_flag, bindings, body) = inner;
@@ -4413,17 +4427,12 @@ fn transform_jsx_element(
     jsx: JsxElement,
     config: &mut JsxConfig,
     loc: &Location,
-    attrs: &Attributes,
     arena: &mut ParseArena,
 ) -> ExpressionDesc {
     match jsx {
-        JsxElement::Fragment(fragment) => {
-            transform_jsx_fragment(fragment, config, loc, attrs, arena)
-        }
-        JsxElement::Unary(unary) => transform_jsx_unary(unary, config, loc, attrs, arena),
-        JsxElement::Container(container) => {
-            transform_jsx_container(container, config, loc, attrs, arena)
-        }
+        JsxElement::Fragment(fragment) => transform_jsx_fragment(fragment, config, loc, arena),
+        JsxElement::Unary(unary) => transform_jsx_unary(unary, config, loc, arena),
+        JsxElement::Container(container) => transform_jsx_container(container, config, loc, arena),
     }
 }
 
@@ -4431,7 +4440,6 @@ fn transform_jsx_element(
 fn mk_react_jsx(
     config: &mut JsxConfig,
     loc: &Location,
-    _attrs: &Attributes,
     component_description: ComponentDescription,
     element_tag: Expression,
     props: Vec<JsxProp>,
@@ -4474,10 +4482,10 @@ fn mk_react_jsx(
         };
 
         let jsx_path = match component_description {
-            ComponentDescription::FragmentComponent | ComponentDescription::UppercasedComponent => {
+            ComponentDescription::Fragment | ComponentDescription::Uppercased => {
                 module_access_name(arena, config, jsx_part)
             }
-            ComponentDescription::LowercasedComponent => {
+            ComponentDescription::Lowercased => {
                 let element_binding = if config.module_name.to_lowercase() == "react" {
                     let react_dom_idx = arena.intern_string("ReactDOM");
                     Longident::Lident(react_dom_idx)
@@ -4548,10 +4556,8 @@ fn append_children_prop(
 
         // For lowercase components, wrap in ReactDOM.someElement
         let expr = match component_description {
-            ComponentDescription::FragmentComponent | ComponentDescription::UppercasedComponent => {
-                transformed_child
-            }
-            ComponentDescription::LowercasedComponent => {
+            ComponentDescription::Fragment | ComponentDescription::Uppercased => transformed_child,
+            ComponentDescription::Lowercased => {
                 let element_binding = if config.module_name.to_lowercase() == "react" {
                     let react_dom_idx = arena.intern_string("ReactDOM");
                     Longident::Lident(react_dom_idx)
@@ -4590,10 +4596,7 @@ fn append_children_prop(
         };
 
         // Children is optional for lowercase components
-        let is_optional = matches!(
-            component_description,
-            ComponentDescription::LowercasedComponent
-        );
+        let is_optional = matches!(component_description, ComponentDescription::Lowercased);
         let children_str_idx = arena.intern_string("children");
 
         props.push(JsxProp::Value {
@@ -4809,7 +4812,6 @@ fn transform_jsx_fragment(
     fragment: JsxFragment,
     config: &mut JsxConfig,
     loc: &Location,
-    attrs: &Attributes,
     arena: &mut ParseArena,
 ) -> ExpressionDesc {
     let children = fragment.children;
@@ -4828,8 +4830,7 @@ fn transform_jsx_fragment(
     mk_react_jsx(
         config,
         loc,
-        attrs,
-        ComponentDescription::FragmentComponent,
+        ComponentDescription::Fragment,
         fragment_expr,
         vec![], // No props for fragments
         children,
@@ -4841,7 +4842,6 @@ fn transform_jsx_unary(
     unary: JsxUnaryElement,
     config: &mut JsxConfig,
     loc: &Location,
-    attrs: &Attributes,
     arena: &mut ParseArena,
 ) -> ExpressionDesc {
     let tag_loc = &unary.tag_name.loc;
@@ -4856,8 +4856,7 @@ fn transform_jsx_unary(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::LowercasedComponent,
+                ComponentDescription::Lowercased,
                 component_name_expr,
                 unary.props,
                 vec![],
@@ -4881,8 +4880,7 @@ fn transform_jsx_unary(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::UppercasedComponent,
+                ComponentDescription::Uppercased,
                 make_id,
                 unary.props,
                 vec![],
@@ -4906,8 +4904,7 @@ fn transform_jsx_unary(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::UppercasedComponent,
+                ComponentDescription::Uppercased,
                 make_id,
                 unary.props,
                 vec![],
@@ -4932,7 +4929,6 @@ fn transform_jsx_container(
     container: JsxContainerElement,
     config: &mut JsxConfig,
     loc: &Location,
-    attrs: &Attributes,
     arena: &mut ParseArena,
 ) -> ExpressionDesc {
     let tag_loc = &container.tag_name_start.loc;
@@ -4947,8 +4943,7 @@ fn transform_jsx_container(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::LowercasedComponent,
+                ComponentDescription::Lowercased,
                 component_name_expr,
                 container.props,
                 container.children,
@@ -4972,8 +4967,7 @@ fn transform_jsx_container(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::UppercasedComponent,
+                ComponentDescription::Uppercased,
                 make_id,
                 container.props,
                 container.children,
@@ -4997,8 +4991,7 @@ fn transform_jsx_container(
             mk_react_jsx(
                 config,
                 loc,
-                attrs,
-                ComponentDescription::UppercasedComponent,
+                ComponentDescription::Uppercased,
                 make_id,
                 container.props,
                 container.children,

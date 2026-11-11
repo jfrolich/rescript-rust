@@ -28,11 +28,14 @@ use crate::parser::parsetree_viewer;
 /// This allows looking up comments by position even when LocIdx values differ.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct PosRange {
+    /// Start offset (`cnum`) of the span.
     pub start: i32,
+    /// End offset (`cnum`) of the span.
     pub end: i32,
 }
 
 impl PosRange {
+    /// The range of an arena location.
     pub fn from_loc(loc: LocIdx, arena: &ParseArena) -> Self {
         let start = arena.loc_start(loc);
         let end = arena.loc_end(loc);
@@ -42,6 +45,7 @@ impl PosRange {
         }
     }
 
+    /// The range of a resolved location.
     pub fn from_location(loc: &Location) -> Self {
         Self {
             start: loc.loc_start.cnum,
@@ -435,29 +439,58 @@ pub fn partition_between_lines(
 /// AST node types for the walker.
 #[derive(Debug)]
 pub enum Node<'a> {
+    /// A switch case.
     Case(&'a Case),
+    /// A type expression.
     CoreType(&'a CoreType),
+    /// A type expression stored in the arena.
     CoreTypeIdx(CoreTypeIdx),
-    ExprArgument { expr: ExprIdx, loc: LocIdx },
+    /// A function-application argument.
+    ExprArgument {
+        /// The argument expression.
+        expr: ExprIdx,
+        /// The argument's location, spanning its label when it has one.
+        loc: LocIdx,
+    },
+    /// An expression.
     Expression(&'a Expression),
+    /// An expression stored in the arena.
     ExpressionIdx(ExprIdx),
+    /// A record expression field: `label: expr`.
     ExprRecordRow(&'a Loc<LidentIdx>, ExprIdx),
+    /// An extension constructor (`exception` or `+=` constructor).
     ExtensionConstructor(&'a ExtensionConstructor),
+    /// A record field declaration.
     LabelDeclaration(&'a LabelDeclaration),
+    /// A module binding: `module M = ...`.
     ModuleBinding(&'a ModuleBinding),
+    /// A module declaration in a signature: `module M: S`.
     ModuleDeclaration(&'a ModuleDeclaration),
+    /// A module expression.
     ModuleExpr(&'a ModuleExpr),
+    /// A field of an object type.
     ObjectField(&'a ObjectField),
+    /// A package type constraint: `with type t = typ`.
     PackageConstraint(&'a Loc<LidentIdx>, CoreTypeIdx),
+    /// A pattern.
     Pattern(&'a Pattern),
+    /// A pattern stored in the arena.
     PatternIdx(PatIdx),
+    /// A record pattern field: `label: pat`.
     PatternRecordRow(&'a Loc<LidentIdx>, PatIdx),
+    /// The rest (`...`) part of a record pattern.
     PatternRecordRest(&'a crate::parser::ast::RecordPatRest),
+    /// A field of a polymorphic variant type.
     RowField(&'a RowField),
+    /// A signature item.
     SignatureItem(&'a SignatureItem),
+    /// A structure item.
     StructureItem(&'a StructureItem),
+    /// A type declaration.
     TypeDeclaration(&'a TypeDeclaration),
+    /// A `let` binding.
     ValueBinding(&'a ValueBinding),
+    /// A JSX prop.
     JsxProp(&'a JsxProp),
 }
 
@@ -1137,6 +1170,7 @@ fn walk_type_declarations(
 /// Rewrite value binding locations for sugar cases.
 /// OCaml's comment_table.ml has special handling for value binding sugar:
 /// - `let x: poly_type = expr` where expr is constraint/newtype
+///
 /// The AST locations for these sugar forms span the entire binding, which would
 /// cause all comments to be "inside" the pattern. OCaml rewrites the locations
 /// so the pattern ends at the type annotation, and uses the inner expression.
@@ -3951,93 +3985,64 @@ fn visit_list_but_continue_with_remaining_comments<'a, T>(
     get_loc: impl Fn(&'a T, &mut ParseArena) -> LocIdx,
     walk_node: impl Fn(&'a T, &mut CommentTable, Vec<Comment>, &mut ParseArena),
     t: &mut CommentTable,
-    comments: Vec<Comment>,
+    mut comments: Vec<Comment>,
     newline_delimited: bool,
     arena: &mut ParseArena,
 ) -> Vec<Comment> {
-    visit_list_impl(
-        nodes,
-        get_loc,
-        walk_node,
-        t,
-        comments,
-        newline_delimited,
-        None,
-        arena,
-    )
-}
+    let mut prev_loc: Option<LocIdx> = None;
+    for node in nodes {
+        if comments.is_empty() {
+            return Vec::new();
+        }
+        let curr_loc = get_loc(node, arena);
 
-fn visit_list_impl<'a, T>(
-    nodes: &'a [T],
-    get_loc: impl Fn(&'a T, &mut ParseArena) -> LocIdx,
-    walk_node: impl Fn(&'a T, &mut CommentTable, Vec<Comment>, &mut ParseArena),
-    t: &mut CommentTable,
-    comments: Vec<Comment>,
-    newline_delimited: bool,
-    prev_loc: Option<LocIdx>,
-    arena: &mut ParseArena,
-) -> Vec<Comment> {
+        let (leading, inside, trailing) = partition_by_loc(comments, curr_loc, arena);
+
+        let curr_loc_resolved = arena.to_location(curr_loc);
+
+        match prev_loc {
+            None => {
+                // First node, all leading comments attach here
+                t.attach_leading(curr_loc, leading, arena);
+            }
+            Some(prev_loc_idx) => {
+                let prev_loc_resolved = arena.to_location(prev_loc_idx);
+                // Check if on same line
+                if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
+                    let (after_prev, before_curr) =
+                        partition_adjacent_trailing_through_question(prev_loc_idx, leading, arena);
+                    t.attach_trailing(prev_loc_idx, after_prev, arena);
+                    t.attach_leading(curr_loc, before_curr, arena);
+                } else {
+                    let (on_same_line_as_prev, after_prev) =
+                        partition_by_on_same_line(prev_loc_idx, leading, arena);
+                    t.attach_trailing(prev_loc_idx, on_same_line_as_prev, arena);
+                    let (before_curr, _, _) = partition_by_loc(after_prev, curr_loc, arena);
+                    t.attach_leading(curr_loc, before_curr, arena);
+                }
+            }
+        }
+
+        walk_node(node, t, inside, arena);
+        comments = trailing;
+        prev_loc = Some(curr_loc);
+    }
+
     if comments.is_empty() {
         return Vec::new();
     }
-    if nodes.is_empty() {
-        return match prev_loc {
-            Some(loc) => {
-                let (after_prev, rest) = if newline_delimited {
-                    partition_by_on_same_line(loc, comments, arena)
-                } else {
-                    partition_adjacent_trailing_through_question(loc, comments, arena)
-                };
-                t.attach_trailing(loc, after_prev, arena);
-                rest
-            }
-            None => comments,
-        };
-    }
-
-    let node = &nodes[0];
-    let rest_nodes = &nodes[1..];
-    let curr_loc = get_loc(node, arena);
-
-    let (leading, inside, trailing) = partition_by_loc(comments, curr_loc, arena);
-
-    let prev_loc_resolved = prev_loc.map(|l| arena.to_location(l));
-    let curr_loc_resolved = arena.to_location(curr_loc);
-
-    match &prev_loc {
-        None => {
-            // First node, all leading comments attach here
-            t.attach_leading(curr_loc, leading, arena);
-        }
-        Some(prev_loc_idx) => {
-            let prev_loc_resolved = prev_loc_resolved.as_ref().unwrap();
-            // Check if on same line
-            if prev_loc_resolved.loc_end.line == curr_loc_resolved.loc_start.line {
-                let (after_prev, before_curr) =
-                    partition_adjacent_trailing_through_question(*prev_loc_idx, leading, arena);
-                t.attach_trailing(*prev_loc_idx, after_prev, arena);
-                t.attach_leading(curr_loc, before_curr, arena);
+    match prev_loc {
+        Some(loc) => {
+            let (after_prev, rest) = if newline_delimited {
+                partition_by_on_same_line(loc, comments, arena)
             } else {
-                let (on_same_line_as_prev, after_prev) =
-                    partition_by_on_same_line(*prev_loc_idx, leading, arena);
-                t.attach_trailing(*prev_loc_idx, on_same_line_as_prev, arena);
-                let (before_curr, _, _) = partition_by_loc(after_prev, curr_loc, arena);
-                t.attach_leading(curr_loc, before_curr, arena);
-            }
+                partition_adjacent_trailing_through_question(loc, comments, arena)
+            };
+            t.attach_trailing(loc, after_prev, arena);
+            rest
         }
+        None => comments,
     }
-
-    walk_node(node, t, inside, arena);
-    visit_list_impl(
-        rest_nodes,
-        get_loc,
-        walk_node,
-        t,
-        trailing,
-        newline_delimited,
-        Some(curr_loc),
-        arena,
-    )
 }
 
 /// Create a comment table from a structure and comments.

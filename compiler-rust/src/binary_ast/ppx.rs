@@ -59,21 +59,30 @@ const EXTERNAL_ATTRS: &[&str] = &[
     "taggedTemplate",
 ];
 
+/// Error for `@deriving(accessors)` on a variant with an inline record argument.
 pub const ACCESSORS_VARIANT_RECORD_ARG_ERROR: &str = "@deriving(accessors) from a variant record argument is unsupported. Either define the record type separately from the variant type or use a positional argument.";
+/// Error for `await` outside an `async` function.
 pub const AWAIT_NOT_ASYNC_CONTEXT_ERROR: &str = "Await on expression not in an async context";
 
+/// A warning raised by the builtin PPX.
 #[derive(Debug, Clone)]
 pub struct PpxWarning {
+    /// Where the warning is reported.
     pub loc: LocIdx,
+    /// The warning.
     pub warning: Warning,
 }
 
+/// A `@@warning` or `@@warnerror` attribute's specification string.
 #[derive(Debug, Clone)]
 pub struct WarningAttributeSpec {
+    /// The specification, such as `"-27+32"`.
     pub spec: String,
+    /// Whether it came from `@@warnerror`, which turns the warnings into errors.
     pub as_error: bool,
 }
 
+/// A fatal builtin PPX error, with any warnings raised before it.
 #[derive(Debug, Clone)]
 pub struct PpxError {
     loc: Option<LocIdx>,
@@ -107,14 +116,17 @@ impl PpxError {
         self
     }
 
+    /// Where the error is reported, if it has a location.
     pub fn loc(&self) -> Option<LocIdx> {
         self.loc
     }
 
+    /// The error message.
     pub fn message_text(&self) -> &str {
         &self.message
     }
 
+    /// Warnings raised before the error, to report alongside it.
     pub fn warnings(&self) -> &[PpxWarning] {
         &self.warnings
     }
@@ -128,6 +140,7 @@ impl fmt::Display for PpxError {
 
 impl std::error::Error for PpxError {}
 
+/// Result of a builtin PPX transformation.
 pub type PpxResult<T> = Result<T, PpxError>;
 
 /// Check if the first char of a string is special (OCaml FFI marker)
@@ -249,9 +262,17 @@ fn classify_let_unwrap_pattern(
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsExpClassification {
     /// A function expression (regular or arrow)
-    JsFunction { arity: usize, arrow: bool },
+    JsFunction {
+        /// The number of parameters.
+        arity: usize,
+        /// Whether it is an arrow function.
+        arrow: bool,
+    },
     /// A literal value (string, number, bool, null, undefined, object literal, array literal)
-    JsLiteral { comment: Option<String> },
+    JsLiteral {
+        /// The single comment leading the literal, if any.
+        comment: Option<String>,
+    },
     /// Unknown expression type
     JsExpUnknown,
 }
@@ -1334,6 +1355,8 @@ pub fn mark_config_attributes_structure(items: &[StructureItem], arena: &ParseAr
     mark_first_config_attribute(leading_structure_attributes(items), arena);
 }
 
+/// Mark the first leading `@@config` of an interface used, like
+/// [`mark_config_attributes_structure`] does for implementations.
 pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseArena) {
     mark_first_config_attribute(leading_signature_attributes(items), arena);
 }
@@ -2437,21 +2460,19 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                         let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(c) =
+                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) =
                             &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
                                 .pexp_desc
                         {
-                            if let Constant::Integer(s, suffix) = c {
-                                // Reject bigint suffix
-                                if matches!(suffix, Some('n')) {
-                                    return None;
-                                }
-                                let v = arena.get_string(*s).parse::<i64>().ok();
-                                if v.is_some() {
-                                    arena.mark_used_attribute(attr);
-                                }
-                                return v;
+                            // Reject bigint suffix
+                            if matches!(suffix, Some('n')) {
+                                return None;
                             }
+                            let v = arena.get_string(*s).parse::<i64>().ok();
+                            if v.is_some() {
+                                arena.mark_used_attribute(attr);
+                            }
+                            return v;
                         }
                     }
                 }
@@ -3531,6 +3552,7 @@ fn get_payload_string(payload: &current::Payload, arena: &ParseArena) -> Option<
 /// ast_external_process.ml for `@return`:
 /// - `@return(nullable)` -> `nullable`
 /// - `@return({null_to_opt: null_to_opt})` -> `null_to_opt`
+///
 /// Non-punned record entries are intentionally rejected here.
 fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
     let current::Payload::PStr(items) = payload else {
@@ -3655,20 +3677,18 @@ fn get_payload_int_result(
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                 let (ref expr, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(c) =
+                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) =
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
                 {
-                    if let current::Constant::Integer(name, suffix) = c {
-                        // OCaml's is_single_int rejects 'n' suffix (bigint)
-                        if matches!(suffix, Some('n')) {
-                            return Ok(None);
-                        }
-                        return arena
-                            .get_string(*name)
-                            .parse::<i32>()
-                            .map(Some)
-                            .map_err(|_| PpxError::int_of_string_failure());
+                    // OCaml's is_single_int rejects 'n' suffix (bigint)
+                    if matches!(suffix, Some('n')) {
+                        return Ok(None);
                     }
+                    return arena
+                        .get_string(*name)
+                        .parse::<i32>()
+                        .map(Some)
+                        .map_err(|_| PpxError::int_of_string_failure());
                 }
             }
             Ok(None)
@@ -3706,13 +3726,12 @@ fn get_payload_string_or_json(
     };
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(eval_inner.0));
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match c {
-            current::Constant::Json(source) => Some(AsStringPayload::Json {
+        ExpressionDesc::Pexp_constant(current::Constant::Json(source)) => {
+            Some(AsStringPayload::Json {
                 source: arena.get_string(*source).to_string(),
                 loc: expr.pexp_loc,
-            }),
-            _ => None,
-        },
+            })
+        }
         _ => None,
     }
 }
@@ -4069,7 +4088,9 @@ fn check_decl(decl: &ExternalDecl, prim_name: &str, loc: LocIdx) -> PpxResult<bo
 
 /// Result of encoding an external: new pval_prim and filtered attributes
 pub struct EncodedExternal {
+    /// The encoded primitive.
     pub pval_prim: Option<PrimitiveRepr>,
+    /// The attributes left after removing the FFI attributes the encoding consumed.
     pub pval_attributes: Vec<Attribute>,
     /// The FFI references a package-relative path, so the external must be
     /// wrapped in `Pstr_include` to prevent cross-module inlining
@@ -6985,14 +7006,12 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle integer literal suffix stripping ('l' suffix)
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
-    if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-        if let Constant::Integer(s, Some('l')) = c {
-            return Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*s, None)),
-                pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            };
-        }
+    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &expr.pexp_desc {
+        return Expression {
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*s, None)),
+            pexp_loc: expr.pexp_loc,
+            pexp_attributes: expr.pexp_attributes.clone(),
+        };
     }
 
     // First check if this is a pipe or #= application
@@ -7139,6 +7158,7 @@ fn pipe_bound(
 /// - Pexp_construct(ctor, None) -> Pexp_construct(ctor, Some(a))
 /// - Pexp_apply(fn1, args) -> Pexp_apply(fn1, (Nolabel, a) :: args)
 /// - otherwise -> fn(a) = Pexp_apply(fn, [(Nolabel, a)])
+///
 /// Matches the `Pexp_tuple` arm of ast_exp_apply.ml `rewrite_pipe_rhs`.
 fn pipe_tuple_map(
     a: Expression,
@@ -9074,19 +9094,35 @@ fn create_rev_map_ref_binding(loc: LocIdx, arena: &mut ParseArena) -> StructureI
     }
 }
 
+/// Identifiers that the generated `toJs`/`fromJs` functions of one type
+/// declaration share (OCaml reuses these bindings across both functions).
+#[derive(Clone, Copy)]
+struct ConverterIdents {
+    param_name: StrIdx,
+    param_lid: LidentIdx,
+    map_lid: LidentIdx,
+    rev_map_lid: LidentIdx,
+    index_lid: LidentIdx,
+    erase_type_lid: LidentIdx,
+}
+
 /// Create typeToJs function: let colorToJs = (param: color) => _index(_map, param)
 fn create_to_js_function(
     fn_name_idx: StrIdx,
     core_type: &CoreType,
     has_bs_as: bool,
     loc: LocIdx,
-    param_name: StrIdx,
-    param_lid: LidentIdx,
-    map_lid: LidentIdx,
-    index_lid: LidentIdx,
-    erase_type_lid: LidentIdx,
+    idents: ConverterIdents,
     arena: &mut ParseArena,
 ) -> StructureItem {
+    let ConverterIdents {
+        param_name,
+        param_lid,
+        map_lid,
+        index_lid,
+        erase_type_lid,
+        ..
+    } = idents;
     let none_loc = arena.none_loc();
 
     // If has_bs_as, body is: _index(_map, param)
@@ -9222,12 +9258,16 @@ fn create_from_js_function(
     fn_name_idx: StrIdx,
     create_type: bool,
     loc: LocIdx,
-    param_name: StrIdx,
-    param_lid: LidentIdx,
-    rev_map_lid: LidentIdx,
-    index_lid: LidentIdx,
+    idents: ConverterIdents,
     arena: &mut ParseArena,
 ) -> StructureItem {
+    let ConverterIdents {
+        param_name,
+        param_lid,
+        rev_map_lid,
+        index_lid,
+        ..
+    } = idents;
     let none_loc = arena.none_loc();
 
     // _index(_revMap, param)
@@ -9465,6 +9505,14 @@ fn generate_js_converter_polyvar(
     let rev_map_lid = arena.push_longident(Longident::Lident(rev_map_name));
     let index_lid = arena.push_longident(Longident::Lident(index_name));
     let erase_type_lid = arena.push_longident(Longident::Lident(erase_type_name));
+    let idents = ConverterIdents {
+        param_name,
+        param_lid,
+        map_lid,
+        rev_map_lid,
+        index_lid,
+        erase_type_lid,
+    };
 
     // Build structure items
     let mut structure_items = vec![];
@@ -9496,11 +9544,7 @@ fn generate_js_converter_polyvar(
         &core_type_structure,
         has_bs_as,
         inner_loc,
-        param_name,
-        param_lid,
-        map_lid,
-        index_lid,
-        erase_type_lid,
+        idents,
         arena,
     ));
 
@@ -9509,10 +9553,7 @@ fn generate_js_converter_polyvar(
         from_js_name_structure,
         create_type,
         inner_loc,
-        param_name,
-        param_lid,
-        rev_map_lid,
-        index_lid,
+        idents,
         arena,
     ));
 

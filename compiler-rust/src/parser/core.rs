@@ -370,6 +370,7 @@ pub mod error_messages {
     pub const STRING_INTERPOLATION_IN_PATTERN: &str =
         "String interpolation is not supported in pattern matching.";
 
+    /// Error message for a tagged template literal in a pattern.
     pub const TAGGED_TEMPLATE_IN_PATTERN: &str =
         "Tagged template literals are not supported in patterns";
 
@@ -508,6 +509,7 @@ where
 /// 1. If token is Lident/Uident: return it
 /// 2. If token is a keyword on the same line: emit "keyword reserved" error, return keyword
 /// 3. Otherwise: emit the custom msg, advance and return empty string
+///
 /// OCaml `parse_lident` / `recover_lident` (compiler/syntax/src/res_core.ml:660-695).
 pub fn parse_lident(p: &mut Parser<'_>) -> (String, LocIdx) {
     let start_pos_idx = p.start_pos_idx();
@@ -566,6 +568,9 @@ pub fn parse_hash_ident(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> (String, L
     }
 }
 
+/// OCaml `parse_ident`: an identifier. A keyword on the same line is
+/// reported as reserved and returned as the name; anything else reports
+/// `msg`, is skipped and yields an empty name.
 pub fn parse_ident(p: &mut Parser<'_>, msg: &str, start_pos_idx: PosIdx) -> (String, LocIdx) {
     match &p.token {
         Token::Lident(ident) | Token::Uident(ident) => {
@@ -1021,6 +1026,7 @@ pub mod ast_helper {
     /// Note: We use separate locations for lid and ptyp_loc:
     /// - lid_loc: just the type constructor identifier
     /// - ptyp_loc: full extent including type arguments
+    ///
     /// This matches OCaml's behavior.
     pub fn make_type_constr(
         lid_idx: crate::parse_arena::LidentIdx,

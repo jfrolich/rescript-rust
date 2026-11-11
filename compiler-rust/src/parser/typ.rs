@@ -602,6 +602,8 @@ fn is_external_bare_arrow_type(p: &mut Parser<'_>) -> bool {
     })
 }
 
+/// Parse the type of an `external` declaration. Inline records are only
+/// extracted from arrow types (res_core.ml:5137-5155).
 pub fn parse_external_type_expr(p: &mut Parser<'_>) -> CoreType {
     // OCaml compiler/syntax/src/res_core.ml:5137-5155 only passes the inline
     // record context to arrow externals. Non-arrow externals such as
