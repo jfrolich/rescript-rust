@@ -1498,6 +1498,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                 ps_filename: pps.ps_filename.clone(),
                 ps_deprecated: pps.ps_deprecated.clone(),
                 ps_crcs: pps.ps_crcs.clone(),
+                ps_alias_rewrites: Default::default(),
             }))
         });
         if let Some(ps) = shared {
@@ -1526,6 +1527,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         ps_filename: pps.ps_filename.clone(),
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
+        ps_alias_rewrites: Default::default(),
     });
     if shareable {
         store.insert_pers_struct(pps, ps.clone());
