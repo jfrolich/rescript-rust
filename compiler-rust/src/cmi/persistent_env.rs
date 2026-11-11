@@ -2337,17 +2337,37 @@ impl PersistentEnv {
             }),
         };
         let mut env = initial_env(ctx);
-        let open_modules = fallback_pers.open_modules.clone();
-        let nopervasives = fallback_pers.nopervasives;
-        let compiling_module = fallback_pers.view.compiling_module.clone();
-        load_pervasives(
-            &mut fallback_pers,
-            &mut env,
-            ctx,
-            &open_modules,
-            nopervasives,
-            compiling_module.as_deref(),
-        );
+        if self.source_fallback_is_runtime {
+            // A module of the runtime is compiled as the runtime package
+            // compiles it (`-nostdlib -nopervasives -open Pervasives` in its
+            // rescript.json), not with the standard library of the module
+            // that needs it: `Stdlib` itself is built from these modules.
+            let module_name = source_path
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().into_owned());
+            fallback_pers.nopervasives = true;
+            fallback_pers.open_modules = Arc::new(vec!["Pervasives".to_string()]);
+            load_pervasives(
+                &mut fallback_pers,
+                &mut env,
+                ctx,
+                &["Pervasives".to_string()],
+                true,
+                module_name.as_deref(),
+            );
+        } else {
+            let open_modules = fallback_pers.open_modules.clone();
+            let nopervasives = fallback_pers.nopervasives;
+            let compiling_module = fallback_pers.view.compiling_module.clone();
+            load_pervasives(
+                &mut fallback_pers,
+                &mut env,
+                ctx,
+                &open_modules,
+                nopervasives,
+                compiling_module.as_deref(),
+            );
+        }
 
         if source_path
             .extension()
@@ -2400,7 +2420,7 @@ impl PersistentEnv {
         }
 
         let options = CompilerOptions {
-            open_modules: self.open_modules.as_ref().clone(),
+            open_modules: fallback_pers.open_modules.as_ref().clone(),
             jsx_version: self.jsx_version,
             jsx_module: self.jsx_module.clone(),
             ..CompilerOptions::default()

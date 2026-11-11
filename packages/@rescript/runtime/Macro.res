@@ -114,6 +114,10 @@ module Attr = {
 }
 
 module Type = {
+  // `open Macro` puts this module in the place of the standard library's
+  // `Type`, so it has everything that one has.
+  include Stdlib_Type
+
   type field = {
     name: string,
     /** The name at run time: the `@as` name when there is one. */
@@ -311,6 +315,12 @@ module Pat = {
 
   /** `_` */
   let any: pat = make("_")
+
+  /** A string literal pattern. */
+  let string = (value: string): pat => make(JSON.stringify(JSON.Encode.string(value)))
+
+  /** An integer literal pattern. */
+  let int = (value: int): pat => make(Int.toString(value))
 
   /**
   The pattern that matches a constructor and binds its arguments, with the

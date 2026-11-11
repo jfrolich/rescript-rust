@@ -613,6 +613,26 @@ fn literal(arena: &ParseArena, expr: ExprIdx) -> Option<Value> {
                 _ => None,
             }
         }
+        // An array and a tuple are both an array at run time.
+        ExpressionDesc::Pexp_array(items) | ExpressionDesc::Pexp_tuple(items) => arena
+            .expr_list(*items)
+            .iter()
+            .map(|item| literal(arena, *item))
+            .collect::<Option<Vec<Value>>>()
+            .map(Value::Array),
+        ExpressionDesc::Pexp_record((fields, None)) => {
+            let mut object = serde_json::Map::new();
+            for field in arena.expr_field_list(*fields) {
+                let Longident::Lident(name) = arena.get_longident(field.lid.txt) else {
+                    return None;
+                };
+                if field.opt {
+                    return None;
+                }
+                object.insert(arena.get_string(*name).to_string(), literal(arena, field.expr)?);
+            }
+            Some(Value::Object(object))
+        }
         _ => None,
     }
 }
@@ -677,7 +697,7 @@ fn call_arguments(
                 Some(value) => args.push(value),
                 None => {
                     return Err(format!(
-                        "Argument {} of the macro `{name}` is a compile-time value, so it has to be a literal.",
+                        "Argument {} of the macro `{name}` is a compile-time value, so it has to be a literal: a number, a string, a boolean, or an array, tuple or record of them.",
                         index + 1
                     ));
                 }

@@ -22,6 +22,8 @@ struct Project {
     host: Arc<QuickJsHost>,
     /// The expanded source of the last compiled file, when it uses macros.
     expanded: Option<String>,
+    /// The warnings of the last compiled file.
+    warnings: String,
 }
 
 impl Project {
@@ -56,6 +58,7 @@ impl Project {
             javascript,
             host,
             expanded: None,
+            warnings: String::new(),
         };
         // The macro API, compiled from source like the rest of the project.
         let macro_source = std::fs::read_to_string(runtime_dir().join("Macro.res")).unwrap();
@@ -103,6 +106,7 @@ impl Project {
                 self.javascript.lock().unwrap().insert(module_name, js.clone());
                 self.host.invalidate();
                 self.expanded = compiled.expanded_source.as_deref().map(text);
+                self.warnings = text(&compiled.warnings);
                 Ok(js)
             }
             Err(e) => Err(rescript_compiler::source_text::decode_internal_utf8(&format!("{e:#}")).into_owned()),
@@ -456,4 +460,87 @@ let label = (text: string): code<string> => Code.string("« " ++ String.toUpperC
     println!("{error}");
     assert!(error.contains("no été"), "{error}");
     assert!(error.contains("Late.res:1:"), "{error}");
+}
+
+#[test]
+fn array_spread_needs_a_runtime_module_first() {
+    // `Primitive_array` is type checked from source here, before anything
+    // else needed it.
+    let mut project = Project::new();
+    let js = compile_ok(&mut project, "Spread.res", "let f = (a, rest) => [a, ...rest]\n");
+    assert!(js.contains("Primitive_array"), "{js}");
+}
+
+#[test]
+fn compile_time_arguments_can_be_structured() {
+    let mut project = Project::new();
+    compile_ok(
+        &mut project,
+        "Sum.res",
+        r#"
+open Macro
+
+type options = {scale: int, label: string}
+
+@macro
+let total = (items: array<(string, int)>, options: options): code<string> => {
+  let sum = items->Array.reduce(0, (sum, (_, n)) => sum + n) * options.scale
+  Code.string(options.label ++ Int.toString(sum))
+}
+"#,
+    );
+    let js = compile_ok(
+        &mut project,
+        "UseSum.res",
+        "let total = %Sum.total([(\"a\", 1), (\"b\", 2)], {scale: 10, label: \"sum=\"})\n",
+    );
+    assert!(js.contains("\"sum=30\""), "{js}");
+}
+
+#[test]
+fn opening_macro_does_not_warn() {
+    let mut project = Project::new();
+    project
+        .compile(
+            "Quiet.res",
+            "open Macro\n@macro\nlet name = (t: typ): code<string> => Code.string(Type.name(t))\nlet kind = Type.typeof(1)\n",
+        )
+        .unwrap();
+    assert_eq!(project.warnings, "");
+}
+
+/// The examples of the playground compile. `playground/scripts/smoke.mjs`
+/// also runs them, with the compiler built to WebAssembly.
+#[test]
+fn playground_examples_compile() {
+    // A debug build of the type checker needs more stack than a test thread
+    // has; the compiler's own threads have it.
+    std::thread::Builder::new()
+        .stack_size(512 * 1024 * 1024)
+        .spawn(compile_playground_examples)
+        .unwrap()
+        .join()
+        .unwrap();
+}
+
+fn compile_playground_examples() {
+    let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../playground/examples");
+    let index: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(dir.join("index.json")).unwrap()).unwrap();
+    for example in index.as_array().unwrap() {
+        let id = example["id"].as_str().unwrap();
+        let mut project = Project::new();
+        for file in example["files"].as_array().unwrap() {
+            let name = file.as_str().unwrap();
+            if !name.ends_with(".res") {
+                continue;
+            }
+            let path = dir.join(id).join(name);
+            let source = std::fs::read_to_string(&path).unwrap();
+            if let Err(error) = project.compile(path.to_str().unwrap(), &source) {
+                panic!("example {id}, {name}:\n{error}");
+            }
+            assert_eq!(project.warnings, "", "example {id}, {name}");
+        }
+    }
 }

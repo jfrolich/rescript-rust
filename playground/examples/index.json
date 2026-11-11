@@ -1,0 +1,85 @@
+[
+  {
+    "id": "debug",
+    "title": "Expression macro",
+    "summary": "%Debug.log(expr) prints the source of an expression next to its value.",
+    "files": [
+      "Debug.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "json",
+    "title": "Generic function: JSON encoder",
+    "summary": "Json.encode is called like a function. The compiler makes one encoder per type it is used at.",
+    "files": [
+      "Json.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "derive",
+    "title": "Derive: declarations from a type",
+    "summary": "@Enum.derive on a variant adds toString, fromString and the list of all values.",
+    "files": [
+      "Enum.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "lens",
+    "title": "Derive: lenses for a record",
+    "summary": "@Lens.derive adds a getter and setter pair per field, with the field's type.",
+    "files": [
+      "Lens.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "types",
+    "title": "Type macro",
+    "summary": "%Partial.t(user) is the record type user with every field optional.",
+    "files": [
+      "Partial.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "files",
+    "title": "Reading a file at compile time",
+    "summary": "%I18n.t(key) reads en.json while compiling: a missing key is a compile error, a placeholder an argument.",
+    "files": [
+      "I18n.res",
+      "en.json",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "comptime",
+    "title": "%comptime: compute now",
+    "summary": "%comptime(expr) runs an expression while compiling and leaves its value in the output.",
+    "files": [
+      "Sieve.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "staged",
+    "title": "Compile-time arguments",
+    "summary": "Power.pow(x, 3): x is code, 3 is a value the macro computes with. The loop runs in the compiler.",
+    "files": [
+      "Power.res",
+      "Main.res"
+    ]
+  },
+  {
+    "id": "items",
+    "title": "Macros on let and module",
+    "summary": "@Trace.calls wraps a function; %Units.table generates the contents of a module.",
+    "files": [
+      "Trace.res",
+      "Units.res",
+      "Main.res"
+    ]
+  }
+]

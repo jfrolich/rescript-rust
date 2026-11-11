@@ -1644,6 +1644,16 @@ impl<'a> TypeCheckContext<'a> {
                 state.used = true;
                 report
             });
+            // `Macro.Type` takes the place of `Stdlib.Type`, which it
+            // includes: opening `Macro` loses nothing.
+            let report = report.filter(|_| {
+                !(event.kind == "module"
+                    && event.name == "Type"
+                    && self
+                        .delayed_open_checks
+                        .iter()
+                        .any(|check| check.slot == event.slot && check.root == crate::macros::MACRO_MODULE))
+            });
             if let Some(loc) = report {
                 let warning = match event.kind {
                     "label" | "constructor" => Warning::OpenShadowLabelConstructor {
