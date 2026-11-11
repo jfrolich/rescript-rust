@@ -204,7 +204,7 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           cargo test --release --locked --manifest-path rewatch/Cargo.toml
 
-      - name: Check signature publication and edit-free rebuilds
+      - name: Check signature publication and stored interface determinism
         run: python3 scripts/test_signature_publication.py
 
       # This job saves the release cache rather than the build job, which
