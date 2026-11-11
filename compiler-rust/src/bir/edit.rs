@@ -40,8 +40,63 @@ impl Bir {
         }
         self.adjust_direct(id, 1);
         self.repair(id);
-        self.capture_created(id);
+        if !self.bulk {
+            self.capture_created(id);
+        }
         id
+    }
+
+    /// Defer capture analysis while constructing a complete tree. Do not edit or
+    /// query capture flags until `finish_bulk`; bulk sessions cannot nest.
+    pub fn begin_bulk(&mut self) {
+        assert!(!self.bulk, "bulk construction already active");
+        self.bulk = true;
+    }
+
+    /// Finish bulk construction with one top-down capture analysis. Existing
+    /// conservative flags are retained, just as in incremental construction.
+    pub fn finish_bulk(&mut self, root: NodeId) {
+        assert!(self.bulk, "bulk construction not active");
+        self.mark_captures(root);
+        self.bulk = false;
+    }
+
+    fn mark_captures(&mut self, root: NodeId) {
+        let epoch = self.next_capture_epoch();
+        let mut stack = vec![(root, 0u32)];
+        while let Some((id, depth)) = stack.pop() {
+            let view = self.view(id);
+            let children = view.children();
+            let boundary = match view {
+                View::Fun { .. } | View::JFun { .. }
+                | View::While { .. } | View::SWhile { .. } => Some(None),
+                View::For { parts, .. } | View::SForRange { parts, .. } => {
+                    Some(parts.last().copied())
+                }
+                _ => None,
+            };
+            let used_var = match view { View::Var { var } => Some(var), _ => None };
+            // Parameters and loop variables are bound *inside* their own
+            // capture boundary, not in the enclosing function's scope.
+            let binder_depth = depth + u32::from(boundary.is_some());
+            for var in self.binders(id) {
+                self.bulk_binders[var.index()] = (epoch, binder_depth);
+            }
+            if let Some(var) = used_var {
+                let (seen, bound_depth) = self.bulk_binders[var.index()];
+                if depth != 0 && (seen != epoch || bound_depth < depth) {
+                    self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+                }
+            }
+            for child in children.into_iter().rev() {
+                let enters = match boundary {
+                    Some(None) => true,
+                    Some(Some(body)) => body == child,
+                    None => false,
+                };
+                stack.push((child, depth + u32::from(enters)));
+            }
+        }
     }
 
     fn allocate(&mut self, node: Node) -> NodeId {
@@ -2767,5 +2822,69 @@ mod incremental_cost_tests {
         b.release(root);
         assert_eq!(b.weighted_switches, 0);
         b.validate(None, false).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod bulk_tests {
+    use super::*;
+
+    #[test]
+    fn four_thousand_nested_functions_are_linear() {
+        let mut bir = Bir::default();
+        bir.begin_bulk();
+        let free = bir.new_var_id(Name::new("free"), 0);
+        let mut root = bir.new_node(View::Var { var: free }, 0);
+        for _ in 0..4_000 {
+            let header = bir.function_header(
+                VarSpan::default(), FunctionAttribute::default(), LamLoc::NONE,
+            );
+            root = bir.new_node(View::Fun { body: root, header }, 0);
+        }
+        bir.finish_bulk(root);
+        let steps = bir.steps.get();
+        println!("bulk 4001 nodes: {steps} steps");
+        assert!(steps <= 40 * 4_001, "{steps}");
+        assert!(bir.vars.flags(free).contains(VarFlags::CAPTURED));
+        bir.validate(Some(root), false).unwrap();
+    }
+
+    fn sample(seed: u64, bulk: bool) -> Bir {
+        let mut b = Bir::default();
+        if bulk { b.begin_bulk(); }
+        let vars = b.new_vars(&[Name::new("outer"), Name::new("inner")]);
+        let free = b.new_var_id(Name::new("free"), 2);
+        let mut state = seed;
+        let mut root = b.new_node(View::Var { var: free }, 0);
+        for _ in 0..30 {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let var = if state & 1 == 0 { free } else { vars.iter().next().unwrap() };
+            let use_ = b.new_node(View::Var { var }, 0);
+            root = match state >> 32 & 3 {
+                0 => b.new_node(View::While { condition: use_, body: root }, 0),
+                1 => b.new_node(View::Seq { first: use_, second: root }, 0),
+                _ => {
+                    let body = b.new_node(View::Seq { first: use_, second: root }, 0);
+                    let header = b.function_header(
+                        VarSpan::default(), FunctionAttribute::default(), LamLoc::NONE,
+                    );
+                    b.new_node(View::Fun { body, header }, 0)
+                }
+            };
+        }
+        let header = b.function_header(vars, FunctionAttribute::default(), LamLoc::NONE);
+        root = b.new_node(View::Fun { body: root, header }, 0);
+        if bulk { b.finish_bulk(root); }
+        b.validate(Some(root), false).unwrap();
+        b
+    }
+
+    #[test]
+    fn seeded_bulk_captures_match_incremental() {
+        for seed in 0..100 {
+            let bulk = sample(seed, true);
+            let incremental = sample(seed, false);
+            assert_eq!(bulk.vars.flags, incremental.vars.flags, "seed {seed}");
+        }
     }
 }

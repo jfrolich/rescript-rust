@@ -48,6 +48,8 @@ pub struct Bir {
     capture_stack: Vec<NodeId>,
     capture_uses: Vec<VarId>,
     tails_valid: bool,
+    bulk: bool,
+    bulk_binders: Vec<(u64, u32)>,
     #[cfg(test)]
     steps: std::cell::Cell<u64>,
     #[cfg(test)]
@@ -112,6 +114,7 @@ impl Bir {
     pub fn new_var_id(&mut self, name: Name, order: u32) -> VarId {
         let id = VarId(index(self.vars.len()));
         self.capture_binders.push(0);
+        self.bulk_binders.push((0, 0));
         self.vars.name.push(name);
         self.vars.order.push(order);
         self.vars.flags.push(VarFlags::default());
