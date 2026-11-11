@@ -1,0 +1,1 @@
+- Expose the JavaScript reformat tool as a library with opt-in file-envelope comparison and decoration-comment removal, and keep JSX comma expressions reparsable.

@@ -49,7 +49,7 @@ location-enabled retry, then dropped with the AST after compilation.
   Subsequent watch builds can use the fast path again.
 - Location-valued generated code (`__LINE__`, assertions, match failures, recursive
   module initialization) retries only that module, before publishing its signature or JS.
-- External PPXs, source maps, editor tooling and requested IR dumps use locations.
+- Source maps, editor tooling and requested IR dumps use locations.
 
 The default standalone parser API still retains complete location side tables for
 formatting and AST marshalling. Location-free compilation does not change
@@ -121,3 +121,11 @@ or `RESCRIPT_RUNTIME_TIMINGS=1` for runtime preparation timings. Check-only has 
 Lambda, codegen, printing or genType work. For a clean-build comparison, clean the
 normal build before each measurement; a normal incremental no-op is not comparable
 to check-only, which checks every module on every invocation.
+
+## Derives
+
+`ppx-flags` accepts only built-in spice derives. Other entries fail configuration
+validation with the package name and flag; source-marker filtering cannot hide
+an unsupported PPX. Spice needs no installed executable and runs on the current
+AST, without a frozen-v0 conversion.
+

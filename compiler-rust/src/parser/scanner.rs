@@ -268,27 +268,10 @@ impl<'src> Scanner<'src> {
         // a valid UTF-8 sequence for a code point above U+FFFF. The source is
         // Latin-1 decoded (one char per original byte).
         let byte = self.ch as u32;
-        let utf16len = if byte & 0xc0 == 0x80 {
-            0
-        } else if byte < 0x80 {
+        let utf16len = if byte < 0x80 {
             1
-        } else if byte > 0xff {
-            // Source that was not Latin-1 decoded holds whole code points.
-            self.ch.len_utf16()
         } else {
-            let mut bytes = [0u8; 4];
-            let mut count = 0;
-            for ch in self.src[self.offset..].chars().take(4) {
-                if ch as u32 > 0xff {
-                    break;
-                }
-                bytes[count] = ch as u32 as u8;
-                count += 1;
-            }
-            match crate::string_literal::get_utf_8_uchar(&bytes[..count], 0) {
-                (true, codepoint, _) if codepoint > 0xffff => 2,
-                _ => 1,
-            }
+            self.non_ascii_utf16_len(byte)
         };
 
         // res_scanner.ml:88-97: a line ends at LF, or at a CR not followed by
@@ -319,6 +302,34 @@ impl<'src> Scanner<'src> {
         // since the line start (`offset16 <- offset - line_offset`).
         if next_byte_offset >= self.bytes.len() {
             self.offset16 = self.char_pos - self.line_offset;
+        }
+    }
+
+    // Keep Latin-1/UTF-8 column accounting off the ASCII advance path.
+    #[cold]
+    #[inline(never)]
+    fn non_ascii_utf16_len(&self, byte: u32) -> usize {
+        if byte & 0xc0 == 0x80 {
+            0
+        } else if byte < 0x80 {
+            1
+        } else if byte > 0xff {
+            // Source that was not Latin-1 decoded holds whole code points.
+            self.ch.len_utf16()
+        } else {
+            let mut bytes = [0u8; 4];
+            let mut count = 0;
+            for ch in self.src[self.offset..].chars().take(4) {
+                if ch as u32 > 0xff {
+                    break;
+                }
+                bytes[count] = ch as u32 as u8;
+                count += 1;
+            }
+            match crate::string_literal::get_utf_8_uchar(&bytes[..count], 0) {
+                (true, codepoint, _) if codepoint > 0xffff => 2,
+                _ => 1,
+            }
         }
     }
 
@@ -614,34 +625,7 @@ impl<'src> Scanner<'src> {
                     return token;
                 }
                 '\\' => {
-                    // Add content before the escape (including the backslash)
-                    let buf = result.get_or_insert_with(String::new);
-                    buf.push_str(self.substring(chunk_start, self.offset));
-                    buf.push('\\');
-                    let escape_start_pos = self.position();
-                    self.next(); // consume backslash
-
-                    // Check if this is a decimal escape that needs conversion
-                    let escape_start = self.offset;
-                    self.scan_string_escape_sequence_text(&escape_start_pos);
-                    let escape_end = self.offset;
-
-                    // Check if it was a 3-digit decimal escape
-                    let escape_text = self.substring(escape_start, escape_end);
-                    let buf = result.as_mut().expect("buffer allocated above");
-                    match escape_text.parse::<u32>() {
-                        Ok(value)
-                            if value <= 255
-                                && escape_text.len() == 3
-                                && escape_text.chars().all(|c| c.is_ascii_digit()) =>
-                        {
-                            // Convert decimal to hex format
-                            write!(buf, "x{:02x}", value).expect("writing to a String");
-                        }
-                        // Keep other escapes (and invalid values) as-is
-                        _ => buf.push_str(escape_text),
-                    }
-                    chunk_start = self.offset;
+                    self.scan_string_escape(&mut result, &mut chunk_start);
                 }
                 c if c == EOF_CHAR => {
                     let end_pos = self.position();
@@ -658,6 +642,39 @@ impl<'src> Scanner<'src> {
                 _ => self.next(),
             }
         }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn scan_string_escape(&mut self, result: &mut Option<String>, chunk_start: &mut usize) {
+        // Add content before the escape (including the backslash)
+        let buf = result.get_or_insert_with(String::new);
+        buf.push_str(self.substring(*chunk_start, self.offset));
+        buf.push('\\');
+        let escape_start_pos = self.position();
+        self.next(); // consume backslash
+
+        // Check if this is a decimal escape that needs conversion
+        let escape_start = self.offset;
+        self.scan_string_escape_sequence_text(&escape_start_pos);
+        let escape_end = self.offset;
+
+        // Check if it was a 3-digit decimal escape
+        let escape_text = self.substring(escape_start, escape_end);
+        let buf = result.as_mut().expect("buffer allocated above");
+        match escape_text.parse::<u32>() {
+            Ok(value)
+                if value <= 255
+                    && escape_text.len() == 3
+                    && escape_text.chars().all(|c| c.is_ascii_digit()) =>
+            {
+                // Convert decimal to hex format
+                write!(buf, "x{:02x}", value).expect("writing to a String");
+            }
+            // Keep other escapes (and invalid values) as-is
+            _ => buf.push_str(escape_text),
+        }
+        *chunk_start = self.offset;
     }
 
     /// Scan past a string escape sequence, advancing the scanner position.
