@@ -62,7 +62,15 @@ module Features = {
   @unboxed type oneOrMany =
     | String(string)
     | Array(array<string>)
-  type loose = unknown
+  type looseObject = {
+    a: string,
+  }
+  type looseObject2 = {
+    b: float,
+  }
+  @unboxed type loose =
+    | LooseObject(looseObject)
+    | LooseObject2(looseObject2)
   @unboxed type rec json =
     | Boolean(bool)
     | String(string)
@@ -145,6 +153,60 @@ module Features = {
     z: float,
   }
   type autocapitalize = string
+  type personObject = {
+    name: string,
+  }
+  type personObject2 = {
+    name: string,
+    age: float,
+  }
+  @unboxed type person =
+    | PersonObject(personObject)
+    | PersonObject2(personObject2)
+  type readingObject = {
+    value: string,
+  }
+  type readingObject2 = {
+    value: float,
+  }
+  @unboxed type reading =
+    | ReadingObject(readingObject)
+    | ReadingObject2(readingObject2)
+  type headers2Object = {
+    name: string,
+    value: string,
+  }
+  @unboxed type headers2 =
+    | Object(dict<string>)
+    | Headers2Object(headers2Object)
+  type blurredObject = {
+    x: float,
+  }
+  type blurredObject2 = {
+    x: float,
+    y?: string,
+  }
+  type blurredObjectCase = {
+    x: float,
+    y?: string,
+  }
+  @unboxed type blurred =
+    | BlurredObject(blurredObjectCase)
+  type spotA = {
+    x: float,
+    y: float,
+  }
+  type spotB = {
+    x: float,
+    y: float,
+  }
+  type spotACase = {
+    x: float,
+    y: float,
+  }
+  @unboxed type spot =
+    | String(string)
+    | SpotA(spotACase)
   type readyState = [#"and" | #closed | #"in" | #"open" | #"true"]
   type dict2<'t> = dict<option<'t>>
   type ref2<'t> = {
@@ -156,6 +218,43 @@ module Features = {
   type refAttributes<'t> = {
     ref?: refAttributesRef<'t>,
   }
+  type stringLit = {
+    @as("type") type_: [#Literal],
+    value: string,
+    raw: Null.t<string>,
+  }
+  type numericLit = {
+    @as("type") type_: [#Literal],
+    value: float,
+    raw: Null.t<string>,
+  }
+  type identName = {
+    @as("type") type_: [#Identifier],
+    name: string,
+  }
+  type identBinding = {
+    @as("type") type_: [#Identifier],
+    name: string,
+    optional: bool,
+  }
+  type arrayPat = {
+    @as("type") type_: [#ArrayPattern],
+    elements: array<Null.t<identBinding>>,
+  }
+  type arrayTarget = {
+    @as("type") type_: [#ArrayPattern],
+    elements: array<Null.t<identName>>,
+  }
+  type arrayPatCase = {
+    @as("type") type_: [#ArrayPattern],
+    elements: unknown,
+  }
+  @unboxed type syntaxNode =
+    | ArrayPat(arrayPatCase)
+    | IdentBinding(identBinding)
+    | IdentName(identName)
+    | NumericLit(numericLit)
+    | StringLit(stringLit)
   type findResult = {
     id: string,
   }
@@ -262,6 +361,16 @@ module Features = {
     | Animal(animal)
     | Dog(dog)
     | @as(null) Null
+  type settleResultObject = {
+    result: string,
+  }
+  type settleResultObject2 = {
+    error: string,
+    code?: float,
+  }
+  @unboxed type settleResult =
+    | SettleResultObject(settleResultObject)
+    | SettleResultObject2(settleResultObject2)
   type pickFrom<'t> = {
     items: array<'t>,
   }
@@ -556,6 +665,9 @@ module Features = {
   /** TypeScript: `(what: Animal | Dog | null) => void` */
   @module("./features.ts")
   external pet: petWhat => unit = "pet"
+  /** TypeScript: `() => { result: string; } | { error: string; code?: number | undefined; }` */
+  @module("./features.ts")
+  external settle: unit => settleResult = "settle"
   /** TypeScript: `() => Dict<string>` */
   @module("./features.ts")
   external env: unit => dict2<string> = "env"
@@ -568,13 +680,16 @@ module Features = {
   /** TypeScript: `() => IterableIterator<[string, number]>` */
   @module("./features.ts")
   external entries: unit => Iterator.t<(string, float), unknown, unknown> = "entries"
+  /** TypeScript: `(node: SyntaxNode) => void` */
+  @module("./features.ts")
+  external visit: syntaxNode => unit = "visit"
 }
 
 // Where ReScript says less than TypeScript:
-// [union] loose: `Loose`: ReScript cannot tell the members of this union apart at run time
 // [callable-object] hybrid: `Hybrid`: the function's properties are dropped
 // [constructor] constructable: `Constructable`: a constructor is not a ReScript value; import the class as a module instead
 // [intersection] id: `Id`: the brand is dropped; the primitive type is used
+// [union] syntaxNode: `elements`: the members merged into case ArrayPat have different types for this field
 // [tuple] single: `[string]`: ReScript has no one-element tuple; an array is used
 // [tuple] optionalTuple: `[string, (number | undefined)?]`: tuples with optional or rest elements are imported as arrays
 // [tuple] restTuple: `[string, ...number[]]`: tuples with optional or rest elements are imported as arrays

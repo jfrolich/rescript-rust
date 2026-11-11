@@ -232,6 +232,17 @@ Garage.park(Vehicle((car :> Garage.vehicle)))
 /// check.
 #[test]
 fn installed_packages_compile() {
+    // Declaration files of large packages nest deeply; builds compile on
+    // threads with a stack this size too.
+    std::thread::Builder::new()
+        .stack_size(256 << 20)
+        .spawn(compile_installed_packages)
+        .expect("thread")
+        .join()
+        .expect("installed packages compile");
+}
+
+fn compile_installed_packages() {
     let root = match std::env::var("TS_IMPORT_PACKAGES") {
         Ok(dir) => PathBuf::from(dir),
         Err(_) => Path::new(env!("CARGO_MANIFEST_DIR")).join(".."),

@@ -150,6 +150,10 @@ struct State {
     anonymous_params: HashMap<String, Vec<String>>,
     /// What the values of each declared type are at run time, by type name.
     runtime: HashMap<String, Runtime>,
+    /// The parameters and fields of each declared record, by type name.
+    records: HashMap<String, (Vec<String>, Vec<Field>)>,
+    /// The literals of each declared variant without payloads, by type name.
+    literal_types: HashMap<String, Vec<Tag>>,
     notes: Vec<Note>,
     /// The notes, for telling a repeated one without a scan.
     noted: HashSet<Note>,
@@ -223,6 +227,19 @@ impl State {
 
     fn declare(&mut self, decl: Decl) {
         self.runtime.insert(decl.name.clone(), Runtime::of(&decl));
+        match &decl.kind {
+            DeclKind::Record(fields) if decl.class.is_none() => {
+                self.records.insert(decl.name.clone(), (decl.params.clone(), fields.clone()));
+            }
+            DeclKind::Variant { tag: None, ctors } if ctors.iter().all(|ctor| ctor.payload == Payload::None) => {
+                let literals = ctors
+                    .iter()
+                    .map(|ctor| ctor.tag.clone().unwrap_or_else(|| Tag::Str(ctor.name.clone())))
+                    .collect();
+                self.literal_types.insert(decl.name.clone(), literals);
+            }
+            _ => {}
+        }
         self.pending.push(decl);
     }
 
@@ -256,6 +273,98 @@ impl State {
                     }
                 }
             },
+        }
+    }
+
+    /// The fields of the record `ty` names, its type parameters replaced by
+    /// the arguments, following abbreviations.
+    fn record_fields(&self, ty: &Ty) -> Option<Vec<Field>> {
+        let mut ty = ty.clone();
+        for _ in 0..16 {
+            let Ty::App(name, args) = &ty else {
+                return None;
+            };
+            let local = name.rsplit('.').next().unwrap_or(name);
+            if let Some((params, fields)) = self.records.get(local) {
+                return Some(
+                    fields
+                        .iter()
+                        .map(|field| Field { ty: substitute(&field.ty, params, args), ..field.clone() })
+                        .collect(),
+                );
+            }
+            match self.runtime.get(local)? {
+                Runtime::Alias(target) => ty = target.clone(),
+                _ => return None,
+            }
+        }
+        None
+    }
+
+    /// What an untagged variant knows of a record with these fields.
+    fn fields_shape(&self, fields: &[Field]) -> ObjectShape {
+        ObjectShape::Closed(
+            fields
+                .iter()
+                .map(|field| {
+                    let literals = if field.optional { None } else { self.literals_of(&field.ty) };
+                    let kind = match &literals {
+                        _ if field.optional => None,
+                        Some(literals) => literals_kind(literals),
+                        None => self.runtime_of(&field.ty, 0),
+                    };
+                    FieldShape {
+                        name: field.js_name.clone().unwrap_or_else(|| field.name.clone()),
+                        required: !field.optional,
+                        literals,
+                        kind,
+                    }
+                })
+                .collect(),
+        )
+    }
+
+    /// The literals a field type stands for: a polymorphic variant, a
+    /// variant without payloads, or `bool`.
+    fn literals_of(&self, ty: &Ty) -> Option<Vec<Literal>> {
+        self.literals_of_at(ty, 0)
+    }
+
+    fn literals_of_at(&self, ty: &Ty, depth: usize) -> Option<Vec<Literal>> {
+        match ty {
+            Ty::Poly(tags) => Some(
+                tags.iter()
+                    .map(|tag| match tag {
+                        Tag::Num(text) if is_hash_number(text) => Literal::Num(text.clone()),
+                        Tag::Num(text) | Tag::Str(text) => Literal::Str(text.clone()),
+                        Tag::Bool(value) => Literal::Bool(*value),
+                        Tag::Null | Tag::Undefined => Literal::Other,
+                    })
+                    .collect(),
+            ),
+            Ty::App(name, args) if name == "bool" && args.is_empty() => {
+                Some(vec![Literal::Bool(true), Literal::Bool(false)])
+            }
+            Ty::App(name, _) => {
+                let local = name.rsplit('.').next().unwrap_or(name);
+                let Some(tags) = self.literal_types.get(local) else {
+                    return match self.runtime.get(local)? {
+                        Runtime::Alias(target) if depth < 16 => self.literals_of_at(target, depth + 1),
+                        _ => None,
+                    };
+                };
+                Some(
+                    tags.iter()
+                        .map(|tag| match tag {
+                            Tag::Str(text) => Literal::Str(text.clone()),
+                            Tag::Num(text) => Literal::Num(text.clone()),
+                            Tag::Bool(value) => Literal::Bool(*value),
+                            Tag::Null | Tag::Undefined => Literal::Other,
+                        })
+                        .collect(),
+                )
+            }
+            _ => None,
         }
     }
 
@@ -310,6 +419,11 @@ pub(crate) struct Converter<'a> {
     free_var_count: usize,
     deferred_seen: bool,
     depth: usize,
+    /// How many named declarations are being converted, nested.
+    declaration_depth: usize,
+    /// The unnamed types being converted, with the name one was given when
+    /// it was reached inside itself.
+    unnamed_in_progress: HashMap<P<Type>, Option<String>>,
     /// The declared type of the interface or class being declared: there it
     /// is the declaration's body, anywhere else a reference to it.
     declaring: Option<P<Type>>,
@@ -325,9 +439,15 @@ pub(crate) struct Converter<'a> {
     declared_parents: HashMap<P<Symbol>, P<Symbol>>,
     /// The classes whose declaration states the class.
     declared_classes: HashSet<P<Symbol>>,
+    /// [`object_groups`] of the plain object members of a union, by members.
+    object_groups: HashMap<Vec<P<Type>>, Option<Vec<Vec<usize>>>>,
 }
 
 const MAX_DEPTH: usize = 48;
+/// How many named declarations deep a conversion goes. Each declaration
+/// stands on its own, so it starts a new count of [`MAX_DEPTH`]; a recursive
+/// group of many declarations, such as a syntax tree, nests this deep.
+const MAX_DECLARATION_DEPTH: usize = 512;
 
 fn num_literal(value: f64) -> Option<String> {
     if value.fract() == 0.0 && value.abs() < 2_147_483_648.0 {
@@ -361,12 +481,15 @@ impl<'a> Converter<'a> {
             free_var_count: 0,
             deferred_seen: false,
             depth: 0,
+            declaration_depth: 0,
+            unnamed_in_progress: HashMap::new(),
             declaring: None,
             modules: Vec::new(),
             class_exports: None,
             class_fields: HashMap::new(),
             declared_parents: HashMap::new(),
             declared_classes: HashSet::new(),
+            object_groups: HashMap::new(),
         }
     }
 
@@ -870,9 +993,50 @@ impl<'a> Converter<'a> {
                 return Ty::App(self.reference(&named), params.into_iter().map(Ty::Var).collect());
             }
         }
-        match self.structure(ty) {
-            Structure::Ty(converted) => converted,
-            Structure::Decl(kind) => self.declare_anonymous(ty, kind),
+        // An unnamed type can contain itself, through a union in one of its
+        // fields (`elements: (BindingPattern | null)[]` in a member of
+        // `BindingPattern`). Reached again while it is converted, it is given
+        // a name, which the outer conversion then declares.
+        let guarded = ty.flags().intersects(TypeFlags::Union | TypeFlags::Intersection);
+        if !guarded {
+            return match self.structure(ty) {
+                Structure::Ty(converted) => converted,
+                Structure::Decl(kind) => self.declare_anonymous(ty, kind),
+            };
+        }
+        if let Some(reserved) = self.unnamed_in_progress.get(&ty).cloned() {
+            if !self.type_params.is_empty() {
+                self.note(Gap::Depth, ty, "the type contains itself");
+                return Ty::unknown();
+            }
+            let name = match reserved {
+                Some(name) => name,
+                None => {
+                    let name = self.fresh_type_name(&self.context_name());
+                    self.unnamed_in_progress.insert(ty, Some(name.clone()));
+                    name
+                }
+            };
+            return Ty::name(&name);
+        }
+        self.unnamed_in_progress.insert(ty, None);
+        let structure = self.structure(ty);
+        let reserved = self.unnamed_in_progress.remove(&ty).flatten();
+        match (structure, reserved) {
+            (Structure::Ty(converted), None) => converted,
+            (Structure::Decl(kind), None) => self.declare_anonymous(ty, kind),
+            (structure, Some(name)) => {
+                let kind = match structure {
+                    Structure::Ty(converted) => DeclKind::Alias(converted),
+                    Structure::Decl(kind) => kind,
+                };
+                let kind = if free_variables(&kind).is_empty() { kind } else { DeclKind::Abstract };
+                let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
+                self.state.set_type(ty, named);
+                self.state.anonymous_params.insert(name.clone(), Vec::new());
+                self.state.declare(Decl { name: name.clone(), params: Vec::new(), kind, ts: None, class: None });
+                Ty::name(&name)
+            }
         }
     }
 
@@ -973,6 +1137,11 @@ impl<'a> Converter<'a> {
         let saved_polarity = std::mem::replace(&mut self.polarity, Polarity::Out);
         let saved_free = std::mem::replace(&mut self.free_vars, false);
         let saved_deferred = std::mem::replace(&mut self.deferred_seen, false);
+        let saved_depth = self.depth;
+        if self.declaration_depth < MAX_DECLARATION_DEPTH {
+            self.depth = 0;
+        }
+        self.declaration_depth += 1;
 
         let declared = self.c.get_declared_type_of_symbol(symbol);
         let is_object_declaration = symbol.flags().intersects(SymbolFlags::Class | SymbolFlags::Interface);
@@ -1004,6 +1173,8 @@ impl<'a> Converter<'a> {
         self.polarity = saved_polarity;
         self.free_vars = saved_free;
         self.deferred_seen = saved_deferred;
+        self.depth = saved_depth;
+        self.declaration_depth -= 1;
 
         if let Some(mark) = mark
             && deferred
@@ -1421,7 +1592,14 @@ impl<'a> Converter<'a> {
             }
             let mut name = if is_plain_field_name(js_name) { js_name.to_string() } else { lower_ident(js_name) };
             let mut index = 2;
-            while fields.iter().any(|field| field.name == name) {
+            // A renamed field must not take the name another property has
+            // in JavaScript (`Comment` beside `comment`): the compiler
+            // rejects a record where one name is defined twice.
+            let taken = |name: &str| {
+                fields.iter().any(|field: &Field| field.name == name || field.js_name.as_deref() == Some(name))
+                    || name != js_name && properties.iter().any(|other| other.name() == name)
+            };
+            while taken(&name) {
                 name = format!("{}{index}", lower_ident(js_name));
                 index += 1;
             }
@@ -1706,6 +1884,8 @@ impl<'a> Converter<'a> {
         let mut bases: Vec<Option<&'static str>> = Vec::with_capacity(members.len());
         // The members that are classes declared for this file.
         let mut classes: Vec<P<Symbol>> = Vec::new();
+        // The members that are plain objects.
+        let mut plain_objects: Vec<P<Type>> = Vec::new();
         for &member in members {
             if literal_tag(member).is_some() {
                 bases.push(None);
@@ -1764,14 +1944,60 @@ impl<'a> Converter<'a> {
                         None => ("object".into(), "Object"),
                     }
                 }
+            } else if flags.intersects(TypeFlags::Intersection)
+                && member.types().iter().all(|&part| {
+                    part.flags().intersects(TypeFlags::Object)
+                        && !self.c.is_array_or_tuple_type(part)
+                        && self.c.get_signatures_of_type(part, SignatureKind::Call).is_empty()
+                })
+            {
+                // An intersection of object types is one record.
+                ("object".into(), "Object")
             } else {
                 return None;
             };
-            if !kinds.insert(kind) {
+            // Several plain objects may be told apart by their fields; that
+            // is checked once they are converted.
+            let plain_object = kind == "object";
+            if !kinds.insert(kind) && !plain_object {
                 return None;
+            }
+            if plain_object {
+                plain_objects.push(member);
             }
             bases.push(Some(base));
         }
+        // Converting a member declares what it mentions, so first a check on
+        // the TypeScript types that an order of the plain objects can exist.
+        // Members that no check tells apart (they share a tag and differ
+        // only inside a field) become one case: `group_of` maps each such
+        // member to its group.
+        let mut group_of: HashMap<P<Type>, usize> = HashMap::new();
+        if plain_objects.len() > 1 {
+            let groups = match self.object_groups.get(&plain_objects) {
+                Some(groups) => groups.clone(),
+                None => {
+                    let shapes: Vec<ObjectShape> =
+                        plain_objects.iter().map(|&member| self.ts_object_shape(member)).collect();
+                    let groups = object_groups(shapes);
+                    self.object_groups.insert(plain_objects.clone(), groups.clone());
+                    groups
+                }
+            }?;
+            for (group, indices) in groups.iter().enumerate() {
+                if indices.len() > 1 {
+                    for &index in indices {
+                        group_of.insert(plain_objects[index], group);
+                    }
+                }
+            }
+        }
+        // For each group, its case and its members.
+        let mut group_cases: HashMap<usize, (usize, Vec<P<Type>>)> = HashMap::new();
+        // The TypeScript member of each case with a payload.
+        let mut ctor_members: Vec<Option<P<Type>>> = Vec::new();
+        // The TypeScript shape of each case made of several members.
+        let mut merged_shapes: HashMap<usize, ObjectShape> = HashMap::new();
 
         let mut ctors: Vec<Ctor> = Vec::new();
         if whole_boolean {
@@ -1811,6 +2037,10 @@ impl<'a> Converter<'a> {
             if !self.state.runtime_of(&payload, 0).is_some_and(|found| expected.contains(&found)) {
                 self.free_vars = saved_free;
                 self.state.rollback(mark);
+                // A union given up is not converted again where it recurs.
+                if plain_objects.len() > 1 {
+                    self.object_groups.insert(plain_objects, None);
+                }
                 return None;
             }
             // An object member is named after its type: `User(user)`.
@@ -1819,10 +2049,117 @@ impl<'a> Converter<'a> {
                 (Ty::App(name, _), "TypedArray") => name.trim_end_matches(".t").to_string(),
                 _ => base.to_string(),
             };
+            if let Some(&group) = group_of.get(&member) {
+                if let Some((_, grouped)) = group_cases.get_mut(&group) {
+                    grouped.push(member);
+                    continue;
+                }
+                group_cases.insert(group, (ctors.len(), vec![member]));
+            }
+            // A member of the same shape as an earlier one is that member.
+            if expected == ["object", "instance"]
+                && ctors.iter().any(|ctor| match &ctor.payload {
+                    Payload::Ty(other) => {
+                        *other == payload
+                            || self.state.runtime_of(other, 0) == Some("object")
+                                && self.state.record_fields(other).is_some_and(|fields| {
+                                    Some(fields) == self.state.record_fields(&payload)
+                                })
+                    }
+                    _ => false,
+                })
+            {
+                continue;
+            }
             let name = unique_ctor(&ctors, &base);
             ctors.push(Ctor { name, tag: None, payload: Payload::Ty(payload) });
+            ctor_members.resize(ctors.len() - 1, None);
+            ctor_members.push(Some(member));
+        }
+        ctor_members.resize(ctors.len(), None);
+        // The members of a group are one case, an inline record with the
+        // fields of all of them.
+        // Their fields are read from TypeScript: a member's record may still
+        // be being declared, in a recursive group. The case's record is named,
+        // and the name is taken first, so that a union of the same members
+        // inside one of the fields refers to it.
+        let mut groups: Vec<(usize, Vec<P<Type>>)> = group_cases.into_values().collect();
+        groups.sort_by_key(|(index, _)| *index);
+        let mut give_up = false;
+        for (index, grouped) in groups {
+            if grouped.len() < 2 {
+                continue;
+            }
+            let key = format!(
+                "merged {}",
+                grouped.iter().map(|member| member.to_bits().to_string()).collect::<Vec<_>>().join(" ")
+            );
+            let named = match self.state.by_shape.get(&key).cloned() {
+                Some(named) => named,
+                None => {
+                    let name = self.fresh_type_name(&format!("{}Case", ctors[index].name));
+                    let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
+                    self.state.set_shape(key, named.clone());
+                    self.path.push(ctors[index].name.clone());
+                    let records: Vec<Vec<Field>> = grouped
+                        .iter()
+                        .map(|&member| {
+                            let properties = self.visible_properties(member);
+                            self.fields(&properties, None)
+                        })
+                        .collect();
+                    self.path.pop();
+                    let case = ctors[index].name.clone();
+                    let fields = self.merge_fields(&case, &records);
+                    // The record has no parameters of its own: a case whose
+                    // fields mention type variables is not merged.
+                    let kind = DeclKind::Record(fields);
+                    if !free_variables(&kind).is_empty() {
+                        give_up = true;
+                        break;
+                    }
+                    self.state.declare(Decl { name, params: Vec::new(), kind, ts: None, class: None });
+                    named
+                }
+            };
+            merged_shapes.insert(index, {
+                let shapes: Vec<ObjectShape> = grouped.iter().map(|&member| self.ts_object_shape(member)).collect();
+                shapes.iter().skip(1).fold(shapes[0].clone(), |merged, shape| merge_shapes(&merged, shape))
+            });
+            ctors[index].payload = Payload::Ty(Ty::App(self.reference(&named), Vec::new()));
         }
         self.free_vars = saved_free;
+        if give_up {
+            self.state.rollback(mark);
+            self.object_groups.insert(plain_objects, None);
+            return None;
+        }
+        // Several plain objects need an order in which the compiler tells
+        // them apart by their fields.
+        // A record still being declared has no fields yet; its TypeScript
+        // members say what they will be.
+        let mut objects: Vec<ObjectShape> = Vec::new();
+        for (index, (ctor, member)) in ctors.iter().zip(&ctor_members).enumerate() {
+            let shape = match &ctor.payload {
+                Payload::Ty(Ty::App(name, _)) if name == "dict" => ObjectShape::Open,
+                Payload::Ty(ty) if self.state.runtime_of(ty, 0) == Some("object") => {
+                    match (self.state.record_fields(ty), merged_shapes.get(&index), member) {
+                        (Some(fields), _, _) => self.state.fields_shape(&fields),
+                        (None, Some(shape), _) => shape.clone(),
+                        (None, None, Some(member)) => self.ts_object_shape(*member),
+                        (None, None, None) => ObjectShape::Open,
+                    }
+                }
+                Payload::Record(fields) => self.state.fields_shape(fields),
+                _ => continue,
+            };
+            objects.push(shape);
+        }
+        if objects.len() > 1 && !objects_ordered(objects) {
+            self.state.rollback(mark);
+            self.object_groups.insert(plain_objects, None);
+            return None;
+        }
         // Each class member was declared a class, and a class that extends
         // another member says so: the compiler then tests it first. If not,
         // the members cannot be told apart after all.
@@ -1833,6 +2170,125 @@ impl<'a> Converter<'a> {
             return None;
         }
         Some(DeclKind::Variant { tag: None, ctors })
+    }
+
+    /// The fields of one case made of several members: every field any of
+    /// them has, optional unless all have it. A field whose type differs is
+    /// the union of the literals when all are literals, otherwise `unknown`,
+    /// with a note.
+    fn merge_fields(&mut self, case: &str, records: &[Vec<Field>]) -> Vec<Field> {
+        let js = |field: &Field| field.js_name.clone().unwrap_or_else(|| field.name.clone());
+        let mut merged: Vec<Field> = Vec::new();
+        for record in records {
+            for field in record {
+                if !merged.iter().any(|other| js(other) == js(field)) {
+                    merged.push(field.clone());
+                }
+            }
+        }
+        for field in &mut merged {
+            let key = js(field);
+            let versions: Vec<Option<&Field>> =
+                records.iter().map(|record| record.iter().find(|other| js(other) == key)).collect();
+            field.optional = versions.iter().any(|version| version.is_none_or(|version| version.optional));
+            let types: Vec<&Field> = versions.into_iter().flatten().collect();
+            if types.iter().all(|version| version.ty == field.ty && version.poly == field.poly) {
+                continue;
+            }
+            let tags: Option<Vec<Tag>> = types
+                .iter()
+                .map(|version| match &version.ty {
+                    Ty::Poly(tags) => Some(tags.clone()),
+                    _ => None,
+                })
+                .collect::<Option<Vec<_>>>()
+                .map(|lists| {
+                    let mut all: Vec<Tag> = Vec::new();
+                    for tag in lists.into_iter().flatten() {
+                        if !all.contains(&tag) {
+                            all.push(tag);
+                        }
+                    }
+                    all
+                });
+            field.poly = Vec::new();
+            field.ty = match tags {
+                Some(tags) => Ty::Poly(tags),
+                None => {
+                    self.note_text(
+                        Gap::Union,
+                        key.clone(),
+                        &format!("the members merged into case {case} have different types for this field"),
+                    );
+                    Ty::unknown()
+                }
+            };
+        }
+        merged
+    }
+
+    /// What the TypeScript type of a plain object member says about the
+    /// fields its converted record will have, for an early check that the
+    /// members of a union can be told apart.
+    fn ts_object_shape(&mut self, member: P<Type>) -> ObjectShape {
+        let properties = self.visible_properties(member);
+        if properties.is_empty() {
+            return ObjectShape::Open;
+        }
+        let fields = properties
+            .iter()
+            .map(|&property| {
+                let optional = property.flags().intersects(SymbolFlags::Optional);
+                let ty = self.c.get_type_of_symbol(property);
+                let (literals, kind) = if optional { (None, None) } else { self.ts_field_values(ty) };
+                FieldShape { name: property.name().to_string(), required: !optional, literals, kind }
+            })
+            .collect();
+        ObjectShape::Closed(fields)
+    }
+
+    /// The literals and the kind of the values of a field's TypeScript type.
+    fn ts_field_values(&mut self, ty: P<Type>) -> (Option<Vec<Literal>>, Option<&'static str>) {
+        let flags = ty.flags();
+        let literal = |tag: Tag| match tag {
+            Tag::Num(text) if is_hash_number(&text) => Literal::Num(text),
+            Tag::Num(text) | Tag::Str(text) => Literal::Str(text),
+            Tag::Bool(value) => Literal::Bool(value),
+            Tag::Null | Tag::Undefined => Literal::Other,
+        };
+        if flags.intersects(TypeFlags::Boolean | TypeFlags::BooleanLiteral) {
+            return (Some(vec![Literal::Bool(true), Literal::Bool(false)]), Some("boolean"));
+        }
+        let tags: Option<Vec<Tag>> = if flags.intersects(TypeFlags::Union) {
+            ty.types().iter().map(|&member| literal_tag(member)).collect()
+        } else {
+            literal_tag(ty).map(|tag| vec![tag])
+        };
+        if let Some(tags) = tags {
+            let literals: Vec<Literal> = tags.into_iter().map(literal).collect();
+            let kind = literals_kind(&literals);
+            return (Some(literals), kind);
+        }
+        let kind = if flags.intersects(TypeFlags::String | TypeFlags::TemplateLiteral | TypeFlags::StringMapping) {
+            Some("string")
+        } else if flags.intersects(TypeFlags::Number) {
+            Some("number")
+        } else if flags.intersects(TypeFlags::BigInt) {
+            Some("bigint")
+        } else if flags.intersects(TypeFlags::Object) {
+            if self.c.is_array_or_tuple_type(ty) {
+                Some("array")
+            } else if !self.c.get_signatures_of_type(ty, SignatureKind::Call).is_empty() {
+                Some("function")
+            } else {
+                // A plain object or a class instance; the check is kept
+                // permissive, the converted types decide.
+                Some("object")
+            }
+        } else {
+            None
+        };
+        (None, kind)
     }
 
     /// A function type. `top` is the imported function itself, where a rest
@@ -2120,4 +2576,264 @@ fn order_decls(decls: Vec<Decl>) -> Vec<Item> {
         .into_iter()
         .map(|group| Item::Types(group.into_iter().filter_map(|index| slots[index].take()).collect()))
         .collect()
+}
+
+/// A JavaScript literal a field of an object member may be, for telling
+/// object members apart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Literal {
+    Str(String),
+    /// A number as written.
+    Num(String),
+    Bool(bool),
+    /// `null` or `undefined`, which no check compares with.
+    Other,
+}
+
+/// What a field of an object member says about its values.
+#[derive(Clone, Debug, PartialEq)]
+struct FieldShape {
+    /// The JavaScript name.
+    name: String,
+    required: bool,
+    literals: Option<Vec<Literal>>,
+    /// As [`State::runtime_of`]: `"string"`, `"array"`, `"instance"`, ...
+    kind: Option<&'static str>,
+}
+
+/// An object member: its fields, or an open object.
+#[derive(Clone, Debug, PartialEq)]
+enum ObjectShape {
+    Closed(Vec<FieldShape>),
+    Open,
+}
+
+/// One check on a field: presence, literals or kind.
+#[derive(Clone, Debug)]
+enum Check {
+    Present(String),
+    Literals(String, Vec<Literal>),
+    Kind(String, &'static str),
+}
+
+impl Check {
+    fn field(&self) -> &str {
+        match self {
+            Check::Present(field) | Check::Literals(field, _) | Check::Kind(field, _) => field,
+        }
+    }
+}
+
+/// `#1` is the number 1 at run time, `#01` the string "01".
+fn is_hash_number(text: &str) -> bool {
+    match text.as_bytes() {
+        [b'0'..=b'9'] => true,
+        [b'1'..=b'9', rest @ ..] => rest.iter().all(u8::is_ascii_digit) && text.parse::<i32>().is_ok(),
+        _ => false,
+    }
+}
+
+fn literal_kind(literal: &Literal) -> Option<&'static str> {
+    match literal {
+        Literal::Str(_) => Some("string"),
+        Literal::Num(_) => Some("number"),
+        Literal::Bool(_) => Some("boolean"),
+        Literal::Other => None,
+    }
+}
+
+fn literals_kind(literals: &[Literal]) -> Option<&'static str> {
+    let first = literal_kind(literals.first()?)?;
+    literals.iter().all(|literal| literal_kind(literal) == Some(first)).then_some(first)
+}
+
+/// What `typeof` answers for a kind.
+fn typeof_of(kind: &str) -> Option<&'static str> {
+    match kind {
+        "string" => Some("string"),
+        "number" => Some("number"),
+        "bigint" => Some("bigint"),
+        "boolean" => Some("boolean"),
+        "symbol" => Some("symbol"),
+        "function" => Some("function"),
+        "object" | "array" | "instance" => Some("object"),
+        _ => None,
+    }
+}
+
+/// No value of the member passes the check. This mirrors the compiler
+/// (`compiler-rust/src/types/variant_layout.rs`, `fails`).
+fn check_fails(check: &Check, shape: &ObjectShape) -> bool {
+    let ObjectShape::Closed(fields) = shape else {
+        return true;
+    };
+    let Some(field) = fields.iter().find(|field| field.name == check.field()) else {
+        return true;
+    };
+    match check {
+        Check::Present(_) => false,
+        Check::Literals(_, literals) => !literals.iter().any(|literal| {
+            match (&field.literals, field.kind.and_then(typeof_of)) {
+                (Some(own), _) => own.contains(literal),
+                (None, Some(own)) => literal_kind(literal).is_none_or(|kind| typeof_of(kind) == Some(own)),
+                (None, None) => true,
+            }
+        }),
+        Check::Kind(_, "array") => field.kind.is_some_and(|kind| kind != "array"),
+        Check::Kind(_, kind) => match (field.kind.and_then(typeof_of), typeof_of(kind)) {
+            (Some(own), Some(checked)) => own != checked,
+            _ => false,
+        },
+    }
+}
+
+/// The checks every value of a member passes: literal, then presence, then
+/// kind, each in field order.
+fn candidate_checks(shape: &ObjectShape) -> Vec<Check> {
+    let ObjectShape::Closed(fields) = shape else {
+        return Vec::new();
+    };
+    let required = || fields.iter().filter(|field| field.required);
+    let literal = required()
+        .filter_map(|field| field.literals.clone().map(|literals| Check::Literals(field.name.clone(), literals)));
+    let presence = required().map(|field| Check::Present(field.name.clone()));
+    let kind = required().filter_map(|field| match field.kind {
+        Some(kind @ ("string" | "number" | "bigint" | "boolean" | "function" | "object" | "array")) => {
+            Some(Check::Kind(field.name.clone(), kind))
+        }
+        _ => None,
+    });
+    literal.chain(presence).chain(kind).collect()
+}
+
+/// Whether `shape` has a test, one check or several joined with `&&`, that
+/// every member of `others` fails.
+fn has_test(shape: &ObjectShape, others: &[&ObjectShape]) -> bool {
+    let mut uncovered: Vec<&ObjectShape> = others.to_vec();
+    for check in candidate_checks(shape) {
+        uncovered.retain(|other| !check_fails(&check, other));
+        if uncovered.is_empty() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Whether the compiler finds an order for these object members: it tests,
+/// one at a time, a member with a test every other remaining member fails.
+/// An open member has no test, so there is at most one, and it is last.
+fn objects_ordered(mut remaining: Vec<ObjectShape>) -> bool {
+    if remaining.iter().filter(|shape| matches!(shape, ObjectShape::Open)).count() > 1 {
+        return false;
+    }
+    while remaining.len() > 1 {
+        let found = (0..remaining.len()).find(|&index| {
+            let others: Vec<&ObjectShape> =
+                remaining.iter().enumerate().filter(|(other, _)| *other != index).map(|(_, shape)| shape).collect();
+            has_test(&remaining[index], &others)
+        });
+        match found {
+            Some(index) => {
+                remaining.remove(index);
+            }
+            None => return false,
+        }
+    }
+    true
+}
+
+/// `ty` with the type variables `params` replaced by `args`.
+fn substitute(ty: &Ty, params: &[String], args: &[Ty]) -> Ty {
+    match ty {
+        Ty::Var(name) => match params.iter().position(|param| param == name) {
+            Some(index) => args.get(index).cloned().unwrap_or_else(|| ty.clone()),
+            None => ty.clone(),
+        },
+        Ty::App(name, items) => Ty::App(name.clone(), items.iter().map(|item| substitute(item, params, args)).collect()),
+        Ty::Tuple(items) => Ty::Tuple(items.iter().map(|item| substitute(item, params, args)).collect()),
+        Ty::Fn(fn_params, ret) => Ty::Fn(
+            fn_params
+                .iter()
+                .map(|param| Param { ty: substitute(&param.ty, params, args), ..param.clone() })
+                .collect(),
+            Box::new(substitute(ret, params, args)),
+        ),
+        Ty::Poly(_) => ty.clone(),
+    }
+}
+
+/// One member made of several: a field both have is required when both
+/// require it and keeps the literals and kind they share; a field one of them
+/// lacks is optional.
+fn merge_shapes(a: &ObjectShape, b: &ObjectShape) -> ObjectShape {
+    let (ObjectShape::Closed(a), ObjectShape::Closed(b)) = (a, b) else {
+        return ObjectShape::Open;
+    };
+    let mut fields: Vec<FieldShape> = Vec::new();
+    for field in a.iter().chain(b) {
+        if fields.iter().any(|other| other.name == field.name) {
+            continue;
+        }
+        let in_a = a.iter().find(|other| other.name == field.name);
+        let in_b = b.iter().find(|other| other.name == field.name);
+        fields.push(match (in_a, in_b) {
+            (Some(x), Some(y)) if x.required && y.required => FieldShape {
+                name: field.name.clone(),
+                required: true,
+                literals: match (&x.literals, &y.literals) {
+                    (Some(l), Some(m)) => {
+                        let mut all = l.clone();
+                        all.extend(m.iter().filter(|literal| !l.contains(literal)).cloned());
+                        Some(all)
+                    }
+                    _ => None,
+                },
+                kind: if x.kind == y.kind { x.kind } else { None },
+            },
+            _ => FieldShape { name: field.name.clone(), required: false, literals: None, kind: None },
+        });
+    }
+    ObjectShape::Closed(fields)
+}
+
+/// The object members of a union in groups that become one case each:
+/// members that no check tells apart, in either direction, are merged until
+/// none are left, as no order could test either first. `None` when the
+/// groups still have no order, or there is more than one open member.
+fn object_groups(shapes: Vec<ObjectShape>) -> Option<Vec<Vec<usize>>> {
+    if shapes.iter().filter(|shape| matches!(shape, ObjectShape::Open)).count() > 1 {
+        return None;
+    }
+    let mut groups: Vec<(Vec<usize>, ObjectShape)> =
+        shapes.into_iter().enumerate().map(|(index, shape)| (vec![index], shape)).collect();
+    // A merged member can only become harder to tell apart from the others,
+    // so one pass that retries the pairs of each merged member is enough.
+    let mut i = 0;
+    while i < groups.len() {
+        let mut j = i + 1;
+        let mut merged = false;
+        while j < groups.len() {
+            let (a, b) = (&groups[i].1, &groups[j].1);
+            if !matches!(a, ObjectShape::Open)
+                && !matches!(b, ObjectShape::Open)
+                && !has_test(a, &[b])
+                && !has_test(b, &[a])
+            {
+                let (indices, shape) = groups.remove(j);
+                groups[i].1 = merge_shapes(&groups[i].1, &shape);
+                groups[i].0.extend(indices);
+                merged = true;
+            } else {
+                j += 1;
+            }
+        }
+        // The merged member is compared with the earlier ones again.
+        if merged && i > 0 {
+            i = 0;
+        } else {
+            i += 1;
+        }
+    }
+    objects_ordered(groups.iter().map(|(_, shape)| shape.clone()).collect())
+        .then(|| groups.into_iter().map(|(indices, _)| indices).collect())
 }

@@ -184,6 +184,16 @@ export function setHeaders(init: Headers | Map<string, string> | Record<string, 
 export function at(when: Date | number | URL): void {}
 export function pet(what: Dog | Animal | null): void {}
 
+// Plain objects told apart by their fields.
+export declare function settle(): { result: string } | { error: string; code?: number };
+export type Person = { name: string } | { name: string; age: number };
+export type Reading = { value: string } | { value: number };
+export type Headers2 = { name: string; value: string } | Record<string, string>;
+export type Blurred = { x: number } | { x: number; y?: string };
+export interface SpotA { x: number; y: number }
+export interface SpotB { x: number; y: number }
+export type Spot = SpotA | SpotB | string;
+
 // --- names and shapes that once produced declarations that do not compile ---
 // A literal that is a ReScript keyword.
 export type ReadyState = "open" | "closed" | "in" | "and" | "true";
@@ -198,3 +208,15 @@ export interface RefAttributes<T> { ref?: Ref<T | null> | ((instance: T | null) 
 export declare function pick<T>(from: { items: T[] }): T;
 // Iterators.
 export declare function entries(): IterableIterator<[string, number]>;
+
+// Members that share a tag: the kind of `value` tells the literals apart,
+// presence of `optional` the identifiers; two patterns that differ only
+// inside `elements` are one case.
+export interface StringLit { type: "Literal"; value: string; raw: string | null }
+export interface NumericLit { type: "Literal"; value: number; raw: string | null }
+export interface IdentName { type: "Identifier"; name: string }
+export interface IdentBinding { type: "Identifier"; name: string; optional: boolean }
+export interface ArrayPat { type: "ArrayPattern"; elements: (IdentBinding | null)[] }
+export interface ArrayTarget { type: "ArrayPattern"; elements: (IdentName | null)[] }
+export type SyntaxNode = StringLit | NumericLit | IdentName | IdentBinding | ArrayPat | ArrayTarget;
+export declare function visit(node: SyntaxNode): void;
