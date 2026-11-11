@@ -12701,13 +12701,6 @@ pub fn compile_source_in_process(
                 host,
             )?;
             match compile(Some(&expanded)) {
-                Err(error) if error.is::<crate::macros::MacroExpansionRequired>() => {
-                    Err(UserDiagnostic::new(
-                        format!("{filename}: macro expansion left a macro unexpanded.\n"),
-                        2,
-                    )
-                    .into())
-                }
                 Ok(mut compiled) => {
                     compiled.expanded_source = Some(expanded.text().to_string());
                     Ok(compiled)
@@ -13112,6 +13105,9 @@ pub(crate) fn in_process_type_check_context<'a>(
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
 ) -> (TypeCheckContext<'a>, Env) {
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    if arena.expansion().is_some() {
+        tctx.macro_mode = crate::macros::discover::MacroMode::Expanded { left: None };
+    }
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
@@ -13328,6 +13324,19 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let _phase = info_span!("compiler.type_structure").entered();
         type_structure(&mut tctx, &env, arena, structure)
     });
+    // A macro use that expansion left behind, in a file that type checks.
+    let typed = match (typed, &tctx.macro_mode) {
+        (Ok(_), crate::macros::discover::MacroMode::Expanded { left: Some(loc) }) => {
+            Err(TypeModError::CoreError(TypeCoreError::ExtensionError(
+                crate::types::typecore::BuiltinExtensionError {
+                    loc: *loc,
+                    message: crate::macros::discover::UNEXPANDED.to_string(),
+                    sub: Vec::new(),
+                },
+            )))
+        }
+        (typed, _) => typed,
+    };
     let (typed_structure, final_env) = match typed {
         Ok(result) => result,
         Err(e) => {

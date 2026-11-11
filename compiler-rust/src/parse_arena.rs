@@ -490,6 +490,9 @@ pub struct ParseArena {
     position_file_names: HashSet<StrIdx>,
     /// Most recent file name recorded in `position_file_names`.
     last_position_file_name: Option<StrIdx>,
+    /// Set when this is the parse of a macro-expanded text: what diagnostics
+    /// need to say where generated code comes from.
+    expansion: Option<std::sync::Arc<crate::macros::edit::Expansion>>,
     /// Arena of locations (returns LocIdx).
     locations: Arena<InternedLocation, LocIdx>,
     /// Arena of longidents (returns LidentIdx).
@@ -986,6 +989,7 @@ impl Default for ParseArena {
             positions: Arena::default(),
             position_file_names: HashSet::new(),
             last_position_file_name: None,
+            expansion: None,
             locations: Arena::default(),
             longidents,
             synthetic_longidents: SyntheticVec::default(),
@@ -2707,6 +2711,15 @@ impl ParseArena {
         for position in self.positions.iter_mut() {
             remap(position);
         }
+    }
+
+    /// The expansion this parse is the result of, if any.
+    pub fn expansion(&self) -> Option<&crate::macros::edit::Expansion> {
+        self.expansion.as_deref()
+    }
+
+    pub fn set_expansion(&mut self, expansion: std::sync::Arc<crate::macros::edit::Expansion>) {
+        self.expansion = Some(expansion);
     }
 
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {

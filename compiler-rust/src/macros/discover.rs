@@ -45,7 +45,17 @@ pub enum MacroMode {
     Off,
     /// A discovery pass of [`super::expand`].
     Discover(Box<Discovery>),
+    /// The compilation of a file after its expansion. A macro use is left
+    /// only where the code has an error of its own (an unknown name in the
+    /// argument of a `@generic`, say): the use is typed as far as its
+    /// declared type goes, so that type checking gets to that error and
+    /// reports it. `left` is the first such use.
+    Expanded { left: Option<LocIdx> },
 }
+
+/// Reported if a macro use is left in a file that otherwise type checks.
+pub const UNEXPANDED: &str =
+    "This macro use was not expanded. This is a bug in the compiler: please report it.";
 
 /// A problem a macro reported, or one with how a macro is used.
 #[derive(Debug, Clone)]
@@ -303,7 +313,8 @@ pub struct Discovery {
     base_dir: std::path::PathBuf,
     pub edits: Vec<Edit>,
     pub errors: Vec<MacroDiagnostic>,
-    /// Start of each top-level item that failed to type check.
+    /// Per top-level item that failed to type check: where the failure
+    /// counts as being, for the order of what is reported.
     pub failed_items: Vec<u32>,
     pub instances: InstanceTable,
     pub comptime: Vec<ComptimeSite>,
@@ -314,6 +325,8 @@ pub struct Discovery {
     item_start: u32,
     /// The item stopped because one of its macros was expanded.
     item_pending: bool,
+    /// How many problems were reported before the item.
+    item_errors: usize,
     /// The application whose function is being typed.
     apply: Option<(LocIdx, PendingCall)>,
     /// The instance groups in the text, by ordinal.
@@ -355,6 +368,7 @@ impl Discovery {
             depth: 0,
             item_start: 0,
             item_pending: false,
+            item_errors: 0,
             apply: None,
             groups: BTreeMap::new(),
             added: Vec::new(),
@@ -618,8 +632,23 @@ fn error_at(loc: LocIdx, message: impl Into<String>) -> TypeCoreError {
 
 /// Stop an ordinary compilation at a macro use.
 fn required(tctx: &mut TypeCheckContext<'_>, loc: LocIdx) -> TypeCoreError {
+    if leave(tctx, loc) {
+        return error_at(loc, UNEXPANDED);
+    }
     tctx.macro_expansion_required = true;
     error_at(loc, "This file uses macros and has to be expanded first.")
+}
+
+/// In the compilation of an expanded file: note the macro use at `loc` as
+/// left over. Returns whether this is such a compilation.
+fn leave(tctx: &mut TypeCheckContext<'_>, loc: LocIdx) -> bool {
+    match &mut tctx.macro_mode {
+        MacroMode::Expanded { left } => {
+            left.get_or_insert(loc);
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Stop typing the current item of a discovery pass: its edit, or the
@@ -641,7 +670,7 @@ fn fail(tctx: &mut TypeCheckContext<'_>, loc: LocIdx, message: impl Into<String>
             discovery.error(at, message);
             pending(tctx, loc)
         }
-        MacroMode::Off => error_at(loc, message),
+        MacroMode::Off | MacroMode::Expanded { .. } => error_at(loc, message),
     }
 }
 
@@ -915,7 +944,7 @@ pub(crate) fn expression_extension(
     if is_hole || quote::is_quote_name(&name) {
         // Quotes are lowered before a discovery pass; one that is left has
         // no payload.
-        return Some(Err(if !discovering(tctx) {
+        return Some(Err(if matches!(tctx.macro_mode, MacroMode::Off) {
             required(tctx, loc)
         } else if is_hole {
             fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
@@ -933,7 +962,8 @@ pub(crate) fn expression_extension(
         Ok(desc) => desc,
         Err(error) => return Some(Err(error)),
     };
-    if !discovering(tctx) {
+    // After expansion a use that is left is typed as its declared result.
+    if !discovering(tctx) && !leave(tctx, loc) {
         return Some(Err(required(tctx, loc)));
     }
     let ctx = tctx.type_ctx;
@@ -979,7 +1009,7 @@ fn comptime(
     extension: &Extension,
     expected_ty: TypeExprRef,
 ) -> TypeCoreResult<Expression> {
-    if !discovering(tctx) {
+    if !discovering(tctx) && !leave(tctx, loc) {
         return Err(required(tctx, loc));
     }
     let expr_idx = match payload_expressions(tctx.arena, &extension.1, 1) {
@@ -1058,7 +1088,7 @@ pub(crate) fn generic_use(
             format!("`{name}` is a macro. Use it as `%{name}(...)` or attach it as `@{name}`."),
         ));
     }
-    if !discovering(tctx) {
+    if !discovering(tctx) && !leave(tctx, loc) {
         return Err(required(tctx, loc));
     }
     let ctx = tctx.type_ctx;
@@ -1125,6 +1155,7 @@ pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructure
     let (start, end) = range(arena, item.pstr_loc);
     discovery.item_start = start;
     discovery.item_pending = false;
+    discovery.item_errors = discovery.errors.len();
     // An instance group that an earlier pass added.
     if is_instance_group(arena, item)
         && let ParsedStructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc
@@ -1188,11 +1219,20 @@ pub(crate) fn end_item(tctx: &mut TypeCheckContext<'_>, ok: bool) {
         return;
     }
     discovery.apply = None;
-    if !ok && !discovery.item_pending {
-        let start = discovery.item_start;
-        discovery.failed_items.push(start);
-    }
     let pending = std::mem::take(&mut discovery.pending);
+    if !ok && !discovery.item_pending {
+        // The item has a type error. It comes after the problems its macros
+        // reported while it was typed, and before the rest of the file.
+        let start = discovery.item_start;
+        let at = discovery.errors[discovery.item_errors..]
+            .iter()
+            .map(|error| error.end)
+            .max()
+            .unwrap_or(start);
+        discovery.failed_items.push(at);
+        // Its types are not final: no generic is generated from them.
+        return;
+    }
     with_discovery(tctx, |tctx, discovery| {
         for generic in pending {
             resolve_generic(tctx, discovery, generic);
@@ -1367,10 +1407,10 @@ pub(crate) fn pattern_extension(
 ) -> Option<TypeCoreError> {
     let name = tctx.arena.get_string(extension.0.txt).to_string();
     if name == HOLE_EXTENSION {
-        return Some(if discovering(tctx) {
-            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
-        } else {
+        return Some(if matches!(tctx.macro_mode, MacroMode::Off) {
             required(tctx, loc)
+        } else {
+            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
         });
     }
     if !is_macro_name(&name) {
@@ -1412,10 +1452,10 @@ pub(crate) fn type_extension(
 ) -> Option<TypeCoreError> {
     let name = tctx.arena.get_string(extension.0.txt).to_string();
     if name == HOLE_EXTENSION {
-        return Some(if discovering(tctx) {
-            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
-        } else {
+        return Some(if matches!(tctx.macro_mode, MacroMode::Off) {
             required(tctx, loc)
+        } else {
+            fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
         });
     }
     if !is_macro_name(&name) {
@@ -1645,11 +1685,18 @@ pub(crate) fn type_item_requires_expansion(
         return None;
     };
     let arena = tctx.arena;
-    inner
+    if !inner
         .1
         .iter()
         .any(|decl| has_macro_attribute(arena, &decl.ptype_attributes))
-        .then(|| required(tctx, item.pstr_loc))
+    {
+        return None;
+    }
+    // After expansion: the type itself is checked as written.
+    if leave(tctx, item.pstr_loc) {
+        return None;
+    }
+    Some(required(tctx, item.pstr_loc))
 }
 
 /// `@M.f type t = ...`, after the declaration is type checked in `env`: the

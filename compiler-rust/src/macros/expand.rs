@@ -145,7 +145,9 @@ pub fn expand_source(
             let _ = type_structure(&mut tctx, &env, arena, &structure);
             match std::mem::replace(&mut tctx.macro_mode, MacroMode::Off) {
                 MacroMode::Discover(discovery) => discovery.finish(),
-                MacroMode::Off => unreachable!("the discovery pass state was taken"),
+                MacroMode::Off | MacroMode::Expanded { .. } => {
+                    unreachable!("the discovery pass state was taken")
+                }
             }
         };
         drop(parser);
@@ -203,7 +205,9 @@ pub fn remap_positions(arena: &mut crate::parse_arena::ParseArena, text: &Source
         .chars()
         .any(|ch| ch.len_utf16() > 1)
         .then(|| original.chars().collect());
+    let mut offsets = Vec::with_capacity(arena.position_count());
     arena.remap_positions(|position| {
+        offsets.push(position.cnum.max(0) as u32);
         if position.cnum < 0 {
             return;
         }
@@ -220,6 +224,10 @@ pub fn remap_positions(arena: &mut crate::parse_arena::ParseArena, text: &Source
         position.bol = bol as i32;
         position.cnum = (bol + column) as i32;
     });
+    arena.set_expansion(Arc::new(super::edit::Expansion {
+        text: text.clone(),
+        offsets,
+    }));
 }
 
 fn unwrap_text(text: Arc<SourceText>) -> SourceText {

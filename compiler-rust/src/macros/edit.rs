@@ -138,6 +138,16 @@ impl SourceText {
     }
 }
 
+/// What the compilation of an expanded file keeps of the expansion.
+#[derive(Debug)]
+pub struct Expansion {
+    /// The expanded text.
+    pub text: SourceText,
+    /// Per position of the parse, by index: its offset in the expanded
+    /// text. The positions themselves point into the source as written.
+    pub offsets: Vec<u32>,
+}
+
 fn char_offsets(text: &str) -> Vec<u32> {
     let mut offsets: Vec<u32> = text.char_indices().map(|(byte, _)| byte as u32).collect();
     offsets.push(text.len() as u32);
