@@ -549,19 +549,6 @@ fn macro_code_has_no_clock_and_no_random_numbers() {
 }
 
 #[test]
-fn generated_syntax_errors_show_the_generated_code() {
-    let mut project = Project::new();
-    compile_ok(
-        &mut project,
-        "Bad.res",
-        "open Macro\n@macro\nlet bad = (): code<int> => Code.raw(\"1 +\")\n",
-    );
-    let error = compile_err(&mut project, "UseBad.res", "let x = %Bad.bad()\n");
-    assert!(error.contains("A macro generated code with a syntax error"), "{error}");
-    assert!(error.contains("let x = (1 +)"), "{error}");
-}
-
-#[test]
 fn pattern_macro() {
     let mut project = Project::new();
     compile_ok(

@@ -1,0 +1,24 @@
+let a = 1
+let x = %Quoted.twice(a + 1)
+----
+
+  We've found a bug for you!
+  QuotedType.res:2:9-28
+
+  1 │ let a = 1
+  2 │ let x = %Quoted.twice(a + 1)
+  3 │
+
+  This is in the code the macro generated, written at Quoted.res:7:9-13
+
+  5 ┆ %code({
+  6 ┆   let v = ${e}
+  7 ┆   v + "two"
+  8 ┆ })
+  9 ┆
+
+  This has type: string
+  But it's expected to have type: int
+
+  You can convert string to int with Int.fromString.
+

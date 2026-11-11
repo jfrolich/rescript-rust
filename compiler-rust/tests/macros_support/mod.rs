@@ -1,5 +1,7 @@
-//! A small in-memory project for the macro tests: the standard library is
-//! type checked from source, and macros run in QuickJS.
+//! A small project for the macro tests: the standard library is type
+//! checked from source, and macros run in QuickJS. Its files are written to
+//! a directory of its own, so that a diagnostic can show the code it is
+//! about; that directory is left out of the diagnostics the tests see.
 #![allow(dead_code)]
 
 use std::collections::HashMap;
@@ -15,8 +17,9 @@ pub fn runtime_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime")
 }
 
-
 pub struct Project {
+    /// Where the files given by a relative name are written.
+    dir: PathBuf,
     registry: ModuleRegistry,
     /// Compiled JavaScript of the project's modules, for the macro engine.
     javascript: Arc<Mutex<HashMap<String, String>>>,
@@ -54,7 +57,15 @@ impl Project {
             }
             std::fs::read_to_string(runtime_dir().join(format!("lib/js/{name}.cjs"))).ok()
         })));
+        static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let dir = std::env::temp_dir().join(format!(
+            "rescript-macro-tests-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
         let mut project = Project {
+            dir,
             registry,
             javascript,
             host,
@@ -69,6 +80,12 @@ impl Project {
 
     pub fn compile(&mut self, filename: &str, source: &str) -> Result<String, String> {
         let module_name = driver::module_name_from_source_filename(filename);
+        let path = self.dir.join(filename);
+        if std::path::Path::new(filename).is_relative() {
+            std::fs::write(&path, source).unwrap();
+        }
+        let filename = path.to_str().unwrap();
+        let prefix = format!("{}/", self.dir.display());
         let host: Arc<dyn MacroHost> = self.host.clone();
         let options = CompilerOptions {
             source_filename: Some(filename.to_string()),
@@ -101,16 +118,33 @@ impl Project {
                     );
                 }
                 let text = |text: &str| {
-                    rescript_compiler::source_text::decode_internal_utf8(text).into_owned()
+                    rescript_compiler::source_text::decode_internal_utf8(text).replace(&prefix, "")
                 };
                 let js = text(&compiled.js_output);
-                self.javascript.lock().unwrap().insert(module_name, js.clone());
+                self.javascript
+                    .lock()
+                    .unwrap()
+                    .insert(module_name, js.clone());
                 self.host.invalidate();
                 self.expanded = compiled.expanded_source.as_deref().map(text);
                 self.warnings = text(&compiled.warnings);
                 Ok(js)
             }
-            Err(e) => Err(rescript_compiler::source_text::decode_internal_utf8(&format!("{e:#}")).into_owned()),
+            Err(e) => Err(
+                rescript_compiler::source_text::decode_internal_utf8(&format!("{e:#}"))
+                    .replace(&prefix, ""),
+            ),
         }
+    }
+}
+
+impl Drop for Project {
+    fn drop(&mut self) {
+        if let Ok(entries) = std::fs::read_dir(&self.dir) {
+            for entry in entries.flatten() {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+        let _ = std::fs::remove_dir(&self.dir);
     }
 }

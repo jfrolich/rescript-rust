@@ -2707,10 +2707,44 @@ impl ParseArena {
     /// Rewrite every position recorded so far. Macro expansion parses the
     /// expanded text and then moves each position to where it is in the
     /// source as written.
-    pub fn remap_positions(&mut self, mut remap: impl FnMut(&mut Position)) {
+    ///
+    /// `range` is asked about each location, with the positions it has in
+    /// the expanded text: it answers when the location does not start and
+    /// end where its two positions go by themselves (a location that ends in
+    /// generated code ends where the macro use ends, not where it starts).
+    /// Such a location gets positions of its own. Returned: for each
+    /// position added, the index of the one it was made from.
+    pub fn remap_positions(
+        &mut self,
+        mut remap: impl FnMut(&mut Position),
+        mut range: impl FnMut(&Position, &Position) -> Option<(Position, Position)>,
+    ) -> Vec<(u32, u32)> {
+        let mut added = Vec::new();
+        let mut moved = Vec::new();
+        for (index, location) in self.locations.iter() {
+            let start = self.positions.get(location.loc_start);
+            let end = self.positions.get(location.loc_end);
+            if let Some(range) = range(start, end) {
+                moved.push((index, range));
+            }
+        }
         for position in self.positions.iter_mut() {
             remap(position);
         }
+        for (index, (start, end)) in moved {
+            let (old_start, old_end) = {
+                let location = self.locations.get(index);
+                (location.loc_start, location.loc_end)
+            };
+            let new_start = self.positions.push(start);
+            let new_end = self.positions.push(end);
+            added.push((new_start.0, old_start.0));
+            added.push((new_end.0, old_end.0));
+            let location = self.locations.get_mut(index);
+            location.loc_start = new_start;
+            location.loc_end = new_end;
+        }
+        added
     }
 
     /// The expansion this parse is the result of, if any.

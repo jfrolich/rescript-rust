@@ -169,6 +169,23 @@
     }
   }
 
+  // An argument that is code comes with `$o`, the compiler's name for where
+  // its text is in the file: the whole of its text is from there.
+  function withOrigin(value, depth) {
+    if (value === null || typeof value !== "object" || depth > 4) return value;
+    if (Array.isArray(value)) {
+      return value.map(function (item) { return withOrigin(item, depth + 1); });
+    }
+    var isCode = typeof value.c === "string" && typeof value.$o === "number";
+    var out = {};
+    Object.keys(value).forEach(function (key) {
+      if (isCode && key === "$o") return;
+      out[key] = key === "t" ? value[key] : withOrigin(value[key], depth + 1);
+    });
+    if (isCode) out.m = [[0, value.c.length, value.$o]];
+    return out;
+  }
+
   function describe(error) {
     if (error && typeof error === "object") {
       if (error.RE_EXN_ID !== undefined) {
@@ -203,19 +220,24 @@
         return value === null || value === undefined ? undefined : value[key];
       }, load(request.module));
       if (typeof macro !== "function") {
-        throw { __macro_error: "`" + request.module + "." + request.name + "` is not a function, so it cannot run as a macro." };
+        throw { __macro_error: "`" + request.module + "." + request.name + "` is not a function, so it cannot run as a macro.", engine: true };
       }
-      var result = macro.apply(null, request.args);
+      var result = macro.apply(null, request.args.map(function (arg) { return withOrigin(arg, 0); }));
       if (result === null || typeof result !== "object" || typeof result.c !== "string") {
-        throw { __macro_error: "The macro `" + request.module + "." + request.name + "` did not return code." };
+        throw { __macro_error: "The macro `" + request.module + "." + request.name + "` did not return code.", engine: true };
       }
-      return JSON.stringify({ ok: result.c });
+      return JSON.stringify({ ok: result.c, spans: result.m || [] });
     } catch (error) {
       if (error && error.__macro_need !== undefined) return JSON.stringify({ need: error.__macro_need });
       if (error && error.__macro_error !== undefined) {
-        return JSON.stringify({ error: error.__macro_error, offset: error.offset === undefined ? null : error.offset });
+        return JSON.stringify({
+          error: error.__macro_error,
+          offset: error.offset === undefined ? null : error.offset,
+          // Said by the engine, not by the macro.
+          engine: error.engine === true,
+        });
       }
-      return JSON.stringify({ error: "The macro raised an exception: " + describe(error) });
+      return JSON.stringify({ error: describe(error), exception: true });
     }
   };
 })();

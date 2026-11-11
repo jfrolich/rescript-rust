@@ -1,0 +1,18 @@
+type user = {name: string, age: int}
+let alice = {name: "Alice", age: 30}
+Console.log(JSON.stringify(Json.encode(alice), ~space="x"))
+----
+
+  We've found a bug for you!
+  ErrorBesideAUse.res:3:55-57
+
+  1 │ type user = {name: string, age: int}
+  2 │ let alice = {name: "Alice", age: 30}
+  3 │ Console.log(JSON.stringify(Json.encode(alice), ~space="x"))
+  4 │
+
+  This has type: string
+  But this optional function argument ~space is expecting: int
+
+  You can convert string to int with Int.fromString.
+

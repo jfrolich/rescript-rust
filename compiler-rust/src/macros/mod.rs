@@ -25,6 +25,7 @@ pub mod expand;
 pub mod quickjs;
 pub mod quote;
 pub mod reflect;
+pub mod report;
 
 /// The engine-side script: module loader and call entry point.
 pub const HOST_JS: &str = include_str!("host.js");

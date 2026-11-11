@@ -34,35 +34,85 @@ use super::quote;
 const MAX_PASSES: usize = 64;
 
 /// A diagnostic at characters `start..end` of `text`, reported against the
-/// source as written.
+/// source as written. One in generated code is reported at the macro use,
+/// with a note about the generated code; `in_expansion` asks for that note
+/// wherever the diagnostic is.
 fn diagnostic(
+    intro: &str,
     original: &str,
     text: &SourceText,
     filename: &str,
-    start: u32,
-    end: u32,
+    (start, end): (u32, u32),
+    in_expansion: bool,
+    message: &str,
+) -> anyhow::Error {
+    let generated = text.generated_code(start, end).or_else(|| {
+        (in_expansion && text.is_edited()).then(|| super::edit::GeneratedCode {
+            start,
+            end: end.max(start + 1),
+            description: None,
+            quote: None,
+        })
+    });
+    let note = generated
+        .map(|generated| {
+            super::report::generated_code_note(
+                text,
+                &generated,
+                false,
+                driver::read_in_process_source,
+            )
+        })
+        .unwrap_or_default();
+    let (start, end) = text.original_range(start, end.max(start + 1));
+    original_diagnostic(intro, original, filename, (start, end), &note, message)
+}
+
+/// A diagnostic at characters `start..end` of the source as written.
+/// `note` goes between the code frame and the message.
+fn original_diagnostic(
+    intro: &str,
+    original: &str,
+    filename: &str,
+    (start, end): (u32, u32),
+    note: &str,
     message: &str,
 ) -> anyhow::Error {
     let lines = LineTable::new(original);
-    let start = text.origin(start);
-    let end = text.origin(end).max(start + 1);
     let position = |offset: u32| {
         let (line, bol) = lines.line_of(offset);
-        Position::new(crate::intern::StrIdx::from_raw(0), line, bol as i32, offset as i32)
+        Position::new(
+            crate::intern::StrIdx::from_raw(0),
+            line,
+            bol as i32,
+            offset as i32,
+        )
     };
+    // Every line of the message is indented like the first.
+    let mut body = String::from(note.strip_prefix("  ").unwrap_or(note));
+    for (index, line) in message.lines().enumerate() {
+        if index > 0 || !body.is_empty() {
+            body.push_str(if line.is_empty() { "\n" } else { "\n  " });
+        }
+        body.push_str(line);
+    }
+    // A note ends with the blank line after its frame.
+    let body = body.replace("\n\n\n", "\n\n");
     UserDiagnostic::new(
         code_frame::format_error_with_intro(
-            "We've found a bug for you!",
+            intro,
             filename,
             original,
             &position(start),
-            &position(end),
-            message,
+            &position(end.max(start + 1)),
+            &body,
         ),
         2,
     )
     .into()
 }
+
+const BUG: &str = "We've found a bug for you!";
 
 /// Expand the macros of a file. Returns the expanded text; it is the source
 /// unchanged ([`SourceText::is_edited`] false) when the file has a problem
@@ -78,6 +128,7 @@ pub fn expand_source(
 ) -> Result<SourceText> {
     let mut text = Arc::new(SourceText::new(source));
     let mut instances = InstanceTable::default();
+    let mut unfinished: Option<(u32, u32)> = None;
     let base_dir = std::path::Path::new(filename)
         .parent()
         .map(|dir| dir.to_path_buf())
@@ -90,10 +141,17 @@ pub fn expand_source(
             if !text.is_edited() {
                 return Ok(SourceText::new(source));
             }
-            return Err(generated_syntax_error(&parser, &text, filename));
+            return Err(generated_syntax_error(&parser, &text, source, filename));
         }
 
-        let quote_edits = quote::lowering_edits(parser.arena(), &structure, &text, module_name);
+        let quote_edits = quote::lowering_edits(
+            parser.arena(),
+            &structure,
+            &text,
+            source,
+            filename,
+            module_name,
+        );
         if !quote_edits.is_empty() {
             text = Arc::new(text.apply(quote_edits));
             continue;
@@ -156,8 +214,18 @@ pub fn expand_source(
         let mut errors = pass.errors;
 
         for site in &pass.comptime {
-            match evaluate_comptime(site, &opens, filename, module_name, options, registry, &host) {
-                Ok(literal) => edits.push(Edit::replace(site.start, site.end, format!("({literal})"))),
+            match evaluate_comptime(
+                site,
+                &opens,
+                filename,
+                module_name,
+                options,
+                registry,
+                &host,
+            ) {
+                Ok(literal) => {
+                    edits.push(Edit::replace(site.start, site.end, format!("({literal})")))
+                }
                 Err(message) => errors.push(MacroDiagnostic {
                     start: site.start,
                     end: site.end,
@@ -173,31 +241,49 @@ pub fn expand_source(
                 // A type error comes first: the ordinary compilation reports it.
                 (Some(error), Some(failed)) if failed < error.start => Ok(unwrap_text(text)),
                 (Some(error), _) => Err(diagnostic(
+                    BUG,
                     source,
                     &text,
                     filename,
-                    error.start,
-                    error.end,
+                    (error.start, error.end),
+                    false,
                     &error.message,
                 )),
                 (None, _) => Ok(unwrap_text(text)),
             };
         }
+        // The macro use that is still expanding when the passes run out.
+        if let Some(edit) = edits
+            .iter()
+            .filter(|edit| edit.end > edit.start)
+            .min_by_key(|edit| edit.start)
+        {
+            unfinished = Some(text.original_range(edit.start, edit.end));
+        }
         text = Arc::new(text.apply(edits));
     }
-    Err(UserDiagnostic::new(
-        format!(
-            "{filename}: macro expansion did not finish after {MAX_PASSES} passes. A macro probably generates a call to itself.\n"
-        ),
-        2,
-    )
-    .into())
+    let message = format!(
+        "Macro expansion did not finish after {MAX_PASSES} passes.\nA macro probably generates a use of itself."
+    );
+    Err(original_diagnostic(
+        BUG,
+        source,
+        filename,
+        unfinished.unwrap_or((0, 0)),
+        "",
+        &message,
+    ))
 }
 
 /// Move every position of a parse of the expanded text to where it is in
 /// the source as written. Generated code takes the position of the macro
-/// use it was generated for.
-pub fn remap_positions(arena: &mut crate::parse_arena::ParseArena, text: &SourceText, original: &str) {
+/// use it was generated for: a location that starts or ends in generated
+/// code covers that use.
+pub fn remap_positions(
+    arena: &mut crate::parse_arena::ParseArena,
+    text: &SourceText,
+    original: &str,
+) {
     let lines = LineTable::new(original);
     // An ordinary parse counts a column in UTF-16 code units; only text
     // with characters outside the BMP makes that differ from characters.
@@ -205,13 +291,7 @@ pub fn remap_positions(arena: &mut crate::parse_arena::ParseArena, text: &Source
         .chars()
         .any(|ch| ch.len_utf16() > 1)
         .then(|| original.chars().collect());
-    let mut offsets = Vec::with_capacity(arena.position_count());
-    arena.remap_positions(|position| {
-        offsets.push(position.cnum.max(0) as u32);
-        if position.cnum < 0 {
-            return;
-        }
-        let offset = text.origin(position.cnum as u32);
+    let place = |position: &mut Position, offset: u32| {
         let (line, bol) = lines.line_of(offset);
         let column = match &wide {
             Some(chars) => chars[bol as usize..offset as usize]
@@ -223,7 +303,34 @@ pub fn remap_positions(arena: &mut crate::parse_arena::ParseArena, text: &Source
         position.line = line;
         position.bol = bol as i32;
         position.cnum = (bol + column) as i32;
-    });
+    };
+    let mut offsets = Vec::with_capacity(arena.position_count());
+    let added = arena.remap_positions(
+        |position| {
+            offsets.push(position.cnum.max(0) as u32);
+            if position.cnum >= 0 {
+                place(position, text.origin(position.cnum as u32));
+            }
+        },
+        |start, end| {
+            if start.cnum < 0 || end.cnum <= start.cnum {
+                return None;
+            }
+            let (from, to) = (start.cnum as u32, end.cnum as u32);
+            let range = text.original_range(from, to);
+            if range == (text.origin(from), text.origin(to)) {
+                return None;
+            }
+            let (mut new_start, mut new_end) = (*start, *end);
+            place(&mut new_start, range.0);
+            place(&mut new_end, range.1);
+            Some((new_start, new_end))
+        },
+    );
+    for (index, from) in added {
+        debug_assert_eq!(index as usize, offsets.len());
+        offsets.push(offsets[from as usize]);
+    }
     arena.set_expansion(Arc::new(super::edit::Expansion {
         text: text.clone(),
         offsets,
@@ -234,20 +341,31 @@ fn unwrap_text(text: Arc<SourceText>) -> SourceText {
     Arc::try_unwrap(text).unwrap_or_else(|shared| (*shared).clone())
 }
 
-fn generated_syntax_error(parser: &Parser<'_>, text: &SourceText, filename: &str) -> anyhow::Error {
-    let mut output = String::from(
-        "A macro generated code with a syntax error. The frame shows the expanded source.\n\n",
-    );
-    for diagnostic in parser.diagnostics().iter().take(1) {
-        output.push_str(&code_frame::format_error(
-            filename,
-            text.text(),
-            &diagnostic.start_pos,
-            &diagnostic.end_pos,
-            &diagnostic.explain_with_source(Some(text.text())),
-        ));
-    }
-    UserDiagnostic::new(output, 2).into()
+fn generated_syntax_error(
+    parser: &Parser<'_>,
+    text: &SourceText,
+    original: &str,
+    filename: &str,
+) -> anyhow::Error {
+    let Some(error) = parser.diagnostics().first() else {
+        return UserDiagnostic::new(
+            format!("{filename}: a macro generated code that does not parse.\n"),
+            2,
+        )
+        .into();
+    };
+    diagnostic(
+        "Syntax error!",
+        original,
+        text,
+        filename,
+        (
+            error.start_pos.cnum.max(0) as u32,
+            error.end_pos.cnum.max(0) as u32,
+        ),
+        true,
+        &error.explain_with_source(Some(text.text())),
+    )
 }
 
 /// The `open` statements at the top level of the file, as source text:
@@ -262,8 +380,11 @@ fn top_level_opens(
         .filter(|item| matches!(item.pstr_desc, StructureItemDesc::Pstr_open(_)))
         .map(|item| {
             let location = parser.arena().to_location(item.pstr_loc);
-            text.slice(location.loc_start.cnum.max(0) as u32, location.loc_end.cnum.max(0) as u32)
-                .to_string()
+            text.slice(
+                location.loc_start.cnum.max(0) as u32,
+                location.loc_end.cnum.max(0) as u32,
+            )
+            .to_string()
         })
         .collect()
 }
@@ -282,7 +403,10 @@ fn evaluate_comptime(
     if site.shape.get("k") == Some(&json!("other")) {
         return Err(format!(
             "%comptime: a value of type {} cannot be written as a literal. Supported: int, float, string, bool, unit, arrays, tuples, options, dicts and records of those.",
-            site.shape.get("name").and_then(Value::as_str).unwrap_or("this type"),
+            site.shape
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("this type"),
         ));
     }
     let source = format!("{}\nlet value = {}\n", opens.join("\n"), site.expression);
@@ -306,8 +430,24 @@ fn evaluate_comptime(
         false,
     )
     .map_err(|error| {
+        // What the report of the expression's own compilation says, without
+        // its header: the expression is in this file, not in one of its own.
+        let report = format!("{error:#}");
+        let said = report
+            .find(&comptime_file)
+            .and_then(|at| report[at..].find("\n\n").map(|blank| &report[at + blank..]))
+            .unwrap_or(&report);
+        let said: Vec<&str> = said.trim_matches('\n').lines().map(str::trim_end).collect();
+        let indent = said
+            .iter()
+            .filter(|line| !line.is_empty())
+            .map(|line| line.len() - line.trim_start().len())
+            .min()
+            .unwrap_or(0);
+        let said: Vec<&str> = said.iter().map(|line| line.get(indent..).unwrap_or("")).collect();
         format!(
-            "%comptime: the expression is compiled on its own, before this file, so it can only use other modules.\n{error:#}"
+            "{}\n\n%comptime compiles its expression on its own, before the rest of this file: it can use other modules, not what this file defines.",
+            said.join("\n")
         )
     })?;
 
@@ -325,19 +465,27 @@ fn evaluate_comptime(
         });
         let response = super::call_host(&**host, &request.to_string())
             .map_err(|message| format!("%comptime: the macro engine failed: {message}"))?;
-        let response: Value = serde_json::from_str(&response)
-            .map_err(|error| format!("%comptime: the macro engine returned invalid JSON: {error}"))?;
+        let response: Value = serde_json::from_str(&response).map_err(|error| {
+            format!("%comptime: the macro engine returned invalid JSON: {error}")
+        })?;
         if let Some(literal) = response.get("ok").and_then(Value::as_str) {
             return Ok(literal.to_string());
         }
         if let Some(message) = response.get("error").and_then(Value::as_str) {
-            return Err(format!("%comptime: {message}"));
+            return Err(
+                if response.get("exception").and_then(Value::as_bool) == Some(true) {
+                    format!("The expression of %comptime raised an exception:\n{message}")
+                } else {
+                    format!("%comptime: {message}")
+                },
+            );
         }
         let Some(question) = response.get("need").and_then(Value::as_str) else {
             return Err("%comptime: the macro engine returned an unknown response.".into());
         };
-        let answer = super::discover::answer_input(&base_dir, question)
-            .unwrap_or_else(|| json!({ "__error": format!("`{question}` cannot be answered in %comptime.") }));
+        let answer = super::discover::answer_input(&base_dir, question).unwrap_or_else(
+            || json!({ "__error": format!("`{question}` cannot be answered in %comptime.") }),
+        );
         answers.insert(question.to_string(), answer);
     }
     Err("%comptime: the expression asked more than 1024 questions.".into())

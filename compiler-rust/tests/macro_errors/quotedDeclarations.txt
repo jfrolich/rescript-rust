@@ -1,0 +1,22 @@
+%%Quoted.decl()
+----
+
+  We've found a bug for you!
+  QuotedDeclarations.res:1:1-15
+
+  1 │ %%Quoted.decl()
+  2 │
+
+  This is in the code the macro generated, written at Quoted.res:27:47-49
+
+  25 │
+  26 │ @macro
+  27 │ let decl = (): decls => %code(let made: int = "x")
+  28 │
+  29 │ // Code that is not written in a quote.
+
+  This has type: string
+  But it's expected to have type: int
+
+  You can convert string to int with Int.fromString.
+

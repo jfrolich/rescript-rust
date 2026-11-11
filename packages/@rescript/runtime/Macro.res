@@ -26,14 +26,50 @@ type declarations
 type decls = code<declarations>
 
 /* The representation the compiler and the engine share: the source text,
-   and for a type the compiler's handle of it. */
-type rec node = {c: string, id?: int, t?: node, raw?: bool}
+   and for a type the compiler's handle of it. `m` says which parts of the
+   text are text from elsewhere, an argument of the macro or a quote: the
+   compiler reports an error in generated code with it. */
+type span
+type rec node = {c: string, m?: array<span>, id?: int, t?: node, raw?: bool}
 
 external toNode: 'a => node = "%identity"
 external ofNode: node => 'a = "%identity"
 
 let make = (source: string): 'a => ofNode({c: source})
 let source = (value: 'a): string => toNode(value).c
+
+/* One node of several, in order. A span is `[start, length, ...origin]`. */
+let cat: array<node> => node = %raw(`function (parts) {
+  var c = "", m;
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i];
+    if (part.m !== undefined) {
+      if (m === undefined) m = [];
+      for (var j = 0; j < part.m.length; j++) {
+        var span = part.m[j].slice();
+        span[0] += c.length;
+        m.push(span);
+      }
+    }
+    c += part.c;
+  }
+  return m === undefined ? {c: c} : {c: c, m: m};
+}`)
+
+let text = (source: string): node => {c: source}
+let build = (parts: array<node>): 'a => ofNode(cat(parts))
+
+/* The nodes with `separator` between them. */
+let join = (nodes: array<node>, separator: string): node => {
+  let parts = []
+  nodes->Array.forEachWithIndex((node, index) => {
+    if index > 0 {
+      parts->Array.push(text(separator))
+    }
+    parts->Array.push(node)
+  })
+  cat(parts)
+}
 
 type host
 @val external host: host = "__rescript_macro"
@@ -74,27 +110,48 @@ type hole
 external __holeCode: code<'a> => hole = "%identity"
 external __holeType: typ => hole = "%identity"
 external __holePat: pat => hole = "%identity"
-let __holeItem = (value: code<'a>): hole => ofNode({c: source(value), raw: true})
+let __holeItem = (value: code<'a>): hole => ofNode({...toNode(value), raw: true})
 
-let quote = (pieces: array<string>, holes: array<hole>): node => {
-  let text = ref(pieces->Array.getUnsafe(0))
-  holes->Array.forEachWithIndex((hole, index) => {
-    let hole = toNode(hole)
-    let filled = hole.raw == Some(true) ? hole.c : "(" ++ hole.c ++ ")"
-    text := text.contents ++ filled ++ pieces->Array.getUnsafe(index + 1)
-  })
-  {c: text.contents}
-}
+/* A piece is the text between two holes: parts of the macro's file, each
+   with its line and column there (line 0: text that is not from the file). */
+type piece = array<(string, int, int)>
 
-let __quoteCode = (pieces, holes): code<'a> => ofNode(quote(pieces, holes))
-let __quoteDecls = (pieces, holes): decls => ofNode(quote(pieces, holes))
-let __quoteType = (pieces, holes): typ => ofNode(quote(pieces, holes))
-let __quotePat = (pieces, holes): pat => ofNode(quote(pieces, holes))
+let quote: (array<piece>, array<hole>, string) => node = %raw(`function (pieces, holes, file) {
+  var parts = [];
+  function add(piece) {
+    for (var i = 0; i < piece.length; i++) {
+      var fragment = piece[i];
+      parts.push(
+        fragment[1] > 0
+          ? {c: fragment[0], m: [[0, fragment[0].length, file, fragment[1], fragment[2]]]}
+          : {c: fragment[0]}
+      );
+    }
+  }
+  add(pieces[0]);
+  for (var i = 0; i < holes.length; i++) {
+    var hole = holes[i];
+    if (hole.raw === true) {
+      parts.push(hole);
+    } else {
+      parts.push({c: "("}, hole, {c: ")"});
+    }
+    add(pieces[i + 1]);
+  }
+  return cat(parts);
+}`)
+
+let __quoteCode = (pieces, holes, file): code<'a> => ofNode(quote(pieces, holes, file))
+let __quoteDecls = (pieces, holes, file): decls => ofNode(quote(pieces, holes, file))
+let __quoteType = (pieces, holes, file): typ => ofNode(quote(pieces, holes, file))
+let __quotePat = (pieces, holes, file): pat => ofNode(quote(pieces, holes, file))
 
 let isSimple: string => bool = %raw(`function (text) {
   return /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(text)
 }`)
 let atom = (text: string) => isSimple(text) ? text : "(" ++ text ++ ")"
+/* `node` where an operand is expected: in parentheses unless it is a name. */
+let atomNode = (node: node): node => isSimple(node.c) ? node : cat([text("("), node, text(")")])
 
 module Attr = {
   /** An attribute: `@Json.key("user_age")` has the name `Json.key` and the payload `user_age`. */
@@ -266,31 +323,40 @@ module Code = {
   let ident = (name: string): code<'a> => make(name)
 
   /** `value.name` */
-  let field = (value: code<'a>, name: string): code<'b> => make(atom(source(value)) ++ "." ++ name)
+  let field = (value: code<'a>, name: string): code<'b> => build([atomNode(toNode(value)), text("." ++ name)])
 
   /** `[a, b, c]` */
   let array = (items: array<code<'a>>): code<array<'a>> =>
-    make("[" ++ items->Array.map(source)->Array.join(", ") ++ "]")
+    build([text("["), join(items->Array.map(toNode), ", "), text("]")])
 
   /** `(a, b, c)` */
-  let tuple = (items: array<code<'a>>): code<'b> => make("(" ++ items->Array.map(source)->Array.join(", ") ++ ")")
+  let tuple = (items: array<code<'a>>): code<'b> =>
+    build([text("("), join(items->Array.map(toNode), ", "), text(")")])
 
   /** `{name: value, ...}` */
   let record = (fields: array<(string, code<'a>)>): code<'b> =>
-    make("{" ++ fields->Array.map(((name, value)) => name ++ ": " ++ source(value))->Array.join(", ") ++ "}")
+    build([
+      text("{"),
+      join(fields->Array.map(((name, value)) => cat([text(name ++ ": "), toNode(value)])), ", "),
+      text("}"),
+    ])
 
   /** `f(a, b)` */
   let call = (f: code<'a>, args: array<code<'b>>): code<'c> =>
-    make(atom(source(f)) ++ "(" ++ args->Array.map(source)->Array.join(", ") ++ ")")
+    build([atomNode(toNode(f)), text("("), join(args->Array.map(toNode), ", "), text(")")])
 
   /** `switch value { | pattern => body ... }` */
   let switch_ = (value: code<'a>, arms: array<(pat, code<'b>)>): code<'b> =>
-    make(
-      "switch " ++
-      atom(source(value)) ++
-      " {\n" ++
-      arms->Array.map(((pattern, body)) => "| " ++ source(pattern) ++ " => " ++ source(body))->Array.join("\n") ++ "\n}",
-    )
+    build([
+      text("switch "),
+      atomNode(toNode(value)),
+      text(" {\n"),
+      join(
+        arms->Array.map(((pattern, body)) => cat([text("| "), toNode(pattern), text(" => "), toNode(body)])),
+        "\n",
+      ),
+      text("\n}"),
+    ])
 
   /** A parameter of `fn`. */
   type param = string
@@ -303,10 +369,10 @@ module Code = {
 
   /** `(params) => body` */
   let fn = (params: array<param>, body: code<'a>): code<'f> =>
-    make("(" ++ params->Array.join(", ") ++ ") => " ++ source(body))
+    build([text("(" ++ params->Array.join(", ") ++ ") => "), toNode(body)])
 
   /** Several declarations, one after the other. */
-  let decls = (items: array<decls>): decls => make(items->Array.map(source)->Array.join("\n"))
+  let decls = (items: array<decls>): decls => build([join(items->Array.map(toNode), "\n")])
 }
 
 module Pat = {

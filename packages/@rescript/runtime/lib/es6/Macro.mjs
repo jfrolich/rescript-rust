@@ -1,7 +1,6 @@
 
 
 import * as Stdlib_Type from "./Stdlib_Type.mjs";
-import * as Primitive_object from "./Primitive_object.mjs";
 import * as Primitive_option from "./Primitive_option.mjs";
 
 function make(source) {
@@ -12,6 +11,44 @@ function make(source) {
 
 function source(value) {
   return value.c;
+}
+
+let cat = (function (parts) {
+  var c = "", m;
+  for (var i = 0; i < parts.length; i++) {
+    var part = parts[i];
+    if (part.m !== undefined) {
+      if (m === undefined) m = [];
+      for (var j = 0; j < part.m.length; j++) {
+        var span = part.m[j].slice();
+        span[0] += c.length;
+        m.push(span);
+      }
+    }
+    c += part.c;
+  }
+  return m === undefined ? {c: c} : {c: c, m: m};
+});
+
+function text(source) {
+  return {
+    c: source
+  };
+}
+
+function build(parts) {
+  return cat(parts);
+}
+
+function join(nodes, separator) {
+  let parts = [];
+  nodes.forEach((node, index) => {
+    if (index > 0) {
+      parts.push(text(separator));
+    }
+    parts.push(node);
+  });
+  return cat(parts);
 }
 
 function error(message) {
@@ -50,29 +87,51 @@ function env(name) {
 
 function __holeItem(value) {
   return {
-    c: value.c,
+    ...value,
     raw: true
   };
 }
 
-function quote(pieces, holes) {
-  let text = pieces[0];
-  holes.forEach((hole, index) => {
-    let filled = Primitive_object.equal(hole.raw, true) ? hole.c : "(" + hole.c + ")";
-    text = text + filled + pieces[index + 1 | 0];
-  });
-  return {
-    c: text
-  };
+let quote = (function (pieces, holes, file) {
+  var parts = [];
+  function add(piece) {
+    for (var i = 0; i < piece.length; i++) {
+      var fragment = piece[i];
+      parts.push(
+        fragment[1] > 0
+          ? {c: fragment[0], m: [[0, fragment[0].length, file, fragment[1], fragment[2]]]}
+          : {c: fragment[0]}
+      );
+    }
+  }
+  add(pieces[0]);
+  for (var i = 0; i < holes.length; i++) {
+    var hole = holes[i];
+    if (hole.raw === true) {
+      parts.push(hole);
+    } else {
+      parts.push({c: "("}, hole, {c: ")"});
+    }
+    add(pieces[i + 1]);
+  }
+  return cat(parts);
+});
+
+function __quoteCode(pieces, holes, file) {
+  return quote(pieces, holes, file);
 }
 
-let __quoteCode = quote;
+function __quoteDecls(pieces, holes, file) {
+  return quote(pieces, holes, file);
+}
 
-let __quoteDecls = quote;
+function __quoteType(pieces, holes, file) {
+  return quote(pieces, holes, file);
+}
 
-let __quoteType = quote;
-
-let __quotePat = quote;
+function __quotePat(pieces, holes, file) {
+  return quote(pieces, holes, file);
+}
 
 let isSimple = (function (text) {
   return /^[A-Za-z_][A-Za-z0-9_$.]*$/.test(text)
@@ -83,6 +142,22 @@ function atom(text) {
     return text;
   } else {
     return "(" + text + ")";
+  }
+}
+
+function atomNode(node) {
+  if (isSimple(node.c)) {
+    return node;
+  } else {
+    return cat([
+      {
+        c: "("
+      },
+      node,
+      {
+        c: ")"
+      }
+    ]);
   }
 }
 
@@ -228,27 +303,87 @@ let raw = make;
 let ident = make;
 
 function field$1(value, name) {
-  return make(atom(value.c) + "." + name);
+  return cat([
+    atomNode(value),
+    text("." + name)
+  ]);
 }
 
 function array(items) {
-  return make("[" + items.map(source).join(", ") + "]");
+  return cat([
+    {
+      c: "["
+    },
+    join(items.map(prim => prim), ", "),
+    {
+      c: "]"
+    }
+  ]);
 }
 
 function tuple(items) {
-  return make("(" + items.map(source).join(", ") + ")");
+  return cat([
+    {
+      c: "("
+    },
+    join(items.map(prim => prim), ", "),
+    {
+      c: ")"
+    }
+  ]);
 }
 
 function record$1(fields) {
-  return make("{" + fields.map(param => param[0] + ": " + param[1].c).join(", ") + "}");
+  return cat([
+    {
+      c: "{"
+    },
+    join(fields.map(param => cat([
+      text(param[0] + ": "),
+      param[1]
+    ])), ", "),
+    {
+      c: "}"
+    }
+  ]);
 }
 
 function call(f, args) {
-  return make(atom(f.c) + "(" + args.map(source).join(", ") + ")");
+  return cat([
+    atomNode(f),
+    {
+      c: "("
+    },
+    join(args.map(prim => prim), ", "),
+    {
+      c: ")"
+    }
+  ]);
 }
 
 function switch_(value, arms) {
-  return make("switch " + atom(value.c) + " {\n" + arms.map(param => "| " + param[0].c + " => " + param[1].c).join("\n") + "\n}");
+  return cat([
+    {
+      c: "switch "
+    },
+    atomNode(value),
+    {
+      c: " {\n"
+    },
+    join(arms.map(param => cat([
+      {
+        c: "| "
+      },
+      param[0],
+      {
+        c: " => "
+      },
+      param[1]
+    ])), "\n"),
+    {
+      c: "\n}"
+    }
+  ]);
 }
 
 function param(name, typ) {
@@ -260,11 +395,14 @@ function labelled(name, typ) {
 }
 
 function fn(params, body) {
-  return make("(" + params.join(", ") + ") => " + body.c);
+  return cat([
+    text("(" + params.join(", ") + ") => "),
+    body
+  ]);
 }
 
 function decls(items) {
-  return make(items.map(source).join("\n"));
+  return cat([join(items.map(prim => prim), "\n")]);
 }
 
 let Code = {
@@ -340,6 +478,10 @@ let Decl = {};
 export {
   make,
   source,
+  cat,
+  text,
+  build,
+  join,
   error,
   errorAt,
   typeOf,
@@ -354,6 +496,7 @@ export {
   __quotePat,
   isSimple,
   atom,
+  atomNode,
   Attr,
   Type,
   Code,

@@ -1,0 +1,25 @@
+let x = %Quoted.shadow(1)
+----
+(compiles)
+
+  Warning number 26
+  QuotedWarning.res:1:9-25
+
+  1 │ let x = %Quoted.shadow(1)
+  2 │
+
+  This is in the code the macro generated, written at Quoted.res:15:7-12
+
+  13 │ @macro
+  14 │ let shadow = (e: code<int>): code<int> => %code({
+  15 │   let unused = 1
+  16 │   ${e}
+  17 │ })
+
+  unused variable unused.
+
+Fix this by:
+- Deleting the variable if it's not used anymore.
+- Prepending the variable name with `_` (like `_unused`) to ignore that the variable is unused.
+- Using the variable somewhere.
+

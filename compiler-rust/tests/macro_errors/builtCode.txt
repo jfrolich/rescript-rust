@@ -1,0 +1,16 @@
+let x = %Quoted.built(1)
+----
+
+  We've found a bug for you!
+  BuiltCode.res:1:9-24
+
+  1 │ let x = %Quoted.built(1)
+  2 │
+
+  This is in the code the macro generated. In the expanded source:
+
+  1 │ let x = (notDefinedAnywhere(1))
+  2 │
+
+  The value notDefinedAnywhere can't be found
+

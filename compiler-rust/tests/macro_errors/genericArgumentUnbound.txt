@@ -1,0 +1,17 @@
+type user = {name: string, age: int}
+let alice = {name: "Alice", age: 30}
+let j = Json.encode(alicia)
+----
+
+  We've found a bug for you!
+  GenericArgumentUnbound.res:3:21-26
+
+  1 │ type user = {name: string, age: int}
+  2 │ let alice = {name: "Alice", age: 30}
+  3 │ let j = Json.encode(alicia)
+  4 │
+
+  The value alicia can't be found
+
+  Hint: Did you mean alice?
+

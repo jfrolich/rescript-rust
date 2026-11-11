@@ -23,15 +23,27 @@ use crate::types::predef;
 use crate::types::type_expr::{RowField, TypeDesc, TypeExprRef};
 use crate::types::variant_runtime::LiteralTag;
 
-/// The types a running expansion has handed to the macro.
+/// What a running expansion has handed to the macro: the types, and the
+/// ranges of the text being expanded that it got as code.
 #[derive(Default)]
 pub struct TypeTable {
     types: Vec<TypeExprRef>,
+    origins: Vec<(u32, u32)>,
 }
 
 impl TypeTable {
     pub fn get(&self, id: usize) -> Option<TypeExprRef> {
         self.types.get(id).copied()
+    }
+
+    /// The id of the text at `range`, for the `$o` of a code argument.
+    pub fn origin(&mut self, range: (u32, u32)) -> usize {
+        self.origins.push(range);
+        self.origins.len() - 1
+    }
+
+    pub fn origins(&self) -> &[(u32, u32)] {
+        &self.origins
     }
 
     fn add(&mut self, ctx: &TypeContext, ty: TypeExprRef) -> usize {
@@ -136,7 +148,10 @@ fn field(
     label: &LabelDeclaration,
 ) -> Value {
     let name = label.ld_id.name().to_string();
-    let js_name = label.ld_runtime_name.clone().unwrap_or_else(|| name.clone());
+    let js_name = label
+        .ld_runtime_name
+        .clone()
+        .unwrap_or_else(|| name.clone());
     let ty = member_type(ctx, params, args, label.ld_type);
     json!({
         "name": name,
@@ -202,7 +217,9 @@ fn type_info_at(
                 json!({ "params": params, "result": type_ref(ctx, table, *ret) }),
             )
         }
-        TypeDesc::Tpoly { body, .. } if depth < 8 => type_info_at(ctx, env, table, *body, depth + 1),
+        TypeDesc::Tpoly { body, .. } if depth < 8 => {
+            type_info_at(ctx, env, table, *body, depth + 1)
+        }
         TypeDesc::Tvariant(row) => {
             let row = ctx.row_desc(*row);
             let constructors: Vec<Value> = row
@@ -301,9 +318,7 @@ fn constructor_info(
                         ConstructorArguments::CstrTuple(types) => (
                             types
                                 .iter()
-                                .map(|ty| {
-                                    type_ref(ctx, table, member_type(ctx, params, args, *ty))
-                                })
+                                .map(|ty| type_ref(ctx, table, member_type(ctx, params, args, *ty)))
                                 .collect::<Vec<Value>>(),
                             Vec::new(),
                         ),
@@ -376,11 +391,14 @@ pub fn value_shape(ctx: &TypeContext, env: &Env, ty: TypeExprRef, depth: usize) 
                         .iter()
                         .map(|label| {
                             let name = label.ld_id.name().to_string();
-                            let field_type = member_type(ctx, &decl.type_params, &args, label.ld_type);
+                            let field_type =
+                                member_type(ctx, &decl.type_params, &args, label.ld_type);
                             // An optional field holds the value itself, not an option.
                             let shape = value_shape(ctx, env, field_type, depth + 1);
                             let shape = match (&shape, label.ld_optional) {
-                                (Value::Object(object), true) if object.get("k") == Some(&json!("option")) => {
+                                (Value::Object(object), true)
+                                    if object.get("k") == Some(&json!("option")) =>
+                                {
                                     object.get("of").cloned().unwrap_or(shape.clone())
                                 }
                                 _ => shape,

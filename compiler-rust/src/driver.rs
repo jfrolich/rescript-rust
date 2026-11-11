@@ -4514,6 +4514,24 @@ fn push_compiler_error_report_header(
         push_compiler_report_location(output, &location);
         output.push_str(&code_frame::print(source, start_pos, end_pos));
         output.push('\n');
+        push_generated_code_note(output, arena, loc, false);
+    }
+}
+
+/// For a diagnostic in code a macro generated: what
+/// [`crate::macros::report`] says about that code.
+fn push_generated_code_note(output: &mut String, arena: &ParseArena, loc: LocIdx, warning: bool) {
+    let Some(expansion) = arena.expansion() else {
+        return;
+    };
+    let location = arena.get_location(loc);
+    if let Some(generated) = expansion.generated_code(location.loc_start.0, location.loc_end.0) {
+        output.push_str(&crate::macros::report::generated_code_note(
+            &expansion.text,
+            &generated,
+            warning,
+            read_in_process_source,
+        ));
     }
 }
 
@@ -5491,6 +5509,7 @@ fn format_compiler_warning_report(
             code_frame::print_warning(source, start_pos, end_pos)
         });
         output.push('\n');
+        push_generated_code_note(&mut output, arena, warning.loc, !warning.is_error);
     }
 
     let indent_after_blank = !matches!(
@@ -5591,7 +5610,7 @@ fn format_type_warnings(
 
 /// The source text an in-process compile reports diagnostics against. Like
 /// OCaml's code frames (location.ml), it is read back from the source file.
-fn read_in_process_source(filename: &str) -> String {
+pub(crate) fn read_in_process_source(filename: &str) -> String {
     #[cfg(target_arch = "wasm32")]
     {
         if let Some(content) = crate::wasm_vfs::read_file(filename) {

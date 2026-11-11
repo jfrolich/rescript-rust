@@ -3,14 +3,20 @@
 //! `%code(JSON.Encode.string(${value}))` becomes
 //!
 //! ```text
-//! Macro.__quoteCode(["JSON.Encode.string(", ")"], [Macro.__holeCode(value)])
+//! Macro.__quoteCode(
+//!   [[("JSON.Encode.string(", 9, 20)], [(")", 9, 48)]],
+//!   [Macro.__holeCode(value)],
+//!   "Json.res",
+//! )
 //! ```
 //!
 //! The pieces are the quote's source text between the holes, so a quote is
 //! parsed and reported on where it is written and the macro's compiled
-//! JavaScript carries it as string literals. The hole expressions stay
-//! ordinary code of the macro: they are type checked, and a quote nested in a
-//! hole is lowered by the next pass.
+//! JavaScript carries it as string literals. Each piece comes with the line
+//! and column it has in the macro's file: the code a macro returns keeps
+//! them, and an error in generated code says which line of which quote it
+//! is in. The hole expressions stay ordinary code of the macro: they are
+//! type checked, and a quote nested in a hole is lowered by the next pass.
 //!
 //! Hygiene, as far as syntax decides it: a name the quote uses that the
 //! macro's file defines at its top level is written with the module's name
@@ -28,7 +34,7 @@ use crate::parser::ast::{
 use crate::parser::longident::Longident;
 use crate::parser::module::HOLE_EXTENSION;
 
-use super::edit::{Edit, Segment, SourceText};
+use super::edit::{Edit, LineTable, Segment, SourceText};
 
 /// The extension names that are quotes.
 pub fn is_quote_name(name: &str) -> bool {
@@ -261,6 +267,10 @@ impl AstIter for QuoteScan<'_> {
 struct QuoteFinder<'a> {
     text: &'a SourceText,
     module_name: &'a str,
+    /// The name of the file, as an error names it.
+    file: &'a str,
+    /// Lines of the file as written.
+    lines: &'a LineTable,
     top_level: &'a TopLevel,
     edits: Vec<Edit>,
 }
@@ -295,7 +305,11 @@ impl QuoteFinder<'_> {
             value_uses: Vec::new(),
             module_roots: Vec::new(),
             bound: HashSet::new(),
-            item_exprs: if single_expression { &no_items } else { &item_exprs },
+            item_exprs: if single_expression {
+                &no_items
+            } else {
+                &item_exprs
+            },
         };
         scan.payload(arena, &extension.1);
 
@@ -306,54 +320,77 @@ impl QuoteFinder<'_> {
             _ => "__quoteDecls",
         };
 
-        // Qualify the names the file defines.
-        let mut substitutions: Vec<((u32, u32), String)> = Vec::new();
+        // Qualify the names the file defines: where the module's name goes
+        // in front.
+        let mut substitutions: Vec<(u32, u32)> = Vec::new();
         for (at, used) in &scan.value_uses {
             if self.top_level.values.contains(used) && !scan.bound.contains(used) {
-                substitutions.push((*at, format!("{}.{}", self.module_name, used)));
+                substitutions.push(*at);
             }
         }
         for (at, root) in &scan.module_roots {
             if self.top_level.modules.contains(root) {
-                substitutions.push((
-                    *at,
-                    format!("{}.{}", self.module_name, self.text.slice(at.0, at.1)),
-                ));
+                substitutions.push(*at);
             }
         }
 
         scan.holes.sort_by_key(|hole| hole.outer.0);
-        substitutions.sort_by_key(|(at, _)| at.0);
+        substitutions.sort_by_key(|at| at.0);
         let in_hole = |at: (u32, u32)| {
             scan.holes
                 .iter()
                 .any(|hole| at.0 >= hole.outer.0 && at.1 <= hole.outer.1)
         };
-        substitutions.retain(|(at, _)| at.0 >= payload.0 && at.1 <= payload.1 && !in_hole(*at));
+        substitutions.retain(|at| at.0 >= payload.0 && at.1 <= payload.1 && !in_hole(*at));
 
-        // The text between two holes, with the substitutions applied.
+        // The text between two holes, as the parts of it that are text of
+        // the file, each with its line and column there, and the names that
+        // were qualified in between.
+        let fragment = |from: u32, to: u32| -> String {
+            if from >= to {
+                return String::new();
+            }
+            // Text a macro generated has no place in the file.
+            let (line, column) = match self.text.generated(from) {
+                Some(_) => (0, 0),
+                None => {
+                    let offset = self.text.origin(from);
+                    let (line, line_start) = self.lines.line_of(offset);
+                    (line, offset - line_start)
+                }
+            };
+            format!(
+                "({}, {line}, {column})",
+                string_literal(self.text.slice(from, to))
+            )
+        };
         let piece = |from: u32, to: u32| -> String {
-            let mut out = String::new();
+            let mut fragments = Vec::new();
             let mut cursor = from;
-            for (at, replacement) in &substitutions {
+            let qualifier = format!(
+                "({}, 0, 0)",
+                string_literal(&format!("{}.", self.module_name))
+            );
+            for at in &substitutions {
                 if at.0 < cursor || at.1 > to {
                     continue;
                 }
-                out.push_str(self.text.slice(cursor, at.0));
-                out.push_str(replacement);
-                cursor = at.1;
+                fragments.push(fragment(cursor, at.0));
+                fragments.push(qualifier.clone());
+                cursor = at.0;
             }
-            out.push_str(self.text.slice(cursor, to));
-            out
+            fragments.push(fragment(cursor, to));
+            fragments.retain(|fragment| !fragment.is_empty());
+            format!("[{}]", fragments.join(", "))
         };
 
         let mut pieces = Vec::with_capacity(scan.holes.len() + 1);
         let mut cursor = payload.0;
         for hole in &scan.holes {
-            pieces.push(string_literal(&piece(cursor, hole.outer.0)));
+            pieces.push(piece(cursor, hole.outer.0));
             cursor = hole.outer.1;
         }
-        pieces.push(string_literal(&piece(cursor, payload.1)));
+        pieces.push(piece(cursor, payload.1));
 
         let mut segments = vec![Segment::Text(format!(
             "(Macro.{function}([{}], [",
@@ -373,11 +410,12 @@ impl QuoteFinder<'_> {
             segments.push(Segment::Copy(hole.inner.0, hole.inner.1));
             segments.push(Segment::Text(")".into()));
         }
-        segments.push(Segment::Text("]))".into()));
+        segments.push(Segment::Text(format!("], {}))", string_literal(self.file))));
         self.edits.push(Edit {
             start,
             end,
             segments,
+            internal: true,
         });
     }
 }
@@ -395,17 +433,26 @@ impl AstIter for QuoteFinder<'_> {
     }
 }
 
-/// The edits that lower the outermost quotes of `structure`.
+/// The edits that lower the outermost quotes of `structure`. `original` is
+/// the file as written and `filename` its name.
 pub fn lowering_edits(
     arena: &ParseArena,
     structure: &[StructureItem],
     text: &SourceText,
+    original: &str,
+    filename: &str,
     module_name: &str,
 ) -> Vec<Edit> {
     let top_level = top_level(arena, structure);
+    let lines = LineTable::new(original);
+    // The name without its directories: the compiled macro is the same
+    // wherever the project is checked out.
+    let file = filename.rsplit(['/', '\\']).next().unwrap_or(filename);
     let mut finder = QuoteFinder {
         text,
         module_name,
+        file,
+        lines: &lines,
         top_level: &top_level,
         edits: Vec::new(),
     };

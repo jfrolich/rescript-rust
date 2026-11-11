@@ -35,7 +35,7 @@ use crate::types::typecore::{
 };
 use crate::types::typedtree::{Expression, ExpressionDesc as TypedExpressionDesc};
 
-use super::edit::{Edit, SourceText};
+use super::edit::{Code, Edit, Segment, SourceText, Span, SpanSource};
 use super::reflect::{self, TypeTable};
 use super::{MacroHost, is_macro_name, quote};
 
@@ -124,11 +124,155 @@ struct Group {
 
 const GROUP_SEPARATOR: &str = "\nand ";
 
-fn render_group(functions: &[String]) -> String {
-    format!(
-        "@{INSTANCES_ATTRIBUTE} @warning(\"-39\") let rec {}",
-        functions.join(GROUP_SEPARATOR)
-    )
+/// A function of an instance group, `name = (...) => body`.
+struct Function {
+    /// The call the function was generated for, in the text being edited,
+    /// and what the function is. `None` for a function that is in the text
+    /// already.
+    generated_for: Option<((u32, u32), Arc<str>)>,
+    segments: Vec<Segment>,
+}
+
+impl Function {
+    /// The function at `start..end` of the text.
+    fn in_text(start: u32, end: u32) -> Self {
+        Function {
+            generated_for: None,
+            segments: vec![Segment::Copy(start, end)],
+        }
+    }
+
+    /// The function after `before`: the start of a group, or the separator.
+    fn render(self, before: &str, out: &mut Vec<Segment>) {
+        if let Some(((start, end), description)) = self.generated_for {
+            out.push(Segment::For(start, end, Some(description)));
+        }
+        out.push(Segment::Text(before.to_string()));
+        out.extend(self.segments);
+    }
+}
+
+fn render_group(functions: Vec<Function>) -> Vec<Segment> {
+    let mut segments = Vec::new();
+    for (index, function) in functions.into_iter().enumerate() {
+        if index == 0 {
+            function.render(
+                &format!("@{INSTANCES_ATTRIBUTE} @warning(\"-39\") let rec "),
+                &mut segments,
+            );
+        } else {
+            function.render(GROUP_SEPARATOR, &mut segments);
+        }
+    }
+    segments
+}
+
+/// Why a macro did not return code.
+struct Failure {
+    message: String,
+    by: FailedBy,
+}
+
+enum FailedBy {
+    /// The macro reported a problem, with `Macro.error`.
+    Report,
+    /// The macro raised an exception.
+    Exception,
+    /// The engine could not run the macro.
+    Engine,
+}
+
+impl Failure {
+    fn engine(message: impl Into<String>) -> Self {
+        Failure {
+            message: message.into(),
+            by: FailedBy::Engine,
+        }
+    }
+
+    /// The message of the diagnostic at the use of the macro `name`.
+    fn report(&self, name: &str) -> String {
+        match self.by {
+            FailedBy::Report => format!(
+                "{}\n\nThis is reported by the macro `{name}`.",
+                self.message
+            ),
+            FailedBy::Exception => {
+                format!("The macro `{name}` raised an exception:\n{}", self.message)
+            }
+            FailedBy::Engine => self.message.clone(),
+        }
+    }
+}
+
+/// The code a macro returned: its text, and the parts of it the engine says
+/// are an argument or a quote. The engine counts in UTF-16 code units.
+fn returned_code(text: &str, spans: Option<&Value>, origins: &[(u32, u32)]) -> Code {
+    let mut code = Code::plain(text);
+    let Some(spans) = spans.and_then(Value::as_array) else {
+        return code;
+    };
+    // The text is one `char` per byte of its UTF-8 encoding.
+    let units: Option<Vec<u32>> = (!text.is_ascii()).then(|| {
+        let decoded = crate::source_text::decode_internal_utf8(text);
+        let mut offsets = Vec::with_capacity(decoded.len() + 1);
+        let mut bytes = 0u32;
+        for ch in decoded.chars() {
+            for _ in 0..ch.len_utf16() {
+                offsets.push(bytes);
+            }
+            bytes += ch.len_utf8() as u32;
+        }
+        offsets.push(bytes);
+        offsets
+    });
+    let length = text.chars().count() as u32;
+    let offset = |unit: u64| -> Option<u32> {
+        match &units {
+            Some(units) => units.get(unit as usize).copied(),
+            None => (unit <= length as u64).then_some(unit as u32),
+        }
+    };
+    for span in spans {
+        let Some(parts) = span.as_array() else {
+            continue;
+        };
+        let (Some(start), Some(len)) = (
+            parts.first().and_then(Value::as_u64),
+            parts.get(1).and_then(Value::as_u64),
+        ) else {
+            continue;
+        };
+        let (Some(from), Some(to)) = (offset(start), offset(start + len)) else {
+            continue;
+        };
+        let source = match &parts[2..] {
+            [origin] => match origin.as_u64().and_then(|id| origins.get(id as usize)) {
+                Some((at, _)) => SpanSource::Text(*at),
+                None => continue,
+            },
+            [file, line, column] => {
+                let (Some(file), Some(line), Some(column)) =
+                    (file.as_str(), line.as_u64(), column.as_u64())
+                else {
+                    continue;
+                };
+                SpanSource::Quote {
+                    file: file.into(),
+                    line: line as u32,
+                    column: column as u32,
+                }
+            }
+            _ => continue,
+        };
+        code.spans.push(Span {
+            start: from,
+            len: to - from,
+            from: source,
+        });
+    }
+    code.spans.sort_by_key(|span| span.start);
+    code
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -170,16 +314,18 @@ fn is_open(ctx: &TypeContext, ty: TypeExprRef) -> bool {
 
 fn macro_type_name(ctx: &TypeContext, ty: TypeExprRef) -> Option<(String, Vec<TypeExprRef>)> {
     match &*ctx.get_desc(ctx.repr(ty)) {
-        TypeDesc::Tconstr { path, args, .. } => Some((
-            path.name(),
-            ctx.type_list(*args).iter().collect(),
-        )),
+        TypeDesc::Tconstr { path, args, .. } => {
+            Some((path.name(), ctx.type_list(*args).iter().collect()))
+        }
         _ => None,
     }
 }
 
 fn param_kind(ctx: &TypeContext, ty: TypeExprRef) -> ParamKind {
-    match macro_type_name(ctx, ty).as_ref().map(|(name, _)| name.as_str()) {
+    match macro_type_name(ctx, ty)
+        .as_ref()
+        .map(|(name, _)| name.as_str())
+    {
         Some("Macro.code") | Some("Macro.decls") => ParamKind::Code,
         Some("Macro.typ") => ParamKind::Typ,
         Some("Macro.Type.decl") => ParamKind::Decl,
@@ -189,7 +335,10 @@ fn param_kind(ctx: &TypeContext, ty: TypeExprRef) -> ParamKind {
 }
 
 fn result_kind(ctx: &TypeContext, ty: TypeExprRef) -> ResultKind {
-    match macro_type_name(ctx, ty).as_ref().map(|(name, _)| name.as_str()) {
+    match macro_type_name(ctx, ty)
+        .as_ref()
+        .map(|(name, _)| name.as_str())
+    {
         Some("Macro.code") => ResultKind::Code,
         Some("Macro.decls") => ResultKind::Decls,
         Some("Macro.typ") => ResultKind::Typ,
@@ -333,7 +482,7 @@ pub struct Discovery {
     groups: BTreeMap<u32, Group>,
     /// Instances this pass generated: the ordinal of the item that needs
     /// the instance, the offset of that item, and the function.
-    added: Vec<(u32, u32, String)>,
+    added: Vec<(u32, u32, Function)>,
     /// Instances an earlier item turned out to need as well: name, ordinal
     /// and offset of that item. They move to its group.
     moved: Vec<(String, u32, u32)>,
@@ -382,14 +531,21 @@ impl Discovery {
         let mut targets: BTreeMap<String, (u32, u32)> = BTreeMap::new();
         let mut queue: VecDeque<(String, u32, u32)> = std::mem::take(&mut self.moved).into();
         while let Some((name, ordinal, at)) = queue.pop_front() {
-            let Some((home, function)) = self.function_in_text(&name) else {
+            let Some((home, (start, end))) = self.function_in_text(&name) else {
                 continue;
             };
-            if home <= ordinal || targets.get(&name).is_some_and(|(target, _)| *target <= ordinal) {
+            if home <= ordinal
+                || targets
+                    .get(&name)
+                    .is_some_and(|(target, _)| *target <= ordinal)
+            {
                 continue;
             }
             targets.insert(name, (ordinal, at));
-            for word in function.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$')) {
+            let function = self.text.slice(start, end);
+            for word in
+                function.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            {
                 if word.contains('$') && self.instances.names.contains(word) {
                     queue.push_back((word.to_string(), ordinal, at));
                 }
@@ -403,46 +559,61 @@ impl Discovery {
 
         // What each group gains, by ordinal: the offset to start a new group
         // at, and the functions.
-        let mut gains: BTreeMap<u32, (u32, Vec<String>)> = BTreeMap::new();
+        let mut gains: BTreeMap<u32, (u32, Vec<Function>)> = BTreeMap::new();
         for (name, (ordinal, at)) in &targets {
-            if let Some((_, function)) = self.function_in_text(name) {
-                gains.entry(*ordinal).or_insert((*at, Vec::new())).1.push(function);
+            if let Some((_, (start, end))) = self.function_in_text(name) {
+                gains
+                    .entry(*ordinal)
+                    .or_insert((*at, Vec::new()))
+                    .1
+                    .push(Function::in_text(start, end));
             }
         }
         let removed: HashSet<&String> = targets.keys().collect();
         for (ordinal, at, function) in std::mem::take(&mut self.added) {
-            gains.entry(ordinal).or_insert((at, Vec::new())).1.push(function);
+            gains
+                .entry(ordinal)
+                .or_insert((at, Vec::new()))
+                .1
+                .push(function);
         }
         for (ordinal, group) in &self.groups {
-            let gained = gains.remove(ordinal).map(|(_, functions)| functions).unwrap_or_default();
-            let loses = group.functions.iter().any(|(name, _, _)| removed.contains(name));
+            let gained = gains
+                .remove(ordinal)
+                .map(|(_, functions)| functions)
+                .unwrap_or_default();
+            let loses = group
+                .functions
+                .iter()
+                .any(|(name, _, _)| removed.contains(name));
             if !loses {
                 if !gained.is_empty() {
-                    let text: String = gained
-                        .iter()
-                        .map(|function| format!("{GROUP_SEPARATOR}{function}"))
-                        .collect();
-                    self.edits.push(Edit::insert(group.item.1, text));
+                    let mut segments = Vec::new();
+                    for function in gained {
+                        function.render(GROUP_SEPARATOR, &mut segments);
+                    }
+                    self.edits
+                        .push(Edit::with(group.item.1, group.item.1, segments));
                 }
                 continue;
             }
-            let mut functions: Vec<String> = group
+            let mut functions: Vec<Function> = group
                 .functions
                 .iter()
                 .filter(|(name, _, _)| !removed.contains(name))
-                .map(|(_, start, end)| self.text.slice(*start, *end).to_string())
+                .map(|(_, start, end)| Function::in_text(*start, *end))
                 .collect();
             functions.extend(gained);
-            let text = if functions.is_empty() {
-                String::new()
-            } else {
-                render_group(&functions)
-            };
-            self.edits.push(Edit::replace(group.item.0, group.item.1, text));
+            self.edits.push(Edit::with(
+                group.item.0,
+                group.item.1,
+                render_group(functions),
+            ));
         }
         for (_, (at, functions)) in gains {
-            self.edits
-                .push(Edit::insert(at, format!("{}\n", render_group(&functions))));
+            let mut segments = render_group(functions);
+            segments.push(Segment::Text("\n".into()));
+            self.edits.push(Edit::with(at, at, segments));
         }
         PassResult {
             edits: self.edits,
@@ -461,14 +632,14 @@ impl Discovery {
         });
     }
 
-    /// The group an instance is defined in, and its text.
-    fn function_in_text(&self, name: &str) -> Option<(u32, String)> {
+    /// The group an instance is defined in, and where its function is.
+    fn function_in_text(&self, name: &str) -> Option<(u32, (u32, u32))> {
         self.groups.iter().find_map(|(home, group)| {
             group
                 .functions
                 .iter()
                 .find(|(function, _, _)| function == name)
-                .map(|(_, start, end)| (*home, self.text.slice(*start, *end).to_string()))
+                .map(|(_, start, end)| (*home, (*start, *end)))
         })
     }
 
@@ -479,12 +650,13 @@ impl Discovery {
         let instance = self.instances.by_key.get_mut(key)?;
         if instance.ordinal > ordinal {
             instance.ordinal = ordinal;
-            self.moved.push((instance.name.clone(), ordinal, self.item_start));
+            self.moved
+                .push((instance.name.clone(), ordinal, self.item_start));
         }
         Some(instance.name.clone())
     }
 
-    fn add_instance(&mut self, function: String) {
+    fn add_instance(&mut self, function: Function) {
         let ordinal = self.text.origin(self.item_start);
         self.added.push((ordinal, self.item_start, function));
     }
@@ -496,31 +668,58 @@ impl Discovery {
         env: &Env,
         table: &mut TypeTable,
         mut request: Value,
-    ) -> Result<String, (String, Option<u32>)> {
+    ) -> Result<Code, Failure> {
         let mut answers = serde_json::Map::new();
         for _ in 0..4096 {
             request["answers"] = Value::Object(answers.clone());
-            let response = super::call_host(&*self.host, &request.to_string())
-                .map_err(|message| (format!("The macro engine failed: {message}"), None))?;
-            let response: Value = serde_json::from_str(&response)
-                .map_err(|error| (format!("The macro engine returned invalid JSON: {error}"), None))?;
+            let response =
+                super::call_host(&*self.host, &request.to_string()).map_err(|message| {
+                    Failure::engine(format!("The macro engine failed: {message}"))
+                })?;
+            let response: Value = serde_json::from_str(&response).map_err(|error| {
+                Failure::engine(format!("The macro engine returned invalid JSON: {error}"))
+            })?;
             if let Some(code) = response.get("ok").and_then(Value::as_str) {
-                return Ok(code.to_string());
+                let mut code = returned_code(code, response.get("spans"), table.origins());
+                // A quote names its file without directories: find the file.
+                let mut paths: HashMap<Arc<str>, Arc<str>> = HashMap::new();
+                for span in &mut code.spans {
+                    if let SpanSource::Quote { file, .. } = &mut span.from {
+                        let path = paths.entry(file.clone()).or_insert_with(|| {
+                            let module = crate::driver::module_name_from_source_filename(file);
+                            tctx.persistent_env
+                                .as_ref()
+                                .and_then(|env| env.resolve_module_source_path(&module))
+                                .map(|path| Arc::from(path.to_string_lossy().as_ref()))
+                                .unwrap_or_else(|| file.clone())
+                        });
+                        *file = path.clone();
+                    }
+                }
+                return Ok(code);
             }
             if let Some(message) = response.get("error").and_then(Value::as_str) {
-                let offset = response
-                    .get("offset")
-                    .and_then(Value::as_u64)
-                    .map(|offset| offset as u32);
-                return Err((message.to_string(), offset));
+                let is = |key: &str| response.get(key).and_then(Value::as_bool) == Some(true);
+                return Err(Failure {
+                    message: message.to_string(),
+                    by: if is("exception") {
+                        FailedBy::Exception
+                    } else if is("engine") {
+                        FailedBy::Engine
+                    } else {
+                        FailedBy::Report
+                    },
+                });
             }
             let Some(question) = response.get("need").and_then(Value::as_str) else {
-                return Err(("The macro engine returned an unknown response.".into(), None));
+                return Err(Failure::engine(
+                    "The macro engine returned an unknown response.",
+                ));
             };
             let answer = self.answer(tctx, env, table, question);
             answers.insert(question.to_string(), answer);
         }
-        Err(("The macro asked more than 4096 questions.".into(), None))
+        Err(Failure::engine("The macro asked more than 4096 questions."))
     }
 
     fn answer(
@@ -570,9 +769,9 @@ pub(crate) fn answer_input(base_dir: &std::path::Path, question: &str) -> Option
             None => json!({ "__error": format!("readFile: cannot read `{rest}`.") }),
         }),
         "env" => Some(match std::env::var(rest) {
-            Ok(value) => {
-                Value::String(crate::source_text::latin1_bytes_to_string(value.into_bytes()))
-            }
+            Ok(value) => Value::String(crate::source_text::latin1_bytes_to_string(
+                value.into_bytes(),
+            )),
             Err(_) => Value::Null,
         }),
         _ => None,
@@ -687,7 +886,8 @@ fn with_discovery<R>(
     tctx: &mut TypeCheckContext<'_>,
     f: impl FnOnce(&mut TypeCheckContext<'_>, &mut Discovery) -> R,
 ) -> Option<R> {
-    let MacroMode::Discover(mut discovery) = std::mem::replace(&mut tctx.macro_mode, MacroMode::Off)
+    let MacroMode::Discover(mut discovery) =
+        std::mem::replace(&mut tctx.macro_mode, MacroMode::Off)
     else {
         return None;
     };
@@ -719,7 +919,12 @@ fn lookup_value(
     name: &str,
 ) -> Option<(Path, Arc<ValueDescription>)> {
     let longident = longident_of(tctx.arena, name)?;
-    env.lookup_value_by_lid(&longident, tctx.arena, &mut tctx.persistent_env, tctx.type_ctx)
+    env.lookup_value_by_lid(
+        &longident,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    )
 }
 
 /// `Json.encode` → (`Json`, `encode`): the file whose JavaScript the engine
@@ -737,12 +942,18 @@ fn literal(arena: &ParseArena, expr: ExprIdx) -> Option<Value> {
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_constant(constant) => match constant {
             Constant::String(text) => Some(Value::String(text.semantic(arena).to_string())),
-            Constant::Integer(text, None) => {
-                arena.get_string(*text).replace('_', "").parse::<i64>().ok().map(Value::from)
-            }
-            Constant::Float(text, None) => {
-                arena.get_string(*text).replace('_', "").parse::<f64>().ok().map(Value::from)
-            }
+            Constant::Integer(text, None) => arena
+                .get_string(*text)
+                .replace('_', "")
+                .parse::<i64>()
+                .ok()
+                .map(Value::from),
+            Constant::Float(text, None) => arena
+                .get_string(*text)
+                .replace('_', "")
+                .parse::<f64>()
+                .ok()
+                .map(Value::from),
             _ => None,
         },
         ExpressionDesc::Pexp_construct(lid, args) if arena.expr_list(args.txt).is_empty() => {
@@ -772,7 +983,10 @@ fn literal(arena: &ParseArena, expr: ExprIdx) -> Option<Value> {
                 if field.opt {
                     return None;
                 }
-                object.insert(arena.get_string(*name).to_string(), literal(arena, field.expr)?);
+                object.insert(
+                    arena.get_string(*name).to_string(),
+                    literal(arena, field.expr)?,
+                );
             }
             Some(Value::Object(object))
         }
@@ -781,7 +995,11 @@ fn literal(arena: &ParseArena, expr: ExprIdx) -> Option<Value> {
 }
 
 /// The argument expressions of `%M.f(a, b)`.
-fn payload_expressions(arena: &ParseArena, payload: &Payload, arity: usize) -> Result<Vec<ExprIdx>, String> {
+fn payload_expressions(
+    arena: &ParseArena,
+    payload: &Payload,
+    arity: usize,
+) -> Result<Vec<ExprIdx>, String> {
     let Payload::PStr(items) = payload else {
         return Err("The arguments of a macro are expressions here.".into());
     };
@@ -792,7 +1010,9 @@ fn payload_expressions(arena: &ParseArena, payload: &Payload, arity: usize) -> R
                 return Err("The arguments of a macro are expressions here.".into());
             };
             match &arena.get_expr(eval.0).pexp_desc {
-                ExpressionDesc::Pexp_tuple(elements) if arity != 1 => Ok(arena.expr_list(*elements).to_vec()),
+                ExpressionDesc::Pexp_tuple(elements) if arity != 1 => {
+                    Ok(arena.expr_list(*elements).to_vec())
+                }
                 _ => Ok(vec![eval.0]),
             }
         }
@@ -826,12 +1046,15 @@ fn call_arguments(
         let at = range(tctx.arena, expr.pexp_loc);
         match kind {
             ParamKind::Code => {
-                let mut code = json!({ "c": discovery.text.slice(at.0, at.1) });
+                let mut code =
+                    json!({ "c": discovery.text.slice(at.0, at.1), "$o": table.origin(at) });
                 // The type as far as it is known here. An argument that
                 // does not type check on its own has none.
                 let ctx = tctx.type_ctx;
                 let expected = ctx.new_var(None);
-                if let Ok(typed) = crate::types::typecore::type_expect(tctx, env, expr, expected, None) {
+                if let Ok(typed) =
+                    crate::types::typecore::type_expect(tctx, env, expr, expected, None)
+                {
                     code["t"] = reflect::type_ref(ctx, table, typed.exp_type);
                 }
                 args.push(code);
@@ -905,7 +1128,7 @@ fn run_call(
     name: &str,
     args: Result<Vec<Value>, String>,
     expected: Option<Value>,
-) -> Option<String> {
+) -> Option<Code> {
     let args = match args {
         Ok(args) => args,
         Err(message) => {
@@ -923,11 +1146,21 @@ fn run_call(
     });
     match discovery.run(tctx, env, table, request) {
         Ok(code) => Some(code),
-        Err((message, _offset)) => {
-            discovery.error(at, format!("{name}: {message}"));
+        Err(failure) => {
+            discovery.error(at, failure.report(name));
             None
         }
     }
+}
+
+/// `(code)`: generated code where an expression, a pattern or a type is
+/// expected.
+fn parenthesized(code: Code) -> Vec<Segment> {
+    vec![
+        Segment::Text("(".into()),
+        Segment::Code(code),
+        Segment::Text(")".into()),
+    ]
 }
 
 /// `%name(...)` where an expression is expected. `None`: not a macro, the
@@ -949,7 +1182,11 @@ pub(crate) fn expression_extension(
         } else if is_hole {
             fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
         } else {
-            fail(tctx, loc, format!("The quote `%{name}` needs a payload: `%{name}(...)`."))
+            fail(
+                tctx,
+                loc,
+                format!("The quote `%{name}` needs a payload: `%{name}(...)`."),
+            )
         }));
     }
     if name == "comptime" {
@@ -974,14 +1211,26 @@ pub(crate) fn expression_extension(
         return Some(Err(fail(
             tctx,
             loc,
-            format!("The macro `{name}` does not return an expression, so it cannot be used as one."),
+            format!(
+                "The macro `{name}` does not return an expression, so it cannot be used as one."
+            ),
         )));
     }
     let mut table = TypeTable::default();
     with_discovery(tctx, |tctx, discovery| {
-        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        let args = call_arguments(
+            tctx,
+            env,
+            discovery,
+            &mut table,
+            &name,
+            &signature,
+            &extension.1,
+        );
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+            discovery
+                .edits
+                .push(Edit::with(at.0, at.1, parenthesized(code)));
         }
     });
     // Type the call as its declared result, `code<string>` as `string`, so
@@ -1014,7 +1263,13 @@ fn comptime(
     }
     let expr_idx = match payload_expressions(tctx.arena, &extension.1, 1) {
         Ok(exprs) if exprs.len() == 1 => exprs[0],
-        _ => return Err(fail(tctx, loc, "%comptime takes one expression: `%comptime(expr)`.")),
+        _ => {
+            return Err(fail(
+                tctx,
+                loc,
+                "%comptime takes one expression: `%comptime(expr)`.",
+            ));
+        }
     };
     let expr = tctx.arena.get_expr(expr_idx);
     let typed = crate::types::typecore::type_expect(tctx, env, expr, expected_ty, None)?;
@@ -1096,7 +1351,9 @@ pub(crate) fn generic_use(
     let Some(erased) = erased_type(ctx, instance) else {
         return Err(error_at(
             loc,
-            format!("`{name}` is marked @generic, so it has to be a function that returns `code<...>`."),
+            format!(
+                "`{name}` is marked @generic, so it has to be a function that returns `code<...>`."
+            ),
         ));
     };
     let (signature, _, _) = signature(ctx, instance);
@@ -1177,7 +1434,11 @@ pub(crate) fn begin_item(tctx: &mut TypeCheckContext<'_>, item: &ParsedStructure
                     Some(next) => next.saturating_sub(GROUP_SEPARATOR.len() as u32),
                     None => end,
                 };
-                Some((arena.get_string(name.txt).to_string(), starts[index], function_end))
+                Some((
+                    arena.get_string(name.txt).to_string(),
+                    starts[index],
+                    function_end,
+                ))
             })
             .collect();
         let ordinal = discovery.text.origin(start);
@@ -1240,7 +1501,11 @@ pub(crate) fn end_item(tctx: &mut TypeCheckContext<'_>, ok: bool) {
     });
 }
 
-fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, generic: PendingGeneric) {
+fn resolve_generic(
+    tctx: &mut TypeCheckContext<'_>,
+    discovery: &mut Discovery,
+    generic: PendingGeneric,
+) {
     let ctx = tctx.type_ctx;
     let full_name = format!("{}.{}", generic.module, generic.name);
     let TypeDesc::Tarrow { args, ret } = &*ctx.get_desc(ctx.repr(generic.ty)) else {
@@ -1313,7 +1578,9 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
             _ => {
                 discovery.error(
                     generic.callee,
-                    format!("`{full_name}`: a @generic takes `code<...>` and compile-time values only."),
+                    format!(
+                        "`{full_name}`: a @generic takes `code<...>` and compile-time values only."
+                    ),
                 );
                 return;
             }
@@ -1321,6 +1588,12 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
     }
     let has_values = generic.signature.params.contains(&ParamKind::Value);
     let result = reflect::print_type(ctx, ret);
+    // What an instance is of, for a diagnostic in its code.
+    let described: Vec<String> = if name_parts.is_empty() {
+        vec![result.clone()]
+    } else {
+        name_parts.clone()
+    };
     let key = format!("{full_name}({})->{result}", key_parts.join(","));
     let ordinal = discovery.text.origin(discovery.item_start);
 
@@ -1337,36 +1610,43 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
             });
             let body = match discovery.run(tctx, &generic.env, &mut table, request) {
                 Ok(body) => body,
-                Err((message, _)) => {
-                    discovery.error(generic.callee, format!("{full_name}: {message}"));
+                Err(failure) => {
+                    discovery.error(generic.callee, failure.report(&full_name));
                     return;
                 }
             };
             if generic.signature.open_result || name_parts.is_empty() {
                 name_parts.push(result.clone());
             }
-            let name = discovery
-                .instances
-                .add(key, &instance_name(&generic.name, &name_parts), ordinal);
+            let name =
+                discovery
+                    .instances
+                    .add(key, &instance_name(&generic.name, &name_parts), ordinal);
             let annotation = if result.contains("'_") || reflect::is_unknown(ctx, ret) {
                 String::new()
             } else {
                 format!(": {result}")
             };
-            discovery.add_instance(format!(
-                "{name} = ({}){annotation} => {body}",
-                params
-                    .iter()
-                    .map(|(param, ty)| {
-                        // A parameter the macro's code does not mention.
-                        let used = body
-                            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-                            .any(|word| word == param);
-                        format!("{}: {ty}", if used { param } else { "_" })
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            ));
+            let params = params
+                .iter()
+                .map(|(param, ty)| {
+                    // A parameter the macro's code does not mention.
+                    let used = body
+                        .text
+                        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+                        .any(|word| word == param);
+                    format!("{}: {ty}", if used { param } else { "_" })
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            let description = format!("`{full_name}` for `{}`", described.join(", "));
+            discovery.add_instance(Function {
+                generated_for: Some((generic.callee, description.into())),
+                segments: vec![
+                    Segment::Text(format!("{name} = ({params}){annotation} => ")),
+                    Segment::Code(body),
+                ],
+            });
             name
         }
     };
@@ -1382,7 +1662,9 @@ fn resolve_generic(tctx: &mut TypeCheckContext<'_>, discovery: &mut Discovery, g
             )),
             None => discovery.error(
                 generic.callee,
-                format!("`{full_name}` takes compile-time values, so it has to be called directly."),
+                format!(
+                    "`{full_name}` takes compile-time values, so it has to be called directly."
+                ),
             ),
         }
     } else {
@@ -1429,15 +1711,27 @@ pub(crate) fn pattern_extension(
         return Some(fail(
             tctx,
             loc,
-            format!("The macro `{name}` does not return a pattern (`pat`), so it cannot be used as one."),
+            format!(
+                "The macro `{name}` does not return a pattern (`pat`), so it cannot be used as one."
+            ),
         ));
     }
     let at = range(tctx.arena, loc);
     let mut table = TypeTable::default();
     with_discovery(tctx, |tctx, discovery| {
-        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        let args = call_arguments(
+            tctx,
+            env,
+            discovery,
+            &mut table,
+            &name,
+            &signature,
+            &extension.1,
+        );
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-            discovery.edits.push(Edit::replace(at.0, at.1, format!("({code})")));
+            discovery
+                .edits
+                .push(Edit::with(at.0, at.1, parenthesized(code)));
         }
     });
     Some(pending(tctx, loc))
@@ -1480,7 +1774,9 @@ pub(crate) fn type_extension(
     let arena = tctx.arena;
     let types: Vec<crate::parse_arena::CoreTypeIdx> = match &extension.1 {
         Payload::PTyp(idx) => match &arena.get_core_type(*idx).ptyp_desc {
-            crate::parser::ast::CoreTypeDesc::Ptyp_tuple(elements) if signature.params.len() != 1 => {
+            crate::parser::ast::CoreTypeDesc::Ptyp_tuple(elements)
+                if signature.params.len() != 1 =>
+            {
                 arena.type_list(*elements).to_vec()
             }
             _ => vec![*idx],
@@ -1503,14 +1799,19 @@ pub(crate) fn type_extension(
             let styp = arena.get_core_type(*idx);
             let type_range = range(arena, styp.ptyp_loc);
             if *kind != ParamKind::Typ {
-                args = Err(format!("The macro `{name}` takes arguments that are not types."));
+                args = Err(format!(
+                    "The macro `{name}` takes arguments that are not types."
+                ));
                 break;
             }
             match crate::types::typecore::transl_type(tctx, env, styp) {
                 Ok((_, ty)) => {
                     let mut value = reflect::type_ref(ctx, &mut table, ty);
+                    value["$o"] = json!(table.origin(type_range));
                     with_discovery(tctx, |_, discovery| {
-                        value["c"] = Value::String(discovery.text.slice(type_range.0, type_range.1).to_string());
+                        value["c"] = Value::String(
+                            discovery.text.slice(type_range.0, type_range.1).to_string(),
+                        );
                     });
                     values.push(value);
                 }
@@ -1522,12 +1823,12 @@ pub(crate) fn type_extension(
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
             // A record or variant body is the right-hand side of a type
             // declaration, which takes no parentheses.
-            let text = if code.trim_start().starts_with(['{', '|']) {
-                code
+            let segments = if code.text.trim_start().starts_with(['{', '|']) {
+                vec![Segment::Code(code)]
             } else {
-                format!("({code})")
+                parenthesized(code)
             };
-            discovery.edits.push(Edit::replace(at.0, at.1, text));
+            discovery.edits.push(Edit::with(at.0, at.1, segments));
         }
     });
     Some(pending(tctx, loc))
@@ -1559,20 +1860,34 @@ pub(crate) fn declarations_extension(
         return Some(fail(
             tctx,
             loc,
-            format!("The macro `{name}` does not return declarations (`decls`), so it cannot be used here."),
+            format!(
+                "The macro `{name}` does not return declarations (`decls`), so it cannot be used here."
+            ),
         ));
     }
     let at = range(tctx.arena, loc);
     let mut table = TypeTable::default();
     with_discovery(tctx, |tctx, discovery| {
-        let args = call_arguments(tctx, env, discovery, &mut table, &name, &signature, &extension.1);
+        let args = call_arguments(
+            tctx,
+            env,
+            discovery,
+            &mut table,
+            &name,
+            &signature,
+            &extension.1,
+        );
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-            let text = if as_module {
-                format!("{{\n{code}\n}}")
+            let segments = if as_module {
+                vec![
+                    Segment::Text("{\n".into()),
+                    Segment::Code(code),
+                    Segment::Text("\n}".into()),
+                ]
             } else {
-                code
+                vec![Segment::Code(code)]
             };
-            discovery.edits.push(Edit::replace(at.0, at.1, text));
+            discovery.edits.push(Edit::with(at.0, at.1, segments));
         }
     });
     Some(pending(tctx, loc))
@@ -1607,9 +1922,11 @@ pub(crate) fn has_macro_attribute(
 fn retire_attribute(discovery: &mut Discovery, arena: &ParseArena, name: &str, loc: LocIdx) {
     let at = range(arena, loc);
     let text = discovery.text.slice(at.0, at.1).to_string();
-    discovery
-        .edits
-        .push(Edit::replace(at.0, at.1, text.replacen(name, &format!("expanded.{name}"), 1)));
+    discovery.edits.push(Edit::replace(
+        at.0,
+        at.1,
+        text.replacen(name, &format!("expanded.{name}"), 1),
+    ));
 }
 
 /// `@M.f let x = ...`: the macro gets the binding as syntax and its result
@@ -1639,7 +1956,11 @@ pub(crate) fn value_item(
         return Some(required(tctx, loc));
     }
     if bindings.len() != 1 {
-        return Some(fail(tctx, attr_loc, format!("`@{name}` works on a `let` with one binding.")));
+        return Some(fail(
+            tctx,
+            attr_loc,
+            format!("`@{name}` works on a `let` with one binding."),
+        ));
     }
     let ctx = tctx.type_ctx;
     let (signature, _, _) = signature(ctx, crate::types::instance(ctx, desc.val_type));
@@ -1647,7 +1968,9 @@ pub(crate) fn value_item(
         return Some(fail(
             tctx,
             attr_loc,
-            format!("A macro on a `let` has the type `Decl.value => decls`, and `{name}` does not."),
+            format!(
+                "A macro on a `let` has the type `Decl.value => decls`, and `{name}` does not."
+            ),
         ));
     }
     let pat = arena.get_pat(binding.pvb_pat);
@@ -1662,11 +1985,13 @@ pub(crate) fn value_item(
     with_discovery(tctx, |tctx, discovery| {
         let args = Ok(vec![json!({
             "name": bound,
-            "pat": { "c": discovery.text.slice(pat_range.0, pat_range.1) },
-            "expr": { "c": discovery.text.slice(expr_range.0, expr_range.1) },
+            "pat": { "c": discovery.text.slice(pat_range.0, pat_range.1), "$o": table.origin(pat_range) },
+            "expr": { "c": discovery.text.slice(expr_range.0, expr_range.1), "$o": table.origin(expr_range) },
         })]);
         if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-            discovery.edits.push(Edit::replace(at.0, at.1, code));
+            discovery
+                .edits
+                .push(Edit::with(at.0, at.1, vec![Segment::Code(code)]));
         }
     });
     Some(pending(tctx, loc))
@@ -1752,11 +2077,21 @@ pub(crate) fn type_item(tctx: &mut TypeCheckContext<'_>, env: &Env, item: &Parse
                 .map(|attr| json!({ "name": arena.get_string(attr.0.txt) }))
                 .collect();
             with_discovery(tctx, |tctx, discovery| {
-                let args = Ok(vec![json!({ "name": type_name, "typ": type_value, "attrs": attrs })]);
-                if let Some(code) = run_call(tctx, env, discovery, &mut table, at, &name, args, None) {
-                    discovery
-                        .edits
-                        .push(Edit::insert(item_range.1, format!("\n{code}")));
+                let args = Ok(vec![
+                    json!({ "name": type_name, "typ": type_value, "attrs": attrs }),
+                ]);
+                if let Some(code) =
+                    run_call(tctx, env, discovery, &mut table, at, &name, args, None)
+                {
+                    discovery.edits.push(Edit::with(
+                        item_range.1,
+                        item_range.1,
+                        vec![
+                            Segment::For(at.0, at.1, None),
+                            Segment::Text("\n".into()),
+                            Segment::Code(code),
+                        ],
+                    ));
                     retire_attribute(discovery, arena, &name, attr_loc);
                 }
             });

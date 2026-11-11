@@ -1,0 +1,12 @@
+let x = %comptime(Option.getOrThrow((None: option<int>)))
+----
+
+  We've found a bug for you!
+  ComptimeThrows.res:1:9-57
+
+  1 │ let x = %comptime(Option.getOrThrow((None: option<int>)))
+  2 │
+
+  The expression of %comptime raised an exception:
+  Panic! Option.getOrThrow called for None value
+

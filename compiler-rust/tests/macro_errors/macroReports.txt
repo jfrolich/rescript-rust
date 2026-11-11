@@ -1,0 +1,13 @@
+let s = Quoted.show("a")
+----
+
+  We've found a bug for you!
+  MacroReports.res:1:9-19
+
+  1 │ let s = Quoted.show("a")
+  2 │
+
+  only int
+
+  This is reported by the macro `Quoted.show`.
+

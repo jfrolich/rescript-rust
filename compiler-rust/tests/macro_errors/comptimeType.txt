@@ -1,0 +1,14 @@
+let x = %comptime(1 + "a")
+----
+
+  We've found a bug for you!
+  ComptimeType.res:1:23-25
+
+  1 │ let x = %comptime(1 + "a")
+  2 │
+
+  This has type: string
+  But it's expected to have type: int
+
+  You can convert string to int with Int.fromString.
+
