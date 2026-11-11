@@ -179,7 +179,7 @@ let which = (c: client) =>
 #[test]
 fn a_record_class_must_be_private() {
     let message = error(r#"@instanceOf("Blob") type blob = {size: float}"#);
-    assert!(message.contains("must be private"), "{message}");
+    assert!(message.contains("@instanceOf can only be used on abstract types and type abbreviations"), "{message}");
     let message = error(
         r#"@instanceOf("Blob") type blob = private {size: float}
 let b: blob = {size: 1.}"#,

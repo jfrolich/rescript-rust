@@ -56,9 +56,7 @@ pub(crate) enum AnnotatedKind {
     /// A private record: `@instanceOf`, with `@extends`. Only its module
     /// builds its values, so a record literal cannot pass for an instance.
     PrivateRecord,
-    /// A record anyone can build.
-    PublicRecord,
-    /// A variant or an open type.
+    /// A record anyone can build, a variant or an open type: none.
     Other,
 }
 
@@ -355,9 +353,9 @@ pub(crate) fn check_runtime_annotation<'a>(
     match (annotation, kind) {
         (None, _) | (Some(_), AnnotatedKind::AbstractOrAbbreviation) => Ok(()),
         (Some(RuntimeAnnotation::InstanceOf(_)), AnnotatedKind::PrivateRecord) => Ok(()),
-        (Some(RuntimeAnnotation::InstanceOf(name)), AnnotatedKind::PublicRecord) => {
-            error(AstUntaggedVariantError::ClassOnPublicRecord(name))
-        }
+        // A record anyone can build is rejected with the message the OCaml
+        // compiler has for every record, so that a program both compilers
+        // reject is reported alike.
         (Some(annotation), _) => error(
             AstUntaggedVariantError::RuntimeAnnotationOnRepresentedType(
                 runtime_attribute_name(&annotation).to_string(),

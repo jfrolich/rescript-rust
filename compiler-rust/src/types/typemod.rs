@@ -4639,9 +4639,6 @@ fn check_declaration_runtime_annotation(
         (crate::parser::ast::TypeKind::Ptype_record(_), crate::parser::ast::PrivateFlag::Private) => {
             AnnotatedKind::PrivateRecord
         }
-        (crate::parser::ast::TypeKind::Ptype_record(_), crate::parser::ast::PrivateFlag::Public) => {
-            AnnotatedKind::PublicRecord
-        }
         _ => AnnotatedKind::Other,
     };
     crate::types::variant_layout::check_runtime_annotation(
@@ -5508,8 +5505,6 @@ pub enum AstUntaggedVariantError {
     ClassOnPublicAbbreviation(String),
     /// A class, by name, that appears twice in its chain of abbreviations.
     ClassTwiceInChain(String),
-    /// `@instanceOf` on a record that is not private.
-    ClassOnPublicRecord(String),
     /// `@module` beside `@instanceOf` without a module name.
     InvalidClassModule,
     /// `@extends` on a declaration that is not a private record with
@@ -5612,9 +5607,6 @@ impl AstUntaggedVariantError {
             ),
             AstUntaggedVariantError::SubclassOfArray(name) => format!(
                 "@instanceOf(\"{name}\") cannot describe the values of an array type: they are recognized by Array.isArray, and subclasses of Array are not supported."
-            ),
-            AstUntaggedVariantError::ClassOnPublicRecord(name) => format!(
-                "A record declared an instance of {name} must be private: write `= private {{...}}`, so that a record literal cannot be used as an instance of {name}."
             ),
             AstUntaggedVariantError::InvalidClassModule => {
                 "@module beside @instanceOf expects the name of the module the class is imported from, as a string.".to_string()
