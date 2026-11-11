@@ -2530,6 +2530,44 @@ Use this process for documentation changes:
 2. Keep root README focused on project-level user/contributor information.
 3. No parity run is required for README-only changes.
 
+## Whole-project build benchmark
+
+Compare two release `rescript` binaries on a disposable copy of any project:
+
+```sh
+scripts/bench_project.sh PROJECT_DIR BASE_RESCRIPT CANDIDATE_RESCRIPT \
+  --runtime-from COMPILER_CHECKOUT
+# Without Valgrind (output identity and wall time only):
+scripts/bench_project.sh PROJECT_DIR BASE_RESCRIPT CANDIDATE_RESCRIPT --no-instructions
+python3 scripts/test_bench_project.py rewatch/target/release/rescript
+```
+
+Requires Python 3 and, for instruction counting, Valgrind. The runtime checkout
+(default: this checkout) supplies fresh runtime and Belt copies under the
+project's `.rescript-pkgs`; the script replaces those copies and the
+`node_modules/@rescript/belt` symlink. An existing real Belt directory must be
+moved aside first. Use a disposable project: clean/build change its outputs.
+Each binary first builds the runtime to populate `lib/ocaml` sources; Belt
+builds with the project's dependencies. Runtime preparation is not timed,
+instruction-counted, or included in the project's output digest.
+
+The script compares sorted project-relative paths and SHA-256 content hashes
+of `.js`, `.mjs`, `.cjs`, `.ts`, and `.tsx` files created or rewritten during
+the project build (stat metadata before/after detects writes, excluding unchanged
+handwritten files). Linked dependencies are followed, visiting each physical
+directory once to avoid duplicate counts and symlink cycles. A mismatch lists
+the first 20 differing paths.
+
+Each binary then gets one clean, single-worker Cachegrind run with CI's
+`--tool=cachegrind --cache-sim=no` flags. Instructions per line count **all**
+physical `.res`/`.resi` files under the project, including dependencies and
+build-directory source copies, rather than only compiled modules. Normal build
+wall time uses the caller's thread setting (set `RAYON_NUM_THREADS=8` for eight
+workers); Cachegrind always uses one. This is a comparison report, not a
+statistical regression gate. Exit status is 0 for identical output, 1 for
+different output, and 2 for usage/build errors. The final `BENCH_PROJECT ` line
+contains a JSON summary, including counts, digests, seconds and instructions.
+
 ## Parse-only instruction benchmark
 
 Run `scripts/bench_parse.sh` from a checkout with Cargo on `PATH`. It builds
