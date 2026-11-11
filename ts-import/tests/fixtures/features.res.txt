@@ -235,6 +235,48 @@ module Features = {
     | IdentName(identName)
     | NumericLit(numericLit)
     | StringLit(stringLit)
+  type namedProp = {
+    @as("type") type_: [#Prop],
+    name: string,
+    size: float,
+  }
+  type knownProp = {
+    @as("type") type_: [#Prop],
+    name: [#height | #width],
+    size: Null.t<float>,
+  }
+  type other = {
+    @as("type") type_: [#Other],
+    id: float,
+  }
+  type third = {
+    @as("type") type_: [#Third],
+    label: string,
+  }
+  type fourth = {
+    @as("type") type_: [#Fourth],
+    flag: bool,
+  }
+  type knownPropCase = {
+    @as("type") type_: [#Prop],
+    name: string,
+    size: Null.t<float>,
+  }
+  @unboxed type prop =
+    | Fourth(fourth)
+    | KnownProp(knownPropCase)
+    | Other(other)
+    | Third(third)
+  type objectCase<'t> = {
+    @as("type") type_: [#Held],
+    value: 't,
+    note?: string,
+  }
+  @unboxed type holder<'t> =
+    | Object(objectCase<'t>)
+    | Object2({
+      @as("type") type_: [#Empty],
+    })
   type findResult = {
     id: string,
   }
@@ -661,6 +703,12 @@ module Features = {
   /** TypeScript: `(node: SyntaxNode) => void` */
   @module("./features.ts")
   external visit: syntaxNode => unit = "visit"
+  /** TypeScript: `<T>(value: T) => Holder<T>` */
+  @module("./features.ts")
+  external hold: 't => holder<'t> = "hold"
+  /** TypeScript: `() => Prop` */
+  @module("./features.ts")
+  external prop: unit => prop = "prop"
 }
 
 // Where ReScript says less than TypeScript:

@@ -220,3 +220,15 @@ export interface ArrayPat { type: "ArrayPattern"; elements: (IdentBinding | null
 export interface ArrayTarget { type: "ArrayPattern"; elements: (IdentName | null)[] }
 export type SyntaxNode = StringLit | NumericLit | IdentName | IdentBinding | ArrayPat | ArrayTarget;
 export declare function visit(node: SyntaxNode): void;
+
+// Merged members whose fields join: literals with their primitive, a type
+// with its nullable form, and a merged case with a type parameter.
+export interface NamedProp { type: "Prop"; name: string; size: number }
+export interface KnownProp { type: "Prop"; name: "width" | "height"; size: number | null }
+export interface Other { type: "Other"; id: number }
+export interface Third { type: "Third"; label: string }
+export interface Fourth { type: "Fourth"; flag: boolean }
+export type Prop = NamedProp | KnownProp | Other | Third | Fourth;
+export type Holder<T> = { type: "Held"; value: T; note?: string } | { type: "Held"; value: T } | { type: "Empty" };
+export declare function hold<T>(value: T): Holder<T>;
+export declare function prop(): Prop;

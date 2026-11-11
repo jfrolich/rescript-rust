@@ -2251,7 +2251,7 @@ impl<'a> Converter<'a> {
                 None => {
                     let name = self.fresh_type_name(&format!("{}Case", ctors[index].name));
                     let named = Named { scope: self.scope.clone(), name: name.clone(), params: 0 };
-                    self.state.set_shape(key, named.clone());
+                    self.state.set_shape(key.clone(), named.clone());
                     self.path.push(ctors[index].name.clone());
                     let records: Vec<Vec<Field>> = grouped
                         .iter()
@@ -2263,14 +2263,19 @@ impl<'a> Converter<'a> {
                     self.path.pop();
                     let case = ctors[index].name.clone();
                     let fields = self.merge_fields(&case, &records);
-                    // The record has no parameters of its own: a case whose
-                    // fields mention type variables is not merged.
+                    // The type variables the fields mention are the record's
+                    // parameters, as for an unnamed type. A record that
+                    // refers to itself took its name before they were known.
                     let kind = DeclKind::Record(fields);
-                    if !free_variables(&kind).is_empty() {
+                    let params = free_variables(&kind);
+                    if !params.is_empty() && mentions(&kind, &name) {
                         give_up = true;
                         break;
                     }
-                    self.state.declare(Decl { name, params: Vec::new(), kind, ts: None, class: None });
+                    self.state.anonymous_params.insert(name.clone(), params.clone());
+                    let named = Named { params: params.len(), ..named };
+                    self.state.set_shape(key, named.clone());
+                    self.state.declare(Decl { name, params, kind, ts: None, class: None });
                     named
                 }
             };
@@ -2278,7 +2283,8 @@ impl<'a> Converter<'a> {
                 let shapes: Vec<ObjectShape> = grouped.iter().map(|&member| self.ts_object_shape(member)).collect();
                 shapes.iter().skip(1).fold(shapes[0].clone(), |merged, shape| merge_shapes(&merged, shape))
             });
-            ctors[index].payload = Payload::Ty(Ty::App(self.reference(&named), Vec::new()));
+            let args = self.state.anonymous_params.get(&named.name).cloned().unwrap_or_default();
+            ctors[index].payload = Payload::Ty(Ty::App(self.reference(&named), args.into_iter().map(Ty::Var).collect()));
         }
         self.free_vars = saved_free;
         if give_up {
@@ -2347,25 +2353,10 @@ impl<'a> Converter<'a> {
             if types.iter().all(|version| version.ty == field.ty && version.poly == field.poly) {
                 continue;
             }
-            let tags: Option<Vec<Tag>> = types
-                .iter()
-                .map(|version| match &version.ty {
-                    Ty::Poly(tags) => Some(tags.clone()),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(|lists| {
-                    let mut all: Vec<Tag> = Vec::new();
-                    for tag in lists.into_iter().flatten() {
-                        if !all.contains(&tag) {
-                            all.push(tag);
-                        }
-                    }
-                    all
-                });
+            let versions: Vec<Ty> = types.iter().map(|version| version.ty.clone()).collect();
             field.poly = Vec::new();
-            field.ty = match tags {
-                Some(tags) => Ty::Poly(tags),
+            field.ty = match self.join_types(case, &key, &versions) {
+                Some(joined) => joined,
                 None => {
                     self.note_text(
                         Gap::Union,
@@ -2377,6 +2368,135 @@ impl<'a> Converter<'a> {
             };
         }
         merged
+    }
+
+    /// A type every one of `types` converts to, for a field of a merged case:
+    /// the union of literals; a primitive for its own literals beside it;
+    /// `T` beside `Null.t<T>`, `option<T>` or `Nullable.t<T>`, the widest of
+    /// them; otherwise an untagged variant with one case per type, when each
+    /// has a kind of its own.
+    fn join_types(&mut self, case: &str, field: &str, types: &[Ty]) -> Option<Ty> {
+        let mut distinct: Vec<Ty> = Vec::new();
+        for ty in types {
+            if !distinct.contains(ty) {
+                distinct.push(ty.clone());
+            }
+        }
+        if let [one] = distinct.as_slice() {
+            return Some(one.clone());
+        }
+        // Literals, and the primitive they are literals of.
+        let primitive_of = |tag: &Tag| match tag {
+            Tag::Str(_) => Some("string"),
+            Tag::Num(_) => Some("float"),
+            Tag::Bool(_) => Some("bool"),
+            Tag::Null | Tag::Undefined => None,
+        };
+        let mut tags: Vec<Tag> = Vec::new();
+        let mut primitives: Vec<&str> = Vec::new();
+        let mut only_literals = true;
+        for ty in &distinct {
+            match ty {
+                Ty::Poly(own) => {
+                    for tag in own {
+                        if !tags.contains(tag) {
+                            tags.push(tag.clone());
+                        }
+                    }
+                }
+                Ty::App(name, args) if args.is_empty() && matches!(name.as_str(), "string" | "float" | "int" | "bool") => {
+                    only_literals = false;
+                    primitives.push(if name == "int" { "float" } else { name });
+                }
+                _ => {
+                    only_literals = false;
+                    primitives.clear();
+                    break;
+                }
+            }
+        }
+        if only_literals {
+            return Some(Ty::Poly(tags));
+        }
+        if let Some(&primitive) = primitives.first()
+            && primitives.iter().all(|other| *other == primitive)
+            && tags.iter().all(|tag| primitive_of(tag) == Some(primitive))
+        {
+            return Some(Ty::name(primitive));
+        }
+        // `T` with the nullable forms of `T`.
+        let unwrap = |ty: &Ty| -> (Ty, u8) {
+            match ty {
+                Ty::App(name, args) if args.len() == 1 => match name.as_str() {
+                    "option" => (args[0].clone(), 1),
+                    "Null.t" => (args[0].clone(), 2),
+                    "Nullable.t" => (args[0].clone(), 3),
+                    _ => (ty.clone(), 0),
+                },
+                _ => (ty.clone(), 0),
+            }
+        };
+        let unwrapped: Vec<(Ty, u8)> = distinct.iter().map(unwrap).collect();
+        if unwrapped.iter().all(|(inner, _)| *inner == unwrapped[0].0) {
+            let inner = unwrapped[0].0.clone();
+            let has = |form: u8| unwrapped.iter().any(|(_, own)| *own == form);
+            return Some(if has(3) || (has(1) && has(2)) {
+                Ty::app("Nullable.t", vec![inner])
+            } else if has(2) {
+                Ty::app("Null.t", vec![inner])
+            } else {
+                Ty::app("option", vec![inner])
+            });
+        }
+        // One constructor applied to arguments that join, such as arrays.
+        if let Ty::App(name, args) = &distinct[0]
+            && !args.is_empty()
+            && distinct.iter().all(|ty| matches!(ty, Ty::App(other, own) if other == name && own.len() == args.len()))
+        {
+            let joined = (0..args.len())
+                .map(|at| {
+                    let column: Vec<Ty> = distinct
+                        .iter()
+                        .map(|ty| match ty {
+                            Ty::App(_, own) => own[at].clone(),
+                            _ => unreachable!("checked above"),
+                        })
+                        .collect();
+                    self.join_types(case, field, &column)
+                })
+                .collect::<Option<Vec<_>>>();
+            if let Some(joined) = joined {
+                return Some(Ty::App(name.clone(), joined));
+            }
+        }
+        // One case per type, each with a kind of its own.
+        let mut kinds: Vec<&'static str> = Vec::new();
+        for ty in &distinct {
+            let kind = match ty {
+                Ty::Poly(_) => return None,
+                _ => self.state.runtime_of(ty, 0)?,
+            };
+            if kinds.contains(&kind) {
+                return None;
+            }
+            kinds.push(kind);
+        }
+        let mut ctors: Vec<Ctor> = Vec::new();
+        for (ty, kind) in distinct.iter().zip(&kinds) {
+            let base = match (ty, *kind) {
+                (Ty::App(name, _), "object" | "instance") if !name.contains('.') && name != "dict" => capitalize(name),
+                (_, kind) => upper_ident(kind),
+            };
+            let name = unique_ctor(&ctors, &base);
+            ctors.push(Ctor { name, tag: None, payload: Payload::Ty(ty.clone()) });
+        }
+        let kind = DeclKind::Variant { tag: None, ctors };
+        let params = free_variables(&kind);
+        let name = self.fresh_type_name(&format!("{case}{}", capitalize(&lower_ident(field))));
+        self.state.anonymous_params.insert(name.clone(), params.clone());
+        let reference = Ty::App(name.clone(), params.iter().cloned().map(Ty::Var).collect());
+        self.state.declare(Decl { name, params, kind, ts: None, class: None });
+        Some(reference)
     }
 
     /// Whether two object types have the same properties, each as optional
@@ -3094,4 +3214,25 @@ fn named_symbol(ty: P<Type>) -> Option<P<Symbol>> {
         let name = symbol.name();
         !name.is_empty() && !name.starts_with(tsrs_ast::INTERNAL_SYMBOL_NAME_PREFIX) && !name.starts_with("__")
     })
+}
+
+/// Whether a declaration body names the type `name`.
+fn mentions(kind: &DeclKind, name: &str) -> bool {
+    let mut found = false;
+    let mut visit = |ty: &Ty| ty.for_each_name(&mut |other| found |= other == name);
+    match kind {
+        DeclKind::Record(fields) => fields.iter().for_each(|field| visit(&field.ty)),
+        DeclKind::Alias(ty) => visit(ty),
+        DeclKind::Variant { ctors, .. } => {
+            for ctor in ctors {
+                match &ctor.payload {
+                    Payload::Ty(ty) => visit(ty),
+                    Payload::Record(fields) => fields.iter().for_each(|field| visit(&field.ty)),
+                    Payload::None => {}
+                }
+            }
+        }
+        DeclKind::Abstract => {}
+    }
+    found
 }
