@@ -10968,8 +10968,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         if let Some(inclusion) = interface_inclusion {
             report_compunit_inclusion_warnings(&mut tctx, inclusion.warnings);
         }
-        if !place_location_free_warnings(arena, options, &mut located_warnings, &mut tctx.warnings)
-        {
+        // The earlier typing warnings already carry located parse slots.
+        // Only inclusion warnings appended since then still need placement.
+        if !place_location_free_warnings(
+            arena, options, &mut located_warnings,
+            &mut tctx.warnings[post_type_warning_start..],
+        ) {
             return Err(LocationRetry::Warning.into());
         }
         let warnings = format_type_warnings_lazy(
