@@ -16,6 +16,7 @@ class FixtureFailureReportingTests(unittest.TestCase):
             scripts = root / "scripts"
             scripts.mkdir()
             shutil.copyfile(script, scripts / script.name)
+            shutil.copyfile(script.with_name("parity_lib.sh"), scripts / "parity_lib.sh")
             fixtures = root / "tests/js_output_parity/fixtures"
             fixtures.mkdir(parents=True)
             sources = []

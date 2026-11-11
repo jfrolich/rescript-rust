@@ -35,7 +35,7 @@ use crate::parser::ast::{
 };
 use crate::parser::longident::Longident;
 
-use super::spice_ppx;
+use super::derive;
 use crate::parser::ast::{
     Extension, PexpBraces, PexpRaw, PrimitiveRepr, PstrRaw, RawKind, RawSource, SpreadElement,
 };
@@ -7052,28 +7052,16 @@ enum Rewritten {
     New(Expression),
 }
 
-/// [`rewrite_expression`] on the expression at `idx`. An identifier, a
-/// constant, `break` or `continue` without attributes maps to itself
-/// (`rewrite_expression_generic` returns an equal node for those), so it is
-/// returned by index.
+/// Keep certified rewrite-free subtrees by index. Their descendants have no
+/// attributes, so they do not need the marshal attribute-sharing marker.
+/// Diagnostics still traverse the original tree in `check::Checker`.
 fn rewrite_child(idx: ExprIdx, arena: &mut ParseArena) -> Rewritten {
-    let expr = arena.get_expr(idx);
-    let unchanged = expr.pexp_attributes.is_empty()
-        && match &expr.pexp_desc {
-            ExpressionDesc::Pexp_ident(_)
-            | ExpressionDesc::Pexp_break
-            | ExpressionDesc::Pexp_continue => true,
-            // The `l` suffix is stripped.
-            ExpressionDesc::Pexp_constant(constant) => {
-                !matches!(constant, Constant::Integer(_, Some('l')))
-            }
-            _ => false,
-        };
-    if unchanged {
-        let loc = expr.pexp_loc;
+    if arena.expr_needs_no_rewrite(idx) {
+        let loc = arena.get_expr(idx).pexp_loc;
         arena.mark_rewritten_expr_loc(loc);
         return Rewritten::Same(idx);
     }
+    let expr = arena.get_expr(idx);
     let expr = expr.clone();
     Rewritten::New(rewrite_expression(&expr, arena))
 }
@@ -9697,7 +9685,7 @@ fn rewrite_structure_impl(
     // Context for tracking already-created module type names (per-structure scope)
     let mut await_context = std::collections::HashSet::new();
     let spice_mapper_active =
-        apply_spice && spice_ppx::structure_uses_spice_mapper(structure, arena);
+        apply_spice && derive::structure_uses_spice_mapper(structure, arena);
 
     // OCaml `Bs_builtin_ppx.structure_mapper` (bs_builtin_ppx.ml:676-802)
     // recurses as `head :: structure_mapper rest`. Constructor arguments are
@@ -10249,10 +10237,10 @@ fn try_rewrite_signature_items(
     arena: &mut ParseArena,
 ) -> PpxResult<Vec<SignatureItem>> {
     let mut rewritten = Vec::new();
-    let spice_mapper_active = spice_ppx::signature_uses_spice_mapper(items, arena);
+    let spice_mapper_active = derive::signature_uses_spice_mapper(items, arena);
     for item in items {
         let expanded_items =
-            spice_ppx::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
+            derive::expand_signature_item_with_mapper(item, arena, spice_mapper_active)
                 .map_err(PpxError::message)?;
         for expanded in expanded_items {
             if let SignatureItemDesc::Psig_value(vd) = &expanded.psig_desc {
@@ -10356,7 +10344,7 @@ fn try_rewrite_structure_item(
     spice_mapper_active: bool,
 ) -> PpxResult<Vec<StructureItem>> {
     let mut result = Vec::new();
-    for expanded in spice_ppx::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
+    for expanded in derive::expand_structure_item_with_mapper(item, arena, spice_mapper_active)
         .map_err(PpxError::message)?
     {
         if let StructureItemDesc::Pstr_primitive(vd) = &expanded.pstr_desc {
@@ -10371,7 +10359,7 @@ fn try_rewrite_structure_item(
 /// Rewrite a structure item, potentially returning multiple items for @deriving.
 fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<StructureItem> {
     let spice_mapper_active =
-        spice_ppx::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
+        derive::structure_uses_spice_mapper(std::slice::from_ref(item), arena);
     try_rewrite_structure_item(item, arena, spice_mapper_active).unwrap_or_else(|error| {
         arena.defer_ppx_error(error);
         rewrite_structure_item_no_spice(item, arena)
@@ -11521,6 +11509,51 @@ let e = () =>
     }
 
     #[test]
+    fn rewrite_child_skips_only_certified_subtrees() {
+        let source = "let x = ((a, [1, 2]), Some((b, c)), (a, @foo b), (1l, 2), (a, %raw(`1`)), (a, b->f))\n";
+        let (mut arena, structure) = parse_structure(source);
+        let StructureItemDesc::Pstr_value((_, bindings)) = &structure[0].pstr_desc else {
+            panic!("expected binding");
+        };
+        let root = arena.vb_list(*bindings)[0].pvb_expr;
+        let ExpressionDesc::Pexp_tuple(items) = arena.get_expr(root).pexp_desc else {
+            panic!("expected tuple");
+        };
+        let items = arena.expr_list(items).to_vec();
+        for &idx in &items[..2] {
+            assert!(arena.expr_needs_no_rewrite(idx));
+            assert!(matches!(rewrite_child(idx, &mut arena), Rewritten::Same(kept) if kept == idx));
+        }
+        for &idx in &items[2..] {
+            assert!(!arena.expr_needs_no_rewrite(idx));
+            assert!(matches!(rewrite_child(idx, &mut arena), Rewritten::New(_)));
+        }
+        assert!(!arena.expr_needs_no_rewrite(root));
+    }
+
+    #[test]
+    fn mutating_a_child_invalidates_its_certified_parents() {
+        let (mut arena, structure) = parse_structure("let x = ((a, b), c)\n");
+        let StructureItemDesc::Pstr_value((_, bindings)) = &structure[0].pstr_desc else {
+            panic!("expected binding");
+        };
+        let root = arena.vb_list(*bindings)[0].pvb_expr;
+        let ExpressionDesc::Pexp_tuple(items) = arena.get_expr(root).pexp_desc else {
+            panic!("expected tuple");
+        };
+        let child = arena.expr_list(items)[0];
+        assert!(arena.expr_needs_no_rewrite(root));
+        assert!(arena.expr_needs_no_rewrite(child));
+        let replacement = arena.get_expr(child).clone();
+        arena.get_expr_mut(child).pexp_attributes = replacement.pexp_attributes.clone();
+        assert!(!arena.expr_needs_no_rewrite(child));
+        assert!(!arena.expr_needs_no_rewrite(root));
+        let reserved = arena.reserve_expr();
+        arena.initialize_expr(reserved, replacement);
+        assert!(!arena.expr_needs_no_rewrite(reserved));
+    }
+
+    #[test]
     fn rewrite_child_keeps_the_node_of_an_unchanged_leaf() {
         let source = "let x = (a, 1, \"s\", f(b), @foo c)\n";
         let (mut arena, structure) = parse_structure(source);
@@ -11547,13 +11580,11 @@ let e = () =>
             ));
             assert!(arena.is_rewritten_expr_loc(before.pexp_loc));
         }
-        // An application and an expression with attributes go through the
-        // mapper and get a new node.
-        for other in [apply, attributed] {
-            let rewritten = rewrite_child(other, &mut arena);
-            assert!(matches!(rewritten, Rewritten::New(_)));
-            assert_ne!(push_rewritten(&mut arena, rewritten), other);
-        }
+        assert!(matches!(rewrite_child(apply, &mut arena), Rewritten::Same(idx) if idx == apply));
+        // An expression with attributes still goes through the full mapper.
+        let rewritten = rewrite_child(attributed, &mut arena);
+        assert!(matches!(rewritten, Rewritten::New(_)));
+        assert_ne!(push_rewritten(&mut arena, rewritten), attributed);
     }
 
     #[test]
