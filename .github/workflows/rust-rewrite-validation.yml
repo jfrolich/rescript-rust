@@ -64,9 +64,11 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           ./scripts/rust_compiler_shims.sh release
 
+      # The same OCaml as ci.yml: diagnostics are laid out by OCaml's Format,
+      # whose break sizing changed in 5.5, and the Rust formatter follows it.
       - uses: ./.github/actions/setup-ocaml
         with:
-          compiler: "5.3.0"
+          compiler: "5.5.2"
           os: ubuntu-24.04
           cache-prefix: opam-rewrite-validation-v1
 
