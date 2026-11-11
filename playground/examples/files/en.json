@@ -1,0 +1,5 @@
+{
+  "title": "Inbox",
+  "greeting": "Hello {name}, you have {count} new messages.",
+  "empty": "Nothing to read."
+}

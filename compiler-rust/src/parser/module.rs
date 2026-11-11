@@ -351,8 +351,13 @@ pub fn parse_structure_item(p: &mut Parser<'_>) -> Option<StructureItem> {
             let ext_start_idx = p.start_pos_idx();
             p.next();
             let id = parse_extension_id(p, ext_start_idx);
-            let payload = parse_payload_region(p);
-            let payload = raw_source_extension_payload(p, &id, payload);
+            let payload = match parse_macro_arguments(p, &id) {
+                Some(payload) => payload,
+                None => {
+                    let payload = parse_payload_region(p);
+                    raw_source_extension_payload(p, &id, payload)
+                }
+            };
             parse_newline_or_semicolon_structure(p);
             Some(StructureItemDesc::Pstr_extension(Box::new((
                 (id, payload),
@@ -4104,6 +4109,153 @@ pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<
     with_loc(id_idx, p.mk_loc_idx_to_prev_end(start_pos_idx))
 }
 
+/// Name of the extension a macro quote hole `${expr}` is kept as.
+pub const HOLE_EXTENSION: &str = "res.hole";
+
+/// `${expr}`: a hole in a macro quote (`%code(...)`, `%type(...)`,
+/// `%pat(...)`). It is an extension node named [`HOLE_EXTENSION`] whose
+/// payload is the expression, so no parsetree node kind is added.
+pub(super) fn parse_hole_extension(p: &mut Parser<'_>) -> Extension {
+    let start_pos_idx = p.start_pos_idx();
+    p.expect(Token::DollarLbrace);
+    let expr = super::expr::parse_expr(p);
+    p.expect(Token::Rbrace);
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let expr_loc = expr.pexp_loc;
+    let expr_idx = p.arena_mut().push_expr(expr);
+    let name = p.arena_mut().push_string(HOLE_EXTENSION);
+    let item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
+        pstr_loc: expr_loc,
+    };
+    (with_loc(name, loc), Payload::PStr(Box::new(vec![item])))
+}
+
+/// The payload of the quotes `%type(...)` and `%pat(...)`, which hold a type
+/// and a pattern where an extension payload is otherwise a structure.
+pub(super) fn parse_quote_payload(p: &mut Parser<'_>, id: &StringLoc) -> Option<Payload> {
+    if !(p.token == Token::Lparen && p.start_pos.cnum == p.prev_end_pos.cnum) {
+        return None;
+    }
+    let quote_type = match p.arena().get_string(id.txt) {
+        "type" => true,
+        "pat" => false,
+        _ => return None,
+    };
+    p.leave_breadcrumb(Grammar::AttributePayload);
+    p.next();
+    let payload = if quote_type {
+        let typ = super::typ::parse_typ_expr(p);
+        Payload::PTyp(p.arena_mut().push_core_type(typ))
+    } else {
+        let pat = super::pattern::parse_pattern(p);
+        Payload::PPat(Box::new((p.arena_mut().push_pat(pat), None)))
+    };
+    p.expect(Token::Rparen);
+    p.eat_breadcrumb();
+    Some(payload)
+}
+
+/// The arguments of a macro where expressions are written,
+/// `%Route.make("/users/:id", 3)`: the name is a module path, which no PPX
+/// extension is. One argument is kept as that expression, several as a
+/// tuple of them.
+pub(super) fn parse_macro_arguments(p: &mut Parser<'_>, id: &StringLoc) -> Option<Payload> {
+    if !(p.token == Token::Lparen && p.start_pos.cnum == p.prev_end_pos.cnum) {
+        return None;
+    }
+    if !p
+        .arena()
+        .get_string(id.txt)
+        .starts_with(|c: char| c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    p.leave_breadcrumb(Grammar::AttributePayload);
+    let start_pos_idx = p.start_pos_idx();
+    p.next();
+    let mut exprs = Vec::new();
+    while p.token != Token::Rparen && p.token != Token::Eof {
+        let expr = super::expr::parse_expr(p);
+        exprs.push(expr);
+        if p.token == Token::Comma {
+            p.next();
+        } else {
+            break;
+        }
+    }
+    p.expect(Token::Rparen);
+    p.eat_breadcrumb();
+    let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+    let expr = match exprs.len() {
+        0 => return Some(Payload::PStr(Box::default())),
+        1 => exprs.pop().expect("one argument"),
+        _ => {
+            let indices: Vec<_> = exprs
+                .into_iter()
+                .map(|expr| p.arena_mut().push_expr(expr))
+                .collect();
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_tuple(p.arena_mut().push_expr_list(&indices)),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+    };
+    let item_loc = expr.pexp_loc;
+    let expr_idx = p.arena_mut().push_expr(expr);
+    let item = StructureItem {
+        pstr_desc: StructureItemDesc::Pstr_eval(Box::new((expr_idx, Attributes::new()))),
+        pstr_loc: item_loc,
+    };
+    Some(Payload::PStr(Box::new(vec![item])))
+}
+
+/// The arguments of a macro in a type position, `%Partial.t(user)`: the
+/// name is a module path, which no PPX extension is, and the arguments are
+/// types. One argument is kept as that type, several as a tuple of them.
+pub(super) fn parse_macro_type_arguments(p: &mut Parser<'_>, id: &StringLoc) -> Option<Payload> {
+    if !(p.token == Token::Lparen && p.start_pos.cnum == p.prev_end_pos.cnum) {
+        return None;
+    }
+    if !p
+        .arena()
+        .get_string(id.txt)
+        .starts_with(|c: char| c.is_ascii_uppercase())
+    {
+        return None;
+    }
+    p.leave_breadcrumb(Grammar::AttributePayload);
+    let start_pos_idx = p.start_pos_idx();
+    p.next();
+    let mut types = Vec::new();
+    while p.token != Token::Rparen && p.token != Token::Eof {
+        let typ = super::typ::parse_typ_expr(p);
+        types.push(p.arena_mut().push_core_type(typ));
+        if p.token == Token::Comma {
+            p.next();
+        } else {
+            break;
+        }
+    }
+    p.expect(Token::Rparen);
+    p.eat_breadcrumb();
+    let payload = match types.as_slice() {
+        [] => Payload::PStr(Box::default()),
+        [single] => Payload::PTyp(*single),
+        _ => {
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            let tuple = CoreType {
+                ptyp_desc: CoreTypeDesc::Ptyp_tuple(p.arena_mut().push_type_list(&types)),
+                ptyp_loc: loc,
+                ptyp_attributes: Attributes::new(),
+            };
+            Payload::PTyp(p.arena_mut().push_core_type(tuple))
+        }
+    };
+    Some(payload)
+}
+
 /// OCaml `parse_extension ?(module_language = false)` (res_core.ml:7683-7689).
 pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Extension {
     // Capture start position BEFORE consuming % or %% so extension location includes it
@@ -4115,6 +4267,9 @@ pub(super) fn parse_extension(p: &mut Parser<'_>, module_language: bool) -> Exte
     }
     let id = parse_extension_id(p, id_start_idx);
 
+    if let Some(payload) = parse_macro_arguments(p, &id) {
+        return (id, payload);
+    }
     let payload = parse_payload_region(p);
     let payload = raw_source_extension_payload(p, &id, payload);
 

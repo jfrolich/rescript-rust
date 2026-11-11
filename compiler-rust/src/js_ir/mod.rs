@@ -287,6 +287,11 @@ impl ModulePathResolver {
                 },
             ),
             (PackageInfoQuery::Script, PackageInfoQuery::Script) => {
+                // A module compiled in memory (the playground, tests) has no
+                // file to find.
+                if env.module_has_in_memory_info(module_name) {
+                    return None;
+                }
                 let js_file = js_name_of_module_name(module_name, import_info.file_case, ".js");
                 (!env.file_exists_in_load_path_uncap(&js_file))
                     .then_some(ModulePathResolutionError::JsNotFound { js_file })

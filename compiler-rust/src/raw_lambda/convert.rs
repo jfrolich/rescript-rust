@@ -5225,7 +5225,20 @@ impl<'a> RawLambdaConverter<'a> {
             }
             StructureItemDesc::Tstr_value(rec_flag, bindings) => {
                 let old_len = fields.len();
-                fields.extend(let_bound_idents(self.ta, self.ta.value_bindings(*bindings)));
+                // The instances a macro generated are not fields of the module.
+                let generated = self
+                    .ta
+                    .value_bindings(*bindings)
+                    .first()
+                    .is_some_and(|binding| {
+                        binding.vb_attributes.iter().any(|attr| {
+                            self.arena.get_string(attr.0.txt)
+                                == crate::macros::discover::INSTANCES_ATTRIBUTE
+                        })
+                    });
+                if !generated {
+                    fields.extend(let_bound_idents(self.ta, self.ta.value_bindings(*bindings)));
+                }
                 let body =
                     self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
                 fields.truncate(old_len);

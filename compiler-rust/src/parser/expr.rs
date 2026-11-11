@@ -1503,12 +1503,28 @@ pub fn parse_atomic_expr(p: &mut Parser<'_>) -> Expression {
             p.next();
             let name = super::module::parse_extension_id(p, id_start_idx);
 
-            let payload = super::module::parse_payload_region(p);
-            let payload = super::module::raw_source_extension_payload(p, &name, payload);
+            let payload = match super::module::parse_quote_payload(p, &name)
+                .or_else(|| super::module::parse_macro_arguments(p, &name))
+            {
+                Some(payload) => payload,
+                None => {
+                    let payload = super::module::parse_payload_region(p);
+                    super::module::raw_source_extension_payload(p, &name, payload)
+                }
+            };
 
             let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
             Expression {
                 pexp_desc: ExpressionDesc::Pexp_extension(Box::new((name, payload))),
+                pexp_loc: loc,
+                pexp_attributes: Attributes::new(),
+            }
+        }
+        Token::DollarLbrace => {
+            let extension = super::module::parse_hole_extension(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            Expression {
+                pexp_desc: ExpressionDesc::Pexp_extension(Box::new(extension)),
                 pexp_loc: loc,
                 pexp_attributes: Attributes::new(),
             }

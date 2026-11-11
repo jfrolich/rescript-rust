@@ -45,6 +45,7 @@ pub mod intern;
 pub mod js_ir;
 pub mod lambda;
 pub mod location;
+pub mod macros;
 pub mod misc;
 pub mod name;
 pub mod parse_arena;

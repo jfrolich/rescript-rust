@@ -1313,6 +1313,11 @@ pub struct TypeCheckContext<'a> {
     pub active_recursive_value_ids: Vec<Ident>,
     /// Mirrors OCaml's Experimental_features.LetUnwrap during type checking.
     pub experimental_let_unwrap: bool,
+    /// Whether this is a macro discovery pass (`macros::expand`).
+    pub macro_mode: crate::macros::discover::MacroMode,
+    /// Set when an ordinary compilation stopped at a macro use: the file
+    /// has to be expanded first.
+    pub macro_expansion_required: bool,
     /// OCaml's `?deprecated_context:FunctionCall` argument (typecore.ml:2594,
     /// 2632): set right before typing the function of an application or the
     /// tag of a tagged template, and taken by the next expression typed.
@@ -1462,6 +1467,8 @@ impl<'a> TypeCheckContext<'a> {
             active_recursive_value_ids: Vec::new(),
             persistent_env: None,
             experimental_let_unwrap: false,
+            macro_mode: crate::macros::discover::MacroMode::Off,
+            macro_expansion_required: false,
             deprecated_function_call: false,
             transparent_modules: false,
             module_expr_semantic_types: HashMap::new(),
@@ -1636,6 +1643,16 @@ impl<'a> TypeCheckContext<'a> {
                 };
                 state.used = true;
                 report
+            });
+            // `Macro.Type` takes the place of `Stdlib.Type`, which it
+            // includes: opening `Macro` loses nothing.
+            let report = report.filter(|_| {
+                !(event.kind == "module"
+                    && event.name == "Type"
+                    && self
+                        .delayed_open_checks
+                        .iter()
+                        .any(|check| check.slot == event.slot && check.root == crate::macros::MACRO_MODULE))
             });
             if let Some(loc) = report {
                 let warning = match event.kind {
@@ -3888,7 +3905,12 @@ fn transl_type_inner(
             Ok((ctyp, package_ty))
         }
 
-        CTD::Ptyp_extension(extension) => Err(builtin_extension_error(tctx.arena, extension)),
+        CTD::Ptyp_extension(extension) => {
+            if let Some(error) = crate::macros::discover::type_extension(tctx, env, loc, extension) {
+                return Err(error);
+            }
+            Err(builtin_extension_error(tctx.arena, extension))
+        }
     }
 }
 
@@ -4972,7 +4994,12 @@ fn type_pattern_inner(
             Ok(result)
         }
 
-        PD::Ppat_extension(extension) => Err(builtin_extension_error(tctx.arena, extension)),
+        PD::Ppat_extension(extension) => {
+            if let Some(error) = crate::macros::discover::pattern_extension(tctx, env, loc, extension) {
+                return Err(error);
+            }
+            Err(builtin_extension_error(tctx.arena, extension))
+        }
     }
 }
 
@@ -7907,7 +7934,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
             check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
-            let ty = crate::types::instance(ctx, desc.val_type);
+            // A `@generic` of another file is called at its erased type.
+            let ty = match crate::macros::discover::generic_use(tctx, env, loc, &path, &desc)? {
+                Some(erased) => erased,
+                None => crate::types::instance(ctx, desc.val_type),
+            };
             rue_unify(tctx, loc, ty, expected_ty, context)?;
 
             Ok({
@@ -8407,6 +8438,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let args = tctx.arena.apply_args(inner.args);
             // Function application
             let funct_expr = tctx.arena.get_expr(*funct);
+            crate::macros::discover::note_application(tctx, loc, funct_expr, args);
 
             let typed_apply = type_application(
                 tctx,
@@ -8791,6 +8823,15 @@ fn type_expect_with_recarg_unscoped<'a>(
         }
 
         ED::Pexp_extension(extension) => {
+            if let Some(result) = crate::macros::discover::expression_extension(
+                tctx,
+                env,
+                loc,
+                extension,
+                expected_ty,
+            ) {
+                return result;
+            }
             // Extension: [%id]
             type_extension_expr(
                 tctx,

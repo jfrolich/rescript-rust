@@ -4,10 +4,11 @@
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/bundle-stdlib.js && vite",
     "build": "node scripts/bundle-stdlib.js && vite build",
     "bundle:stdlib": "node scripts/bundle-stdlib.js",
     "build:wasm": "cd crate && wasm-pack build --target web --release",
+    "smoke": "node scripts/bundle-stdlib.js && node scripts/smoke.mjs",
     "preview": "vite preview"
   },
   "devDependencies": {

@@ -2700,6 +2700,15 @@ impl ParseArena {
         self.apply_args.get(args)
     }
 
+    /// Rewrite every position recorded so far. Macro expansion parses the
+    /// expanded text and then moves each position to where it is in the
+    /// source as written.
+    pub fn remap_positions(&mut self, mut remap: impl FnMut(&mut Position)) {
+        for position in self.positions.iter_mut() {
+            remap(position);
+        }
+    }
+
     pub fn get_expr(&self, idx: ExprIdx) -> &Expression {
         let raw = idx.0;
         if raw < SHARED_EXPRESSION_BASE {

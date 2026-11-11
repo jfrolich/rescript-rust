@@ -159,6 +159,10 @@ impl<T, Idx: ArenaIdx> Arena<T, Idx> {
     }
 
     /// Iterate over all items with their indices.
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
+        self.items.iter_mut()
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (Idx, &T)> {
         self.items
             .iter()

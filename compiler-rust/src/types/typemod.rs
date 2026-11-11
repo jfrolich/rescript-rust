@@ -15732,7 +15732,8 @@ fn type_module_expr_with_alias_inner<'a>(
         }
 
         ParsedModuleExprDesc::Pmod_extension(ext) => Err(TypeModError::CoreError(
-            crate::types::typecore::builtin_extension_error(arena, ext),
+            crate::macros::discover::declarations_extension(tctx, env, mod_expr.pmod_loc, ext, true)
+                .unwrap_or_else(|| crate::types::typecore::builtin_extension_error(arena, ext)),
         )),
     }
 }
@@ -16652,12 +16653,23 @@ fn type_structure_unscoped<'a>(
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
         let warnings_before_item = tctx.warnings.len();
-        let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        // In a macro discovery pass an item that fails does not end the
+        // pass: later items are still searched for macros.
+        crate::macros::discover::begin_item(tctx, item);
+        let typed = type_structure_item_with_macros(tctx, &current_env, arena, item);
+        crate::macros::discover::end_item(tctx, typed.is_ok());
+        let (typed_item, item_sig, new_env) = match typed {
+            Ok(typed) => typed,
+            Err(_) if crate::macros::discover::skips_failed_item(tctx) => continue,
+            Err(error) => return Err(error),
+        };
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
         }
-        if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
+        if !rescript_hide_structure_item(&typed_item.str_desc, arena)
+            && !crate::macros::discover::is_instance_group(arena, item)
+        {
             sig_items.extend(item_sig);
         }
         typed_items.push(typed_item);
@@ -16768,6 +16780,66 @@ pub fn check_nongen_schemes(
         check_nongen_scheme(ctx, env, item)?;
     }
     Ok(())
+}
+
+/// Type check a structure item, with the macros attached to it.
+fn type_structure_item_with_macros<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    item: &ParsedStructureItem,
+) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
+    if let Some(error) = crate::macros::discover::value_item(tctx, env, item) {
+        return Err(TypeModError::CoreError(error));
+    }
+    if let Some(error) = crate::macros::discover::type_item_requires_expansion(tctx, item) {
+        return Err(TypeModError::CoreError(error));
+    }
+    let mut typed = type_structure_item(tctx, env, arena, item)?;
+    crate::macros::discover::type_item(tctx, &typed.2, item);
+    mark_macro_values(tctx, arena, item, &mut typed.1, &mut typed.2);
+    Ok(typed)
+}
+
+/// `@macro let f = ...` and `@generic let f = ...`: keep the mark on the
+/// value's description, where the files that use `f` look for it. A `let`
+/// keeps no other attribute there.
+fn mark_macro_values<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    arena: &'a ParseArena,
+    item: &ParsedStructureItem,
+    signature: &mut [crate::types::decl::SignatureItem],
+    env: &mut Env,
+) {
+    let ParsedStructureItemDesc::Pstr_value((_, bindings)) = &item.pstr_desc else {
+        return;
+    };
+    for binding in arena.vb_list(*bindings) {
+        let Some(mark) = binding
+            .pvb_attributes
+            .iter()
+            .find(|attr| matches!(arena.get_string(attr.0.txt), "macro" | "generic"))
+        else {
+            continue;
+        };
+        let mut pattern = arena.get_pat(binding.pvb_pat);
+        while let crate::parser::ast::PatternDesc::Ppat_constraint(inner) = &pattern.ppat_desc {
+            pattern = arena.get_pat(inner.0);
+        }
+        let crate::parser::ast::PatternDesc::Ppat_var(name) = &pattern.ppat_desc else {
+            continue;
+        };
+        let name = arena.get_string(name.txt);
+        let attribute = parser_attr_to_decl_attr(arena, tctx.type_ctx, mark);
+        for sig_item in signature.iter_mut() {
+            if let crate::types::decl::SignatureItem::SigValue(id, desc) = sig_item
+                && id.name() == name
+            {
+                desc.val_attributes = vec![attribute.clone()].into();
+                env.add_value(*id, desc.clone());
+            }
+        }
+    }
 }
 
 /// Type check a structure item.
@@ -20193,7 +20265,8 @@ fn type_structure_item<'a>(
         ParsedStructureItemDesc::Pstr_extension(inner) => {
             let (extension, _attrs) = &**inner;
             Err(TypeModError::CoreError(
-                crate::types::typecore::builtin_extension_error(arena, extension),
+                crate::macros::discover::declarations_extension(tctx, env, loc, extension, false)
+                    .unwrap_or_else(|| crate::types::typecore::builtin_extension_error(arena, extension)),
             ))
         }
     }

@@ -49,6 +49,7 @@ oxc_span = "0.49"
 
 # WASM support
 wasm-bindgen = { version = "0.2", optional = true }
+rquickjs = { version = "0.9", optional = true }
 
 [dev-dependencies]
 proptest = "1.5"
@@ -58,7 +59,9 @@ tempfile = "3"
 
 [features]
 default = ["native"]
-native = ["rayon", "env_logger", "clap"]
+native = ["rayon", "env_logger", "clap", "macro-quickjs"]
+# The embedded JavaScript engine that runs compile-time macros.
+macro-quickjs = ["rquickjs"]
 wasm = ["wasm-bindgen"]
 
 [profile.release]

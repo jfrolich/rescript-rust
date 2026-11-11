@@ -302,6 +302,15 @@ fn parse_pattern_with(p: &mut Parser<'_>, alias: bool, or_: bool) -> Pattern {
                 attrs.clone(),
             )
         }
+        Token::DollarLbrace => {
+            let extension = super::module::parse_hole_extension(p);
+            let loc = p.mk_loc_idx_to_prev_end(start_pos_idx);
+            pat(
+                PatternDesc::Ppat_extension(Box::new(extension)),
+                loc,
+                attrs.clone(),
+            )
+        }
         Token::Eof => {
             p.err_unexpected();
             recover::default_pattern(p.arena_mut())

@@ -21,6 +21,8 @@
 
 #### :rocket: New Feature
 
+- Add compile-time macros to the Rust compiler: `@macro` and `@generic` functions that return quoted code (`%code`, `%type`, `%pat` with `${...}` holes), `%comptime`, and the `Macro` module. `rescript build` does not expand them yet; see `docs/comptime`. https://github.com/jfrolich/rescript-rust/pull/90
+
 #### :bug: Bug fix
 
 - JSX v4: keep `@directive` on an async component's own function instead of its generated sync wrapper, so `@react.component let make = @directive("'use cache';") async (...) => ...` compiles to an async function that starts with `'use cache'` (ReScript 12 dropped the directive; Next.js rejects it on a sync function).

@@ -572,11 +572,23 @@ pub fn format_error(
     end_pos: &Position,
     message: &str,
 ) -> String {
+    format_error_with_intro("Syntax error!", filename, src, start_pos, end_pos, message)
+}
+
+/// [`format_error`] with another header line than "Syntax error!".
+pub fn format_error_with_intro(
+    intro: &str,
+    filename: &str,
+    src: &str,
+    start_pos: &Position,
+    end_pos: &Position,
+    message: &str,
+) -> String {
     let mut result = String::new();
 
     // Header (OCaml `Res_diagnostics_printing_utils` colors it like other errors).
     result.push_str("\n  ");
-    result.push_str(&colorize_intro("Syntax error!", true));
+    result.push_str(&colorize_intro(intro, true));
     result.push('\n');
 
     // Location

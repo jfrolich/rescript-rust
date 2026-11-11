@@ -1,16 +1,593 @@
-# Comptime (proposed)
+# RFC: compile-time macros
 
-Compile-time metaprogramming for ReScript, modelled on Zig's `comptime`:
-regular ReScript functions that run during compilation, introspect types, and
-specialize code. It is meant to replace most PPX use cases.
+A macro is a ReScript function that the compiler runs while it compiles
+another file. It returns code. It does the jobs a PPX does, and it can ask the
+type checker about types, the way Zig's `comptime` can.
 
-This is a design proposal. The compiler does not implement it. An early
-prototype in the Rust compiler was removed before the first Rust release, so
-the feature can be rebuilt on top of the released architecture.
+```rescript
+// Debug.res
+open Macro
 
-| Document | Contents |
-|----------|----------|
-| [DESIGN.md](DESIGN.md) | Proposed architecture: goals, `@typeInfo`, execution model, in-process compilation, derive attributes, PPX replacement |
-| [EXAMPLES.md](EXAMPLES.md) | Worked examples (JSON codecs, DSL parsing, derive) |
-| [BUILDERS.md](BUILDERS.md) | `typeInfo` shape and the record/variant builder builtins |
-| [PROTOTYPE_NOTES.md](PROTOTYPE_NOTES.md) | Lessons from the removed prototype (inlining strategy, `@typeInfo` on concrete types, optimizer reuse) |
+@macro
+let log = (e: code<'a>): code<'a> =>
+  %code({
+    let value = ${e}
+    Console.log2(${Code.string(Code.print(e) ++ " =")}, value)
+    value
+  })
+```
+
+```rescript
+// Main.res
+let total = %Debug.log(price *. Int.toFloat(quantity))
+// prints: price *. Int.toFloat(quantity) = 37.5
+```
+
+**Status.** Implemented in the Rust compiler (`compiler-rust/src/macros`),
+with tests (`compiler-rust/tests/macros.rs`) and a browser playground
+(`playground/`). `rescript build` does not expand macros yet; see
+[What is missing](#what-is-missing). [IMPLEMENTATION.md](IMPLEMENTATION.md)
+describes the compiler side.
+
+- [Why](#why)
+- [A tour](#a-tour)
+- [Reference](#reference)
+- [How it runs](#how-it-runs)
+- [Cost](#cost)
+- [Compared with](#compared-with)
+- [What is missing](#what-is-missing)
+- [Open questions](#open-questions)
+- [Trying it](#trying-it)
+
+## Why
+
+ReScript code generation is done by PPXs today: native executables, written
+in OCaml against a frozen copy of the parse tree, started once per file. They
+see syntax only, so a JSON deriver cannot know what `user` is unless the type
+is written out next to the attribute, and they cannot be written in ReScript.
+The Rust compiler carries a port of one PPX (7,000 lines for ppx-spice)
+because starting a process per file was too slow for it.
+
+The first proposal for this directory copied Zig: mark a function `comptime`
+and let the compiler partially evaluate its body. That works well when the
+output is an expression built by walking a record. Every other shape of
+output (a record literal, the arms of a switch, a new type, a module, a
+derived name) needed a builtin of its own; the list reached 21 builtins, 3
+attributes and 3 grammar forms, and the prototype needed a second evaluator
+inside the type checker.
+
+This design has one mechanism. A macro is an ordinary function: its loops
+are loops and its helpers are functions. What it returns is written as
+ReScript, and is type checked like code written by hand.
+
+| | PPX | First proposal | This RFC |
+| --- | --- | --- | --- |
+| Written in | OCaml | ReScript | ReScript |
+| Sees types | no | yes | yes |
+| Output shapes | any syntax | expressions; a builtin per other shape | expressions, types, patterns, declarations |
+| Special forms | none (attributes and extensions) | 27 | 7 |
+| Runs in | a process per file | an evaluator in the type checker, plus a JS engine | a JS engine in the compiler |
+| Macro body is type checked | by OCaml | no | yes |
+
+## A tour
+
+Every example here is a project in `playground/examples` and is compiled by
+the tests.
+
+### Quotes and holes
+
+`%code(...)` is a quote: a piece of ReScript that is not evaluated, a value
+of type `code<'a>`. `${...}` is a hole in it, filled with another piece of
+code. `%type(...)` and `%pat(...)` quote a type and a pattern.
+
+A quote is checked for syntax where it is written. Its types are checked
+where the macro is used, after the holes are filled.
+
+A parameter of type `code<'a>` receives the code of the argument. A parameter
+of an ordinary type receives a value, which the call site has to write as a
+literal. There is no `comptime` keyword: the type of the parameter says when
+it exists.
+
+```rescript
+@generic
+let rec pow = (base: code<float>, n: int): code<float> =>
+  if n == 0 {
+    %code(1.0)
+  } else if mod(n, 2) == 0 {
+    %code({
+      let half = ${pow(base, n / 2)}
+      half *. half
+    })
+  } else {
+    %code(${base} *. ${pow(base, n - 1)})
+  }
+```
+
+`Power.pow(x, 10)` compiles to four multiplications. The recursion ran in the
+compiler.
+
+### Three ways to use a macro
+
+| You write | The macro is | It receives | Its result |
+| --- | --- | --- | --- |
+| `%M.f(args)` | `@macro` | the code of each argument (`code<'a>` parameters) and the value of each literal (other parameters) | replaces the `%M.f(...)`: an expression, a type, a pattern, the contents of a module, or top-level declarations |
+| `@M.f` on a `type` or a `let` | `@macro` | the checked type declaration (`Type.decl`), or the `let` before it is checked (`Decl.value`) | declarations: added after the type, or in place of the `let` |
+| `M.f(args)` | `@generic` | the code of each argument, with its type | the body of a function the compiler makes for that type |
+
+The first two are visible at the call site, like a PPX extension or
+attribute. The third looks like a function call, and is for the functions
+that would be generic if the language could express them: encoders,
+comparisons, printers.
+
+### Asking about types
+
+`typeOf(value)` is the type of an argument of a `@generic`. `Type.info`
+describes a type one level deep: its fields or constructors, with their types
+as values that can be asked again.
+
+```rescript
+@generic
+let encode = (value: code<'a>): code<JSON.t> =>
+  switch Type.info(typeOf(value)) {
+  | String => %code(JSON.Encode.string(${value}))
+  | Int => %code(JSON.Encode.int(${value}))
+  | Float => %code(JSON.Encode.float(${value}))
+  | Bool => %code(JSON.Encode.bool(${value}))
+  | Option(_) =>
+    %code(
+      switch ${value} {
+      | Some(v) => encode(v)
+      | None => JSON.Encode.null
+      }
+    )
+  | Array(_) => %code(JSON.Encode.array(${value}->Array.map(v => encode(v))))
+  | Record({fields}) =>
+    let entries = fields->Array.map(f => {
+      let key = f.attrs->Attr.string("Json.key")->Option.getOr(f.jsName)
+      %code((${Code.string(key)}, encode(${value->Code.field(f.name)})))
+    })
+    %code(JSON.Encode.object(Dict.fromArray(${Code.array(entries)})))
+  | Abstract({name}) =>
+    switch Type.companion(typeOf(value), "toJson") {
+    | Some(toJson) => %code(${toJson}(${value}))
+    | None => error(`${name} is abstract and its module has no toJson`)
+    }
+  | _ => error(`Json.encode cannot encode the type ${Type.name(typeOf(value))}`)
+  }
+```
+
+The macro does not recurse into the fields. It returns code that calls
+`encode` on each field, and the compiler expands those calls in turn. That is
+why a recursive type works, and why each type gets one function.
+
+```rescript
+type user = {
+  name: string,
+  @Json.key("user_age") age: int,
+  email: option<string>,
+  tags: array<string>,
+}
+
+let json = Json.encode(alice)
+```
+
+The file the compiler compiles after expansion (redundant parentheses
+removed):
+
+```rescript
+@res.macroInstances @warning("-39")
+let rec encode$user = (a$: user): JSON.t =>
+  JSON.Encode.object(Dict.fromArray([
+    ("name", encode$string(a$.name)),
+    ("user_age", encode$int(a$.age)),
+    ("email", encode$option_string(a$.email)),
+    ("tags", encode$array_string(a$.tags)),
+  ]))
+and encode$string = (a$: string): JSON.t => JSON.Encode.string(a$)
+and encode$int = (a$: int): JSON.t => JSON.Encode.int(a$)
+and encode$option_string = (a$: option<string>): JSON.t =>
+  switch a$ {
+  | Some(v) => encode$string(v)
+  | None => JSON.Encode.null
+  }
+and encode$array_string = (a$: array<string>): JSON.t =>
+  JSON.Encode.array(a$->Array.map(v => encode$string(v)))
+
+let json = encode$user(alice)
+```
+
+A name with a `$` cannot be written in source, so an instance cannot collide
+with a name of the file. The group is not part of the module's signature and
+is not exported. The backend inlines the small ones: the JavaScript of
+`encode$user` reads `a$.name` directly.
+
+A `@generic` waits for inference. It is expanded when the top-level item that
+contains the call has been type checked, with the types inference settled on:
+
+```rescript
+let team = [alice, bob]
+let all = team->Array.map(member => Json.encode(member))   // member: user
+```
+
+When the type is still unknown at that point, the error says so and asks for
+an annotation.
+
+A type the macro cannot see into is `Abstract`. `Type.companion(t, "toJson")`
+is the value `toJson` in the module that defines the type, if there is one:
+the way a library says "encode my type like this" without the macro knowing
+the library.
+
+### Declarations from a type
+
+A macro attached to a type receives the declaration and returns
+declarations, which are added after the type.
+
+```rescript
+@macro
+let derive = (t: Type.decl): decls =>
+  switch Type.info(t.typ) {
+  | Variant({constructors}) =>
+    let label = (c: Type.constructor) => c.attrs->Attr.string("Enum.label")->Option.getOr(c.jsName)
+    let toString = Code.switch_(
+      %code(value),
+      constructors->Array.map(c => {
+        let (pattern, _) = Pat.constructor(c)
+        (pattern, Code.string(label(c)))
+      }),
+    )
+    %code(
+      let ${Pat.var(t.name ++ "ToString")} = (value: ${t.typ}): string => ${toString}
+      let ${Pat.var(t.name ++ "Values")}: array<${t.typ}> =
+        ${Code.array(constructors->Array.map(c => Code.ident(c.name)))}
+    )
+  | _ => error("Enum.derive needs a variant type")
+  }
+```
+
+```rescript
+@Enum.derive
+type color = Red | Green | @Enum.label("navy blue") Blue
+
+colorValues->Array.map(colorToString)   // ["Red", "Green", "navy blue"]
+```
+
+Names are built with `Pat.var`: a hole can stand where a name is bound.
+
+### Types, patterns, modules
+
+```rescript
+// Partial.res: every field optional
+@macro
+let t = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | _ => error(`Partial.t needs a record type, and ${Type.name(source)} is not one`)
+  }
+```
+
+```rescript
+type userPatch = %Partial.t(user)
+
+let describe = code =>
+  switch code {
+  | %Http.status("ok") => "fine"          // a macro that returns pat
+  | _ => "other"
+  }
+
+module Length = %Units.table("meters", [("feet", 0.3048), ("miles", 1609.344)])
+
+@Trace.calls
+let marathon = (miles: float) => Length.milesToMeters(miles) /. 1000.0
+```
+
+### Computing now
+
+`%comptime(expr)` evaluates an expression while compiling and puts the value
+in its place as a literal. It needs no macro: `expr` is ordinary code that
+uses other modules.
+
+```rescript
+let primes = %comptime(Sieve.primesBelow(60))
+```
+
+```js
+let primes = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53, 59];
+```
+
+The output does not import `Sieve`.
+
+### Reading files
+
+`Macro.readFile(path)` is the text of a file of the project. The example
+`files` reads `en.json`: `%I18n.t("title")` is a string, `%I18n.t("greeting")`
+is a function with a labelled argument for each placeholder of the message,
+and a key that is not in the file does not compile:
+
+```
+  We've found a bug for you!
+  Main.res:8:12-29
+
+  7 │ // A key that is not in en.json does not compile:
+  8 │ let oops = %I18n.t("goodbye")
+
+  I18n.t: There is no message "goodbye" in en.json. It has: title, greeting, empty
+```
+
+### Errors
+
+`Macro.error(message)` stops compilation with the message at the macro use,
+as above. Code a macro generates is type checked like written code, and a
+type error in it is reported at the macro use. A syntax error in generated
+code shows the generated code:
+
+```
+A macro generated code with a syntax error. The frame shows the expanded source.
+
+  Syntax error!
+  UseBad.res:1:13
+
+  1 │ let x = (1 +)
+
+  Did you forget to write an expression here?
+```
+
+## Reference
+
+### The seven forms
+
+| Form | Where | Meaning |
+| --- | --- | --- |
+| `@macro` | on a `let` | The function is a macro: used as `%M.f(...)` or attached as `@M.f`. |
+| `@generic` | on a `let` | The function is a macro that is called like a function, with one instance per type. |
+| `%code(...)` | expression | A quoted expression, or quoted declarations when the content is `let`, `type` or `module` items. |
+| `%type(...)` | expression | A quoted type. |
+| `%pat(...)` | expression | A quoted pattern. |
+| `${...}` | inside a quote | A hole: an expression of type `code`, `typ` or `pat`, by its position. |
+| `%comptime(expr)` | expression | The value of `expr`, computed while compiling. |
+
+Everything else is the module `Macro` of the standard library
+(`packages/@rescript/runtime/Macro.res`).
+
+### Using a macro
+
+A macro is named by a module path: `%Json.encode(x)`, `@Json.codec`,
+`%Lib.Numbers.answer()`. An extension or attribute whose name starts with a
+lowercase letter is not a macro, so existing PPX names and built-in
+attributes keep their meaning.
+
+| Position | Example | Macro type |
+| --- | --- | --- |
+| Expression | `%Debug.log(x + 1)` | `(...) => code<'a>` |
+| Type | `type t = %Partial.t(user)` | `(typ, ...) => typ` |
+| Pattern | `\| %Http.status("ok") => ...` | `(...) => pat` |
+| Top level | `%%Gen.constants("k", 3)` | `(...) => decls` |
+| Module | `module K = %Gen.constants("k", 3)` | `(...) => decls` |
+| On a type | `@Enum.derive type color = ...` | `Type.decl => decls` |
+| On a `let` | `@Trace.calls let f = ...` | `Decl.value => decls` |
+| Call | `Json.encode(user)` | `@generic`: `(code<'a>, ...) => code<'b>` |
+
+Arguments are separated by commas. An argument for a `code<'a>` parameter is
+any expression. An argument for a parameter of another type is a compile-time
+value: a number, a string, a boolean, `()`, or an array, tuple or record of
+those.
+
+A `@generic` is typed at the call as an ordinary function, with `code<t>`
+read as `t`: `Json.encode` is an `'a => JSON.t`. It can be piped into and
+passed as a value (`users->Array.map(Json.encode)`). A `@generic` with a
+compile-time parameter has to be called directly.
+
+### The `Macro` module
+
+| | |
+| --- | --- |
+| `code<'a>`, `typ`, `pat`, `decls` | Code that evaluates to an `'a`; a type; a pattern; declarations. |
+| `error(message)`, `errorAt(~offset, message)` | Stop compilation at the macro use. |
+| `typeOf(code)` | The type of an argument of a `@generic`. |
+| `expected()` | The type the call site of a `@generic` expects as result. |
+| `readFile(path)`, `env(name)` | The text of a file, looked up from the directory of the file being compiled and then its parents; an environment variable of the build. |
+| `Type.info(t)` | What the type is, one level deep (below). |
+| `Type.name(t)` | The type as source text: `array<string>`. |
+| `Type.companion(t, name)` | The value `name` in the module that defines `t`, as code. |
+| `Type.record(fields)`, `Type.variant(constructors)`, `Type.field`, `Type.constructor` | Build a type. |
+| `Code.string`, `int`, `float`, `bool`, `unit` | Literals. |
+| `Code.ident(name)` | A name that is resolved where the macro is used. |
+| `Code.field`, `array`, `tuple`, `record`, `call`, `switch_`, `fn` | Build code whose shape depends on data: a field access, a switch with one arm per constructor, a function with one parameter per name. |
+| `Code.print(code)` | The source text of a piece of code. |
+| `Code.raw(text)` | Code from source text. Nothing checks it until the macro's result is compiled. |
+| `Code.decls(items)` | Several declarations in a row. |
+| `Pat.var(name)`, `Pat.any`, `Pat.string`, `Pat.int` | Patterns. |
+| `Pat.constructor(c)` | The pattern that matches a constructor and binds its arguments, and the code of each bound argument with its type. |
+| `Attr.find`, `has`, `string` | Look up an attribute of a field, constructor or declaration. |
+
+`Type.info` returns one of:
+
+```rescript
+type info =
+  | Int | Float | String | Bool | Unit | BigInt | Char
+  | Option(typ) | Array(typ) | List(typ) | Dict(typ) | Promise(typ)
+  | Result(typ, typ)
+  | Tuple(array<typ>)
+  | Record({name: string, fields: array<field>, attrs: array<Attr.t>})
+  | Variant({name: string, constructors: array<constructor>, attrs: array<Attr.t>})
+  | PolyVariant({constructors: array<constructor>})
+  | Function({params: array<typ>, result: typ})
+  | Abstract({name: string})   // hidden by an interface, or external
+  | Unknown                    // inference has not settled it
+```
+
+A `field` has `name`, `jsName` (the `@as` name), `typ`, `optional`,
+`mutable_` and `attrs`. A `constructor` has `name`, `jsName`, `args`,
+`fields` (of an inline record) and `attrs`.
+
+### Rules
+
+- **A macro cannot be used in the file that defines it.** The compiler runs
+  the compiled JavaScript of the macro's file, so that file is compiled
+  first. A use of a macro is a dependency on its file.
+- **A macro is deterministic.** It has no clock, no random numbers, no
+  network and no file system of its own: `Math.random()`, `Date.now()` and
+  `new Date()` raise. Its inputs are its arguments, the answers of the
+  compiler (`Type.info`, `Type.companion`), `readFile` and `env`. That makes
+  an expansion a function of inputs the build can record.
+- **A macro has limits.** A call may take 20 seconds and its engine 512 MB;
+  expansion of a file stops after 64 rounds. Each is an error at the macro
+  use, not a hang.
+- **Names in a quote.** A top-level name of the macro's own file that a
+  quote mentions is resolved in that file: inside `Json.res`, `encode(v)` in
+  a quote means `Json.encode(v)` wherever the macro is used. Every other
+  name is resolved where the macro is used. A binder in a quote
+  (`let value = ...`) is not renamed, so it can shadow a name the argument
+  code uses; see [What is missing](#what-is-missing).
+- **Instances.** An instance of a `@generic` is keyed by the macro, the
+  types and values of its arguments and its result type. A file has one
+  instance per key, in a `let rec` group before the first top-level item
+  that needs it. Instances are not shared between files.
+- **`%comptime`** can use other modules, not values of its own file. The
+  value has to be writable as a literal: numbers, strings, booleans, `()`,
+  arrays, tuples, options, dicts and records of those.
+
+## How it runs
+
+```mermaid
+flowchart LR
+  A[Main.res] --> B[parse and type check]
+  B -->|no macro used| J[JavaScript]
+  B -->|a macro is used| C[expansion pass]
+  C --> D{edits?}
+  D -->|yes: apply to the source text| C
+  D -->|no| E[compile the expanded text]
+  E --> J
+  C <-->|call, answer, call again| F[(JS engine: the macro's compiled module)]
+```
+
+1. An ordinary compilation stops at the first macro use. A file without
+   macros is compiled exactly as before, in one pass.
+2. Expansion works on the source text. A pass type checks the file; at each
+   macro use the type checker runs the macro and records the result as an
+   edit of the text. The edits are applied and the next pass starts. A pass
+   without edits ends it. Code a macro generated can use macros: they are
+   expanded in the next pass.
+3. The expanded text is compiled like any file. Every position is mapped
+   back to the source as written, so errors, warnings and source maps point
+   at the file the user edits; generated code has the position of the macro
+   use it came from.
+4. Macros run as JavaScript: the compiled output of the macro's module, in a
+   JavaScript engine inside the compiler. Native builds embed QuickJS, one
+   engine per compiler thread, created on first use. The playground uses the
+   browser's engine.
+5. The engine cannot call into the compiler. When a macro asks something
+   (`Type.info`, `readFile`), the call ends with the question, the compiler
+   answers it, and the macro runs again with the answer. A macro is
+   deterministic, so the second run takes the same path.
+
+Because expansion produces source text, the expanded file is something a
+person can read, and a tool can show. The playground's "Expanded" tab is that
+text.
+
+## Cost
+
+Measured on an Apple M-series Mac mini, release builds.
+
+| What | Time |
+| --- | --- |
+| Create a QuickJS engine | 92 µs, once per compiler thread |
+| Load a macro module | 84 µs, once per engine |
+| Run a derive-style macro (10-field record, 41 questions to the compiler) | 14 µs |
+| Start ppx-spice once (it is started once per file) | 6.1 ms |
+| Start Node once | 70 ms |
+
+The engine numbers are from a benchmark of the embedding with stub answers
+(rquickjs 0.9); they do not include the type checker's work to answer.
+
+The cost that matters is the passes. Each pass type checks the whole file
+again, and a file needs one pass more than its deepest nesting of generated
+code that uses macros: `Json.encode(user)` takes a pass for `user`, one for
+the field types, one for what those contain. A file that uses no macro is
+not affected: it takes the path it always took.
+
+Not measured yet: a large project end to end. That needs the build system
+integration.
+
+## Compared with
+
+| | Runs | Sees types | Output | Notes |
+| --- | --- | --- | --- | --- |
+| PPX (OCaml) | native process per file | no | parse tree | not writable in ReScript; frozen AST |
+| Zig `comptime` | interpreter in the compiler | yes | the function body, partially evaluated | no quotes; the first proposal followed it |
+| Rust procedural macros | native code per crate | no | token stream | derive sees syntax only |
+| Template Haskell | interpreter in the compiler | yes (`reify`) | quotes and splices | the closest relative: typed quotes, staged by type |
+| Scala 3 macros | the compiler's VM | yes | typed quotes | `inline` plus quotes; the staging idea here is the same |
+| This RFC | JS engine in the compiler | yes | quotes of ReScript source | macro code is the module's ordinary JavaScript |
+
+## What is missing
+
+Implemented and tested: everything in the tour and the reference above. Not
+implemented:
+
+- **`rescript build`.** The build system compiles from parse trees it made
+  earlier and does not call expansion. It needs: macro names in the
+  dependency scan, a host that reads the compiled JavaScript of a module,
+  and expansion when a compilation asks for it. The compiler side is one
+  call (`driver::compile_source_in_process` does it for the tests and the
+  playground).
+- **A cache.** An expansion is a function of the macro's code, its
+  arguments, the answers it got and the files it read. Storing results in
+  the build database (`lib/bs/rescript.sqlite`) keyed on those makes
+  rebuilds skip the engine.
+- **Hygiene for binders.** A `let` inside a quote can capture a name used by
+  argument code. The plan is a fresh mark per expansion on binders that a
+  quote introduces, with `Code.ident` as the explicit way out.
+- **Positions inside generated code.** A type error in generated code is
+  reported at the macro use, not at the place in the quote.
+- **Attribute payloads beyond one string.** `@Json.key("user_age")` reaches
+  the macro; `@Json.codec({strict: true})` does not yet pass its argument.
+- **Parametric types.** `Type.info` of `result<a, b>` or a record with type
+  parameters works for the common shapes, without a specification of what
+  it returns for the rest.
+- **Types local to an expression** cannot be named by an instance, which
+  lives at the top level.
+- **Sharing instances between files.** Two files that encode `user` each
+  get an `encode$user`.
+- **Editor tooling**: hover and go-to-definition inside macro uses, and a
+  command to show the expansion.
+- **Interface files.** A macro module with a `.resi` is untested: the
+  interface has to carry `@macro` and `@generic`.
+- **Windows and the playground of rescript-lang.org.** QuickJS is C; it
+  builds on macOS and Linux here and is untested on the other release
+  targets.
+
+## Open questions
+
+1. **Explicit quotes or Zig-style bodies.** This RFC chooses quotes: one
+   mechanism for every output shape, at the cost of a quote mark on each
+   generated piece.
+2. **The plain-call form.** `Json.encode(user)` hides that a macro runs.
+   The alternative is `%Json.encode(user)` everywhere, which is honest and
+   noisier, and cannot be passed as a value.
+3. **The engine.** QuickJS only, or Node as an option for macros that need
+   npm packages with native parts. QuickJS runs plain JavaScript packages.
+4. **Names.** `@macro`, `@generic`, `%code`, `%comptime`, the module
+   `Macro`. `Macro.Type` takes the place of the standard library's `Type`
+   under `open Macro`; it includes that module so nothing is lost.
+5. **Text or trees.** Expansion edits source text and type checks again.
+   It is simple, and gives generated code everything written code gets. A
+   tree-based expansion that types only the generated piece is faster and
+   much more code. The measurement that decides is a large project with
+   many derives.
+
+## Trying it
+
+```bash
+# the tests
+cargo test --manifest-path compiler-rust/Cargo.toml --test macros
+
+# the playground
+cd playground
+npm ci
+npm run build:wasm
+npm run dev
+```
+
+The playground has an example for each section of the tour. Its "Expanded"
+tab shows the file after expansion, "JavaScript" the output, and "Output"
+what the program prints.

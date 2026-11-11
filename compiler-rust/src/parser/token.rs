@@ -238,6 +238,8 @@ pub enum Token<'a> {
     Percent,
     /// `%%`
     PercentPercent,
+    /// `${`: opens a hole in a macro quote (`%code(...)`).
+    DollarLbrace,
     /// ` `` ` (backtick)
     Backtick,
     /// `<<` (left shift)
@@ -522,6 +524,7 @@ impl<'a> Token<'a> {
             Token::AtAt => Token::AtAt,
             Token::Percent => Token::Percent,
             Token::PercentPercent => Token::PercentPercent,
+            Token::DollarLbrace => Token::DollarLbrace,
             Token::Backtick => Token::Backtick,
             Token::LeftShift => Token::LeftShift,
             Token::RightShift => Token::RightShift,
@@ -642,6 +645,7 @@ impl<'a> std::fmt::Display for Token<'a> {
             Token::AtAt => write!(f, "@@"),
             Token::Percent => write!(f, "%"),
             Token::PercentPercent => write!(f, "%%"),
+            Token::DollarLbrace => write!(f, "${{"),
             Token::Comment(c) => write!(f, "Comment{}", c),
             Token::List => write!(f, "list{{"),
             Token::Dict => write!(f, "dict{{"),
