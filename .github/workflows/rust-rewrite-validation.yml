@@ -147,14 +147,37 @@ jobs:
       - name: Test release Rust compiler
         run: cargo test --release --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
 
-  # The parity suites that gate a change: JavaScript output and diagnostics.
+  # The parity suites that gate a change (see "The Correctness Contract" in
+  # AGENTS.md), each its own check so that a pull request shows which one
+  # failed. They run side by side, and finish before the compiler tests.
   parity:
+    name: parity (${{ matrix.suite }})
     needs: build
     runs-on: ubuntu-24.04
     timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - suite: javascript
+            run: |
+              python3 scripts/test_bsc_output_filenames.py
+              python3 scripts/test_marshal_debug_flags.py
+              ./scripts/test_js_output_parity.sh --release
+          - suite: diagnostics
+            # Compare normal user-facing errors, not runtime-specific backtraces.
+            run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+          - suite: stdlib
+            run: RUST_TARGET=release ./scripts/test_stdlib_output_parity.sh
+          - suite: gentype
+            # The in-repo suites; the Tella suite needs a private checkout.
+            run: |
+              GENTYPE_PARITY_WITHOUT_TELLA=1 \
+              REWATCH_BIN="$PWD/rewatch/target/release/rescript" \
+              RUST_BSC="$PWD/rewatch/target/release/bsc" \
+                ./scripts/test_gentype_output_parity.sh
     steps:
       - uses: actions/checkout@v6
-
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/setup-linux-dependencies
       - uses: ./.github/actions/setup-ocaml
@@ -168,32 +191,21 @@ jobs:
       - name: Build native reference compiler and libraries
         run: opam exec -- make lib
 
-      # Diagnostic cases that read the runtime's or Belt's compiled files
-      # (`-I packages/@rescript/belt/lib/ocaml`) need the OCaml compiler's.
+      # Cases that read the runtime's or Belt's compiled files (such as
+      # `-I packages/@rescript/belt/lib/ocaml`) need the OCaml compiler's.
       - name: Build the runtime and Belt with the OCaml compiler
         run: |
           PROJECT_ROOT="$PWD" RUST_TARGET=release bash -c \
             'source scripts/parity_lib.sh && parity_build_ocaml_reference "$PROJECT_ROOT/tests/tests"'
 
-      - name: Compare exact CLI output filenames and marshal debug output
-        run: |
-          python3 scripts/test_bsc_output_filenames.py
-          python3 scripts/test_marshal_debug_flags.py
-
-      - name: JavaScript output parity
-        if: ${{ !cancelled() }}
-        run: ./scripts/test_js_output_parity.sh --release
-
-      - name: Diagnostic parity
-        if: ${{ !cancelled() }}
-        # Compare normal user-facing errors, not runtime-specific backtraces.
-        run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
+      - name: ${{ matrix.suite }} parity
+        run: ${{ matrix.run }}
 
       - name: Preserve failed parity diagnostics
         if: ${{ failure() }}
         uses: actions/upload-artifact@v7
         with:
-          name: parity-diagnostics-${{ github.event.pull_request.number || github.sha }}
+          name: parity-${{ matrix.suite }}-${{ github.event.pull_request.number || github.sha }}
           path: .parity-cache
           include-hidden-files: true
           if-no-files-found: ignore
