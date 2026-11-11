@@ -99,6 +99,7 @@
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
 - Allocate the map of an environment table layer on its first binding, so an `open` no longer creates and drops empty maps in every table. https://github.com/jfrolich/rescript-rust/pull/93
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
+- Collect the JavaScript global names a renamed local must avoid only for a program that uses a global named like one (`x$1`), instead of walking every program before printing it. https://github.com/jfrolich/rescript-rust/pull/102
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
 - Remove OCaml leftovers: unused warning numbers, the `Record_float_unused` representation, the `ns.braces` attribute name and unused `Ast_helper` functions. https://github.com/rescript-lang/rescript/pull/8805
 - Remove the S-expression parsetree printer (`res_parser -print sexp`). https://github.com/rescript-lang/rescript/pull/8803

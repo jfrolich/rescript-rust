@@ -410,6 +410,19 @@ pub struct FunInfo {
     pub directive: Option<StrId>,
 }
 
+/// Whether `id` prints as its own name whatever the scope: a JavaScript
+/// global, or a global identifier without a stamp.
+pub(crate) fn is_raw_js_name(id: &Ident) -> bool {
+    id.is_js() || (id.is_global() && id.stamp() == 0)
+}
+
+/// Whether `name` ends in `$` and digits, like the name of a local renamed
+/// apart from another one (`x$1`).
+fn ends_in_rename_suffix(name: &str) -> bool {
+    let stem = name.trim_end_matches(|c: char| c.is_ascii_digit());
+    stem.len() < name.len() && stem.ends_with('$')
+}
+
 /// Variable declaration (`J.variable_declaration`).
 #[derive(Debug, Clone)]
 pub struct VarDecl {
@@ -1102,6 +1115,19 @@ impl JsArena {
             .max(0)
     }
 
+    /// Whether some identifier is a raw JavaScript name of the form a
+    /// renamed local takes, `name$1`. Scans the identifier payload tables
+    /// that hold variables, parameters and declarations; eliminated nodes
+    /// may contribute, so `true` only means the program has to be looked at.
+    pub(crate) fn may_use_js_name_of_renamed_local(&self) -> bool {
+        self.idents
+            .rows
+            .iter()
+            .chain(&self.ident_lists.items)
+            .chain(self.vars.rows.iter().map(|decl| &decl.ident))
+            .any(|id| is_raw_js_name(id) && ends_in_rename_suffix(id.name()))
+    }
+
     /// Store an identifier.
     pub fn ident_id(&mut self, id: Ident) -> IdentId {
         IdentId::new(self.idents.push(id))
@@ -1400,6 +1426,45 @@ mod tests {
             ident: Some(id(50)),
         }]);
         assert_eq!(a.ident_stamp_bound(), 50);
+    }
+
+    #[test]
+    fn only_a_raw_js_name_with_a_rename_suffix_asks_for_the_reservation_walk() {
+        use crate::ident::IdentFlags;
+        assert!(ends_in_rename_suffix("x$1"));
+        assert!(ends_in_rename_suffix("$12"));
+        assert!(!ends_in_rename_suffix("x1"));
+        assert!(!ends_in_rename_suffix("x$"));
+        assert!(!ends_in_rename_suffix("x$1a"));
+        assert!(!ends_in_rename_suffix(""));
+
+        let decl = |ident| VarDecl {
+            ident,
+            value: None,
+            property: Property::Strict,
+            ident_info: IdentInfo::default(),
+        };
+        // Locals and plain JavaScript names never ask for it.
+        let mut a = JsArena::new();
+        a.ident_id(Ident::new("x$1", 7, IdentFlags::NONE));
+        a.ident_id(Ident::create_js("console"));
+        a.ident_list(&[Ident::new("y$2", 8, IdentFlags::NONE)]);
+        a.var_id(decl(Ident::new("z$3", 9, IdentFlags::NONE)));
+        assert!(!a.may_use_js_name_of_renamed_local());
+
+        // A raw name with the suffix does, in each table the walk reads.
+        let mut a = JsArena::new();
+        a.ident_id(Ident::create_js("x$1"));
+        assert!(a.may_use_js_name_of_renamed_local());
+        let mut a = JsArena::new();
+        a.ident_list(&[Ident::create_js("x$1")]);
+        assert!(a.may_use_js_name_of_renamed_local());
+        let mut a = JsArena::new();
+        a.var_id(decl(Ident::new("x$1", 0, IdentFlags::GLOBAL)));
+        assert!(a.may_use_js_name_of_renamed_local());
+        let mut a = JsArena::new();
+        a.var_id(decl(Ident::new("x$1", 4, IdentFlags::GLOBAL)));
+        assert!(!a.may_use_js_name_of_renamed_local());
     }
 
     #[test]
