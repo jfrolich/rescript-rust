@@ -1,0 +1,15 @@
+type user = {name: string}
+type t = %Spliced.flagged(user)
+----
+
+  We've found a bug for you!
+  OptionalFieldByHand.res:2:10-31
+
+  1 │ type user = {name: string}
+  2 │ type t = %Spliced.flagged(user)
+  3 │
+
+  The optional field `name` has the type `string`, and the type of an optional field is an option. Type.optional makes a field optional.
+
+  This is reported by the macro `Spliced.flagged`.
+

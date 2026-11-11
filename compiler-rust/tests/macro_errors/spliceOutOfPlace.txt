@@ -1,0 +1,15 @@
+open Macro
+@macro
+let sum = (a: code<int>): code<int> => %code(1 + ${...[a]})
+----
+
+  We've found a bug for you!
+  SpliceOutOfPlace.res:3:50-58
+
+  1 │ open Macro
+  2 │ @macro
+  3 │ let sum = (a: code<int>): code<int> => %code(1 + ${...[a]})
+  4 │
+
+  A splice `${...items}` stands for the items of a list in a quote: the arguments of a call, the items of an array or a tuple, the fields of a record, or the cases of a switch.
+

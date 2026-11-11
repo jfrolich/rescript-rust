@@ -214,3 +214,50 @@ fn comptime_errors() {
         );
     });
 }
+
+const SPLICED: &str = r#"open Macro
+
+// Entries of a record, one of them a quote with the wrong type.
+@macro
+let point = (x: code<int>): code<'r> => {
+  let entries = [Code.entry("x", x), Code.entry("y", %code("two"))]
+  %code({${...entries}})
+}
+
+@macro
+let flagged = (source: typ): typ =>
+  switch Type.info(source) {
+  | Record({fields}) => Type.record(fields->Array.map(f => {...f, optional: true}))
+  | _ => error("flagged needs a record")
+  }
+"#;
+
+#[test]
+fn splice_holes_and_optional_fields() {
+    on_a_big_stack(|| {
+        let mut project = Project::new();
+        project.compile("Spliced.res", SPLICED).unwrap();
+        // A splice hole stands in a list of a quote, and nowhere else.
+        check(
+            &mut project,
+            "spliceOutOfPlace",
+            "open Macro\n@macro\nlet sum = (a: code<int>): code<int> => %code(1 + ${...[a]})\n",
+        );
+        check(
+            &mut project,
+            "spliceOutsideAQuote",
+            "let xs = [1]\nlet ys = [0, ${...xs}]\n",
+        );
+        // Spliced code keeps the place it was written at.
+        check(
+            &mut project,
+            "splicedEntryType",
+            "type point = {x: int, y: int}\nlet p: point = %Spliced.point(1)\n",
+        );
+        check(
+            &mut project,
+            "optionalFieldByHand",
+            "type user = {name: string}\ntype t = %Spliced.flagged(user)\n",
+        );
+    });
+}
