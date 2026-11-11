@@ -104,7 +104,8 @@ fn payload_target(arena: &ParseArena, payload: &Payload) -> Option<(String, Opti
     let ExpressionDesc::Pexp_constant(Constant::String(text)) = &arena.get_expr(eval.0).pexp_desc else {
         return None;
     };
-    let text = text.semantic(arena);
+    // The parser keeps one `char` per source byte; TypeScript wants the text.
+    let text = crate::source_text::decode_internal_utf8_runs(text.semantic(arena));
     match text.rfind('#') {
         Some(index) if index > 0 && index + 1 < text.len() => {
             Some((text[..index].to_string(), Some(text[index + 1..].to_string())))
@@ -281,9 +282,11 @@ fn parse_generated(
     code: &str,
     loc: LocIdx,
 ) -> Result<Vec<StructureItem>, PpxError> {
+    // The parser reads one `char` per source byte.
+    let text: String = code.bytes().map(char::from).collect();
     let arena = std::mem::take(parser.arena_mut());
     let first_location = arena.location_count();
-    let mut generated = Parser::in_arena(arena, code);
+    let mut generated = Parser::in_arena(arena, &text);
     let items = crate::parser::module::parse_structure(&mut generated);
     let failed = generated.has_errors();
     let mut arena = generated.into_arena();
