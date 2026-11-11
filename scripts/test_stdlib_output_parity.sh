@@ -8,6 +8,7 @@
 #   ./scripts/test_stdlib_output_parity.sh [OPTIONS] [FILE|PATTERN]
 #
 # Options:
+#   --reformat       Normalize JavaScript (default: exact)
 #   -q, --quick       Stop on first failure
 #   -v, --verbose     Show progress for each file
 #   -h, --help        Show this help message
@@ -20,6 +21,10 @@ FILE_ARG=""
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --reformat)
+            PARITY_COMPARE_MODE=reformat
+            shift
+            ;;
         -q|--quick)
             QUICK_MODE=true
             shift
@@ -29,7 +34,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '4,12p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -44,6 +49,7 @@ PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUNTIME_DIR="$PROJECT_ROOT/packages/@rescript/runtime"
 RUST_TARGET="${RUST_TARGET:-debug}"
 source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_init_comparison
 CACHE_DIR="$PROJECT_ROOT/.parity-cache/stdlib-output"
 
 RED='\033[0;31m'
@@ -173,9 +179,8 @@ while IFS= read -r file; do
             failed_files="$failed_files$rel_path (missing CommonJS output)\n"
             printf 'missing output: %s\n' "$actual_cjs" >> "$diff_file"
             file_failed=true
-        elif ! diff -q "$expected_cjs" "$actual_cjs" >/dev/null 2>&1; then
+        elif ! parity_compare_js "$expected_cjs" "$actual_cjs" >> "$diff_file" 2>&1; then
             printf '%s\n' "--- CommonJS: $module_name ---" >> "$diff_file"
-            diff -u "$expected_cjs" "$actual_cjs" >> "$diff_file" 2>&1 || true
             file_failed=true
         fi
     fi
@@ -186,9 +191,8 @@ while IFS= read -r file; do
             failed_files="$failed_files$rel_path (missing ESM output)\n"
             printf 'missing output: %s\n' "$actual_mjs" >> "$diff_file"
             file_failed=true
-        elif ! diff -q "$expected_mjs" "$actual_mjs" >/dev/null 2>&1; then
+        elif ! parity_compare_js "$expected_mjs" "$actual_mjs" >> "$diff_file" 2>&1; then
             printf '%s\n' "--- ESM: $module_name ---" >> "$diff_file"
-            diff -u "$expected_mjs" "$actual_mjs" >> "$diff_file" 2>&1 || true
             file_failed=true
         fi
     fi
