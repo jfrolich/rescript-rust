@@ -2136,13 +2136,21 @@ impl<'a> Converter<'a> {
         let mut group_cases: HashMap<usize, (usize, Vec<P<Type>>)> = HashMap::new();
         // The fields of the object cases made so far.
         let mut seen_records: Vec<Vec<Field>> = Vec::new();
-        // The case name of each unnamed object member: its first required
-        // field that no other object member has.
+        // The case name of each unnamed object member: the one literal of a
+        // required field (its tag), else its first required field that no
+        // other object member has.
         let mut inline_names: HashMap<P<Type>, String> = HashMap::new();
+        // The shape of each plain object member, when there are several.
+        let mut shape_of: HashMap<P<Type>, ObjectShape> = HashMap::new();
         if plain_objects.len() > 1 {
             let shapes: Vec<ObjectShape> = plain_objects.iter().map(|&member| self.ts_object_shape(member)).collect();
             for (index, &member) in plain_objects.iter().enumerate() {
+                shape_of.insert(member, shapes[index].clone());
                 if named_symbol(member).is_some() || group_of.contains_key(&member) {
+                    continue;
+                }
+                if let Some(name) = tag_name(&[&shapes[index]]) {
+                    inline_names.insert(member, name);
                     continue;
                 }
                 let ObjectShape::Closed(fields) = &shapes[index] else { continue };
@@ -2193,7 +2201,15 @@ impl<'a> Converter<'a> {
                     continue;
                 }
                 group_cases.insert(group, (ctors.len(), vec![member]));
-                let base = named_symbol(member).map_or_else(|| "Object".to_string(), |symbol| upper_ident(symbol.name()));
+                // A case of members that share a tag is named after it.
+                let shapes: Vec<&ObjectShape> = plain_objects
+                    .iter()
+                    .filter(|other| group_of.get(other) == Some(&group))
+                    .filter_map(|other| shape_of.get(other))
+                    .collect();
+                let base = tag_name(&shapes).unwrap_or_else(|| {
+                    named_symbol(member).map_or_else(|| "Object".to_string(), |symbol| upper_ident(symbol.name()))
+                });
                 let name = unique_ctor(&ctors, &base);
                 ctors.push(Ctor { name, tag: None, payload: Payload::None });
                 ctor_members.resize(ctors.len() - 1, None);
@@ -3049,6 +3065,35 @@ impl Check {
             Check::Present(field) | Check::Literals(field, _) | Check::Kind(field, _) => field,
         }
     }
+}
+
+/// The name of the tag these object shapes share: the one literal a required
+/// field has in all of them, the first such field of the first shape.
+fn tag_name(shapes: &[&ObjectShape]) -> Option<String> {
+    let ObjectShape::Closed(first) = shapes.first()? else {
+        return None;
+    };
+    first.iter().filter(|field| field.required).find_map(|field| {
+        let [literal] = field.literals.as_deref()? else {
+            return None;
+        };
+        let shared = shapes.iter().all(|shape| match shape {
+            ObjectShape::Closed(fields) => fields.iter().any(|other| {
+                other.name == field.name
+                    && other.required
+                    && other.literals.as_deref() == Some(std::slice::from_ref(literal))
+            }),
+            ObjectShape::Open => false,
+        });
+        if !shared {
+            return None;
+        }
+        match literal {
+            Literal::Str(text) | Literal::Num(text) => Some(upper_ident(text)),
+            Literal::Bool(value) => Some(upper_ident(&value.to_string())),
+            Literal::Other => None,
+        }
+    })
 }
 
 /// `#1` is the number 1 at run time, `#01` the string "01".

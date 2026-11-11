@@ -225,12 +225,12 @@ module Features = {
     @as("type") type_: [#ArrayPattern],
     elements: array<Null.t<identName>>,
   }
-  type arrayPatCase = {
+  type arrayPatternCase = {
     @as("type") type_: [#ArrayPattern],
     elements: unknown,
   }
   @unboxed type syntaxNode =
-    | ArrayPat(arrayPatCase)
+    | ArrayPattern(arrayPatternCase)
     | IdentBinding(identBinding)
     | IdentName(identName)
     | NumericLit(numericLit)
@@ -257,24 +257,24 @@ module Features = {
     @as("type") type_: [#Fourth],
     flag: bool,
   }
-  type knownPropCase = {
+  type propCase = {
     @as("type") type_: [#Prop],
     name: string,
     size: Null.t<float>,
   }
   @unboxed type prop =
     | Fourth(fourth)
-    | KnownProp(knownPropCase)
+    | Prop(propCase)
     | Other(other)
     | Third(third)
-  type objectCase<'t> = {
+  type heldCase<'t> = {
     @as("type") type_: [#Held],
     value: 't,
     note?: string,
   }
   @unboxed type holder<'t> =
-    | Object(objectCase<'t>)
-    | Object2({
+    | Held(heldCase<'t>)
+    | Empty({
       @as("type") type_: [#Empty],
     })
   type strLit = {
@@ -750,7 +750,7 @@ module Features = {
 // [callable-object] hybrid: `Hybrid`: the function's properties are dropped
 // [constructor] constructable: `Constructable`: a constructor is not a ReScript value; import the class as a module instead
 // [intersection] id: `Id`: the brand is dropped; the primitive type is used
-// [union] syntaxNode: `elements`: the members merged into case ArrayPat have different types for this field
+// [union] syntaxNode: `elements`: the members merged into case ArrayPattern have different types for this field
 // [tuple] single: `[string]`: ReScript has no one-element tuple; an array is used
 // [tuple] optionalTuple: `[string, (number | undefined)?]`: tuples with optional or rest elements are imported as arrays
 // [tuple] restTuple: `[string, ...number[]]`: tuples with optional or rest elements are imported as arrays
