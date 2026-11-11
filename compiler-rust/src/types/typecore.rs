@@ -24222,6 +24222,9 @@ fn wrong_constructor_name_error(
 /// for a qualified name, so the result is `Name_type_mismatch` with
 /// `tp = (tpath0, expand_path tpath)` and the candidates' `(tp0, expand_path
 /// tp0)`.
+/// A type path and its expansion (`(tp, expand_path tp)`).
+type ExpandedPath = (Path, Path);
+
 fn qualified_constructor_type_mismatch(
     opath: Option<&Path>,
     cstr: &crate::types::decl::ConstructorDescription,
@@ -24229,7 +24232,7 @@ fn qualified_constructor_type_mismatch(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-) -> Option<((Path, Path), Vec<(Path, Path)>)> {
+) -> Option<(ExpandedPath, Vec<ExpandedPath>)> {
     let target_path = opath?;
     let cstr_path = constructor_result_path(ctx, cstr)?;
     if compare_type_paths_for_constructor_disambiguation(

@@ -204,12 +204,15 @@ fn fixed_row_type_id_for_decl(
     row_ids.iter().find(|row_id| row_id.decl_idx == decl_idx)
 }
 
+/// Translated declaration parameters with their variances, and their types.
+type TranslatedParams = (Vec<(TypedCoreType, TypesVariance)>, Vec<TypeExprRef>);
+
 fn translate_type_declaration_params<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     arena: &'a ParseArena,
     params: &[(crate::parse_arena::CoreTypeIdx, ParserVariance)],
-) -> TypeModResult<(Vec<(TypedCoreType, TypesVariance)>, Vec<TypeExprRef>)> {
+) -> TypeModResult<TranslatedParams> {
     let ctx = tctx.type_ctx;
     let mut typed_params = Vec::with_capacity(params.len());
     let mut internal_params = Vec::with_capacity(params.len());
@@ -16941,12 +16944,14 @@ fn type_structure_item<'a>(
             // typedecl.ml:1534-1538 builds the final env with `List.fold_right`
             // over the declarations (fixed-row types first), each through
             // `Env.store_type`; collect them and add them after the loop.
-            let mut final_env_entries: Vec<(
+            // A declaration with its constructors and labels.
+            type FinalEnvEntry = (
                 Ident,
                 crate::types::TypeDeclaration,
                 Vec<(Ident, crate::types::ConstructorDescription)>,
                 Vec<(Ident, crate::types::LabelDescription)>,
-            )> = Vec::new();
+            );
+            let mut final_env_entries: Vec<FinalEnvEntry> = Vec::new();
 
             for (row_index, row_id) in fixed_row_type_ids.iter().enumerate() {
                 tctx.type_ctx

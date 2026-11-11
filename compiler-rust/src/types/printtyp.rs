@@ -159,6 +159,13 @@ pub(crate) enum OutSigItem {
 // Printtyp
 // ============================================================================
 
+/// Resolves an unqualified type name in the printing environment.
+pub(crate) type TypeNameLookup<'a> = Box<dyn Fn(&str) -> Option<Path> + 'a>;
+
+/// Prints extra explanation after a unification error's trace pair.
+pub(crate) type ExtraInfoPrinter<'f, W, P> =
+    &'f mut dyn FnMut(&mut Formatter<W>, &mut P, TypeExprRef, TypeExprRef);
+
 /// The mutable naming state of OCaml `Printtyp`: `names`, `name_counter`,
 /// `named_vars`, the weak-variable tables, and the loop marks
 /// (`visited_objects`, `aliased`, `delayed`).
@@ -178,7 +185,7 @@ pub(crate) struct Printtyp<'a> {
     /// `Env.lookup_type (Lident s) !printing_env` for
     /// `non_shadowed_pervasive_or_stdlib`; `None` stands for `Env.empty`,
     /// where every lookup fails.
-    printing_env_lookup_type: Option<Box<dyn Fn(&str) -> Option<Path> + 'a>>,
+    printing_env_lookup_type: Option<TypeNameLookup<'a>>,
     /// Types added to the printing environment by `tree_of_signature_rec`
     /// (`Env.add_signature`), most recent last. Only the first
     /// `signature_types_visible` entries are in scope; later entries are
@@ -217,7 +224,7 @@ impl<'a> Printtyp<'a> {
     }
 
     /// `set_printing_env`: resolve unqualified type names in `lookup`.
-    pub(crate) fn set_printing_env(&mut self, lookup: Box<dyn Fn(&str) -> Option<Path> + 'a>) {
+    pub(crate) fn set_printing_env(&mut self, lookup: TypeNameLookup<'a>) {
         self.printing_env_lookup_type = Some(lookup);
     }
 
@@ -3169,9 +3176,7 @@ impl<'a> Printtyp<'a> {
         tr: &[TracePair],
         txt1: &mut dyn FnMut(&mut Formatter<W>),
         txt2: &mut dyn FnMut(&mut Formatter<W>),
-        print_extra_info: Option<
-            &mut dyn FnMut(&mut Formatter<W>, &mut Self, TypeExprRef, TypeExprRef),
-        >,
+        print_extra_info: Option<ExtraInfoPrinter<'_, W, Self>>,
     ) {
         self.reset();
         self.trace_same_names(tr);

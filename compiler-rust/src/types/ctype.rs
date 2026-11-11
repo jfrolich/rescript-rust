@@ -10134,7 +10134,9 @@ pub fn compute_variance_decl(
         super::TypeKind::TypeVariant(constructors, _) => {
             // `compute_variance_gadt` on the manifest and on each
             // constructor, then the union of the results.
-            let mut tll: Vec<(Vec<(bool, TypeExprRef)>, Option<TypeExprRef>)> =
+            // Each part's (strictness, type) fields and GADT result type.
+            type VariancePart = (Vec<(bool, TypeExprRef)>, Option<TypeExprRef>);
+            let mut tll: Vec<VariancePart> =
                 mn.into_iter().map(|field| (vec![field], None)).collect();
             for cstr in constructors {
                 tll.push((for_constr(&cstr.cd_args), cstr.cd_res));

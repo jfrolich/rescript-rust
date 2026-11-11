@@ -48,12 +48,15 @@ type StoreTable<V> = std::collections::HashMap<TypeExprRef, V, BuildHasherDefaul
 const PAGE_BITS: usize = 10;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 
+/// One page of a [`TypeNodeTable`]: per node, its write epoch and value.
+type Page<V> = Box<[(u32, V)]>;
+
 /// Map from type nodes to `V`, cleared in O(1) between uses.
 pub(crate) struct TypeNodeTable<V: Copy> {
     epoch: u32,
     /// Per local node, by page: the epoch it was last written in, and its
     /// value. Entries from older epochs are absent.
-    pages: Vec<Option<Box<[(u32, V)]>>>,
+    pages: Vec<Option<Page<V>>>,
     store: StoreTable<V>,
 }
 

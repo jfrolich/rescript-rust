@@ -495,6 +495,27 @@ pub(crate) struct OpenSlotEvent {
 /// A saved position: resolved file name (or raw handle), line, bol, cnum.
 type PositionKey = (Result<u32, String>, i32, i32, i32);
 
+/// A compilation-local signature and its component-table name index.
+type IndexedSignature = (Arc<super::decl::Signature>, Arc<super::env_lazy::SignatureIndex>);
+
+/// A module's values by name: each value's path and declaration.
+type ResolvedModuleValues =
+    crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>;
+
+/// A module's types by name: each type's path, identifier and declaration.
+type ResolvedModuleTypes =
+    crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>;
+
+/// A module's submodules by name: each one's identifier and declaration.
+type ModuleDeclarations =
+    crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>;
+
+/// A dotted type path resolved to its identifier and declaration.
+type ResolvedTypeItem = (Ident, Arc<super::decl::TypeDeclaration>);
+
+/// `raw_lambda::typeopt` answers by environment, type and query.
+type TypeoptAnswers = crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>;
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -703,34 +724,17 @@ pub struct TypeContext {
     component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
-    signature_indexes: RefCell<
-        crate::fast_hash::AHashMap<
-            usize,
-            (
-                Arc<super::decl::Signature>,
-                Arc<super::env_lazy::SignatureIndex>,
-            ),
-        >,
-    >,
+    signature_indexes: RefCell<crate::fast_hash::AHashMap<usize, IndexedSignature>>,
     component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
-    resolved_module_value_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            Path,
-            crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>,
-        >,
-    >,
+    resolved_module_value_cache: RefCell<crate::fast_hash::AHashMap<Path, ResolvedModuleValues>>,
 
     /// Cached dotted type lookups keyed by resolved module access path.
     /// Keyed by env id as well: OCaml's Env is persistent, so a binding can
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
-    resolved_module_type_cache: RefCell<
-        ScopedPathMap<
-            crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
-        >,
-    >,
+    resolved_module_type_cache: RefCell<ScopedPathMap<ResolvedModuleTypes>>,
 
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache:
@@ -738,28 +742,19 @@ pub struct TypeContext {
 
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
-    qualified_module_decl_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            Path,
-            crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
-        >,
-    >,
+    qualified_module_decl_cache: RefCell<crate::fast_hash::AHashMap<Path, ModuleDeclarations>>,
 
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        hashbrown::HashMap<
-            (u64, Path, bool),
-            (Ident, Arc<super::decl::TypeDeclaration>),
-            crate::fast_hash::FastState,
-        >,
+        hashbrown::HashMap<(u64, Path, bool), ResolvedTypeItem, crate::fast_hash::FastState>,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ScopedPathMap<Path>>,
     /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
     /// is lowered (`None` outside that phase): the types no longer change.
-    typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
+    typeopt_answers: RefCell<Option<TypeoptAnswers>>,
     /// Outcome of expanding a `Pdot`-headed constructor, per module scope
     /// (see `ctype::PdotExpansion`).
     pdot_expansions: RefCell<

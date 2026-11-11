@@ -180,14 +180,21 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     table
 }
 
+/// The constructors or labels that share a name, with their identifiers.
+type Candidates<T> = Vec<(Ident, Arc<T>)>;
+
+/// `TycompTbl`'s `mk_callback` data for a candidate found in an opened
+/// layer: the layer's slot and the first candidate it hides.
+pub type OpenSlotMark<'a, T> = Option<(u32, Option<&'a T>)>;
+
 /// The layer tables that opening one signature adds to an Env. Built once
 /// and attachable to any number of Envs (see `Env::add_prebuilt_open_layers`).
 #[derive(Debug)]
 pub(crate) struct OpenedLayers {
     values: Arc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
     types: Arc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
-    constrs: Arc<OpenedMap<Vec<(Ident, Arc<ConstructorDescription>)>>>,
-    labels: Arc<OpenedMap<Vec<(Ident, Arc<LabelDescription>)>>>,
+    constrs: Arc<OpenedMap<Candidates<ConstructorDescription>>>,
+    labels: Arc<OpenedMap<Candidates<LabelDescription>>>,
     modules: Arc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
     module_components: Arc<OpenedMap<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>>,
     modtypes: Arc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
@@ -950,8 +957,8 @@ impl<T: Clone> TycompTbl<T> {
     pub fn find_all_marking(
         &self,
         name: impl crate::name::NameKey,
-    ) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
-        let mut items: Vec<(&T, Option<(u32, Option<&T>)>)> = Vec::new();
+    ) -> Vec<(&T, OpenSlotMark<'_, T>)> {
+        let mut items: Vec<(&T, OpenSlotMark<'_, T>)> = Vec::new();
         let Some(key) = name.name_key() else {
             return items;
         };
@@ -1276,10 +1283,7 @@ impl Env {
     pub(crate) fn find_all_constructors_marking(
         &self,
         name: &str,
-    ) -> Vec<(
-        &ConstructorDescription,
-        Option<(u32, Option<&ConstructorDescription>)>,
-    )> {
+    ) -> Vec<(&ConstructorDescription, OpenSlotMark<'_, ConstructorDescription>)> {
         self.data
             .constrs
             .find_all_marking(name)
@@ -1297,7 +1301,7 @@ impl Env {
     pub(crate) fn find_all_labels_marking(
         &self,
         name: &str,
-    ) -> Vec<(&LabelDescription, Option<(u32, Option<&LabelDescription>)>)> {
+    ) -> Vec<(&LabelDescription, OpenSlotMark<'_, LabelDescription>)> {
         self.data
             .labels
             .find_all_marking(name)

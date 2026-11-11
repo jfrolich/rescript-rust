@@ -621,10 +621,21 @@ impl ChildScanCursor {
     }
 }
 
+/// A forced component value: its position in the signature, identifier and
+/// declaration.
+type ComponentValue = (usize, Ident, ValueDescription);
+
+/// A forced child module's position in the signature and component tables.
+type ChildComponents = (usize, Arc<StoredModuleComponents>);
+
+/// A functor result substituted for one argument path, with the replay
+/// record of computing it during a store build.
+type FunctorResultSubst = (ModuleType, Option<Arc<super::context::StorePiece>>);
+
 #[derive(Debug, Clone)]
 struct StructureComponentTables {
     index: Arc<SignatureIndex>,
-    component_values: RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>,
+    component_values: RefCell<HashMap<String, Option<ComponentValue>>>,
     constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
     labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
     modtypes: HashMap<String, (Ident, ModtypeDeclaration)>,
@@ -640,7 +651,7 @@ struct StructureComponentTables {
     // Cache forced child component thunks by name, including misses, so a
     // lookup for one child does not materialize every sibling in the parent
     // signature.
-    child_components: RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>,
+    child_components: RefCell<HashMap<String, Option<ChildComponents>>>,
     child_component_scan: RefCell<ChildComponentScanState>,
     // The component substitution for value lookups depends only on the
     // signature and access path; build it once per component table.
@@ -2132,8 +2143,7 @@ pub(crate) struct StoredModuleComponents {
     cached_piece: OnceCell<Arc<super::context::StorePiece>>,
     functor_component_result: OnceCell<ModuleType>,
     functor_component_piece: OnceCell<Arc<super::context::StorePiece>>,
-    functor_result_subst_cache:
-        OnceCell<RefCell<HashMap<Path, (ModuleType, Option<Arc<super::context::StorePiece>>)>>>,
+    functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
 }
 
 impl StoredModuleComponents {

@@ -4441,11 +4441,15 @@ fn flatten_object_fields_for_inclusion(
 
 type ObjectFieldForInclusion = (crate::name::Name, FieldKind, TypeExprRef);
 
+/// A field present on both sides: its name, then the implementation's and
+/// the signature's kind and type.
+type PairedObjectField = (crate::name::Name, FieldKind, TypeExprRef, FieldKind, TypeExprRef);
+
 fn associate_object_fields_for_inclusion(
     impl_fields: Vec<ObjectFieldForInclusion>,
     sig_fields: Vec<ObjectFieldForInclusion>,
 ) -> (
-    Vec<(crate::name::Name, FieldKind, TypeExprRef, FieldKind, TypeExprRef)>,
+    Vec<PairedObjectField>,
     Vec<ObjectFieldForInclusion>,
     Vec<ObjectFieldForInclusion>,
 ) {
