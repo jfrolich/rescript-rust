@@ -482,6 +482,13 @@ type ModuleDeclarations =
 /// A dotted type path resolved to its identifier and declaration.
 type ResolvedTypeItem = (Ident, Arc<super::decl::TypeDeclaration>);
 
+/// Resolved signatures keyed by their spelling and optional module scope.
+type ResolvedModuleSignatures = hashbrown::HashMap<
+    (String, Option<ScopeId>),
+    (Path, Arc<super::decl::Signature>),
+    crate::fast_hash::FastState,
+>;
+
 /// `raw_lambda::typeopt` answers by environment, type and query.
 type TypeoptAnswers = crate::fast_hash::AHashMap<(EnvId, TypeExprRef, u8), bool>;
 
@@ -682,13 +689,7 @@ pub struct TypeContext {
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
     /// signature snapshot instead of cloning every `SignatureItem`.
-    resolved_module_sig_cache: RefCell<
-        hashbrown::HashMap<
-            (String, Option<ScopeId>),
-            (Path, Arc<super::decl::Signature>),
-            crate::fast_hash::FastState,
-        >,
-    >,
+    resolved_module_sig_cache: RefCell<ResolvedModuleSignatures>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
