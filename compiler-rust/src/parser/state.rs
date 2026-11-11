@@ -577,7 +577,7 @@ impl<'src> Parser<'src> {
     /// Comments are collected in the parser's comment list.
     /// Note: Doc/module comments are currently treated as comments (not tokens).
     pub fn next(&mut self) {
-        if self.token == Token::Eof {
+        if matches!(self.token, Token::Eof) {
             return;
         }
         self.consume_line_break();
@@ -659,7 +659,7 @@ impl<'src> Parser<'src> {
 
     /// Advance to the next token, but only if not at EOF.
     pub fn next_unsafe(&mut self) {
-        if self.token != Token::Eof {
+        if !matches!(self.token, Token::Eof) {
             self.next();
         }
     }
