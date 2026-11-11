@@ -142,6 +142,10 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>()
                 .join(";");
+            // printlambda.ml: `Blk_record {array = true}` prints `array[...]`.
+            if matches!(tag_info, TagInfo::Record(r) if r.array) {
+                f.string("array");
+            }
             f.string("[");
             f.string(&names);
             f.string("]");

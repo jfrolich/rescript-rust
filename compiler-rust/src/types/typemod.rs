@@ -11855,9 +11855,10 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                             ld_attributes: vec![],
                                         });
                                     }
+                                    let repres = crate::types::record_runtime::boxed_representation(&record_labels);
                                     crate::types::TypeKind::TypeRecord(
                                         crate::types::decl::SharedVec::from(record_labels),
-                                        crate::types::RecordRepresentation::RecordRegular,
+                                        repres,
                                     )
                                 }
                             };
@@ -18130,7 +18131,7 @@ fn type_structure_item<'a>(
                             let repres = if decl_has_unboxed_attr && internal_labels.len() == 1 {
                                 crate::types::RecordRepresentation::RecordUnboxed(false)
                             } else {
-                                crate::types::RecordRepresentation::RecordRegular
+                                crate::types::record_runtime::boxed_representation(&internal_labels)
                             };
                             (
                                 crate::types::TypeKind::TypeRecord(
@@ -20251,7 +20252,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                     let repres = if decl_has_unboxed_attr && internal_labels.len() == 1 {
                         crate::types::RecordRepresentation::RecordUnboxed(false)
                     } else {
-                        crate::types::RecordRepresentation::RecordRegular
+                        crate::types::record_runtime::boxed_representation(&internal_labels)
                     };
                     (
                         crate::types::TypeKind::TypeRecord(

@@ -897,3 +897,84 @@ switch iterator->IterableIterator.next {
     let output = compile_test_source_to_js(source, "iterator_effect_only.res").unwrap();
     assert!(!output.contains("let match"), "{output}");
 }
+
+// #9224: a record whose fields have the runtime names "0", "1", ... is
+// `RecordArray`, decided at its declaration. A spread over it copies its
+// fields one by one even with an optional field, and `{}` is an array.
+#[test]
+fn array_record_spread_and_empty_literal_are_arrays() {
+    let source = r#"
+type t = {@as("0") a?: int, @as("1") b: int}
+let upd = (r: t) => {...r, b: 2}
+type e = {@as("0") x?: int}
+let empty: e = {}
+"#;
+    let output = compile_test_source_to_js(source, "array_record_spread.res").unwrap();
+    assert!(
+        output.contains("return [\n    r[0],\n    2\n  ];"),
+        "the spread copies the fields into an array:\n{output}"
+    );
+    assert!(output.contains("let empty = [];"), "{output}");
+    assert!(!output.contains("...r"), "no object spread:\n{output}");
+}
+
+#[test]
+fn record_rest_into_an_array_record_is_rejected() {
+    let source = r#"
+type source = {@as("0") s0: int, @as("1") s1: int, @as("2") s2: int}
+type head = {@as("0") s0: int, @as("1") s1: int}
+let split = (r: source) => {
+  let {s2, ...head as rest} = r
+  (s2, rest)
+}
+"#;
+    let err = compile_test_source_to_js(source, "record_rest_array_record.res").unwrap_err();
+    assert!(
+        format!("{err:#}").contains(
+            "The rest of a record pattern cannot have a record type represented as an array"
+        ),
+        "{err:#}"
+    );
+}
+
+#[test]
+fn coercion_between_array_and_object_records_is_rejected() {
+    for (source, name) in [
+        (
+            r#"
+type obj = {@as("0") a: int, @as("1") b: int, x: int}
+type arr = {@as("0") a: int, @as("1") b: int}
+let toArr = (x: obj) => (x :> arr)
+"#,
+            "record_coercion_into_array_record.res",
+        ),
+        (
+            r#"
+type pair = {@as("0") a: int, @as("1") b: int}
+type tail = {@as("1") b: int}
+let toTail = (r: pair) => (r :> tail)
+"#,
+            "record_coercion_array_to_object.res",
+        ),
+    ] {
+        let err = compile_test_source_to_js(source, name).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("is represented as a JavaScript array"),
+            "{name}: {err:#}"
+        );
+    }
+}
+
+#[test]
+fn untagged_variant_with_an_array_record_and_an_array_is_rejected() {
+    let source = r#"
+type pair = {@as("0") x?: int, @as("1") y?: int}
+@unboxed type v = Pair(pair) | List(array<int>)
+"#;
+    let err = compile_test_source_to_js(source, "untagged_array_record_and_array.res").unwrap_err();
+    assert!(
+        format!("{err:#}")
+            .contains("At most one case can be an array, a tuple or a record represented as an array"),
+        "{err:#}"
+    );
+}

@@ -5963,7 +5963,7 @@ fn make_record_matching<'p>(
             let mut new_args: ArgsBuf = ArgsBuf::new();
             for lbl in all_labels.iter() {
                 let access = match &lbl.lbl_repres {
-                    RecordRepresentation::RecordRegular => {
+                    RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
                         b.prim(Primitive::Pfield(lbl.lbl_pos, fld_record(lbl)), &[*arg], loc)
                     }
                     RecordRepresentation::RecordInlined { .. } => {

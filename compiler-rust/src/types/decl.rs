@@ -264,6 +264,9 @@ impl TypeDeclaration {
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
+    /// A regular record whose fields have the runtime names "0", "1", ...
+    /// in declaration order, represented as a JavaScript array
+    RecordArray,
     /// Unboxed single-field record
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)

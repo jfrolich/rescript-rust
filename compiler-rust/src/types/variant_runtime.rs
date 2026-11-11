@@ -284,6 +284,10 @@ impl ShapeAllocation {
     /// `payload_kind`, the kind of a tuple.
     pub const TUPLE_ARRAY: ShapeAllocation = ShapeAllocation(13);
 
+    /// The `InstanceType Array` constant of variant_layout.ml
+    /// `payload_kind` for a record represented as an array (`RecordArray`).
+    pub const RECORD_ARRAY: ShapeAllocation = ShapeAllocation(14);
+
     /// Whether this is a static block, which an import keeps.
     pub fn is_predef(self) -> bool {
         self.0 < Self::FIRST_FRESH

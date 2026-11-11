@@ -402,6 +402,9 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
         .map(|decl| &decl.type_kind)
     {
         Some(TypeKind::TypeRecord(_, RecordRepresentation::RecordUnboxed(_))) => None,
+        Some(TypeKind::TypeRecord(_, RecordRepresentation::RecordArray)) => Some(
+            BlockType::Instance(Instance::Array(ShapeAllocation::RECORD_ARRAY)),
+        ),
         Some(TypeKind::TypeRecord(_, _)) => Some(BlockType::Object),
         _ => None,
     }
@@ -554,7 +557,9 @@ fn get_block_type(
 fn at_most_one_of_kind(kind: &BlockType) -> String {
     let kind = match kind {
         BlockType::Object => "an object type".to_string(),
-        BlockType::Instance(Instance::Array(_)) => "an array or tuple type".to_string(),
+        BlockType::Instance(Instance::Array(_)) => {
+            "an array, a tuple or a record represented as an array".to_string()
+        }
         BlockType::Instance(instance) => format!("an instance of {}", instance.as_str()),
         BlockType::Function => "a function type".to_string(),
         BlockType::String => "a string type".to_string(),

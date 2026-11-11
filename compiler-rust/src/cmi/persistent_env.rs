@@ -3573,11 +3573,13 @@ fn decode_cmj_tag_info(value: &OcamlValue) -> Option<TagInfo> {
                 runtime: Box::new(block(&fields[4])?),
             }),
         )),
-        OcamlValue::Block(2, fields) if fields.len() == 2 => Some(TagInfo::Record(Box::new(
+        // `Blk_record {fields; mutable_flag; array}`.
+        OcamlValue::Block(2, fields) if fields.len() == 3 => Some(TagInfo::Record(Box::new(
             crate::lambda::lam_tag_info::RecordTag {
                 fields: record_fields(&fields[0])?,
                 logical_field_count: None,
                 mutable_flag: mutable_flag(&fields[1])?,
+                array: fields[2].as_bool(),
             },
         ))),
         OcamlValue::Block(3, fields) if fields.len() == 1 => {

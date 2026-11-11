@@ -323,7 +323,9 @@ fn raw_polyvariant_const(rb: &RawArena, tag: &str) -> RawLambda {
 fn raw_record_field_access(lbl: &LabelDescription) -> (i32, FieldDbgInfo) {
     let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => FieldDbgInfo::Record { name },
+        RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+            FieldDbgInfo::Record { name }
+        }
         RecordRepresentation::RecordUnboxed(_) => FieldDbgInfo::Record { name },
         RecordRepresentation::RecordInlined { .. } => FieldDbgInfo::RecordInline { name },
         RecordRepresentation::RecordExtension => FieldDbgInfo::RecordExtension { name },
@@ -338,7 +340,9 @@ fn raw_record_field_access(lbl: &LabelDescription) -> (i32, FieldDbgInfo) {
 fn raw_record_setfield_access(lbl: &LabelDescription) -> Option<(i32, SetFieldDbgInfo)> {
     let name = lbl.lbl_runtime_name;
     let info = match &lbl.lbl_repres {
-        RecordRepresentation::RecordRegular => SetFieldDbgInfo::RecordSet(name),
+        RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+            SetFieldDbgInfo::RecordSet(name)
+        }
         RecordRepresentation::RecordUnboxed(_) => return None,
         RecordRepresentation::RecordInlined { .. } => SetFieldDbgInfo::RecordInlineSet(name),
         RecordRepresentation::RecordExtension => SetFieldDbgInfo::RecordExtensionSet(name),
@@ -2638,7 +2642,10 @@ impl<'a> RawLambdaConverter<'a> {
 
         // `record_copies_fields` (translcore.ml:1037-1050): with no `init`, or
         // a small record with no optional field, copy the fields one by one.
+        // A shallow copy is an object spread, so an array record always
+        // copies its fields.
         let build_direct = base.is_none()
+            || repres == RecordRepresentation::RecordArray
             || (all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional));
 
         if build_direct {
@@ -2701,7 +2708,8 @@ impl<'a> RawLambdaConverter<'a> {
             }
 
             let result = match repres {
-                RecordRepresentation::RecordRegular => {
+                RecordRepresentation::RecordRegular | RecordRepresentation::RecordArray => {
+                    let array = repres == RecordRepresentation::RecordArray;
                     // OCaml: if mut = Mutable then raise Not_constant
                     // Mutable records never become constant blocks
                     if matches!(mutable_flag, ParserMutableFlag::Mutable) {
@@ -2711,6 +2719,7 @@ impl<'a> RawLambdaConverter<'a> {
                                     fields: fields_info,
                                     logical_field_count,
                                     mutable_flag,
+                                    array,
                                 })),
                                 Mutable::Mutable,
                             ),
@@ -2724,6 +2733,7 @@ impl<'a> RawLambdaConverter<'a> {
                                 fields: fields_info,
                                 logical_field_count,
                                 mutable_flag,
+                                array,
                             })),
                             elems,
                             loc,
@@ -5236,13 +5246,13 @@ impl<'a> RawLambdaConverter<'a> {
             }
             ExpressionDesc::Texp_record {
                 fields,
+                empty_representation,
                 extended_expression,
-                ..
             } => self.convert_record_raw(
                 SrcLoc::from(expr.exp_loc),
                 self.ta.record_fields(*fields),
                 extended_expression.map(|e| self.ta.expr(e)),
-                None,
+                empty_representation.as_deref().cloned(),
             ),
             ExpressionDesc::Texp_field(record, _, lbl) => {
                 if matches!(lbl.lbl_repres, RecordRepresentation::RecordUnboxed(_)) {
@@ -6033,7 +6043,8 @@ impl<'a> RawLambdaConverter<'a> {
                                 _ => *pos,
                             };
                             let info = match repr {
-                                RecordRepresentation::RecordRegular => {
+                                RecordRepresentation::RecordRegular
+                                | RecordRepresentation::RecordArray => {
                                     FieldDbgInfo::Record { name: crate::name::Name::new(name) }
                                 }
                                 RecordRepresentation::RecordInlined { .. } => {

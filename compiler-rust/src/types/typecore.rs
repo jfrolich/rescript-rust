@@ -6789,6 +6789,7 @@ pub enum RecordRestError {
         rest_runtime_name: String,
     },
     UnboxedRecord,
+    ArrayRecord,
     MutableSourceRecord,
 }
 
@@ -6886,6 +6887,9 @@ impl RecordRestError {
             RecordRestError::UnboxedRecord => {
                 "Record rest patterns cannot be used with unboxed record types.".to_string()
             }
+            RecordRestError::ArrayRecord => "The rest of a record pattern cannot have a record type \
+                 represented as an array (fields with the runtime names \"0\", \"1\", ...)."
+                .to_string(),
             RecordRestError::MutableSourceRecord => {
                 "Record rest patterns cannot be used on records with mutable fields.".to_string()
             }
@@ -7156,6 +7160,10 @@ fn type_record_pat_rest(
             crate::types::RecordRepresentation::RecordUnboxed(_),
         ) => {
             return rest_err(rest_type_lid.loc, RecordRestError::UnboxedRecord);
+        }
+        // The rest is an object spread, which can't produce an array.
+        crate::types::TypeKind::TypeRecord(_, crate::types::RecordRepresentation::RecordArray) => {
+            return rest_err(rest_type_lid.loc, RecordRestError::ArrayRecord);
         }
         crate::types::TypeKind::TypeRecord(labels, _) => labels.to_vec(),
         _ => {

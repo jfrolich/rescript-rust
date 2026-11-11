@@ -2102,29 +2102,28 @@ impl<'r> JsPrinter<'r> {
 
         // Check if this is a record with field names
         match tag_info {
+            // js_dump.ml `Blk_record {array}`: the type declaration decided
+            // the record is a JavaScript array.
+            TagInfo::Record(record) if record.array => self.print_array_literal(elements),
             TagInfo::Record(record) if record.fields.len() == elements.len() => {
                 let fields = &record.fields;
-                if record_uses_array_syntax(fields) {
-                    self.print_array_literal(elements);
-                } else {
-                    self.print_object_literal(
-                        level,
-                        elements.iter().zip(fields.iter()).filter_map(
-                            |(elem, (field_name, optional))| {
-                                if *optional && is_undefined_literal(a, *elem) {
-                                    None
-                                } else {
-                                    Some((field_name.as_str(), *elem))
-                                }
-                            },
-                        ),
-                        |this, (field_name, elem)| {
-                            this.print_literal_property_name(field_name);
-                            this.write(": ");
-                            this.print_expression(elem, 1);
+                self.print_object_literal(
+                    level,
+                    elements.iter().zip(fields.iter()).filter_map(
+                        |(elem, (field_name, optional))| {
+                            if *optional && is_undefined_literal(a, *elem) {
+                                None
+                            } else {
+                                Some((field_name.as_str(), *elem))
+                            }
                         },
-                    );
-                }
+                    ),
+                    |this, (field_name, elem)| {
+                        this.print_literal_property_name(field_name);
+                        this.write(": ");
+                        this.print_expression(elem, 1);
+                    },
+                );
             }
             TagInfo::RecordInlined(inlined) if inlined.fields.len() == elements.len() => {
                 let (name, fields, runtime) = (&inlined.name, &inlined.fields, &inlined.runtime);
@@ -3018,14 +3017,6 @@ fn transform_float_literal(float_str: &str) -> String {
         out.push(byte as char);
     }
     out
-}
-
-fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
-    !fields.is_empty()
-        && fields
-            .iter()
-            .enumerate()
-            .all(|(i, (field_name, _))| field_name == &i.to_string())
 }
 
 fn unwrap_uppercase_exotic(name: &str) -> &str {

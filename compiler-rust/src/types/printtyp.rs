@@ -3600,6 +3600,19 @@ fn print_subtype_context<W: std::io::Write>(
                 " is private: its values can only be built in the module that defines it, so another type cannot be coerced to it.",
             );
         }
+        C::RecordArrayMismatch {
+            array_record_name,
+            object_record_name,
+        } => {
+            ppf.space();
+            ppf.str("The record ");
+            info(ppf, &array_record_name.name());
+            ppf.str(
+                " is represented as a JavaScript array (its fields have the runtime names \"0\", \"1\", ...) and ",
+            );
+            info(ppf, &object_record_name.name());
+            ppf.str(" as an object, so neither can be coerced to the other.");
+        }
     }
 }
 

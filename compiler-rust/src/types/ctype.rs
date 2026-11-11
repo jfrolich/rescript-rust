@@ -128,6 +128,13 @@ pub enum SubtypeContext {
     /// The target is a private record or variant, whose values only its own
     /// module can build.
     CoercionIntoPrivateType { typename: Path },
+
+    /// One record is represented as a JavaScript array, the other as an
+    /// object.
+    RecordArrayMismatch {
+        array_record_name: Path,
+        object_record_name: Path,
+    },
 }
 
 /// User-facing type kind for subtype diagnostics.
@@ -750,7 +757,9 @@ fn same_record_representation(
 ) -> bool {
     use super::decl::RecordRepresentation as R;
     match (left, right) {
-        (R::RecordRegular, R::RecordRegular) | (R::RecordExtension, R::RecordExtension) => true,
+        (R::RecordRegular, R::RecordRegular)
+        | (R::RecordArray, R::RecordArray)
+        | (R::RecordExtension, R::RecordExtension) => true,
         (R::RecordInlined { name: left, .. }, R::RecordInlined { name: right, .. }) => {
             left == right
         }
@@ -6480,8 +6489,24 @@ fn subtype_concrete_typedecls(
             crate::types::TypeKind::TypeRecord(fields1, repr1),
             crate::types::TypeKind::TypeRecord(fields2, repr2),
         ) => {
+            // Not between `RecordArray` and `RecordRegular`: an object is no
+            // array, and an array coerced to an object record would still
+            // pass for the array case of an untagged variant
+            // (compiler/ml/ctype.ml `subtype_rec`).
             if repr1 != repr2 {
-                push_subtype_cstr(cstrs, trace, t1, t2, None);
+                use crate::types::RecordRepresentation as R;
+                let context = match (repr1, repr2) {
+                    (R::RecordRegular, R::RecordArray) => Some(SubtypeContext::RecordArrayMismatch {
+                        array_record_name: p2,
+                        object_record_name: p1,
+                    }),
+                    (R::RecordArray, R::RecordRegular) => Some(SubtypeContext::RecordArrayMismatch {
+                        array_record_name: p1,
+                        object_record_name: p2,
+                    }),
+                    _ => None,
+                };
+                push_subtype_cstr(cstrs, trace, t1, t2, context);
                 return Ok(());
             }
             let (violations, mut tl1, mut tl2) = check_record_fields(fields1, fields2);

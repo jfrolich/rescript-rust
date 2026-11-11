@@ -80,6 +80,8 @@ pub struct RecordTag {
     pub fields: Vec<(String, bool)>,
     pub logical_field_count: Option<usize>,
     pub mutable_flag: MutableFlag,
+    /// `RecordArray`: the fields are the elements of a JavaScript array.
+    pub array: bool,
 }
 
 impl TagInfo {
@@ -115,6 +117,7 @@ impl TagInfo {
             fields: vec![("contents".to_string(), false)],
             logical_field_count: None,
             mutable_flag: MutableFlag::Mutable,
+            array: false,
         }))
     }
 
@@ -152,6 +155,7 @@ impl TagInfo {
             fields,
             logical_field_count: None,
             mutable_flag,
+            array: false,
         }))
     }
 

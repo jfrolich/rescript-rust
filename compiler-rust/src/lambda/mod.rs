@@ -222,32 +222,11 @@ pub(crate) fn untagged_value(c: &Constant) -> Option<untagged_dispatch::Value> {
         })),
         Constant::Block { tag_info, .. } => match &**tag_info {
             TagInfo::Tuple => Value::Array,
-            TagInfo::Record(record) => {
-                let fields = &record.fields;
-                if !fields.is_empty()
-                    && fields
-                        .iter()
-                        .enumerate()
-                        .all(|(i, (name, _))| is_decimal_index(name, i))
-                {
-                    Value::Array
-                } else {
-                    Value::Object
-                }
-            }
+            TagInfo::Record(record) if record.array => Value::Array,
             _ => Value::Object,
         },
         Constant::Char(_) | Constant::Some(_) | Constant::ModuleAlias => return None,
     })
-}
-
-/// `name = string_of_int i` without allocating: canonical decimal digits
-/// (no sign, no leading zeros) spelling exactly `i`.
-fn is_decimal_index(name: &str, i: usize) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|b| b.is_ascii_digit())
-        && (name == "0" || !name.starts_with('0'))
-        && name.parse::<usize>() == Ok(i)
 }
 
 /// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`:

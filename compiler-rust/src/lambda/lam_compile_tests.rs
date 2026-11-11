@@ -4714,6 +4714,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("id".to_string(), true),
                                             ("name".to_string(), true),
@@ -4781,6 +4782,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("pk".to_string(), false),
                                             ("exportStatus".to_string(), true),
@@ -4831,6 +4833,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     JE::number(Number::int(3), &mut j),
                                 ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("xx".to_string(), false),
                                             ("yy".to_string(), false),
@@ -4841,6 +4844,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                 )))), &mut j),
                         ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                             crate::lambda::lam_tag_info::RecordTag {
+                                array: false,
                                 fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                                 logical_field_count: None,
                                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
@@ -4932,6 +4936,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                 Lambda::prim(
                     Primitive::Pmakeblock(
                         TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                            array: false,
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
@@ -5404,6 +5409,7 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
                 MutableFlag::Immutable,
                 compiler.j.tag_id(TagInfo::Record(Box::new(
                     crate::lambda::lam_tag_info::RecordTag {
+                        array: false,
                         fields: vec![("d".to_string(), false)],
                         logical_field_count: None,
                         mutable_flag: crate::parser::ast::MutableFlag::Immutable,
