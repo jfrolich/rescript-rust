@@ -496,13 +496,18 @@ fn write_items(items: &[Item], indent: &str, out: &mut String) {
             }
             Item::External(external) => {
                 write_doc(&external.ts, indent, out);
-                out.push_str(indent);
-                for attr in &external.attrs {
-                    let _ = write!(out, "@{attr} ");
+                // The attributes on a line of their own, as the formatter
+                // prints a long external.
+                if !external.attrs.is_empty() {
+                    out.push_str(indent);
+                    for (index, attr) in external.attrs.iter().enumerate() {
+                        let _ = write!(out, "{}@{attr}", if index == 0 { "" } else { " " });
+                    }
+                    out.push('\n');
                 }
                 let _ = writeln!(
                     out,
-                    "external {}: {} = {}",
+                    "{indent}external {}: {} = {}",
                     external.name,
                     print_ty(&external.ty),
                     string_literal(&external.js_name)

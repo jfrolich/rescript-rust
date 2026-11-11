@@ -201,179 +201,260 @@ module Features = {
   /** TypeScript: `Response` */
   type response
   /** TypeScript: `string` */
-  @module("./features.ts") external aString: string = "aString"
+  @module("./features.ts")
+  external aString: string = "aString"
   /** TypeScript: `number` */
-  @module("./features.ts") external aNumber: float = "aNumber"
+  @module("./features.ts")
+  external aNumber: float = "aNumber"
   /** TypeScript: `boolean` */
-  @module("./features.ts") external aBoolean: bool = "aBoolean"
+  @module("./features.ts")
+  external aBoolean: bool = "aBoolean"
   /** TypeScript: `bigint` */
-  @module("./features.ts") external aBigint: bigint = "aBigint"
+  @module("./features.ts")
+  external aBigint: bigint = "aBigint"
   /** TypeScript: `symbol` */
-  @module("./features.ts") external aSymbol: Symbol.t = "aSymbol"
+  @module("./features.ts")
+  external aSymbol: Symbol.t = "aSymbol"
   /** TypeScript: `undefined` */
-  @module("./features.ts") external nothing: unit = "nothing"
+  @module("./features.ts")
+  external nothing: unit = "nothing"
   /** TypeScript: `null` */
-  @module("./features.ts") external aNull: Null.t<unknown> = "aNull"
+  @module("./features.ts")
+  external aNull: Null.t<unknown> = "aNull"
   /** TypeScript: `"hello"` */
-  @module("./features.ts") external literalString: string = "literalString"
+  @module("./features.ts")
+  external literalString: string = "literalString"
   /** TypeScript: `42` */
-  @module("./features.ts") external literalNumber: float = "literalNumber"
+  @module("./features.ts")
+  external literalNumber: float = "literalNumber"
   /** TypeScript: `"on"` */
-  @module("./features.ts") external stringLiteralType: string = "stringLiteralType"
+  @module("./features.ts")
+  external stringLiteralType: string = "stringLiteralType"
   /** TypeScript: `() => void` */
-  @module("./features.ts") external returnsVoid: unit => unit = "returnsVoid"
+  @module("./features.ts")
+  external returnsVoid: unit => unit = "returnsVoid"
   /** TypeScript: `string | undefined` */
-  @module("./features.ts") external maybeString: option<string> = "maybeString"
+  @module("./features.ts")
+  external maybeString: option<string> = "maybeString"
   /** TypeScript: `string | null` */
-  @module("./features.ts") external nullableString: Null.t<string> = "nullableString"
+  @module("./features.ts")
+  external nullableString: Null.t<string> = "nullableString"
   /** TypeScript: `string | null | undefined` */
-  @module("./features.ts") external nullishString: Nullable.t<string> = "nullishString"
+  @module("./features.ts")
+  external nullishString: Nullable.t<string> = "nullishString"
   /** TypeScript: `(id: string) => { id: string; } | undefined` */
-  @module("./features.ts") external find: string => option<findResult> = "find"
+  @module("./features.ts")
+  external find: string => option<findResult> = "find"
   /** TypeScript: `number[]` */
-  @module("./features.ts") external numbers: array<float> = "numbers"
+  @module("./features.ts")
+  external numbers: array<float> = "numbers"
   /** TypeScript: `readonly number[]` */
-  @module("./features.ts") external readonlyNumbers: array<float> = "readonlyNumbers"
+  @module("./features.ts")
+  external readonlyNumbers: array<float> = "readonlyNumbers"
   /** TypeScript: `[string, number]` */
-  @module("./features.ts") external pair: (string, float) = "pair"
+  @module("./features.ts")
+  external pair: (string, float) = "pair"
   /** TypeScript: `readonly [string, number, boolean]` */
-  @module("./features.ts") external triple: (string, float, bool) = "triple"
+  @module("./features.ts")
+  external triple: (string, float, bool) = "triple"
   /** TypeScript: `[string]` */
-  @module("./features.ts") external single: array<string> = "single"
+  @module("./features.ts")
+  external single: array<string> = "single"
   /** TypeScript: `[string, (number | undefined)?]` */
-  @module("./features.ts") external optionalTuple: array<unknown> = "optionalTuple"
+  @module("./features.ts")
+  external optionalTuple: array<unknown> = "optionalTuple"
   /** TypeScript: `[string, ...number[]]` */
-  @module("./features.ts") external restTuple: array<unknown> = "restTuple"
+  @module("./features.ts")
+  external restTuple: array<unknown> = "restTuple"
   /** TypeScript: `readonly ["a", 1]` */
-  @module("./features.ts") external constTuple: ([#a], [#1]) = "constTuple"
+  @module("./features.ts")
+  external constTuple: ([#a], [#1]) = "constTuple"
   /** TypeScript: `{ [key: string]: number; }` */
-  @module("./features.ts") external dictionary: dict<float> = "dictionary"
+  @module("./features.ts")
+  external dictionary: dict<float> = "dictionary"
   /** TypeScript: `Record<string, Point>` */
-  @module("./features.ts") external record: dict<point> = "record"
+  @module("./features.ts")
+  external record: dict<point> = "record"
   /** TypeScript: `Record<"a" | "b", number>` */
-  @module("./features.ts") external keyedRecord: keyedRecord = "keyedRecord"
+  @module("./features.ts")
+  external keyedRecord: keyedRecord = "keyedRecord"
   /** TypeScript: `{ [key: string]: string; known: string; }` */
-  @module("./features.ts") external mixedIndex: mixedIndex = "mixedIndex"
+  @module("./features.ts")
+  external mixedIndex: mixedIndex = "mixedIndex"
   /** TypeScript: `{}` */
-  @module("./features.ts") external emptyObject: unknown = "emptyObject"
+  @module("./features.ts")
+  external emptyObject: unknown = "emptyObject"
   /** TypeScript: `object` */
-  @module("./features.ts") external anyObject: unknown = "anyObject"
+  @module("./features.ts")
+  external anyObject: unknown = "anyObject"
   /** TypeScript: `{ host: string; port: number; tags: string[]; }` */
-  @module("./features.ts") external inferredObject: inferredObject = "inferredObject"
+  @module("./features.ts")
+  external inferredObject: inferredObject = "inferredObject"
   /** TypeScript: `(a: string, b: number) => boolean` */
-  @module("./features.ts") external twoArgs: (string, float) => bool = "twoArgs"
+  @module("./features.ts")
+  external twoArgs: (string, float) => bool = "twoArgs"
   /** TypeScript: `(a: string, b?: number | undefined) => string` */
-  @module("./features.ts") external optionalArg: (string, ~b: float=?) => string = "optionalArg"
+  @module("./features.ts")
+  external optionalArg: (string, ~b: float=?) => string = "optionalArg"
   /** TypeScript: `(a: string, b?: number) => number` */
-  @module("./features.ts") external defaultArg: (string, ~b: float=?) => float = "defaultArg"
+  @module("./features.ts")
+  external defaultArg: (string, ~b: float=?) => float = "defaultArg"
   /** TypeScript: `(first: string, ...rest: number[]) => void` */
-  @module("./features.ts") @variadic external restArgs: (string, array<float>) => unit = "restArgs"
+  @module("./features.ts") @variadic
+  external restArgs: (string, array<float>) => unit = "restArgs"
   /** TypeScript: `(done: (error: Error | null, value?: string | undefined) => void) => void` */
-  @module("./features.ts") external callback: ((Null.t<JsError.t>, ~value: string=?) => unit) => unit = "callback"
+  @module("./features.ts")
+  external callback: ((Null.t<JsError.t>, ~value: string=?) => unit) => unit = "callback"
   /** TypeScript: `(f: (...args: number[]) => number) => void` */
-  @module("./features.ts") external restCallback: (array<float> => float) => unit = "restCallback"
+  @module("./features.ts")
+  external restCallback: (array<float> => float) => unit = "restCallback"
   /** TypeScript: `(prefix: string) => (name: string) => string` */
-  @module("./features.ts") external returnsFunction: string => string => string = "returnsFunction"
+  @module("./features.ts")
+  external returnsFunction: string => string => string = "returnsFunction"
   /** TypeScript: `{ (value: string): string; (value: number): number; }` */
-  @module("./features.ts") external overloaded: string => string = "overloaded"
+  @module("./features.ts")
+  external overloaded: string => string = "overloaded"
   /** TypeScript: `(this: Point, scale: number) => Point` */
-  @module("./features.ts") external withThis: float => point = "withThis"
+  @module("./features.ts")
+  external withThis: float => point = "withThis"
   /** TypeScript: `(value: unknown) => value is string` */
-  @module("./features.ts") external isString: 'a => bool = "isString"
+  @module("./features.ts")
+  external isString: 'a => bool = "isString"
   /** TypeScript: `(value: unknown) => asserts value is string` */
-  @module("./features.ts") external assertString: 'a => unit = "assertString"
+  @module("./features.ts")
+  external assertString: 'a => unit = "assertString"
   /** TypeScript: `(id: number) => Promise<{ id: number; label: string; }>` */
-  @module("./features.ts") external arrow: float => promise<arrowResult> = "arrow"
+  @module("./features.ts")
+  external arrow: float => promise<arrowResult> = "arrow"
   /** TypeScript: `<T>(value: T) => T` */
-  @module("./features.ts") external identity: 't => 't = "identity"
+  @module("./features.ts")
+  external identity: 't => 't = "identity"
   /** TypeScript: `<T, U>(items: T[], f: (item: T, index: number) => U) => U[]` */
-  @module("./features.ts") external mapArray: (array<'t>, ('t, float) => 'u) => array<'u> = "mapArray"
+  @module("./features.ts")
+  external mapArray: (array<'t>, ('t, float) => 'u) => array<'u> = "mapArray"
   /** TypeScript: `<T extends { id: string; }>(item: T) => T` */
-  @module("./features.ts") external constrained: 't => 't = "constrained"
+  @module("./features.ts")
+  external constrained: 't => 't = "constrained"
   /** TypeScript: `<T, K extends keyof T>(item: T, key: K) => T[K]` */
-  @module("./features.ts") external pluck: ('t, 'k) => unknown = "pluck"
+  @module("./features.ts")
+  external pluck: ('t, 'k) => unknown = "pluck"
   /** TypeScript: `(run: <T>(value: T) => T) => void` */
-  @module("./features.ts") external genericCallback: ('t => 't) => unit = "genericCallback"
+  @module("./features.ts")
+  external genericCallback: ('t => 't) => unit = "genericCallback"
   /** TypeScript: `<T>(value: T) => Maybe<T>` */
-  @module("./features.ts") external maybe: 't => maybe<'t> = "maybe"
+  @module("./features.ts")
+  external maybe: 't => maybe<'t> = "maybe"
   /** TypeScript: `(color: Color, level: Level, flag: Flag) => void` */
-  @module("./features.ts") external paint: (color, level, flag) => unit = "paint"
+  @module("./features.ts")
+  external paint: (color, level, flag) => unit = "paint"
   /** TypeScript: `(color: Color.Red) => void` */
-  @module("./features.ts") external onlyRed: color => unit = "onlyRed"
+  @module("./features.ts")
+  external onlyRed: color => unit = "onlyRed"
   module Animal = {
     type t = animal
     /** TypeScript: `typeof Animal` */
-    @module("./features.ts") @new external make: (string, ~legs: float=?) => animal = "Animal"
+    @module("./features.ts") @new
+    external make: (string, ~legs: float=?) => animal = "Animal"
     /** TypeScript: `number` */
-    @module("./features.ts") @scope("Animal") external count: float = "count"
+    @module("./features.ts") @scope("Animal")
+    external count: float = "count"
     /** TypeScript: `(name: string) => Animal` */
-    @module("./features.ts") @scope("Animal") external create: string => animal = "create"
+    @module("./features.ts") @scope("Animal")
+    external create: string => animal = "create"
   }
   module Dog = {
     type t = dog
     /** TypeScript: `typeof Dog` */
-    @module("./features.ts") @new external make: (string, ~legs: float=?) => dog = "Dog"
+    @module("./features.ts") @new
+    external make: (string, ~legs: float=?) => dog = "Dog"
     /** TypeScript: `number` */
-    @module("./features.ts") @scope("Dog") external count: float = "count"
+    @module("./features.ts") @scope("Dog")
+    external count: float = "count"
     /** TypeScript: `(name: string) => Animal` */
-    @module("./features.ts") @scope("Dog") external create: string => animal = "create"
+    @module("./features.ts") @scope("Dog")
+    external create: string => animal = "create"
   }
   module Stack = {
     type t<'t> = stack<'t>
     /** TypeScript: `typeof Stack` */
-    @module("./features.ts") @new external make: unit => stack<'t> = "Stack"
+    @module("./features.ts") @new
+    external make: unit => stack<'t> = "Stack"
   }
   module Base = {
     type t = base
   }
   /** TypeScript: `(animal: Animal) => Dog` */
-  @module("./features.ts") external adopt: animal => dog = "adopt"
+  @module("./features.ts")
+  external adopt: animal => dog = "adopt"
   /** TypeScript: `typeof Animal` */
-  @module("./features.ts") external animalClass: unknown = "AnimalClass"
+  @module("./features.ts")
+  external animalClass: unknown = "AnimalClass"
   /** TypeScript: `"text"` */
-  @module("./features.ts") external resolvedConditional: string = "resolvedConditional"
+  @module("./features.ts")
+  external resolvedConditional: string = "resolvedConditional"
   /** TypeScript: `<T>(value: T) => Conditional<T>` */
-  @module("./features.ts") external deferredConditional: 't => [#other | #text] = "deferredConditional"
+  @module("./features.ts")
+  external deferredConditional: 't => [#other | #text] = "deferredConditional"
   /** TypeScript: `Promise<Point>` */
-  @module("./features.ts") external promise: promise<point> = "promise"
+  @module("./features.ts")
+  external promise: promise<point> = "promise"
   /** TypeScript: `Map<string, Point>` */
-  @module("./features.ts") external map: Map.t<string, point> = "map"
+  @module("./features.ts")
+  external map: Map.t<string, point> = "map"
   /** TypeScript: `Set<number>` */
-  @module("./features.ts") external set: Set.t<float> = "set"
+  @module("./features.ts")
+  external set: Set.t<float> = "set"
   /** TypeScript: `Date` */
-  @module("./features.ts") external date: Date.t = "date"
+  @module("./features.ts")
+  external date: Date.t = "date"
   /** TypeScript: `RegExp` */
-  @module("./features.ts") external regexp: RegExp.t = "regexp"
+  @module("./features.ts")
+  external regexp: RegExp.t = "regexp"
   /** TypeScript: `Error` */
-  @module("./features.ts") external error: JsError.t = "error"
+  @module("./features.ts")
+  external error: JsError.t = "error"
   /** TypeScript: `Uint8Array<ArrayBufferLike>` */
-  @module("./features.ts") external bytes: Uint8Array.t = "bytes"
+  @module("./features.ts")
+  external bytes: Uint8Array.t = "bytes"
   /** TypeScript: `ArrayBuffer` */
-  @module("./features.ts") external buffer: ArrayBuffer.t = "buffer"
+  @module("./features.ts")
+  external buffer: ArrayBuffer.t = "buffer"
   /** TypeScript: `Iterable<number>` */
-  @module("./features.ts") external iterable: iterable = "iterable"
+  @module("./features.ts")
+  external iterable: iterable = "iterable"
   /** TypeScript: `AsyncIterable<string>` */
-  @module("./features.ts") external asyncIterable: asyncIterable = "asyncIterable"
+  @module("./features.ts")
+  external asyncIterable: asyncIterable = "asyncIterable"
   /** TypeScript: `URL` */
-  @module("./features.ts") external url: url = "url"
+  @module("./features.ts")
+  external url: url = "url"
   /** TypeScript: `(input: string, init?: { signal?: AbortSignal | undefined; } | undefined) => Promise<Response>` */
-  @module("./features.ts") external fetchLike: (string, ~init: fetchLikeInit=?) => promise<response> = "fetchLike"
+  @module("./features.ts")
+  external fetchLike: (string, ~init: fetchLikeInit=?) => promise<response> = "fetchLike"
   /** TypeScript: `(value: any) => any` */
-  @module("./features.ts") external takesAny: 'a => unknown = "takesAny"
+  @module("./features.ts")
+  external takesAny: 'a => unknown = "takesAny"
   /** TypeScript: `(value: unknown) => unknown` */
-  @module("./features.ts") external takesUnknown: 'a => unknown = "takesUnknown"
+  @module("./features.ts")
+  external takesUnknown: 'a => unknown = "takesUnknown"
   /** TypeScript: `(message: string) => never` */
-  @module("./features.ts") external fails: string => 'a = "fails"
+  @module("./features.ts")
+  external fails: string => 'a = "fails"
   /** TypeScript: `any` */
-  @module("./features.ts") external anyValue: unknown = "anyValue"
+  @module("./features.ts")
+  external anyValue: unknown = "anyValue"
   /** TypeScript: `never[]` */
-  @module("./features.ts") external neverArray: array<'a> = "neverArray"
+  @module("./features.ts")
+  external neverArray: array<'a> = "neverArray"
   /** TypeScript: `(args: string[]) => number` */
-  @module("./features.ts") external default: array<string> => float = "default"
+  @module("./features.ts")
+  external default: array<string> => float = "default"
   /** TypeScript: `(level?: Level | undefined) => Level | null` */
-  @module("./features.ts") external withLevel: (~level: level=?) => Null.t<level> = "withLevel"
+  @module("./features.ts")
+  external withLevel: (~level: level=?) => Null.t<level> = "withLevel"
   /** TypeScript: `(mode?: Autocapitalize | undefined) => void` */
-  @module("./features.ts") external capitalize: (~mode: string=?) => unit = "capitalize"
+  @module("./features.ts")
+  external capitalize: (~mode: string=?) => unit = "capitalize"
 }
 
 // Where ReScript says less than TypeScript:
