@@ -1495,16 +1495,21 @@ impl<'r> JsPrinter<'r> {
         match a.ek(expr) {
             ExprKind::Fun(_) | ExprKind::Object(_) | ExprKind::JsonLiteral(_) => true,
             ExprKind::RawJsCode(info) => !a.raw(info).is_stmt,
-            ExprKind::CamlBlock(_, _, tag_info) => matches!(
-                a.tag(tag_info),
-                crate::lambda::TagInfo::Record(_)
-                    | crate::lambda::TagInfo::Module(_)
-                    | crate::lambda::TagInfo::PolyVar(_)
-                    | crate::lambda::TagInfo::Extension
-                    | crate::lambda::TagInfo::RecordExt { .. }
-                    | crate::lambda::TagInfo::RecordInlined(_)
-                    | crate::lambda::TagInfo::Constructor(_)
-            ),
+            // An array record prints as an array literal, which needs no
+            // parentheses (compiler/core/js_dump.ml `exp_need_paren`).
+            ExprKind::CamlBlock(_, _, tag_info) => match a.tag(tag_info) {
+                crate::lambda::TagInfo::Record(record) => !record.array,
+                crate::lambda::TagInfo::Module(_)
+                | crate::lambda::TagInfo::PolyVar(_)
+                | crate::lambda::TagInfo::Extension
+                | crate::lambda::TagInfo::RecordExt { .. }
+                | crate::lambda::TagInfo::RecordInlined(_)
+                | crate::lambda::TagInfo::Constructor(_) => true,
+                crate::lambda::TagInfo::Tuple
+                | crate::lambda::TagInfo::ModuleExport(_)
+                | crate::lambda::TagInfo::Some
+                | crate::lambda::TagInfo::SomeNotNested => false,
+            },
             ExprKind::OptionalBlock(inner, true) => self.arrow_expr_needs_paren(inner),
             _ => false,
         }
@@ -5611,6 +5616,42 @@ mod tests {
         };
 
         assert_eq!(rendered, "() => ({\n  TAG: \"Some\",\n  _0: 1\n})");
+    }
+
+    #[test]
+    fn test_print_arrow_function_leaves_array_record_body_bare() {
+        let mut j = JsArena::new();
+        let rendered = {
+            let v = test_fun(
+                false,
+                &[],
+                &[JS::return_(
+                    JE::new(
+                        ExprKind::CamlBlock(
+                            JE::list(&[JE::number(Number::int(1), &mut j)], &mut j),
+                            MutableFlag::Immutable,
+                            j.tag_id(TagInfo::Record(Box::new(
+                                crate::lambda::lam_tag_info::RecordTag {
+                                    fields: vec![("0".to_string(), false)],
+                                    logical_field_count: None,
+                                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                                    array: true,
+                                },
+                            ))),
+                        ),
+                        &mut j,
+                    ),
+                    &mut j,
+                )],
+                false,
+                false,
+                None,
+                &mut j,
+            );
+            print_expr(&j, v)
+        };
+
+        assert_eq!(rendered, "() => [1]");
     }
 
     #[test]
