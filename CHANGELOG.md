@@ -88,6 +88,8 @@
 
 - Compute the item digests and item references of a compiled module's interface once, when it is published, instead of decoding the stored interface again for each. https://github.com/jfrolich/rescript-rust/pull/87
 
+- Keep the bindings most recently added to a type-checking environment in a short list in front of its map, so a `let` no longer copies map nodes that every recorded environment then holds until the module is done. https://github.com/jfrolich/rescript-rust/pull/91
+
 - Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
 - Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
 - Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
