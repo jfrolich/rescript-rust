@@ -160,6 +160,11 @@ pub struct PortablePersStruct {
     /// logical interface will have the same fingerprint even if internal stamps
     /// differ due to dependency changes.
     pub fingerprint: u64,
+    /// [`Self::item_refs`]. Set when the struct is built from its decoded
+    /// signature, so recording what dependents read does not decode it
+    /// again; a struct read from storage computes it on first use.
+    #[serde(skip)]
+    item_refs: std::sync::OnceLock<Arc<super::item_deps::UnitRefs>>,
 }
 
 /// The decoded signature of a [`PortablePersStruct`].
@@ -225,6 +230,7 @@ impl PortablePersStruct {
         raw: Option<&PortableRawSignature>,
         fingerprint: u64,
     ) -> Self {
+        let item_refs = super::item_deps::signature_refs(crate::name::Name::new(&ps_name), sig);
         PortablePersStruct {
             ps_name,
             ps_filename,
@@ -234,7 +240,19 @@ impl PortablePersStruct {
             sig: crate::binser::Encoded::encode(sig),
             raw: raw.map(crate::binser::Encoded::encode),
             fingerprint,
+            item_refs: Arc::new(item_refs).into(),
         }
+    }
+
+    /// The references of every item of the signature
+    /// ([`super::item_deps::signature_refs`] for the unit `ps_name`).
+    pub fn item_refs(&self) -> &Arc<super::item_deps::UnitRefs> {
+        self.item_refs.get_or_init(|| {
+            Arc::new(super::item_deps::signature_refs(
+                crate::name::Name::new(&self.ps_name),
+                &self.signature(),
+            ))
+        })
     }
 
     /// The signature, decoded.

@@ -7818,16 +7818,6 @@ struct RegistryUnitSource<'a> {
 }
 
 impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
-    fn lambda_units(&self, unit: Name, name: &str) -> Vec<Name> {
-        if !self.lambdas {
-            return Vec::new();
-        }
-        self.registry
-            .with_info(&unit, |info| {
-                lambda_units_of(&info.cmj_export_lambdas, name)
-            })
-            .unwrap_or_default()
-    }
     fn ignored(&self, unit: Name) -> bool {
         self.registry.module_info_is_runtime(&unit)
     }
@@ -7838,6 +7828,13 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
             .get(unit.as_str())
             .cloned()
             .or_else(|| registry.cached_modules.get_cloned(&unit))?;
+        // The references of the signature alone belong to the signature. A
+        // unit registered under another name than its signature's is read
+        // against that name.
+        let named_as_registered = ps.ps_name == unit.as_str();
+        if !self.lambdas && named_as_registered {
+            return Some(ps.item_refs().clone());
+        }
         let lambdas = if self.lambdas {
             registry
                 .with_info(&unit, |info| Arc::as_ptr(&info.cmj_export_lambdas) as usize)
@@ -7849,7 +7846,22 @@ impl super::item_deps::UnitSource for RegistryUnitSource<'_> {
         if let Some(refs) = registry.item_refs_cache.read().unwrap().get(&key) {
             return Some(refs.clone());
         }
-        let refs = Arc::new(super::item_deps::unit_refs(unit, &ps, self));
+        let signature_refs = if named_as_registered {
+            ps.item_refs().clone()
+        } else {
+            Arc::new(super::item_deps::signature_refs(unit, &ps.signature()))
+        };
+        // A unit without JS metadata exports no inlinable body.
+        let with_lambdas = self.lambdas.then(|| {
+            registry.with_info(&unit, |info| {
+                signature_refs
+                    .with_lambda_units(|name| lambda_units_of(&info.cmj_export_lambdas, name))
+            })
+        });
+        let refs = match with_lambdas.flatten() {
+            Some(refs) => Arc::new(refs),
+            None => signature_refs,
+        };
         registry
             .item_refs_cache
             .write()

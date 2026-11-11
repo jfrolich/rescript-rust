@@ -21,7 +21,7 @@ use smallvec::SmallVec;
 
 use super::persistent_env::InMemoryModuleInfo;
 use super::portable_types::{
-    PortablePersStruct, PortableRowField, PortableTypeDesc, PortableTypeEntry,
+    PortablePersStruct, PortableRowField, PortableSignature, PortableTypeDesc, PortableTypeEntry,
 };
 use crate::name::Name;
 use crate::types::decl::{
@@ -473,6 +473,7 @@ impl RefWalker<'_> {
 }
 
 /// The references of the items of one unit's signature, computed once.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitRefs {
     /// Item (kind and name) to the references of its declaration(s) and
     /// inlinable lambda.
@@ -481,9 +482,10 @@ pub struct UnitRefs {
     pub aliases: ahash::AHashMap<(Kind, Name), Vec<UnitRead>>,
 }
 
-/// The references of every item of `ps`.
-pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -> UnitRefs {
-    let ps = ps.signature();
+/// The references of every item of the signature `ps` of `unit`, leaving out
+/// what the inlinable bodies of its values and modules refer to (see
+/// [`UnitRefs::with_lambda_units`]). They depend on the signature alone.
+pub fn signature_refs(unit: Name, ps: &PortableSignature) -> UnitRefs {
     let own_keys: ahash::AHashSet<(Kind, Name)> =
         ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
     let mut refs: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
@@ -512,18 +514,6 @@ pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -
             walker.item(item);
         }
         let mut out = std::mem::take(&mut walker.out);
-        match item {
-            SignatureItem::SigValue(id, _) | SignatureItem::SigModule(id, _, _) => {
-                for lambda_unit in source.lambda_units(unit, id.name()) {
-                    out.push(UnitRead {
-                        unit: lambda_unit,
-                        segs: Segs::new(),
-                        kind: Kind::Module,
-                    });
-                }
-            }
-            _ => {}
-        }
         if let SignatureItem::SigModule(_, md, _) = item
             && let ModuleType::MtyAlias(_, target) = &md.md_type
         {
@@ -531,21 +521,51 @@ pub fn unit_refs(unit: Name, ps: &PortablePersStruct, source: &dyn UnitSource) -
             read_of_path(target, Kind::Module, Some(unit), &mut targets);
             aliases.entry(key).or_default().extend(targets);
         }
-        out.sort_by(|a, b| (a.unit, &a.segs, a.kind).cmp(&(b.unit, &b.segs, b.kind)));
-        out.dedup();
+        sort_reads(&mut out);
         refs.entry(key).or_default().extend(out);
     }
     UnitRefs { refs, aliases }
 }
 
+/// Sort `reads` and drop repeated ones.
+fn sort_reads(reads: &mut Vec<UnitRead>) {
+    reads.sort_by(|a, b| (a.unit, &a.segs, a.kind).cmp(&(b.unit, &b.segs, b.kind)));
+    reads.dedup();
+}
+
+impl UnitRefs {
+    /// These references plus, for each value and module item, the units its
+    /// inlinable body refers to: `lambda_units` of the item's name.
+    pub fn with_lambda_units(&self, lambda_units: impl Fn(&str) -> Vec<Name>) -> UnitRefs {
+        let mut refs = self.refs.clone();
+        for ((kind, name), item_refs) in refs.iter_mut() {
+            if !matches!(kind, Kind::Value | Kind::Module) {
+                continue;
+            }
+            let units = lambda_units(name.as_str());
+            if units.is_empty() {
+                continue;
+            }
+            item_refs.extend(units.into_iter().map(|unit| UnitRead {
+                unit,
+                segs: Segs::new(),
+                kind: Kind::Module,
+            }));
+            sort_reads(item_refs);
+        }
+        UnitRefs {
+            refs,
+            aliases: self.aliases.clone(),
+        }
+    }
+}
+
 /// What resolving reads needs to know about the units.
 pub trait UnitSource {
-    /// The units an inlinable lambda exported under `name` refers to.
-    fn lambda_units(&self, unit: Name, name: &str) -> Vec<Name>;
     /// Units whose reads need no recording (the runtime, which does not
     /// change within a build).
     fn ignored(&self, unit: Name) -> bool;
-    /// The item references of a unit ([`unit_refs`] of its signature),
+    /// The item references of a unit ([`signature_refs`] of its signature),
     /// `None` when it is not known.
     fn refs(&self, unit: Name) -> Option<Arc<UnitRefs>>;
 }
@@ -635,4 +655,116 @@ pub fn read_digest<'a>(
         digests.get(key).hash(&mut hasher);
     }
     hasher.finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cmi::portable_types::PortableTypeGraph;
+    use crate::ident::Ident;
+    use crate::types::decl::{AliasPresence, ModuleDeclaration, RecStatus};
+
+    fn module_item(name: &str, md_type: ModuleType) -> SignatureItem {
+        SignatureItem::SigModule(
+            Ident::create_persistent(name),
+            ModuleDeclaration {
+                md_type,
+                md_attributes: vec![],
+                md_loc: crate::types::DeclLoc::none(),
+                md_path: None,
+            },
+            RecStatus::TrecNot,
+        )
+    }
+
+    /// `module A = Dep` and `module B: Other.S`.
+    fn signature() -> PortableSignature {
+        let persistent = |name: &str| Path::pident(Ident::create_persistent(name));
+        PortableSignature {
+            ps_sig: vec![
+                module_item(
+                    "A",
+                    ModuleType::MtyAlias(AliasPresence::MtaAbsent, persistent("Dep")),
+                ),
+                module_item(
+                    "B",
+                    ModuleType::MtyIdent(Path::pdot(persistent("Other"), "S")),
+                ),
+            ],
+            cmi_longident_names: vec![],
+            type_graph: PortableTypeGraph {
+                entries: vec![],
+                variant_layouts: vec![],
+                mutabilities: vec![],
+            },
+            locations: Default::default(),
+        }
+    }
+
+    fn whole(unit: &str) -> UnitRead {
+        UnitRead {
+            unit: Name::new(unit),
+            segs: Segs::new(),
+            kind: Kind::Module,
+        }
+    }
+
+    #[test]
+    fn signature_refs_follow_declarations_and_aliases() {
+        let refs = signature_refs(Name::new("Unit"), &signature());
+        let a = (Kind::Module, Name::new("A"));
+        let b = (Kind::Module, Name::new("B"));
+        // An alias reads its target only through a path into it.
+        assert_eq!(refs.refs[&a], vec![]);
+        assert_eq!(refs.aliases[&a], vec![whole("Dep")]);
+        assert_eq!(
+            refs.refs[&b],
+            vec![UnitRead {
+                unit: Name::new("Other"),
+                segs: Segs::from_slice(&[Name::new("S")]),
+                kind: Kind::Modtype,
+            }]
+        );
+        assert!(!refs.aliases.contains_key(&b));
+    }
+
+    #[test]
+    fn lambda_units_add_to_the_references_of_their_item() {
+        let base = signature_refs(Name::new("Unit"), &signature());
+        let unchanged = base.with_lambda_units(|_| Vec::new());
+        assert_eq!(unchanged, base);
+
+        let with_lambdas = base.with_lambda_units(|name| match name {
+            "B" => vec![Name::new("Inlined"), Name::new("Inlined")],
+            _ => Vec::new(),
+        });
+        let a = (Kind::Module, Name::new("A"));
+        let b = (Kind::Module, Name::new("B"));
+        assert_eq!(with_lambdas.refs[&a], base.refs[&a]);
+        assert_eq!(with_lambdas.aliases, base.aliases);
+        let mut expected = base.refs[&b].clone();
+        expected.push(whole("Inlined"));
+        sort_reads(&mut expected);
+        assert_eq!(with_lambdas.refs[&b], expected);
+    }
+
+    #[test]
+    fn a_published_signature_carries_its_item_references() {
+        let published = PortablePersStruct::new(
+            "Unit".to_string(),
+            "Unit.res".to_string(),
+            None,
+            Vec::new(),
+            signature(),
+            None,
+            0,
+        );
+        let from_decoded = signature_refs(Name::new("Unit"), &published.signature());
+        assert_eq!(**published.item_refs(), from_decoded);
+
+        // A struct read back from storage computes them on first use.
+        let bytes = crate::binser::to_vec(&published).expect("encodes");
+        let stored: PortablePersStruct = crate::binser::from_slice(&bytes).expect("decodes");
+        assert_eq!(**stored.item_refs(), from_decoded);
+    }
 }
