@@ -1,0 +1,59 @@
+name: Macros playground
+
+# Builds the playground in playground/ and deploys it to GitHub Pages.
+# Started by hand: the repository has to have Pages enabled with
+# "GitHub Actions" as its source.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: macros-playground
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins the toolchain of every Rust build here.
+      - name: Install the pinned Rust toolchain
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - name: Install wasm-pack
+        run: cargo install wasm-pack --version 0.14.0 --locked
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: playground/package-lock.json
+
+      - name: Build
+        working-directory: playground
+        run: |
+          npm ci
+          npm run build:wasm
+          npm run smoke
+          npm run build
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: playground/dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-24.04
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
