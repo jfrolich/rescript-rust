@@ -57,8 +57,8 @@ use super::js_stmt_make::{block_finishes_output, block_terminates};
 use super::lam_coercion::{
     ExtractedExports, can_reuse_existing_undefined_export_binding, collect_declared_idents,
     extract_toplevel_exports, insert_rebound_export_before_equivalent_later_binding,
-    keeps_declared_same_name_function_export_alias, max_ident_stamp_in_block,
-    max_ident_stamp_in_expression, push_effect_expression, push_s_exp, push_s_if_empty,
+    keeps_declared_same_name_function_export_alias, push_effect_expression, push_s_exp,
+    push_s_if_empty,
     resolve_declared_same_name_self_alias_target, resolve_export_aliases,
     reusable_same_name_export_binding,
 };
@@ -749,9 +749,9 @@ impl LambdaCompiler {
         // this phase. See compiler/core/lam_compile.ml:60, 771-782, 911 and
         // 1614. Seed Rust's JS-lowering generator past every existing Lambda
         // stamp before `compile_expr` creates temporary identifiers.
-        let js_lowering_start_stamp =
-            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root)
-                .max(crate::ident::Ident::current_local_stamp());
+        let js_lowering_start_stamp = a
+            .ident_stamp_bound()
+            .max(crate::ident::Ident::current_local_stamp());
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
         crate::timing::measure(crate::timing::Phase::Codegen, || {
@@ -986,12 +986,9 @@ impl LambdaCompiler {
         extracted: ExtractedExports,
         finished: OutputFinished,
     ) -> (Vec<Ident>, Vec<Ident>) {
-        let mut max_stamp = max_ident_stamp_in_block(j, block);
+        let mut max_stamp = j.ident_stamp_bound();
         for export in &extracted.exports {
             max_stamp = max_stamp.max(export.stamp());
-        }
-        for value in &extracted.values {
-            max_stamp = max_stamp.max(max_ident_stamp_in_expression(j, *value));
         }
         self.id_gen.set_current_stamp(max_stamp);
 

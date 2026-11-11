@@ -577,14 +577,16 @@ pub(crate) fn lookup_type_decl_for_path_pub(
 /// OCaml `get_level env p` (ctype.ml:666-673): the newtype level of `p`'s
 /// declaration, or `Path.binding_time p`.
 fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
-    // The lookup also runs for a path rooted at a persistent unit, whose
-    // declaration never carries a newtype level (`Subst.type_declaration`
-    // clears it, compiler/ml/subst.ml:292): OCaml still calls `Env.find_type`
-    // there, and for a dotted path that builds the parent's component tables
-    // (compiler/ml/env.ml:781-813) at this point of level lowering.
+    // A declaration reached through a persistent unit never carries a newtype
+    // level (`Subst.type_declaration` clears it, compiler/ml/subst.ml:292),
+    // so the answer for such a path does not depend on the declaration and
+    // needs no lookup.
     //
     // `Env.find_type` answers from bindings fixed within one module scope, so
     // repeated level checks of the same path reuse the first lookup.
+    if path_root_is_persistent(path) {
+        return path.binding_time();
+    }
     let scope_id = env.scope_id();
     if let Some(found_level) = ctx.find_type_newtype_level(scope_id, path) {
         return found_level.unwrap_or_else(|| path.binding_time());
@@ -596,14 +598,9 @@ fn get_level_in_env(ctx: &TypeContext, env: &Env, path: &Path) -> i32 {
             .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level)),
         PathView::Pdot(_, _, _) => {
             // OCaml compiler/ml/ctype.ml:666-673 calls Env.find_type, whose
-            // dotted path lookup (compiler/ml/env.ml:800-813) runs
-            // `get_components (find_module_descr p env)` and reads
-            // `comp_types`. For a persistent parent that builds its
-            // `ps_comps` table (env.ml:781-788, env.ml:1454-1552) at this
-            // point of level lowering. It does not perform the env.ml:865-887
+            // dotted path lookup (compiler/ml/env.ml:800-813) reads the
+            // parent's `comp_types`. It does not perform the env.ml:865-887
             // find_module alias scrape used by normalize_path/module lookup.
-            // In Rust's in-process mode the active persistent table lives on
-            // TypeContext.
             let mut persistent_env = in_process_module_resolution_env(ctx);
             crate::types::typecore::lookup_type_decl_for_path(path, env, &mut persistent_env, ctx)
                 .and_then(|decl| decl.type_newtype_level.map(|(level, _)| level))
@@ -1812,6 +1809,79 @@ fn reaches_quick(
             search(&mut children.into_iter())
         }
     }
+}
+
+/// What one complete walk of a type found (see [`binding_facts`]).
+#[derive(Clone, Copy)]
+struct BindingFacts {
+    /// The variable is not reachable from the type, so `deep_occur` is false
+    /// and `occur_check` succeeds.
+    var_free: bool,
+    /// No `Tunivar` or `Tpoly` is reachable from the type, so `occur_univar`
+    /// succeeds.
+    univar_free: bool,
+}
+
+/// Walks every node reachable from `ty`, objects and variant rows included,
+/// without a visited set. `None` when the type has more than a small budget
+/// of nodes; that also bounds cycles and repeatedly visited shared nodes, so
+/// a finished walk saw a finite tree and the checks that fail on a repeated
+/// node (`occur_check`) cannot fail on it.
+fn binding_facts(ctx: &TypeContext, var: TypeExprRef, ty: TypeExprRef) -> Option<BindingFacts> {
+    fn walk(
+        ctx: &TypeContext,
+        var: TypeExprRef,
+        ty: TypeExprRef,
+        budget: &mut u32,
+        facts: &mut BindingFacts,
+    ) -> Option<()> {
+        let ty = ctx.repr(ty);
+        if ty == var {
+            facts.var_free = false;
+            return Some(());
+        }
+        if *budget == 0 {
+            return None;
+        }
+        *budget -= 1;
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) | TypeDesc::Tnil => Some(()),
+            TypeDesc::Tunivar(_) => {
+                facts.univar_free = false;
+                Some(())
+            }
+            TypeDesc::Tconstr { args, .. } | TypeDesc::Ttuple(args) => ctx
+                .type_list(args)
+                .iter()
+                .try_for_each(|arg| walk(ctx, var, arg, budget, facts)),
+            TypeDesc::Tarrow { args, ret } => {
+                ctx.type_args(args)
+                    .iter()
+                    .try_for_each(|arg| walk(ctx, var, arg.typ, budget, facts))?;
+                walk(ctx, var, *ret, budget, facts)
+            }
+            other => {
+                if matches!(other, TypeDesc::Tpoly { .. }) {
+                    facts.univar_free = false;
+                }
+                drop(desc);
+                let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+                iter_type_expr(ctx, ty, |child| children.push(child));
+                children
+                    .into_iter()
+                    .try_for_each(|child| walk(ctx, var, child, budget, facts))
+            }
+        }
+    }
+
+    let mut facts = BindingFacts {
+        var_free: true,
+        univar_free: true,
+    };
+    let mut budget = 64;
+    walk(ctx, ctx.repr(var), ty, &mut budget, &mut facts)?;
+    Some(facts)
 }
 
 pub fn occurs(ctx: &TypeContext, needle: TypeExprRef, haystack: TypeExprRef) -> bool {
@@ -7635,37 +7705,36 @@ fn unify_types(
         )
     };
     if var1 || var2 {
-        if var1 && constr2 && state.env().is_some() && deep_occur(ctx, t1, t2) {
-            // OCaml compiler/ml/ctype.ml:2302-2303: see the full match below.
-            let env = state.env().expect("checked above");
-            let exp1 = expand_head_unif(ctx, env, t1);
-            let exp2 = expand_head_unif(ctx, env, t2);
-            return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
-        }
-        if constr1 && var2 && state.env().is_some() && deep_occur(ctx, t2, t1) {
-            let env = state.env().expect("checked above");
-            let exp1 = expand_head_unif(ctx, env, t1);
-            let exp2 = expand_head_unif(ctx, env, t2);
-            return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
-        }
-        if var1 {
-            // OCaml compiler/ml/ctype.ml:2280-2286 `unify1_var`.
-            if occur_check(ctx, state.env(), state.mode, t1, t2).is_err() {
+        // OCaml compiler/ml/ctype.ml:2280-2286 and 2302-2304: `unify1_var`
+        // of the variable side with the other one, unless the other side is
+        // a constructor the variable occurs in (see the full match below).
+        let (var, ty, ty_is_constr) = if var1 {
+            (t1, t2, constr2)
+        } else {
+            (t2, t1, constr1)
+        };
+        // Three checks precede the link, each a walk over `ty`: `deep_occur`,
+        // `occur` and `occur_univar`. One walk settles all of them for the
+        // usual small type that holds neither the variable nor a universal
+        // variable.
+        let facts = binding_facts(ctx, var, ty);
+        if !facts.is_some_and(|facts| facts.var_free) {
+            if ty_is_constr && state.env().is_some() && deep_occur(ctx, var, ty) {
+                let env = state.env().expect("checked above");
+                let exp1 = expand_head_unif(ctx, env, t1);
+                let exp2 = expand_head_unif(ctx, env, t2);
+                return unify_after_expansion(ctx, state, t1, exp1, t2, exp2);
+            }
+            if occur_check(ctx, state.env(), state.mode, var, ty).is_err() {
                 return Err(TypeError::Unify(vec![]));
             }
-            if let Some(env) = state.env() {
-                occur_univar(ctx, env, t2)?;
-            }
-            return unify1_var_link(ctx, state, t1, t2);
         }
-        // Symmetric `unify1_var` case from compiler/ml/ctype.ml:2304.
-        if occur_check(ctx, state.env(), state.mode, t2, t1).is_err() {
-            return Err(TypeError::Unify(vec![]));
+        if let Some(env) = state.env()
+            && !facts.is_some_and(|facts| facts.univar_free)
+        {
+            occur_univar(ctx, env, ty)?;
         }
-        if let Some(env) = state.env() {
-            occur_univar(ctx, env, t1)?;
-        }
-        return unify1_var_link(ctx, state, t2, t1);
+        return unify1_var_link(ctx, state, var, ty);
     }
 
     let desc1 = ctx.get_desc(t1);
@@ -11307,12 +11376,14 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
         };
 
         // OCaml compiler/ml/typecore.ml:2341 calls
-        // `unify_var env (newvar ()) arg.typ` (ctype.ml:2820-2837).
+        // `unify_var env (newvar ()) arg.typ` (ctype.ml:2820-2837). The
+        // variable is new, so it cannot occur in the argument type and
+        // nothing else refers to it: all the call leaves behind is the
+        // argument type lowered to the variable's level, the current one.
+        let level = ctx.current_level();
         for arg_ty in arg_types {
-            let mut state = UnifyState::new();
-            state.set_env(env);
-            if unify_var(ctx, &mut state, ctx.new_var(None), arg_ty).is_err() {
-                unreachable!("lower_args failed unify_var")
+            if update_level_checked(ctx, env, level, arg_ty).is_err() {
+                unreachable!("lower_args failed to lower an argument type")
             }
         }
 
@@ -14644,6 +14715,69 @@ mod tests {
         let with_univar = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_univar(None)]);
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, with_univar, &mut budget));
+    }
+
+    #[test]
+    fn binding_facts_settle_small_types_only() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let var = ctx.new_var(None);
+        let other = ctx.new_var(None);
+
+        let plain = ctx.new_tuple(vec![other, ctx.new_arrow_simple(other, other)]);
+        let facts = binding_facts(&ctx, var, plain).expect("small type");
+        assert!(facts.var_free && facts.univar_free);
+
+        let with_var = ctx.new_tuple(vec![other, ctx.new_arrow_simple(var, other)]);
+        let facts = binding_facts(&ctx, var, with_var).expect("small type");
+        assert!(!facts.var_free && facts.univar_free);
+        assert!(deep_occur(&ctx, var, with_var));
+
+        let with_univar = ctx.new_tuple(vec![other, ctx.new_univar(None)]);
+        let facts = binding_facts(&ctx, var, with_univar).expect("small type");
+        assert!(facts.var_free && !facts.univar_free);
+
+        let univar = ctx.new_univar(None);
+        let with_poly = ctx.new_poly(ctx.new_tuple(vec![univar, other]), vec![univar]);
+        let facts = binding_facts(&ctx, var, with_poly).expect("small type");
+        assert!(facts.var_free && !facts.univar_free);
+
+        // A cycle and a heavily shared type both run the budget out.
+        let hole = ctx.new_var(None);
+        let cycle = ctx.new_tuple(vec![hole, hole]);
+        link_type(&ctx, hole, cycle);
+        assert!(binding_facts(&ctx, var, cycle).is_none());
+        let mut shared = other;
+        for _ in 0..40 {
+            shared = ctx.new_tuple(vec![shared, shared]);
+        }
+        assert!(binding_facts(&ctx, var, shared).is_none());
+    }
+
+    #[test]
+    fn unifying_a_variable_checks_occurrence_and_universal_variables() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let unify_in_env = |t1, t2| {
+            let mut state = UnifyState::new();
+            state.set_env(&env);
+            unify(&ctx, &mut state, t1, t2)
+        };
+
+        // The variable inside the other side: the occurs check rejects it.
+        let var = ctx.new_var(None);
+        let recursive = ctx.new_tuple(vec![var, var]);
+        assert!(unify_in_env(var, recursive).is_err());
+
+        // A universal variable may not escape into a type variable.
+        let var = ctx.new_var(None);
+        let with_univar = ctx.new_tuple(vec![ctx.new_univar(None), ctx.new_var(None)]);
+        assert!(unify_in_env(var, with_univar).is_err());
+
+        // Neither: the variable is linked to the type.
+        let var = ctx.new_var(None);
+        let plain = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_var(None)]);
+        assert!(unify_in_env(var, plain).is_ok());
+        assert_eq!(ctx.repr(var), ctx.repr(plain));
     }
 
     #[test]

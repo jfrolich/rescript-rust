@@ -395,6 +395,7 @@ fn rewrite_bounded_vars(a: &mut LamArena, s: &mut Subst, lam: Lam, id_gen: &IdGe
 }
 
 /// The largest identifier stamp in `lam`.
+#[cfg(test)]
 pub(crate) fn max_ident_stamp_in_lambda(a: &LamArena, lam: Lam) -> i32 {
     let own = match a.node(lam) {
         Node::Var(id)

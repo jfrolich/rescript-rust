@@ -11,7 +11,6 @@ use crate::cmi::persistent_env::CmjExportArity;
 use crate::ident::Ident;
 use crate::lambda::arena::{Lam, LamArena, Node};
 use crate::lambda::lam_arity::Arity;
-use crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda;
 use crate::lambda::lam_compat::{FieldDbgInfo, LetKind};
 use crate::lambda::lam_compile_context::RecFlag;
 use crate::lambda::lam_pass_alpha_conversion::alpha_conversion;
@@ -86,8 +85,7 @@ pub fn simplify_in_arena(
     let mut meta = LamStats::new(exports);
     // OCaml's `Ident.rename` reads the global `Ident.currentstamp`; start the
     // shared counter past every stamp of the program.
-    meta.id_gen
-        .set_current_stamp(max_ident_stamp_in_lambda(&a, lam));
+    meta.id_gen.set_current_stamp(a.ident_stamp_bound());
     let id_gen = meta.id_gen.clone();
     let a = &mut a;
 

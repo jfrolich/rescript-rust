@@ -2146,6 +2146,204 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
     simplified
 }
 
+/// The coercion of a compilation unit without an interface to its inferred
+/// signature (`Includemod.compunits` with `simplify_signature sg`,
+/// compiler/ml/typemod.ml:1766-1768), when it can be given without comparing
+/// anything: `None` sends the caller to [`compunit`].
+///
+/// The inferred signature `simple_sig` is `impl_sig` without its shadowed
+/// values, so the full check pairs each of its items with that same item of
+/// the unit and every comparison succeeds. What the check leaves behind is
+/// the coercion and the items it marked as used. Each paired item is exported
+/// as it is (see [`includes_itself_plainly`]), so the coercion only selects
+/// the fields that are not shadowed, as `signatures_with_subst` builds it.
+pub fn inferred_signature_coercion(
+    type_ctx: &TypeContext,
+    env: &Env,
+    impl_sig: &Signature,
+    simple_sig: &Signature,
+) -> Option<ModuleCoercion> {
+    if !includes_itself_plainly(simple_sig) {
+        return None;
+    }
+    mark_self_included_items_used(type_ctx, env, simple_sig);
+    if simple_sig.len() == impl_sig.len() {
+        return Some(ModuleCoercion::Tcoerce_none);
+    }
+
+    // `simple_sig` is a subsequence of `impl_sig`: walk both, giving each
+    // kept runtime component its position among the unit's.
+    let mut kept = simple_sig.iter().peekable();
+    let mut coercions = Vec::new();
+    let mut id_pos_list = Vec::new();
+    let mut runtime_fields = Vec::new();
+    let mut runtime_pos = 0usize;
+    for item in impl_sig {
+        let is_kept = kept.peek().is_some_and(|kept_item| {
+            std::mem::discriminant(*kept_item) == std::mem::discriminant(item)
+                && match (item_ident(item), item_ident(kept_item)) {
+                    (Some(id), Some(kept_id)) => id.same(kept_id),
+                    _ => false,
+                }
+        });
+        let runtime = is_runtime_component(item);
+        if let SignatureItem::SigModule(id, _, _) = item {
+            id_pos_list.push((*id, runtime_pos, ModuleCoercion::Tcoerce_none));
+        }
+        if is_kept {
+            kept.next();
+            if runtime {
+                coercions.push((runtime_pos, ModuleCoercion::Tcoerce_none));
+                runtime_fields.extend(runtime_component_name(item));
+            }
+        }
+        if runtime {
+            runtime_pos += 1;
+        }
+    }
+    if kept.next().is_some() {
+        // Not the subsequence expected: let the full check decide.
+        return None;
+    }
+    if coercions.len() == runtime_pos {
+        // Only externals were shadowed; every field keeps its position.
+        return Some(ModuleCoercion::Tcoerce_none);
+    }
+    Some(ModuleCoercion::Tcoerce_structure(
+        coercions,
+        id_pos_list,
+        runtime_fields,
+    ))
+}
+
+fn item_ident(item: &SignatureItem) -> Option<&Ident> {
+    match item {
+        SignatureItem::SigValue(id, _)
+        | SignatureItem::SigType(id, _, _)
+        | SignatureItem::SigTypext(id, _, _)
+        | SignatureItem::SigModule(id, _, _)
+        | SignatureItem::SigModtype(id, _) => Some(id),
+        SignatureItem::SigClass | SignatureItem::SigClassType => None,
+    }
+}
+
+/// Whether the inclusion of `sig` in itself pairs every item with itself and
+/// coerces none of them: no name is declared twice (a repeated name pairs
+/// both declarations with the last one), and nested modules are aliases or
+/// structures of the same kind, whose own coercion is then the identity.
+/// Functors and named module types are left to the full check, and so are
+/// module type declarations that are not plain signatures.
+fn includes_itself_plainly(sig: &Signature) -> bool {
+    let mut seen: HashSet<(std::mem::Discriminant<SignatureItem>, crate::name::Name)> =
+        HashSet::with_capacity(sig.len());
+    sig.iter().all(|item| {
+        let id = match item {
+            SignatureItem::SigValue(id, _) | SignatureItem::SigTypext(id, _, _) => id,
+            SignatureItem::SigType(id, _, _) => {
+                // A row type is paired with the type it belongs to
+                // (`adjusted_item_field_desc`).
+                if crate::types::btype::is_row_name(id.name()) {
+                    return false;
+                }
+                id
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                let plain = match &md.md_type {
+                    ModuleType::MtySignature(nested) => includes_itself_plainly(nested),
+                    ModuleType::MtyAlias(..) => true,
+                    ModuleType::MtyIdent(_) | ModuleType::MtyFunctor { .. } => false,
+                };
+                if !plain {
+                    return false;
+                }
+                id
+            }
+            SignatureItem::SigModtype(id, decl) => {
+                // A module type is checked for equivalence with itself
+                // (`modtype_declarations`), which a signature that declares
+                // a name twice fails as a permutation.
+                let plain = match &decl.mtd_type {
+                    None => true,
+                    Some(ModuleType::MtySignature(nested)) => includes_itself_plainly(nested),
+                    Some(
+                        ModuleType::MtyAlias(..)
+                        | ModuleType::MtyIdent(_)
+                        | ModuleType::MtyFunctor { .. },
+                    ) => false,
+                };
+                if !plain {
+                    return false;
+                }
+                id
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => return false,
+        };
+        seen.insert((std::mem::discriminant(item), id.name_atom()))
+    })
+}
+
+/// The usage marks of the inclusion of `sig` in itself, for a signature
+/// accepted by [`includes_itself_plainly`]: those of `value_descriptions`,
+/// `type_declarations`, `extension_constructors` and the module and module
+/// type cases of `check_paired_signature_items`, each with an item as both
+/// sides.
+fn mark_self_included_items_used(type_ctx: &TypeContext, env: &Env, sig: &Signature) {
+    if env.is_implicit_coercion() {
+        return;
+    }
+    // Both sides are one declaration, so the usage is `Positive`
+    // (includecore.ml:384-398, 461-466).
+    let usage = crate::types::usage::ConstructorUsage::Positive;
+    for item in sig {
+        match item {
+            SignatureItem::SigValue(id, desc) => {
+                type_ctx
+                    .usage()
+                    .mark_value_used(id.name_atom(), type_ctx.resolve_loc(desc.val_loc));
+            }
+            SignatureItem::SigType(id, decl, _) => {
+                let loc = type_ctx.resolve_loc(decl.type_loc);
+                let mut usage_tables = type_ctx.usage();
+                usage_tables.mark_type_used(id.name_atom(), loc.clone());
+                if let crate::types::TypeKind::TypeVariant(cstrs, _) = &decl.type_kind {
+                    for cstr in cstrs {
+                        usage_tables.mark_constructor_used(
+                            usage,
+                            id.name(),
+                            loc.clone(),
+                            cstr.cd_id.name(),
+                        );
+                    }
+                }
+            }
+            SignatureItem::SigTypext(id, ext, _) => {
+                type_ctx.usage().mark_constructor_used(
+                    usage,
+                    ext.ext_type_path.last(),
+                    type_ctx.resolve_loc(ext.ext_loc),
+                    id.name(),
+                );
+            }
+            SignatureItem::SigModule(id, md, _) => {
+                type_ctx
+                    .usage()
+                    .mark_module_used(id.name_atom(), type_ctx.resolve_loc(md.md_loc));
+                if let ModuleType::MtySignature(nested) = &md.md_type {
+                    mark_self_included_items_used(type_ctx, env, nested);
+                }
+            }
+            SignatureItem::SigModtype(_, decl) => {
+                // Both directions of the equivalence check mark the items
+                // of the module type's signature.
+                if let Some(ModuleType::MtySignature(nested)) = &decl.mtd_type {
+                    mark_self_included_items_used(type_ctx, env, nested);
+                }
+            }
+            SignatureItem::SigClass | SignatureItem::SigClassType => {}
+        }
+    }
+}
+
 pub fn compunit(
     type_ctx: &TypeContext,
     env: &Env,
@@ -4928,6 +5126,140 @@ mod tests {
             val_attributes: Default::default(),
             val_path: None,
         }
+    }
+
+    fn structure_module(items: Signature) -> ModuleDeclaration {
+        ModuleDeclaration {
+            md_type: ModuleType::MtySignature(std::sync::Arc::new(items)),
+            md_attributes: vec![],
+            md_loc: crate::types::DeclLoc::none(),
+            md_path: None,
+        }
+    }
+
+    /// The fast path and the full check on a unit and its inferred signature.
+    fn inferred_coercions(
+        type_ctx: &TypeContext,
+        env: &Env,
+        unit: &Signature,
+    ) -> (Option<String>, String) {
+        let simple = simplify_signature(unit);
+        let fast = inferred_signature_coercion(type_ctx, env, unit, &simple)
+            .map(|coercion| format!("{coercion:?}"));
+        let full = compunit(type_ctx, env, "Unit.res", unit, "(inferred signature)", &simple)
+            .expect("a unit includes its inferred signature");
+        (fast, format!("{full:?}"))
+    }
+
+    #[test]
+    fn inferred_signature_coercion_matches_the_full_check() {
+        let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = initial_env(&type_ctx);
+        let value = |name: &str| {
+            SignatureItem::SigValue(Ident::create_local(name), value_desc(type_ctx.new_var(None)))
+        };
+        let ty = |name: &str| {
+            SignatureItem::SigType(
+                Ident::create_local(name),
+                std::sync::Arc::new(abstract_type_decl(None)),
+                RecStatus::TrecNot,
+            )
+        };
+        let module = |name: &str, items: Signature| {
+            SignatureItem::SigModule(
+                Ident::create_local(name),
+                structure_module(items),
+                RecStatus::TrecNot,
+            )
+        };
+
+        // Nothing shadowed: the identity.
+        let plain: Signature = vec![
+            value("a"),
+            ty("t"),
+            module("M", vec![value("x"), value("y")]),
+            value("b"),
+        ];
+        let (fast, full) = inferred_coercions(&type_ctx, &env, &plain);
+        assert_eq!(fast.as_deref(), Some(full.as_str()));
+        assert_eq!(full, "Tcoerce_none");
+
+        // A shadowed value: the fields that remain, at their positions in
+        // the unit.
+        let shadowed: Signature = vec![
+            value("a"),
+            value("make"),
+            ty("t"),
+            module("M", vec![value("x")]),
+            value("make"),
+            value("b"),
+        ];
+        let (fast, full) = inferred_coercions(&type_ctx, &env, &shadowed);
+        assert_eq!(fast.as_deref(), Some(full.as_str()));
+        assert!(full.starts_with("Tcoerce_structure"));
+
+        // Left to the full check: a module declared twice, and a nested
+        // structure that declares a value twice.
+        let twice: Signature = vec![module("M", vec![]), module("M", vec![])];
+        assert!(inferred_coercions(&type_ctx, &env, &twice).0.is_none());
+        let nested: Signature = vec![module("M", vec![value("x"), value("x")])];
+        assert!(inferred_coercions(&type_ctx, &env, &nested).0.is_none());
+    }
+
+    #[test]
+    fn inferred_signature_coercion_marks_what_the_full_check_marks() {
+        // One unit, checked either way; returns which declarations were
+        // marked as used: a value, a value of a nested module, and a value
+        // of a module type.
+        let marked = |fast: bool| {
+            let type_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+            let env = initial_env(&type_ctx);
+            let mut next_offset = 0;
+            let mut tracked_value = |name: &str| {
+                next_offset += 10;
+                let loc = Location::new(crate::intern::StrIdx(1), next_offset, next_offset + 5);
+                let id = Ident::create_local(name);
+                let mut desc = value_desc(type_ctx.new_var(None));
+                desc.val_loc = type_ctx.intern_loc(loc);
+                let cell = type_ctx
+                    .usage()
+                    .check_value_usage(id.name_atom(), type_ctx.resolve_loc(desc.val_loc))
+                    .expect("a new declaration");
+                (SignatureItem::SigValue(id, desc), cell)
+            };
+            let (top, top_cell) = tracked_value("top");
+            let (inner, inner_cell) = tracked_value("inner");
+            let (in_modtype, in_modtype_cell) = tracked_value("inModtype");
+            let unit: Signature = vec![
+                top,
+                SignatureItem::SigModule(
+                    Ident::create_local("M"),
+                    structure_module(vec![inner]),
+                    RecStatus::TrecNot,
+                ),
+                SignatureItem::SigModtype(
+                    Ident::create_local("S"),
+                    ModtypeDeclaration {
+                        mtd_type: Some(ModuleType::MtySignature(std::sync::Arc::new(vec![
+                            in_modtype,
+                        ]))),
+                        mtd_attributes: vec![],
+                        mtd_loc: crate::types::DeclLoc::none(),
+                    },
+                ),
+            ];
+            let simple = simplify_signature(&unit);
+            if fast {
+                assert!(inferred_signature_coercion(&type_ctx, &env, &unit, &simple).is_some());
+            } else {
+                compunit(&type_ctx, &env, "Unit.res", &unit, "(inferred signature)", &simple)
+                    .expect("a unit includes its inferred signature");
+            }
+            let usage = type_ctx.usage();
+            [top_cell, inner_cell, in_modtype_cell].map(|cell| usage.is_used(cell))
+        };
+        assert_eq!(marked(true), marked(false));
+        assert_eq!(marked(true), [true, true, true]);
     }
 
     #[test]

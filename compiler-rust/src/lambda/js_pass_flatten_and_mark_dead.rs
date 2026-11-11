@@ -22,7 +22,6 @@ use crate::lambda::lam_compat::LetKind;
 use super::js_exp_make::{
     direct_projection_from_pure_literal, int_literal, js_expr_no_side_effects,
 };
-use super::lam_coercion::max_ident_stamp_in_block;
 
 pub(crate) fn apply_js_flatten_pass(mut deps: DepsProgram) -> DepsProgram {
     let program = &mut deps.program;
@@ -383,7 +382,7 @@ fn block_substitution_name(ident: &Ident, tag_info: &TagInfo, index: usize) -> S
 
 pub(crate) fn max_ident_stamp_in_program(program: &Program) -> i32 {
     program.exports.iter().fold(
-        max_ident_stamp_in_block(&program.arena, &program.block),
+        program.arena.ident_stamp_bound(),
         |max_stamp, export| max_stamp.max(export.stamp()),
     )
 }

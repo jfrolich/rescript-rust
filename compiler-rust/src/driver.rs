@@ -6975,9 +6975,8 @@ fn compile_source_to_js_with_options_inner(
 
     // OCaml's no-interface path runs inferred-signature inclusion before
     // checking non-generalizable schemes and normalizing the signature
-    // (compiler/ml/typemod.ml:1766-1771). Besides producing the export
-    // coercion, the real Includemod traversal performs substitution and Ident
-    // allocations that must precede Lambda identifier allocation.
+    // (compiler/ml/typemod.ml:1766-1771). It yields the export coercion and
+    // marks the unit's items as used.
     let (inferred_simple_signature, inferred_implementation_coercion) = if !has_resi {
         let simple_signature =
             crate::types::includemod::simplify_signature(&typed_structure.str_type);
@@ -6995,12 +6994,11 @@ fn compile_source_to_js_with_options_inner(
                 suppress_info_style,
             ));
         }
-        let implementation_coercion = crate::types::includemod::compunit(
+        let implementation_coercion = coerce_to_inferred_signature(
             &type_ctx,
             &env,
             source_file_for_interface,
             &typed_structure.str_type,
-            "(inferred signature)",
             &simple_signature,
         );
         // A payload reader's error escapes the inclusion (includecore.ml:45).
@@ -7665,6 +7663,33 @@ struct CompunitInclusion {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// The coercion of an implementation without an interface to its inferred
+/// signature `simple_signature` (compiler/ml/typemod.ml:1766-1768).
+fn coerce_to_inferred_signature(
+    type_ctx: &TypeContext,
+    env: &Env,
+    source_file: &str,
+    signature: &crate::types::decl::Signature,
+    simple_signature: &crate::types::decl::Signature,
+) -> crate::types::includemod::IncludeModResult<crate::types::typedtree::ModuleCoercion> {
+    if let Some(coercion) = crate::types::includemod::inferred_signature_coercion(
+        type_ctx,
+        env,
+        signature,
+        simple_signature,
+    ) {
+        return Ok(coercion);
+    }
+    crate::types::includemod::compunit(
+        type_ctx,
+        env,
+        source_file,
+        signature,
+        "(inferred signature)",
+        simple_signature,
+    )
+}
+
 fn check_compunit_inclusion_for_errors(
     tctx: &mut TypeCheckContext<'_>,
     type_ctx: &TypeContext,
@@ -10544,12 +10569,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     ),
                 ));
             }
-            let inferred_inclusion = crate::types::includemod::compunit(
+            let inferred_inclusion = coerce_to_inferred_signature(
                 &type_ctx,
                 &env,
                 filename,
                 &typed_structure.str_type,
-                "(inferred signature)",
                 &simple_signature,
             );
             // A payload reader's error escapes the inclusion (includecore.ml:45).

@@ -420,6 +420,13 @@ impl LamArena {
         self.nodes.len()
     }
 
+    /// A stamp at least as large as every identifier in this arena. Includes
+    /// identifiers from eliminated nodes: fresh-name generation needs an
+    /// upper bound, not a walk of the reachable term.
+    pub(crate) fn ident_stamp_bound(&self) -> i32 {
+        self.idents.iter().map(Ident::stamp).max().unwrap_or(0).max(0)
+    }
+
     // ---------------------------------------------------------------- reads
 
     #[inline]
@@ -2493,6 +2500,27 @@ mod tests {
         let mut buf = Vec::new();
         crate::lambda::printlambda::print_lambda(lam, &mut buf);
         String::from_utf8(buf).unwrap()
+    }
+
+    #[test]
+    fn stamp_bound_includes_all_identifier_insertion_paths() {
+        let mut a = LamArena::new();
+        assert_eq!(a.ident_stamp_bound(), 0);
+        let root = a.import(&sample());
+        assert_eq!(a.ident_stamp_bound(), 3);
+        assert_eq!(
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root),
+            3,
+        );
+        a.add_ident(id("unused", 10));
+        a.add_idents(&[id("param", 20)]);
+        a.add_idents_iter([id("catch", 30)]);
+        assert_eq!(a.ident_stamp_bound(), 30);
+        // Unreachable identifiers still reserve their stamps.
+        assert_eq!(
+            crate::lambda::lam_beta_reduce::max_ident_stamp_in_lambda(&a, root),
+            3,
+        );
     }
 
     #[test]

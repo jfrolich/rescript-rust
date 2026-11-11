@@ -84,6 +84,9 @@
 
 #### :house: Internal
 
+- Type-check faster: lower argument levels directly, settle the checks before binding a type variable in one walk, and skip the inclusion check of a unit against its own inferred signature. https://github.com/jfrolich/rescript-rust/pull/84
+- Size the compile worker pool to one worker per core on CPUs with efficiency cores, instead of oversubscribing it. https://github.com/jfrolich/rescript-rust/pull/83
+- Reduce backend identifier-allocation setup work by scanning arena identifier tables instead of recursively walking Lambda and JavaScript trees. https://github.com/jfrolich/rescript-rust/pull/82
 - Remove OCaml leftovers: unused warning numbers, the `Record_float_unused` representation, the `ns.braces` attribute name and unused `Ast_helper` functions. https://github.com/rescript-lang/rescript/pull/8805
 - Remove the S-expression parsetree printer (`res_parser -print sexp`). https://github.com/rescript-lang/rescript/pull/8803
 - Use one set of OCaml warning flags for the whole repository, including the editor analysis and tools. https://github.com/rescript-lang/rescript/pull/8796
