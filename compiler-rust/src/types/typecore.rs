@@ -14666,6 +14666,10 @@ fn type_record(
             .unwrap_or(entry.original_index as i32)
     });
 
+    // The label parameter pairing of the previous field, reused while the
+    // fields belong to the same record type.
+    let mut label_param_subst: Option<crate::types::ctype::LabelParamSubst> = None;
+
     // Type check explicitly written fields in lbl_pos order.
     for explicit_field in explicit_fields.iter() {
         let field = explicit_field.field;
@@ -14773,33 +14777,71 @@ fn type_record(
                         ctx.begin_def();
                     }
 
-                    let (poly_vars, ty_arg0, ty_res0) =
-                        crate::types::ctype::instance_label(ctx, true, &env_label);
-                    if separate {
-                        ctx.end_def();
-                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
-                        crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
-                    }
+                    // When the record type is already an application of this
+                    // label's type constructor, the unification below can only
+                    // bind the label's fresh type parameters to the record
+                    // type's arguments: substitute them directly instead of
+                    // copying and unifying every parameter for every field.
+                    let substituted_ty_arg = if separate
+                        || matches!(
+                            &*ctx.borrow_desc(ctx.repr(env_label.lbl_arg)),
+                            TypeDesc::Tpoly { .. }
+                        ) {
+                        None
+                    } else {
+                        if !label_param_subst
+                            .as_ref()
+                            .is_some_and(|subst| subst.is_for(ctx, env_label.lbl_res, record_ty))
+                        {
+                            label_param_subst = crate::types::ctype::record_label_param_subst(
+                                ctx,
+                                env_label.lbl_res,
+                                record_ty,
+                            );
+                        }
+                        label_param_subst.as_ref().map(|subst| {
+                            crate::types::ctype::instance_label_arg_at(
+                                ctx,
+                                env_label.lbl_arg,
+                                subst,
+                            )
+                        })
+                    };
 
-                    // Match OCaml typecore.ml:3695-3698:
-                    //   unify env (instance_def ty_res) (instance env ty_expected)
-                    //   let ty_arg = instance_def ty_arg
-                    let ty_res = crate::types::ctype::instance(ctx, ty_res0);
-                    let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
-                    if let Err(err) =
-                        crate::types::unify(ctx, &mut tctx.unify_state, ty_res, expected_record_ty)
-                    {
-                        let trace = match err {
-                            TypeError::Unify(trace) => trace,
-                            _ => vec![(ty_res, expected_record_ty)],
-                        };
-                        return Err(TypeCoreError::LabelMismatch {
-                            loc: field.lid.loc,
-                            lid: tctx.arena.get_longident(field.lid.txt).clone(),
-                            trace,
-                        });
-                    }
-                    let ty_arg = crate::types::ctype::instance(ctx, ty_arg0);
+                    let (poly_vars, ty_arg) = if let Some(ty_arg) = substituted_ty_arg {
+                        (Vec::new(), ty_arg)
+                    } else {
+                        let (poly_vars, ty_arg0, ty_res0) =
+                            crate::types::ctype::instance_label(ctx, true, &env_label);
+                        if separate {
+                            ctx.end_def();
+                            crate::types::generalize_structure(ctx, ctx.current_level(), ty_arg0);
+                            crate::types::generalize_structure(ctx, ctx.current_level(), ty_res0);
+                        }
+
+                        // Match OCaml typecore.ml:3695-3698:
+                        //   unify env (instance_def ty_res) (instance env ty_expected)
+                        //   let ty_arg = instance_def ty_arg
+                        let ty_res = crate::types::ctype::instance(ctx, ty_res0);
+                        let expected_record_ty = crate::types::ctype::instance(ctx, record_ty);
+                        if let Err(err) = crate::types::unify(
+                            ctx,
+                            &mut tctx.unify_state,
+                            ty_res,
+                            expected_record_ty,
+                        ) {
+                            let trace = match err {
+                                TypeError::Unify(trace) => trace,
+                                _ => vec![(ty_res, expected_record_ty)],
+                            };
+                            return Err(TypeCoreError::LabelMismatch {
+                                loc: field.lid.loc,
+                                lid: tctx.arena.get_longident(field.lid.txt).clone(),
+                                trace,
+                            });
+                        }
+                        (poly_vars, crate::types::ctype::instance(ctx, ty_arg0))
+                    };
 
                     if separate {
                         // OCaml compiler/ml/typecore.ml:3699-3702 closes the
