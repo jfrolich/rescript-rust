@@ -144,6 +144,7 @@ module Features = {
     y: float,
     z: float,
   }
+  type autocapitalize = string
   type findResult = {
     id: string,
   }
@@ -371,6 +372,8 @@ module Features = {
   @module("./features.ts") external default: array<string> => float = "default"
   /** TypeScript: `(level?: Level | undefined) => Level | null` */
   @module("./features.ts") external withLevel: (~level: level=?) => Null.t<level> = "withLevel"
+  /** TypeScript: `(mode?: Autocapitalize | undefined) => void` */
+  @module("./features.ts") external capitalize: (~mode: string=?) => unit = "capitalize"
 }
 
 // Where ReScript says less than TypeScript:

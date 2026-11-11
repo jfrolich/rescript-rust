@@ -165,3 +165,7 @@ export namespace Util { export const version = "1"; export function helper(): vo
 
 // An optional enum parameter keeps the enum's type.
 export function withLevel(level?: Level): Level | null { return level ?? null; }
+
+// Literals next to `string & {}` are suggestions: any string is accepted.
+export type Autocapitalize = "none" | "off" | "on" | (string & {});
+export function capitalize(mode?: Autocapitalize): void {}

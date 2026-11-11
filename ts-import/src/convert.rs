@@ -1230,7 +1230,14 @@ impl<'a> Converter<'a> {
             )
         });
         if let Some(primitive) = primitive {
-            self.note(Gap::Intersection, ty, "the brand is dropped; the primitive type is used");
+            // `string & {}` is `string`: the `{}` only keeps the literals of a
+            // union apart for the editor.
+            let branded = ty.types().iter().any(|&member| {
+                member != primitive && !self.c.get_properties_of_type(member).is_empty()
+            });
+            if branded {
+                self.note(Gap::Intersection, ty, "the brand is dropped; the primitive type is used");
+            }
             return self.structure(primitive);
         }
         let properties = self.visible_properties(ty);
@@ -1291,6 +1298,27 @@ impl<'a> Converter<'a> {
             if members.is_empty() {
                 return Structure::Ty(Ty::name("bool"));
             }
+        }
+
+        // `"on" | "off" | (string & {})` accepts any string: the literals are
+        // suggestions for the editor. The same for numbers.
+        for (primitive, literal) in [
+            (TypeFlags::String, TypeFlags::StringLiteral),
+            (TypeFlags::Number, TypeFlags::NumberLiteral),
+        ] {
+            let is_primitive = |member: &P<Type>| {
+                member.flags().intersects(primitive)
+                    || (member.flags().intersects(TypeFlags::Intersection)
+                        && member.types().iter().any(|part| part.flags().intersects(primitive)))
+            };
+            if members.iter().any(is_primitive) {
+                members.retain(|member| !member.flags().intersects(literal));
+            }
+        }
+        if let [one] = members.as_slice()
+            && !whole_boolean
+        {
+            return Structure::Ty(self.convert(*one));
         }
 
         // The members of one enum (what is left of `Priority | undefined`):
