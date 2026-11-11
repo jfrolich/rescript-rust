@@ -34,8 +34,11 @@ pub enum Element {
 /// Nullable kind for optional values.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoxedNullable {
+    /// The value may be `undefined`.
     Undefined,
+    /// The value may be `null`.
     Null,
+    /// The value may be `null` or `undefined`.
     NullUndefined,
 }
 
@@ -59,7 +62,9 @@ pub enum IdKind {
     Module(Ident),
     /// Function with arity information
     FunctionId {
+        /// The function's arity.
         arity: Arity,
+        /// The function's definition and whether it is recursive, when known.
         lambda: Option<(Lambda, RecFlag)>,
     },
     /// Exception identifier
@@ -74,12 +79,17 @@ pub enum IdKind {
 /// Identifier table for tracking identifier kinds.
 pub type IdentTable = HashMap<Ident, IdKind>;
 
+/// Arity known for a field of an external module.
 #[derive(Debug, Clone)]
 pub enum ExternalArityInfo {
+    /// The field is a value with this arity.
     Single(Arity),
+    /// The field is a submodule; one arity per submodule field.
     Submodule(Vec<Arity>),
 }
 
+/// Arities of one module's fields, by field name; `None` for a field without
+/// arity information.
 pub type ExternalArityFieldTable = HashMap<String, Option<ExternalArityInfo>>;
 
 /// `Lam_compile_env.query_external_id_info` results, per module and field.

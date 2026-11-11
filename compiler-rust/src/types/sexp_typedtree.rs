@@ -32,15 +32,19 @@ use std::io::Write;
 /// S-expression type
 #[derive(Debug, Clone)]
 pub enum Sexp {
+    /// An atom, printed as is.
     Atom(String),
+    /// A parenthesized list.
     List(Vec<Sexp>),
 }
 
 impl Sexp {
+    /// An atom of `s`.
     pub fn atom(s: &str) -> Self {
         Sexp::Atom(s.to_string())
     }
 
+    /// A list of `items`.
     pub fn list(items: Vec<Sexp>) -> Self {
         Sexp::List(items)
     }
@@ -407,7 +411,6 @@ fn sexp_type_expr_inline(
         }
         _ => {}
     }
-    drop(desc);
 
     if let Some(id) = state.lookup_active_binding(te) {
         return Sexp::list(vec![Sexp::atom("ref"), Sexp::atom(&id.to_string())]);

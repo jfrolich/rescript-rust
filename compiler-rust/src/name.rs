@@ -375,6 +375,12 @@ impl<'de> Deserialize<'de> for Name {
     }
 }
 
+impl PartialEq<Name> for String {
+    fn eq(&self, other: &Name) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -408,11 +414,5 @@ mod tests {
         assert!(a < b);
         let hasher = content_hasher();
         assert_eq!(hasher.hash_one(a), hasher.hash_one(Name::new("a_name")));
-    }
-}
-
-impl PartialEq<Name> for String {
-    fn eq(&self, other: &Name) -> bool {
-        self.as_str() == other.as_str()
     }
 }

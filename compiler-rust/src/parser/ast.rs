@@ -29,7 +29,7 @@ pub fn extend_cow_lifetime(cow: Cow<'_, str>) -> Cow<'static, str> {
 }
 
 /// Re-export Located for convenience.
-/// Note: Located<T> uses LocIdx for efficient arena-based storage.
+/// Note: `Located<T>` uses LocIdx for efficient arena-based storage.
 pub type Loc<T> = Located<T>;
 
 /// Location type alias - uses arena index for efficient storage.
@@ -124,7 +124,7 @@ pub enum Variance {
 }
 
 /// Argument label for function parameters.
-/// Uses Located<StrIdx> to allow sharing with Longident::Lident when the same
+/// Uses `Located<StrIdx>` to allow sharing with Longident::Lident when the same
 /// identifier is used for both label and value (punning).
 /// The location matches OCaml's `Labelled of string loc`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -251,33 +251,24 @@ pub type Attribute = (StringLoc, Payload);
 /// The empty case is represented as `None` (no heap allocation at all).
 /// Every constructor and mutator keeps the invariant that `Some` never holds
 /// an empty Vec, which `is_empty` and the derived `PartialEq` rely on.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Attributes(
-    #[serde(
-        serialize_with = "serialize_attributes",
-        deserialize_with = "deserialize_attributes"
+    #[expect(
+        clippy::box_collection,
+        reason = "the box keeps `Attributes` at 8 bytes; a bare `Vec` would add 16 bytes to every AST node"
     )]
     pub(crate) Option<Box<Vec<Attribute>>>,
 );
 
-fn serialize_attributes<S: serde::Serializer>(
-    attrs: &Option<Box<Vec<Attribute>>>,
-    s: S,
-) -> Result<S::Ok, S::Error> {
-    match attrs {
-        None => Vec::<Attribute>::new().serialize(s),
-        Some(v) => v.serialize(s),
+impl Serialize for Attributes {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        self.as_slice().serialize(s)
     }
 }
 
-fn deserialize_attributes<'de, D: serde::Deserializer<'de>>(
-    d: D,
-) -> Result<Option<Box<Vec<Attribute>>>, D::Error> {
-    let v = Vec::<Attribute>::deserialize(d)?;
-    if v.is_empty() {
-        Ok(None)
-    } else {
-        Ok(Some(Box::new(v)))
+impl<'de> Deserialize<'de> for Attributes {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Vec::<Attribute>::deserialize(d).map(Attributes::from_vec)
     }
 }
 
@@ -1615,7 +1606,7 @@ mod tests {
         println!("\n=== AST Enum Sizes (after boxing) ===");
         println!(
             "Token:              {} bytes",
-            size_of::<crate::parser::token::Token>()
+            size_of::<crate::parser::token::Token<'_>>()
         );
         println!("ExpressionDesc:     {} bytes", size_of::<ExpressionDesc>());
         println!("PatternDesc:        {} bytes", size_of::<PatternDesc>());

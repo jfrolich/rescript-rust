@@ -66,12 +66,15 @@ pub(crate) enum AnnotatedKind {
 /// `@instanceOf` path is still not accepted.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnsupportedClass {
+    /// The path starts with `globalThis.`, which the compiler adds itself.
     ThroughGlobalThis,
     /// Names the `@typeOf` that says the same.
     EveryValueOf(&'static str),
     /// Names the `@typeOf` of the wrapped primitive.
     WrapperOf(&'static str),
+    /// `Array`, whose instances `Array.isArray` recognizes.
     ArrayClass,
+    /// A global that is not a class.
     NotAClass,
 }
 
@@ -414,7 +417,7 @@ pub(crate) fn value_shape(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Value
     loop {
         let t_repr = ctx.repr(t);
         let path = match &*ctx.get_desc(t_repr) {
-            TypeDesc::Tconstr { path, .. } if fuel > 0 => path.clone(),
+            TypeDesc::Tconstr { path, .. } if fuel > 0 => *path,
             _ => return ValueShape::Unstated,
         };
         if let Some(decl) = find_type(ctx, env, &path)
@@ -459,7 +462,7 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
         }
         TypeDesc::Tarrow { .. } => return Some(BlockType::Function),
         TypeDesc::Tobject { .. } => return Some(BlockType::Object),
-        TypeDesc::Tconstr { path, .. } => path.clone(),
+        TypeDesc::Tconstr { path, .. } => *path,
         _ => return None,
     };
     match find_type(ctx, env, &path)
@@ -467,6 +470,9 @@ pub(crate) fn payload_kind(ctx: &TypeContext, env: &Env, t: TypeExprRef) -> Opti
         .map(|decl| &decl.type_kind)
     {
         Some(TypeKind::TypeRecord(_, RecordRepresentation::RecordUnboxed(_))) => None,
+        Some(TypeKind::TypeRecord(_, RecordRepresentation::RecordArray)) => Some(
+            BlockType::Instance(Instance::Array(ShapeAllocation::RECORD_ARRAY)),
+        ),
         Some(TypeKind::TypeRecord(_, _)) => Some(BlockType::Object),
         _ => None,
     }
@@ -640,7 +646,9 @@ fn get_block_type(
 fn at_most_one_of_kind(kind: &BlockType) -> String {
     let kind = match kind {
         BlockType::Object => "an object type".to_string(),
-        BlockType::Instance(Instance::Array(_)) => "an array or tuple type".to_string(),
+        BlockType::Instance(Instance::Array(_)) => {
+            "an array, a tuple or a record represented as an array".to_string()
+        }
         BlockType::Instance(instance) => format!("an instance of {}", instance.as_str()),
         BlockType::Function => "a function type".to_string(),
         BlockType::String => "a string type".to_string(),
@@ -1024,7 +1032,7 @@ fn check_extends(
     // to the parameters of the two types.
     let instance = |path: &Path| {
         let arity = find_type(ctx, env, path).map_or(0, |decl| decl.type_params.len());
-        ctx.new_constr(path.clone(), (0..arity).map(|_| ctx.new_var(None)).collect())
+        ctx.new_constr(*path, (0..arity).map(|_| ctx.new_var(None)).collect())
     };
     let own_type = instance(own);
     let parent_type = instance(superclass);

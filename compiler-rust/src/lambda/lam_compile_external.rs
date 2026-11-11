@@ -4,11 +4,12 @@
 //! Extracted from `lam_compile.rs` for organization.
 
 use super::js_exp_make::{
-    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr, js_seq,
-    poly_var_tag_access, poly_var_value_access, runtime_member_for_eta_wrapped_primitive,
-    string_switch_iife,
+    external_polyvar_int_dispatch, external_polyvar_string_dispatch, int_expr,
+    js_expr_no_side_effects, js_seq, poly_var_tag_access, poly_var_value_access,
+    runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
+use super::lam_compile_arguments::HeldArgs;
 use crate::ident::Ident;
 use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
@@ -23,6 +24,57 @@ use crate::lambda::lam_primitive::{
     Attr, DeclKind, ExternalDecl, ExternalModuleName, ImportSource, JsxElement, Label, LabelNoname,
     ModuleBindName, ModuleSource, Mutable, ObjParam, Param, Primitive,
 };
+
+/// The literal tag and payload of a poly-variant block
+/// `{NAME: "tag", VAL: value}`.
+fn literal_polyvar_block(j: &JsArena, arg: Expr) -> Option<(crate::js_ir::arena::StrId, Expr)> {
+    let ExprKind::CamlBlock(items, _, tag) = j.ek(arg) else {
+        return None;
+    };
+    if !matches!(j.tag(tag), TagInfo::PolyVar(_)) {
+        return None;
+    }
+    match j.exprs(items) {
+        [key, value] => match j.ek(*key) {
+            ExprKind::Str(txt) => Some((txt, *value)),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+/// js_of_lam_variant.ml `eval_in_place`: the `@string` and `@int`
+/// dispatches read an argument other than a literal once, inside the
+/// function that switches on it. That is the same as reading it in place
+/// when the read has no effect and cannot await.
+pub(crate) fn polyvar_dispatch_in_place(j: &JsArena, arg: Expr) -> bool {
+    js_expr_no_side_effects(j, arg)
+}
+
+/// js_of_lam_variant.ml `eval_as_event_in_place`: an event-style argument
+/// other than a literal is read twice, for the tag and for the payload. That
+/// is the same as reading it once for constants, variables, and fields,
+/// array elements and conditionals of them. A JS global (`@val`) or a
+/// property read, as from a `@get` external, may run a getter each time.
+pub(crate) fn polyvar_event_in_place(j: &JsArena, arg: Expr) -> bool {
+    fn duplicable(j: &JsArena, e: Expr) -> bool {
+        match j.ek(e) {
+            ExprKind::Undefined { .. }
+            | ExprKind::Bool(_)
+            | ExprKind::Number(_)
+            | ExprKind::Str(_)
+            | ExprKind::TemplateLiteral(_)
+            | ExprKind::Qualified(_) => true,
+            // `Ext_ident.is_js`; Rust creates JS globals as persistent idents.
+            ExprKind::Var(id) => !super::js_pass_external_shadow::is_js_global(&j.ident(id)),
+            ExprKind::StaticIndex(e, _, pos) => pos.get().is_some() && duplicable(j, e),
+            ExprKind::ArrayIndex(a, b) => duplicable(j, a) && duplicable(j, b),
+            ExprKind::Cond(a, b, c) => duplicable(j, a) && duplicable(j, b) && duplicable(j, c),
+            _ => false,
+        }
+    }
+    literal_polyvar_block(j, arg).is_some() || duplicable(j, arg)
+}
 
 pub(crate) fn external_module_import_attributes(
     module_name: &ExternalModuleName,
@@ -140,6 +192,100 @@ impl LambdaCompiler {
         }
     }
 
+    /// lam_compile_external_call.ml `hold_arg`: the translation of a
+    /// poly-variant argument other than a literal reads it twice, as
+    /// `e.NAME` and `e.VAL`, or inside the function a dispatch on its tag
+    /// builds, where an `await` is a syntax error. So unless it can read the
+    /// argument in place, the argument is bound to a temporary after its
+    /// statements, which keeps it in its place among the arguments (see
+    /// `sequence_arguments`). Of an optional argument known to be present,
+    /// only the payload is bound, so the translation still sees `Some`.
+    pub(crate) fn hold_external_arg(
+        &mut self,
+        arg_label: LabelNoname,
+        arg_type: &Attr,
+        (mut block, arg): (Block, Expr),
+    ) -> (Block, Expr) {
+        let needs_temporary = |j: &JsArena, e: Expr| match arg_type {
+            Attr::PolyVar { .. } => !polyvar_event_in_place(j, e),
+            Attr::PolyVarString { .. } | Attr::Int(_) => !polyvar_dispatch_in_place(j, e),
+            Attr::ArgCst(_) | Attr::ExternUnit | Attr::Nothing | Attr::Ignore | Attr::Unwrap => {
+                false
+            }
+        };
+        let target = match (arg_label, self.j.ek(arg)) {
+            (LabelNoname::ArgOptional, ExprKind::OptionalBlock(x, _)) => x,
+            _ => arg,
+        };
+        if !needs_temporary(&self.j, target) {
+            return (block, arg);
+        }
+        let tmp = self.fresh_tmp_ident();
+        block.push(super::lam_compile_arguments::define_strict_variable(
+            tmp,
+            target,
+            &mut self.j,
+        ));
+        let var = JE::var(tmp, &mut self.j);
+        let value = match self.j.ek(arg) {
+            ExprKind::OptionalBlock(_, identity) if target != arg => {
+                let cold = self.j.expr_cold(arg);
+                self.j
+                    .expr_with(ExprKind::OptionalBlock(var, identity), cold)
+            }
+            _ => var,
+        };
+        (block, value)
+    }
+
+    /// lam_compile_external_call.ml `hold_args`: `hold_external_arg` for
+    /// the compiled arguments of a call, paired with the specs as in
+    /// `assemble_external_args_no_splice`.
+    pub(crate) fn hold_external_args(&mut self, arg_types: &[Param], args: HeldArgs) -> HeldArgs {
+        let mut args = args.into_iter();
+        let mut held = HeldArgs::with_capacity(args.len());
+        for spec in arg_types {
+            if matches!(spec.arg_type, Attr::ArgCst(_)) {
+                continue;
+            }
+            let Some(arg) = args.next() else { break };
+            held.push(self.hold_external_arg(spec.arg_label, &spec.arg_type, arg));
+        }
+        held.extend(args);
+        held
+    }
+
+    /// lam_compile_external_obj.ml `hold_obj_args`: `hold_external_arg` for
+    /// the compiled arguments of an object-creating external, paired with
+    /// the labels as in `compile_js_object_create`.
+    pub(crate) fn hold_external_obj_args(
+        &mut self,
+        obj_params: &[ObjParam],
+        args: HeldArgs,
+    ) -> HeldArgs {
+        let mut args = args.into_iter();
+        let mut held = HeldArgs::with_capacity(args.len());
+        for param in obj_params {
+            let arg_label = match &param.obj_arg_label {
+                Label::ObjLabel { .. } | Label::ObjEmpty
+                    if matches!(param.obj_arg_type, Attr::ArgCst(_)) =>
+                {
+                    continue;
+                }
+                Label::ObjEmpty => None,
+                Label::ObjLabel { .. } => Some(LabelNoname::ArgLabel),
+                Label::ObjOptional { .. } => Some(LabelNoname::ArgOptional),
+            };
+            let Some(arg) = args.next() else { break };
+            held.push(match arg_label {
+                Some(label) => self.hold_external_arg(label, &param.obj_arg_type, arg),
+                None => arg,
+            });
+        }
+        held.extend(args);
+        held
+    }
+
     pub(crate) fn external_polyvar_string_expr(
         &mut self,
         arg: Expr,
@@ -164,24 +310,10 @@ impl LambdaCompiler {
         }
     }
 
-    /// The literal tag and duplicable payload of a poly-variant block
-    /// `{NAME: "tag", VAL: value}`.
+    /// The literal tag and payload of a poly-variant block
+    /// `{NAME: "tag", VAL: value}`, which pass in place.
     fn literal_polyvar_block(&self, arg: Expr) -> Option<(crate::js_ir::arena::StrId, Expr)> {
-        let ExprKind::CamlBlock(items, _, tag) = self.j.ek(arg) else {
-            return None;
-        };
-        if !matches!(self.j.tag(tag), TagInfo::PolyVar(_)) {
-            return None;
-        }
-        match self.j.exprs(items) {
-            [key, value] => match self.j.ek(*key) {
-                ExprKind::Str(txt) if expression_has_no_side_effects(&self.j, *value) => {
-                    Some((txt, *value))
-                }
-                _ => None,
-            },
-            _ => None,
-        }
+        literal_polyvar_block(&self.j, arg)
     }
 
     pub(crate) fn external_polyvar_event_exprs(
@@ -310,9 +442,12 @@ impl LambdaCompiler {
 
         loop {
             match a.view(cursor) {
-                View::Let(kind, alias_id, value, body)
-                    if matches!(kind, LetKind::Alias | LetKind::Strict | LetKind::StrictOpt) =>
-                {
+                View::Let(
+                    LetKind::Alias | LetKind::Strict | LetKind::StrictOpt,
+                    alias_id,
+                    value,
+                    body,
+                ) => {
                     let (primitive, args, _) = a.as_prim(value)?;
                     let Primitive::Pfield(index, FieldDbgInfo::Module { name }) = primitive else {
                         return None;
@@ -322,7 +457,7 @@ impl LambdaCompiler {
                     }
                     note_target(*args.first()?)?;
 
-                    alias_chain.push((alias_id, *index, name.clone()));
+                    alias_chain.push((alias_id, *index, *name));
                     cursor = body;
                 }
                 View::Prim(primitive, args, _) => {
@@ -343,12 +478,9 @@ impl LambdaCompiler {
                         let expected_field = &fields[position];
                         match a.view(*arg) {
                             View::Var(arg_id) => {
-                                let Some((_, field_index, field_name)) = alias_chain
+                                let (_, field_index, field_name) = alias_chain
                                     .iter()
-                                    .find(|(alias_id, _, _)| alias_id.same(&arg_id))
-                                else {
-                                    return None;
-                                };
+                                    .find(|(alias_id, _, _)| alias_id.same(&arg_id))?;
                                 if *field_index != position as i32 || field_name != expected_field {
                                     return None;
                                 }
@@ -406,7 +538,7 @@ impl LambdaCompiler {
         let id = *self
             .external_module_ids
             .entry(key)
-            .or_insert_with(|| self.id_gen.create(&external_module_ident_name(module_name)));
+            .or_insert_with(|| self.id_gen.create(external_module_ident_name(module_name)));
 
         ModuleId {
             id,
@@ -492,7 +624,7 @@ impl LambdaCompiler {
     pub(crate) fn null_undefined_to_opt_expr(&mut self, expr: Expr) -> Expr {
         if self.can_inline_null_to_opt(expr) {
             JE::cond(
-                self.is_null_or_undefined_expr(expr.clone()),
+                self.is_null_or_undefined_expr(expr),
                 JE::undefined(false, &mut self.j),
                 self.optional_block(expr, false),
                 &mut self.j,
@@ -603,7 +735,7 @@ impl LambdaCompiler {
             matches!(arg_type, Attr::Unwrap) && matches!(arg_label, LabelNoname::ArgOptional);
         let (arg, raw_arg) = match arg_label {
             LabelNoname::ArgOptional => {
-                let raw_copy = keep_raw.then(|| raw_arg.clone());
+                let raw_copy = keep_raw.then_some(raw_arg);
                 (self.external_optional_to_undefined_expr(raw_arg), raw_copy)
             }
             LabelNoname::ArgLabel | LabelNoname::ArgEmpty => (raw_arg, None),
@@ -917,9 +1049,9 @@ impl LambdaCompiler {
             };
 
             let value_arg = if pending.for_sure_no_nested_option {
-                prepared.clone()
+                prepared
             } else {
-                self.val_from_option_expr(prepared.clone())
+                self.val_from_option_expr(prepared)
             };
             let (value, effect) = self.lower_object_external_arg_value_and_effect(
                 value_arg,
@@ -1021,7 +1153,6 @@ impl LambdaCompiler {
     }
 
     /// `Lam_compile_external_call.translate_ffi`.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn compile_js_call(
         &mut self,
         prim_name: &str,

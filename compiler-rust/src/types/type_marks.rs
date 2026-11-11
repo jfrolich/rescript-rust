@@ -48,12 +48,15 @@ type StoreTable<V> = std::collections::HashMap<TypeExprRef, V, BuildHasherDefaul
 const PAGE_BITS: usize = 10;
 const PAGE_SIZE: usize = 1 << PAGE_BITS;
 
+/// One page of a [`TypeNodeTable`]: per node, its write epoch and value.
+type Page<V> = Box<[(u32, V)]>;
+
 /// Map from type nodes to `V`, cleared in O(1) between uses.
 pub(crate) struct TypeNodeTable<V: Copy> {
     epoch: u32,
     /// Per local node, by page: the epoch it was last written in, and its
     /// value. Entries from older epochs are absent.
-    pages: Vec<Option<Box<[(u32, V)]>>>,
+    pages: Vec<Option<Page<V>>>,
     store: StoreTable<V>,
 }
 
@@ -85,11 +88,6 @@ impl<V: Copy> TypeNodeTable<V> {
         let page = self.pages.get(idx >> PAGE_BITS)?.as_ref()?;
         let (epoch, value) = page[idx & (PAGE_SIZE - 1)];
         (epoch == self.epoch).then_some(value)
-    }
-
-    #[inline]
-    pub(crate) fn contains(&self, ty: TypeExprRef) -> bool {
-        self.get(ty).is_some()
     }
 
     /// Set the value of `ty`, returning the previous one.
@@ -239,15 +237,15 @@ mod tests {
             assert!(set.visit(local));
             assert!(!set.visit(local));
             assert!(set.visit(store));
-            assert!(set.contains(store));
+            assert!(set.get(store).is_some());
             // A nested walk gets its own table.
             let mut inner = visit_set();
-            assert!(!inner.contains(local));
+            assert!(inner.get(local).is_none());
             assert!(inner.visit(local));
         }
         let set = visit_set();
-        assert!(!set.contains(local));
-        assert!(!set.contains(store));
+        assert!(set.get(local).is_none());
+        assert!(set.get(store).is_none());
     }
 
     #[test]
@@ -267,7 +265,7 @@ mod tests {
         table.epoch = u32::MAX;
         assert!(table.visit(TypeExprRef(1)));
         table.clear();
-        assert!(!table.contains(TypeExprRef(1)));
+        assert!(table.get(TypeExprRef(1)).is_none());
         assert!(table.visit(TypeExprRef(1)));
     }
 }

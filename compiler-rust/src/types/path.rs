@@ -46,6 +46,11 @@ use std::sync::{LazyLock, Mutex};
 #[derive(Clone, Copy)]
 pub struct Path(&'static PathNode);
 
+/// [`Path::flatten`] failed: the path contains a functor application
+/// (`Papply`), so it has no single head identifier and component list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContainsApply;
+
 /// The constructor of a [`Path`], for pattern matching.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PathView {
@@ -317,10 +322,6 @@ impl Path {
         }
     }
 
-    /// Check if two paths refer to the same entity (`Path.same`,
-    /// `compiler/ml/path.ml:23-29`): structural, with `Ident.same` on
-    /// identifiers and `Pdot` positions ignored.
-    #[inline]
     /// The address of the interned node: equal exactly for identical paths
     /// (identifier flags and positions included), unlike `==`.
     #[inline]
@@ -328,6 +329,10 @@ impl Path {
         std::ptr::from_ref(self.0) as usize
     }
 
+    /// Check if two paths refer to the same entity (`Path.same`,
+    /// `compiler/ml/path.ml:23-29`): structural, with `Ident.same` on
+    /// identifiers and `Pdot` positions ignored.
+    #[inline]
     pub fn same(&self, other: &Path) -> bool {
         std::ptr::eq(self.0.class(), other.0.class())
     }
@@ -519,9 +524,9 @@ impl Path {
 
     /// Flatten this path to an identifier and list of component names.
     ///
-    /// Returns `Err(())` if the path contains a `Papply`.
-    pub fn flatten(&self) -> Result<(&'static Ident, Vec<&'static str>), ()> {
-        fn go(path: Path, acc: &mut Vec<&'static str>) -> Result<&'static Ident, ()> {
+    /// Fails with [`ContainsApply`] if the path contains a `Papply`.
+    pub fn flatten(&self) -> Result<(&'static Ident, Vec<&'static str>), ContainsApply> {
+        fn go(path: Path, acc: &mut Vec<&'static str>) -> Result<&'static Ident, ContainsApply> {
             match path.view() {
                 PathView::Pident(id) => Ok(id),
                 PathView::Pdot(p, s, _) => {
@@ -529,7 +534,7 @@ impl Path {
                     acc.push(s.as_str());
                     Ok(id)
                 }
-                PathView::Papply(_, _) => Err(()),
+                PathView::Papply(_, _) => Err(ContainsApply),
             }
         }
 

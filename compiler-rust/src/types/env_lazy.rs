@@ -9,6 +9,7 @@
 use crate::fast_hash::AHashMap as HashMap;
 use crate::types::path::PathView;
 use std::cell::{OnceCell, RefCell};
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::ident::Ident;
@@ -331,7 +332,7 @@ fn build_type_constructors(
             }
             super::decl::ConstructorArguments::CstrRecord(labels) => {
                 let inline_params = super::typecore::inline_record_type_params(ctx, labels);
-                let inline_path = Path::pdot(type_path.clone(), cd.cd_id.name());
+                let inline_path = Path::pdot(type_path, cd.cd_id.name());
                 let inline_constr = ctx.new_generic_constr(inline_path, inline_params.clone());
                 let inline_decl = TypeDeclaration {
                     type_params: inline_params.clone(),
@@ -375,7 +376,6 @@ fn build_type_constructors(
                     let old_result_module_path = path.parent();
                     let new_result_module_path = type_path.parent();
                     let args = *args;
-                    drop(desc);
                     if let (Some(old_prefix), Some(new_prefix)) =
                         (old_result_module_path, new_result_module_path)
                     {
@@ -387,7 +387,7 @@ fn build_type_constructors(
                             // Mirror that component-prefix substitution before
                             // exposing the constructor description table.
                             let new_prefix = Arc::new(new_prefix);
-                            for arg in ctx.type_list(&args).iter() {
+                            for arg in ctx.type_list(args).iter() {
                                 crate::cmi::persistent_env::rewrite_type_expr_by_path_prefix(
                                     arg,
                                     &old_prefix,
@@ -400,7 +400,6 @@ fn build_type_constructors(
                     ctx.new_generic_constr(type_path, ctx.type_list(args).to_vec())
                 }
                 _ => {
-                    drop(desc);
                     res_ty
                 }
             }
@@ -470,7 +469,7 @@ fn build_constructors_for_name(
                     }
                     super::decl::ConstructorArguments::CstrRecord(labels) => {
                         let inline_params = super::typecore::inline_record_type_params(ctx, labels);
-                        let inline_path = ext_path.clone();
+                        let inline_path = ext_path;
                         let inline_constr =
                             ctx.new_generic_constr(inline_path, inline_params.clone());
                         let inline_decl = TypeDeclaration {
@@ -558,10 +557,25 @@ impl ChildScanCursor {
     }
 }
 
+/// A forced component value: its position in the signature, identifier and
+/// declaration.
+type ComponentValue = (usize, Ident, ValueDescription);
+
+/// A forced child module's position in the signature and component tables.
+type ChildComponents = (usize, Rc<StoredModuleComponents>);
+
+/// A functor result substituted for one argument path, with the replay
+/// record of computing it during a store build.
+type FunctorResultSubst = (ModuleType, Option<Rc<super::context::StorePiece>>);
+
+/// Each child module's substituted `Mty_alias`/`Mty_ident` target, whether
+/// it is an alias, by name; `None` for a child with neither.
+type ModuleAliasTargets = HashMap<String, Option<(bool, Arc<Path>)>>;
+
 #[derive(Debug, Clone)]
 struct StructureComponentTables {
     index: Arc<SignatureIndex>,
-    component_values: RefCell<HashMap<String, Option<(usize, Ident, ValueDescription)>>>,
+    component_values: RefCell<HashMap<String, Option<ComponentValue>>>,
     constructors: RefCell<HashMap<String, Arc<Vec<ConstructorDescription>>>>,
     labels: RefCell<HashMap<String, Arc<Vec<LabelDescription>>>>,
     /// The labels of each record type of the component, by type name: what
@@ -585,13 +599,13 @@ struct StructureComponentTables {
     // Cache forced child component thunks by name, including misses, so a
     // lookup for one child does not materialize every sibling in the parent
     // signature.
-    child_components: RefCell<HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>>,
+    child_components: RefCell<HashMap<String, Option<ChildComponents>>>,
     child_component_scan: RefCell<ChildComponentScanState>,
     /// The `Mty_alias`/`Mty_ident` target of each child module after the
     /// component substitution (and whether it is an alias). OCaml forces a
     /// `comp_modules` declaration once per table (env.ml:1568), so every
     /// lookup sees the same substituted target block.
-    module_alias_targets: RefCell<HashMap<String, Option<(bool, Arc<Path>)>>>,
+    module_alias_targets: RefCell<ModuleAliasTargets>,
     // The component substitution for value lookups depends only on the
     // signature and access path; build it once per component table.
     value_subst_maps: RefCell<Option<Arc<crate::cmi::persistent_env::ValueSubstMaps>>>,
@@ -601,11 +615,11 @@ struct StructureComponentTables {
     in_store: std::cell::Cell<bool>,
     /// Store pieces per forced entry, one table per `ForcedKind` so lookups
     /// can borrow the entry name.
-    store_pieces: RefCell<[HashMap<String, Arc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
+    store_pieces: RefCell<[HashMap<String, Rc<super::context::StorePiece>>; FORCED_KIND_COUNT]>,
     /// The layer tables `open` adds for this view, built on first open.
     opened_layers: OnceCell<(
-        Arc<super::env::OpenedLayers>,
-        Option<Arc<super::context::StorePiece>>,
+        Rc<super::env::OpenedLayers>,
+        Option<Rc<super::context::StorePiece>>,
     )>,
 }
 
@@ -628,7 +642,7 @@ const _: () = assert!(ForcedKind::QualifiedModule as usize + 1 == FORCED_KIND_CO
 pub(crate) struct QualifiedModuleComponents {
     access_path: Arc<Path>,
     signature: Arc<Signature>,
-    tables: Arc<StructureComponentTables>,
+    tables: Rc<StructureComponentTables>,
     compiler_counters_enabled: bool,
     value_source_prefix: Option<Arc<Path>>,
 }
@@ -695,11 +709,11 @@ fn scan_child_component_from_signature(
     access_path: &Arc<Path>,
     source_prefix: Option<&Arc<Path>>,
     signature: &Arc<Signature>,
-    child_components: &mut HashMap<String, Option<(usize, Arc<StoredModuleComponents>)>>,
+    child_components: &mut HashMap<String, Option<(usize, Rc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
     child_name: &str,
     ctx: &super::context::TypeContext,
-) -> (Option<(usize, Arc<StoredModuleComponents>)>, usize) {
+) -> (Option<(usize, Rc<StoredModuleComponents>)>, usize) {
     let ChildComponentScanState::Pending(cursor) = state else {
         return (None, 0);
     };
@@ -739,10 +753,10 @@ fn scan_child_component_from_signature(
                         strengthened_child_env_decl(md, *id, strengthen_source, runtime_pos, ctx),
                         md.clone(),
                         child_access_path,
-                        Some(((**access_path).clone(), signature.clone())),
+                        Some(((**access_path), signature.clone())),
                     );
                     working_env
-                        .local_module_components_arc(&Path::pident(*id))
+                        .local_module_components_shared(&Path::pident(*id))
                         .map(|stored| (runtime_pos, stored))
                 };
                 if let (Some(source), Some((_, stored))) = (source_prefix, &stored) {
@@ -793,7 +807,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_child_components_arc(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc_and_value_source_prefix(
@@ -808,7 +822,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_complete_child_components_arc(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         ctx: &super::context::TypeContext,
     ) -> Self {
         Self::new_with_child_components_arc_and_value_source_prefix_inner(
@@ -824,7 +838,7 @@ impl QualifiedModuleComponents {
     pub(crate) fn new_with_child_components_arc_and_value_source_prefix(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         value_source_prefix: Option<Path>,
         ctx: &super::context::TypeContext,
     ) -> Self {
@@ -841,13 +855,13 @@ impl QualifiedModuleComponents {
     fn new_with_child_components_arc_and_value_source_prefix_inner(
         access_path: Path,
         signature: Arc<Signature>,
-        child_components: HashMap<String, (usize, Arc<StoredModuleComponents>)>,
+        child_components: HashMap<String, (usize, Rc<StoredModuleComponents>)>,
         value_source_prefix: Option<Path>,
         child_component_scan_complete: bool,
         ctx: &super::context::TypeContext,
     ) -> Self {
         let value_source_prefix = value_source_prefix.map(Arc::new);
-        let shared_access_path = Arc::new(access_path.clone());
+        let shared_access_path = Arc::new(access_path);
         // An in-process unit's signature names its own items through the unit
         // (`Unit.t`); OCaml's `prefix_idents` puts them at the component path
         // (env.ml:1454-1481, 1530-1538). Re-root a copy once, so values,
@@ -882,14 +896,14 @@ impl QualifiedModuleComponents {
                     }
                     let (old_prefix, new_prefix) = match item {
                         SignatureItem::SigModule(id, _, _) => (
-                            Path::pdot((**source).clone(), id.name()),
+                            Path::pdot(**source, id.name()),
                             Arc::new(ctx.dotted_from_ident(
                                 shared_access_path.clone(),
                                 *id,
                                 super::path::NOPOS,
                             )),
                         ),
-                        _ => ((**source).clone(), shared_access_path.clone()),
+                        _ => ((**source), shared_access_path.clone()),
                     };
                     crate::cmi::persistent_env::rewrite_sig_by_path_prefix(
                         std::slice::from_ref(item),
@@ -970,7 +984,7 @@ impl QualifiedModuleComponents {
         Self {
             access_path: shared_access_path,
             signature,
-            tables: Arc::new(StructureComponentTables {
+            tables: Rc::new(StructureComponentTables {
                 index,
                 component_values: RefCell::new(HashMap::new()),
                 constructors: RefCell::new(HashMap::new()),
@@ -1056,7 +1070,7 @@ impl QualifiedModuleComponents {
         &self,
         ctx: &super::context::TypeContext,
         build: impl FnOnce() -> super::env::OpenedLayers,
-    ) -> Arc<super::env::OpenedLayers> {
+    ) -> Rc<super::env::OpenedLayers> {
         if let Some((layers, piece)) = self.tables.opened_layers.get() {
             if let Some(piece) = piece {
                 ctx.touch_store_piece(piece);
@@ -1065,13 +1079,13 @@ impl QualifiedModuleComponents {
         }
         if self.tables.in_store.get() {
             let (layers, piece) = ctx.build_in_store(build);
-            let layers = Arc::new(layers);
+            let layers = Rc::new(layers);
             if let Some(piece) = piece {
                 let _ = self.tables.opened_layers.set((layers.clone(), Some(piece)));
             }
             return layers;
         }
-        let layers = Arc::new(build());
+        let layers = Rc::new(build());
         let _ = self.tables.opened_layers.set((layers.clone(), None));
         layers
     }
@@ -1370,7 +1384,7 @@ impl QualifiedModuleComponents {
         if let Some(family) = self.tables.label_families.borrow().get(type_name) {
             return *family;
         }
-        let type_path = Path::pdot(self.access_path().clone(), type_name);
+        let type_path = Path::pdot(*self.access_path(), type_name);
         let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
         // `decl` is already the component's substituted declaration: the
         // signature was copied and its paths prefixed for this access path
@@ -1448,7 +1462,7 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
-    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
         self.force_entry(ForcedKind::ChildComponents, name, ctx, || {
             self.lookup_child_components_inner(name, ctx)
         })
@@ -1458,7 +1472,7 @@ impl QualifiedModuleComponents {
         &self,
         name: &str,
         ctx: &super::context::TypeContext,
-    ) -> Option<(usize, Arc<StoredModuleComponents>)> {
+    ) -> Option<(usize, Rc<StoredModuleComponents>)> {
         if let Some(cached) = self.tables.child_components.borrow().get(name).cloned() {
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_lazy_hit(
@@ -1715,7 +1729,7 @@ fn submodule_lookup_path(
     runtime_pos: usize,
     _md: &ModuleDeclaration,
 ) -> Path {
-    Path::pdot_pos(parent_access_path.clone(), module_name, runtime_pos as i32)
+    Path::pdot_pos(*parent_access_path, module_name, runtime_pos as i32)
 }
 
 fn module_decl_is_self_alias_for_access_path(md: &ModuleDeclaration, access_path: &Path) -> bool {
@@ -1855,15 +1869,22 @@ fn access_path_is_direct_opened_component(env: &super::env::Env, access_path: &P
 }
 
 fn build_local_module_components(
-    env: &super::env::Env,
-    access_path: &Path,
-    md: &ModuleDeclaration,
-    parent_substitution_context: Option<(&Path, &[SignatureItem])>,
-    source_prefix: Option<&Path>,
+    stored: &StoredModuleComponents,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &super::context::TypeContext,
     cache_mode: super::typecore::ComponentLookupApi,
 ) -> Option<QualifiedModuleComponents> {
+    let env = stored.seed_env.as_ref();
+    let access_path = &stored.access_path;
+    let md = &stored.module_decl;
+    let parent_substitution_context =
+        stored
+            .parent_context
+            .as_ref()
+            .map(|(parent_access_path, parent_sig)| {
+                (parent_access_path, parent_sig.as_ref().as_slice())
+            });
+    let source_prefix = stored.source_prefix.get();
     if ctx.persistent_env_is_in_process()
         && let Some(alias_path) = md.md_type.ident_or_alias_path()
         && let PathView::Pident(alias_id) = alias_path.view()
@@ -1982,7 +2003,7 @@ fn build_local_module_components(
                 super::decl::ModuleType::MtyAlias(_, target) => Some(target.as_ref()),
                 _ => None,
             };
-            let Some((raw_sig, resolved_name)) = (match alias_target.map(|p| p.view()) {
+            (match alias_target.map(|p| p.view()) {
                 Some(PathView::Pident(alias_id)) if alias_id.is_persistent() =>
                 {
                     // OCaml compiler/ml/env.ml:1517 calls `scrape_alias` before
@@ -2007,10 +2028,7 @@ fn build_local_module_components(
                     })
                 }
                 _ => None,
-            }) else {
-                return None;
-            };
-            (raw_sig, resolved_name)
+            })?
         };
     let pident_sibling_alias_name =
         parent_substitution_context
@@ -2032,7 +2050,7 @@ fn build_local_module_components(
                     })
                     .then(|| alias_id.name().to_string())
             });
-    let shared_access_path = Arc::new(access_path.clone());
+    let shared_access_path = Arc::new(*access_path);
     let mut qualified_sig = crate::types::typecore::qualify_resolved_signature_for_local_components(
         access_path,
         &md.md_type,
@@ -2086,7 +2104,7 @@ fn build_local_module_components(
     if raw_sig.len() != qualified_sig.len() {
         return None;
     }
-    let shared_source_prefix = source_prefix.map(|source| Arc::new(source.clone()));
+    let shared_source_prefix = source_prefix.map(|source| Arc::new(*source));
     if let Some(source) = shared_source_prefix.as_ref()
         && !source.same(access_path)
     {
@@ -2181,7 +2199,7 @@ fn build_local_module_components(
                 }
                 if let Some(working_env) = working_env.as_ref()
                     && let Some(stored) =
-                        working_env.local_module_components_arc(&Path::pident(*id))
+                        working_env.local_module_components_shared(&Path::pident(*id))
                 {
                     child_components.insert(id.name().to_string(), (runtime_pos, stored));
                 }
@@ -2224,17 +2242,16 @@ pub(crate) struct StoredModuleComponents {
     /// For a child of components whose signature names its items through an
     /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
     source_prefix: OnceCell<Path>,
-    cached: OnceCell<Arc<QualifiedModuleComponents>>,
+    cached: OnceCell<Rc<QualifiedModuleComponents>>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
     /// Key of this module's compilation-private components (see
     /// `TypeContext::local_stored_components`).
     local_id: u64,
-    cached_piece: OnceCell<Arc<super::context::StorePiece>>,
+    cached_piece: OnceCell<Rc<super::context::StorePiece>>,
     functor_component_result: OnceCell<ModuleType>,
-    functor_component_piece: OnceCell<Arc<super::context::StorePiece>>,
-    functor_result_subst_cache:
-        OnceCell<RefCell<HashMap<Path, (ModuleType, Option<Arc<super::context::StorePiece>>)>>>,
+    functor_component_piece: OnceCell<Rc<super::context::StorePiece>>,
+    functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
 }
 
 impl StoredModuleComponents {
@@ -2304,7 +2321,7 @@ impl StoredModuleComponents {
             }
             let (components, piece) =
                 ctx.build_in_store_guarded(|| self.build_components(pers_env, ctx, cache_mode));
-            let components = Arc::new(components?);
+            let components = Rc::new(components?);
             match piece {
                 Some(piece) => {
                     if self.cached.set(components.clone()).is_ok() {
@@ -2323,7 +2340,7 @@ impl StoredModuleComponents {
             return Some(f(components.as_ref()));
         }
 
-        let components = Arc::new(self.build_components(pers_env, ctx, cache_mode)?);
+        let components = Rc::new(self.build_components(pers_env, ctx, cache_mode)?);
         if self.cached.set(components.clone()).is_err()
             && let Some(cached) = self.cached.get().cloned()
         {
@@ -2338,22 +2355,7 @@ impl StoredModuleComponents {
         ctx: &super::context::TypeContext,
         cache_mode: super::typecore::ComponentLookupApi,
     ) -> Option<QualifiedModuleComponents> {
-        let parent_substitution_context =
-            self.parent_context
-                .as_ref()
-                .map(|(parent_access_path, parent_sig)| {
-                    (parent_access_path, parent_sig.as_ref().as_slice())
-                });
-        let components = build_local_module_components(
-            self.seed_env.as_ref(),
-            &self.access_path,
-            &self.module_decl,
-            parent_substitution_context,
-            self.source_prefix.get(),
-            pers_env,
-            ctx,
-            cache_mode,
-        )?;
+        let components = build_local_module_components(self, pers_env, ctx, cache_mode)?;
         if ctx.compiler_counters_enabled() {
             crate::perf_counters::record_stored_component_build(cache_mode);
         }

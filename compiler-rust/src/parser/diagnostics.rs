@@ -304,15 +304,13 @@ fn explain_unexpected(token: &Token<'_>, context: &[(Grammar, Position)]) -> Str
         Grammar::AtomicTypExpr => {
             // Check next grammar context
             if let Some(next) = next_grammar {
-                match (next, token) {
-                    // In record field declarations
-                    (
-                        Grammar::StringFieldDeclarations | Grammar::FieldDeclarations,
-                        Token::String(_) | Token::At | Token::Rbrace | Token::Comma | Token::Eof,
-                    ) => {
-                        return "I'm missing a type here".to_string();
-                    }
-                    _ => {}
+                // In record field declarations
+                if let (
+                    Grammar::StringFieldDeclarations | Grammar::FieldDeclarations,
+                    Token::String(_) | Token::At | Token::Rbrace | Token::Comma | Token::Eof,
+                ) = (next, token)
+                {
+                    return "I'm missing a type here".to_string();
                 }
             }
             // Check if token is a structure item start or EOF

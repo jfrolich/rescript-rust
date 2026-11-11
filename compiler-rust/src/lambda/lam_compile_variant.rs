@@ -766,7 +766,7 @@ impl LambdaCompiler {
         if let Some(small) = self.compile_small_string_switch_assignment(
             a,
             &tmp,
-            scrut_compiled.expr.clone(),
+            scrut_compiled.expr,
             &borrowed_cases,
             default,
             default.is_none(),
@@ -895,7 +895,7 @@ impl LambdaCompiler {
         Self::literal_tag_value(&tag.literal)
     }
 
-    fn named_const_cases<'a>(&self, switch: &'a LamSwitch) -> Option<Vec<(SwitchCaseTag, Lam)>> {
+    fn named_const_cases(&self, switch: &LamSwitch) -> Option<Vec<(SwitchCaseTag, Lam)>> {
         switch
             .sw_consts
             .iter()
@@ -908,7 +908,7 @@ impl LambdaCompiler {
             .collect()
     }
 
-    fn named_block_cases<'a>(&self, switch: &'a LamSwitch) -> Option<Vec<(SwitchCaseTag, Lam)>> {
+    fn named_block_cases(&self, switch: &LamSwitch) -> Option<Vec<(SwitchCaseTag, Lam)>> {
         switch
             .sw_blocks
             .iter()
@@ -921,7 +921,7 @@ impl LambdaCompiler {
             .collect()
     }
 
-    fn const_switch_default<'a>(&self, switch: &'a LamSwitch) -> Option<Lam> {
+    fn const_switch_default(&self, switch: &LamSwitch) -> Option<Lam> {
         if switch.sw_consts_full {
             None
         } else {
@@ -933,7 +933,7 @@ impl LambdaCompiler {
         switch.sw_consts_full || switch.sw_failaction.is_none()
     }
 
-    fn block_switch_default<'a>(&self, switch: &'a LamSwitch) -> Option<Lam> {
+    fn block_switch_default(&self, switch: &LamSwitch) -> Option<Lam> {
         if switch.sw_blocks_full {
             None
         } else {
@@ -1023,7 +1023,7 @@ impl LambdaCompiler {
         JE::new(
             ExprKind::StaticIndex(
                 expr,
-                JE::str_id(&field_name.to_string(), &mut self.j),
+                JE::str_id(field_name, &mut self.j),
                 crate::js_ir::arena::FieldPos::new(None),
             ),
             &mut self.j,
@@ -1033,7 +1033,7 @@ impl LambdaCompiler {
     pub(crate) fn switch_case_expr(&mut self, tag: &SwitchCaseTag) -> Expr {
         match tag {
             SwitchCaseTag::String(value) => {
-                JE::new(ExprKind::Str(JE::str_id(&value, &mut self.j)), &mut self.j)
+                JE::new(ExprKind::Str(JE::str_id(value, &mut self.j)), &mut self.j)
             }
             SwitchCaseTag::Int(value) => match i32::try_from(*value) {
                 Ok(value) => JE::number(Number::int(value), &mut self.j),
@@ -1211,37 +1211,16 @@ impl LambdaCompiler {
         }
     }
 
-    fn compile_named_string_switch_assignment_with_strategy(
+    /// The general `switch` arm of `compile_general_cases` for a named string
+    /// switch assigning to `result`, without trying the small-switch arms.
+    fn compile_named_string_switch_assignment_general(
         &mut self,
         a: &mut LamArena,
         result: &Ident,
         test: Expr,
         cases: &[(SwitchCaseTag, Lam)],
         default: Option<Lam>,
-        complete: bool,
-        allow_small: bool,
     ) -> Block {
-        if allow_small {
-            // OCaml's `compile_general_cases` (lam_compile.ml:540-566) pattern-
-            // matches the UNFILTERED cases list against `[(id, lam)], Default x`
-            // etc. Cases that equal the default are only filtered out in the
-            // `_, _` switch arm (lam_compile.ml:587-592), AFTER the small-arm
-            // selection. Pre-filtering would let `[("Pow", 1), ("Sum", -1)]`
-            // with `Default(-1)` collapse to `[(Pow, 1)] + Default(-1)` and
-            // hit the 1-case-Default S.if_ arm, where OCaml stays in the
-            // switch arm and emits `switch { case "Pow": 1; default: -1 }`.
-            if let Some(block) = self.compile_small_string_switch_assignment(
-                a,
-                result,
-                test.clone(),
-                cases,
-                default,
-                complete,
-            ) {
-                return block;
-            }
-        }
-
         let filtered_cases = self.filtered_switch_case_refs(a, cases, default);
         let clauses = stable_group_switch_cases(a, filtered_cases, |_, _| true)
             .into_iter()
@@ -1287,9 +1266,21 @@ impl LambdaCompiler {
         default: Option<Lam>,
         complete: bool,
     ) -> Block {
-        self.compile_named_string_switch_assignment_with_strategy(
-            a, result, test, cases, default, complete, true,
-        )
+        // OCaml's `compile_general_cases` (lam_compile.ml:540-566) pattern-
+        // matches the UNFILTERED cases list against `[(id, lam)], Default x`
+        // etc. Cases that equal the default are only filtered out in the
+        // `_, _` switch arm (lam_compile.ml:587-592), AFTER the small-arm
+        // selection. Pre-filtering would let `[("Pow", 1), ("Sum", -1)]`
+        // with `Default(-1)` collapse to `[(Pow, 1)] + Default(-1)` and
+        // hit the 1-case-Default S.if_ arm, where OCaml stays in the
+        // switch arm and emits `switch { case "Pow": 1; default: -1 }`.
+        match self.compile_small_string_switch_assignment(a, result, test, cases, default, complete)
+        {
+            Some(block) => block,
+            None => {
+                self.compile_named_string_switch_assignment_general(a, result, test, cases, default)
+            }
+        }
     }
 
     fn compile_named_string_switch_return_with_strategy(
@@ -1365,7 +1356,7 @@ impl LambdaCompiler {
 
         if allow_small {
             if let Some(block) =
-                self.compile_small_string_switch_return(a, test.clone(), cases, default, complete)
+                self.compile_small_string_switch_return(a, test, cases, default, complete)
             {
                 return block;
             }
@@ -1577,12 +1568,7 @@ impl LambdaCompiler {
         // down to 1 still emits a `switch` (matching OCaml), instead of
         // collapsing to `if/else`.
         if let Some(block) = self.compile_small_string_switch_tail_loop_return(
-            a,
-            test.clone(),
-            cases,
-            default,
-            complete,
-            tail_loop,
+            a, test, cases, default, complete, tail_loop,
         ) {
             return block;
         }
@@ -1624,7 +1610,7 @@ impl LambdaCompiler {
             // list, so `[(case, body)] + Default(eq body)` shapes derived from
             // a >1-case input keep emitting a switch.
             if let Some(block) =
-                self.compile_small_string_switch_effect(a, test.clone(), cases, default, complete)
+                self.compile_small_string_switch_effect(a, test, cases, default, complete)
             {
                 return block;
             }
@@ -1723,7 +1709,7 @@ impl LambdaCompiler {
             self.compile_named_string_switch_assignment(
                 a,
                 result,
-                scrut_expr.clone(),
+                scrut_expr,
                 &const_cases,
                 const_default,
                 const_complete,
@@ -1793,7 +1779,7 @@ impl LambdaCompiler {
         } else {
             self.compile_named_string_switch_return(
                 a,
-                scrut_expr.clone(),
+                scrut_expr,
                 &const_cases,
                 const_default,
                 const_complete,
@@ -1860,7 +1846,7 @@ impl LambdaCompiler {
         } else {
             self.compile_named_string_switch_tail_loop_return(
                 a,
-                scrut_expr.clone(),
+                scrut_expr,
                 &const_cases,
                 const_default,
                 const_complete,
@@ -1934,7 +1920,7 @@ impl LambdaCompiler {
         } else {
             self.compile_named_string_switch_effect(
                 a,
-                scrut_expr.clone(),
+                scrut_expr,
                 &const_cases,
                 const_default,
                 const_complete,

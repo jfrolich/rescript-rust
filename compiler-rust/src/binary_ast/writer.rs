@@ -47,7 +47,11 @@ use crate::parser::ast::{
 
 /// The separator character used in the binary AST format.
 const MAGIC_SEP_CHAR: u8 = b'\n';
+/// Magic number at the start of an implementation (`.ast`) file, matching
+/// OCaml's `Config.ast_impl_magic_number`.
 pub const AST_IMPL_MAGIC_NUMBER: &[u8] = b"Caml1999M022";
+/// Magic number at the start of an interface (`.iast`) file, matching
+/// OCaml's `Config.ast_intf_magic_number`.
 pub const AST_INTF_MAGIC_NUMBER: &[u8] = b"Caml1999N022";
 
 /// Write a parsetree0 binary AST file for a structure (implementation, .ast file).
@@ -374,6 +378,7 @@ fn is_false_literal(expr_idx: crate::parse_arena::ExprIdx, arena: &ParseArena) -
     false
 }
 
+/// Hide every export of a structure that sets `@@config({no_export})`.
 pub fn apply_no_export_config(
     arena: &mut ParseArena,
     structure: Vec<StructureItem>,

@@ -30,8 +30,11 @@ use crate::lambda::{FlatMakePath, LamLoc, lam_pass_guard_raises, lam_pass_sroa};
 /// (lam_coercion.ml:200-208). CMJ export arities are read from the final
 /// metadata rather than recollected.
 pub struct Simplified {
+    /// The arena holding the simplified program.
     pub arena: LamArena,
+    /// The simplified program.
     pub lam: Lam,
+    /// The metadata the program was simplified with.
     pub meta: LamStats,
 }
 
@@ -328,7 +331,7 @@ fn flat_make_alias(
                     return lam;
                 };
                 let (primitive, pos, name, base, loc) =
-                    (primitive.clone(), *pos, name.clone(), *base, loc);
+                    (primitive.clone(), *pos, *name, *base, loc);
                 let base = resolve(a, seen, base, groups);
                 if let Some((Primitive::Pmakeblock(TagInfo::Module(names), _), args, _)) =
                     a.as_prim(base)

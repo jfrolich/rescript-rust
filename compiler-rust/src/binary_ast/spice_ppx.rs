@@ -134,9 +134,9 @@ fn lident_path_parse(arena: &mut ParseArena, parts: &[&str]) -> LidentIdx {
             arena.push_lident_from_idx(lident_name)
         };
     }
-    let mut lid = Longident::Lident(arena.push_string(parts[0].to_string()));
+    let mut lid = Longident::Lident(arena.push_string(parts[0]));
     for part in &parts[1..] {
-        lid = Longident::Ldot(Box::new(lid), arena.push_string(part.to_string()));
+        lid = Longident::Ldot(Box::new(lid), arena.push_string(part));
     }
     arena.push_longident(lid)
 }
@@ -580,7 +580,7 @@ fn pat_var_with_loc(arena: &mut ParseArena, name: &str, loc: LocIdx) -> Pattern 
 }
 
 fn pat_var_dynamic(arena: &mut ParseArena, name: &str, loc: LocIdx) -> Pattern {
-    let idx = arena.push_string(name.to_string());
+    let idx = arena.push_string(name);
     pat_var_idx(arena, idx, loc)
 }
 
@@ -1799,13 +1799,8 @@ fn codecs_generate_codecs_for(
             if type_args.is_empty() {
                 Ok((encode, decode))
             } else {
-                codecs_parameterize_codecs(
-                    &arena.type_list(*type_args).to_vec(),
-                    encode,
-                    decode,
-                    settings,
-                    arena,
-                )
+                let type_args = arena.type_list(*type_args).to_vec();
+                codecs_parameterize_codecs(&type_args, encode, decode, settings, arena)
             }
         }
         _ => Err("This syntax is not yet handled by spice".to_string()),
@@ -1895,7 +1890,7 @@ fn records_parse_decl(
     } else if is_option {
         match &pld_type.ptyp_desc {
             CoreTypeDesc::Ptyp_constr(inner) => {
-                let (_, args) = &*inner;
+                let (_, args) = inner;
                 let inner_type = arena.get_core_type(arena.type_list(*args)[0]).clone();
                 let codecs = codecs_generate_value_codecs(settings, &inner_type, arena)?;
                 records_make_omittable_codecs(codecs, arena)
@@ -2211,7 +2206,7 @@ fn records_generate_flat_decoder_expr(
         arena,
     );
     let mut acc = ok_expr;
-    for (field, decode_expr) in fields.iter().zip(decode_exprs.into_iter()).rev() {
+    for (field, decode_expr) in fields.iter().zip(decode_exprs).rev() {
         let ok_pat = pat_construct_with_loc(
             {
                 let lident_name = arena.intern_string("Ok");
@@ -2919,14 +2914,14 @@ fn variants_generate_decoder_case(
             Ok(case(json_str_pat, rhs, arena))
         }
         crate::parser::ast::ConstructorArguments::Pcstr_record(fields) => {
-            let arg_len = expr_constant(Constant::Integer(arena.intern_string(&"2"), None), arena);
+            let arg_len = expr_constant(Constant::Integer(arena.intern_string("2"), None), arena);
             let payload_value = expr_apply(
                 expr_ident_path(arena, &["Array", "getUnsafe"]),
                 vec![
                     (ArgLabel::Nolabel, expr_ident_path(arena, &["json_arr"])),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(arena.intern_string(&"1"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string("1"), None), arena),
                     ),
                 ],
                 false,
@@ -3324,7 +3319,7 @@ fn variants_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string("0"), None), arena),
                     ),
                 ],
                 false,
@@ -4010,7 +4005,7 @@ fn polyvars_generate_codecs(
                     (ArgLabel::Nolabel, json_arr_expr.clone()),
                     (
                         ArgLabel::Nolabel,
-                        expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena),
+                        expr_constant(Constant::Integer(arena.intern_string("0"), None), arena),
                     ),
                 ],
                 false,
@@ -4212,7 +4207,7 @@ fn default_option_inner_type(manifest: &CoreType, arena: &ParseArena) -> Option<
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return None;
     };
-    let (constructor, args) = &*inner;
+    let (constructor, args) = inner;
     (args.len() == 1 && longident_matches(arena, constructor.txt, &["option"]))
         .then(|| arena.type_list(*args)[0])
 }
@@ -4228,7 +4223,7 @@ fn manifest_value_encoder(
     let CoreTypeDesc::Ptyp_constr(inner) = &manifest.ptyp_desc else {
         return Ok(None);
     };
-    let (constructor, args) = &*inner;
+    let (constructor, args) = inner;
     if !longident_matches(arena, constructor.txt, &["option"]) || args.len() != 1 {
         return Ok(None);
     }
@@ -5877,6 +5872,9 @@ pub fn signature_uses_spice_mapper(signature: &[SignatureItem], arena: &ParseAre
     signature_contains_spice_type_decl(signature, arena)
 }
 
+/// Expand the Spice codecs of one structure item. `mapper_active` tells
+/// whether the Spice mapper runs over the whole structure; see
+/// [`structure_uses_spice_mapper`].
 pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
@@ -5900,6 +5898,9 @@ fn map_structure_items_with_mapper(
     Ok(expanded)
 }
 
+/// Expand the Spice codecs of one signature item. `mapper_active` tells
+/// whether the Spice mapper runs over the whole signature; see
+/// [`signature_uses_spice_mapper`].
 pub fn expand_signature_item_with_mapper(
     item: &SignatureItem,
     arena: &mut ParseArena,

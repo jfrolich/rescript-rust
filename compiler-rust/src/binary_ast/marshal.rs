@@ -65,9 +65,9 @@ const CODE_CUSTOM_FIXED: u8 = 0x19;
 /// module-level constants. We mirror that by sharing within these groups.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub(crate) enum EmptyPayloadShareKind {
-    ObjectTypeAttr,
-    ObjectFieldAttr,
-    ParserAttr,
+    ObjectType,
+    ObjectField,
+    Parser,
 }
 
 impl EmptyPayloadShareKind {
@@ -76,9 +76,9 @@ impl EmptyPayloadShareKind {
     #[inline]
     const fn as_index(self) -> usize {
         match self {
-            Self::ObjectTypeAttr => 0,
-            Self::ObjectFieldAttr => 1,
-            Self::ParserAttr => 2,
+            Self::ObjectType => 0,
+            Self::ObjectField => 1,
+            Self::Parser => 2,
         }
     }
 }
@@ -277,9 +277,6 @@ pub struct MarshalWriter<'a> {
     /// Shared object indices for `pval_prim` single-element lists by sharing group.
     prim_list_table: [Option<u32>; PrimListShareKind::COUNT],
 
-    /// Depth counter for JSX context while marshalling.
-    jsx_depth: u32,
-
     /// Depth counter for extension expression context while marshalling.
     extension_depth: u32,
 
@@ -384,7 +381,6 @@ impl<'a> MarshalWriter<'a> {
 
             pstr_empty_table: [None; EmptyPayloadShareKind::COUNT],
             prim_list_table: [None; PrimListShareKind::COUNT],
-            jsx_depth: 0,
             extension_depth: 0,
             external_ext_depth: 0,
             pack_depth: 0,
@@ -418,7 +414,7 @@ impl<'a> MarshalWriter<'a> {
     }
 
     #[inline]
-    pub fn with_current_expr_idx<R>(
+    pub(crate) fn with_current_expr_idx<R>(
         &mut self,
         idx: ExprIdx,
         f: impl FnOnce(&mut MarshalWriter<'a>) -> R,
@@ -431,22 +427,22 @@ impl<'a> MarshalWriter<'a> {
     }
 
     #[inline]
-    pub fn current_expr_idx(&self) -> Option<ExprIdx> {
+    pub(crate) fn current_expr_idx(&self) -> Option<ExprIdx> {
         self.current_expr_idx
     }
 
     #[inline]
-    pub fn enter_case_owner(&mut self, owner: ExprIdx) {
+    pub(crate) fn enter_case_owner(&mut self, owner: ExprIdx) {
         self.case_owner_stack.push((owner, 0));
     }
 
     #[inline]
-    pub fn exit_case_owner(&mut self) {
+    pub(crate) fn exit_case_owner(&mut self) {
         self.case_owner_stack.pop();
     }
 
     #[inline]
-    pub fn next_case_owner_index(&mut self) -> Option<(ExprIdx, usize)> {
+    pub(crate) fn next_case_owner_index(&mut self) -> Option<(ExprIdx, usize)> {
         if let Some((owner, next_idx)) = self.case_owner_stack.last_mut() {
             let case_idx = *next_idx;
             *next_idx += 1;
@@ -457,42 +453,27 @@ impl<'a> MarshalWriter<'a> {
     }
 
     #[inline]
-    pub fn enter_jsx(&mut self) {
-        self.jsx_depth += 1;
-    }
-
-    #[inline]
-    pub fn exit_jsx(&mut self) {
-        self.jsx_depth = self.jsx_depth.saturating_sub(1);
-    }
-
-    #[inline]
-    pub fn in_jsx(&self) -> bool {
-        self.jsx_depth > 0
-    }
-
-    #[inline]
-    pub fn enter_extension(&mut self) {
+    pub(crate) fn enter_extension(&mut self) {
         self.extension_depth += 1;
     }
 
     #[inline]
-    pub fn exit_extension(&mut self) {
+    pub(crate) fn exit_extension(&mut self) {
         self.extension_depth = self.extension_depth.saturating_sub(1);
     }
 
     #[inline]
-    pub fn in_extension(&self) -> bool {
+    pub(crate) fn in_extension(&self) -> bool {
         self.extension_depth > 0
     }
 
     #[inline]
-    pub fn enter_external_ext(&mut self) {
+    pub(crate) fn enter_external_ext(&mut self) {
         self.external_ext_depth += 1;
     }
 
     #[inline]
-    pub fn exit_external_ext(&mut self) {
+    pub(crate) fn exit_external_ext(&mut self) {
         self.external_ext_depth = self.external_ext_depth.saturating_sub(1);
         if self.external_ext_depth == 0 {
             // The shared `raw_exp` node belongs to one `%external` rewrite;
@@ -502,77 +483,77 @@ impl<'a> MarshalWriter<'a> {
     }
 
     #[inline]
-    pub fn in_external_ext(&self) -> bool {
+    pub(crate) fn in_external_ext(&self) -> bool {
         self.external_ext_depth > 0
     }
 
     #[inline]
-    pub fn enter_pack(&mut self) {
+    pub(crate) fn enter_pack(&mut self) {
         self.pack_depth += 1;
     }
 
     #[inline]
-    pub fn exit_pack(&mut self) {
+    pub(crate) fn exit_pack(&mut self) {
         self.pack_depth = self.pack_depth.saturating_sub(1);
     }
 
     #[inline]
-    pub fn in_pack(&self) -> bool {
+    pub(crate) fn in_pack(&self) -> bool {
         self.pack_depth > 0
     }
 
     #[inline]
-    pub fn enter_letmodule_expr(&mut self) {
+    pub(crate) fn enter_letmodule_expr(&mut self) {
         self.letmodule_expr_depth += 1;
     }
 
     #[inline]
-    pub fn exit_letmodule_expr(&mut self) {
+    pub(crate) fn exit_letmodule_expr(&mut self) {
         self.letmodule_expr_depth = self.letmodule_expr_depth.saturating_sub(1);
     }
 
     #[inline]
-    pub fn in_letmodule_expr(&self) -> bool {
+    pub(crate) fn in_letmodule_expr(&self) -> bool {
         self.letmodule_expr_depth > 0
     }
 
     #[inline]
-    pub fn enter_module_typeof(&mut self) {
+    pub(crate) fn enter_module_typeof(&mut self) {
         self.module_typeof_depth += 1;
     }
 
     #[inline]
-    pub fn exit_module_typeof(&mut self) {
+    pub(crate) fn exit_module_typeof(&mut self) {
         self.module_typeof_depth = self.module_typeof_depth.saturating_sub(1);
     }
 
     #[inline]
-    pub fn in_module_typeof(&self) -> bool {
+    pub(crate) fn in_module_typeof(&self) -> bool {
         self.module_typeof_depth > 0
     }
 
     #[inline]
-    pub fn enter_raw_expansion(&mut self) {
+    pub(crate) fn enter_raw_expansion(&mut self) {
         self.raw_template_attr_list_stack.push(None);
     }
 
     #[inline]
-    pub fn exit_raw_expansion(&mut self) {
+    pub(crate) fn exit_raw_expansion(&mut self) {
         self.raw_template_attr_list_stack.pop();
     }
 
     #[inline]
-    pub fn in_raw_expansion(&self) -> bool {
+    pub(crate) fn in_raw_expansion(&self) -> bool {
         !self.raw_template_attr_list_stack.is_empty()
     }
 
     #[inline]
-    pub fn raw_template_attr_list(&self) -> Option<u32> {
+    pub(crate) fn raw_template_attr_list(&self) -> Option<u32> {
         self.raw_template_attr_list_stack.last().copied().flatten()
     }
 
     #[inline]
-    pub fn set_raw_template_attr_list(&mut self, obj_idx: u32) {
+    pub(crate) fn set_raw_template_attr_list(&mut self, obj_idx: u32) {
         if let Some(slot) = self.raw_template_attr_list_stack.last_mut() {
             if slot.is_none() {
                 *slot = Some(obj_idx);
@@ -581,22 +562,22 @@ impl<'a> MarshalWriter<'a> {
     }
 
     #[inline]
-    pub fn raw_expansion_expr(&self, loc: LocIdx) -> Option<u32> {
+    pub(crate) fn raw_expansion_expr(&self, loc: LocIdx) -> Option<u32> {
         self.raw_expansion_expr_table.get(&loc).copied()
     }
 
     #[inline]
-    pub fn set_raw_expansion_expr(&mut self, loc: LocIdx, obj_idx: u32) {
+    pub(crate) fn set_raw_expansion_expr(&mut self, loc: LocIdx, obj_idx: u32) {
         self.raw_expansion_expr_table.entry(loc).or_insert(obj_idx);
     }
 
     #[inline]
-    pub fn internal_expansive_attr_tuple(&self) -> Option<u32> {
+    pub(crate) fn internal_expansive_attr_tuple(&self) -> Option<u32> {
         self.internal_expansive_attr_tuple
     }
 
     #[inline]
-    pub fn set_internal_expansive_attr_tuple(&mut self, obj_idx: u32) {
+    pub(crate) fn set_internal_expansive_attr_tuple(&mut self, obj_idx: u32) {
         if self.internal_expansive_attr_tuple.is_none() {
             self.internal_expansive_attr_tuple = Some(obj_idx);
         }
@@ -1374,13 +1355,10 @@ impl<'a> MarshalWriter<'a> {
     /// on little-endian systems. Most modern systems are little-endian.
     pub fn write_double(&mut self, f: f64) {
         // Detect endianness at compile time
-        #[cfg(target_endian = "little")]
-        {
+        if cfg!(target_endian = "little") {
             self.write_u8(CODE_DOUBLE_LITTLE);
             self.write_bytes(&f.to_le_bytes());
-        }
-        #[cfg(target_endian = "big")]
-        {
+        } else {
             self.write_u8(CODE_DOUBLE_BIG);
             self.write_bytes(&f.to_be_bytes());
         }
@@ -1486,14 +1464,14 @@ impl<'a> MarshalWriter<'a> {
         self.buffer.len()
     }
 
-    /// Write an Option<String> with content-based sharing.
+    /// Write an `Option<String>` with content-based sharing.
     ///
     /// This enables sharing of common delimiter values like Some("js") that appear
     /// multiple times in the AST. OCaml shares these because they're often the same
     /// pointer (constant values defined at module level).
     ///
     /// - None → integer 0
-    /// - Some(s) → Block(tag=0, [s]) with content-based sharing
+    /// - `Some(s)` → `Block(tag=0, [s])` with content-based sharing
     pub fn write_option_string(&mut self, opt: Option<&str>) {
         let Some(s) = opt else {
             // None is encoded as integer 0, not a block, so no sharing needed
@@ -1597,7 +1575,7 @@ impl<'a> MarshalWriter<'a> {
     /// - `push_arity(Some(n))` for computed paths → different ArityIdx, won't share
     ///
     /// - ArityIdx pointing to None → integer 0 (not shared, always fresh)
-    /// - ArityIdx pointing to Some(n) → Block(tag=0, [n]), shared by ArityIdx
+    /// - ArityIdx pointing to `Some(n)` → `Block(tag=0, [n])`, shared by ArityIdx
     pub fn write_arity_idx(&mut self, idx: ArityIdx) {
         // Get the actual arity value from the arena
         let arity = self.arena.and_then(|arena| arena.get_arity(idx));
@@ -1929,7 +1907,7 @@ mod tests {
         let mut arena = ParseArena::default();
         // Create two different StrIdx with the same content
         let idx1 = arena.intern_string("same");
-        let idx2 = arena.push_string("same".to_string()); // Different idx, same content
+        let idx2 = arena.push_string("same"); // Different idx, same content
 
         let mut w = MarshalWriter::new();
         w.set_arena(&arena);

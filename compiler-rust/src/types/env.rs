@@ -29,6 +29,7 @@ use crate::ident::Ident;
 use crate::location::Location;
 use crate::types::path::PathView;
 use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use crate::name::Name;
@@ -67,7 +68,6 @@ fn free_vars_rec(
             result.insert(ty);
         }
         _ => {
-            drop(desc);
             super::btype::iter_type_expr(ctx, ty, |child| {
                 free_vars_rec(ctx, child, result, visited);
             });
@@ -192,8 +192,11 @@ pub enum EnvError {
     LabelNotFound(SmolStr),
     /// Inconsistent import.
     InconsistentImport {
+        /// The unit imported.
         name: String,
+        /// One interface file it was compiled against.
         source1: String,
+        /// The other, which disagrees.
         source2: String,
     },
     /// Illegal value name.
@@ -247,17 +250,24 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     table
 }
 
+/// The constructors or labels that share a name, with their identifiers.
+type Candidates<T> = Vec<(Ident, Arc<T>)>;
+
+/// `TycompTbl`'s `mk_callback` data for a candidate found in an opened
+/// layer: the layer's slot and the first candidate it hides.
+pub type OpenSlotMark<'a, T> = Option<(u32, Option<&'a T>)>;
+
 /// The layer tables that opening one signature adds to an Env. Built once
 /// and attachable to any number of Envs (see `Env::add_prebuilt_open_layers`).
 #[derive(Debug)]
 pub(crate) struct OpenedLayers {
-    values: Arc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
-    types: Arc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
-    constrs: Arc<OpenedMap<Vec<(Ident, Arc<ConstructorDescription>)>>>,
-    labels: Arc<OpenedMap<Vec<(Ident, Arc<LabelDescription>)>>>,
-    modules: Arc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
-    module_components: Arc<OpenedMap<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>>,
-    modtypes: Arc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
+    values: Rc<OpenedMap<(Ident, Arc<ValueDescription>, i32)>>,
+    types: Rc<OpenedMap<(Ident, Arc<TypeDeclaration>, i32)>>,
+    constrs: Rc<OpenedMap<Candidates<ConstructorDescription>>>,
+    labels: Rc<OpenedMap<Candidates<LabelDescription>>>,
+    modules: Rc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
+    module_components: Rc<OpenedMap<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>>,
+    modtypes: Rc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
 }
 
 impl OpenedLayers {
@@ -268,42 +278,42 @@ impl OpenedLayers {
         constructors: Vec<(Ident, ConstructorDescription)>,
         labels: Vec<(Ident, LabelDescription)>,
         modules: Vec<(Ident, ModuleDeclaration, i32)>,
-        module_components: Vec<(Ident, Arc<super::env_lazy::StoredModuleComponents>, i32)>,
+        module_components: Vec<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>,
         modtypes: Vec<(Ident, ModtypeDeclaration)>,
     ) -> Self {
         OpenedLayers {
-            values: Arc::new(id_open_table(
+            values: Rc::new(id_open_table(
                 values
                     .into_iter()
                     .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
                     .collect(),
             )),
-            types: Arc::new(id_open_table(
+            types: Rc::new(id_open_table(
                 types
                     .into_iter()
                     .map(|(id, decl)| (id, decl, crate::types::path::NOPOS))
                     .collect(),
             )),
-            constrs: Arc::new(tycomp_open_table(
+            constrs: Rc::new(tycomp_open_table(
                 constructors
                     .into_iter()
                     .map(|(id, desc)| (id, Arc::new(desc)))
                     .collect(),
             )),
-            labels: Arc::new(tycomp_open_table(
+            labels: Rc::new(tycomp_open_table(
                 labels
                     .into_iter()
                     .map(|(id, desc)| (id, Arc::new(desc)))
                     .collect(),
             )),
-            modules: Arc::new(id_open_table(
+            modules: Rc::new(id_open_table(
                 modules
                     .into_iter()
                     .map(|(id, decl, pos)| (id, Arc::new(decl), pos))
                     .collect(),
             )),
-            module_components: Arc::new(id_open_table(module_components)),
-            modtypes: Arc::new(id_open_table(
+            module_components: Rc::new(id_open_table(module_components)),
+            modtypes: Rc::new(id_open_table(
                 modtypes
                     .into_iter()
                     .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
@@ -333,8 +343,8 @@ struct IdOpened<T> {
     /// The open's root path, one block shared by every lookup through the
     /// open and by all the tables it opens (env.ml `add_components`).
     root: Option<Arc<Path>>,
-    components: Arc<OpenedMap<(Ident, T, i32)>>,
-    next: Arc<IdTbl<T>>,
+    components: Rc<OpenedMap<(Ident, T, i32)>>,
+    next: Rc<IdTbl<T>>,
     /// The open's `using` callback (OCaml `IdTbl.opened.using`), as a slot
     /// registered with the type checker.
     slot: Option<u32>,
@@ -344,10 +354,15 @@ struct IdOpened<T> {
 /// argument of `Env.lookup`, or the table `lookup_module{,_descr}` reads).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OpenLookupKind {
+    /// The value table.
     Value,
+    /// The type table.
     Type,
+    /// The module table, read for a module's declaration.
     Module,
+    /// The module component table, read for a module's components.
     Component,
+    /// The module type table.
     Modtype,
 }
 
@@ -490,6 +505,83 @@ fn ident_tbl_fold_name_order<'a>(names: impl Iterator<Item = (&'a str, i32)>) ->
     order
 }
 
+/// The persistent map of one layer of an Env table. It allocates nothing
+/// until its first insertion: every `open` starts a new layer in each of the
+/// environment's tables, most layers never get a binding of their own, and
+/// an empty persistent map still owns a root node and a hasher.
+#[derive(Clone)]
+struct LayerMap<K, V>(Option<PersistentHashMap<K, V>>);
+
+impl<K, V> std::fmt::Debug for LayerMap<K, V>
+where
+    K: std::fmt::Debug + std::hash::Hash + Eq,
+    V: std::fmt::Debug,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.0 {
+            Some(map) => map.fmt(f),
+            None => f.write_str("{}"),
+        }
+    }
+}
+
+impl<K, V> Default for LayerMap<K, V> {
+    fn default() -> Self {
+        LayerMap(None)
+    }
+}
+
+impl<K: std::hash::Hash + Eq + Clone, V: Clone> LayerMap<K, V> {
+    #[inline]
+    fn is_empty(&self) -> bool {
+        self.0.as_ref().is_none_or(|map| map.is_empty())
+    }
+
+    fn len(&self) -> usize {
+        self.0.as_ref().map_or(0, |map| map.len())
+    }
+
+    #[inline]
+    fn get(&self, key: &K) -> Option<&V> {
+        self.0.as_ref()?.get(key)
+    }
+
+    #[inline]
+    fn contains_key(&self, key: &K) -> bool {
+        self.0.as_ref().is_some_and(|map| map.contains_key(key))
+    }
+
+    fn get_mut(&mut self, key: &K) -> Option<&mut V> {
+        self.0.as_mut()?.get_mut(key)
+    }
+
+    fn insert(&mut self, key: K, value: V) {
+        self.0.get_or_insert_with(Default::default).insert(key, value);
+    }
+
+    fn iter(&self) -> impl Iterator<Item = (&K, &V)> {
+        self.0.iter().flat_map(|map| map.iter())
+    }
+
+    fn keys(&self) -> impl Iterator<Item = &K> {
+        self.iter().map(|(key, _)| key)
+    }
+
+    fn values(&self) -> impl Iterator<Item = &V> {
+        self.iter().map(|(_, value)| value)
+    }
+
+    /// Whether both are the same map, sharing every node.
+    #[cfg(test)]
+    fn ptr_eq(&self, other: &Self) -> bool {
+        match (&self.0, &other.0) {
+            (Some(left), Some(right)) => left.ptr_eq(right),
+            (None, None) => true,
+            _ => false,
+        }
+    }
+}
+
 /// Same-name bindings in an Env table, oldest first. Most names are bound
 /// once, so a single binding is stored inline; a name bound again moves its
 /// bindings to a shared vector, so copying a persistent-map node on insert
@@ -530,26 +622,121 @@ impl<T> std::ops::Deref for IdBucket<T> {
     }
 }
 
+/// A binding added to an `IdTbl` since its map was last extended, heading
+/// the list of the bindings added before it.
+#[derive(Debug)]
+struct Recent<T> {
+    id: Ident,
+    value: T,
+    next: Option<std::rc::Rc<Recent<T>>>,
+    /// Bindings in the list headed by this one.
+    len: u32,
+    /// One bit per name bound in the list headed by this one (see
+    /// `recent_name_bit`): a lookup of a name whose bit is clear skips the
+    /// list.
+    names: u64,
+}
+
+/// How many bindings an `IdTbl` keeps in its recent list before moving them
+/// into its map. Larger batches copy the map less often but make every
+/// lookup of a listed name walk further; 16 measured best of 8 to 64 on a
+/// 3,735-module application.
+const RECENT_LIMIT: u32 = 16;
+
+#[inline]
+fn recent_name_bit(name: Name) -> u64 {
+    1 << (name.content_hash() & 63)
+}
+
 /// A table of bindings indexed by identifier.
 ///
 /// This matches OCaml `Env.IdTbl`: local bindings live in `current`, and each
 /// open is represented symbolically as an `opened` layer rather than flattening
 /// every opened binding into the same name map with an origin boolean.
+///
+/// The local bindings are a persistent map plus the list of the bindings
+/// added since the map was last extended, newest first. Every snapshot of an
+/// environment keeps its version of the table alive, and adding to a shared
+/// map copies whole map nodes, which the snapshot then holds until the module
+/// is torn down. Adding to the list allocates one small node instead; the
+/// list is moved into the map once it holds `RECENT_LIMIT` bindings, so the
+/// map is copied once per batch. Every reader looks in the list first.
 #[derive(Debug, Clone)]
 pub struct IdTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
-    opened: Option<Arc<IdOpened<T>>>,
+    current: LayerMap<Name, IdBucket<T>>,
+    recent: Option<std::rc::Rc<Recent<T>>>,
+    opened: Option<Rc<IdOpened<T>>>,
 }
 
 impl<T: Clone> IdTbl<T> {
+    /// An empty table.
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            recent: None,
             opened: None,
         }
     }
 
+    /// Bind `id` to `value`, shadowing earlier bindings of its name.
     pub fn add(&mut self, id: Ident, value: T) {
+        let (len, names) = self
+            .recent
+            .as_ref()
+            .map_or((0, 0), |recent| (recent.len, recent.names));
+        self.recent = Some(std::rc::Rc::new(Recent {
+            names: names | recent_name_bit(id.name_atom()),
+            len: len + 1,
+            id,
+            value,
+            next: self.recent.take(),
+        }));
+        if len + 1 >= RECENT_LIMIT {
+            self.move_recent_to_map();
+        }
+    }
+
+    /// Move the recent bindings into the map, oldest first.
+    fn move_recent_to_map(&mut self) {
+        let mut next = self.recent.take();
+        let mut newest_first = Vec::with_capacity(next.as_ref().map_or(0, |r| r.len as usize));
+        while let Some(node) = next {
+            // A snapshot may still hold the list; then copy the binding out.
+            match std::rc::Rc::try_unwrap(node) {
+                Ok(node) => {
+                    newest_first.push((node.id, node.value));
+                    next = node.next;
+                }
+                Err(node) => {
+                    newest_first.push((node.id, node.value.clone()));
+                    next = node.next.clone();
+                }
+            }
+        }
+        for (id, value) in newest_first.into_iter().rev() {
+            self.add_to_map(id, value);
+        }
+    }
+
+    /// The recent bindings of `key`, newest first.
+    #[inline]
+    fn recent_named(&self, key: Name) -> impl Iterator<Item = (&Ident, &T)> {
+        let bit = recent_name_bit(key);
+        let has_name = move |node: &&Recent<T>| node.names & bit != 0;
+        std::iter::successors(self.recent.as_deref().filter(has_name), move |node| {
+            node.next.as_deref().filter(has_name)
+        })
+        .filter(move |node| node.id.name_atom() == key)
+        .map(|node| (&node.id, &node.value))
+    }
+
+    /// Every recent binding, newest first.
+    fn recent_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
+        std::iter::successors(self.recent.as_deref(), |node| node.next.as_deref())
+            .map(|node| (&node.id, &node.value))
+    }
+
+    fn add_to_map(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         // `get_mut` copies the shared map path even when the key is absent,
         // so probe first: most added names are new.
@@ -562,20 +749,22 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// Add the components of an opened module, rooted at `root`, as a new
+    /// layer; `slot` identifies the open for unused-open warnings.
     pub fn add_open_layer(
         &mut self,
         root: Path,
         components: Vec<(Ident, T, i32)>,
         slot: Option<u32>,
     ) {
-        self.add_open_layer_table(Arc::new(root), Arc::new(id_open_table(components)), slot);
+        self.add_open_layer_table(Arc::new(root), Rc::new(id_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
         root: Arc<Path>,
-        components: Arc<OpenedMap<(Ident, T, i32)>>,
+        components: Rc<OpenedMap<(Ident, T, i32)>>,
         slot: Option<u32>,
     ) {
         if components.is_empty() {
@@ -583,11 +772,12 @@ impl<T: Clone> IdTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
-            opened: Some(Arc::new(IdOpened {
+            current: LayerMap::default(),
+            recent: None,
+            opened: Some(Rc::new(IdOpened {
                 root: Some(root),
                 components,
-                next: Arc::new(next),
+                next: Rc::new(next),
                 slot,
             })),
         };
@@ -602,10 +792,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn open_slot_use_by_key(&self, key: Name) -> Option<OpenSlotUse> {
-        if self
-            .current
-            .get(&key)
-            .is_some_and(|entries| !entries.is_empty())
+        if self.recent_named(key).next().is_some()
+            || self
+                .current
+                .get(&key)
+                .is_some_and(|entries| !entries.is_empty())
         {
             return None;
         }
@@ -620,23 +811,30 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_current_by_ident(&self, id: &Ident) -> Option<&T> {
+        let stamp = id.stamp();
+        let is_id = |entry_id: &Ident| {
+            if stamp == 0 {
+                entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
+            } else {
+                entry_id.same(id) && entry_id.name_atom() == id.name_atom()
+            }
+        };
+        if let Some((_, value)) = self
+            .recent_named(id.name_atom())
+            .find(|(entry_id, _)| is_id(entry_id))
+        {
+            return Some(value);
+        }
         // Opening a module starts a fresh, usually empty, local layer; skip
         // hashing the name for those.
         if self.current.is_empty() {
             return None;
         }
-        let stamp = id.stamp();
         self.current.get(&id.name_atom()).and_then(|entries| {
             entries
                 .iter()
                 .rev()
-                .find(|(entry_id, _)| {
-                    if stamp == 0 {
-                        entry_id.is_persistent() && entry_id.name_atom() == id.name_atom()
-                    } else {
-                        entry_id.same(id) && entry_id.name_atom() == id.name_atom()
-                    }
-                })
+                .find(|(entry_id, _)| is_id(entry_id))
                 .map(|(_, value)| value)
         })
     }
@@ -646,6 +844,9 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn find_name_entry_key(&self, key: Name) -> Option<(&Ident, &T)> {
+        if let Some(found) = self.recent_named(key).next() {
+            return Some(found);
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -662,19 +863,25 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// The innermost binding of `name`.
     pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
         self.find_name_entry(name).map(|(_, value)| value)
     }
 
+    /// The innermost binding of `name`, with its identifier.
     pub fn find_by_name_with_id(&self, name: impl crate::name::NameKey) -> Option<(&Ident, &T)> {
         self.find_name_entry(name)
     }
 
+    /// The innermost binding of `name`, with its path.
     pub fn find_by_name_with_path(&self, name: impl crate::name::NameKey) -> Option<(Path, &T)> {
         self.find_by_key_with_path(name.name_key()?)
     }
 
     fn find_by_key_with_path(&self, key: Name) -> Option<(Path, &T)> {
+        if let Some((id, value)) = self.recent_named(key).next() {
+            return Some((Path::pident(*id), value));
+        }
         if !self.current.is_empty()
             && let Some((id, value)) = self.current.get(&key).and_then(|entries| entries.last())
         {
@@ -712,10 +919,13 @@ impl<T: Clone> IdTbl<T> {
             .and_then(|opened| opened.next.find_by_ident(id))
     }
 
+    /// The local binding of exactly `id`.
     pub fn find_local_by_ident(&self, id: &Ident) -> Option<&T> {
         self.find_by_ident(id)
     }
 
+    /// Replace the innermost binding of `name` by `f` of it, returning the new
+    /// binding.
     pub fn update_by_name<F>(&mut self, name: &str, f: &mut F) -> Option<(Ident, T)>
     where
         F: FnMut(&T) -> T,
@@ -727,6 +937,10 @@ impl<T: Clone> IdTbl<T> {
     where
         F: FnMut(&T) -> T,
     {
+        // The map holds the bindings that can be changed in place.
+        if self.recent_named(key).next().is_some() {
+            self.move_recent_to_map();
+        }
         if self.current.contains_key(&key)
             && let Some(entries) = self.current.get_mut(&key)
             && let Some((id, value)) = entries.last_mut()
@@ -737,18 +951,19 @@ impl<T: Clone> IdTbl<T> {
         }
 
         if let Some(opened) = self.opened.as_mut() {
-            let opened = Arc::make_mut(opened);
-            if let Some((id, value, _)) = Arc::make_mut(&mut opened.components).get_mut(&key) {
+            let opened = Rc::make_mut(opened);
+            if let Some((id, value, _)) = Rc::make_mut(&mut opened.components).get_mut(&key) {
                 let updated = f(value);
                 *value = updated.clone();
                 return Some((*id, updated));
             }
-            return Arc::make_mut(&mut opened.next).update_by_key(key, f);
+            return Rc::make_mut(&mut opened.next).update_by_key(key, f);
         }
 
         None
     }
 
+    /// Every binding of `name`, innermost first.
     pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
         if let Some(key) = name.name_key() {
@@ -758,6 +973,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_all_key<'a>(&'a self, key: Name, items: &mut Vec<&'a T>) {
+        items.extend(self.recent_named(key).map(|(_, value)| value));
         if let Some(entries) = self.current.get(&key) {
             items.extend(entries.iter().rev().map(|(_, value)| value));
         }
@@ -769,10 +985,12 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// Whether `name` is bound.
     pub fn contains(&self, name: impl crate::name::NameKey) -> bool {
         self.find_by_name(name).is_some()
     }
 
+    /// Every binding in the table.
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
@@ -780,6 +998,7 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_iter<'a>(&'a self, items: &mut Vec<(&'a Ident, &'a T)>) {
+        items.extend(self.recent_entries());
         for entries in self.current.values() {
             items.extend(entries.iter().map(|(id, value)| (id, value)));
         }
@@ -799,7 +1018,11 @@ impl<T: Clone> IdTbl<T> {
     }
 
     fn collect_fold_name_order<'a>(&'a self, names: &mut Vec<&'a str>) {
-        names.extend(ident_tbl_fold_name_order(self.current.iter().map(
+        // Read the local layer as one map, so the names come out in the
+        // order they would without a recent list.
+        let mut local = self.clone();
+        local.move_recent_to_map();
+        names.extend(ident_tbl_fold_name_order(local.current.iter().map(
             |(name, entries)| {
                 (
                     name.as_str(),
@@ -816,6 +1039,8 @@ impl<T: Clone> IdTbl<T> {
         }
     }
 
+    /// The local bindings that neither a later local binding nor an open
+    /// shadows.
     pub fn visible_local_entries(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut seen = HashSet::new();
         let mut shadowing_opens = Vec::new();
@@ -834,12 +1059,18 @@ impl<T: Clone> IdTbl<T> {
         shadowing_opens: &mut Vec<&'a OpenedMap<(Ident, T, i32)>>,
         items: &mut Vec<(&'a Ident, &'a T)>,
     ) {
-        for (name, entries) in self.current.iter() {
+        // Newest first, so the first binding seen for a name is its latest.
+        let recent = self.recent_entries();
+        let mapped = self
+            .current
+            .values()
+            .filter_map(|entries| entries.last().map(|(id, value)| (id, value)));
+        for (id, value) in recent.chain(mapped) {
+            let name = id.name_atom();
             if !shadowing_opens
                 .iter()
-                .any(|opened| opened.contains_key(name))
-                && seen.insert(*name)
-                && let Some((id, value)) = entries.last()
+                .any(|opened| opened.contains_key(&name))
+                && seen.insert(name)
             {
                 items.push((id, value));
             }
@@ -861,8 +1092,8 @@ impl<T: Clone> Default for IdTbl<T> {
 
 #[derive(Debug, Clone)]
 struct TycompOpened<T> {
-    components: Arc<OpenedMap<Vec<(Ident, T)>>>,
-    next: Arc<TycompTbl<T>>,
+    components: Rc<OpenedMap<Vec<(Ident, T)>>>,
+    next: Rc<TycompTbl<T>>,
     /// The open's `using` callback slot.
     slot: Option<u32>,
 }
@@ -874,22 +1105,24 @@ struct TycompOpened<T> {
 /// as lists.
 #[derive(Debug, Clone)]
 pub struct TycompTbl<T> {
-    current: PersistentHashMap<Name, IdBucket<T>>,
+    current: LayerMap<Name, IdBucket<T>>,
     /// Order in which each name of `current` was first added: the `Ident.add`
     /// sequence that shapes OCaml's AVL tree (compiler/ext/ident.ml:144-150).
-    current_first_add: PersistentHashMap<Name, i32>,
-    opened: Option<Arc<TycompOpened<T>>>,
+    current_first_add: LayerMap<Name, i32>,
+    opened: Option<Rc<TycompOpened<T>>>,
 }
 
 impl<T: Clone> TycompTbl<T> {
+    /// An empty table.
     pub fn new() -> Self {
         Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
             opened: None,
         }
     }
 
+    /// Bind `id` to `value`, shadowing earlier bindings of its name.
     pub fn add(&mut self, id: Ident, value: T) {
         let key = id.name_atom();
         if self.current.contains_key(&key)
@@ -903,14 +1136,16 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// Add the components of an opened module as a new layer; `slot`
+    /// identifies the open for unused-open warnings.
     pub fn add_open_layer(&mut self, components: Vec<(Ident, T)>, slot: Option<u32>) {
-        self.add_open_layer_table(Arc::new(tycomp_open_table(components)), slot);
+        self.add_open_layer_table(Rc::new(tycomp_open_table(components)), slot);
     }
 
     /// Open a prebuilt layer table (possibly shared with other Envs).
     fn add_open_layer_table(
         &mut self,
-        components: Arc<OpenedMap<Vec<(Ident, T)>>>,
+        components: Rc<OpenedMap<Vec<(Ident, T)>>>,
         slot: Option<u32>,
     ) {
         if components.is_empty() {
@@ -918,16 +1153,17 @@ impl<T: Clone> TycompTbl<T> {
         }
         let next = std::mem::take(self);
         *self = Self {
-            current: PersistentHashMap::default(),
-            current_first_add: PersistentHashMap::default(),
-            opened: Some(Arc::new(TycompOpened {
+            current: LayerMap::default(),
+            current_first_add: LayerMap::default(),
+            opened: Some(Rc::new(TycompOpened {
                 components,
-                next: Arc::new(next),
+                next: Rc::new(next),
                 slot,
             })),
         };
     }
 
+    /// The innermost binding of `name`.
     pub fn find_by_name(&self, name: impl crate::name::NameKey) -> Option<&T> {
         self.find_by_key(name.name_key()?)
     }
@@ -949,6 +1185,8 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// The innermost binding of `name`, with its identifier and whether it is
+    /// local rather than opened.
     pub fn find_by_name_with_origin(
         &self,
         name: impl crate::name::NameKey,
@@ -971,6 +1209,7 @@ impl<T: Clone> TycompTbl<T> {
         }
     }
 
+    /// The binding of exactly `id`.
     pub fn find_by_ident(&self, id: &Ident) -> Option<&T> {
         let stamp = id.stamp();
         if !self.current.is_empty()
@@ -995,6 +1234,7 @@ impl<T: Clone> TycompTbl<T> {
             .and_then(|opened| opened.next.find_by_ident(id))
     }
 
+    /// Every binding of `name`, innermost first.
     pub fn find_all(&self, name: impl crate::name::NameKey) -> Vec<&T> {
         let mut items = Vec::new();
         if let Some(key) = name.name_key() {
@@ -1020,8 +1260,8 @@ impl<T: Clone> TycompTbl<T> {
     pub fn find_all_marking(
         &self,
         name: impl crate::name::NameKey,
-    ) -> Vec<(&T, Option<(u32, Option<&T>)>)> {
-        let mut items: Vec<(&T, Option<(u32, Option<&T>)>)> = Vec::new();
+    ) -> Vec<(&T, OpenSlotMark<'_, T>)> {
+        let mut items: Vec<(&T, OpenSlotMark<'_, T>)> = Vec::new();
         let Some(key) = name.name_key() else {
             return items;
         };
@@ -1057,6 +1297,7 @@ impl<T: Clone> TycompTbl<T> {
         items
     }
 
+    /// Every binding in the table.
     pub fn iter(&self) -> impl Iterator<Item = (&Ident, &T)> {
         let mut items = Vec::new();
         self.collect_iter(&mut items);
@@ -1204,7 +1445,7 @@ struct EnvData {
 
     /// Lazily-forced qualified component views for local module bindings.
     /// This mirrors OCaml's `env.components` table for local `Pident` paths.
-    module_components: IdTbl<Arc<super::env_lazy::StoredModuleComponents>>,
+    module_components: IdTbl<Rc<super::env_lazy::StoredModuleComponents>>,
 
     /// Module type bindings.
     modtypes: IdTbl<Arc<ModtypeDeclaration>>,
@@ -1354,7 +1595,7 @@ impl Env {
         name: &str,
     ) -> Vec<(
         &ConstructorDescription,
-        Option<(u32, Option<&ConstructorDescription>)>,
+        OpenSlotMark<'_, ConstructorDescription>,
     )> {
         self.data
             .constrs
@@ -1373,7 +1614,7 @@ impl Env {
     pub(crate) fn find_all_labels_marking(
         &self,
         name: &str,
-    ) -> Vec<(&LabelDescription, Option<(u32, Option<&LabelDescription>)>)> {
+    ) -> Vec<(&LabelDescription, OpenSlotMark<'_, LabelDescription>)> {
         self.data
             .labels
             .find_all_marking(name)
@@ -1475,7 +1716,7 @@ impl Env {
                 .filter_map(|(id, decl)| match &decl.md_type {
                     ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
                         let target = decl.md_type.ident_or_alias_path().unwrap();
-                        Some((*id, target.clone()))
+                        Some((*id, *target))
                     }
                     _ => None,
                 })
@@ -1998,7 +2239,7 @@ impl Env {
         parent_context: Option<(Path, Arc<Signature>)>,
     ) {
         let seed_env = self.clone_preserve_id();
-        let stored_components = Arc::new(
+        let stored_components = Rc::new(
             super::env_lazy::StoredModuleComponents::new_with_parent_context(
                 seed_env,
                 component_path,
@@ -2180,16 +2421,16 @@ impl Env {
         Some(f(components.as_ref()))
     }
 
-    pub(crate) fn local_module_components_arc(
+    pub(crate) fn local_module_components_shared(
         &self,
         path: &Path,
-    ) -> Option<Arc<super::env_lazy::StoredModuleComponents>> {
+    ) -> Option<Rc<super::env_lazy::StoredModuleComponents>> {
         let PathView::Pident(id) = path.view() else {
             return None;
         };
         // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
         // component table and shares the forced lazy value. Return the stored
-        // Arc directly so child component maps keep the same thunk instead of
+        // Rc directly so child component maps keep the same thunk instead of
         // deep-cloning its captured seed environment.
         self.data.module_components.find_by_ident(id).cloned()
     }
@@ -2258,7 +2499,7 @@ impl Env {
     /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
     /// keeps its suffix string; an unchanged `Pident` is returned itself.
     pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
-        Path::clone(&self.normalize_shared_path(ctx, &Arc::new(path.clone()), 0))
+        *self.normalize_shared_path(ctx, &Arc::new(*path), 0)
     }
 
     /// Normalize the prefix of a value/extension path by following module aliases.
@@ -2587,7 +2828,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                 }
             }
             TypeKind::TypeRecord(labels, _) => {
-                let res_ty = ctx.new_generic_constr(type_path.clone(), decl.type_params.clone());
+                let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
                 // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
                 for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
                     res_ty, &decl, decl.type_private, ctx, |_| {},
@@ -2992,6 +3233,179 @@ mod tests {
                 "predef declarations live in the worker store"
             );
         }
+    }
+
+    /// Everything a reader can ask an `IdTbl`, in a comparable form.
+    fn id_tbl_readings(tbl: &IdTbl<i32>, names: &[&str], ids: &[Ident]) -> Vec<String> {
+        let mut readings = Vec::new();
+        for name in names {
+            readings.push(format!(
+                "{name}: {:?} {:?} {:?} {:?}",
+                tbl.find_by_name_with_id(*name),
+                tbl.find_by_name_with_path(*name),
+                tbl.find_all(*name),
+                tbl.open_slot_use(*name),
+            ));
+        }
+        for id in ids {
+            readings.push(format!("{id:?}: {:?}", tbl.find_by_ident(id)));
+        }
+        let mut all: Vec<_> = tbl.iter().map(|(id, value)| (id.stamp(), *value)).collect();
+        all.sort_unstable();
+        readings.push(format!("all: {all:?}"));
+        let mut visible: Vec<_> = tbl
+            .visible_local_entries()
+            .map(|(id, value)| (id.stamp(), *value))
+            .collect();
+        visible.sort_unstable();
+        readings.push(format!("visible: {visible:?}"));
+        readings.push(format!("fold order: {:?}", tbl.fold_name_order()));
+        readings
+    }
+
+    #[test]
+    fn recent_bindings_read_like_map_bindings() {
+        let names = ["a", "b", "c", "d", "e", "f", "g", "opened", "missing"];
+        // `listed` adds through the recent list, `mapped` straight to the map.
+        let mut listed = IdTbl::new();
+        let mut mapped = IdTbl::new();
+        let mut ids = vec![Ident::create_local("missing")];
+        let steps = 3 * RECENT_LIMIT as usize + 5;
+        for step in 0..steps {
+            if step == RECENT_LIMIT as usize + 3 {
+                // An open in the middle of a batch: the bindings before it
+                // stay readable below the opened layer.
+                let root = Path::pident(Ident::create_persistent("Opened"));
+                for tbl in [&mut listed, &mut mapped] {
+                    let components = vec![
+                        (Ident::create_persistent("opened"), -1, 0),
+                        (Ident::create_persistent("a"), -2, 1),
+                    ];
+                    tbl.add_open_layer(root, components, Some(7));
+                }
+            }
+            // Rebind a few names many times, in an irregular order.
+            let id = Ident::create_local(names[(step * 5 + step / 4) % 7]);
+            ids.push(id);
+            listed.add(id, step as i32);
+            mapped.add_to_map(id, step as i32);
+            assert_eq!(
+                id_tbl_readings(&listed, &names, &ids),
+                id_tbl_readings(&mapped, &names, &ids),
+                "after {} additions",
+                step + 1
+            );
+        }
+        assert!(
+            mapped.recent.is_none() && listed.recent.is_some(),
+            "the comparison must end with bindings still in the list"
+        );
+    }
+
+    #[test]
+    fn adding_to_a_table_leaves_a_snapshot_and_its_map_alone() {
+        let mut tbl = IdTbl::new();
+        let first = Ident::create_local("x");
+        tbl.add(first, 1);
+        tbl.move_recent_to_map();
+        let snapshot = tbl.clone();
+
+        let second = Ident::create_local("x");
+        tbl.add(second, 2);
+        tbl.add(Ident::create_local("y"), 3);
+        assert!(
+            tbl.current.ptr_eq(&snapshot.current),
+            "a binding added after a snapshot must not copy the map"
+        );
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_by_ident(&first), Some(&1));
+        assert_eq!(snapshot.find_by_name_with_id("x"), Some((&first, &1)));
+        assert_eq!(snapshot.find_by_name("y"), None);
+
+        // Filling the batch moves it into the table's own copy of the map.
+        for n in 0..RECENT_LIMIT {
+            tbl.add(Ident::create_local("z"), 10 + n as i32);
+        }
+        assert!(!tbl.current.ptr_eq(&snapshot.current));
+        assert_eq!(tbl.find_by_name_with_id("x"), Some((&second, &2)));
+        assert_eq!(tbl.find_all("x"), vec![&2, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&1]);
+        assert_eq!(snapshot.find_by_name("z"), None);
+    }
+
+    #[test]
+    fn a_table_layer_has_no_map_until_a_binding_is_moved_into_it() {
+        let mut values: IdTbl<i32> = IdTbl::new();
+        assert!(values.current.0.is_none());
+        let first = Ident::create_local("x");
+        values.add(first, 1);
+        assert!(
+            values.current.0.is_none(),
+            "a recent binding needs no map"
+        );
+        for n in 1..RECENT_LIMIT {
+            values.add(Ident::create_local("y"), n as i32);
+        }
+        assert!(values.current.0.is_some());
+        assert_eq!(values.current.len(), 2);
+
+        // An open starts a new layer, which again has no map; the layer
+        // below keeps its own.
+        let root = Path::pident(Ident::create_persistent("Opened"));
+        values.add_open_layer(root, vec![(Ident::create_persistent("z"), 7, 0)], None);
+        assert!(values.current.0.is_none() && values.current.is_empty());
+        assert_eq!(values.find_by_name("x"), Some(&1));
+        assert_eq!(values.find_by_ident(&first), Some(&1));
+        assert_eq!(values.find_by_name("z"), Some(&7));
+        // Every binding of both layers: `x`, each `y` and the opened `z`.
+        assert_eq!(values.iter().count(), RECENT_LIMIT as usize + 1);
+
+        let mut labels: TycompTbl<i32> = TycompTbl::new();
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), None);
+        assert!(labels.fold_name_order().is_empty());
+        labels.add(Ident::create_local("l"), 1);
+        assert!(labels.current.0.is_some() && labels.current_first_add.0.is_some());
+        labels.add_open_layer(vec![(Ident::create_persistent("m"), 2)], None);
+        assert!(labels.current.0.is_none() && labels.current_first_add.0.is_none());
+        assert_eq!(labels.find_by_name("l"), Some(&1));
+        assert_eq!(labels.find_all("m"), vec![&2]);
+    }
+
+    #[test]
+    fn updating_a_recent_binding_leaves_a_snapshot_alone() {
+        let mut tbl = IdTbl::new();
+        tbl.add(Ident::create_local("x"), 1);
+        let id = Ident::create_local("x");
+        tbl.add(id, 2);
+        let snapshot = tbl.clone();
+
+        let updated = tbl.update_by_name("x", &mut |value| value * 10);
+        assert_eq!(updated, Some((id, 20)));
+        assert_eq!(tbl.find_all("x"), vec![&20, &1]);
+        assert_eq!(snapshot.find_all("x"), vec![&2, &1]);
+        assert_eq!(tbl.update_by_name("unbound", &mut |value| *value), None);
+    }
+
+    #[test]
+    fn opened_table_updates_preserve_shared_snapshots() {
+        let root = Path::pident(Ident::create_persistent("M"));
+        let mut table = IdTbl::new();
+        table.add_open_layer(root, vec![(Ident::create_local("x"), 1, 0)], None);
+        table.add_open_layer(root, vec![(Ident::create_local("y"), 2, 0)], None);
+        let snapshot = table.clone();
+        assert!(Rc::ptr_eq(
+            table.opened.as_ref().unwrap(),
+            snapshot.opened.as_ref().unwrap(),
+        ));
+
+        // Exercise copy-on-write both in the newest layer and through `next`.
+        assert!(table.update_by_name("y", &mut |value| value + 10).is_some());
+        assert!(table.update_by_name("x", &mut |value| value + 10).is_some());
+        assert_eq!(table.find_by_name("x"), Some(&11));
+        assert_eq!(table.find_by_name("y"), Some(&12));
+        assert_eq!(snapshot.find_by_name("x"), Some(&1));
+        assert_eq!(snapshot.find_by_name("y"), Some(&2));
     }
 
     #[test]

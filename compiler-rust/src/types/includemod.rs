@@ -36,6 +36,9 @@ use crate::parser::code_frame;
 /// Result type for inclusion checking.
 pub type IncludeModResult<T> = Result<T, IncludeModError>;
 
+// Keep the error of every inclusion-check `Result` small; box declarations.
+const _: () = assert!(std::mem::size_of::<IncludeModError>() <= 64);
+
 /// `Builtin_attributes.check_deprecated_inclusion`
 /// (builtin_attributes.ml:119-122): `deprecated_of_attrs` of both sides,
 /// whose `string_of_opt_payload` reads the record form as `""` and raises
@@ -117,47 +120,68 @@ pub enum IncludeModError {
     /// A `@deprecated` payload with an invalid escape: its reader's
     /// `Location.Error` (ast_payload.ml:39-51), which escapes inclusion
     /// checking.
-    InvalidStringEscape { loc: crate::types::DeclLoc },
+    InvalidStringEscape {
+        /// The payload's location.
+        loc: crate::types::DeclLoc,
+    },
     /// `Dont_match` (includemod.ml): the module types do not match, which
     /// the enclosing `modtypes` reports as their `Module_types` entry.
     DontMatch,
     /// `Missing_field (id, loc, kind, item)`: an expected item the
     /// implementation lacks.
     MissingField {
+        /// The missing item.
         id: Ident,
+        /// Where the signature declares it.
         loc: crate::types::DeclLoc,
+        /// What kind of item it is, as printed (e.g. "value", "type").
         kind: &'static str,
-        item: SignatureItem,
+        /// The signature's item.
+        item: Box<SignatureItem>,
     },
     /// `Value_descriptions (id, vd1, vd2)`.
     ValueTypeMismatch {
+        /// The value.
         name: Ident,
-        actual: ValueDescription,
-        expected: ValueDescription,
-        /// `find_arity_mismatch env vd1.val_type vd2.val_type`.
+        /// The implementation's declaration.
+        actual: Box<ValueDescription>,
+        /// The signature's declaration.
+        expected: Box<ValueDescription>,
+        /// `find_arity_mismatch env vd1.val_type vd2.val_type`: the
+        /// implementation's and the signature's arity, when they differ.
         arity_mismatch: Option<(usize, usize)>,
     },
     /// `Type_declarations (id, decl1, decl2, errs)`.
     TypeDeclarationMismatch {
+        /// The type.
         name: Ident,
-        actual: TypeDeclaration,
-        expected: TypeDeclaration,
+        /// The implementation's declaration.
+        actual: Box<TypeDeclaration>,
+        /// The signature's declaration.
+        expected: Box<TypeDeclaration>,
         /// `Includecore.type_declarations`'s differences, never empty.
         errs: Vec<TypeMismatch>,
     },
     /// `Extension_constructors (id, ext1, ext2)`.
     ExtensionConstructorMismatch {
+        /// The constructor.
         name: Ident,
-        actual: ExtensionConstructor,
-        expected: ExtensionConstructor,
+        /// The implementation's constructor.
+        actual: Box<ExtensionConstructor>,
+        /// The signature's constructor.
+        expected: Box<ExtensionConstructor>,
     },
     /// `Modtype_infos (id, info1, info2)` before the errors of the
     /// equivalence check (includemod.ml `modtype_infos`); `expected` is
     /// `Subst.modtype_declaration subst info2`.
     ModuleTypeDeclarationMismatch {
+        /// The module type.
         name: Ident,
-        actual: ModtypeDeclaration,
-        expected: ModtypeDeclaration,
+        /// The implementation's declaration.
+        actual: Box<ModtypeDeclaration>,
+        /// The signature's declaration.
+        expected: Box<ModtypeDeclaration>,
+        /// Why they are not equivalent.
         error: Box<IncludeModError>,
     },
     /// `Modtype_permutation`.
@@ -166,36 +190,53 @@ pub enum IncludeModError {
     /// the comparison (includemod.ml `modtypes`); a `DontMatch` error
     /// stands for none.
     ModuleTypesMismatch {
+        /// The implementation's module type.
         actual: Box<ModuleType>,
+        /// The signature's module type.
         expected: Box<ModuleType>,
+        /// Why the first is not included in the second.
         error: Box<IncludeModError>,
     },
     /// `Unbound_module_path path`.
-    UnboundModulePath { path: Path },
+    UnboundModulePath {
+        /// The normalized path.
+        path: Path,
+    },
     /// The errors under `Module id`.
     InModule {
+        /// The module.
         name: Ident,
+        /// The error inside it.
         error: Box<IncludeModError>,
     },
     /// The errors under `Body param`, a functor's result.
     InFunctorBody {
+        /// The functor's parameter.
         param: Ident,
+        /// The error in the result.
         error: Box<IncludeModError>,
     },
     /// The errors under `Arg param`, a functor's parameter, where inclusion
     /// goes the other way.
     InFunctorArg {
+        /// The functor's parameter.
         param: Ident,
+        /// The error in the parameter.
         error: Box<IncludeModError>,
     },
     /// The errors under `Modtype id`.
     AtModtype {
+        /// The module type.
         name: Ident,
+        /// The error inside it.
         error: Box<IncludeModError>,
     },
     /// The errors under `Reverse`: the second half of an equivalence check
     /// of module types, compared the other way round.
-    Reversed { error: Box<IncludeModError> },
+    Reversed {
+        /// The error in the reversed check.
+        error: Box<IncludeModError>,
+    },
     /// Several errors at the same position, in order.
     SignatureMismatch(Vec<IncludeModError>),
 }
@@ -800,7 +841,7 @@ fn include_symptom(
                 filename,
                 label,
                 *loc,
-                &format_signature(type_ctx, std::slice::from_ref(item)),
+                &format_signature(type_ctx, std::slice::from_ref(&**item)),
             );
         }
         IncludeModError::ValueTypeMismatch {
@@ -1054,7 +1095,7 @@ impl PathSubstMap {
             return self
                 .map
                 .iter()
-                .find_map(|(key, value)| key.same(path).then(|| *value));
+                .find_map(|(key, value)| key.same(path).then_some(*value));
         }
         if !path_has_pos_hint(path) {
             // No key and not the path carry a position hint, so `same`
@@ -1081,7 +1122,7 @@ fn path_has_pos_hint(path: &Path) -> bool {
 
 fn strip_pos_hints(path: &Path) -> Path {
     match path.view() {
-        PathView::Pident(_) => path.clone(),
+        PathView::Pident(_) => *path,
         PathView::Pdot(parent, name, _) => {
             Path::pdot_pos(strip_pos_hints(parent), *name, crate::types::path::NOPOS)
         }
@@ -1139,7 +1180,7 @@ fn with_local_pident_module_type<R>(
             ModuleType::MtyAlias(_, next)
                 if !(next.same(&current) && namespace == PathNamespace::Module) =>
             {
-                current = crate::types::Path::clone(&next);
+                current = **next;
                 namespace = PathNamespace::Module;
             }
             _ => return Some(f(&mty)),
@@ -1161,6 +1202,8 @@ pub fn modtypes(
     modtypes_with_warnings(type_ctx, env, mty_impl, mty_sig, &mut warnings)
 }
 
+/// OCaml `Includemod.modtypes`: check that `mty_impl` is included in
+/// `mty_sig` and return the coercion, collecting warnings.
 pub fn modtypes_with_warnings(
     type_ctx: &TypeContext,
     env: &Env,
@@ -1410,7 +1453,7 @@ fn modtypes_inner(
                             )
                         })
                         .unwrap_or_else(|| {
-                            ModuleType::MtyAlias(*pres_impl, std::sync::Arc::new(impl_path.clone()))
+                            ModuleType::MtyAlias(*pres_impl, std::sync::Arc::new(impl_path))
                         });
                 // includemod.ml:231: `modtypes ~loc env cxt subst mty1 mty2`.
                 modtypes_inner(
@@ -1732,6 +1775,8 @@ fn modtypes_inner(
 // Signature Inclusion
 // ============================================================================
 
+/// Whether a signature item has a runtime representation (and so a slot
+/// in the module's block).
 pub fn is_runtime_component(item: &SignatureItem) -> bool {
     match item {
         SignatureItem::SigValue(_, desc) => !matches!(desc.val_kind, ValueKind::ValPrim(_)),
@@ -1943,7 +1988,7 @@ fn missing_signature_item_error(
         id: *id,
         loc,
         kind: field_desc_kind(field_desc),
-        item: item.clone(),
+        item: Box::new(item.clone()),
     }
 }
 
@@ -2129,6 +2174,8 @@ fn check_paired_signature_items(
     Ok(coercions)
 }
 
+/// Drop every value declaration that a later one with the same name
+/// shadows (OCaml `Typemod.simplify_signature`).
 pub fn simplify_signature(sig: &Signature) -> Signature {
     let mut seen_values = HashSet::new();
     let mut simplified = Vec::with_capacity(sig.len());
@@ -2155,7 +2202,7 @@ pub fn simplify_signature(sig: &Signature) -> Signature {
 /// values, so the full check pairs each of its items with that same item of
 /// the unit and every comparison succeeds. What the check leaves behind is
 /// the coercion and the items it marked as used. Each paired item is exported
-/// as it is (see [`includes_itself_plainly`]), so the coercion only selects
+/// as it is (see `includes_itself_plainly`), so the coercion only selects
 /// the fields that are not shadowed, as `signatures_with_subst` builds it.
 pub fn inferred_signature_coercion(
     type_ctx: &TypeContext,
@@ -2304,13 +2351,13 @@ fn mark_self_included_items_used(type_ctx: &TypeContext, env: &Env, sig: &Signat
             SignatureItem::SigType(id, decl, _) => {
                 let loc = type_ctx.resolve_loc(decl.type_loc);
                 let mut usage_tables = type_ctx.usage();
-                usage_tables.mark_type_used(id.name_atom(), loc.clone());
+                usage_tables.mark_type_used(id.name_atom(), loc);
                 if let crate::types::TypeKind::TypeVariant(cstrs, _) = &decl.type_kind {
                     for cstr in cstrs {
                         usage_tables.mark_constructor_used(
                             usage,
                             id.name(),
-                            loc.clone(),
+                            loc,
                             cstr.cd_id.name(),
                         );
                     }
@@ -2344,6 +2391,8 @@ fn mark_self_included_items_used(type_ctx: &TypeContext, env: &Env, sig: &Signat
     }
 }
 
+/// OCaml `Includemod.compunit`: check that a unit's implementation
+/// signature is included in its interface.
 pub fn compunit(
     type_ctx: &TypeContext,
     env: &Env,
@@ -2364,6 +2413,7 @@ pub fn compunit(
     )
 }
 
+/// [`compunit`], collecting warnings.
 pub fn compunit_with_warnings(
     type_ctx: &TypeContext,
     env: &Env,
@@ -2606,8 +2656,8 @@ fn value_descriptions(
         let arity_mismatch = find_arity_mismatch(type_ctx, env, impl_desc.val_type, expected_ty);
         return Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            actual: impl_desc.clone(),
-            expected: expected_desc,
+            actual: Box::new(impl_desc.clone()),
+            expected: Box::new(expected_desc),
             arity_mismatch,
         });
     }
@@ -2619,8 +2669,8 @@ fn value_descriptions(
     let dont_match = || {
         Err(IncludeModError::ValueTypeMismatch {
             name: id,
-            actual: impl_desc.clone(),
-            expected: expected_desc.clone(),
+            actual: Box::new(impl_desc.clone()),
+            expected: Box::new(expected_desc.clone()),
             arity_mismatch: None,
         })
     };
@@ -2950,7 +3000,7 @@ fn substitute_type_constructor_path(path: &Path, subst: &InclusionSubst) -> Path
         return replacement;
     }
     match &path.view() {
-        PathView::Pident(_) => path.clone(),
+        PathView::Pident(_) => *path,
         PathView::Pdot(prefix, name, pos) => {
             Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
@@ -2978,7 +3028,7 @@ fn substitute_module_path(path: &Path, subst: &InclusionSubst) -> Path {
         return replacement;
     }
     match &path.view() {
-        PathView::Pident(_) => path.clone(),
+        PathView::Pident(_) => *path,
         PathView::Pdot(prefix, name, pos) => {
             Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
@@ -2994,7 +3044,7 @@ fn substitute_modtype_path(path: &Path, subst: &InclusionSubst) -> Path {
         return replacement;
     }
     match &path.view() {
-        PathView::Pident(_) => path.clone(),
+        PathView::Pident(_) => *path,
         PathView::Pdot(prefix, name, pos) => {
             Path::pdot_pos(substitute_module_path(prefix, subst), *name, *pos)
         }
@@ -3316,12 +3366,14 @@ pub(crate) fn includecore_type_declarations(
             if !type_manifest_for_inclusion(
                 type_ctx,
                 env,
+                &ParamCorrespondence {
+                    impl_params: &impl_decl.type_params,
+                    sig_params: &sig_decl.type_params,
+                    map: &param_map,
+                },
                 impl_manifest,
-                &impl_decl.type_params,
                 sig_manifest,
-                &sig_decl.type_params,
                 sig_decl.type_private,
-                &param_map,
             ) {
                 return Ok(vec![TypeMismatch::Manifest]);
             }
@@ -3409,17 +3461,21 @@ pub(crate) fn includecore_type_declarations(
                 env,
                 &impl_decl.type_params,
                 &sig_decl.type_params,
-                impl_constructors,
-                sig_constructors,
-                type_ctx.variant_layout(
-                    impl_decl
-                        .variant_layout_ref()
-                        .expect("variant declaration layout"),
+                (
+                    impl_constructors,
+                    type_ctx.variant_layout(
+                        impl_decl
+                            .variant_layout_ref()
+                            .expect("variant declaration layout"),
+                    ),
                 ),
-                type_ctx.variant_layout(
-                    sig_decl
-                        .variant_layout_ref()
-                        .expect("variant declaration layout"),
+                (
+                    sig_constructors,
+                    type_ctx.variant_layout(
+                        sig_decl
+                            .variant_layout_ref()
+                            .expect("variant declaration layout"),
+                    ),
                 ),
                 warnings,
             )?
@@ -3742,19 +3798,19 @@ fn compare_constructor_arguments(
     }
 }
 
+/// A variant declaration's constructors and runtime layout.
+type VariantShape<'a> = (&'a [ConstructorDeclaration], crate::types::VariantLayout);
+
 /// `compare_variants ~loc env params1 params2 ~layout1 ~layout2 cstrs1
 /// cstrs2` (includecore.ml): every difference of the constructors, lined up
 /// by name, each compared at its own position in each layout.
-#[allow(clippy::too_many_arguments)]
 fn compare_variant_declarations(
     type_ctx: &TypeContext,
     env: &Env,
     params1: &[TypeExprRef],
     params2: &[TypeExprRef],
-    cstrs1: &[ConstructorDeclaration],
-    cstrs2: &[ConstructorDeclaration],
-    layout1: crate::types::VariantLayout,
-    layout2: crate::types::VariantLayout,
+    (cstrs1, layout1): VariantShape<'_>,
+    (cstrs2, layout2): VariantShape<'_>,
     warnings: &mut Vec<Warning>,
 ) -> IncludeModResult<Vec<TypeMismatch>> {
     fn name(cd: &ConstructorDeclaration) -> &str {
@@ -3944,8 +4000,8 @@ fn type_decl_mismatch(
 ) -> IncludeModError {
     IncludeModError::TypeDeclarationMismatch {
         name,
-        actual: actual.clone(),
-        expected: expected.clone(),
+        actual: Box::new(actual.clone()),
+        expected: Box::new(expected.clone()),
         errs,
     }
 }
@@ -4095,16 +4151,29 @@ fn fixed_private_row_pair_types(
     }
 }
 
+/// How the parameters of an implementation declaration correspond to those
+/// of the signature declaration it is checked against.
+#[derive(Clone, Copy)]
+struct ParamCorrespondence<'a> {
+    impl_params: &'a [TypeExprRef],
+    sig_params: &'a [TypeExprRef],
+    /// Each implementation parameter's signature counterpart.
+    map: &'a HashMap<TypeExprRef, TypeExprRef>,
+}
+
 fn fixed_private_variant_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
     impl_row: &RowDesc,
     sig_row: &RowDesc,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let ParamCorrespondence {
+        impl_params,
+        sig_params,
+        map: param_map,
+    } = *params;
     // Direct port of compiler/ml/includecore.ml:87-125:
     // private fixed rows compare the implementation row against the abstract
     // row carried by the signature manifest, while preserving the declaration
@@ -4167,13 +4236,16 @@ fn fixed_private_variant_manifest_for_inclusion(
 fn fixed_private_object_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
-    sig_params: &[TypeExprRef],
     impl_fields: TypeExprRef,
     sig_fields: TypeExprRef,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let ParamCorrespondence {
+        impl_params,
+        sig_params,
+        map: param_map,
+    } = *params;
     // Direct port of compiler/ml/includecore.ml:126-151 for private fixed
     // object rows.
     let (sig_fields_flat, sig_rest) = flatten_object_fields_for_inclusion(type_ctx, sig_fields);
@@ -4236,13 +4308,12 @@ fn fixed_private_object_manifest_for_inclusion(
 fn type_manifest_for_inclusion(
     type_ctx: &TypeContext,
     env: &Env,
+    params: &ParamCorrespondence<'_>,
     impl_manifest: TypeExprRef,
-    impl_params: &[TypeExprRef],
     sig_manifest: TypeExprRef,
-    sig_params: &[TypeExprRef],
     sig_private: crate::types::PrivateFlag,
-    param_map: &HashMap<TypeExprRef, TypeExprRef>,
 ) -> bool {
+    let param_map = params.map;
     // Direct port of compiler/ml/includecore.ml:87-159 `type_manifest`.
     let impl_expanded = type_ctx.repr(crate::types::ctype::expand_head(
         type_ctx,
@@ -4264,12 +4335,10 @@ fn type_manifest_for_inclusion(
             return fixed_private_variant_manifest_for_inclusion(
                 type_ctx,
                 env,
+                params,
                 impl_manifest,
-                impl_params,
-                sig_params,
                 &type_ctx.row_desc(impl_row),
                 &type_ctx.row_desc(sig_row),
-                param_map,
             );
         }
         (
@@ -4288,12 +4357,10 @@ fn type_manifest_for_inclusion(
             return fixed_private_object_manifest_for_inclusion(
                 type_ctx,
                 env,
+                params,
                 impl_manifest,
-                impl_params,
-                sig_params,
                 *impl_fields,
                 *sig_fields,
-                param_map,
             );
         }
         _ => {}
@@ -4741,32 +4808,34 @@ fn flatten_object_fields_for_inclusion(
             } => {
                 flattened.push((*name, type_ctx.mutability_repr(*mutability), *typ));
                 let next = type_ctx.repr(*rest);
-                drop(desc);
                 current = next;
             }
             _ => {
-                drop(desc);
                 break;
             }
         }
     }
-    flattened.sort_by(|left, right| left.0.cmp(&right.0));
+    flattened.sort_by_key(|left| left.0);
     (flattened, current)
 }
 
 type ObjectFieldForInclusion = (crate::name::Name, FieldKind, TypeExprRef);
 
+/// A field present on both sides: its name, then the implementation's and
+/// the signature's kind and type.
+type PairedObjectField = (
+    crate::name::Name,
+    FieldKind,
+    TypeExprRef,
+    FieldKind,
+    TypeExprRef,
+);
+
 fn associate_object_fields_for_inclusion(
     impl_fields: Vec<ObjectFieldForInclusion>,
     sig_fields: Vec<ObjectFieldForInclusion>,
 ) -> (
-    Vec<(
-        crate::name::Name,
-        FieldKind,
-        TypeExprRef,
-        FieldKind,
-        TypeExprRef,
-    )>,
+    Vec<PairedObjectField>,
     Vec<ObjectFieldForInclusion>,
     Vec<ObjectFieldForInclusion>,
 ) {
@@ -4890,8 +4959,8 @@ fn extension_constructors(
     let sig_ext = substitute_extension_constructor_paths(type_ctx, sig_ext, subst);
     let mismatch = || IncludeModError::ExtensionConstructorMismatch {
         name: id,
-        actual: impl_ext.clone(),
-        expected: sig_ext.clone(),
+        actual: Box::new(impl_ext.clone()),
+        expected: Box::new(sig_ext.clone()),
     };
 
     if !impl_ext.ext_type_path.same(&sig_ext.ext_type_path) {
@@ -5003,8 +5072,8 @@ fn modtype_declarations(
     };
     equivalence.map_err(|error| IncludeModError::ModuleTypeDeclarationMismatch {
         name: id,
-        actual: impl_decl.clone(),
-        expected: sig_decl.clone(),
+        actual: Box::new(impl_decl.clone()),
+        expected: Box::new(sig_decl.clone()),
         error: Box::new(IncludeModError::AtModtype {
             name: id,
             error: Box::new(error),

@@ -93,7 +93,7 @@ fn get_serde_legacy(attr: &Attribute, arena: &ParseArena) -> SpiceResult<(bool, 
     let ExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
         return Err(invalid());
     };
-    let (fields, spread) = &*record;
+    let (fields, spread) = record;
     if spread.is_some() || fields.len() != 1 {
         return Err(invalid());
     }
@@ -396,10 +396,9 @@ fn validate(tag: Option<&str>, cases: &[SerdeCase], arena: &mut ParseArena) -> S
                         Ok(Some(attr)) => {
                             let expr = get_expression_from_payload(attr, arena)?;
                             match &expr.pexp_desc {
-                                ExpressionDesc::Pexp_constant(c) => match &*c {
-                                    Constant::String(s) => s.semantic(arena).to_string(),
-                                    _ => txt,
-                                },
+                                ExpressionDesc::Pexp_constant(Constant::String(s)) => {
+                                    s.semantic(arena).to_string()
+                                }
                                 _ => txt,
                             }
                         }
@@ -1108,7 +1107,7 @@ pub(super) fn polyvariant_case(
 fn json_arr_head(arena: &mut ParseArena) -> Expression {
     let get = expr_ident_path(arena, &["Array", "getUnsafe"]);
     let json_arr = ident(arena, "json_arr");
-    let zero = expr_constant(Constant::Integer(arena.intern_string(&"0"), None), arena);
+    let zero = expr_constant(Constant::Integer(arena.intern_string("0"), None), arena);
     apply(arena, get, vec![json_arr, zero])
 }
 

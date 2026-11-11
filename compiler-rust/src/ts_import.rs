@@ -40,20 +40,25 @@ const EXTENSION: &str = "ts";
 /// One `%ts` item of a file and what it expanded to.
 #[derive(Debug, Clone)]
 pub struct Import {
+    /// What the item asks for: the module and the exports.
     pub request: Request,
-    /// Byte offsets of the structure item in the source.
+    /// Byte offset of the start of the structure item in the source.
     pub start: usize,
+    /// Byte offset of its end.
     pub end: usize,
     /// The ReScript declarations that replace the item.
     pub code: Result<String, String>,
+    /// What the TypeScript types say that the declarations do not.
     pub notes: Vec<Note>,
 }
 
 /// Every `%ts` item of a file with its expansion, for tools that show what an
-/// import means (the playground, `bsc -dts-import`).
+/// import means (the playground).
 #[derive(Debug, Clone, Default)]
 pub struct Report {
+    /// The items, in source order.
     pub imports: Vec<Import>,
+    /// What resolving them cost.
     pub stats: Stats,
 }
 

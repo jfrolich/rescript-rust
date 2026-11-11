@@ -9,18 +9,17 @@
 //!
 //! The Lambda IR is organized into several submodules:
 //!
-//! - [`constant`] - Lambda constants (literals, blocks, etc.)
-//! - [`primitive`] - Primitive operations (arithmetic, comparisons, etc.)
-//! - [`compat`] - Compatibility types (comparison, let_kind, etc.)
-//! - [`tag_info`] - Block tag information for variants and records
-//! - [`arity`] - Arity tracking for functions
-//! - [`free_variables`] - Free variable analysis
-//! - [`analysis`] - Side effect and size analysis
-//! - [`closure`] - Closure analysis
-//! - [`subst`] - Variable substitution
-//! - [`beta_reduce`] - Beta reduction (function inlining)
-//! - [`print`] - Pretty printing for debugging
-//! - [`compile_context`] - Compilation context for Lambda to JS IR
+//! - [`lam_constant`] - Lambda constants (literals, blocks, etc.)
+//! - [`lam_primitive`] - Primitive operations (arithmetic, comparisons, etc.)
+//! - [`lam_compat`] - Compatibility types (comparison, let_kind, etc.)
+//! - [`lam_tag_info`] - Block tag information for variants and records
+//! - [`lam_arity`] - Arity tracking for functions
+//! - [`lam_analysis`] - Side effect and size analysis
+//! - [`lam_closure`] - Closure and free variable analysis
+//! - [`lam_subst`] - Variable substitution
+//! - [`lam_beta_reduce`] - Beta reduction (function inlining)
+//! - [`lam_print`] - Pretty printing for debugging
+//! - [`lam_compile_context`] - Compilation context for Lambda to JS IR
 
 pub mod arena;
 pub mod js_exp_make;
@@ -78,7 +77,9 @@ pub use lam_tag_info::TagInfo;
 /// its runtime position (counted as in `Env`) and its source name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FlatMakeStep {
+    /// The field's runtime position.
     pub pos: i32,
+    /// The field's source name.
     pub name: String,
 }
 
@@ -178,7 +179,9 @@ impl Default for FunctionAttribute {
 /// Key selected by a Lambda switch branch.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SwitchKey {
+    /// An integer case: a constant constructor index or a block tag.
     Int(i32),
+    /// A variant constructor case, dispatched by its runtime representation.
     Constructor(crate::types::VariantConstructorCase),
 }
 
@@ -222,32 +225,11 @@ pub(crate) fn untagged_value(c: &Constant) -> Option<untagged_dispatch::Value> {
         })),
         Constant::Block { tag_info, .. } => match &**tag_info {
             TagInfo::Tuple => Value::Array,
-            TagInfo::Record(record) => {
-                let fields = &record.fields;
-                if !fields.is_empty()
-                    && fields
-                        .iter()
-                        .enumerate()
-                        .all(|(i, (name, _))| is_decimal_index(name, i))
-                {
-                    Value::Array
-                } else {
-                    Value::Object
-                }
-            }
+            TagInfo::Record(record) if record.array => Value::Array,
             _ => Value::Object,
         },
         Constant::Char(_) | Constant::Some(_) | Constant::ModuleAlias => return None,
     })
-}
-
-/// `name = string_of_int i` without allocating: canonical decimal digits
-/// (no sign, no leading zeros) spelling exactly `i`.
-fn is_decimal_index(name: &str, i: usize) -> bool {
-    !name.is_empty()
-        && name.bytes().all(|b| b.is_ascii_digit())
-        && (name == "0" || !name.starts_with('0'))
-        && name.parse::<usize>() == Ok(i)
 }
 
 /// lambda.ml `literal_denotes_same` = `Variant_runtime.same_literal_value`:
@@ -346,30 +328,46 @@ pub(crate) fn same_block_runtime(
 /// Runtime dispatch semantics for a Lambda switch.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SwitchDispatch {
+    /// Dispatch on integer indices and block tags.
     Direct,
+    /// Dispatch on a variant's runtime representation, for untagged and
+    /// custom-tagged variants.
     Variant(crate::types::VariantMatchingFacts),
 }
 
 /// Switch construct for pattern matching.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LambdaSwitch {
+    /// Whether the constant cases cover every constant constructor.
     pub sw_consts_full: bool,
+    /// Constant cases and their actions.
     pub sw_consts: Vec<(SwitchKey, Lambda)>,
+    /// Whether the block cases cover every block constructor.
     pub sw_blocks_full: bool,
+    /// Block cases and their actions.
     pub sw_blocks: Vec<(SwitchKey, Lambda)>,
+    /// The action taken when no case matches.
     pub sw_failaction: Option<Box<Lambda>>,
+    /// How the runtime tells the cases apart.
     pub sw_dispatch: SwitchDispatch,
 }
 
 /// Runtime literal carried by an OCaml/ReScript variant tag.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum SwitchCaseTag {
+    /// A string literal tag.
     String(String),
+    /// An integer literal tag.
     Int(i64),
+    /// A float literal tag, in its source text.
     Float(String),
+    /// A bigint literal tag, in its source text.
     BigInt(String),
+    /// A boolean literal tag.
     Bool(bool),
+    /// The `null` tag.
     Null,
+    /// The `undefined` tag.
     Undefined,
 }
 
@@ -481,10 +479,10 @@ pub enum Lambda {
     Lfor(Ident, Box<Lambda>, Box<Lambda>, DirectionFlag, Box<Lambda>),
 
     /// For-of loop: variable, iterable, body (upstream #7887).
-    Lfor_of(Ident, Box<Lambda>, Box<Lambda>),
+    LforOf(Ident, Box<Lambda>, Box<Lambda>),
 
     /// For-await-of loop: variable, async iterable, body (upstream #7887).
-    Lfor_await_of(Ident, Box<Lambda>, Box<Lambda>),
+    LforAwaitOf(Ident, Box<Lambda>, Box<Lambda>),
 
     /// Assignment to a mutable variable
     Lassign(Ident, Box<Lambda>),
@@ -567,6 +565,8 @@ impl Lambda {
         }
     }
 
+    /// `Lam.prim`: a primitive application, constant-folded where the operands
+    /// allow (lam.ml:482-560).
     pub fn prim(primitive: Primitive, args: Vec<Lambda>, loc: LamLoc) -> Self {
         let default = |primitive: Primitive, args: Vec<Lambda>, loc: LamLoc| -> Lambda {
             Lambda::Lprim(Box::new(PrimInfo {
@@ -1009,12 +1009,12 @@ impl Lambda {
 
     /// Create a for-of loop. Port of OCaml `Lam.for_of`.
     pub fn for_of(var: Ident, iterable: Lambda, body: Lambda) -> Self {
-        Lambda::Lfor_of(var, Box::new(iterable), Box::new(body))
+        Lambda::LforOf(var, Box::new(iterable), Box::new(body))
     }
 
     /// Create a for-await-of loop. Port of OCaml `Lam.for_await_of`.
     pub fn for_await_of(var: Ident, iterable: Lambda, body: Lambda) -> Self {
-        Lambda::Lfor_await_of(var, Box::new(iterable), Box::new(body))
+        Lambda::LforAwaitOf(var, Box::new(iterable), Box::new(body))
     }
 
     /// Create a try-with block
@@ -1313,7 +1313,6 @@ fn has_boolean_type(lam: &Lambda) -> Option<LamLoc> {
                         | Primitive::Pfloatcomp(_)
                         | Primitive::Pbigintcomp(_)
                         | Primitive::Pstringcomp(_),
-                    loc: _,
                     ..
                 }
             ) =>
@@ -1359,7 +1358,7 @@ fn lambda_eq_approx(lhs: &Lambda, rhs: &Lambda) -> bool {
             lambda_eq_approx(a1, a2) && lambda_eq_approx(b1, b2)
         }
         (Lambda::Lbreak, Lambda::Lbreak) | (Lambda::Lcontinue, Lambda::Lcontinue) => true,
-        // OCaml `Lam.eq_approx`: Lfor / Lfor_of / Lfor_await_of are
+        // OCaml `Lam.eq_approx`: Lfor / LforOf / LforAwaitOf are
         // conservatively false (mirrors `compiler/core/lam.ml` `eq_approx`).
         // Falls through to the catch-all `_ => false` below.
         (Lambda::Lassign(v1, l1), Lambda::Lassign(v2, l2)) => {

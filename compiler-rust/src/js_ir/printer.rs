@@ -433,7 +433,7 @@ impl<'r> JsPrinter<'r> {
             .get(&name)
             .and_then(|names| names.stamps.iter().find(|(s, _)| *s == stamp))
         {
-            return printed.clone();
+            return *printed;
         }
         let mut i = scope.names.get(&name).map_or(0, |names| names.next);
         let printed = loop {
@@ -451,8 +451,8 @@ impl<'r> JsPrinter<'r> {
         };
         let names = scope.names.entry(name).or_default();
         names.next = i + 1;
-        names.stamps.push((stamp, printed.clone()));
-        scope.used.insert(printed.clone());
+        names.stamps.push((stamp, printed));
+        scope.used.insert(printed);
         printed
     }
 
@@ -467,7 +467,7 @@ impl<'r> JsPrinter<'r> {
         let printed = self.add_ident(base, id.stamp());
         self.current_name_scope_mut()
             .ident_names
-            .insert(*id, printed.clone());
+            .insert(*id, printed);
         printed
     }
 
@@ -481,11 +481,18 @@ impl<'r> JsPrinter<'r> {
 
     /// Reserve raw JavaScript names so renamed locals cannot capture them.
     pub(super) fn reserve_js_names(&mut self, block: &[Stmt]) {
+        // A renamed local is `name$1`, `name$2`, ...: only a raw name of
+        // that form can be captured, and a program rarely uses one. The
+        // arena's identifier tables tell without walking the program.
+        if !self.a.may_use_js_name_of_renamed_local() {
+            self.reserved_js_names.clear();
+            return;
+        }
         #[derive(Default)]
         struct JsNames(HashSet<Name>);
         impl JsNames {
             fn add(&mut self, id: &Ident) {
-                if id.is_js() || (id.is_global() && id.stamp() == 0) {
+                if super::arena::is_raw_js_name(id) {
                     self.0.insert(id.name_atom());
                 }
             }
@@ -1135,7 +1142,7 @@ impl<'r> JsPrinter<'r> {
                 .expect("a function's environment is printed in the enclosing scope");
             scope
                 .used
-                .extend(names.stamps.iter().map(|(_, printed)| printed.clone()));
+                .extend(names.stamps.iter().map(|(_, printed)| *printed));
             scope.names.insert(mangled, names);
         }
 
@@ -2102,29 +2109,28 @@ impl<'r> JsPrinter<'r> {
 
         // Check if this is a record with field names
         match tag_info {
+            // js_dump.ml `Blk_record {array}`: the type declaration decided
+            // the record is a JavaScript array.
+            TagInfo::Record(record) if record.array => self.print_array_literal(elements),
             TagInfo::Record(record) if record.fields.len() == elements.len() => {
                 let fields = &record.fields;
-                if record_uses_array_syntax(fields) {
-                    self.print_array_literal(elements);
-                } else {
-                    self.print_object_literal(
-                        level,
-                        elements.iter().zip(fields.iter()).filter_map(
-                            |(elem, (field_name, optional))| {
-                                if *optional && is_undefined_literal(a, *elem) {
-                                    None
-                                } else {
-                                    Some((field_name.as_str(), *elem))
-                                }
-                            },
-                        ),
-                        |this, (field_name, elem)| {
-                            this.print_literal_property_name(field_name);
-                            this.write(": ");
-                            this.print_expression(elem, 1);
+                self.print_object_literal(
+                    level,
+                    elements.iter().zip(fields.iter()).filter_map(
+                        |(elem, (field_name, optional))| {
+                            if *optional && is_undefined_literal(a, *elem) {
+                                None
+                            } else {
+                                Some((field_name.as_str(), *elem))
+                            }
                         },
-                    );
-                }
+                    ),
+                    |this, (field_name, elem)| {
+                        this.print_literal_property_name(field_name);
+                        this.write(": ");
+                        this.print_expression(elem, 1);
+                    },
+                );
             }
             TagInfo::RecordInlined(inlined) if inlined.fields.len() == elements.len() => {
                 let (name, fields, runtime) = (&inlined.name, &inlined.fields, &inlined.runtime);
@@ -3018,14 +3024,6 @@ fn transform_float_literal(float_str: &str) -> String {
         out.push(byte as char);
     }
     out
-}
-
-fn record_uses_array_syntax(fields: &[(String, bool)]) -> bool {
-    !fields.is_empty()
-        && fields
-            .iter()
-            .enumerate()
-            .all(|(i, (field_name, _))| field_name == &i.to_string())
 }
 
 fn unwrap_uppercase_exotic(name: &str) -> &str {
@@ -3992,7 +3990,7 @@ mod tests {
             &mut j,
         );
 
-        let rendered = print_stmts(&j, &vec![first, second]);
+        let rendered = print_stmts(&j, &[first, second]);
 
         assert!(rendered.contains("for (let i = 0, i_finish = finishExpr(1); i < i_finish; ++i)"));
         assert!(
@@ -4049,7 +4047,7 @@ mod tests {
 
         assert_eq!(
             print_expr(&j, expr),
-            format!("tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`")
+            "tag`\u{4f60}\u{597d}\u{ff0c}\n\u{4e16}\u{754c}`"
         );
     }
 
@@ -4147,13 +4145,8 @@ mod tests {
         let value = JE::var(Ident::create_local("x"), &mut j);
         let expr = JE::bin(
             BinOp::Or,
-            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
-            JE::bin(
-                BinOp::EqEqEq,
-                value.clone(),
-                JE::undefined(false, &mut j),
-                &mut j,
-            ),
+            JE::bin(BinOp::EqEqEq, value, JE::null(&mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::undefined(false, &mut j), &mut j),
             &mut j,
         );
 
@@ -4166,13 +4159,8 @@ mod tests {
         let value = JE::var(Ident::create_local("x"), &mut j);
         let expr = JE::bin(
             BinOp::Or,
-            JE::bin(
-                BinOp::EqEqEq,
-                value.clone(),
-                JE::undefined(false, &mut j),
-                &mut j,
-            ),
-            JE::bin(BinOp::EqEqEq, value.clone(), JE::null(&mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::undefined(false, &mut j), &mut j),
+            JE::bin(BinOp::EqEqEq, value, JE::null(&mut j), &mut j),
             &mut j,
         );
 
@@ -4359,7 +4347,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "({\n    high: add(1, 2),\n    low: 3\n  });"
         );
     }
@@ -4529,7 +4517,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (Primitive_object.equal(e, {\n    RE_EXN_ID: Not_found\n  }) !== false) {\n  return 1;\n}"
         );
     }
@@ -4732,7 +4720,7 @@ mod tests {
             ),
             &mut j,
         );
-        let result = print_stmts(&j, &vec![stmt]);
+        let result = print_stmts(&j, &[stmt]);
         assert!(result.contains("if (true)"));
         assert!(result.contains("return 1;"));
         assert!(result.contains("else"));
@@ -4754,7 +4742,7 @@ mod tests {
             &mut j,
         );
 
-        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &[stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
@@ -4778,7 +4766,7 @@ mod tests {
             &mut j,
         );
 
-        assert_eq!(print_stmts(&j, &vec![stmt]), "if (true) {\n  return 1;\n}");
+        assert_eq!(print_stmts(&j, &[stmt]), "if (true) {\n  return 1;\n}");
     }
 
     #[test]
@@ -4814,7 +4802,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  return 1;\n} else if (false) {\n  return 2;\n}"
         );
     }
@@ -4928,7 +4916,7 @@ mod tests {
             &[JS::break_(None, &mut j)],
             &mut j,
         );
-        let result = print_stmts(&j, &vec![stmt]);
+        let result = print_stmts(&j, &[stmt]);
         assert!(result.contains("while (true)"));
         assert!(result.contains("break;"));
     }
@@ -4971,7 +4959,7 @@ mod tests {
                             ),
                             &mut j,
                         ),
-                        hidden.clone(),
+                        hidden,
                     ],
                     &mut j,
                 ),
@@ -4981,7 +4969,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  log();\n  \n} else {\n  \n}"
         );
     }
@@ -5045,7 +5033,7 @@ mod tests {
             &mut j,
         );
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i = 0, i_finish = xs.length; i < i_finish; ++i) {}"
         );
     }
@@ -5062,7 +5050,7 @@ mod tests {
         );
         let stmt = JS::for_range(None, None, finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
@@ -5092,7 +5080,7 @@ mod tests {
         );
         let stmt = JS::for_range(None, Some(init), finish, i, ForDirection::Upto, &[], &mut j);
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "for (let i = (sideEffect(), 0), i_finish = xs.length; i <= i_finish; ++i) {}"
         );
     }
@@ -5139,7 +5127,7 @@ mod tests {
             &mut j,
         );
 
-        let rendered = print_stmts(&j, &vec![stmt_before, stmt_fun, stmt_after]);
+        let rendered = print_stmts(&j, &[stmt_before, stmt_fun, stmt_after]);
         let before_idx = rendered.find("let before").unwrap();
         let fun_idx = rendered.find("function url").unwrap();
         let after_idx = rendered.find("let after").unwrap();
@@ -5937,8 +5925,9 @@ mod tests {
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_variable_declaration_is_omitted_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadPure,
+        };
 
         let rendered = {
             let v = vec![
@@ -5974,8 +5963,9 @@ mod tests {
     #[test]
     fn test_print_dead_non_pure_variable_declaration_as_expression_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadNonPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadNonPure,
+        };
         let effect = Ident::create_local("effect");
 
         let rendered = {
@@ -6003,8 +5993,9 @@ mod tests {
     #[ignore = "stale internal shape expectation; covered by strict lambda/JS parity gates"]
     fn test_print_dead_pure_top_level_function_binding_is_omitted_like_ocaml() {
         let mut j = JsArena::new();
-        let mut dead_info = IdentInfo::default();
-        dead_info.used_stats = UsedStats::DeadPure;
+        let dead_info = IdentInfo {
+            used_stats: UsedStats::DeadPure,
+        };
 
         let rendered = {
             let v = vec![
@@ -6331,7 +6322,7 @@ mod tests {
         );
 
         assert_eq!(
-            print_stmts(&j, &vec![stmt]),
+            print_stmts(&j, &[stmt]),
             "if (true) {\n  return $$Promise.all([\n    p1,\n    p2,\n    p3\n  ]).then;\n}"
         );
     }
@@ -6851,10 +6842,14 @@ mod tests {
                     &mut j,
                 ),
                 MutableFlag::Immutable,
-                j.tag_id(TagInfo::record(
-                    vec![("0".to_string(), false), ("1".to_string(), false)],
-                    crate::parser::ast::MutableFlag::Immutable,
-                )),
+                // A `RecordArray` block, as typedecl gives a record with
+                // the runtime names "0", "1".
+                j.tag_id(TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                    fields: vec![("0".to_string(), false), ("1".to_string(), false)],
+                    logical_field_count: None,
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                    array: true,
+                }))),
             ),
             &mut j,
         );

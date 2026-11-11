@@ -32,6 +32,7 @@ pub type InlineTypeEntry = (
 /// inline.
 type Regions = smallvec::SmallVec<[RegionStatus; 16]>;
 
+/// Whether errors in a grammar region are reported.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RegionStatus {
     /// Errors in this region should be reported.

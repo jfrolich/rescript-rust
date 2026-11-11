@@ -98,6 +98,7 @@ impl OcamlString {
         }
     }
 
+    /// The string's text.
     pub fn as_str(&self) -> &str {
         &self.text
     }
@@ -153,7 +154,7 @@ impl OcamlValue {
         matches!(self, OcamlValue::Int(0))
     }
 
-    /// Get the Some value from an Option (Block(0, [value])), or None if Int(0).
+    /// Get the Some value from an Option (`Block(0, [value])`), or None if `Int(0)`.
     pub fn as_option(&self) -> Option<&OcamlValue> {
         match self {
             OcamlValue::Int(0) => None,
@@ -278,6 +279,7 @@ impl std::fmt::Display for MarshalError {
 impl std::error::Error for MarshalError {}
 
 /// Reader for OCaml Marshal binary format.
+#[derive(Default)]
 pub struct MarshalReader {
     /// The object table for shared references.
     /// Each object is assigned an index as it's read; shared references
@@ -289,10 +291,7 @@ pub struct MarshalReader {
 impl MarshalReader {
     /// Create a new reader.
     pub fn new() -> Self {
-        MarshalReader {
-            obj_table: Vec::new(),
-            string_scope: 0,
-        }
+        Self::default()
     }
 
     fn decoded_string(&mut self, text: String) -> OcamlValue {

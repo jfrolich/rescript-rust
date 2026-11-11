@@ -161,7 +161,10 @@ fn print_taginfo<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
         TagInfo::Record(_) | TagInfo::RecordInlined(_) => {
             let fields = tag_info.record_fields().expect("record block");
             let names: Vec<&str> = fields.iter().map(|(name, _)| name.as_str()).collect();
-            f.print(format_args!("[{}]", names.join(";")));
+            // printlambda.ml: `Blk_record {array = true}` prints `array[...]`.
+            let array = matches!(tag_info, TagInfo::Record(r) if r.array);
+            let prefix = if array { "array" } else { "" };
+            f.print(format_args!("{prefix}[{}]", names.join(";")));
         }
         TagInfo::Module(names) => f.print(format_args!("[{}]", names.join(";"))),
         TagInfo::ModuleExport(_) => f.string("module/exports"),
@@ -693,8 +696,8 @@ fn lam<W: Write>(f: &mut Formatter<W>, lambda: &Lambda) {
             f.string(")");
             f.close_box();
         }
-        Lambda::Lfor_of(param, iterable, body) => for_of(f, "for_of", param, iterable, body),
-        Lambda::Lfor_await_of(param, iterable, body) => {
+        Lambda::LforOf(param, iterable, body) => for_of(f, "for_of", param, iterable, body),
+        Lambda::LforAwaitOf(param, iterable, body) => {
             for_of(f, "for_await_of", param, iterable, body)
         }
         Lambda::Lassign(id, expr) => {

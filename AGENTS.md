@@ -395,7 +395,7 @@ These principles apply to all performance-sensitive Rust code in the compiler, e
 
 #### Data layout principles
 
-- **No `Rc` or `Arc`** — Reference counting prevents thread sharing and is slower than arena allocation. Use arena indices (`ExprIdx(u32)`), bump-allocated references (`&'arena T`), or owned/borrowed data (`Box<T>`, `&T`, `Cow<'a, T>`). The parser's `StrIdx`/`LocIdx`/`PosIdx` pattern is the model.
+- **Prefer arenas for compiler graphs** — Use typed `Vec` pools with small indices (such as `ExprIdx(u32)`) for ASTs and IRs whose nodes share a lifetime; this avoids per-node allocations and reference-count updates. Prefer owned or borrowed data (`Box<T>`, `&T`, `Cow<'a, T>`) when sharing is unnecessary. When shared ownership is genuinely needed, use `Rc` for worker-local state and `Arc` for cross-thread sharing. `Rc` cannot cross threads; `Arc<T>` supports cross-thread sharing only when `T` is `Send + Sync`. Do not introduce reference counting merely to work around an unclear ownership model; measure performance-sensitive changes.
 
 - **Keep enums small (≤16 bytes)** — Rust enums are sized by their largest variant. If 85% of variants fit in 8 bytes but one variant needs 100 bytes, every instance wastes 92 bytes. Box the large, rare variants. OXC measured 10% speedup from enforcing 16-byte AST enums.
 

@@ -15,12 +15,15 @@ use std::sync::Arc;
 /// A parsed source, kept alive while its typed tree is used (typed-tree
 /// locations and attributes point into its arena).
 pub trait ParsedSource {
+    /// The arena holding the parsed tree.
     fn arena(&self) -> &ParseArena;
 }
 
 /// One module's source, type-checked.
 pub struct TypedSource {
+    /// The parsed source the typed tree was checked from.
     pub parsed: Arc<dyn ParsedSource>,
+    /// The typed tree and the type state it refers to.
     pub typed: ToolingTypedModule,
     /// The absolute path of the source.
     pub path: PathBuf,
@@ -29,7 +32,9 @@ pub struct TypedSource {
 /// The absolute source paths of a module (OCaml's `paths`).
 #[derive(Debug, Clone, Default)]
 pub struct SourcePaths {
+    /// The `.res` file, if any.
     pub implementation: Option<PathBuf>,
+    /// The `.resi` file, if any.
     pub interface: Option<PathBuf>,
 }
 
@@ -53,8 +58,11 @@ pub trait Project {
 
 /// A loaded module: OCaml's `full` (a `File.t` and its `extra`).
 pub struct Loaded {
+    /// The type-checked source.
     pub source: TypedSource,
+    /// What processing the typed tree found.
     pub file: File,
+    /// The references and locations in the typed tree.
     pub extra: Extra,
     /// An attribute reader's error raised by a command reading this module.
     pub raised: super::process_attributes::Raised,
@@ -67,6 +75,7 @@ impl Loaded {
         Some(invalid_escape_message(&self.ctx(), error))
     }
 
+    /// What the module's typed tree is read with.
     pub fn ctx(&self) -> Ctx<'_> {
         Ctx {
             arena: self.source.parsed.arena(),
@@ -89,6 +98,7 @@ pub struct ProjectSession<'p> {
 }
 
 impl<'p> ProjectSession<'p> {
+    /// An empty session over the modules of `project`.
     pub fn new(project: &'p dyn Project) -> Self {
         let names = project.module_names();
         let ids = names
@@ -105,6 +115,7 @@ impl<'p> ProjectSession<'p> {
         }
     }
 
+    /// The project the session loads modules from.
     pub fn project(&self) -> &'p dyn Project {
         self.project
     }

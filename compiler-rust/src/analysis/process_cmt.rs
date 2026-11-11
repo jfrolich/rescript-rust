@@ -16,7 +16,9 @@ use std::sync::Arc;
 /// locations and attributes point into it) and type context.
 #[derive(Clone, Copy)]
 pub struct Ctx<'a> {
+    /// The module's parse arena.
     pub arena: &'a ParseArena,
+    /// The module's type context.
     pub types: &'a TypeContext,
     /// Where an attribute reader's error is kept (see [`attrs::Raised`]).
     pub raised: &'a attrs::Raised,
@@ -83,8 +85,7 @@ fn add_declared<T: Clone>(
         stamp,
         env.module_path.clone(),
         is_exported,
-        attributes,
-        raised,
+        raised.declared_attributes(attributes),
     );
     add_stamp(stamp, declared.clone());
     declared
@@ -161,7 +162,9 @@ fn map_record_field(raised: &attrs::Raised, ld: &decl::LabelDeclaration) -> Fiel
 
 /// The processing state shared by a file's items: its stamps.
 pub struct Processor<'a> {
+    /// What the items are read from.
     pub ctx: Ctx<'a>,
+    /// The declarations found so far, by stamp.
     pub stamps: Stamps,
 }
 
@@ -265,8 +268,7 @@ impl Processor<'_> {
                                     stamp,
                                     env.module_path.clone(),
                                     true,
-                                    cd_attributes,
-                                    self.ctx.raised,
+                                    self.ctx.raised.declared_attributes(cd_attributes),
                                 );
                                 self.stamps.add_constructor(stamp, declared);
                                 item
@@ -353,7 +355,7 @@ impl Processor<'_> {
         match module_type {
             decl::ModuleType::MtyIdent(_) | decl::ModuleType::MtyAlias(..) => {
                 let path = module_type.ident_or_alias_path().unwrap();
-                Module::Ident(path.clone())
+                Module::Ident(*path)
             }
             decl::ModuleType::MtySignature(signature) => {
                 Module::Structure(Arc::new(self.for_type_signature(name, env, signature)))
@@ -460,8 +462,7 @@ impl Processor<'_> {
                             stamp,
                             env.module_path.clone(),
                             true,
-                            cd_attributes,
-                            self.ctx.raised,
+                            self.ctx.raised.declared_attributes(cd_attributes),
                         );
                         self.stamps.add_constructor(stamp, declared);
                         item
@@ -696,8 +697,9 @@ impl Processor<'_> {
                         stamp,
                         ModulePath::NotVisible,
                         false,
-                        self.ctx.parsed(attributes),
-                        self.ctx.raised,
+                        self.ctx
+                            .raised
+                            .declared_attributes(self.ctx.parsed(attributes)),
                     );
                     self.stamps.add_module(stamp, declared.clone());
                     items.insert(0, module_item_of(&declared));
@@ -943,8 +945,7 @@ impl Processor<'_> {
                         stamp,
                         ModulePath::NotVisible,
                         false,
-                        Attrs::Decl(&[]),
-                        self.ctx.raised,
+                        self.ctx.raised.declared_attributes(Attrs::Decl(&[])),
                     );
                     self.stamps.add_module(stamp, declared);
                 }
@@ -987,8 +988,7 @@ impl Processor<'_> {
                     stamp,
                     ModulePath::NotVisible,
                     false,
-                    Attrs::Decl(&[]),
-                    self.ctx.raised,
+                    self.ctx.raised.declared_attributes(Attrs::Decl(&[])),
                 );
                 self.stamps.add_module(stamp, declared);
                 self.scan_let_modules(env, *body);
@@ -1103,7 +1103,9 @@ fn get_module_path(
 /// What a module's typed annotations are (`Cmt_format.binary_annots`).
 #[derive(Clone, Copy)]
 pub enum Annots<'a> {
+    /// A `.res` file's structure.
     Implementation(&'a [tt::StructureItem]),
+    /// A `.resi` file's signature.
     Interface(&'a [tt::TypedSignatureItem]),
 }
 

@@ -89,12 +89,14 @@ impl Position {
 pub struct LocationOrigin([u8; 3]);
 
 impl LocationOrigin {
+    /// Encode a source declaration identity; panics if it exceeds 24 bits.
     pub fn new(value: u32) -> Self {
         assert!(value < 1 << 24, "source declaration identity overflow");
         let bytes = value.to_le_bytes();
         Self([bytes[0], bytes[1], bytes[2]])
     }
 
+    /// Decode the source declaration identity.
     pub fn raw(self) -> u32 {
         u32::from_le_bytes([self.0[0], self.0[1], self.0[2], 0])
     }

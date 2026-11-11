@@ -312,7 +312,7 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         ExpressionDesc::Pexp_array(_)
         | ExpressionDesc::Pexp_tuple(_)
         | ExpressionDesc::Pexp_record(_) => true,
-        ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::Char { .. }) => true,
+        ExpressionDesc::Pexp_constant(Constant::Char { .. }) => true,
         ExpressionDesc::Pexp_template(template) if template.values.is_empty() => true,
         ExpressionDesc::Pexp_construct(lid, _)
             if arena.is_lident(lid.txt, "::") || arena.is_lident(lid.txt, "[]") =>
@@ -321,10 +321,9 @@ pub fn is_huggable_expression(arena: &crate::parse_arena::ParseArena, expr: &Exp
         }
         ExpressionDesc::Pexp_object_literal(_) | ExpressionDesc::Pexp_braces(_) => true,
         _ if is_block_expr(arena, expr) => true,
-        ExpressionDesc::Pexp_constant(c) => match c {
-            Constant::String(payload) => is_multiline_text(payload.source(arena)),
-            _ => false,
-        },
+        ExpressionDesc::Pexp_constant(Constant::String(payload)) => {
+            is_multiline_text(payload.source(arena))
+        }
         _ => false,
     }
 }
@@ -405,6 +404,7 @@ pub fn is_unary_operator_idx(
 /// - Pexp_sequence, Pexp_open, Pexp_ifthenelse: inline
 /// - Pexp_for, Pexp_while, Pexp_try: inline
 /// - Pexp_array, Pexp_record: inline
+///
 /// Note: Pexp_match (switch) is NOT in this list, so it will NOT inline
 pub fn should_inline_rhs_binary_expr(arena: &ParseArena, expr: &Expression) -> bool {
     matches!(
@@ -578,15 +578,21 @@ pub fn collect_list_patterns<'a>(
 pub enum FunParam<'a> {
     /// Regular parameter with pattern
     Parameter {
+        /// Attributes on the parameter.
         attrs: &'a [Attribute],
+        /// Its label: none, `~label` or `~label=?`.
         label: &'a ArgLabel,
+        /// Default value of an optional labeled parameter.
         default_expr: Option<&'a Expression>,
+        /// The parameter pattern.
         pat: &'a Pattern,
     },
     /// Newtype parameter(s): (type t) or (type t u v)
     /// Multiple consecutive newtypes are combined into a single NewTypes variant.
     NewTypes {
+        /// Attributes on the `type` parameters.
         attrs: &'a [Attribute],
+        /// The introduced type names.
         names: Vec<&'a StringLoc>,
     },
 }
@@ -653,80 +659,75 @@ pub fn fun_expr<'a>(
     // Now collect_params: only handle Pexp_fun, stop at anything else
     let mut n_fun = 0;
 
-    loop {
-        match &current.pexp_desc {
-            ExpressionDesc::Pexp_fun(inner) => {
-                if let Some(source_params) = arena.stored_nary_fun_params(inner) {
-                    // A function with its own parameter list is a separate
-                    // `Pexp_fun` in the body (res_parsetree_viewer.ml:213-216
-                    // reads only the outer node's params).
-                    if n_fun > 0 {
-                        break;
-                    }
-                    is_async = is_async || inner.is_async;
-                    push_nary_newtypes(arena, inner, &mut params);
-                    for source in source_params {
-                        params.push(FunParam::Parameter {
-                            attrs: &source.p_attrs,
-                            label: &source.p_lbl,
-                            default_expr: source.p_default.map(|idx| arena.get_expr(idx)),
-                            pat: arena.get_pat(source.p_pat),
-                        });
-                    }
-                    current = arena.get_expr(inner.rhs);
-                    break;
-                }
-                let PexpFun {
-                    arg_label,
-                    default,
-                    lhs,
-                    rhs,
-                    arity,
-                    is_async: expr_is_async,
-                } = &**inner;
-                // Check is_async on the FIRST Pexp_fun we encounter
-                // (it may be nested inside Pexp_newtype). The first one always
-                // collects a parameter, so `n_fun == 0` identifies it.
-                if n_fun == 0 {
-                    is_async = is_async || *expr_is_async;
-                }
-
-                // OCaml's condition: arity = None || n_fun = 0
-                // ArityIdx: arena.get_arity() returns None for unknown, Some(_) for known
-                // Only collect if this is the first function OR there's no arity marker
-                if n_fun == 0 {
-                    push_nary_newtypes(arena, inner, &mut params);
-                }
-                if n_fun == 0 || arena.get_arity(*arity).is_none() {
-                    // OCaml's fun_expr passes {expr_ with pexp_attributes = []} to collect_params,
-                    // which means the FIRST parameter always gets empty attrs. For nested functions,
-                    // the inner expression keeps its attributes. We emulate this by using empty
-                    // slice for n_fun == 0.
-                    let attrs: &[Attribute] = if n_fun == 0 {
-                        &[] // First parameter: OCaml strips top-level attrs
-                    } else {
-                        &current.pexp_attributes // Nested: preserve attrs
-                    };
-                    let pat_ref: &Pattern = arena.get_pat(*lhs);
-                    params.push(FunParam::Parameter {
-                        attrs,
-                        label: arg_label,
-                        default_expr: default.as_ref().map(|idx| {
-                            let e: &Expression = arena.get_expr(*idx);
-                            e
-                        }),
-                        pat: pat_ref,
-                    });
-                    n_fun += 1;
-                    current = arena.get_expr(*rhs);
-                } else {
-                    // Stop collecting - arity marker indicates end of this function's params
-                    break;
-                }
+    // IMPORTANT: Don't collect Pexp_newtype here - OCaml's collect_params doesn't
+    // This ensures `(type a, ()) => (type b c, x) => 3` keeps the two functions separate
+    while let ExpressionDesc::Pexp_fun(inner) = &current.pexp_desc {
+        if let Some(source_params) = arena.stored_nary_fun_params(inner) {
+            // A function with its own parameter list is a separate
+            // `Pexp_fun` in the body (res_parsetree_viewer.ml:213-216
+            // reads only the outer node's params).
+            if n_fun > 0 {
+                break;
             }
-            // IMPORTANT: Don't collect Pexp_newtype here - OCaml's collect_params doesn't
-            // This ensures `(type a, ()) => (type b c, x) => 3` keeps the two functions separate
-            _ => break,
+            is_async = is_async || inner.is_async;
+            push_nary_newtypes(arena, inner, &mut params);
+            for source in source_params {
+                params.push(FunParam::Parameter {
+                    attrs: &source.p_attrs,
+                    label: &source.p_lbl,
+                    default_expr: source.p_default.map(|idx| arena.get_expr(idx)),
+                    pat: arena.get_pat(source.p_pat),
+                });
+            }
+            current = arena.get_expr(inner.rhs);
+            break;
+        }
+        let PexpFun {
+            arg_label,
+            default,
+            lhs,
+            rhs,
+            arity,
+            is_async: expr_is_async,
+        } = &**inner;
+        // Check is_async on the FIRST Pexp_fun we encounter
+        // (it may be nested inside Pexp_newtype). The first one always
+        // collects a parameter, so `n_fun == 0` identifies it.
+        if n_fun == 0 {
+            is_async = is_async || *expr_is_async;
+        }
+
+        // OCaml's condition: arity = None || n_fun = 0
+        // ArityIdx: arena.get_arity() returns None for unknown, Some(_) for known
+        // Only collect if this is the first function OR there's no arity marker
+        if n_fun == 0 {
+            push_nary_newtypes(arena, inner, &mut params);
+        }
+        if n_fun == 0 || arena.get_arity(*arity).is_none() {
+            // OCaml's fun_expr passes {expr_ with pexp_attributes = []} to collect_params,
+            // which means the FIRST parameter always gets empty attrs. For nested functions,
+            // the inner expression keeps its attributes. We emulate this by using empty
+            // slice for n_fun == 0.
+            let attrs: &[Attribute] = if n_fun == 0 {
+                &[] // First parameter: OCaml strips top-level attrs
+            } else {
+                &current.pexp_attributes // Nested: preserve attrs
+            };
+            let pat_ref: &Pattern = arena.get_pat(*lhs);
+            params.push(FunParam::Parameter {
+                attrs,
+                label: arg_label,
+                default_expr: default.as_ref().map(|idx| {
+                    let e: &Expression = arena.get_expr(*idx);
+                    e
+                }),
+                pat: pat_ref,
+            });
+            n_fun += 1;
+            current = arena.get_expr(*rhs);
+        } else {
+            // Stop collecting - arity marker indicates end of this function's params
+            break;
         }
     }
 
@@ -1135,10 +1136,11 @@ pub fn is_doc_comment_attribute(arena: &ParseArena, attr: &Attribute) -> bool {
     };
     matches!(
         &arena.get_expr(eval.0).pexp_desc,
-        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(..))
+        ExpressionDesc::Pexp_constant(c) if matches!(c, Constant::String(..))
     )
 }
 
+/// Split attributes into doc comments and all others, keeping their order.
 pub fn partition_doc_comment_attributes<'a>(
     arena: &ParseArena,
     attrs: &'a [Attribute],

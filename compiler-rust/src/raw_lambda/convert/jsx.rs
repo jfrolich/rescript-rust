@@ -116,15 +116,6 @@ fn jsx_children<'e>(
     }
 }
 
-/// `Lambda.record_fields_are_array`: the runtime names are "0", "1", ...
-fn record_fields_are_array(labels: &[LabelDescription]) -> bool {
-    !labels.is_empty()
-        && labels
-            .iter()
-            .enumerate()
-            .all(|(i, lbl)| lbl.lbl_runtime_name == i.to_string())
-}
-
 /// `is_omitted` of `jsx_props_of`: an optional prop written as `None`.
 fn is_omitted(lbl: &LabelDescription, e: &Expression) -> bool {
     lbl.lbl_optional && is_construct(e, "None")
@@ -148,8 +139,11 @@ impl<'a> RawLambdaConverter<'a> {
         let fields = self.ta.record_fields(*fields);
         let representation =
             crate::types::typedtree::record_representation(fields, empty_representation.as_deref());
-        if !representation.is_none_or(|repres| *repres == RecordRepresentation::RecordRegular) {
-            return Some(JsxProps::Spread(props));
+        match representation {
+            None | Some(RecordRepresentation::RecordRegular) => {}
+            // Props that are a JavaScript array: an ordinary call.
+            Some(RecordRepresentation::RecordArray) => return None,
+            Some(_) => return Some(JsxProps::Spread(props)),
         }
         let all_labels =
             crate::types::typedtree::record_all_labels(self.type_ctx, fields).unwrap_or_default();
@@ -163,8 +157,6 @@ impl<'a> RawLambdaConverter<'a> {
             Some(_) => all_labels.len() < 20 && !all_labels.iter().any(|lbl| lbl.lbl_optional),
         };
         let children = match children {
-            // A record with the runtime names "0", "1", ... is an array.
-            _ if record_fields_are_array(&all_labels) => return None,
             None => None,
             // Children printed as JSX children must be the `children` prop.
             Some((lbl, _)) if lbl.lbl_runtime_name != "children" => return None,
@@ -330,7 +322,7 @@ impl<'a> RawLambdaConverter<'a> {
                                                 name: lbl.lbl_runtime_name,
                                             },
                                         ),
-                                        &vec![rb.var(init_id)],
+                                        &[rb.var(init_id)],
                                         loc,
                                     ),
                                 ),

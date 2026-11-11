@@ -45,7 +45,9 @@ pub enum Doc {
     Indent(Box<Doc>),
     /// Different output depending on whether we're in break or flat mode
     IfBreaks {
+        /// Printed when the enclosing group breaks.
         yes: Box<Doc>,
+        /// Printed when the enclosing group stays flat.
         no: Box<Doc>,
         /// When true, always use the `yes` branch
         broken: Rc<Cell<bool>>,
@@ -75,11 +77,20 @@ pub enum Doc {
     /// line, and a blank line when `prev` or `next`, the list's children at
     /// those positions printed on each side of it, span several lines. It
     /// measures them but does not print them.
-    ItemSeparator { prev: u32, next: u32 },
+    ItemSeparator {
+        /// Position of the item before the separator.
+        prev: u32,
+        /// Position of the item after the separator.
+        next: u32,
+    },
     /// `Res_doc.Comment`, over the documents of a concatenation: prints like
     /// them, and an item separator does not measure them.
     Comment(Vec<Doc>),
 }
+
+/// A deferred line suffix: the indentation and mode it was met in, and the
+/// document to print at the end of the line.
+type LineSuffix<'a> = (i32, Mode, &'a Doc);
 
 /// A command of the `to_string` stack: a document, or an `ItemSeparator`
 /// resolved against the `ItemList` that holds it.
@@ -92,26 +103,33 @@ enum Cmd<'d> {
 impl Doc {
     // ========== Constructors ==========
 
+    /// The empty document.
     pub fn nil() -> Doc {
         Doc::Nil
     }
 
+    /// Literal text, which must not contain newlines.
     pub fn text(s: impl Into<String>) -> Doc {
         Doc::Text(s.into())
     }
 
+    /// A line break that renders as a space in flat mode.
     pub fn line() -> Doc {
         Doc::LineBreak(LineStyle::Classic)
     }
 
+    /// A line break that renders as nothing in flat mode.
     pub fn soft_line() -> Doc {
         Doc::LineBreak(LineStyle::Soft)
     }
 
+    /// A line break that is always printed and breaks the enclosing groups.
     pub fn hard_line() -> Doc {
         Doc::LineBreak(LineStyle::Hard)
     }
 
+    /// A line break that is always printed without the current indentation,
+    /// for multiline string and template contents.
     pub fn literal_line() -> Doc {
         Doc::LineBreak(LineStyle::Literal)
     }
@@ -135,10 +153,12 @@ impl Doc {
         }
     }
 
+    /// Indent the line breaks inside `doc` by two more spaces.
     pub fn indent(doc: Doc) -> Doc {
         Doc::Indent(Box::new(doc))
     }
 
+    /// `yes` if the enclosing group breaks, `no` if it stays flat.
     pub fn if_breaks(yes: Doc, no: Doc) -> Doc {
         Doc::IfBreaks {
             yes: Box::new(yes),
@@ -147,10 +167,12 @@ impl Doc {
         }
     }
 
+    /// Defer `doc` to the end of the current line, before its newline.
     pub fn line_suffix(doc: Doc) -> Doc {
         Doc::LineSuffix(Box::new(doc))
     }
 
+    /// A group printed flat if it fits in the remaining width, broken otherwise.
     pub fn group(doc: Doc) -> Doc {
         Doc::Group {
             should_break: Rc::new(Cell::new(false)),
@@ -158,6 +180,8 @@ impl Doc {
         }
     }
 
+    /// A group that is broken when `force_break` is set, and otherwise behaves
+    /// like [`Doc::group`].
     pub fn breakable_group(doc: Doc, force_break: bool) -> Doc {
         Doc::Group {
             should_break: Rc::new(Cell::new(force_break)),
@@ -165,10 +189,12 @@ impl Doc {
         }
     }
 
+    /// The first of `layouts` that fits flat, or the last one if none fits.
     pub fn custom_layout(layouts: Vec<Doc>) -> Doc {
         Doc::CustomLayout(layouts)
     }
 
+    /// Force the enclosing group to break.
     pub fn break_parent() -> Doc {
         Doc::BreakParent
     }
@@ -189,70 +215,87 @@ impl Doc {
 
     // ========== Common combinators ==========
 
+    /// A space.
     pub fn space() -> Doc {
         Doc::text(" ")
     }
 
+    /// The text `,`.
     pub fn comma() -> Doc {
         Doc::text(",")
     }
 
+    /// The text `.`.
     pub fn dot() -> Doc {
         Doc::text(".")
     }
 
+    /// The text `..`.
     pub fn dotdot() -> Doc {
         Doc::text("..")
     }
 
+    /// The text `...`.
     pub fn dotdotdot() -> Doc {
         Doc::text("...")
     }
 
+    /// The text `<`.
     pub fn less_than() -> Doc {
         Doc::text("<")
     }
 
+    /// The text `>`.
     pub fn greater_than() -> Doc {
         Doc::text(">")
     }
 
+    /// The text `{`.
     pub fn lbrace() -> Doc {
         Doc::text("{")
     }
 
+    /// The text `}`.
     pub fn rbrace() -> Doc {
         Doc::text("}")
     }
 
+    /// The text `(`.
     pub fn lparen() -> Doc {
         Doc::text("(")
     }
 
+    /// The text `)`.
     pub fn rparen() -> Doc {
         Doc::text(")")
     }
 
+    /// The text `[`.
     pub fn lbracket() -> Doc {
         Doc::text("[")
     }
 
+    /// The text `]`.
     pub fn rbracket() -> Doc {
         Doc::text("]")
     }
 
+    /// The text `?`.
     pub fn question() -> Doc {
         Doc::text("?")
     }
 
+    /// The text `~`.
     pub fn tilde() -> Doc {
         Doc::text("~")
     }
 
+    /// The text `=`.
     pub fn equal() -> Doc {
         Doc::text("=")
     }
 
+    /// The text `"`.
     pub fn double_quote() -> Doc {
         Doc::text("\"")
     }
@@ -591,7 +634,7 @@ impl Doc {
         let mut pos = 0i32;
         // `line_suffices`, oldest first: OCaml conses each new suffix and
         // reverses the list when it flushes them.
-        let mut line_suffices: Vec<(i32, Mode, &Doc)> = Vec::new();
+        let mut line_suffices: Vec<LineSuffix<'_>> = Vec::new();
         let mut stack: Vec<(i32, Mode, Cmd<'_>)> = vec![(0, Mode::Flat, Cmd::Doc(self))];
 
         // `Mini_buffer.flush_newline`: trim the spaces before the line break.
@@ -628,7 +671,7 @@ impl Doc {
                         // lines, the other comments as they are, a
                         // separator, then what follows.
                         let mut same_line = Vec::with_capacity(line_suffices.len());
-                        let mut below: Vec<(&[Doc], (i32, Mode, &Doc))> = Vec::new();
+                        let mut below: Vec<(&[Doc], LineSuffix<'_>)> = Vec::new();
                         for suffix in line_suffices.drain(..) {
                             match suffix.2.own_line_suffix() {
                                 None => same_line.push(suffix),

@@ -143,43 +143,6 @@ pub(super) fn external_module(bundle: &str) -> ExternalModuleName {
     }
 }
 
-fn external_module_with_attrs(
-    bundle: &str,
-    hint: &str,
-    attrs: &[(&str, &str)],
-) -> ExternalModuleName {
-    ExternalModuleName {
-        bundle: bundle.to_string(),
-        module_bind_name: ModuleBindName::PhintName(hint.to_string()),
-        import_attributes: Some(
-            attrs
-                .iter()
-                .map(|(key, value)| (key.to_string(), value.to_string()))
-                .collect(),
-        ),
-    }
-}
-
-fn js_var_external(name: &str, external_module_name: Option<ExternalModuleName>) -> Lambda {
-    Lambda::prim(
-        Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-            prim_name: name.to_string(),
-            arg_types: vec![],
-            ffi: ExternalDecl {
-                kind: DeclKind::DeclVal {
-                    name: name.to_string(),
-                },
-                module_: external_module_name.map(ModuleSource::ModuleNamed),
-                scopes: vec![],
-                variadic: false,
-                effective_arity: 0,
-            },
-        })),
-        vec![],
-        LamLoc::NONE,
-    )
-}
-
 fn test_apply_info() -> ApInfo {
     ApInfo {
         loc: LamLoc::NONE,
@@ -202,142 +165,6 @@ fn test_function_calling(ident: Ident, target: &Ident) -> (Ident, Lambda) {
             })),
             FunctionAttribute::default(),
             LamLoc::NONE,
-        ),
-    )
-}
-
-fn test_apply(target: &Ident) -> Lambda {
-    Lambda::Lapply(Box::new(Apply {
-        ap_func: Box::new(Lambda::var(*target)),
-        ap_args: vec![],
-        ap_info: test_apply_info(),
-    }))
-}
-
-fn test_function_calling_two(ident: Ident, first: &Ident, second: &Ident) -> (Ident, Lambda) {
-    let param = Ident::create_local("param");
-    (
-        ident,
-        Lambda::function_(
-            1,
-            vec![param],
-            Lambda::seq(test_apply(first), test_apply(second)),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        ),
-    )
-}
-
-fn test_unit_function(ident: Ident) -> (Ident, Lambda) {
-    let param = Ident::create_local("param");
-    (
-        ident,
-        Lambda::function_(
-            1,
-            vec![param],
-            Lambda::const_(Constant::JsUndefined { is_unit: true }),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        ),
-    )
-}
-
-fn console_log_effect(arg: Lambda) -> Lambda {
-    Lambda::seq(
-        Lambda::prim(
-            Primitive::PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
-                prim_name: "console.log".to_string(),
-                arg_types: vec![],
-                ffi: crate::lambda::lam_primitive::ExternalDecl::test_val("", 0),
-            })),
-            vec![arg],
-            LamLoc::NONE,
-        ),
-        Lambda::const_(Constant::JsUndefined { is_unit: true }),
-    )
-}
-
-pub(super) fn import_attributes_lowered_lambda() -> Lambda {
-    let include_json = Ident::create_local("include");
-    let my_json = Ident::create_local("myJson");
-    let include_css = Ident::create_local("include");
-    let button_css = Ident::create_local("buttonCss");
-
-    let json_module = external_module_with_attrs(
-        "./myJson.json",
-        "MyJsonJson",
-        &[("type", "json"), ("some-identifier", "yep")],
-    );
-    let css_module = external_module_with_attrs(
-        "./myCss.css",
-        "MyCssCss",
-        &[("type", "css"), ("some-identifier", "yep")],
-    );
-
-    Lambda::let_(
-        LetKind::Strict,
-        include_json,
-        Lambda::prim(
-            Primitive::Pmakeblock(
-                TagInfo::Module(vec!["myJson".to_string()]),
-                Mutable::Immutable,
-            ),
-            vec![js_var_external("default", Some(json_module))],
-            LamLoc::NONE,
-        ),
-        Lambda::let_(
-            LetKind::Alias,
-            my_json,
-            Lambda::prim(
-                Primitive::Pfield(
-                    0,
-                    FieldDbgInfo::Module {
-                        name: crate::name::Name::new("myJson"),
-                    },
-                ),
-                vec![Lambda::var(include_json)],
-                LamLoc::NONE,
-            ),
-            Lambda::seq(
-                console_log_effect(Lambda::var(my_json)),
-                Lambda::let_(
-                    LetKind::Strict,
-                    include_css,
-                    Lambda::prim(
-                        Primitive::Pmakeblock(
-                            TagInfo::Module(vec!["buttonCss".to_string()]),
-                            Mutable::Immutable,
-                        ),
-                        vec![js_var_external("button", Some(css_module))],
-                        LamLoc::NONE,
-                    ),
-                    Lambda::let_(
-                        LetKind::Alias,
-                        button_css,
-                        Lambda::prim(
-                            Primitive::Pfield(
-                                0,
-                                FieldDbgInfo::Module {
-                                    name: crate::name::Name::new("buttonCss"),
-                                },
-                            ),
-                            vec![Lambda::var(include_css)],
-                            LamLoc::NONE,
-                        ),
-                        Lambda::seq(
-                            console_log_effect(Lambda::var(button_css)),
-                            Lambda::prim(
-                                Primitive::Pmakeblock(
-                                    TagInfo::ModuleExport(vec![my_json, button_css]),
-                                    Mutable::Immutable,
-                                ),
-                                vec![Lambda::var(my_json), Lambda::var(button_css)],
-                                LamLoc::NONE,
-                            ),
-                        ),
-                    ),
-                ),
-            ),
         ),
     )
 }
@@ -1136,15 +963,13 @@ fn compile_effectful_underscore_binding_from_nested_js_function_calls_survives_s
             ap_func: Box::new(outer_value),
             ap_args: vec![starj_empty.clone()],
             ap_info: ApInfo {
-                loc: loc,
-
+                loc,
                 status: ApplyStatus::Uncurry,
             },
         }))),
         ap_args: vec![starj_empty],
         ap_info: ApInfo {
-            loc: loc,
-
+            loc,
             status: ApplyStatus::Uncurry,
         },
     }));
@@ -3024,56 +2849,6 @@ fn if_expression_result_temp_uses_tmp_name_like_ocaml() {
     expect_dump!(dump::expr(&compiler.j, compiled.expr), "tmp");
 }
 
-pub(super) fn mixed_untagged_string_overlap_switch(
-    space_body: Lambda,
-    default_body: Lambda,
-) -> LambdaSwitch {
-    LambdaSwitch {
-        sw_consts_full: false,
-        sw_consts: vec![
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("a"),
-                        literal: crate::types::VariantLiteralTag::String("a".to_string()),
-                    }),
-                ),
-                default_body.clone(),
-            ),
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("b"),
-                        literal: crate::types::VariantLiteralTag::String("b".to_string()),
-                    }),
-                ),
-                default_body.clone(),
-            ),
-            (
-                crate::lambda::SwitchKey::Constructor(
-                    crate::types::VariantConstructorCase::Constant(crate::types::VariantTag {
-                        name: crate::name::Name::new("space"),
-                        literal: crate::types::VariantLiteralTag::String("space".to_string()),
-                    }),
-                ),
-                space_body,
-            ),
-        ],
-        sw_blocks_full: false,
-        sw_blocks: vec![],
-        sw_failaction: Some(Box::new(default_body)),
-        sw_dispatch: crate::lambda::SwitchDispatch::Variant(crate::types::VariantMatchingFacts {
-            tag_name: None,
-            block_types: vec![crate::types::VariantBlockType::String],
-            literal_tags: vec![
-                crate::types::VariantLiteralTag::String("space".to_string()),
-                crate::types::VariantLiteralTag::String("b".to_string()),
-                crate::types::VariantLiteralTag::String("a".to_string()),
-            ],
-        }),
-    }
-}
-
 pub(super) fn single_complete_array_block_switch(
     array_body: Lambda,
     undefined_body: Lambda,
@@ -3315,15 +3090,13 @@ fn nested_app_na_calls_reassociate_through_lam_apply_for_ari_regress_shape() {
                         Lambda::const_(Constant::int(5)),
                     ],
                     ap_info: ApInfo {
-                        loc: loc,
-
+                        loc,
                         status: ApplyStatus::Na,
                     },
                 }))),
                 ap_args: vec![Lambda::const_(Constant::int(6))],
                 ap_info: ApInfo {
-                    loc: loc,
-
+                    loc,
                     status: ApplyStatus::Na,
                 },
             })),
@@ -3412,15 +3185,13 @@ fn nested_app_na_calls_reassociate_multi_arg_returned_functions_for_test_demo_sh
                             Lambda::const_(Constant::int(4)),
                         ],
                         ap_info: ApInfo {
-                            loc: loc,
-
+                            loc,
                             status: ApplyStatus::Na,
                         },
                     }))),
                     ap_args: vec![Lambda::const_(Constant::int(6)), Lambda::var(extra)],
                     ap_info: ApInfo {
-                        loc: loc,
-
+                        loc,
                         status: ApplyStatus::Na,
                     },
                 })),
@@ -4714,6 +4485,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("id".to_string(), true),
                                             ("name".to_string(), true),
@@ -4745,7 +4517,7 @@ fn js_flatten_and_mark_dead_materializes_strictopt_identity_optional_record_fiel
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable })](undefined, x_name, undefined, undefined, x_x, undefined)}"
+        "Block{let[Strict] x_name = OptionalBlock[true](\"test\"); let[Strict] x_x = OptionalBlock[true](\"test\"); let[StrictOpt,DeadPure] x = CamlBlock[Immutable, Record(RecordTag { fields: [(\"id\", true), (\"name\", true), (\"title\", true), (\"className\", true), (\"x\", true), (\"y\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](undefined, x_name, undefined, undefined, x_x, undefined)}"
     );
 }
 
@@ -4781,6 +4553,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
                                 MutableFlag::Immutable,
                                 j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("pk".to_string(), false),
                                             ("exportStatus".to_string(), true),
@@ -4809,7 +4582,7 @@ fn js_flatten_and_mark_dead_materializes_strict_identity_optional_record_fields_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
+        "Block{let[Strict] story_exportStatus = OptionalBlock[true](\"IDLE\"); let[Strict] story_instantPlayerEligible = OptionalBlock[true](true); let[Strict,DeadPure] story = CamlBlock[Immutable, Record(RecordTag { fields: [(\"pk\", false), (\"exportStatus\", true), (\"instantPlayerEligible\", true)], logical_field_count: None, mutable_flag: Immutable, array: false })](\"STORY#id\", story_exportStatus, story_instantPlayerEligible)}"
     );
 }
 
@@ -4831,6 +4604,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                     JE::number(Number::int(3), &mut j),
                                 ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                                     crate::lambda::lam_tag_info::RecordTag {
+                                        array: false,
                                         fields: vec![
                                             ("xx".to_string(), false),
                                             ("yy".to_string(), false),
@@ -4841,6 +4615,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
                                 )))), &mut j),
                         ], &mut j), MutableFlag::Immutable, j.tag_id(TagInfo::Record(Box::new(
                             crate::lambda::lam_tag_info::RecordTag {
+                                array: false,
                                 fields: vec![("a".to_string(), false), ("b".to_string(), false)],
                                 logical_field_count: None,
                                 mutable_flag: crate::parser::ast::MutableFlag::Immutable,
@@ -4857,7 +4632,7 @@ fn js_flatten_and_mark_dead_keeps_alias_bound_deep_constant_records_inline_like_
 
     expect_dump!(
         dump::block(&deps.program.arena, &deps.program.block),
-        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable })](2, 3))"
+        "let[Alias,DeadPure] v = CamlBlock[Immutable, Record(RecordTag { fields: [(\"a\", false), (\"b\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](OptionalBlock[true](3), CamlBlock[Immutable, Record(RecordTag { fields: [(\"xx\", false), (\"yy\", false)], logical_field_count: None, mutable_flag: Immutable, array: false })](2, 3))"
     );
 }
 
@@ -4932,6 +4707,7 @@ fn top_level_record_field_assignments_on_pure_fresh_literals_collapse_to_rhs_eff
                 Lambda::prim(
                     Primitive::Pmakeblock(
                         TagInfo::Record(Box::new(crate::lambda::lam_tag_info::RecordTag {
+                            array: false,
                             fields: vec![("x".to_string(), false)],
                             logical_field_count: None,
                             mutable_flag: crate::parser::ast::MutableFlag::Mutable,
@@ -5404,6 +5180,7 @@ fn lowers_record_pfield_from_pure_caml_block_directly_like_ocaml() {
                 MutableFlag::Immutable,
                 compiler.j.tag_id(TagInfo::Record(Box::new(
                     crate::lambda::lam_tag_info::RecordTag {
+                        array: false,
                         fields: vec![("d".to_string(), false)],
                         logical_field_count: None,
                         mutable_flag: crate::parser::ast::MutableFlag::Immutable,

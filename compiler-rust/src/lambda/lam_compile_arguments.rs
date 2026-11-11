@@ -15,6 +15,14 @@ use crate::lambda::arena::{Lam, LamArena};
 use crate::lambda::lam_compat::LetKind;
 use ahash::AHashSet;
 
+/// Compiled arguments of a call, primitive or literal, each with the
+/// statements it needs first. Most have at most a few, so they stay off the
+/// heap.
+pub(crate) type HeldArgs = smallvec::SmallVec<[(Block, Expr); 4]>;
+
+/// The values of compiled arguments.
+pub(crate) type ArgValues = smallvec::SmallVec<[Expr; 4]>;
+
 /// `delay_safe`: local immutable values and pure operations on them may be
 /// evaluated after later arguments; heap reads and JS globals may not.
 pub(crate) fn delay_safe(j: &JsArena, assignable: &AHashSet<Ident>, e: Expr) -> bool {
@@ -148,11 +156,11 @@ impl LambdaCompiler {
     pub(crate) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: Vec<(Block, Expr)>,
-    ) -> (Block, Vec<Expr>) {
+        args: HeldArgs,
+    ) -> (Block, ArgValues) {
         if !args.iter().skip(1).any(|(block, _)| !block.is_empty()) {
             let mut code = Vec::new();
-            let mut values = Vec::with_capacity(args.len());
+            let mut values = ArgValues::with_capacity(args.len());
             for (block, value) in args {
                 code.extend(block);
                 values.push(value);
@@ -161,7 +169,7 @@ impl LambdaCompiler {
         }
         let mut chunks: Vec<Block> = Vec::with_capacity(args.len() * 2);
         let mut has_code = false;
-        let mut values = Vec::with_capacity(args.len());
+        let mut values = ArgValues::with_capacity(args.len());
         for (i, (block, value)) in args.into_iter().enumerate().rev() {
             let (held, value) = if !has_code {
                 (Vec::new(), value)
@@ -193,22 +201,32 @@ impl LambdaCompiler {
     }
 
     /// lam_compile.ml `compile_arguments`: compiles the arguments of a call
-    /// or literal (`Ext_list.map`, left to right, in `NeedValue Not_tail`),
-    /// then orders them with `sequence_arguments`.
+    /// or literal, then orders them with `sequence_arguments`.
     pub(crate) fn compile_arguments(
         &mut self,
         a: &mut LamArena,
         method_callee: bool,
         args: impl IntoIterator<Item = Lam>,
-    ) -> (Block, Vec<Expr>) {
-        let compiled = args
-            .into_iter()
+    ) -> (Block, ArgValues) {
+        let compiled = self.compile_each_argument(a, args);
+        self.sequence_arguments(method_callee, compiled)
+    }
+
+    /// The first half of `compile_arguments`: each argument compiled left to
+    /// right in `NeedValue Not_tail` (`Ext_list.map`). `compile_arguments
+    /// ?hold` adds statements to the result, such as the bindings of
+    /// `hold_external_args`, before it is sequenced.
+    pub(crate) fn compile_each_argument(
+        &mut self,
+        a: &mut LamArena,
+        args: impl IntoIterator<Item = Lam>,
+    ) -> HeldArgs {
+        args.into_iter()
             .map(|arg| {
                 let compiled = self.compile_expr(a, arg);
                 (compiled.prelude, compiled.expr)
             })
-            .collect();
-        self.sequence_arguments(method_callee, compiled)
+            .collect()
     }
 
     /// Extends `assignable` with the variables `lam` assigns that are not
@@ -321,8 +339,10 @@ mod tests {
         let callee = JE::static_index(receiver, "m", None, &mut compiler.j);
         let later = later_statement(&mut compiler.j);
         let value = JE::string("v", &mut compiler.j);
-        let (code, values) =
-            compiler.sequence_arguments(true, vec![(vec![], callee), (later, value)]);
+        let (code, values) = compiler.sequence_arguments(
+            true,
+            HeldArgs::from_vec(vec![(vec![], callee), (later, value)]),
+        );
         assert_eq!(code.len(), 2, "held object, then the argument's statement");
         let StmtKind::Variable(decl) = compiler.j.sk(code[0]) else {
             panic!("expected held object");
@@ -348,8 +368,10 @@ mod tests {
         let b = JE::static_index(obj, "b", None, &mut compiler.j);
         let later = later_statement(&mut compiler.j);
         let value = JE::string("v", &mut compiler.j);
-        let (code, values) =
-            compiler.sequence_arguments(false, vec![(vec![], a), (vec![], b), (later, value)]);
+        let (code, values) = compiler.sequence_arguments(
+            false,
+            HeldArgs::from_vec(vec![(vec![], a), (vec![], b), (later, value)]),
+        );
         assert_eq!(code.len(), 3);
         let held: Vec<Ident> = code[..2]
             .iter()
@@ -511,7 +533,7 @@ mod tests {
     fn sequence_arguments_handles_long_argument_lists() {
         let mut compiler = LambdaCompiler::new();
         let value = JE::string("v", &mut compiler.j);
-        let args: Vec<(Block, Expr)> = (0..20_000)
+        let args: HeldArgs = (0..20_000)
             .map(|_| (later_statement(&mut compiler.j), value))
             .collect();
         let (code, values) = compiler.sequence_arguments(false, args);

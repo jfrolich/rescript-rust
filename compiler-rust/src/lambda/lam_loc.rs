@@ -113,6 +113,7 @@ impl LamLocTable {
         self.rows.len()
     }
 
+    /// Whether the table has no coordinate rows.
     pub fn is_empty(&self) -> bool {
         self.rows.is_empty()
     }
@@ -262,6 +263,7 @@ impl CmjExportLambdas {
         &self.locs
     }
 
+    /// The export lambdas and the location table they resolve in.
     pub fn into_parts(self) -> (AHashMap<String, Lambda>, LamLocTable) {
         (self.lambdas, self.locs)
     }
@@ -433,8 +435,8 @@ pub fn for_each_loc_mut(lam: &mut Lambda, f: &mut impl FnMut(&mut LamLoc)) {
         | Lambda::LtryFinally(e1, e2)
         | Lambda::Lsequence(e1, e2)
         | Lambda::Lwhile(e1, e2)
-        | Lambda::Lfor_of(_, e1, e2)
-        | Lambda::Lfor_await_of(_, e1, e2) => {
+        | Lambda::LforOf(_, e1, e2)
+        | Lambda::LforAwaitOf(_, e1, e2) => {
             for_each_loc_mut(e1, f);
             for_each_loc_mut(e2, f);
         }

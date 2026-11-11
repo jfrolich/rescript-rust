@@ -60,6 +60,7 @@ impl fmt::Display for RawLambdaPrinter<'_> {
     }
 }
 
+/// Writes `raw` in the `-drawlambda` format.
 pub fn print_raw_lambda(a: &LamArena, raw: RawLambda, out: &mut impl Write) {
     let mut f = Formatter::new(out);
     lam(a, &mut f, raw, None);
@@ -142,6 +143,10 @@ fn print_tag_info<W: Write>(f: &mut Formatter<W>, tag_info: &TagInfo) {
                 .map(|(name, _)| name.as_str())
                 .collect::<Vec<_>>()
                 .join(";");
+            // printlambda.ml: `Blk_record {array = true}` prints `array[...]`.
+            if matches!(tag_info, TagInfo::Record(r) if r.array) {
+                f.string("array");
+            }
             f.string("[");
             f.string(&names);
             f.string("]");
@@ -278,7 +283,7 @@ fn print_function<W: Write>(
     f.string("(function");
     for param in params {
         f.space();
-        print_ident(f, &param);
+        print_ident(f, param);
     }
     f.space();
     print_function_attribute(f, attr);
@@ -473,20 +478,18 @@ fn lam<W: Write>(a: &LamArena, f: &mut Formatter<W>, lam0: RawLambda, reraise_ex
             f.close_box();
         }
         View::Prim(primitive, args, _) => {
-            if matches!(primitive, Primitive::Praise) {
-                if let ([arg], Some(exn_id)) = (args, reraise_exn)
-                    && let Some(id) = a.as_var(*arg)
-                {
-                    if id.same(exn_id) {
-                        f.open_box(BoxKind::Box, 2);
-                        f.string("(reraise");
-                        f.space();
-                        print_ident(f, &id);
-                        f.string(")");
-                        f.close_box();
-                        return;
-                    }
-                }
+            if matches!(primitive, Primitive::Praise)
+                && let ([arg], Some(exn_id)) = (args, reraise_exn)
+                && let Some(id) = a.as_var(*arg)
+                && id.same(exn_id)
+            {
+                f.open_box(BoxKind::Box, 2);
+                f.string("(reraise");
+                f.space();
+                print_ident(f, &id);
+                f.string(")");
+                f.close_box();
+                return;
             }
             f.open_box(BoxKind::Box, 2);
             f.string("(");

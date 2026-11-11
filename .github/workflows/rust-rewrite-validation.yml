@@ -18,6 +18,22 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  compiler-warnings:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install --component clippy
+      - name: Check all compiler targets and feature configurations
+        run: |
+          cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --all-features -- -D warnings
+          cargo clippy --locked --manifest-path compiler-rust/Cargo.toml --all-targets --no-default-features -- -D warnings
+      - name: Check compiler documentation
+        env:
+          RUSTDOCFLAGS: "-D warnings"
+        run: cargo doc --locked --manifest-path compiler-rust/Cargo.toml --all-features --no-deps
+
   release-parity:
     runs-on: ubuntu-24.04
     timeout-minutes: 90
@@ -64,9 +80,11 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           ./scripts/rust_compiler_shims.sh release
 
+      # The same OCaml as ci.yml: diagnostics are laid out by OCaml's Format,
+      # whose break sizing changed in 5.5, and the Rust formatter follows it.
       - uses: ./.github/actions/setup-ocaml
         with:
-          compiler: "5.3.0"
+          compiler: "5.5.2"
           os: ubuntu-24.04
           cache-prefix: opam-rewrite-validation-v1
 

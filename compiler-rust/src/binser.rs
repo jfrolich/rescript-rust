@@ -8,6 +8,7 @@ use serde::de::{self, DeserializeSeed, IntoDeserializer, Visitor};
 use serde::ser::{self, Serialize};
 use std::fmt;
 
+/// An encoding or decoding failure in the internal binary format.
 #[derive(Debug)]
 pub struct Error(String);
 
@@ -50,6 +51,7 @@ pub fn from_slice<'de, T: de::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T> {
     Ok(value)
 }
 
+/// Serializer for the compiler-owned binary format.
 pub struct Serializer {
     out: Vec<u8>,
 }
@@ -308,6 +310,7 @@ fields!(SerializeTupleVariant, serialize_field);
 fields!(SerializeStruct, serialize_field, _key);
 fields!(SerializeStructVariant, serialize_field, _key);
 
+/// Deserializer borrowing bytes in the compiler-owned binary format.
 pub struct Deserializer<'de> {
     input: &'de [u8],
 }
@@ -598,6 +601,97 @@ impl<'de> de::VariantAccess<'de> for &mut Deserializer<'de> {
     }
 }
 
+/// A value kept in this format until it is read. Large values that are built
+/// once and read rarely (a published module's signature and type graph) take
+/// a small fraction of their decoded size this way. Clones share the bytes.
+/// Serialized as its bytes, so storing it does not encode it again.
+pub struct Encoded<T> {
+    bytes: std::sync::Arc<[u8]>,
+    _value: std::marker::PhantomData<fn() -> T>,
+}
+
+impl<T> Encoded<T> {
+    /// The encoded size.
+    pub fn len(&self) -> usize {
+        self.bytes.len()
+    }
+
+    /// Whether the encoded representation contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+}
+
+impl<T: Serialize> Encoded<T> {
+    /// Encode a value once for shared storage and deferred decoding.
+    pub fn encode(value: &T) -> Self {
+        Encoded {
+            bytes: to_vec(value)
+                .expect("encoding to memory cannot fail")
+                .into(),
+            _value: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: de::DeserializeOwned> Encoded<T> {
+    /// The value, `None` when the bytes do not decode as a `T` (read from a
+    /// store another compiler version wrote).
+    pub fn try_decode(&self) -> Option<T> {
+        from_slice(&self.bytes).ok()
+    }
+
+    /// The value. The bytes were encoded from a `T` by this process.
+    pub fn decode(&self) -> T {
+        self.try_decode().expect("encoded value decodes")
+    }
+}
+
+impl<T> Clone for Encoded<T> {
+    fn clone(&self) -> Self {
+        Encoded {
+            bytes: self.bytes.clone(),
+            _value: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T> fmt::Debug for Encoded<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "Encoded({} bytes)", self.bytes.len())
+    }
+}
+
+impl<T> Serialize for Encoded<T> {
+    fn serialize<S: ser::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        serializer.serialize_bytes(&self.bytes)
+    }
+}
+
+impl<'de, T> de::Deserialize<'de> for Encoded<T> {
+    fn deserialize<D: de::Deserializer<'de>>(
+        deserializer: D,
+    ) -> std::result::Result<Self, D::Error> {
+        struct BytesVisitor<T>(std::marker::PhantomData<fn() -> T>);
+        impl<T> Visitor<'_> for BytesVisitor<T> {
+            type Value = Encoded<T>;
+            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                f.write_str("encoded bytes")
+            }
+            fn visit_bytes<E: de::Error>(
+                self,
+                bytes: &[u8],
+            ) -> std::result::Result<Self::Value, E> {
+                Ok(Encoded {
+                    bytes: bytes.into(),
+                    _value: std::marker::PhantomData,
+                })
+            }
+        }
+        deserializer.deserialize_byte_buf(BytesVisitor(std::marker::PhantomData))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -666,94 +760,5 @@ mod tests {
         }
         let bytes = to_vec(&Iter).unwrap();
         assert_eq!(from_slice::<Vec<u32>>(&bytes).unwrap(), vec![0, 2]);
-    }
-}
-
-/// A value kept in this format until it is read. Large values that are built
-/// once and read rarely (a published module's signature and type graph) take
-/// a small fraction of their decoded size this way. Clones share the bytes.
-/// Serialized as its bytes, so storing it does not encode it again.
-pub struct Encoded<T> {
-    bytes: std::sync::Arc<[u8]>,
-    _value: std::marker::PhantomData<fn() -> T>,
-}
-
-impl<T> Encoded<T> {
-    /// The encoded size.
-    pub fn len(&self) -> usize {
-        self.bytes.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.bytes.is_empty()
-    }
-}
-
-impl<T: Serialize> Encoded<T> {
-    pub fn encode(value: &T) -> Self {
-        Encoded {
-            bytes: to_vec(value)
-                .expect("encoding to memory cannot fail")
-                .into(),
-            _value: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T: de::DeserializeOwned> Encoded<T> {
-    /// The value, `None` when the bytes do not decode as a `T` (read from a
-    /// store another compiler version wrote).
-    pub fn try_decode(&self) -> Option<T> {
-        from_slice(&self.bytes).ok()
-    }
-
-    /// The value. The bytes were encoded from a `T` by this process.
-    pub fn decode(&self) -> T {
-        self.try_decode().expect("encoded value decodes")
-    }
-}
-
-impl<T> Clone for Encoded<T> {
-    fn clone(&self) -> Self {
-        Encoded {
-            bytes: self.bytes.clone(),
-            _value: std::marker::PhantomData,
-        }
-    }
-}
-
-impl<T> fmt::Debug for Encoded<T> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Encoded({} bytes)", self.bytes.len())
-    }
-}
-
-impl<T> Serialize for Encoded<T> {
-    fn serialize<S: ser::Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
-        serializer.serialize_bytes(&self.bytes)
-    }
-}
-
-impl<'de, T> de::Deserialize<'de> for Encoded<T> {
-    fn deserialize<D: de::Deserializer<'de>>(
-        deserializer: D,
-    ) -> std::result::Result<Self, D::Error> {
-        struct BytesVisitor<T>(std::marker::PhantomData<fn() -> T>);
-        impl<T> Visitor<'_> for BytesVisitor<T> {
-            type Value = Encoded<T>;
-            fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                f.write_str("encoded bytes")
-            }
-            fn visit_bytes<E: de::Error>(
-                self,
-                bytes: &[u8],
-            ) -> std::result::Result<Self::Value, E> {
-                Ok(Encoded {
-                    bytes: bytes.into(),
-                    _value: std::marker::PhantomData,
-                })
-            }
-        }
-        deserializer.deserialize_byte_buf(BytesVisitor(std::marker::PhantomData))
     }
 }

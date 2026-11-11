@@ -34,6 +34,7 @@ use crate::parser::longident::Longident;
 use crate::types::path::PathView;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
+use std::rc::Rc;
 use std::sync::Arc;
 
 /// Append-only store of type nodes (OCaml `type_expr` records,
@@ -150,7 +151,9 @@ impl Deref for TypeDescRef<'_> {
 /// `Cmt_utils.deprecated_used_context`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DeprecatedContext {
+    /// The deprecated function is called.
     FunctionCall,
+    /// The deprecated item is referenced without a call.
     Reference,
 }
 
@@ -158,10 +161,15 @@ pub enum DeprecatedContext {
 /// `.cmt` for `rescript-tools migrate`.
 #[derive(Debug, Clone)]
 pub struct DeprecatedUse {
+    /// Where the item is used.
     pub source_loc: crate::location::Location,
+    /// The deprecation message.
     pub text: String,
+    /// The `migrate` template expression, marshalled.
     pub migrate: Option<crate::binary_ast::marshal::MarshalFragment>,
+    /// The `migrateInPipeChain` template expression, marshalled.
     pub migrate_in_pipe_chain: Option<crate::binary_ast::marshal::MarshalFragment>,
+    /// How the item is used, when that matters for migration.
     pub context: Option<DeprecatedContext>,
 }
 
@@ -453,6 +461,38 @@ pub(crate) struct OpenSlotEvent {
 /// A saved position: resolved file name (or raw handle), line, bol, cnum.
 type PositionKey = (Result<u32, String>, i32, i32, i32);
 
+/// A compilation-local signature and its component-table name index.
+type IndexedSignature = (
+    Arc<super::decl::Signature>,
+    Arc<super::env_lazy::SignatureIndex>,
+);
+
+/// A module's values by name: each value's path and declaration.
+type ResolvedModuleValues =
+    crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>;
+
+/// A module's types by name: each type's path, identifier and declaration.
+type ResolvedModuleTypes =
+    crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>;
+
+/// A module's submodules by name: each one's identifier and declaration.
+type ModuleDeclarations =
+    crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>;
+
+/// A dotted type path resolved to its identifier and declaration.
+type ResolvedTypeItem = (Ident, Arc<super::decl::TypeDeclaration>);
+
+/// `raw_lambda::typeopt` answers by environment, type and query.
+type TypeoptAnswers = crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>;
+
+/// OCaml `Ctype.reified_var_counter_key`: the next index for each base
+/// name, and the names already given.
+#[derive(Default)]
+pub(crate) struct ReifiedNames {
+    counters: crate::fast_hash::AHashMap<String, usize>,
+    used: crate::fast_hash::AHashSet<String>,
+}
+
 /// Type checking context.
 ///
 /// This context is created for each type checking session (typically one
@@ -502,9 +542,9 @@ pub struct TypeContext {
     /// Dedicated memo ref for OCaml's simple_abbrevs (nullary, non-object
     /// abbreviations). This points to a mutable AbbrevMemo cell.
     simple_abbrevs: Cell<AbbrevMemoRef>,
-    /// Counters for OCaml `Ctype.get_new_abstract_name` when reifying local
-    /// GADT constraint variables.
-    reified_var_counters: RefCell<crate::fast_hash::AHashMap<String, usize>>,
+    /// OCaml `Ctype.reified_var_counter_key`, for `get_new_abstract_name`
+    /// when reifying local GADT constraint variables.
+    reified_var_counters: RefCell<ReifiedNames>,
     /// OCaml `Ctype.existential_constructors_key` (ctype.ml:936-944): the
     /// constructor binding each existential type `instance_constructor`
     /// created in this compilation, by the stamp of its identifier.
@@ -574,7 +614,7 @@ pub struct TypeContext {
     /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
     /// of this compilation instead of being rebuilt on every lookup.
     local_stored_components:
-        RefCell<crate::fast_hash::AHashMap<u64, Arc<super::env_lazy::QualifiedModuleComponents>>>,
+        RefCell<crate::fast_hash::AHashMap<u64, Rc<super::env_lazy::QualifiedModuleComponents>>>,
     /// OCaml-shaped mutation trail. Logging is dormant unless a snapshot lives.
     mutation_journal: RefCell<TypeMutationJournal>,
     mutation_logging: TrailLogging,
@@ -650,7 +690,7 @@ pub struct TypeContext {
     qualified_module_components_cache: RefCell<
         crate::fast_hash::AHashMap<
             QualifiedModuleComponentsCacheKey,
-            Arc<super::env_lazy::QualifiedModuleComponents>,
+            Rc<super::env_lazy::QualifiedModuleComponents>,
         >,
     >,
 
@@ -665,34 +705,17 @@ pub struct TypeContext {
     component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
     /// Component-table name indexes of compilation-local signatures, keyed by
     /// address; the entry keeps the signature alive so the key stays unique.
-    signature_indexes: RefCell<
-        crate::fast_hash::AHashMap<
-            usize,
-            (
-                Arc<super::decl::Signature>,
-                Arc<super::env_lazy::SignatureIndex>,
-            ),
-        >,
-    >,
+    signature_indexes: RefCell<crate::fast_hash::AHashMap<usize, IndexedSignature>>,
     component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
     /// Cached dotted value lookups keyed by resolved module access path.
-    resolved_module_value_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            Path,
-            crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::ValueDescription>)>,
-        >,
-    >,
+    resolved_module_value_cache: RefCell<crate::fast_hash::AHashMap<Path, ResolvedModuleValues>>,
 
     /// Cached dotted type lookups keyed by resolved module access path.
     /// Keyed by env id as well: OCaml's Env is persistent, so a binding can
     /// never change under an existing path, but Rust's Env is mutated in
     /// place (`add_module`) and must invalidate these derived entries.
-    resolved_module_type_cache: RefCell<
-        ScopedPathMap<
-            crate::fast_hash::AHashMap<String, (Path, Ident, Arc<super::decl::TypeDeclaration>)>,
-        >,
-    >,
+    resolved_module_type_cache: RefCell<ScopedPathMap<ResolvedModuleTypes>>,
 
     /// Cached child-module access paths keyed by resolved parent access path.
     resolved_child_module_path_cache:
@@ -700,28 +723,19 @@ pub struct TypeContext {
 
     /// Forced declarations shared by persistent/global alias component views.
     /// Local component views keep their own thunk state in StructureComponentTables.
-    qualified_module_decl_cache: RefCell<
-        crate::fast_hash::AHashMap<
-            Path,
-            crate::fast_hash::AHashMap<String, (Ident, Arc<super::decl::ModuleDeclaration>)>,
-        >,
-    >,
+    qualified_module_decl_cache: RefCell<crate::fast_hash::AHashMap<Path, ModuleDeclarations>>,
 
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        hashbrown::HashMap<
-            (u64, Path, bool),
-            (Ident, Arc<super::decl::TypeDeclaration>),
-            crate::fast_hash::FastState,
-        >,
+        hashbrown::HashMap<(u64, Path, bool), ResolvedTypeItem, crate::fast_hash::FastState>,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
     normalized_path_full_cache: RefCell<ScopedPathMap<Arc<super::ctype::NormRecipe>>>,
     /// Answers of `raw_lambda::typeopt` queries while the finished typed tree
     /// is lowered (`None` outside that phase): the types no longer change.
-    typeopt_answers: RefCell<Option<crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>>>,
+    typeopt_answers: RefCell<Option<TypeoptAnswers>>,
     /// Outcome of expanding a `Pdot`-headed constructor, per module scope
     /// (see `ctype::PdotExpansion`).
     pdot_expansions: RefCell<
@@ -853,7 +867,7 @@ pub struct TypeContext {
     label_families: RefCell<Vec<Arc<Vec<super::decl::LabelDescription>>>>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
-    typed_envs: RefCell<Vec<Arc<Env>>>,
+    typed_envs: RefCell<Vec<Rc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
     typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
@@ -877,11 +891,11 @@ pub(crate) enum StoreEffect {
     /// one local identifier stamp.
     Stamps(Vec<i32>),
     /// A shared piece forced while building this one.
-    Piece(Arc<StorePiece>),
+    Piece(Rc<StorePiece>),
     /// A component view registered in this compilation's component cache.
     RegisterComponents(
         QualifiedModuleComponentsCacheKey,
-        Arc<super::env_lazy::QualifiedModuleComponents>,
+        Rc<super::env_lazy::QualifiedModuleComponents>,
     ),
     /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
     /// module for the compilation on first use.
@@ -933,7 +947,7 @@ struct StoreStampOrigins {
     built: Vec<(i32, i32)>,
     /// Runs of binders this compilation replayed: the piece, the index of
     /// its `StoreEffect::Stamps` effect, and the local stamp of the first.
-    replayed: Vec<(Arc<StorePiece>, usize, i32)>,
+    replayed: Vec<(Rc<StorePiece>, usize, i32)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -946,7 +960,7 @@ static NEXT_STORE_PIECE_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::At
 thread_local! {
     /// The piece of every store build with no effects and no guards (id 0;
     /// built pieces count from 1). Pieces stay on their worker thread.
-    static EMPTY_STORE_PIECE: Arc<StorePiece> = Arc::new(StorePiece {
+    static EMPTY_STORE_PIECE: Rc<StorePiece> = Rc::new(StorePiece {
         id: 0,
         effects: Vec::new(),
         guards: Vec::new(),
@@ -1108,7 +1122,7 @@ impl TypeContext {
             passive_variants: Cell::new(false),
             rigid_variants: Cell::new(false),
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
-            reified_var_counters: RefCell::new(crate::fast_hash::AHashMap::new()),
+            reified_var_counters: RefCell::new(ReifiedNames::default()),
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
@@ -1208,6 +1222,8 @@ impl TypeContext {
         }
     }
 
+    /// Allocate a layout to be completed later, for a variant of a recursive
+    /// declaration group.
     pub fn pending_variant_layout(&self) -> super::variant_runtime::LayoutRef {
         // A pending layout is completed later by this compilation.
         self.poison_store_build();
@@ -1217,6 +1233,7 @@ impl TypeContext {
         layout_ref
     }
 
+    /// Allocate a completed layout.
     pub fn alloc_complete_variant_layout(
         &self,
         layout: super::variant_runtime::Layout,
@@ -1231,6 +1248,7 @@ impl TypeContext {
         layout_ref
     }
 
+    /// Complete a layout allocated with [`Self::pending_variant_layout`].
     pub fn complete_variant_layout(
         &self,
         layout_ref: super::variant_runtime::LayoutRef,
@@ -1279,6 +1297,7 @@ impl TypeContext {
         }
     }
 
+    /// A copy of the layout `layout_ref` refers to.
     pub fn variant_layout(
         &self,
         layout_ref: super::variant_runtime::LayoutRef,
@@ -1301,7 +1320,7 @@ impl TypeContext {
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
             let env_ref = EnvRef::from_usize(typed_envs.len());
-            typed_envs.push(Arc::new(env.clone_preserve_id()));
+            typed_envs.push(Rc::new(env.clone_preserve_id()));
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
@@ -1310,7 +1329,7 @@ impl TypeContext {
     }
 
     /// Resolve a typedtree environment reference.
-    pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Arc<Env>> {
+    pub fn get_typed_env(&self, env_ref: EnvRef) -> Option<Rc<Env>> {
         self.typed_envs.borrow().get(env_ref.index()).cloned()
     }
 
@@ -1366,6 +1385,8 @@ impl TypeContext {
             .unwrap_or_else(|| arena.get_string(idx).to_string())
     }
 
+    /// The name of a longident component interned with
+    /// [`Self::intern_cmi_longident_name`].
     pub fn resolve_cmi_longident_component(&self, idx: StrIdx) -> Option<String> {
         self.cmi_longident_component_name(idx)
     }
@@ -1404,7 +1425,9 @@ impl TypeContext {
 
     /// OCaml `Ctype.reset_reified_var_counter` (ctype.ml:906).
     pub(crate) fn reset_reified_var_counter(&self) {
-        self.reified_var_counters.borrow_mut().clear();
+        let mut names = self.reified_var_counters.borrow_mut();
+        names.counters.clear();
+        names.used.clear();
     }
 
     /// The `Hashtbl.replace` into `existential_constructors_key` in OCaml
@@ -1426,17 +1449,29 @@ impl TypeContext {
             .copied()
     }
 
-    /// Match OCaml `Ctype.get_new_abstract_name`.
+    /// Match OCaml `Ctype.get_new_abstract_name`. A numbered name can equal
+    /// a base name ending in digits, as `$a1` for the second `'a` and the
+    /// first `'a1`, so names already given are skipped.
     pub(crate) fn next_reified_abstract_name(&self, prefix: &str) -> String {
         self.poison_store_build_for("next_reified_abstract_name");
-        let mut counters = self.reified_var_counters.borrow_mut();
-        let index = counters.get(prefix).map_or(0, |previous| previous + 1);
-        counters.insert(prefix.to_string(), index);
-        if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
-            prefix.to_string()
-        } else {
-            format!("{prefix}{index}")
+        let mut names = self.reified_var_counters.borrow_mut();
+        let ReifiedNames { counters, used } = &mut *names;
+        let name = |index: usize| {
+            if index == 0 && !prefix.is_empty() && !prefix.ends_with('$') {
+                prefix.to_string()
+            } else {
+                format!("{prefix}{index}")
+            }
+        };
+        let mut index = counters.get(prefix).map_or(0, |previous| previous + 1);
+        let mut candidate = name(index);
+        while used.contains(&candidate) {
+            index += 1;
+            candidate = name(index);
         }
+        counters.insert(prefix.to_string(), index);
+        used.insert(candidate.clone());
+        candidate
     }
 
     /// Cache a resolved module signature.
@@ -1464,10 +1499,10 @@ impl TypeContext {
     /// Cache a lazily-built qualified module-components view.
     /// Register a (possibly shared) component view in this compilation's
     /// component cache.
-    pub(crate) fn register_qualified_module_components_arc(
+    pub(crate) fn register_qualified_module_components_shared(
         &self,
         key: QualifiedModuleComponentsCacheKey,
-        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+        components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_qualified_component_registered();
@@ -1494,7 +1529,7 @@ impl TypeContext {
         }
         self.qualified_module_components_cache
             .borrow_mut()
-            .insert(key, Arc::new(components));
+            .insert(key, Rc::new(components));
     }
 
     /// Borrow a cached qualified module-components view.
@@ -1626,7 +1661,7 @@ impl TypeContext {
         if self.in_store_build() {
             self.store_build_guards
                 .borrow_mut()
-                .push((alias_source.clone(), nonempty));
+                .push((*alias_source, nonempty));
         }
         nonempty
     }
@@ -1634,7 +1669,7 @@ impl TypeContext {
     fn alias_source_has_component_paths(&self, alias_source: &Path) -> bool {
         self.component_paths_by_alias_source
             .borrow()
-            .get(&SamePathKey(alias_source.clone()))
+            .get(&SamePathKey(*alias_source))
             .is_some_and(|paths| !paths.is_empty())
     }
 
@@ -2714,7 +2749,7 @@ impl TypeContext {
         } else {
             let (level, id) = {
                 let pages = &self.shared_pages;
-                let original = super::shared_store::page_node(&pages, idx);
+                let original = super::shared_store::page_node(pages, idx);
                 (original.level, original.id)
             };
             let index = self.store_descs.push(desc, level, id);
@@ -3834,6 +3869,7 @@ impl TypeContext {
         Some(sig)
     }
 
+    /// Whether the raw signature of the persistent module `name` is loaded.
     pub fn has_raw_module_sig(&self, name: &str) -> bool {
         self.poison_store_build_for("read:has_raw_module_sig");
         self.raw_module_sigs.borrow().contains_key(name)
@@ -3999,6 +4035,8 @@ impl TypeContext {
         self.id_gen.create(name)
     }
 
+    /// Create a new identifier named by a string of a parse arena, as
+    /// [`Self::create_ident`] does.
     pub fn create_ast_ident(
         &self,
         arena: &crate::parse_arena::ParseArena,
@@ -4100,15 +4138,6 @@ impl TypeContext {
         };
         super::Path::pdot_pos(*f(&Arc::new(*prefix)), *text, *pos)
     }
-
-    pub(crate) fn dotted_prefix(&self, path: &super::Path) -> Arc<super::Path> {
-        let super::path::PathView::Pdot(prefix, _, _) = path.view() else {
-            panic!("expected dotted path")
-        };
-        Arc::new(*prefix)
-    }
-
-
 
     /// A scope for one parser arena or decoded interface. Uses the existing
     /// table-owner namespace and never reuses an ordinal.
@@ -4442,14 +4471,14 @@ impl TypeContext {
     pub(crate) fn local_stored_components(
         &self,
         id: u64,
-    ) -> Option<Arc<super::env_lazy::QualifiedModuleComponents>> {
+    ) -> Option<Rc<super::env_lazy::QualifiedModuleComponents>> {
         self.local_stored_components.borrow().get(&id).cloned()
     }
 
     pub(crate) fn set_local_stored_components(
         &self,
         id: u64,
-        components: Arc<super::env_lazy::QualifiedModuleComponents>,
+        components: Rc<super::env_lazy::QualifiedModuleComponents>,
     ) {
         self.local_stored_components
             .borrow_mut()
@@ -4464,7 +4493,7 @@ impl TypeContext {
     pub(crate) fn build_in_store<R>(
         &self,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         self.build_in_store_with_guards(false, build)
     }
 
@@ -4473,7 +4502,7 @@ impl TypeContext {
     pub(crate) fn build_in_store_guarded<R>(
         &self,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         self.build_in_store_with_guards(true, build)
     }
 
@@ -4481,7 +4510,7 @@ impl TypeContext {
         &self,
         guarded: bool,
         build: impl FnOnce() -> R,
-    ) -> (R, Option<Arc<StorePiece>>) {
+    ) -> (R, Option<Rc<StorePiece>>) {
         let depth = self.store_build_depth.get();
         let outer_effects = std::mem::take(&mut *self.store_build_effects.borrow_mut());
         let outer_guards = std::mem::take(&mut *self.store_build_guards.borrow_mut());
@@ -4524,9 +4553,9 @@ impl TypeContext {
             // guarded answer: touching, replaying or checking such a piece
             // does nothing, so they all share one piece and the enclosing
             // build need not record it.
-            return (result, Some(EMPTY_STORE_PIECE.with(Arc::clone)));
+            return (result, Some(EMPTY_STORE_PIECE.with(Rc::clone)));
         }
-        let piece = Arc::new(StorePiece {
+        let piece = Rc::new(StorePiece {
             id: NEXT_STORE_PIECE_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             effects,
             guards,
@@ -4542,7 +4571,7 @@ impl TypeContext {
 
     /// Note that this compilation is using shared store data built by `piece`:
     /// the first time, apply the effects that building it had.
-    pub(crate) fn touch_store_piece(&self, piece: &Arc<StorePiece>) {
+    pub(crate) fn touch_store_piece(&self, piece: &Rc<StorePiece>) {
         if piece.effects.is_empty() && piece.guards.is_empty() {
             return;
         }
@@ -4560,7 +4589,7 @@ impl TypeContext {
         self.suspend_store_build(|| self.replay_store_piece(piece));
     }
 
-    fn replay_store_piece(&self, piece: &Arc<StorePiece>) {
+    fn replay_store_piece(&self, piece: &Rc<StorePiece>) {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
         }
@@ -4656,6 +4685,7 @@ impl TypeContext {
         result
     }
 
+    /// `Ident.rename`: the identifier with the same name and a fresh stamp.
     pub fn rename_ident(&self, id: &Ident) -> Ident {
         self.rename_ident_stamp(id)
     }
@@ -4882,6 +4912,7 @@ impl TypeContext {
         self.rigid_variants.replace(value)
     }
 
+    /// Whether GADT instances are being tracked (OCaml `Ctype.trace_gadt_instances`).
     pub fn trace_gadt_instances(&self) -> bool {
         self.trace_gadt_instances.get()
     }
@@ -4940,8 +4971,7 @@ impl TypeContext {
         // Path compression: relink all traversed nodes to the representative
         // (OCaml `Btype.repr_link`). Stored handles use compilation-local
         // descriptor overlays, just like ordinary unification writes.
-        for i in 0..chain_len {
-            let node = chain[i];
+        for &node in &chain[..chain_len] {
             if node != current {
                 // A direct link already points at the representative. OCaml
                 // btype.ml:107-115 does not log/write it (`compress = false`);
@@ -4969,6 +4999,24 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    #[test]
+    fn typed_environment_snapshots_share_ownership() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let env_ref = ctx.store_typed_env(&env);
+        let first = ctx.get_typed_env(env_ref).expect("stored environment");
+        let other = Env::empty();
+        ctx.store_typed_env(&other);
+        assert_eq!(ctx.store_typed_env(&env), env_ref);
+        let second = ctx.get_typed_env(env_ref).expect("same environment");
+        assert!(Rc::ptr_eq(&first, &second));
+
+        // A retained snapshot must remain usable after its context is dropped.
+        drop(ctx);
+        assert_eq!(first.id(), env.id());
+        assert_eq!(second.id(), env.id());
+    }
 
     #[test]
     fn type_nodes_address_every_node_across_chunks() {

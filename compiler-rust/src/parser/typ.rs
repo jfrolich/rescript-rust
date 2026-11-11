@@ -606,6 +606,8 @@ fn is_external_bare_arrow_type(p: &mut Parser<'_>) -> bool {
     })
 }
 
+/// Parse the type of an `external` declaration. Inline records are only
+/// extracted from arrow types (res_core.ml:5137-5155).
 pub fn parse_external_type_expr(p: &mut Parser<'_>) -> CoreType {
     // OCaml compiler/syntax/src/res_core.ml:5137-5155 only passes the inline
     // record context to arrow externals. Non-arrow externals such as
@@ -1195,10 +1197,7 @@ fn parse_function_type(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> CoreType {
         let regular_attrs = parse_attributes(p);
 
         // Combine: doc_attrs @ regular_attrs (OCaml: doc_attr @ parse_attributes p)
-        let param_attrs: Attributes = doc_attrs
-            .into_iter()
-            .chain(regular_attrs.into_iter())
-            .collect();
+        let param_attrs: Attributes = doc_attrs.into_iter().chain(regular_attrs).collect();
 
         // Capture start position before label - OCaml includes the ~ in arrow location
         // But if there's an uncurried marker (.), the arrow should start at the .

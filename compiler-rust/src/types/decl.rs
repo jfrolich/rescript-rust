@@ -44,8 +44,11 @@ pub enum ValueKind {
 /// `Primitive.prim_kind`.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PrimKind {
+    /// A compiler intrinsic, named by the primitive's name (`"%..."`).
     KindIntrinsic,
+    /// A JavaScript binding described by its FFI attributes.
     KindExternal(std::sync::Arc<crate::types::external_ffi_types::ExternalFfi>),
+    /// An external declared as an inline constant.
     KindInlineConst(Box<crate::types::external_ffi_types::InlineConst>),
 }
 
@@ -147,7 +150,9 @@ impl std::ops::Deref for TypeDeclarationRef<'_> {
 pub enum TypeInlinedType {
     /// Inlined record
     Record {
+        /// The name of the record type.
         type_name: String,
+        /// Its fields.
         labels: Vec<LabelDeclaration>,
     },
 }
@@ -162,6 +167,7 @@ pub enum TypeInlinedType {
 pub struct SharedVec<T>(std::sync::Arc<Vec<T>>);
 
 impl<T> SharedVec<T> {
+    /// Share `items`.
     pub fn new(items: Vec<T>) -> Self {
         Self(std::sync::Arc::new(items))
     }
@@ -229,6 +235,7 @@ impl<T: Clone> IntoIterator for SharedVec<T> {
 }
 
 impl<T: Clone> SharedVec<T> {
+    /// The items, cloned only when the vector is still shared.
     pub fn into_vec(self) -> Vec<T> {
         std::sync::Arc::unwrap_or_clone(self.0)
     }
@@ -251,6 +258,7 @@ pub enum TypeKind {
 }
 
 impl TypeDeclaration {
+    /// The variant layout of a variant declaration.
     pub fn variant_layout_ref(&self) -> Option<super::variant_runtime::LayoutRef> {
         match self.type_kind {
             TypeKind::TypeVariant(_, layout) => Some(layout),
@@ -264,11 +272,16 @@ impl TypeDeclaration {
 pub enum RecordRepresentation {
     /// Regular record (all fields boxed/tagged)
     RecordRegular,
+    /// A regular record whose fields have the runtime names "0", "1", ...
+    /// in declaration order, represented as a JavaScript array
+    RecordArray,
     /// Unboxed single-field record
     RecordUnboxed(bool),
     /// Inlined record (in variant constructor)
     RecordInlined {
+        /// The constructor's name.
         name: String,
+        /// The constructor whose payload the record is.
         representation: super::variant_runtime::ConstructorReference,
     },
     /// Extension record
@@ -278,7 +291,9 @@ pub enum RecordRepresentation {
 /// Runtime representation for single-payload unboxing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TypeRepresentation {
+    /// The value is represented as a block.
     Boxed,
+    /// The value is represented by its single payload (`@unboxed`).
     Unboxed,
 }
 
@@ -516,8 +531,11 @@ pub enum ModuleType {
     MtySignature(std::sync::Arc<Signature>),
     /// Functor
     MtyFunctor {
+        /// The parameter.
         param: Ident,
+        /// The parameter's module type; `None` for a generative functor `()`.
         param_type: Option<Box<ModuleType>>,
+        /// The result's module type.
         result: Box<ModuleType>,
     },
     /// Module alias. The target is a shared path block, like a `Pdot`
@@ -792,6 +810,7 @@ pub enum AttributePayload {
         /// not deprecated; `Err` the location of a template with an invalid
         /// escape met first, where reading it raises.
         reason: Result<Option<String>, DeclLoc>,
+        /// Whether the migration can be applied automatically.
         can_be_automigrated: bool,
         /// The `migrate` template expression, marshalled in the current
         /// parsetree layout (`Cmt_utils.deprecated_used.migration_template`).
@@ -1035,14 +1054,19 @@ pub fn walk_signature_locations(sig: &mut [SignatureItem], v: &mut dyn Signature
     }
 }
 
+/// The attribute marking constructors of a variant shaped like `option`
+/// (OCaml `Datarepr.internal_optional`).
 pub const INTERNAL_OPTIONAL_ATTR_NAME: &str = "internal.optional";
 
+/// Whether the attributes include the [`INTERNAL_OPTIONAL_ATTR_NAME`]
+/// marker.
 pub fn has_internal_optional_attr(attrs: &[Attribute]) -> bool {
     attrs
         .iter()
         .any(|attr| attr.attr_name.txt == INTERNAL_OPTIONAL_ATTR_NAME)
 }
 
+/// A new [`INTERNAL_OPTIONAL_ATTR_NAME`] marker attribute.
 pub fn internal_optional_attr() -> Attribute {
     Attribute {
         attr_name: Located::noloc(INTERNAL_OPTIONAL_ATTR_NAME.to_string()),
@@ -1051,6 +1075,8 @@ pub fn internal_optional_attr() -> Attribute {
     }
 }
 
+/// Whether the constructors are exactly `None` and `Some(_)`, in either
+/// order.
 pub fn variant_has_optional_shape(cdecls: &[ConstructorDeclaration]) -> bool {
     matches!(
         cdecls,
@@ -1073,6 +1099,9 @@ pub fn variant_has_optional_shape(cdecls: &[ConstructorDeclaration]) -> bool {
     )
 }
 
+/// A constructor's attributes as its description carries them: with the
+/// [`INTERNAL_OPTIONAL_ATTR_NAME`] marker when the variant is shaped like
+/// `option`.
 pub fn constructor_description_attrs_for_variant(
     cdecls: &[ConstructorDeclaration],
     cd: &ConstructorDeclaration,

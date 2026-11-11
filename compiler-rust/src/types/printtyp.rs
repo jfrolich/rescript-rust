@@ -166,6 +166,10 @@ pub(crate) enum OutSigItem {
 // Printtyp
 // ============================================================================
 
+/// Prints extra explanation after a unification error's trace pair.
+pub(crate) type ExtraInfoPrinter<'f, W, P> =
+    &'f mut dyn FnMut(&mut Formatter<W>, &mut P, TypeExprRef, TypeExprRef);
+
 /// The mutable naming state of OCaml `Printtyp`: `names`, `name_counter`,
 /// `named_vars`, the weak-variable tables, and the loop marks
 /// (`visited_objects`, `aliased`, `delayed`).
@@ -489,11 +493,11 @@ impl<'a> Printtyp<'a> {
         }
         let depth = visited.len();
         visited.push(px);
-        let desc = (*self.ctx.get_desc(ty));
+        let desc = *self.ctx.get_desc(ty);
         match desc {
             TypeDesc::Tvar(..) => self.add_named_var(ty),
             TypeDesc::Tarrow { args, ret } => {
-                for arg in self.ctx.type_args(&args).iter() {
+                for arg in self.ctx.type_args(args).iter() {
                     self.mark_loops_rec(visited, arg.typ);
                 }
                 self.mark_loops_rec(visited, ret);
@@ -619,7 +623,7 @@ impl<'a> Printtyp<'a> {
             let name = self.name_of_type(mark, px);
             return OutType::Otyp_var(mark, name);
         }
-        let desc = (*self.ctx.get_desc(ty));
+        let desc = *self.ctx.get_desc(ty);
         let pr_typ = |this: &mut Self| -> OutType {
             match &desc {
                 TypeDesc::Tvar(..) => {
@@ -945,7 +949,7 @@ impl<'a> Printtyp<'a> {
                 return;
             }
             visited.push(ty);
-            let desc = (*ctx.get_desc(ty));
+            let desc = *ctx.get_desc(ty);
             match desc {
                 TypeDesc::Tvar(..) => vars.push(ty),
                 TypeDesc::Tobject { fields, .. } => go(ctx, visited, vars, fields),
@@ -1034,7 +1038,7 @@ impl<'a> Printtyp<'a> {
         let ty_manifest = decl.type_manifest.map(|ty| {
             // Special hack to hide variant name.
             let repr = self.ctx.repr(ty);
-            let desc = (*self.ctx.get_desc(repr));
+            let desc = *self.ctx.get_desc(repr);
             let ty = match desc {
                 TypeDesc::Tvariant(row) => {
                     let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
@@ -2705,13 +2709,13 @@ impl<'a> Printtyp<'a> {
     fn unalias(&self, ty: TypeExprRef) -> TypeExprRef {
         let ty = self.ctx.repr(ty);
         let level = self.ctx.get_level(ty);
-        let desc = (*self.ctx.get_desc(ty));
+        let desc = *self.ctx.get_desc(ty);
         match desc {
             TypeDesc::Tvar(..) | TypeDesc::Tunivar(..) => ty,
             TypeDesc::Tvariant(row) => {
                 let row = btype::row_repr(self.ctx, &self.ctx.row_desc(row));
                 let more = self.ctx.repr(row.row_more);
-                let more_desc = (*self.ctx.get_desc(more));
+                let more_desc = *self.ctx.get_desc(more);
                 let row_more = self
                     .ctx
                     .alloc_type_at_level(more_desc, self.ctx.get_level(more));
@@ -2735,7 +2739,7 @@ impl<'a> Printtyp<'a> {
     fn unalias_object(&self, ty: TypeExprRef) -> TypeExprRef {
         let ty = self.ctx.repr(ty);
         let level = self.ctx.get_level(ty);
-        let desc = (*self.ctx.get_desc(ty));
+        let desc = *self.ctx.get_desc(ty);
         match desc {
             TypeDesc::Tfield {
                 name,
@@ -2961,8 +2965,8 @@ impl<'a> Printtyp<'a> {
     ) {
         let t3 = self.ctx.repr(t3);
         let t4 = self.ctx.repr(t4);
-        let d3 = (*self.ctx.get_desc(t3));
-        let d4 = (*self.ctx.get_desc(t4));
+        let d3 = *self.ctx.get_desc(t3);
+        let d4 = *self.ctx.get_desc(t4);
         let binding_time = |p: &Path| p.binding_time();
         match (&d3, &d4) {
             (TypeDesc::Ttuple(l), TypeDesc::Tvar(..))
@@ -3275,9 +3279,7 @@ impl<'a> Printtyp<'a> {
         tr: &[TracePair],
         txt1: &mut dyn FnMut(&mut Formatter<W>),
         txt2: &mut dyn FnMut(&mut Formatter<W>),
-        print_extra_info: Option<
-            &mut dyn FnMut(&mut Formatter<W>, &mut Self, TypeExprRef, TypeExprRef),
-        >,
+        print_extra_info: Option<ExtraInfoPrinter<'_, W, Self>>,
     ) {
         self.reset();
         self.trace_same_names(tr);
@@ -3599,6 +3601,19 @@ fn print_subtype_context<W: std::io::Write>(
             ppf.str(
                 " is private: its values can only be built in the module that defines it, so another type cannot be coerced to it.",
             );
+        }
+        C::RecordArrayMismatch {
+            array_record_name,
+            object_record_name,
+        } => {
+            ppf.space();
+            ppf.str("The record ");
+            info(ppf, &array_record_name.name());
+            ppf.str(
+                " is represented as a JavaScript array (its fields have the runtime names \"0\", \"1\", ...) and ",
+            );
+            info(ppf, &object_record_name.name());
+            ppf.str(" as an object, so neither can be coerced to the other.");
         }
     }
 }

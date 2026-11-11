@@ -45,6 +45,10 @@ pub use program_printer::{
     print_program,
 };
 
+/// Per-module cache of `.cmj` metadata; `None` records a module whose `.cmj`
+/// has no such data, so the lookup is not repeated.
+type CmjCache<T> = RefCell<AHashMap<String, Option<Arc<T>>>>;
+
 /// Module identifier for imports/requires
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ModuleId {
@@ -71,10 +75,13 @@ pub enum ModuleFormat {
 /// root configuration's specs, so a dependency's are the same.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct JsPackageSpec {
+    /// The module system this output uses.
     pub module_format: ModuleFormat,
     /// Next to the source, or under `lib/<out_of_source_dir>/`.
     pub in_source: bool,
+    /// The directory under `lib/` used when not `in_source`.
     pub out_of_source_dir: String,
+    /// The file suffix of the generated JavaScript, such as `.res.js`.
     pub suffix: String,
 }
 
@@ -98,20 +105,35 @@ pub struct ModulePathResolver {
     module_path_cache: RefCell<AHashMap<String, Option<String>>>,
     runtime_module_cache: RefCell<AHashMap<String, bool>>,
     pure_module_cache: RefCell<AHashMap<String, bool>>,
-    cmj_export_constants_cache:
-        RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportConstant>>>>>,
-    cmj_export_arities_cache:
-        RefCell<AHashMap<String, Option<Arc<AHashMap<String, CmjExportArity>>>>>,
-    cmj_export_lambdas_cache:
-        RefCell<AHashMap<String, Option<Arc<crate::lambda::CmjExportLambdas>>>>,
+    cmj_export_constants_cache: CmjCache<AHashMap<String, CmjExportConstant>>,
+    cmj_export_arities_cache: CmjCache<AHashMap<String, CmjExportArity>>,
+    cmj_export_lambdas_cache: CmjCache<crate::lambda::CmjExportLambdas>,
 }
 
+/// Why an import of a ReScript module cannot be emitted
+/// (js_name_of_module_id.ml); the driver reports each as a compiler error.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModulePathResolutionError {
-    CmjNotFound { module_name: String },
-    JsNotFound { js_file: String },
-    MissingMlDependency { module_name: String },
-    DependencyScriptModuleDependentNot { module_name: String },
+    /// No `.cmj` for the module was found: it does not exist or is a namespace.
+    CmjNotFound {
+        /// The module that was looked up.
+        module_name: String,
+    },
+    /// In script mode, the dependency's JavaScript file is not on the load path.
+    JsNotFound {
+        /// The JavaScript file name that was looked for.
+        js_file: String,
+    },
+    /// The module's package has no output for the current module system.
+    MissingMlDependency {
+        /// The imported module.
+        module_name: String,
+    },
+    /// The dependency is compiled in script mode but the current package is not.
+    DependencyScriptModuleDependentNot {
+        /// The imported module.
+        module_name: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -909,7 +931,9 @@ pub struct JsRawInfo {
 /// A field excluded by object-rest destructuring.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct RecordRestField {
+    /// The record label as written in the source.
     pub label: String,
+    /// The local the field is bound to, once the rest pass has chosen one.
     pub ident: Option<Ident>,
 }
 

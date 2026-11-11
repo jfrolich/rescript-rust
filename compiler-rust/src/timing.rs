@@ -6,6 +6,7 @@
 //! worker report timings for a single module without parallel-worker pollution.
 
 use std::cell::RefCell;
+#[cfg(not(target_arch = "wasm32"))]
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
@@ -100,6 +101,7 @@ impl PhaseTimingSnapshot {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 /// Aggregate nanoseconds per phase, indexed by `Phase as usize`.
 static PHASE_NS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];

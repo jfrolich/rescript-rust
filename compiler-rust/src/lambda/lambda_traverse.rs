@@ -46,7 +46,12 @@ pub fn arena_assigned_variables(
         a.iter_children(lam, |child| walk(a, child, assigned));
     }
     let mut assigned = ahash::AHashSet::new();
-    walk(a, lam, &mut assigned);
+    // Assignments are rare (only a mutable variable kept local makes them),
+    // and this is asked for every pass and every inlined call: skip the walk
+    // of the whole term when the arena holds none.
+    if a.may_assign() {
+        walk(a, lam, &mut assigned);
+    }
     assigned
 }
 
@@ -80,7 +85,7 @@ pub fn shallow_exists(lam: &Lambda, f: &mut impl FnMut(&Lambda) -> bool) -> bool
         Lambda::LifThenElse(e1, e2, e3) => f(e1) || f(e2) || f(e3),
         Lambda::Lsequence(e1, e2) | Lambda::Lwhile(e1, e2) => f(e1) || f(e2),
         Lambda::Lfor(_, e1, e2, _, e3) => f(e1) || f(e2) || f(e3),
-        Lambda::Lfor_of(_, e1, e2) | Lambda::Lfor_await_of(_, e1, e2) => f(e1) || f(e2),
+        Lambda::LforOf(_, e1, e2) | Lambda::LforAwaitOf(_, e1, e2) => f(e1) || f(e2),
         Lambda::Lassign(_, e) => f(e),
     }
 }
@@ -228,7 +233,7 @@ pub fn shallow_map_sharing(mut lam: Lambda, f: &mut impl FnMut(Lambda) -> Mapped
             };
             return (Lambda::seq(*a, *b), true);
         }
-        Lambda::Lwhile(a, b) | Lambda::Lfor_of(_, a, b) | Lambda::Lfor_await_of(_, a, b) => {
+        Lambda::Lwhile(a, b) | Lambda::LforOf(_, a, b) | Lambda::LforAwaitOf(_, a, b) => {
             let c1 = map_in(a, f);
             let c2 = map_in(b, f);
             c1 || c2

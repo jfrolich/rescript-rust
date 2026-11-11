@@ -61,21 +61,30 @@ const EXTERNAL_ATTRS: &[&str] = &[
     "taggedTemplate",
 ];
 
+/// Error for `@deriving(accessors)` on a variant with an inline record argument.
 pub const ACCESSORS_VARIANT_RECORD_ARG_ERROR: &str = "@deriving(accessors) from a variant record argument is unsupported. Either define the record type separately from the variant type or use a positional argument.";
+/// Error for `await` outside an `async` function.
 pub const AWAIT_NOT_ASYNC_CONTEXT_ERROR: &str = "Await on expression not in an async context";
 
+/// A warning raised by the builtin PPX.
 #[derive(Debug, Clone)]
 pub struct PpxWarning {
+    /// Where the warning is reported.
     pub loc: LocIdx,
+    /// The warning.
     pub warning: Warning,
 }
 
+/// A `@@warning` or `@@warnerror` attribute's specification string.
 #[derive(Debug, Clone)]
 pub struct WarningAttributeSpec {
+    /// The specification, such as `"-27+32"`.
     pub spec: String,
+    /// Whether it came from `@@warnerror`, which turns the warnings into errors.
     pub as_error: bool,
 }
 
+/// A fatal builtin PPX error, with any warnings raised before it.
 #[derive(Debug, Clone)]
 pub struct PpxError {
     loc: Option<LocIdx>,
@@ -109,14 +118,17 @@ impl PpxError {
         self
     }
 
+    /// Where the error is reported, if it has a location.
     pub fn loc(&self) -> Option<LocIdx> {
         self.loc
     }
 
+    /// The error message.
     pub fn message_text(&self) -> &str {
         &self.message
     }
 
+    /// Warnings raised before the error, to report alongside it.
     pub fn warnings(&self) -> &[PpxWarning] {
         &self.warnings
     }
@@ -130,28 +142,12 @@ impl fmt::Display for PpxError {
 
 impl std::error::Error for PpxError {}
 
+/// Result of a builtin PPX transformation.
 pub type PpxResult<T> = Result<T, PpxError>;
 
 /// Check if the first char of a string is special (OCaml FFI marker)
 fn first_char_special(s: &str) -> bool {
     matches!(s.chars().next(), Some('#' | '?' | '%'))
-}
-
-/// Check if a string starts with the OCaml marshal magic number.
-/// The marshal magic bytes are 0x84, 0x95, 0xA6, 0xBE. These are stored as
-/// Latin-1 code points (U+0084, U+0095, U+00A6, U+00BE) in UTF-8 strings,
-/// so we must compare against chars (not raw UTF-8 bytes).
-fn starts_with_marshal_magic(s: &str) -> bool {
-    let mut chars = s.chars();
-    matches!(
-        (chars.next(), chars.next(), chars.next(), chars.next()),
-        (
-            Some('\u{84}'),
-            Some('\u{95}'),
-            Some('\u{A6}'),
-            Some('\u{BE}')
-        )
-    )
 }
 
 fn prim_str(arena: &mut ParseArena, s: impl Into<String>) -> StrIdx {
@@ -279,9 +275,17 @@ fn classify_let_unwrap_pattern(
 #[derive(Debug, Clone, PartialEq)]
 pub enum JsExpClassification {
     /// A function expression (regular or arrow)
-    JsFunction { arity: usize, arrow: bool },
+    JsFunction {
+        /// The number of parameters.
+        arity: usize,
+        /// Whether it is an arrow function.
+        arrow: bool,
+    },
     /// A literal value (string, number, bool, null, undefined, object literal, array literal)
-    JsLiteral { comment: Option<String> },
+    JsLiteral {
+        /// The single comment leading the literal, if any.
+        comment: Option<String>,
+    },
     /// Unknown expression type
     JsExpUnknown,
 }
@@ -396,7 +400,7 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
         })
         .parse_expression();
 
-    let result = match parser_result {
+    match parser_result {
         Ok(expr) => {
             match &expr {
                 // Function expression: function(...) { ... }
@@ -443,9 +447,7 @@ pub fn classify_js_exp(s: &str) -> JsExpClassification {
             }
         }
         Err(_) => JsExpClassification::JsExpUnknown,
-    };
-
-    result
+    }
 }
 
 /// Classify a JavaScript statement fragment.
@@ -863,7 +865,7 @@ fn raw_js_expression_parse_warning(
         .labels
         .as_ref()
         .and_then(|labels| labels.first());
-    let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
+    let start_offset = first_label.map_or(code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
     let (message, start_offset, end_offset) = flow_like_raw_js_expression_parse_warning(
         code,
@@ -900,7 +902,7 @@ fn raw_js_program_parse_warning(
         .labels
         .as_ref()
         .and_then(|labels| labels.first());
-    let start_offset = first_label.map_or_else(|| code.len(), |label| label.offset());
+    let start_offset = first_label.map_or(code.len(), |label| label.offset());
     let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
     let (message, start_offset, end_offset) = flow_like_raw_js_program_parse_warning(
         code,
@@ -1203,17 +1205,6 @@ pub(crate) fn warn_unused_attribute(
     }
 }
 
-/// OCaml `Bs_ast_invariant.warn_discarded_unused_attributes`.
-pub(crate) fn warn_discarded_unused_attributes(
-    attrs: &[Attribute],
-    arena: &ParseArena,
-    warnings: &mut Vec<PpxWarning>,
-) {
-    for attr in attrs {
-        warn_unused_attribute(attr, arena, warnings);
-    }
-}
-
 /// OCaml `Bs_ast_invariant.check_constant` (bs_ast_invariant.ml:54-64): an
 /// integer literal without suffix that `Int32.of_string` rejects warns.
 fn check_constant(
@@ -1404,6 +1395,8 @@ pub fn mark_config_attributes_structure(items: &[StructureItem], arena: &ParseAr
     mark_first_config_attribute(leading_structure_attributes(items), arena);
 }
 
+/// Mark the first leading `@@config` of an interface used, like
+/// [`mark_config_attributes_structure`] does for implementations.
 pub fn mark_config_attributes_signature(items: &[SignatureItem], arena: &ParseArena) {
     mark_first_config_attribute(leading_signature_attributes(items), arena);
 }
@@ -1928,10 +1921,10 @@ fn validate_external_attribute_payload_errors(
             "val" | "send" | "set" | "get" | "new" => {
                 // ast_external_process.ml: an empty payload is fine; otherwise
                 // reject a `json` literal, then require a semantic string.
-                if !payload_is_empty_str(payload) {
-                    if payload_semantic_string(payload, arena)?.is_none() {
-                        return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
-                    }
+                if !payload_is_empty_str(payload)
+                    && payload_semantic_string(payload, arena)?.is_none()
+                {
+                    return Err(PpxError::at_loc(attr_name.loc, "Invalid payload"));
                 }
             }
             "module" => {
@@ -2468,28 +2461,6 @@ fn payload_raw_source_info(payload: &Payload, arena: &ParseArena) -> Option<(Str
     }
 }
 
-fn payload_single_record_fields_without_spread<'a>(
-    payload: &'a Payload,
-    arena: &'a ParseArena,
-) -> Option<&'a [ExpressionRecordField]> {
-    match payload {
-        Payload::PStr(items) if items.len() == 1 => {
-            if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
-                let (expr, _) = &**eval_inner;
-                if let ExpressionDesc::Pexp_record(record) =
-                    &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
-                {
-                    if record.1.is_none() {
-                        return Some(arena.expr_field_list(record.0));
-                    }
-                }
-            }
-            None
-        }
-        _ => None,
-    }
-}
-
 fn payload_string_literals(
     payload: &Payload,
     arena: &ParseArena,
@@ -2581,21 +2552,19 @@ fn get_as_int_attr(attrs: &[Attribute], arena: &ParseArena) -> Option<i64> {
                 if items.len() == 1 {
                     if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                         let (ref expr, _) = **eval_inner;
-                        if let ExpressionDesc::Pexp_constant(c) =
+                        if let ExpressionDesc::Pexp_constant(Constant::Integer(s, suffix)) =
                             &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr))
                                 .pexp_desc
                         {
-                            if let Constant::Integer(s, suffix) = &*c {
-                                // Reject bigint suffix
-                                if matches!(suffix, Some('n')) {
-                                    return None;
-                                }
-                                let v = arena.get_string(*s).parse::<i64>().ok();
-                                if v.is_some() {
-                                    arena.mark_used_attribute(attr);
-                                }
-                                return v;
+                            // Reject bigint suffix
+                            if matches!(suffix, Some('n')) {
+                                return None;
                             }
+                            let v = arena.get_string(*s).parse::<i64>().ok();
+                            if v.is_some() {
+                                arena.mark_used_attribute(attr);
+                            }
+                            return v;
                         }
                     }
                 }
@@ -3505,7 +3474,7 @@ fn get_opt_arg_type_unchecked(_nolabel: bool, typ: &CoreType, arena: &ParseArena
 /// Wrap a type in the predeclared `undefined<T>` constructor.
 /// Mirrors OCaml's `Ast_comb.to_undefined_type` and `Ast_literal.Lid.js_undefined`.
 fn to_undefined_type(typ: &CoreType, loc: LocIdx, arena: &mut ParseArena) -> CoreType {
-    let undefined_str = arena.push_string("undefined".to_string());
+    let undefined_str = arena.push_string("undefined");
     let longident = arena.push_longident(Longident::Lident(undefined_str));
 
     CoreType {
@@ -3727,6 +3696,7 @@ fn get_payload_string(
 /// ast_external_process.ml for `@return`:
 /// - `@return(nullable)` -> `nullable`
 /// - `@return({null_to_opt: null_to_opt})` -> `null_to_opt`
+///
 /// Non-punned record entries are intentionally rejected here.
 fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> Option<String> {
     let current::Payload::PStr(items) = payload else {
@@ -3749,7 +3719,7 @@ fn get_return_wrapper_config(payload: &current::Payload, arena: &ParseArena) -> 
             Some(arena.get_string(*name_idx).to_string())
         }
         ExpressionDesc::Pexp_record(inner) => {
-            let (fields, with_obj) = &*inner;
+            let (fields, with_obj) = inner;
             if with_obj.is_some() || fields.len() != 1 {
                 return None;
             }
@@ -3792,7 +3762,7 @@ fn validate_return_wrapper_config_shape(
     let ExpressionDesc::Pexp_record(inner) = &expr.pexp_desc else {
         return Ok(());
     };
-    let (fields, with_obj) = &*inner;
+    let (fields, with_obj) = inner;
     if with_obj.is_some() {
         return Ok(());
     }
@@ -3828,7 +3798,7 @@ fn return_wrapper_config_warning(
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(inner) => {
-            let (_fields, with_obj) = &*inner;
+            let (_fields, with_obj) = inner;
             with_obj
                 .is_some()
                 .then_some((expr.pexp_loc, "`with` is not supported, discarding"))
@@ -3851,20 +3821,18 @@ fn get_payload_int_result(
         current::Payload::PStr(items) if items.len() == 1 => {
             if let StructureItemDesc::Pstr_eval(eval_inner) = &items[0].pstr_desc {
                 let (ref expr, _) = **eval_inner;
-                if let ExpressionDesc::Pexp_constant(c) =
+                if let ExpressionDesc::Pexp_constant(current::Constant::Integer(name, suffix)) =
                     &crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr)).pexp_desc
                 {
-                    if let current::Constant::Integer(name, suffix) = &*c {
-                        // OCaml's is_single_int rejects 'n' suffix (bigint)
-                        if matches!(suffix, Some('n')) {
-                            return Ok(None);
-                        }
-                        return arena
-                            .get_string(*name)
-                            .parse::<i32>()
-                            .map(Some)
-                            .map_err(|_| PpxError::int_of_string_failure());
+                    // OCaml's is_single_int rejects 'n' suffix (bigint)
+                    if matches!(suffix, Some('n')) {
+                        return Ok(None);
                     }
+                    return arena
+                        .get_string(*name)
+                        .parse::<i32>()
+                        .map(Some)
+                        .map_err(|_| PpxError::int_of_string_failure());
                 }
             }
             Ok(None)
@@ -3951,7 +3919,7 @@ fn validate_module_import_attributes_payload(
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return Ok(false);
     };
-    let (fields, _) = &*record_inner;
+    let (fields, _) = record_inner;
 
     let mut from_name = false;
     let mut with_fields: Option<&[ExpressionRecordField]> = None;
@@ -3970,7 +3938,7 @@ fn validate_module_import_attributes_payload(
                 let field_expr =
                     crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr));
                 if let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc {
-                    let (import_fields, _) = &*with_inner;
+                    let (import_fields, _) = with_inner;
                     with_fields = Some(arena.expr_field_list(*import_fields));
                 }
             }
@@ -4033,7 +4001,7 @@ fn get_module_import_attributes(
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return Ok(None);
     };
-    let (fields, _) = &*record_inner;
+    let (fields, _) = record_inner;
 
     let mut from_name: Option<String> = None;
     let mut with_fields: Option<ImportAttributes> = None;
@@ -4054,7 +4022,7 @@ fn get_module_import_attributes(
                 let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc else {
                     continue;
                 };
-                let (import_fields, _) = &*with_inner;
+                let (import_fields, _) = with_inner;
                 let mut import_attributes: ImportAttributes =
                     Vec::with_capacity(import_fields.len());
                 for import_field in arena.expr_field_list(*import_fields) {
@@ -4279,7 +4247,9 @@ fn check_decl(decl: &ExternalDecl, prim_name: &str, loc: LocIdx) -> PpxResult<bo
 
 /// Result of encoding an external: new pval_prim and filtered attributes
 pub struct EncodedExternal {
+    /// The encoded primitive.
     pub pval_prim: Option<PrimitiveRepr>,
+    /// The attributes left after removing the FFI attributes the encoding consumed.
     pub pval_attributes: Vec<Attribute>,
     /// The FFI references a package-relative path, so the external must be
     /// wrapped in `Pstr_include` to prevent cross-module inlining
@@ -4564,7 +4534,7 @@ fn transform_inline_sig_value(
         });
     }
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &*c {
+        ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline(42) let x: t
             Constant::Integer(s, None) => {
@@ -4633,9 +4603,7 @@ fn transform_inline_sig_value(
 /// semantic string.
 fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> PpxResult<Option<String>> {
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) if matches!(&*c, Constant::String(_)) => {
-            expr_semantic_string(expr, arena)
-        }
+        ExpressionDesc::Pexp_constant(Constant::String(_)) => expr_semantic_string(expr, arena),
         ExpressionDesc::Pexp_template(template)
             if template.source_segments.len() == 1 && template.values.is_empty() =>
         {
@@ -4650,29 +4618,6 @@ fn inline_string_semantic(expr: &Expression, arena: &ParseArena) -> PpxResult<Op
 /// OCaml readers raise on the same payload.
 fn checked<T>(read: PpxResult<T>) -> T {
     read.expect("the check pass raised on this payload")
-}
-
-/// Create a type for a simple builtin type (string, int, float, bool)
-fn make_simple_type(type_name: &'static str, arena: &mut ParseArena) -> CoreType {
-    let none_loc = arena.none_loc();
-    let lid_idx = match type_name {
-        "string" => arena.ast_literal_type_string_lident(),
-        "int" => arena.ast_literal_type_int_lident(),
-        "bool" => arena.ast_literal_type_bool_lident(),
-        "float" => arena.ast_literal_type_float_lident(),
-        _ => arena.push_lident_static(type_name),
-    };
-    CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_constr((
-            Located {
-                txt: lid_idx,
-                loc: none_loc,
-            },
-            crate::parse_arena::ArenaList::EMPTY,
-        )),
-        ptyp_loc: none_loc,
-        ptyp_attributes: Attributes::new(),
-    }
 }
 /// Transform an @inline let binding into a primitive
 fn transform_inline_binding(
@@ -4704,7 +4649,7 @@ fn transform_inline_binding(
         });
     }
     match &expr.pexp_desc {
-        ExpressionDesc::Pexp_constant(c) => match &*c {
+        ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline let x = 42
             Constant::Integer(s, None) => {
@@ -4866,30 +4811,6 @@ fn todo(message: Option<String>, arena: &mut ParseArena, loc: LocIdx) -> Express
         }),
         pexp_loc: loc,
         pexp_attributes: Attributes::new(),
-    }
-}
-
-/// Build a chain of arrow types from a list of type arguments and a result type.
-/// Mirrors OCaml's `Typ.arrows`:
-/// - First arrow gets arity = Some(list_length)
-/// - Inner arrows get arity = None
-fn build_arrows(
-    args: Vec<TypeArg>,
-    result: CoreType,
-    loc: LocIdx,
-    arena: &mut ParseArena,
-) -> CoreType {
-    if args.is_empty() {
-        return result;
-    }
-    let arity = arena.push_arity(Some(args.len() as i32));
-    let first = args[0].clone();
-    let ret = arena.push_core_type(result);
-    arena.set_nary_arrow_args(arity, args);
-    CoreType {
-        ptyp_desc: CoreTypeDesc::Ptyp_arrow(Box::new((Box::new(first), ret, arity))),
-        ptyp_loc: loc,
-        ptyp_attributes: Attributes::new(),
     }
 }
 
@@ -5947,11 +5868,9 @@ fn spelunk_expression_for_await_module_types(
         }
         ExpressionDesc::Pexp_let(inner) => {
             let (_, ref bindings, ref body) = *inner;
-            let binding_results = spelunk_value_bindings_for_await_module_types(
-                &arena.vb_list(*bindings).to_vec(),
-                context,
-                arena,
-            );
+            let bindings = arena.vb_list(*bindings).to_vec();
+            let binding_results =
+                spelunk_value_bindings_for_await_module_types(&bindings, context, arena);
             let body_expr = arena.get_expr(*body).clone();
             let mut results = spelunk_expression_for_await_module_types(&body_expr, context, arena);
             results.extend(binding_results);
@@ -6085,27 +6004,6 @@ fn transform_module_await(
 }
 
 // ========== Expression Rewriting ==========
-
-/// Check if an expression is a pipe operator application (a -> b)
-fn is_pipe_application(expr: &Expression, arena: &mut ParseArena) -> bool {
-    if let ExpressionDesc::Pexp_apply(inner) = &expr.pexp_desc {
-        let PexpApply { ref funct, .. } = *inner;
-        let args = arena.apply_args(inner.args);
-        if args.len() == 2
-            && matches!(&args[0].0, ArgLabel::Nolabel)
-            && matches!(&args[1].0, ArgLabel::Nolabel)
-        {
-            let funct_expr = arena.get_expr(*funct);
-            if let ExpressionDesc::Pexp_ident(lid) = &funct_expr.pexp_desc {
-                if let Longident::Lident(op_idx) = arena.get_longident(lid.txt) {
-                    let op = arena.get_string(*op_idx);
-                    return op == "->";
-                }
-            }
-        }
-    }
-    false
-}
 
 /// Rewrite a single attribute, transforming strings in its payload
 fn rewrite_attribute(attr: &Attribute, arena: &mut ParseArena) -> Attribute {
@@ -6805,10 +6703,10 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         PatternDesc::Ppat_constant(c) => match c {
             // Strip 'l' suffix from integer literals
             Constant::Integer(s, Some('l')) => {
-                PatternDesc::Ppat_constant(Constant::Integer(s.clone(), None))
+                PatternDesc::Ppat_constant(Constant::Integer(*s, None))
             }
             // Other constants: no transformation needed
-            _ => PatternDesc::Ppat_constant(c.clone()),
+            _ => PatternDesc::Ppat_constant(*c),
         },
 
         // Alias pattern: recurse into the aliased pattern
@@ -6835,7 +6733,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
 
         // Constructor pattern: recurse into optional payload
         PatternDesc::Ppat_construct(lid, args) => {
-            let mut args = args.clone();
+            let args = *args;
             for p in arena.pat_list(args.txt).to_vec().iter_mut() {
                 let pat = arena.get_pat(*p).clone();
                 let rw = rewrite_pattern(&pat, arena);
@@ -6847,7 +6745,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
         // Variant pattern: recurse into optional payload
         PatternDesc::Ppat_variant(inner) => {
             let (ref label, ref args) = **inner;
-            let mut args = args.clone();
+            let mut args = *args;
             // The rewritten node gets its own list; the original keeps its own.
             let mut new_items = arena.pat_list(args.txt).to_vec();
             for p in new_items.iter_mut() {
@@ -7192,14 +7090,12 @@ fn rewrite_expression(expr: &Expression, arena: &mut ParseArena) -> Expression {
     // Handle integer literal suffix stripping ('l' suffix)
     // OCaml: {e with pexp_desc = Pexp_constant (Pconst_integer (s, None))}
     // This is an early-return case that preserves attributes without remapping.
-    if let ExpressionDesc::Pexp_constant(c) = &expr.pexp_desc {
-        if let Constant::Integer(s, Some('l')) = &*c {
-            return Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(s.clone(), None)),
-                pexp_loc: expr.pexp_loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            };
-        }
+    if let ExpressionDesc::Pexp_constant(Constant::Integer(s, Some('l'))) = &expr.pexp_desc {
+        return Expression {
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*s, None)),
+            pexp_loc: expr.pexp_loc,
+            pexp_attributes: expr.pexp_attributes.clone(),
+        };
     }
 
     // First check if this is a pipe or #= application
@@ -7347,6 +7243,7 @@ fn pipe_bound(
 /// - Pexp_construct(ctor, None) -> Pexp_construct(ctor, Some(a))
 /// - Pexp_apply(fn1, args) -> Pexp_apply(fn1, (Nolabel, a) :: args)
 /// - otherwise -> fn(a) = Pexp_apply(fn, [(Nolabel, a)])
+///
 /// Matches the `Pexp_tuple` arm of ast_exp_apply.ml `rewrite_pipe_rhs`.
 fn pipe_tuple_map(
     a: Expression,
@@ -7478,7 +7375,7 @@ fn rewrite_pipe_rhs(
             rewrap(&f, ExpressionDesc::Pexp_open(Box::new((flag, lid, body))))
         }
         ExpressionDesc::Pexp_let(inner) => {
-            let (flag, bindings, body) = (inner.0, inner.1.clone(), inner.2);
+            let (flag, bindings, body) = (inner.0, inner.1, inner.2);
             let body = arena.get_expr(body).clone();
             let rewritten = rewrite_pipe_rhs(loc, attrs, a, body, arena);
             let body = arena.push_expr(rewritten);
@@ -7848,10 +7745,11 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
                 }
             }
 
+            let old_bindings = arena.vb_list(*bindings).to_vec();
             let new_bindings = if *rec_flag == RecFlag::Recursive {
-                rewrite_value_bindings_without_flattening(&arena.vb_list(*bindings).to_vec(), arena)
+                rewrite_value_bindings_without_flattening(&old_bindings, arena)
             } else {
-                flatten_value_bindings(&arena.vb_list(*bindings).to_vec(), arena)
+                flatten_value_bindings(&old_bindings, arena)
             };
             let rw_body = rewrite_child(*body, arena);
             ExpressionDesc::Pexp_let((
@@ -8024,7 +7922,8 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
             }
 
             let rw_scrutinee = rewrite_child(*scrutinee, arena);
-            let rw_cases = rewrite_cases(&arena.case_list(*cases).to_vec(), arena);
+            let old_cases = arena.case_list(*cases).to_vec();
+            let rw_cases = rewrite_cases(&old_cases, arena);
             ExpressionDesc::Pexp_match((
                 push_rewritten(arena, rw_scrutinee),
                 arena.push_case_list(&rw_cases),
@@ -8034,7 +7933,8 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         ExpressionDesc::Pexp_try(inner) => {
             let (ref body, ref cases, ref finally) = *inner;
             let rw_body = rewrite_child(*body, arena);
-            let rw_cases = rewrite_cases(&arena.case_list(*cases).to_vec(), arena);
+            let old_cases = arena.case_list(*cases).to_vec();
+            let rw_cases = rewrite_cases(&old_cases, arena);
             let rw_finally = finally.map(|finally| {
                 let rw = rewrite_child(finally, arena);
                 push_rewritten(arena, rw)
@@ -8097,7 +7997,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
         }
 
         ExpressionDesc::Pexp_construct(ctor, args) => {
-            let mut args = args.clone();
+            let mut args = *args;
             // The rewritten node gets its own list; the original keeps its own.
             let mut new_items = arena.expr_list(args.txt).to_vec();
             for e in new_items.iter_mut() {
@@ -8110,7 +8010,7 @@ fn rewrite_expression_generic(expr: &Expression, arena: &mut ParseArena) -> Expr
 
         ExpressionDesc::Pexp_variant(inner) => {
             let (ref label, ref args) = **inner;
-            let mut args = args.clone();
+            let mut args = *args;
             // The rewritten node gets its own list; the original keeps its own.
             let mut new_items = arena.expr_list(args.txt).to_vec();
             for e in new_items.iter_mut() {
@@ -8600,7 +8500,7 @@ fn deriving_config_actions(
     let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(inner.0));
     match &expr.pexp_desc {
         ExpressionDesc::Pexp_record(record) => {
-            let (fields, with_obj) = &*record;
+            let (fields, with_obj) = record;
             if with_obj.is_some() {
                 return Ok(Vec::new());
             }
@@ -8674,9 +8574,8 @@ fn parse_deriving_actions(
 
         if name == "deriving" {
             for config in deriving_config_actions(payload, arena).unwrap_or_default() {
-                match config.name.as_str() {
-                    "accessors" => actions.push(DeriveAction::Accessors),
-                    _ => {}
+                if config.name == "accessors" {
+                    actions.push(DeriveAction::Accessors);
                 }
             }
         } else {
@@ -9958,8 +9857,9 @@ fn rewrite_structure_unit(
             let (ref _rec_flag, ref bindings) = *inner;
             // Spelunk through the ORIGINAL bindings to find await module types
             // (before expression rewriting transforms them)
+            let original_bindings = arena.vb_list(*bindings).to_vec();
             let module_type_decls = spelunk_value_bindings_for_await_module_types(
-                &arena.vb_list(*bindings).to_vec(),
+                &original_bindings,
                 await_context,
                 arena,
             );
@@ -10646,10 +10546,11 @@ fn rewrite_structure_item_no_spice(
             // Default case: rewrite all bindings. Recursive bindings must keep
             // their original patterns so Typecore can raise Illegal_letrec_pat,
             // matching OCaml.
+            let old_bindings = arena.vb_list(*bindings).to_vec();
             let new_bindings = if *rec_flag == RecFlag::Recursive {
-                rewrite_value_bindings_without_flattening(&arena.vb_list(*bindings).to_vec(), arena)
+                rewrite_value_bindings_without_flattening(&old_bindings, arena)
             } else {
-                flatten_value_bindings(&arena.vb_list(*bindings).to_vec(), arena)
+                flatten_value_bindings(&old_bindings, arena)
             };
             vec![StructureItem {
                 pstr_desc: StructureItemDesc::Pstr_value((
@@ -11209,8 +11110,7 @@ mod tests {
             values: vec![],
         }));
         let error = collect_leading_builtin_warning_attributes(&structure, &arena)
-            .err()
-            .expect("an invalid escape is an error");
+            .expect_err("an invalid escape is an error");
         assert_eq!(error.message_text(), "Invalid string escape sequence");
         assert_eq!(error.loc(), Some(loc));
     }
@@ -11330,7 +11230,7 @@ let e = () =>
         let ExpressionDesc::Pexp_match(match_expr) = &expr.pexp_desc else {
             panic!("expected rewritten let? match");
         };
-        let (_, cases) = &*match_expr;
+        let (_, cases) = match_expr;
         let [early_case, continue_case] = arena.case_list(*cases) else {
             panic!("expected early-return and continuation cases");
         };
@@ -11576,8 +11476,7 @@ let e = () =>
         let structure_error = |source: &str| {
             let (mut arena, structure) = parse_structure(source);
             let error = rewrite_structure(&structure, &mut arena, false)
-                .err()
-                .expect("the deriver is rejected");
+                .expect_err("the deriver is rejected");
             located(&arena, error)
         };
         let signature_error = |source: &str| {
@@ -11590,8 +11489,7 @@ let e = () =>
             );
             let mut arena = parser.into_arena();
             let error = rewrite_signature(&signature, &mut arena, false)
-                .err()
-                .expect("the deriver is rejected");
+                .expect_err("the deriver is rejected");
             located(&arena, error)
         };
         let unknown = "@deriving(lenses)\ntype t = {name: string}\n";
@@ -11629,7 +11527,7 @@ let e = () =>
         let StructureItemDesc::Pstr_value(value) = &structure[0].pstr_desc else {
             panic!("expected value binding");
         };
-        let (_, bindings) = &*value;
+        let (_, bindings) = value;
         let ExpressionDesc::Pexp_tuple(items) =
             &arena.get_expr(arena.vb_list(*bindings)[0].pvb_expr).pexp_desc
         else {
@@ -11673,7 +11571,7 @@ let f = value => {
         let StructureItemDesc::Pstr_value(value) = &rewritten[0].pstr_desc else {
             panic!("expected value binding");
         };
-        let (_, bindings) = &*value;
+        let (_, bindings) = value;
         let ExpressionDesc::Pexp_fun(fun) = &arena
             .get_expr(arena.vb_list(*bindings)[0].pvb_expr)
             .pexp_desc

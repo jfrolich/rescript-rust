@@ -555,7 +555,6 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
         match &*desc {
             TypeDesc::Tvariant(row) => {
                 let row = *row;
-                drop(desc);
                 matches!(
                     crate::types::btype::row_field(ctx, tag, &ctx.row_desc(row)),
                     RowField::Rabsent
@@ -581,11 +580,7 @@ impl<'a, O: Oracle> Parmatch<'a, O> {
                 r1.push(self.omega);
                 r2.push(l2[j].pat);
                 j += 1;
-            } else if j == l2.len() {
-                r1.push(l1[i].pat);
-                r2.push(self.omega);
-                i += 1;
-            } else if l1[i].lbl.lbl_pos < l2[j].lbl.lbl_pos {
+            } else if j == l2.len() || l1[i].lbl.lbl_pos < l2[j].lbl.lbl_pos {
                 r1.push(l1[i].pat);
                 r2.push(self.omega);
                 i += 1;
