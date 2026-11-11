@@ -157,7 +157,7 @@ export function Example({ example, prebuilt }) {
             ))}
             <span className="tabs-hint">editable</span>
           </div>
-          <div className="pane-scroll">
+          <div className="pane-scroll" style={{ "--lines": activeFile.source.split("\n").length }}>
             <CodeEditor
               key={`${generation}/${activeFile.name}`}
               value={activeFile.source}

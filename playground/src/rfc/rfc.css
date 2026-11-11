@@ -701,6 +701,24 @@ td:first-child {
   transition: opacity 0.15s;
 }
 
+/* The source is as tall as the result beside it. Alone, on a narrow screen,
+   it is as tall as its text, up to a limit. */
+.pane-source .pane-scroll {
+  flex: 1 1 auto;
+  height: 0;
+  max-height: none;
+  min-height: min(calc(var(--lines, 12) * 20.8px + 36px), 520px);
+  display: flex;
+  flex-direction: column;
+}
+
+.pane-source .editor,
+.pane-source .cm-editor {
+  flex: 1 0 auto;
+  display: flex;
+  flex-direction: column;
+}
+
 .pane-scroll.stale {
   opacity: 0.55;
 }
@@ -1242,6 +1260,10 @@ td:first-child {
   .pane-scroll {
     max-height: 380px;
     min-height: 120px;
+  }
+
+  .pane-source .pane-scroll {
+    min-height: min(calc(var(--lines, 12) * 20.8px + 36px), 380px);
   }
 
   .example-head {
