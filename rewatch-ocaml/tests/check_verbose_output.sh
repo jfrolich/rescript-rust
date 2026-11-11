@@ -32,15 +32,8 @@ normalize_events() {
   sed -E \
     's# at "[^"]*rescript\.json"# at "<PROJECT>/rescript.json"#g' \
     "$input" \
-    | awk '
-        /^(DEBUG|TRACE):$/ {
-          label = $0
-          if ((getline message) > 0) print label "\t" message
-          next
-        }
-        /^compile dirty: / { print }
-      ' \
-    | sort >"$output"
+    | grep -E '^(debug|trace): ' \
+    | LC_ALL=C sort >"$output"
 }
 
 capture() {
@@ -83,7 +76,7 @@ compare_events() {
 compare_events "$work/rust-v.events" "$work/ocaml-v.events"
 compare_events "$work/rust-vv.events" "$work/ocaml-vv.events"
 
-if grep -E '^(TRACE:|compile dirty:)' "$work/ocaml-v.events" >/dev/null; then
+if grep -E '^trace:' "$work/ocaml-v.events" >/dev/null; then
   echo "-v unexpectedly emitted trace-level events" >&2
   cat "$work/ocaml-v.events" >&2
   exit 1

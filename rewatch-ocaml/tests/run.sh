@@ -525,7 +525,7 @@ if "$port" build "$missing_project" >"$work/missing-project.log" 2>&1; then
 fi
 missing_project_native=$(native_path "$missing_project")
 tr '\\' '/' <"$work/missing-project.log" | grep -F \
-  "Could not start Rescript build: Could not write lockfile because the specified project folder does not exist: $missing_project_native" \
+  "Project folder '$missing_project_native' does not exist." \
   >/dev/null
 
 compiler_args_json=$("$port" compiler-args "$basic/src/A.res")
@@ -704,10 +704,19 @@ stop_watch() {
   pid=$2
   if $windows_posix_shell; then
     remove_file_with_retry "$project/lib/rescript/watch.lock"
+    expected_status=0
   else
     kill -TERM "$pid"
+    expected_status=143
   fi
+  set +e
   wait "$pid"
+  stop_status=$?
+  set -e
+  if [ "$stop_status" -ne "$expected_status" ]; then
+    echo "watch of $project exited with $stop_status, expected $expected_status" >&2
+    exit 1
+  fi
 }
 
 remove_obstruction_directory() {
@@ -724,7 +733,7 @@ if printf 'let =\n' | "$port" format --stdin .res \
   echo "format stdin unexpectedly accepted invalid syntax" >&2
   exit 1
 fi
-grep -F "Error formatting stdin:" "$work/format-invalid.err" >/dev/null
+grep -F "Error formatting <stdin>:" "$work/format-invalid.err" >/dev/null
 
 format_stdin_tmp="$work/format-stdin-tmp"
 format_stdin_fifo="$work/format-stdin.fifo"
@@ -769,9 +778,9 @@ if "$port" format --check "$work/unformatted.res" \
   echo "format check unexpectedly accepted an unformatted file" >&2
   exit 1
 fi
-unformatted_native=$(native_path "$work/unformatted.res")
+# Paths are shown relative to the current directory when they are below it.
 tr '\\' '/' <"$work/format-check.err" | \
-  grep -F "[format check] $unformatted_native" >/dev/null
+  grep -E '^\[format check\] .*unformatted\.res$' >/dev/null
 grep -F "The file listed above needs formatting" \
   "$work/format-check.err" >/dev/null
 grep -F "Formatting check failed" "$work/format-check.err" >/dev/null
@@ -863,6 +872,16 @@ mkdir -p "$basic/lib/bs/other"
 touch "$basic/lib/bs/other/Authored.js"
 
 "$port" build --after-build 'test -f src/A.mjs' "$basic"
+# The command runs through the shell, so its operators and exit status count;
+# this one works in both /bin/sh and cmd.exe.
+if "$port" build --after-build 'echo shell-ok && exit 3' "$basic" \
+  >"$work/after-build-shell.log" 2>&1; then
+  echo "a failing --after-build shell command did not fail the build" >&2
+  exit 1
+fi
+grep -q 'shell-ok' "$work/after-build-shell.log"
+grep -q -- '--after-build command failed with exit code 3' \
+  "$work/after-build-shell.log"
 test ! -d "$basic/lib/bs"
 test -f "$basic/src/A.mjs"
 test -f "$basic/src/Authored.js"
@@ -1483,7 +1502,7 @@ printf 'let other =\n' >"$initial_failure_freshness/src/B.res"
 initial_failure_freshness_pid=$!
 background_pids="$background_pids $initial_failure_freshness_pid"
 if ! wait_for_text "$initial_failure_freshness/watch.log" \
-  'Error in initial-failure-freshness'; then
+  'This let-binding misses an expression'; then
   cat "$initial_failure_freshness/watch.log" >&2
   exit 1
 fi
@@ -2016,12 +2035,11 @@ if "$port" build "$unlinked_dependency" \
   exit 1
 fi
 grep -q "Could not resolve dependency dep" "$unlinked_dependency/build.log"
-if "$port" clean "$unlinked_dependency" \
-  >"$unlinked_dependency/clean.log" 2>&1; then
-  echo "clean resolved an unlinked packages dependency" >&2
-  exit 1
-fi
-grep -q "Could not resolve dependency dep" "$unlinked_dependency/clean.log"
+# Clean skips the dependency it cannot resolve and cleans the rest.
+"$port" clean "$unlinked_dependency" >"$unlinked_dependency/clean.log" 2>&1
+grep -q "Skipping a dependency: Could not resolve dependency dep" \
+  "$unlinked_dependency/clean.log"
+artifacts_removed "$unlinked_dependency"
 test -f "$unlinked_dependency/packages/dep/src/Dep.js"
 test -f "$unlinked_dependency/packages/dep/lib/rescript/marker"
 
@@ -2298,7 +2316,7 @@ mv "$source_map/rescript.next" "$source_map/rescript.json"
 "$port" build "$source_map" >"$source_map/changed.log"
 grep 'Cleaned previous build due to compiler update' \
   "$source_map/changed.log" >/dev/null
-grep 'Compiled 1 modules' "$source_map/changed.log" >/dev/null
+grep -x 'Compiled 1 module' "$source_map/changed.log" >/dev/null
 
 sed 's/"sources":"src"/"sources":"src","dependencies":["consumer"]/' \
   "$monorepo/packages/dep/rescript.json" > "$monorepo/packages/dep/rescript.next"
@@ -2380,3 +2398,19 @@ for attempt in first second; do
     exit 1
   fi
 done
+
+# The compiler benchmarks add the words the worker domains allocated, which
+# the runtime's report at exit leaves out, to that report.
+worker_allocations="$work/worker-allocations"
+mkdir -p "$worker_allocations/src"
+printf '%s\n' \
+  '{"name":"worker-allocations","sources":"src","package-specs":{"module":"esmodule","in-source":true,"suffix":".mjs"}}' \
+  >"$worker_allocations/rescript.json"
+printf 'let x = 1\n' >"$worker_allocations/src/A.res"
+env REWATCH_REPORT_WORKER_ALLOCATIONS=1 REWATCH_COMPILER_DOMAINS=1 \
+  "$port" build "$worker_allocations" >"$worker_allocations/build.log" 2>&1
+worker_words=$(sed -n 's/^worker_allocated_words: \([0-9]*\)$/\1/p' "$worker_allocations/build.log")
+if ! test "${worker_words:-0}" -gt 0; then
+  cat "$worker_allocations/build.log" >&2
+  exit 1
+fi

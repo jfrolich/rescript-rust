@@ -44,8 +44,9 @@ terminate_and_wait() {
   wait "$pid"
   local status=$?
   set -e
-  if [ "$status" -ne 0 ] && \
-    { ! $windows_posix_shell || [ "$status" -ne 143 ]; }; then
+  # A watcher stopped by SIGTERM exits with 143, as the help says.
+  if [ "$status" -ne 143 ] && \
+    { ! $windows_posix_shell || [ "$status" -ne 0 ]; }; then
     printf '%s exited with status %s after shutdown\n' "$label" "$status" >&2
     return 1
   fi
@@ -616,7 +617,7 @@ run_multiple_parse_errors_case() {
   fi
   for implementation in rust ocaml; do
     error="$work/$implementation.err"
-    if [ "$(grep -cF 'Error in multiple-parse-errors:' "$error")" -ne 2 ] || \
+    if [ "$(grep -cF 'Syntax error!' "$error")" -ne 2 ] || \
       ! grep -E '[/\\]src[/\\]A\.res' "$error" >/dev/null || \
       ! grep -E '[/\\]src[/\\]B\.res' "$error" >/dev/null; then
       echo "$implementation did not retain every independent parse error" >&2
@@ -723,7 +724,11 @@ if ! grep -F '.\" Pipe this output to groff' \
 fi
 checked=$((checked + 1))
 run_case implicit-conflicting-verbosity exit2 exit2 -v -q
+require_both_errors_contain implicit-conflicting-verbosity 'Usage: rescript build'
 run_case build-conflicting-verbosity exit2 exit2 build --verbose --quiet
+run_case unknown-command reject reject bogus-command
+require_both_errors_contain unknown-command \
+  "Project folder 'bogus-command' does not exist. Run 'rescript --help' for the available commands."
 run_case filter-perl-quoting exit2 exit2 build --filter '\QFoo.res\E' "$project"
 run_case filter-comment-group exit2 exit2 build --filter '(?#note)Foo' "$project"
 run_case filter-octal-escape exit2 exit2 build --filter '\123' "$project"
@@ -740,7 +745,8 @@ run_case filter-class-algebra accept exit2 build --filter \
   '[a-z&&[^aeiou]]' "$project"
 run_case build-no-timing-preserves-folder exit2 accept build --no-timing "$project"
 run_case compiler-args-source accept accept compiler-args "$project/src/A.res"
-run_case compiler-args-extension accept reject compiler-args "$project/src/A.txt"
+run_case compiler-args-extension exit2 exit2 compiler-args "$project/src/A.txt"
+require_both_errors_contain compiler-args-extension 'is not a .res or .resi source file'
 run_case compiler-args-missing panic reject compiler-args "$project/src/Missing.res"
 run_case compiler-args-no-project panic reject compiler-args "$work/orphan/A.res"
 
@@ -790,6 +796,42 @@ run_case format-directory reject reject format "$project/src"
 require_same_output format-directory
 run_case format-unsupported-extension reject reject format "$project/src/A.txt"
 require_same_output format-unsupported-extension
+# A syntax error does not stop the run: every other file is checked and
+# listed in path order, then the run fails. --check writes nothing, so both
+# implementations check the same project.
+format_broken="$work/format-broken"
+mkdir -p "$format_broken/src"
+printf '{"name":"format-broken","sources":["src"]}\n' \
+  >"$format_broken/rescript.json"
+for name in D B C A; do
+  printf 'let   value =    1\n' >"$format_broken/src/$name.res"
+done
+printf 'let value =\n' >"$format_broken/src/Broken.res"
+run_case --cwd "$format_broken" format-continues-after-syntax-error \
+  reject reject format --check
+printf '%s\n' '[format check] src/A.res' '[format check] src/B.res' \
+  '[format check] src/C.res' '[format check] src/D.res' \
+  >"$work/format-broken.expected"
+for implementation in rust ocaml; do
+  # Windows prints the relative paths with backslashes.
+  tr '\\' '/' <"$work/$implementation.err" >"$work/format-broken.err"
+  grep -F '[format check]' "$work/format-broken.err" >"$work/format-broken.listed"
+  if ! cmp -s "$work/format-broken.expected" "$work/format-broken.listed" || \
+    ! grep -F 'Error formatting src/Broken.res:' "$work/format-broken.err" \
+      >/dev/null || \
+    ! grep -F 'The 4 files listed above need formatting' \
+      "$work/format-broken.err" >/dev/null; then
+    echo "format-continues-after-syntax-error: $implementation did not report every file in order" >&2
+    dump_both
+    exit 1
+  fi
+done
+require_same_output format-continues-after-syntax-error
+run_case --cwd "$format_broken" format-duplicate-arguments \
+  reject reject format --check src/A.res src/A.res
+require_both_errors_contain format-duplicate-arguments \
+  'The file listed above needs formatting'
+require_same_output format-duplicate-arguments
 run_case --cwd "$work/empty" format-no-config reject reject format
 require_both_errors_contain format-no-config \
   "Could not read rescript.json at $work/empty:"
@@ -825,7 +867,7 @@ if [ "$rust_status" -eq 0 ] || [ "$ocaml_status" -eq 0 ] || \
   echo "format-invalid-stdin: expected both formatters to reject" >&2
   exit 1
 fi
-require_both_errors_contain format-invalid-stdin 'Error formatting stdin:'
+require_both_errors_contain format-invalid-stdin 'Error formatting <stdin>:'
 require_both_errors_contain format-invalid-stdin \
   'This let-binding misses an expression'
 checked=$((checked + 1))
@@ -878,9 +920,12 @@ if ! grep -F -- '--after-build command cannot be empty' \
   cat "$work/ocaml.out" "$work/ocaml.err" >&2
   exit 1
 fi
-run_case after-build-missing-program panic reject build --after-build \
+# The shell reports the missing program; the build fails with its status.
+run_case after-build-missing-program reject reject build --after-build \
   rewatch-command-that-does-not-exist "$project"
-if ! grep -F 'Could not run --after-build command' \
+require_both_errors_contain after-build-missing-program \
+  '--after-build command failed'
+if ! grep -F -- '--after-build command failed' \
     "$work/ocaml.err" >/dev/null || \
   ! grep -F 'rewatch-command-that-does-not-exist' \
     "$work/ocaml.err" >/dev/null; then
@@ -923,7 +968,7 @@ set +e
 wait "$signal_lock_watch_pid"
 signal_lock_status=$?
 set -e
-if ! $windows_posix_shell && [ "$signal_lock_status" -ne 0 ]; then
+if ! $windows_posix_shell && [ "$signal_lock_status" -ne 143 ]; then
   echo "Signal during build-lock wait exited with $signal_lock_status" >&2
   exit 1
 fi
@@ -987,6 +1032,30 @@ for implementation in rust ocaml; do
     grep -F 'invalid JSON' "$work/$implementation.err" >/dev/null; then
     echo "watch-lock-before-config: $implementation lock acquisition did not precede config parsing" >&2
     cat "$work/$implementation.out" "$work/$implementation.err" >&2
+    exit 1
+  fi
+  checked=$((checked + 1))
+  # Clean refuses while a watcher of the project runs, which would otherwise
+  # keep reading the removed artifacts.
+  set +e
+  "$executable" clean "$owner_dir" \
+    >"$work/$implementation.out" 2>"$work/$implementation.err"
+  status=$?
+  set -e
+  if [ "$(classify "$status")" != reject ] || \
+    ! grep -F 'Could not clean while rescript watch' \
+      "$work/$implementation.err" >/dev/null || \
+    [ ! -f "$owner_dir/src/A.js" ]; then
+    echo "clean-during-watch: $implementation clean did not refuse while a watcher runs" >&2
+    cat "$work/$implementation.out" "$work/$implementation.err" >&2
+    exit 1
+  fi
+  printf 'let value = 2\n' >"$owner_dir/src/A.res"
+  wait_for_text "$owner_dir/watch.out" "Finished incremental compilation"
+  if grep -F 'No such file' "$owner_dir/watch.out" "$owner_dir/watch.err" \
+    >/dev/null; then
+    echo "clean-during-watch: the $implementation watcher lost its artifacts" >&2
+    cat "$owner_dir/watch.out" "$owner_dir/watch.err" >&2
     exit 1
   fi
   kill -TERM "$watch_lock_owner_pid"
@@ -1080,7 +1149,7 @@ if [ "$rust_permission_details" -ne 1 ] || \
 fi
 run_case build-source-path-is-file accept accept build "$work/source-path-file"
 if ! cmp -s "$work/rust.err" "$work/ocaml.err" || \
-  ! grep -F 'Could not read folder: "src"' "$work/ocaml.err" >/dev/null; then
+  ! grep -F 'warning: source folder "src" of package source-path-file' "$work/ocaml.err" >/dev/null; then
   echo "Non-directory source diagnostics differ" >&2
   dump_both
   exit 1
@@ -1114,9 +1183,9 @@ normalize_project_path "$work/rust.err" "$work/rust.err.norm" \
   "$work/format-source-selection"
 normalize_project_path "$work/ocaml.err" "$work/ocaml.err.norm" \
   "$work/format-source-selection"
-missing_folder='Could not read folder: "missing". Specified in dependency: installed'
-base_file='[format check] <ROOT>/packages/local/base/Base.res'
-native_file='[format check] <ROOT>/packages/local/native/Native.res'
+missing_folder='warning: source folder "missing" of package installed'
+base_file='[format check] packages/local/base/Base.res'
+native_file='[format check] packages/local/native/Native.res'
 other_file='<ROOT>/packages/local/other/Other.res'
 if ! grep -F "$missing_folder" "$work/rust.err.norm" >/dev/null || \
   ! grep -F "$missing_folder" "$work/ocaml.err.norm" >/dev/null || \
@@ -1180,7 +1249,7 @@ run_case build-malformed-package-json reject reject build \
   "$work/malformed-package-json"
 require_both_errors_contain build-malformed-package-json \
   'Could not initialize build: Could not parse package.json:'
-run_case build-mismatched-dependency-name panic exit2 build \
+run_case build-mismatched-dependency-name panic reject build \
   "$work/mismatched-dependency"
 strip_ansi "$work/ocaml.err" >"$work/ocaml.err.plain"
 if ! grep -F \
@@ -1190,22 +1259,22 @@ if ! grep -F \
   cat "$work/ocaml.out" "$work/ocaml.err" >&2
   exit 1
 fi
-run_case build-missing-dependency exit2 exit2 build "$work/missing-dependency"
+run_case build-missing-dependency reject reject build "$work/missing-dependency"
 require_both_errors_contain build-missing-dependency \
-  "Could not build package tree reading dependency 'absent' at path '$work/missing-dependency'. Error:"
+  "Could not resolve dependency absent of the package at '$work/missing-dependency'. Is it installed?"
 if ! grep -F 'Error building package tree.' "$work/rust.out" >/dev/null; then
   echo "Missing dependency did not report package-tree progress" >&2
   dump_both
   exit 1
 fi
-run_case build-configless-dependency exit2 exit2 build "$work/configless-dependency"
+run_case build-configless-dependency reject reject build "$work/configless-dependency"
 require_both_errors_contain build-configless-dependency \
   "Could not build package tree for 'no-config' at path '$work/configless-dependency'. Error:"
-run_case build-malformed-dependency exit2 exit2 build "$work/malformed-dependency"
+run_case build-malformed-dependency reject reject build "$work/malformed-dependency"
 require_both_errors_contain build-malformed-dependency \
   "Could not build package tree for 'bad-config' at path '$work/malformed-dependency'. Error:"
 run_case build-duplicate-dependency accept accept build "$work/duplicate-dependency"
-duplicate_warning='Duplicated package: shared ./node_modules/shared (chosen) vs ./node_modules/a/node_modules/shared in ./node_modules/a'
+duplicate_warning='warning: duplicated package: shared ./node_modules/shared (chosen) vs ./node_modules/a/node_modules/shared in ./node_modules/a'
 normalize_project_path "$work/rust.err" "$work/rust.err.norm" \
   "$work/duplicate-dependency"
 normalize_project_path "$work/ocaml.err" "$work/ocaml.err.norm" \
@@ -1504,7 +1573,7 @@ for implementation in rust ocaml; do
   wait_for_exit "$quiet_watch_pid"
   wait "$quiet_watch_pid"
   if [ -s "$work/quiet-watch-$implementation.out" ] || \
-    grep -F "Incremental build failed" \
+    grep -F "Build failed" \
       "$work/quiet-watch-$implementation.err" >/dev/null; then
     echo "quiet-watch-$implementation: quiet watch emitted progress or a duplicate failure summary" >&2
     cat "$work/quiet-watch-$implementation.out" \
@@ -1517,7 +1586,7 @@ for implementation in rust ocaml; do
   # rebuild reports the parse error again. Compare the distinct reports only.
   node -e '
     const fs = require("fs");
-    const blocks = fs.readFileSync(process.argv[1], "utf8").split(/^(?=Error in )/m);
+    const blocks = fs.readFileSync(process.argv[1], "utf8").split(/^(?=  Syntax error!)/m);
     const distinct = blocks.filter((block, i) => block !== blocks[i - 1]);
     fs.writeFileSync(process.argv[1], distinct.join(""));
   ' "$work/quiet-watch-$implementation.err.norm"
@@ -1533,9 +1602,9 @@ if ! cmp -s "$work/quiet-watch-rust.err.norm" \
 fi
 checked=$((checked + 1))
 
-run_case clean-missing-dependency exit2 exit2 clean "$work/missing-dependency"
-run_case clean-configless-dependency exit2 exit2 clean "$work/configless-dependency"
-run_case clean-malformed-dependency exit2 exit2 clean "$work/malformed-dependency"
+run_case clean-missing-dependency accept accept clean "$work/missing-dependency"
+run_case clean-configless-dependency accept accept clean "$work/configless-dependency"
+run_case clean-malformed-dependency accept accept clean "$work/malformed-dependency"
 run_both clean "$work/clean-duplicate-{impl}"
 if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
   [ -e "$work/clean-duplicate-rust/src/one/A.js" ] || \
@@ -1585,11 +1654,11 @@ printf '{"name":"missing-dependency","sources":["src"],"dependencies":["absent"]
   >"$work/missing-dependency/rescript.json"
 checked=$((checked + 1))
 run_case --cwd "$work/missing-dependency" \
-  format-missing-dependency exit2 exit2 format
+  format-missing-dependency reject reject format
 run_case --cwd "$work/configless-dependency" \
-  format-configless-dependency exit2 exit2 format
+  format-configless-dependency reject reject format
 run_case --cwd "$work/malformed-dependency" \
-  format-malformed-dependency exit2 exit2 format
+  format-malformed-dependency reject reject format
 if [ -e "$work/missing-dependency/lib/rescript/build.lock" ] || \
   [ -e "$work/missing-dependency/lib/rescript/watch.lock" ]; then
   echo "OCaml dependency failures left a build or watch lock behind" >&2
