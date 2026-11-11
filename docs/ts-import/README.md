@@ -194,17 +194,20 @@ To see which gaps matter, every export of twelve modules was imported: `react`, 
 
 ### The gaps and how to close them
 
-One row per gap, with the solution this document proposes, what it needs, and where it stands. *Converter* is work in the import alone: the ReScript it would generate compiles today. *Language* is a change to ReScript, described under [language changes](#language-changes). A declaration can have several gaps, so the shares add up to more than 22%. The unions are split by cause, because each cause has its own solution. The 306 union declarations that remain are not counted per cause yet.
+One row per gap, with the solution this document proposes, what it needs, and where it stands. *Converter* is work in the import alone: the ReScript it would generate compiles today. *Language* is a change to ReScript, described under [language changes](#language-changes). A declaration can have several gaps, so the shares add up to more than 22%. The unions are split by cause, because each cause has its own solution. Each of the 306 union declarations that remain is counted under one cause, by the TypeScript type its note quotes.
 
 | Gap | Declarations | Imported today as | Solution | Needs | Status |
 |---|---|---|---|---|---|
 | **Unions** | **8.4%** | | | | |
 | Members share a tag: vite's syntax tree, where six members say `type: "Literal"` | closed | A variant | [Each member a case](#members-that-share-a-tag); another field tells apart the members that share a tag | language: object cases, then converter | done; the tests are an `if` chain, see [many cases](#object-cases-told-apart-by-their-fields) |
-| Library interfaces: `NodeJS.ReadableStream \| WritableStream`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject` | part of the 8.4% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter | not started |
+| Library interfaces: `EventEmitter \| EventTarget`, `boolean \| AddEventListenerOptions`, `EventListener \| EventListenerObject`, `ArrayBufferLike` | 2.5% | `unknown` | [Import the interfaces as records and function types](#library-interfaces); object cases then tell them apart | converter | not started |
+| React's own types: `ReactNode`, in 70 declarations | 2.1% | `unknown` | [A table of known React types](#library-interfaces): `React.element` | converter | not started |
 | Plain objects without a tag: `{result} \| {error}`, `{value: string} \| {value: number}` | closed | A variant | Object cases, told apart by a field that is present or by its kind | language: object cases | done |
-| Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | part of the 8.4% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
-| Nothing tells the members apart: `T \| PromiseLike<T>`, two function types | part of the 8.4% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
-| Merged members whose fields mention a type variable (react's `PendingReactPromise`) | part of the 8.4% | `unknown` | The merged case takes the variables as parameters | converter | not started |
+| Arguments of an event listener: `[] \| [err: Error] \| [chunk: Buffer]` | 1.1% | `unknown` | [A GADT of the event names](#event-maps): each name fixes the arguments | converter | not started |
+| Nothing tells the members apart: `T \| PromiseLike<T>`, `U \| readonly U[]`, two function types | 1.1% | `unknown` | [An opaque type](#nothing-tells-the-members-apart) with a conversion to and from each member | converter | not started |
+| Members merged into one case disagree on a field's type | 0.5% | A variant; the field is `unknown` | The join of the types: `string` for a literal and a string, a variant where one exists | converter | not started |
+| `object` or `{}` as a member: `object \| RuleProps`, `AddressInfo \| {}` | 0.2% | `unknown` | An open object case, tested last | converter | not started |
+| Others: CSS property types of React's `style`, merged members whose fields mention a type variable | 0.9% | `unknown` | Not examined one by one | | |
 | `string \| symbol`, unions of classes (`Car \| Vehicle`, `Readable \| Writable`) | | | `@typeOf("symbol")`; [classes on records](#classes-on-records) | language | done |
 | **Other gaps** | | | | | |
 | `any` | 9.0% | A type variable as an argument, `unknown` as a result | None. `any` is a hole in the TypeScript, not in ReScript. | | stays |
