@@ -1041,6 +1041,7 @@ impl KeyEncode for crate::types::variant_runtime::ObjectCase {
     fn encode(&self, out: &mut KeyOut<'_>) {
         self.name.encode(out);
         self.test.encode(out);
+        self.literals.encode(out);
     }
 }
 

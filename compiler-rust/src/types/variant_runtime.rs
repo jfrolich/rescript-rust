@@ -659,6 +659,9 @@ pub struct ObjectCase {
     pub name: crate::name::Name,
     /// The test, empty for the last case.
     pub test: Vec<FieldCheck>,
+    /// The required fields whose type is a set of literals, with the
+    /// literals, in field order: what a `switch` on a field reads.
+    pub literals: Vec<(String, Vec<LiteralTag>)>,
 }
 
 /// OCaml `Variant_runtime.matching_facts`: declaration-level facts needed

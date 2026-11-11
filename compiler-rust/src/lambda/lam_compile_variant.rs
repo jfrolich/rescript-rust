@@ -400,6 +400,20 @@ impl LambdaCompiler {
                     .collect();
                 vec![JS::string_switch(emit.scrut, clauses, default, &mut this.j)]
             }),
+            Tree::SwitchField(field, clauses, default) => self.with_switch_depth(|this| {
+                let default = this.emit_untagged_tree(a, emit, tail_loop, *default);
+                let default = (!default.is_empty()).then(|| this.j.stmt_list(&default));
+                let clauses = plan
+                    .value_clauses(*clauses)
+                    .iter()
+                    .map(|(literal, clause)| StringClauseInfo {
+                        tag_type: Self::literal_tag_value(literal),
+                        clause: this.emit_untagged_tree_clause(a, emit, tail_loop, clause),
+                    })
+                    .collect();
+                let scrut = this.static_index(emit.scrut, field);
+                vec![JS::string_switch(scrut, clauses, default, &mut this.j)]
+            }),
             Tree::SwitchTypeof(clauses, default)
                 if clauses.len() == 1
                     && matches!(plan.typeof_clauses(*clauses)[0].1, UntaggedClause::Body(_)) =>
@@ -426,6 +440,30 @@ impl LambdaCompiler {
                 let default = this.j.stmt_list(&default);
                 vec![JS::string_switch(expr, clauses, Some(default), &mut this.j)]
             }),
+        }
+    }
+
+    /// A case of a `switch` on a field, whose body may be any tree.
+    fn emit_untagged_tree_clause(
+        &mut self,
+        a: &mut LamArena,
+        emit: &mut UntaggedEmit<'_, '_>,
+        tail_loop: &mut TailLoop<'_>,
+        clause: &UntaggedClause<Lam>,
+    ) -> Clause {
+        match clause {
+            UntaggedClause::Body(body)
+                if !matches!(emit.plan.tree(*body), Tree::Run(_) | Tree::Fallback) =>
+            {
+                let block = self.emit_untagged_tree(a, emit, tail_loop, *body);
+                Clause {
+                    should_break: !block_last_is_return_throw_or_continue(&self.j, &block),
+                    body: self.j.stmt_list(&block),
+                    source_loc: None,
+                    comment: None,
+                }
+            }
+            clause => self.emit_untagged_clause(a, emit, tail_loop, clause),
         }
     }
 

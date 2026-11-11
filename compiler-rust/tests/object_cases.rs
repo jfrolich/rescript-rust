@@ -436,3 +436,73 @@ let f = node =>
         "{f}"
     );
 }
+
+
+const SYNTAX_NODE: &str = r#"
+type regex = {pattern: string, flags: string}
+@unboxed type node =
+  | StringLiteral({@as("type") type_: [#Literal], value: string, raw: Null.t<string>})
+  | NumericLiteral({@as("type") type_: [#Literal], value: float, raw: Null.t<string>})
+  | RegExpLiteral({@as("type") type_: [#Literal], value: Null.t<RegExp.t>, regex: regex})
+  | Identifier({@as("type") type_: [#Identifier | #IdentifierName], name: string})
+  | Block({@as("type") type_: [#BlockStatement], body: array<int>})
+  | Empty({@as("type") type_: [#EmptyStatement], start: float})
+  | Custom({kind: string, data: dict<string>})
+"#;
+
+#[test]
+fn many_cases_are_a_switch_on_their_literal_field() {
+    let js = js(&format!(
+        r#"{SYNTAX_NODE}
+let describe = node =>
+  switch node {{
+  | StringLiteral(_) => 1
+  | NumericLiteral(_) => 2
+  | RegExpLiteral(_) => 3
+  | Identifier(_) => 4
+  | Block(_) => 5
+  | Empty(_) => 6
+  | Custom(_) => 7
+  }}
+"#
+    ));
+    // The cases that share `"Literal"` are told apart inside its arm, a case
+    // with two literals has two labels, and the case without a `type`
+    // literal is the default.
+    assert_eq!(
+        function(&js, "describe"),
+        concat!(
+            r#"switch (node.type) { case "Literal" : if ("raw" in node && typeof node.value === "string") { return 1; } "#,
+            r#"else if ("raw" in node) { return 2; } else { return 3; } "#,
+            r#"case "IdentifierName" : case "Identifier" : return 4; "#,
+            r#"case "BlockStatement" : return 5; case "EmptyStatement" : return 6; default: return 7; }"#
+        )
+    );
+}
+
+#[test]
+fn a_switch_with_a_default_tests_the_named_cases() {
+    let js = js(&format!(
+        r#"{SYNTAX_NODE}
+let isBlock = node => switch node {{ | Block(_) => true | _ => false }}
+let literal = node => switch node {{ | NumericLiteral({{value}}) => value | _ => 0. }}
+"#
+    ));
+    assert_eq!(
+        function(&js, "isBlock"),
+        r#"if (typeof node !== "object") { return false; } switch (node.type) { case "BlockStatement" : return true; default: return false; }"#
+    );
+    assert!(function(&js, "literal").contains(r#"switch (node.type) { case "Literal" :"#), "{js}");
+}
+
+#[test]
+fn three_literals_keep_the_if_chain() {
+    assert_eq!(
+        tests_of(
+            "A({kind: [#a], x: int}) | B({kind: [#b], x: int}) | C({kind: [#c], x: int})",
+            &["A", "B", "C"]
+        ),
+        [r#"x.kind === "a""#, r#"x.kind === "b""#]
+    );
+}
+

@@ -1383,15 +1383,28 @@ fn order_object_cases(
                 .collect();
             test_against(case, &others).map(|test| (index, test))
         })?;
-        let (name, _) = remaining.remove(index);
-        ordered.push(ObjectCase { name, test });
+        let (name, shape) = remaining.remove(index);
+        let literals = required_literals(&shape);
+        ordered.push(ObjectCase { name, test, literals });
     }
-    ordered.extend(
-        remaining
-            .into_iter()
-            .map(|(name, _)| ObjectCase { name, test: Vec::new() }),
-    );
+    ordered.extend(remaining.into_iter().map(|(name, shape)| ObjectCase {
+        name,
+        test: Vec::new(),
+        literals: required_literals(&shape),
+    }));
     Some(ordered)
+}
+
+/// The required fields of a case whose type is a set of literals.
+fn required_literals(shape: &ObjectShape) -> Vec<(String, Vec<LiteralTag>)> {
+    match shape {
+        ObjectShape::Closed(fields) => fields
+            .iter()
+            .filter(|field| field.required)
+            .filter_map(|field| Some((field.name.clone(), field.literals.clone()?)))
+            .collect(),
+        ObjectShape::Open => Vec::new(),
+    }
 }
 
 /// The object cases of an `@unboxed` variant with several, in the order they
