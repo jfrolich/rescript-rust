@@ -4,7 +4,6 @@ use crate::helpers;
 use crate::project_context::ProjectContext;
 use anyhow::anyhow;
 use std::fs;
-use std::io::{self, BufRead};
 use std::path::{Component, Path, PathBuf};
 
 use std::time::{SystemTime, UNIX_EPOCH};
