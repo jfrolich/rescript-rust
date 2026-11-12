@@ -40,7 +40,7 @@ pub struct Simplified {
 
 /// The idents of the module-export `Pmakeblock` at the end of the top-level
 /// `let`/`let rec`/sequence spine, with its arguments.
-fn module_export(a: &LamArena, mut lam: Lam) -> Option<(&[Ident], &[Lam])> {
+pub(crate) fn module_export(a: &LamArena, mut lam: Lam) -> Option<(&[Ident], &[Lam])> {
     loop {
         match a.node(lam) {
             Node::Let { body, .. } | Node::LetRec { body, .. } | Node::Sequence(_, body) => {

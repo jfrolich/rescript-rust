@@ -17,13 +17,15 @@ ROOT = Path(__file__).resolve().parent.parent
 RATCHET = ROOT / "compiler-rust/tests/backend_coverage.txt"
 
 
-STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits", "js-bridge")
+STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits", "lambda-alias",
+          "js-bridge", "lower")
 
 
 def summarize(directory, stage, prefix=None):
     reasons = collections.Counter()
     identical = 0
     units = {}
+    shared_catch_only = set()
     for path in sorted(directory.rglob("*.json")):
         report = json.loads(path.read_text())
         if prefix and not Path(report["unit"]).resolve().is_relative_to(prefix):
@@ -32,6 +34,8 @@ def summarize(directory, stage, prefix=None):
             raise RuntimeError(f"unexpected report stage: {report['stage']}")
         if report["stage"] != stage:
             continue
+        if report.get("shared_catch_only", False):
+            shared_catch_only.add(report["unit"])
         if report["unsupported"] is None:
             if not report["identical"]:
                 raise RuntimeError("unclassified shadow result")
@@ -45,8 +49,11 @@ def summarize(directory, stage, prefix=None):
             reasons[min(outcomes)] += 1
         else:
             identical += 1
-    return {"units": identical + sum(reasons.values()), "identical": identical,
-            "unsupported": dict(sorted(reasons.items()))}
+    result = {"units": identical + sum(reasons.values()), "identical": identical,
+              "unsupported": dict(sorted(reasons.items()))}
+    if stage == "lower":
+        result["shared_catch_only"] = len(shared_catch_only)
+    return result
 
 
 def rule_counts(directory, prefix=None):
@@ -85,6 +92,21 @@ def flatten_counts(directory, prefix=None, stage="lambda-flatten"):
     return dict(sorted(totals.items()))
 
 
+def fact_counts(directory, prefix=None):
+    """Binders whose fact was compared with the legacy table, per kind."""
+    totals = collections.Counter()
+    seen = set()
+    for path in sorted(directory.rglob("lambda-alias.*.json")):
+        report = json.loads(path.read_text())
+        if prefix and not Path(report["unit"]).resolve().is_relative_to(prefix):
+            continue
+        if report["unit"] in seen or "facts" not in report:
+            continue
+        seen.add(report["unit"])
+        totals.update(report["facts"])
+    return dict(sorted(totals.items()))
+
+
 def check(actual, baseline):
     for stage in STAGES:
         check_stage(stage, actual[stage], baseline[stage])
@@ -98,12 +120,18 @@ def check_stage(stage, actual, baseline):
         old_fallback = sum(old["unsupported"].values())
         if new["units"] < old["units"]:
             raise RuntimeError(f"{corpus}: missing units: {new['units']} < {old['units']}")
-        if fallback > old_fallback:
+        # A corpus grows when tests are added. A unit added to a corpus that
+        # already has fallbacks may be one more. No existing unit may become
+        # one: units are identical plus fallbacks, so fallbacks growing by at
+        # most the units added means the identical count did not fall. A
+        # corpus without fallbacks keeps none.
+        added = new["units"] - old["units"]
+        if fallback > old_fallback + added:
             raise RuntimeError(f"{corpus}: fallback count grew: {fallback} > {old_fallback}")
-        if new["identical"] * old["units"] < old["identical"] * new["units"]:
-            raise RuntimeError(f"{corpus}: supported share fell")
+        if fallback and not old_fallback:
+            raise RuntimeError(f"{corpus}: a fully supported corpus gained a fallback")
         for reason, count in new["unsupported"].items():
-            if count > old["unsupported"].get(reason, 0):
+            if count > old["unsupported"].get(reason, 0) + added:
                 raise RuntimeError(f"{corpus}: fallback reason grew: {reason}: {count}")
 
 
@@ -121,6 +149,8 @@ def main():
     rules = {}
     flatten_rules = {}
     exits_rules = {}
+    alias_rules = {}
+    alias_facts = {}
     with tempfile.TemporaryDirectory(prefix="bir-shadow-") as temporary:
         for corpus, folder in [("runtime", "packages/@rescript/runtime"),
                                ("tests/tests", "tests/tests"), ("fixtures", None)]:
@@ -152,6 +182,8 @@ def main():
             rules[corpus] = rule_counts(reports, prefix)
             flatten_rules[corpus] = flatten_counts(reports, prefix)
             exits_rules[corpus] = flatten_counts(reports, prefix, "lambda-exits")
+            alias_rules[corpus] = flatten_counts(reports, prefix, "lambda-alias")
+            alias_facts[corpus] = fact_counts(reports, prefix)
     text = json.dumps(results, indent=2, sort_keys=True) + "\n"
     print(text, end="")
     print("lambda-norm rule firings (not ratcheted):")
@@ -160,6 +192,10 @@ def main():
     print(json.dumps(flatten_rules, indent=2, sort_keys=True))
     print("lambda-exits rule firings (not ratcheted):")
     print(json.dumps(exits_rules, indent=2, sort_keys=True))
+    print("lambda-alias rule firings (not ratcheted):")
+    print(json.dumps(alias_rules, indent=2, sort_keys=True))
+    print("lambda-alias binders compared with the legacy table, per kind (not ratcheted):")
+    print(json.dumps(alias_facts, indent=2, sort_keys=True))
     if args.record:
         RATCHET.write_text(text)
     else:

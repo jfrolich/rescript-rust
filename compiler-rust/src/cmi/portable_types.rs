@@ -176,8 +176,8 @@ pub enum PortableRowField {
     Rabsent,
 }
 
-/// A published signature. The checking worker publishes shared nodes before
-/// handing this value to the registry; encoding is deferred to its first reader.
+/// A published signature. The checking worker freezes owned node arrays;
+/// a first importer installs them in the pool, and storage encodes them later.
 #[derive(Debug)]
 pub struct PortablePersStruct {
     /// The unit name.
@@ -193,9 +193,44 @@ pub struct PortablePersStruct {
     /// Stamp-independent structural fingerprint.
     pub fingerprint: u64,
     summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
-    decoded: std::sync::Mutex<Option<(PortableSignature, Option<PortableRawSignature>)>>,
+    /// Publication hashes from the shared graph; absent on stored/fallback units.
+    shared_item_hashes: Option<Vec<(super::item_deps::Kind, crate::name::Name, u64)>>,
+    decoded: std::sync::Mutex<Option<(PublishedSignature, RawSignature)>>,
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
+    publication_counter_id: usize,
+}
+
+/// Absence of a raw signature is different from storage having moved it to
+/// `encoded`. Readers can observe the latter after waiting for `decoded`, even
+/// if their earlier `encoded.get()` saw an empty slot.
+#[derive(Debug)]
+enum RawSignature {
+    Decoded(Option<Box<PortableRawSignature>>),
+    Encoded,
+}
+
+#[derive(Debug)]
+enum PublishedSignature {
+    Portable(Box<PortableSignature>),
+    Shared(super::shared_reader::PublishedGraph),
+}
+
+impl PublishedSignature {
+    fn portable(&self) -> std::borrow::Cow<'_, PortableSignature> {
+        match self {
+            Self::Portable(sig) => std::borrow::Cow::Borrowed(sig),
+            Self::Shared(graph) => std::borrow::Cow::Owned(graph.portable()),
+        }
+    }
+    fn summary(&self, unit: &str, hashes: Option<&[(super::item_deps::Kind, crate::name::Name, u64)]>) -> super::item_deps::SignatureSummary {
+        match self {
+            Self::Portable(sig) => super::item_deps::SignatureSummary::with_item_hashes(unit, sig, hashes),
+            Self::Shared(graph) => super::item_deps::SignatureSummary::from_graph(
+                unit, &graph.reader(), &graph.signature, hashes,
+            ),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -246,7 +281,9 @@ impl<'de> serde::Deserialize<'de> for PortablePersStruct {
             shareable: s.shareable,
             fingerprint: s.fingerprint,
             published_generation: None,
+            publication_counter_id: 0,
             summary: Default::default(),
+            shared_item_hashes: None,
             decoded: Default::default(),
             encoded: std::sync::OnceLock::from(EncodedSignatures {
                 sig: s.sig,
@@ -267,7 +304,9 @@ impl Clone for PortablePersStruct {
             shareable: self.shareable,
             fingerprint: self.fingerprint,
             published_generation: self.published_generation,
+            publication_counter_id: self.publication_counter_id,
             summary: self.summary.clone(),
+            shared_item_hashes: None,
             decoded: Default::default(),
             encoded: std::sync::OnceLock::from(encoded.clone()),
         }
@@ -310,7 +349,44 @@ pub struct PortableRawSignature {
     pub raw_locations: DeclLocTable,
 }
 
+// A deterministic schedule point: storage runs after a reader observes that
+// bytes are absent, but before it acquires the decoded-signature lock.
+#[cfg(test)]
+thread_local! {
+    static RAW_READ_STORAGE: std::cell::RefCell<Option<(&'static str, bool)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 impl PortablePersStruct {
+    #[cfg(test)]
+    fn run_raw_read_storage(&self, presence: bool) {
+        let run = RAW_READ_STORAGE.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            if hook.as_ref().is_some_and(|(name, kind)| *name == self.ps_name && *kind == presence) {
+                hook.take();
+                true
+            } else {
+                false
+            }
+        });
+        if run {
+            std::thread::scope(|scope| {
+                scope.spawn(|| self.encoded()).join().unwrap();
+            });
+        }
+    }
+
+    fn record_access(&self, imported: bool) {
+        if let Some(generation) = self.published_generation {
+            crate::perf_counters::record_signature_access(
+                self.publication_counter_id,
+                generation,
+                imported,
+            );
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn has_decoded_signatures(&self) -> bool {
         self.decoded.lock().unwrap().is_some()
@@ -334,9 +410,14 @@ impl PortablePersStruct {
             shareable: graph_is_shareable(&sig.type_graph),
             fingerprint,
             published_generation: None,
+            publication_counter_id: 0,
             summary: Default::default(),
+            shared_item_hashes: None,
             encoded: Default::default(),
-            decoded: std::sync::Mutex::new(Some((sig, raw))),
+            decoded: std::sync::Mutex::new(Some((
+                PublishedSignature::Portable(Box::new(sig)),
+                RawSignature::Decoded(raw.map(Box::new)),
+            ))),
         }
     }
 
@@ -344,6 +425,10 @@ impl PortablePersStruct {
     /// its decoded graph, so keep only the bytes storage will need anyway.
     pub fn prepare_for_storage(&self) {
         self.encoded();
+        // The scheduler calls this only for a unit with no waiting importer.
+        // Unlike an ordinary storage reader, it can release detached arrays
+        // as well as raw signatures. A later build can load the stored bytes.
+        *self.decoded.lock().unwrap() = None;
     }
 
     fn encoded(&self) -> &EncodedSignatures {
@@ -354,13 +439,27 @@ impl PortablePersStruct {
                 .expect("unencoded publication has signatures");
             // Compute the summary while the decoded form is still available.
             self.summary.get_or_init(|| {
-                Arc::new(super::item_deps::SignatureSummary::of(&self.ps_name, sig))
+                Arc::new(sig.summary(&self.ps_name, self.shared_item_hashes.as_deref()))
             });
             let encoded = EncodedSignatures {
-                sig: crate::binser::Encoded::encode(sig),
-                raw: raw.as_ref().map(crate::binser::Encoded::encode),
+                sig: match sig {
+                    PublishedSignature::Portable(sig) => crate::binser::Encoded::encode(sig.as_ref()),
+                    PublishedSignature::Shared(graph) => graph.encode(),
+                },
+                raw: match raw {
+                    RawSignature::Decoded(raw) => raw.as_deref().map(crate::binser::Encoded::encode),
+                    RawSignature::Encoded => {
+                        unreachable!("raw signature encoded before its publication")
+                    }
+                },
             };
-            *decoded = None;
+            if matches!(sig, PublishedSignature::Portable(_)) {
+                *decoded = None;
+            } else if let Some((_, raw)) = decoded.as_mut() {
+                // Keep the frozen graph for a later importer, not a duplicate
+                // raw signature after its bytes have been produced.
+                *raw = RawSignature::Encoded;
+            }
             encoded
         })
     }
@@ -375,7 +474,7 @@ impl PortablePersStruct {
         let decoded = self.decoded.lock().unwrap();
         if let Some((sig, _)) = decoded.as_ref() {
             return self.summary.get_or_init(|| {
-                Arc::new(super::item_deps::SignatureSummary::of(&self.ps_name, sig))
+                Arc::new(sig.summary(&self.ps_name, self.shared_item_hashes.as_deref()))
             });
         }
         drop(decoded);
@@ -404,12 +503,14 @@ impl PortablePersStruct {
     /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
         if self.encoded.get().is_none() {
+            #[cfg(test)]
+            self.run_raw_read_storage(false);
             let decoded = self.decoded.lock().unwrap();
-            if let Some((_, raw)) = decoded.as_ref() {
+            if let Some((_, RawSignature::Decoded(raw))) = decoded.as_ref() {
                 // GenType may read a dependency's raw signature while publishing
                 // the current unit. Do not encode either signature just to read
                 // this graph; byte production belongs to the storage reader.
-                return raw.clone();
+                return raw.as_deref().cloned();
             }
         }
         self.encoded()
@@ -422,10 +523,12 @@ impl PortablePersStruct {
         if let Some(encoded) = self.encoded.get() {
             return encoded.raw.is_some();
         }
+        #[cfg(test)]
+        self.run_raw_read_storage(true);
         let decoded = self.decoded.lock().unwrap();
         match decoded.as_ref() {
-            Some((_, raw)) => raw.is_some(),
-            None => {
+            Some((_, RawSignature::Decoded(raw))) => raw.is_some(),
+            Some((_, RawSignature::Encoded)) | None => {
                 drop(decoded);
                 self.encoded().raw.is_some()
             }
@@ -910,6 +1013,42 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
+    serialize_pers_struct_inner(ps, ctx, arena, true, &PublicationStamps::new(ctx))
+}
+
+/// Publication computes hashes after the shared graph is built, not here.
+pub(crate) fn serialize_for_publication(
+    ps: &PersStruct,
+    ctx: &TypeContext,
+    arena: Option<&ParseArena>,
+) -> PortablePersStruct {
+    serialize_pers_struct_inner(ps, ctx, arena, false, &PublicationStamps::new(ctx))
+}
+
+/// Naming input shared by the direct builder and check-only oracle. Each
+/// store binder consumes one fresh compilation stamp, independent of which
+/// representation reads it. This is not a replay of store-building effects.
+struct PublicationStamps<'a> {
+    ctx: &'a TypeContext,
+    assigned: std::cell::RefCell<AHashMap<i32, i32>>,
+}
+impl<'a> PublicationStamps<'a> {
+    fn new(ctx: &'a TypeContext) -> Self {
+        Self { ctx, assigned: Default::default() }
+    }
+    fn get(&self, stamp: i32) -> Option<i32> {
+        Some(*self.assigned.borrow_mut().entry(stamp)
+            .or_insert_with(|| self.ctx.published_binder_stamp()))
+    }
+}
+
+fn serialize_pers_struct_inner(
+    ps: &PersStruct,
+    ctx: &TypeContext,
+    arena: Option<&ParseArena>,
+    hash_portable: bool,
+    stamps: &PublicationStamps<'_>,
+) -> PortablePersStruct {
     // The file names of the signatures' locations travel with them, keyed
     // in order of first use (see `PortableFileNames`).
     let mut file_names = PortableFileNames::default();
@@ -933,26 +1072,18 @@ pub fn serialize_pers_struct(
         },
     );
     {
-        // A store binder's stamp depends on the order in which threads built
-        // store data, so a published signature that mentions one (a functor
-        // application's result, say) gives it a stamp of this compilation
-        // instead: a fresh one per binder, in the order the signature first
-        // mentions them, which depends on the signature alone.
-        let stamps = std::cell::RefCell::new(AHashMap::<i32, i32>::new());
-        let saved_stamp = |stamp| {
-            Some(
-                *stamps
-                    .borrow_mut()
-                    .entry(stamp)
-                    .or_insert_with(|| ctx.published_binder_stamp()),
-            )
-        };
+        let saved_stamp = |stamp| stamps.get(stamp);
         remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
         if let Some(raw) = &mut raw {
             remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
         }
     }
-    let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig);
+    let fingerprint = if hash_portable {
+        compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig)
+    } else {
+        // Filled before the Arc is registered or exposed to any reader.
+        0
+    };
     PortablePersStruct::new(
         ps.ps_name.clone(),
         ps.ps_filename.clone(),
@@ -964,6 +1095,36 @@ pub fn serialize_pers_struct(
     )
 }
 
+/// Apply the publication's deterministic store-binder mapping before
+/// either shared nodes or bytes are produced. Graph indices are untouched.
+fn remap_saved_ident(id: &mut crate::ident::Ident, stamps: &dyn Fn(i32) -> Option<i32>) {
+    if id.stamp() >= crate::ident::STORE_STAMP_BASE
+        && let Some(stamp) = stamps(id.stamp())
+    {
+        *id = id.with_stamp(stamp);
+    }
+}
+fn remap_saved_path(p: &mut Path, stamps: &dyn Fn(i32) -> Option<i32>) {
+    use crate::types::path::PathView;
+    *p = match *p.view() {
+        PathView::Pident(mut id) => {
+            let before = id.stamp();
+            remap_saved_ident(&mut id, stamps);
+            if id.stamp() == before { *p } else { Path::pident(id) }
+        }
+        PathView::Pdot(mut parent, name, pos) => {
+            let before = parent;
+            remap_saved_path(&mut parent, stamps);
+            if parent == before { *p } else { Path::pdot_pos(parent, name, pos) }
+        }
+        PathView::Papply(mut f, mut arg) => {
+            let before = (f, arg);
+            remap_saved_path(&mut f, stamps);
+            remap_saved_path(&mut arg, stamps);
+            if (f, arg) == before { *p } else { Path::papply(f, arg) }
+        }
+    };
+}
 /// Give every identifier with a store stamp the stamp `stamps` maps it to,
 /// before either shared nodes or bytes are produced. Graph indices are
 /// untouched. `stamps` is asked only for stamps of the store range.
@@ -972,37 +1133,10 @@ fn remap_saved_stamps(
     graph: &mut PortableTypeGraph,
     stamps: &dyn Fn(i32) -> Option<i32>,
 ) {
-    fn ident(id: &mut crate::ident::Ident, stamps: &dyn Fn(i32) -> Option<i32>) {
-        if id.stamp() >= crate::ident::STORE_STAMP_BASE
-            && let Some(stamp) = stamps(id.stamp())
-        {
-            *id = id.with_stamp(stamp);
-        }
-    }
-    fn path(p: &mut Path, stamps: &dyn Fn(i32) -> Option<i32>) {
-        use crate::types::path::PathView;
-        *p = match *p.view() {
-            PathView::Pident(mut id) => {
-                let before = id.stamp();
-                ident(&mut id, stamps);
-                if id.stamp() == before { *p } else { Path::pident(id) }
-            }
-            PathView::Pdot(mut parent, name, pos) => {
-                let before = parent;
-                path(&mut parent, stamps);
-                if parent == before { *p } else { Path::pdot_pos(parent, name, pos) }
-            }
-            PathView::Papply(mut f, mut arg) => {
-                let before = (f, arg);
-                path(&mut f, stamps);
-                path(&mut arg, stamps);
-                if (f, arg) == before { *p } else { Path::papply(f, arg) }
-            }
-        };
-    }
+
     fn labels(labels: &mut [LabelDeclaration], stamps: &dyn Fn(i32) -> Option<i32>) {
         for label in labels {
-            ident(&mut label.ld_id, stamps);
+            remap_saved_ident(&mut label.ld_id, stamps);
         }
     }
     fn args(args: &mut ConstructorArguments, stamps: &dyn Fn(i32) -> Option<i32>) {
@@ -1012,15 +1146,15 @@ fn remap_saved_stamps(
     }
     fn module(mty: &mut ModuleType, stamps: &dyn Fn(i32) -> Option<i32>) {
         match mty {
-            ModuleType::MtyIdent(p) => path(p, stamps),
-            ModuleType::MtyAlias(_, p) => path(Arc::make_mut(p), stamps),
+            ModuleType::MtyIdent(p) => remap_saved_path(p, stamps),
+            ModuleType::MtyAlias(_, p) => remap_saved_path(Arc::make_mut(p), stamps),
             ModuleType::MtySignature(sig) => signature(Arc::make_mut(sig), stamps),
             ModuleType::MtyFunctor {
                 param,
                 param_type,
                 result,
             } => {
-                ident(param, stamps);
+                remap_saved_ident(param, stamps);
                 if let Some(mty) = param_type {
                     module(mty, stamps);
                 }
@@ -1032,22 +1166,22 @@ fn remap_saved_stamps(
         for item in sig {
             match item {
                 SignatureItem::SigValue(id, vd) => {
-                    ident(id, stamps);
+                    remap_saved_ident(id, stamps);
                     if let Some(p) = &mut vd.val_path {
-                        path(p, stamps);
+                        remap_saved_path(p, stamps);
                     }
                 }
                 SignatureItem::SigType(id, td, _) => {
-                    ident(id, stamps);
+                    remap_saved_ident(id, stamps);
                     let td = Arc::make_mut(td);
                     if let Some(p) = &mut td.type_path {
-                        path(p, stamps);
+                        remap_saved_path(p, stamps);
                     }
                     match &mut td.type_kind {
                         TypeKind::TypeRecord(fields, _) => labels(fields, stamps),
                         TypeKind::TypeVariant(constructors, _) => {
                             for cd in constructors.iter_mut() {
-                                ident(&mut cd.cd_id, stamps);
+                                remap_saved_ident(&mut cd.cd_id, stamps);
                                 args(&mut cd.cd_args, stamps);
                             }
                         }
@@ -1059,19 +1193,19 @@ fn remap_saved_stamps(
                     }
                 }
                 SignatureItem::SigTypext(id, ext, _) => {
-                    ident(id, stamps);
-                    path(&mut ext.ext_type_path, stamps);
+                    remap_saved_ident(id, stamps);
+                    remap_saved_path(&mut ext.ext_type_path, stamps);
                     args(&mut ext.ext_args, stamps);
                 }
                 SignatureItem::SigModule(id, md, _) => {
-                    ident(id, stamps);
+                    remap_saved_ident(id, stamps);
                     if let Some(p) = &mut md.md_path {
-                        path(p, stamps);
+                        remap_saved_path(p, stamps);
                     }
                     module(&mut md.md_type, stamps);
                 }
                 SignatureItem::SigModtype(id, md) => {
-                    ident(id, stamps);
+                    remap_saved_ident(id, stamps);
                     if let Some(mty) = &mut md.mtd_type {
                         module(mty, stamps);
                     }
@@ -1084,10 +1218,10 @@ fn remap_saved_stamps(
     for entry in &mut graph.entries {
         match &mut entry.desc {
             PortableTypeDesc::Tconstr { path: p, .. }
-            | PortableTypeDesc::Tpackage { path: p, .. } => path(p, stamps),
+            | PortableTypeDesc::Tpackage { path: p, .. } => remap_saved_path(p, stamps),
             PortableTypeDesc::Tvariant(row) => {
                 if let Some((p, _)) = &mut row.row_name {
-                    path(p, stamps);
+                    remap_saved_path(p, stamps);
                 }
             }
             PortableTypeDesc::Tvar(_)
@@ -1112,25 +1246,113 @@ fn serialize_signature(
     arena: Option<&ParseArena>,
     file_names: &mut PortableFileNames,
 ) -> (Signature, PortableTypeGraph, DeclLocTable) {
-    let mut ser = TypeGraphSerializer::new(ctx, arena, file_names);
+    let mut ser = TypeGraphSerializer::<PortableSink>::new(ctx, arena, file_names);
     let mut sig = sig.clone();
     ser.remap_signature(&mut sig);
     ser.remap_signature_locations(&mut sig);
     let type_graph = PortableTypeGraph {
-        entries: ser.entries,
+        entries: ser.sink.entries,
         variant_layouts: ser.variant_layouts,
         mutabilities: ser.mutabilities,
     };
     (sig, type_graph, ser.locations)
 }
 
-struct TypeGraphSerializer<'a, 'f> {
+/// One traversal, with either portable entries or shared descriptor payloads.
+trait SignatureSink: Default + Sized {
+    type Desc;
+    fn reserve(&mut self) -> usize;
+    fn write(&mut self, index: usize, desc: Self::Desc, level: i32);
+    fn describe(ser: &mut TypeGraphSerializer<'_, '_, Self>, desc: &TypeDesc) -> Self::Desc;
+}
+
+#[derive(Default)]
+struct PortableSink { entries: Vec<PortableTypeEntry> }
+
+impl SignatureSink for PortableSink {
+    type Desc = PortableTypeDesc;
+    fn reserve(&mut self) -> usize {
+        let index = self.entries.len();
+        self.entries.push(PortableTypeEntry { desc: PortableTypeDesc::Tvar(None), level: 0 });
+        index
+    }
+    fn write(&mut self, index: usize, desc: Self::Desc, level: i32) {
+        self.entries[index] = PortableTypeEntry { desc, level };
+    }
+    fn describe(ser: &mut TypeGraphSerializer<'_, '_, Self>, desc: &TypeDesc) -> PortableTypeDesc {
+        match desc {
+            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(*name),
+            TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
+                args: ser
+                    .ctx
+                    .type_args(args)
+                    .iter()
+                    .map(|arg| {
+                        (
+                            ser.portable_label(&arg.label().to_arg_label()),
+                            ser.serialize_type(arg.typ),
+                        )
+                    })
+                    .collect(),
+                ret: ser.serialize_type(*ret),
+            },
+            TypeDesc::Ttuple(types) => {
+                PortableTypeDesc::Ttuple(ser.ctx.type_list(types).iter().map(|t| ser.serialize_type(t)).collect())
+            }
+            TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
+                path: *path,
+                args: ser.ctx.type_list(args).iter().map(|t| ser.serialize_type(t)).collect(),
+            },
+            TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
+                fields: ser.serialize_type(*fields),
+            },
+            TypeDesc::Tfield {
+                name,
+                mutability,
+                typ,
+                rest,
+            } => PortableTypeDesc::Tfield {
+                name: *name,
+                mutability: ser.serialize_mutability(*mutability),
+                typ: ser.serialize_type(*typ),
+                rest: ser.serialize_type(*rest),
+            },
+            TypeDesc::Tnil => PortableTypeDesc::Tnil,
+            TypeDesc::Tlink(r) => PortableTypeDesc::Tlink(ser.serialize_type(*r)),
+            TypeDesc::Tsubst(r) => PortableTypeDesc::Tsubst(ser.serialize_type(*r)),
+            TypeDesc::Tvariant(row_desc) => {
+                PortableTypeDesc::Tvariant(ser.serialize_row_desc(&ser.ctx.row_desc(row_desc)))
+            }
+            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(*name),
+            TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
+                body: ser.serialize_type(*body),
+                vars: ser.ctx.type_list(vars).iter().map(|t| ser.serialize_type(t)).collect(),
+            },
+            TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
+                path: *path,
+                lids: ser
+                    .ctx
+                    .package_lids(lids)
+                    .iter()
+                    .map(|lid| ser.serialize_longident(lid))
+                    .collect(),
+                args: ser.ctx.type_list(args).iter().map(|t| ser.serialize_type(t)).collect(),
+            },
+        }
+    }
+
+}
+
+#[path = "signature_builder.rs"]
+mod signature_builder;
+
+struct TypeGraphSerializer<'a, 'f, S: SignatureSink = PortableSink> {
     ctx: &'a TypeContext,
     arena: Option<&'a ParseArena>,
-    entries: Vec<PortableTypeEntry>,
-    /// The node of each entry.
-    nodes: Vec<TypeExprRef>,
-    cache: AHashMap<TypeExprRef, usize>,
+    sink: S,
+    #[cfg(test)]
+    visits: usize,
+    cache: crate::types::type_marks::Pooled<crate::types::type_marks::TypeNodeTable<TypeExprRef>>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
     mutabilities: Vec<crate::types::asttypes::MutableFlag>,
@@ -1198,7 +1420,7 @@ impl PortableFileNames {
     }
 }
 
-impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
+impl<'a, 'f, S: SignatureSink> TypeGraphSerializer<'a, 'f, S> {
     fn new(
         ctx: &'a TypeContext,
         arena: Option<&'a ParseArena>,
@@ -1207,9 +1429,10 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
         TypeGraphSerializer {
             ctx,
             arena,
-            entries: Vec::new(),
-            nodes: Vec::new(),
-            cache: AHashMap::new(),
+            sink: S::default(),
+            #[cfg(test)]
+            visits: 0,
+            cache: crate::types::type_marks::ref_table(),
             variant_layouts: Vec::new(),
             variant_layout_cache: AHashMap::new(),
             mutabilities: Vec::new(),
@@ -1268,89 +1491,25 @@ impl<'a, 'f> TypeGraphSerializer<'a, 'f> {
 
     /// Serialize a TypeExprRef, returning the portable index.
     fn serialize_type(&mut self, r: TypeExprRef) -> usize {
-        if let Some(&idx) = self.cache.get(&r) {
-            return idx;
+        if let Some(mapped) = self.cache.get(r) {
+            return mapped.index();
         }
 
         // Allocate placeholder first to handle recursive types.
-        let idx = self.entries.len();
-        self.cache.insert(r, idx);
-        self.nodes.push(r);
-        self.entries.push(PortableTypeEntry {
-            desc: PortableTypeDesc::Tvar(None),
-            level: 0,
-        });
+        let idx = self.sink.reserve();
+        self.cache.insert(r, TypeExprRef::from_usize(idx));
 
+        #[cfg(test)]
+        { self.visits += 1; }
         let desc_snapshot = self.ctx.get_desc(r);
         let level = self.ctx.get_level(r);
         let portable_desc = self.serialize_desc(&desc_snapshot);
-        self.entries[idx] = PortableTypeEntry {
-            desc: portable_desc,
-            level,
-        };
+        self.sink.write(idx, portable_desc, level);
         idx
     }
 
-    fn serialize_desc(&mut self, desc: &TypeDesc) -> PortableTypeDesc {
-        match desc {
-            TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(*name),
-            TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
-                args: self
-                    .ctx
-                    .type_args(args)
-                    .iter()
-                    .map(|arg| {
-                        (
-                            self.portable_label(&arg.label().to_arg_label()),
-                            self.serialize_type(arg.typ),
-                        )
-                    })
-                    .collect(),
-                ret: self.serialize_type(*ret),
-            },
-            TypeDesc::Ttuple(types) => {
-                PortableTypeDesc::Ttuple(self.ctx.type_list(types).iter().map(|t| self.serialize_type(t)).collect())
-            }
-            TypeDesc::Tconstr { path, args, .. } => PortableTypeDesc::Tconstr {
-                path: *path,
-                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(t)).collect(),
-            },
-            TypeDesc::Tobject { fields } => PortableTypeDesc::Tobject {
-                fields: self.serialize_type(*fields),
-            },
-            TypeDesc::Tfield {
-                name,
-                mutability,
-                typ,
-                rest,
-            } => PortableTypeDesc::Tfield {
-                name: *name,
-                mutability: self.serialize_mutability(*mutability),
-                typ: self.serialize_type(*typ),
-                rest: self.serialize_type(*rest),
-            },
-            TypeDesc::Tnil => PortableTypeDesc::Tnil,
-            TypeDesc::Tlink(r) => PortableTypeDesc::Tlink(self.serialize_type(*r)),
-            TypeDesc::Tsubst(r) => PortableTypeDesc::Tsubst(self.serialize_type(*r)),
-            TypeDesc::Tvariant(row_desc) => {
-                PortableTypeDesc::Tvariant(self.serialize_row_desc(&self.ctx.row_desc(row_desc)))
-            }
-            TypeDesc::Tunivar(name) => PortableTypeDesc::Tunivar(*name),
-            TypeDesc::Tpoly { body, vars } => PortableTypeDesc::Tpoly {
-                body: self.serialize_type(*body),
-                vars: self.ctx.type_list(vars).iter().map(|t| self.serialize_type(t)).collect(),
-            },
-            TypeDesc::Tpackage { path, lids, args } => PortableTypeDesc::Tpackage {
-                path: *path,
-                lids: self
-                    .ctx
-                    .package_lids(lids)
-                    .iter()
-                    .map(|lid| self.serialize_longident(lid))
-                    .collect(),
-                args: self.ctx.type_list(args).iter().map(|t| self.serialize_type(t)).collect(),
-            },
-        }
+    fn serialize_desc(&mut self, desc: &TypeDesc) -> S::Desc {
+        S::describe(self, desc)
     }
 
     fn serialize_longident(&self, lid: &Longident) -> PortableLongident {
@@ -1704,28 +1863,116 @@ fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
 pub enum SignaturePublicationMode {
     /// A dependent in this build (including an interface's implementation).
     Eager,
-    /// No dependent in this build; a later reader can fill the pool slot.
+    /// No dependent in this build; storage may run as soon as lowering finishes.
+    /// Hashing and storage retain a graph without installing it in the pool.
     OnDemand,
 }
 
-/// Prepare the address-keyed pool and worker map when dependents need them.
-pub fn publish_pers_struct(
+/// Publish directly from the checker. The portable oracle is check-only;
+/// ordinary storage reconstructs it from the frozen graph after release.
+pub(crate) fn publish_signature(
+    ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
+    mode: SignaturePublicationMode, checked: bool,
+) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
+    let stamps = PublicationStamps::new(ctx);
+    let Some((graph, raw)) = signature_builder::build(ps, ctx, arena, &stamps) else {
+        let portable = serialize_for_publication(ps, ctx, arena);
+        return if checked {
+            let (pps, comparison) = publish_pers_struct_checked(portable, ctx, mode);
+            (pps, Some(comparison))
+        } else { (publish_pers_struct(portable, ctx, mode), None) };
+    };
+    let reader = graph.reader();
+    let fingerprint = signature_fingerprint(&reader, &graph.signature);
+    let hashes = super::item_deps::item_declaration_hashes(&reader, &graph.signature);
+    let comparison = checked.then(|| {
+        use super::signature_check::{Comparison, Outcome};
+        let oracle = serialize_pers_struct_inner(ps, ctx, arena, true, &stamps);
+        let decoded = oracle.decoded.lock().unwrap();
+        let portable = decoded.as_ref().unwrap().0.portable();
+        let oracle_hashes = super::item_deps::item_declaration_hashes(&HashGraph::of(&portable.type_graph), &portable.ps_sig);
+        let items = |xs: &[(super::item_deps::Kind, crate::name::Name, u64)]| {
+            xs.iter().map(|(kind, name, hash)| ((*kind, *name), *hash)).collect::<Vec<_>>()
+        };
+        Comparison {
+            shared_graph: "published", carried: graph.graph.carried.needed(),
+            outcomes: [
+                Outcome::fingerprint(oracle.fingerprint, fingerprint),
+                Outcome::item_hashes(&items(&oracle_hashes), &items(&hashes)),
+                Outcome::bytes(&crate::binser::to_vec(portable.as_ref()).unwrap(), &graph.storage_bytes_for_check()),
+            ],
+        }
+    });
+    let pps = Arc::new(PortablePersStruct {
+        ps_name: ps.ps_name.clone(), ps_filename: ps.ps_filename.clone(),
+        ps_deprecated: ps.ps_deprecated.clone(), ps_crcs: ps.ps_crcs.clone(),
+        shareable: true, fingerprint, summary: Default::default(), shared_item_hashes: Some(hashes),
+        decoded: std::sync::Mutex::new(Some((
+            PublishedSignature::Shared(graph), RawSignature::Decoded(raw.map(Box::new)),
+        ))),
+        encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
+        publication_counter_id: crate::perf_counters::signature_publication_id(),
+    });
+    pps.record_access(false);
+    (pps, comparison)
+}
+
+/// Build the shared graph before publishing its address-keyed registry entry.
+/// Leaf units also need a graph: their fingerprint may not use the portable
+/// form. Only a non-shareable signature or a full pool takes the old path.
+fn prepare_publication(
     mut pps: PortablePersStruct,
     ctx: &TypeContext,
-    mode: SignaturePublicationMode,
-) -> Arc<PortablePersStruct> {
+    check: bool,
+) -> (Arc<PortablePersStruct>, Option<(Arc<PersStruct>, u32)>) {
+    use super::shared_reader::FrozenGraph;
     pps.published_generation = Some(crate::types::thread_store::build_generation());
-    let pps = Arc::new(pps);
-    if mode == SignaturePublicationMode::Eager && pps.shareable {
-        let store = ctx.thread_store();
-        let pool = store.shared_pool();
+    pps.publication_counter_id = crate::perf_counters::signature_publication_id();
+    let store = ctx.thread_store();
+    let pool = store.shared_pool();
+    let (shared, fingerprint, hashes) = {
         let decoded = pps.decoded.lock().unwrap();
-        let sig = &decoded.as_ref().expect("new publication").0;
-        if let Some(ps) = pool.pers_struct(&pps, || shared_pers_struct(&pps, sig, pool)) {
-            store.insert_pers_struct(pps.clone(), ps);
-        }
+        let source = &decoded.as_ref().expect("new publication").0;
+        let sig = source.portable();
+        let shared = if pps.shareable || check {
+            shared_pers_struct_at(&pps, &sig, pool)
+        } else {
+            None
+        };
+        let (fingerprint, hashes) = match &shared {
+            Some((ps, base)) => {
+                let pages = pool.pages();
+                let frozen = FrozenGraph::new(
+                    pool, crate::types::shared_store::graph_at(&pages, *base),
+                );
+                (
+                    signature_fingerprint(&frozen, &ps.ps_sig),
+                    Some(super::item_deps::item_declaration_hashes(&frozen, &ps.ps_sig)),
+                )
+            }
+            None => (signature_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig), None),
+        };
+        (shared, fingerprint, hashes)
+    };
+    pps.fingerprint = fingerprint;
+    pps.shared_item_hashes = hashes;
+    let pps = Arc::new(pps);
+    pps.record_access(false);
+    if pps.shareable && let Some((ps, _)) = &shared {
+        let cached = pool.pers_struct(&pps, || Some(ps.clone()))
+            .expect("a prepared shared graph is registered once");
+        store.insert_pers_struct(pps.clone(), cached);
     }
-    pps
+    (pps, shared)
+}
+
+/// Prepare the address-keyed pool and worker map before signature release.
+pub fn publish_pers_struct(
+    pps: PortablePersStruct,
+    ctx: &TypeContext,
+    _mode: SignaturePublicationMode,
+) -> Arc<PortablePersStruct> {
+    prepare_publication(pps, ctx, false).0
 }
 
 /// [`publish_pers_struct`] in signature check mode
@@ -1740,57 +1987,19 @@ pub fn publish_pers_struct(
 /// a graph of the pool that no reader is given. Only a full pool leaves a
 /// unit without a comparison.
 pub fn publish_pers_struct_checked(
-    mut pps: PortablePersStruct,
+    pps: PortablePersStruct,
     ctx: &TypeContext,
-    mode: SignaturePublicationMode,
+    _mode: SignaturePublicationMode,
 ) -> (Arc<PortablePersStruct>, super::signature_check::Comparison) {
-    use super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    use super::shared_reader::{FrozenGraph, portable_signature};
     use super::signature_check::{Comparison, Outcome};
-    pps.published_generation = Some(crate::types::thread_store::build_generation());
-    let pps = Arc::new(pps);
+    let (pps, shared) = prepare_publication(pps, ctx, true);
     let store = ctx.thread_store();
     let pool = store.shared_pool();
     let decoded = pps.decoded.lock().unwrap();
-    let portable = &decoded.as_ref().expect("new publication").0;
-    let mut carried = Carried {
-        file_names: portable.cmi_longident_names.clone(),
-        ..Default::default()
-    };
-    let (shared_graph, shared) = if pps.shareable {
-        let mut base = None;
-        let ps = pool.pers_struct(&pps, || {
-            let (ps, at) = shared_pers_struct_at(&pps, portable, pool, Some(&mut carried))?;
-            base = Some(at);
-            Some(ps)
-        });
-        if let Some(ps) = &ps {
-            store.insert_pers_struct(pps.clone(), ps.clone());
-        }
-        let shared_graph = match mode {
-            SignaturePublicationMode::Eager => "published",
-            SignaturePublicationMode::OnDemand => "forced: no dependent in this build",
-        };
-        (
-            shared_graph,
-            ps.zip(base).map(|(ps, base)| (ps.ps_sig.clone(), base)),
-        )
-    } else {
-        let intern = |name: &str| pool.intern_longident_name(name);
-        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-        let shared = internalize_signature_into_shared(
-            &portable.ps_sig,
-            &portable.type_graph,
-            &portable.locations,
-            &files,
-            pool,
-            Some(&pps.ps_filename),
-            Some(&mut carried),
-        );
-        (
-            "forced: not shareable",
-            shared.map(|(sig, base)| (Arc::new(sig), base)),
-        )
-    };
+    let portable = decoded.as_ref().expect("new publication").0.portable();
+    let shared_graph = if pps.shareable { "published" } else { "forced: not shareable" };
+    let shared = shared.map(|(ps, base)| (ps.ps_sig.clone(), base));
     let comparison = match shared {
         None => Comparison::not_applicable(shared_graph, "the shared pool is full"),
         Some((sig, base)) => {
@@ -1807,19 +2016,22 @@ pub fn publish_pers_struct_checked(
             };
             Comparison {
                 shared_graph,
-                carried: carried.needed(),
+                carried: crate::types::shared_store::graph_at(&pages, base).carried.needed(),
                 outcomes: [
-                    Outcome::fingerprint(pps.fingerprint, signature_fingerprint(&frozen, &sig)),
+                    Outcome::fingerprint(
+                        signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig),
+                        pps.fingerprint,
+                    ),
                     Outcome::item_hashes(
                         &items(super::item_deps::item_declaration_hashes(
                             &HashGraph::of(&portable.type_graph),
                             &portable.ps_sig,
                         )),
-                        &items(super::item_deps::item_declaration_hashes(&frozen, &sig)),
+                        &items(pps.shared_item_hashes.as_ref().expect("shared publication hashes").clone()),
                     ),
                     Outcome::bytes(
-                        &encode(portable),
-                        &encode(&portable_signature(&frozen, &sig, &carried)),
+                        &encode(&portable),
+                        &encode(&portable_signature(&frozen, &sig)),
                     ),
                 ],
             }
@@ -1834,17 +2046,14 @@ fn shared_pers_struct(
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
 ) -> Option<Arc<PersStruct>> {
-    Some(shared_pers_struct_at(pps, portable, pool, None)?.0)
+    Some(shared_pers_struct_at(pps, portable, pool)?.0)
 }
 
 /// [`shared_pers_struct`], with the base index of the graph it published.
-/// `carried` receives what the published graph does not hold of `portable`
-/// (the signature equality check, `signature_check.rs`).
 fn shared_pers_struct_at(
     pps: &PortablePersStruct,
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
-    carried: Option<&mut super::shared_reader::Carried>,
 ) -> Option<(Arc<PersStruct>, u32)> {
     let intern = |name: &str| pool.intern_longident_name(name);
     let files = FileRemap::new(&portable.cmi_longident_names, &intern);
@@ -1855,7 +2064,6 @@ fn shared_pers_struct_at(
         &files,
         pool,
         Some(&pps.ps_filename),
-        carried,
     )?;
     let ps = PersStruct {
         ps_name: pps.ps_name.clone(),
@@ -1882,6 +2090,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
 
     let store = ctx.thread_store();
     if let Some(ps) = store.pers_struct(&pps) {
+        pps.record_access(true);
         return ps;
     }
 
@@ -1891,10 +2100,30 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         // keeps the result so later units on this worker skip the pool map.
         let pool = store.shared_pool();
         let shared = pool.pers_struct(&pps, || {
+            let mut decoded = pps.decoded.lock().unwrap();
+            if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_mut() {
+                if !std::ptr::eq(graph.names.as_ref(), pool.names_ref()) {
+                    // A source-built runtime or watch registry can outlive its
+                    // pool generation. Import from its frozen graph, never from
+                    // addresses or name indices owned by the previous pool.
+                    return shared_pers_struct(&pps, &graph.portable(), pool);
+                }
+                if graph.graph.is_detached() {
+                    *graph = signature_builder::promote(graph, &pps.ps_filename, pool)?;
+                }
+                return Some(Arc::new(PersStruct {
+                    ps_name: pps.ps_name.clone(), ps_sig: graph.signature.clone(),
+                    ps_filename: pps.ps_filename.clone(),
+                    ps_deprecated: pps.ps_deprecated.clone(), ps_crcs: pps.ps_crcs.clone(),
+                    ps_alias_rewrites: Default::default(),
+                }));
+            }
+            drop(decoded);
             let portable = pps.signature();
             shared_pers_struct(&pps, &portable, pool)
         });
         if let Some(ps) = shared {
+            pps.record_access(true);
             store.insert_pers_struct(pps, ps.clone());
             return ps;
         }
@@ -2092,7 +2321,6 @@ fn internalize_signature_into_shared(
     files: &FileRemap<'_>,
     pool: &crate::types::shared_store::SharedTypePool,
     unit: Option<&str>,
-    carried: Option<&mut super::shared_reader::Carried>,
 ) -> Option<(Signature, u32)> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
@@ -2149,14 +2377,17 @@ fn internalize_signature_into_shared(
             })
             .collect();
         shapes.signature(&mut sig);
-        if let Some(carried) = carried {
-            carried.record_import(graph, &scopes, shapes);
-        }
+        let mut carried = super::shared_reader::Carried {
+            file_names: files.original.to_vec(),
+            ..Default::default()
+        };
+        carried.record_import(graph, &scopes, shapes);
         crate::types::shared_store::SharedGraphParts {
             nodes,
             payloads: sink.payloads.into_inner(),
             layouts,
             locations: table,
+            carried,
         }
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
@@ -2213,6 +2444,7 @@ pub(crate) fn internalize_raw_signature(
 /// same base, so each imported name gets a fresh index in the importing
 /// owner, once.
 struct FileRemap<'a> {
+    original: &'a [(u32, String)],
     names: AHashMap<u32, &'a str>,
     fresh: std::cell::RefCell<AHashMap<u32, crate::intern::StrIdx>>,
     intern: &'a dyn Fn(&str) -> crate::intern::StrIdx,
@@ -2221,6 +2453,7 @@ struct FileRemap<'a> {
 impl<'a> FileRemap<'a> {
     fn new(names: &'a [(u32, String)], intern: &'a dyn Fn(&str) -> crate::intern::StrIdx) -> Self {
         FileRemap {
+            original: names,
             names: names
                 .iter()
                 .map(|(raw, name)| (*raw, name.as_str()))
@@ -2608,6 +2841,11 @@ mod identity_tests {
     use crate::context::IdGenerator;
 
     #[test]
+    fn publication_state_keeps_portable_fallback_out_of_line() {
+        assert_eq!(std::mem::size_of::<PublishedSignature>(), 24);
+    }
+
+    #[test]
     fn store_stamps_are_remapped_everywhere_a_signature_holds_them() {
         use crate::ident::{Ident, IdentFlags, STORE_STAMP_BASE};
         use crate::types::decl::{RecStatus, signature_mut};
@@ -2671,6 +2909,78 @@ mod identity_tests {
     }
 
     #[test]
+    fn absent_raw_signature_stays_absent_without_eager_encoding() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let source = PersStruct {
+            ps_name: "NoRaw".into(),
+            ps_filename: "NoRaw.res".into(),
+            ps_sig: Arc::new(vec![]),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+        };
+        let published = publish_signature(
+            &source, &ctx, None, SignaturePublicationMode::Eager, false,
+        ).0;
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.encoded.get().is_none());
+        published.encoded();
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.has_decoded_signatures());
+    }
+
+    #[test]
+    fn gentype_alias_declarations_ignore_storage_schedule() {
+        use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+        use crate::driver::{CompilerOptions, compile_source_in_process};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        let options = CompilerOptions {
+            open_modules: vec!["Schedule".into()],
+            gentype_config: Some(Arc::new(crate::gentype::config::build_config_from_cli_args(
+                None, &["-bs-project-root".into(), root.path().to_string_lossy().into_owned(),
+                    "-bs-gentype".into()],
+            ))),
+            ..Default::default()
+        };
+        let run = |schedule| {
+            let mut registry = ModuleRegistry::new();
+            registry.register_namespace("Schedule", &[
+                ("Dependency".into(), "Dependency-Schedule".into()),
+                ("Aliases".into(), "Aliases-Schedule".into()),
+                ("Use".into(), "Use-Schedule".into()),
+            ]);
+            for (name, source) in [
+                ("Dependency", include_str!("../../tests/fixtures/gentype-storage/Dependency.res")),
+                ("Aliases", include_str!("../../tests/fixtures/gentype-storage/Aliases.res")),
+                ("Use", include_str!("../../tests/fixtures/gentype-storage/Use.res")),
+                ("Output", include_str!("../../tests/fixtures/gentype-storage/Output.res")),
+            ] {
+                let module = format!("{name}-Schedule");
+                let filename = root.path().join("src").join(format!("{name}.res"));
+                std::fs::write(&filename, source).unwrap();
+                if name == "Aliases" {
+                    RAW_READ_STORAGE.with(|hook| *hook.borrow_mut() = schedule);
+                }
+                let result = compile_source_in_process(source, filename.to_str().unwrap(),
+                    &module, &options, &registry, false, None).unwrap();
+                registry.register_module_arc(&module, result.pers_struct.unwrap(),
+                    InMemoryModuleInfo::new(filename, result.is_pure,
+                        result.cmj_export_constants, false));
+            }
+            RAW_READ_STORAGE.with(|hook| assert!(hook.borrow().is_none(), "schedule point was not reached"));
+            let declarations = crate::gentype::main::type_declarations_of_module("Aliases-Schedule");
+            assert_eq!(declarations.len(), 1);
+            declarations.into_iter().map(|(_, data)| crate::binser::to_vec(&data).unwrap()).collect::<Vec<_>>()
+        };
+        let expected = run(None);
+        assert!(expected == run(Some(("Dependency-Schedule", true))), "presence read raced with storage");
+        assert!(expected == run(Some(("Dependency-Schedule", false))), "raw read raced with storage");
+    }
+
+    #[test]
     fn dependency_raw_read_does_not_encode_during_publication() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let portable = serialize_pers_struct(
@@ -2687,13 +2997,14 @@ mod identity_tests {
         );
         {
             let mut decoded = portable.decoded.lock().unwrap();
-            let (sig, raw) = decoded.as_mut().unwrap();
-            *raw = Some(PortableRawSignature {
+            let (source, raw) = decoded.as_mut().unwrap();
+            let sig = source.portable();
+            *raw = RawSignature::Decoded(Some(Box::new(PortableRawSignature {
                 raw_ps_sig: sig.ps_sig.clone(),
                 cmi_longident_names: sig.cmi_longident_names.clone(),
                 raw_type_graph: sig.type_graph.clone(),
                 raw_locations: sig.locations.clone(),
-            });
+            })));
         }
         assert!(portable.has_raw_signature());
         assert!(portable.encoded.get().is_none());
@@ -2714,9 +3025,117 @@ mod identity_tests {
     }
 
     #[test]
+    fn direct_publication_preserves_first_mention_store_binder_order() {
+        fn source(ctx: &TypeContext) -> PersStruct {
+            let id = |name, n| crate::ident::Ident::new(
+                name, crate::ident::STORE_STAMP_BASE + n, crate::ident::IdentFlags::NONE,
+            );
+            let nil = ctx.new_type(TypeDesc::Tnil);
+            let row = ctx.new_row_desc(RowDesc {
+                row_fields: Default::default(), row_more: nil, row_closed: true, row_fixed: true,
+                row_name: Some((Path::pident(id("row", 8)), vec![])),
+            });
+            let variant = ctx.new_type(TypeDesc::Tvariant(row));
+            let constr = ctx.new_type(TypeDesc::Tconstr {
+                path: Path::pident(id("t", 9)), args: ctx.new_type_list(&[]),
+                abbrev: AbbrevMemoRef::nil(),
+            });
+            let typ = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[variant, constr])));
+            let sig = Arc::new(vec![SignatureItem::SigValue(id("value", 7), ValueDescription {
+                val_type: typ, val_kind: ValueKind::ValReg,
+                val_loc: crate::types::DeclLoc::none(), val_attributes: Default::default(), val_path: None,
+            })]);
+            ctx.register_raw_module_sig("Binders", sig.clone());
+            PersStruct {
+                ps_name: "Binders".into(), ps_filename: "Binders.res".into(), ps_sig: sig,
+                ps_deprecated: None, ps_crcs: vec![], ps_alias_rewrites: Default::default(),
+            }
+        }
+        let reference = TypeContext::new(Arc::new(IdGenerator::new()));
+        let expected = serialize_pers_struct(&source(&reference), &reference, None);
+        let direct = TypeContext::new(Arc::new(IdGenerator::new()));
+        let (actual, comparison) = publish_signature(
+            &source(&direct), &direct, None, SignaturePublicationMode::OnDemand, true,
+        );
+        assert!(comparison.unwrap().outcomes.iter().all(|outcome|
+            matches!(outcome, super::super::signature_check::Outcome::Equal)));
+        assert_eq!(crate::binser::to_vec(&expected).unwrap(), crate::binser::to_vec(actual.as_ref()).unwrap());
+        assert_eq!(reference.published_binder_stamp(), direct.published_binder_stamp(),
+            "the oracle must not consume additional publication stamps");
+    }
+
+    #[test]
+    fn direct_publication_defers_pool_installation_even_after_storage() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let leaf = ctx.new_var(None);
+        let typ = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[leaf, leaf])));
+        let ps = PersStruct {
+            ps_name: "Deferred".into(),
+            ps_filename: "Deferred.res".into(),
+            ps_sig: Arc::new(vec![SignatureItem::SigValue(
+                crate::ident::Ident::create_persistent("value"),
+                ValueDescription {
+                    val_type: typ,
+                    val_kind: ValueKind::ValReg,
+                    val_loc: crate::types::DeclLoc::none(),
+                    val_attributes: Default::default(),
+                    val_path: None,
+                },
+            )]),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+        };
+        let oracle = serialize_pers_struct(&ps, &ctx, None).signature();
+        let published = {
+            let _release = crate::perf_counters::SignaturePublication::begin();
+            publish_signature(&ps, &ctx, None, SignaturePublicationMode::Eager, true).0
+        };
+        assert!(ctx.thread_store().pers_struct(&published).is_none());
+        let leaf = publish_signature(&ps, &ctx, None, SignaturePublicationMode::OnDemand, false).0;
+        drop(ps);
+        drop(ctx);
+        // Ordinary storage may precede an importer. The scheduler's explicit
+        // leaf path instead releases the graph because no importer is waiting.
+        published.encoded();
+        leaf.prepare_for_storage();
+        assert!(!leaf.has_decoded_signatures());
+        assert_eq!(crate::binser::to_vec(&leaf.signature()).unwrap(), crate::binser::to_vec(&oracle).unwrap());
+        assert_eq!(
+            crate::binser::to_vec(&published.signature()).unwrap(),
+            crate::binser::to_vec(&oracle).unwrap()
+        );
+        let detached = || {
+            let decoded = published.decoded.lock().unwrap();
+            let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() else {
+                panic!("frozen graph")
+            };
+            graph.graph.is_detached()
+        };
+        assert!(detached());
+        let reader = TypeContext::new(Arc::new(IdGenerator::new()));
+        let first = internalize_pers_struct(published.clone(), &reader);
+        assert!(!detached());
+        assert!(Arc::ptr_eq(
+            &first,
+            &internalize_pers_struct(published.clone(), &reader)
+        ));
+        let decoded = published.decoded.lock().unwrap();
+        let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() else {
+            panic!("frozen graph")
+        };
+        // Both the detached and pool-installed borrowed encodings have the
+        // PortableSignature wire format, including repeated references.
+        assert_eq!(
+            crate::binser::to_vec(&graph.encode().decode()).unwrap(),
+            crate::binser::to_vec(&oracle).unwrap()
+        );
+    }
+
+    #[test]
     fn publication_fills_the_pool_under_the_registry_arc() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let portable = serialize_pers_struct(
+        let mut portable = serialize_pers_struct(
             &PersStruct {
                 ps_name: "Published".into(),
                 ps_sig: Arc::new(vec![]),
@@ -2728,10 +3147,14 @@ mod identity_tests {
             &ctx,
             None,
         );
+        let expected_fingerprint = portable.fingerprint;
+        portable.fingerprint = expected_fingerprint.wrapping_add(1);
         let published = {
             let _guard = crate::perf_counters::SignaturePublication::begin();
             publish_pers_struct(portable, &ctx, SignaturePublicationMode::Eager)
         };
+        assert_eq!(published.fingerprint, expected_fingerprint);
+        assert!(published.shared_item_hashes.is_some());
         assert!(published.has_decoded_signatures());
         let pool = ctx.thread_store().shared_pool();
         let shared = pool
@@ -2747,7 +3170,7 @@ mod identity_tests {
     }
 
     #[test]
-    fn leaf_publication_encodes_then_internalizes_on_demand() {
+    fn leaf_publication_hashes_shared_nodes_and_encodes_later() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let portable = serialize_pers_struct(
             &PersStruct {
@@ -2766,7 +3189,7 @@ mod identity_tests {
             publish_pers_struct(portable, &ctx, SignaturePublicationMode::OnDemand)
         };
         assert!(published.has_decoded_signatures());
-        assert!(ctx.thread_store().pers_struct(&published).is_none());
+        assert!(ctx.thread_store().pers_struct(&published).is_some());
         published.prepare_for_storage();
         assert!(!published.has_decoded_signatures());
 
@@ -2778,7 +3201,7 @@ mod identity_tests {
                 shared_pers_struct(&published, &published.signature(), pool)
             })
             .unwrap();
-        assert!(built.get(), "leaf allocated a pool slot eagerly");
+        assert!(!built.get(), "leaf rebuilt the graph used for hashing");
         let loaded = internalize_pers_struct(published.clone(), &ctx);
         assert!(Arc::ptr_eq(&shared, &loaded));
         assert!(Arc::ptr_eq(
@@ -2806,8 +3229,49 @@ mod identity_tests {
     }
 
     #[test]
-    fn a_frozen_graph_reads_back_with_what_it_does_not_hold() {
-        use super::super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    fn shared_hash_walk_is_linear_in_chains_and_shared_children() {
+        use super::super::graph_hash::GraphWalk;
+        use super::super::shared_reader::FrozenGraph;
+        const N: usize = 10_000;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let pool = ctx.thread_store().shared_pool();
+        for shared_child in [false, true] {
+            let mut entries: Vec<_> = (0..N).map(|i| PortableTypeEntry {
+                desc: if shared_child {
+                    if i == 0 { PortableTypeDesc::Tnil } else { PortableTypeDesc::Ttuple(vec![0]) }
+                } else if i + 1 == N {
+                    PortableTypeDesc::Tnil
+                } else {
+                    PortableTypeDesc::Ttuple(vec![i + 1])
+                },
+                level: GENERIC_LEVEL,
+            }).collect();
+            let root = if shared_child {
+                entries.push(PortableTypeEntry {
+                    desc: PortableTypeDesc::Ttuple((1..N).collect()), level: GENERIC_LEVEL,
+                });
+                N
+            } else { 0 };
+            let graph = PortableTypeGraph { entries, variant_layouts: vec![], mutabilities: vec![] };
+            let intern = |name: &str| pool.intern_longident_name(name);
+            let files = FileRemap::new(&[], &intern);
+            let (_, base) = internalize_signature_into_shared(
+                &vec![], &graph, &DeclLocTable::default(), &files, pool, Some("Steps.res"),
+            ).unwrap();
+            let pages = pool.pages();
+            let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+            let mut walk = GraphWalk::new(&frozen);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            walk.type_ref(&mut h, crate::types::shared_store::shared_ref(base, root));
+            assert_eq!(walk.records(), graph.entries.len() as u64);
+            walk.type_ref(&mut h, crate::types::shared_store::shared_ref(base, root));
+            assert_eq!(walk.records(), graph.entries.len() as u64);
+        }
+    }
+
+    #[test]
+    fn a_frozen_graph_reads_back_without_portable_side_inputs() {
+        use super::super::shared_reader::{FrozenGraph, portable_signature};
         use crate::types::asttypes::MutableFlag;
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let pool = ctx.thread_store().shared_pool();
@@ -2822,7 +3286,9 @@ mod identity_tests {
         // the first and the last share a mutability cell.
         let portable = PortableSignature {
             ps_sig: vec![],
-            cmi_longident_names: vec![],
+            // Includes a file used only by the raw signature. Preserve its key
+            // and order even though no location in this graph references it.
+            cmi_longident_names: vec![(17, "Raw.res".into()), (4, "Unit.res".into())],
             type_graph: PortableTypeGraph {
                 entries: vec![
                     entry(PortableTypeDesc::Tlink(1), 3),
@@ -2839,7 +3305,6 @@ mod identity_tests {
         };
         let intern = |name: &str| pool.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-        let mut carried = Carried::default();
         let (sig, base) = internalize_signature_into_shared(
             &portable.ps_sig,
             &portable.type_graph,
@@ -2847,27 +3312,33 @@ mod identity_tests {
             &files,
             pool,
             Some("Unit.res"),
-            Some(&mut carried),
         )
         .unwrap();
         let pages = pool.pages();
         let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
         let bytes = |sig: &PortableSignature| crate::binser::to_vec(sig).unwrap();
-        assert_eq!(carried.needed(), ["link levels"]);
         assert_eq!(
-            bytes(&portable_signature(&frozen, &sig, &carried)),
+            crate::types::shared_store::graph_at(&pages, base).carried.needed(),
+            ["file names", "link levels"]
+        );
+        assert_eq!(
+            bytes(&portable_signature(&frozen, &sig)),
             bytes(&portable)
         );
-        // The pages alone hold the link at the generic level.
-        assert_ne!(
-            bytes(&portable_signature(&frozen, &sig, &Carried::default())),
-            bytes(&portable)
+        // Type readers still see the normalized link level.
+        assert_eq!(
+            crate::types::shared_store::graph_at(&pages, base).nodes()[0].level,
+            GENERIC_LEVEL
         );
         // Both forms hash alike.
         assert_eq!(
             signature_fingerprint(&frozen, &sig),
             signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig)
         );
+        let expected = bytes(&portable);
+        drop(files);
+        drop(portable);
+        assert_eq!(bytes(&portable_signature(&frozen, &sig)), expected);
     }
 
     #[test]
@@ -3004,7 +3475,6 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             None,
-            None,
         )
         .unwrap()
         .0;
@@ -3034,7 +3504,6 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             Some(unit),
-            None,
         )
         .unwrap()
         .0;
@@ -3102,9 +3571,9 @@ mod type_arg_tests {
             ret: shared,
         });
         let mut file_names = PortableFileNames::default();
-        let mut ser = TypeGraphSerializer::new(&ctx, None, &mut file_names);
+        let mut ser = TypeGraphSerializer::<PortableSink>::new(&ctx, None, &mut file_names);
         let index = ser.serialize_type(arrow);
-        let PortableTypeDesc::Tarrow { args, ret } = &ser.entries[index].desc else {
+        let PortableTypeDesc::Tarrow { args, ret } = &ser.sink.entries[index].desc else {
             panic!("not arrow")
         };
         assert_eq!(args.len(), 3);
@@ -3113,7 +3582,7 @@ mod type_arg_tests {
         assert_ne!(args[2].1, *ret);
         // Both labels share one portable entry.
         assert_eq!(ser.locations.len(), 1);
-        let entries = std::mem::take(&mut ser.entries);
+        let entries = std::mem::take(&mut ser.sink.entries);
         let locations = std::mem::take(&mut ser.locations);
         drop(ser);
         // Import into another compilation: the producer's table is gone.

@@ -1,0 +1,1 @@
+- Retain signature node arrays for hashing and storage without installing them in the shared pool until the first importer asks. Stream unread signatures to storage, reuse type-walk memo tables, and move uniquely owned arrays into the pool rather than copying them.

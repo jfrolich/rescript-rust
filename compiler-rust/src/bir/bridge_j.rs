@@ -32,6 +32,19 @@ pub struct Imported {
     pub steps: usize,
 }
 
+impl Imported {
+    /// Plain J tree built by lowering, before export coercion and dependency discovery.
+    pub(super) fn from_lowering(arena: Bir, root: NodeId, idents: Vec<Ident>) -> Self {
+        let syntax_variable_count = idents.len();
+        Self {
+            arena, root, idents, modules: vec![], exports: vec![],
+            export_set: Default::default(), reservations: vec![], side_effect: None, steps: 0,
+            module_variables: vec![], import_variables: vec![], export_variables: vec![],
+            reservation_variables: vec![], syntax_variable_count,
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum Source<'a> {
     Expr(j::Expr),

@@ -108,9 +108,10 @@ fn no_bounded_variables(b: &Bir, root: NodeId) -> bool {
     true
 }
 
-/// SizeCounter::lam/constant in lam_analysis.rs. Stop at EXIT_INLINE_SIZE;
-/// unlike a node count, applications/functions/sequences have no own cost.
-fn size(b: &Bir, root: NodeId) -> usize {
+/// `size_upto` (SizeCounter::lam/constant in lam_analysis.rs): the size of
+/// `root` if below `limit`, `limit` otherwise; the walk stops there. Unlike a
+/// node count, applications/functions/sequences have no own cost.
+pub(crate) fn size_upto(b: &Bir, root: NodeId, limit: usize) -> usize {
     enum Item {
         Node(NodeId),
         Constant(ConstId),
@@ -145,19 +146,19 @@ fn size(b: &Bir, root: NodeId) -> usize {
                     | View::While { .. }
                     | View::For { .. }
                     | View::ForOf { .. }
-                    | View::ForAwaitOf { .. } => return 7,
+                    | View::ForAwaitOf { .. } => return limit,
                     View::Apply { .. } | View::Fun { .. } | View::Seq { .. } => {}
                     View::Prim { primitive, args } => match &b.primitive(primitive).primitive {
                         Primitive::Pfield(_, FieldDbgInfo::Module { .. }) if matches!(args, [x] if matches!(b.node(*x).op(), Op::Global | Op::Var)) =>
                         {
                             total += 1;
-                            if total >= 7 {
-                                return 7;
+                            if total >= limit {
+                                return limit;
                             }
                             continue;
                         }
                         Primitive::Praise | Primitive::PisNotNone if args.len() == 1 => {}
-                        Primitive::PrawJsCode(_) => return 7,
+                        Primitive::PrawJsCode(_) => return limit,
                         Primitive::Pmakeblock(
                             tag @ (TagInfo::Record(_) | TagInfo::RecordInlined(_)),
                             _,
@@ -181,8 +182,8 @@ fn size(b: &Bir, root: NodeId) -> usize {
                 work.extend(b.view(n).children().into_iter().map(Item::Node));
             }
         }
-        if total >= 7 {
-            return 7;
+        if total >= limit {
+            return limit;
         }
     }
     total
@@ -373,7 +374,7 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                     && h.label as i32 >= 0
                     && no_bounded_variables(e.bir(), handler)
                     && {
-                        let size = size(e.bir(), handler);
+                        let size = size_upto(e.bir(), handler, 7);
                         (uses <= 2 && size < 7) || size < 5
                     };
                 if immediate || small {

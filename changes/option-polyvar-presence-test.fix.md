@@ -1,0 +1,1 @@
+- Keep the presence test of an optional polymorphic variant matched against a variant name, as the reference compiler does.

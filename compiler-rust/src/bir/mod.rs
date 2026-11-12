@@ -17,6 +17,8 @@ pub mod bridge_j;
 pub(crate) mod emit_view;
 pub mod engine;
 pub mod l;
+pub mod j;
+pub mod lower;
 pub mod replay;
 pub mod shadow;
 mod dump;

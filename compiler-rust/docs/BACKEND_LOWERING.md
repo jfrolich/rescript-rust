@@ -1290,8 +1290,8 @@ loop frame has no label until a `Break` or `Continue` with
 that starts at 0 for each top-level group (3.4) and is shared by the
 functions inside the group.
 
-Incidental and observable: the counter also advances in lowerings whose
-output is discarded. Tested:
+Resolved Q2: the following named-variant dispatch becomes conditionals,
+not a JavaScript switch:
 
 ```rescript
 let h = (c, xs: array<t>) => {
@@ -1313,18 +1313,38 @@ let h = (c, xs: array<t>) => {
 }
 ```
 
-prints `loop_1: for (...)` and `break loop_1;` with no `loop_0` in the
-function: the conditional is in **V**, its first branch is lowered as a value
-(the loop gets `loop_0`, discarded) and again in `A(tmp)` (`loop_1`, kept).
-The same loop in a `let r = if c {...}` (**D**) and in a statement `if`
-followed by other code (**E**) also prints `loop_1`; as the body of a function
-`(c, xs) => if c {...; 1} else {2}` (**R**) it prints `loop_0`, because the
-legacy code lowers the branches in **R** first and keeps that output (3.6 row
-R5). OCaml lowers the value pass first in a return continuation
-(`lam_compile.ml:1636-1644`), so by reading it prints `loop_1` there. Open
-(Q2): confirm with the OCaml compiler; if it does, the legacy code has a
-parity defect in that case, to be fixed in the legacy code before S3.7's gate
-means anything for it.
+The OCaml reference emits **no loop label** for this dispatch, including
+when the conditional is directly in return position. The small arms of
+`compile_general_cases` preserve the incoming context
+(`compiler/core/lam_compile.ml:740-762`); only its general JavaScript-switch
+arm calls `enter_switch` (`compiler/core/lam_compile.ml:793`). `Lbreak` and
+`Lcontinue` request the innermost loop's label only when `switch_depth > 0`
+(`compiler/core/lam_compile.ml:2086-2118`). The legacy Rust port previously
+entered switch context around the entire named-variant dispatch, producing
+an unnecessary `loop_0` for the return-position example. It now enters that
+context in the general switch arm instead, in all lowering continuations.
+
+The counter also advances in lowerings whose output is discarded. The
+`stringReturn` variant in `tests/tests/src/lowering_conditional_loop.res`
+retains a real JavaScript switch: the OCaml reference prints `loop_1: for
+(...)` and `break loop_1;`. `EffectCall should_return` first probes both
+branches with `NeedValue should_return`
+(`compiler/core/lam_compile.ml:1636-1644`); the discarded probe allocates
+`loop_0`, and the retained return lowering allocates `loop_1`. The legacy
+Rust return lowering previously retained the first pass and printed
+`loop_0`. It now saves the existing label counter before lowering return
+branches. If that lowering allocated labels, it resets the counter to the
+saved value, performs the value probe, and lowers the retained return
+branches with the resulting counter. The decision uses the counter already
+maintained by label allocation, not another traversal of the Lambda body.
+Ordinary foldable conditionals require no additional value probe. Labels
+are allocated lazily, not on entering a loop
+(`compiler/core/lam_compile_context.ml:92-102`).
+
+The fixture and its OCaml-generated `.mjs` cover the original return shape,
+a non-return conditional, nested loops, and string dispatch. The minimal
+before-change outputs are recorded in
+[LOWERING_REFERENCE_EXPERIMENTS.md](LOWERING_REFERENCE_EXPERIMENTS.md).
 
 The rule lives in the lowering. With `probe` there are no discarded
 lowerings, so the numbers are computed:
@@ -1428,11 +1448,30 @@ Invariants:
 4. When `triggered` is clear, the output is the same as without `loop_`: the
    record is read only by self calls.
 
+Resolved Q5: compiling `g` in `tests/tests/src/lowering_nested_rec.res`
+with the OCaml reference produces an outer `while (true)` and a self-call
+jump (`_x = x - 1 | 0; continue;`), not `return g(x - 1 | 0);`.
+`compile_recursive_let` creates a `return_label` containing the function's
+`id`, `params`, `new_params`, `immutable_mask` and `triggered` flag, then
+installs it as `Tail_with_name {label = Some ret; ...}` in the return
+continuation (`compiler/core/lam_compile.ml:525-547`). `Lletrec` compiles
+its bindings first and then its body with the original `lambda_cxt`
+(`compiler/core/lam_compile.ml:2046-2057`): the nested function's own label
+does not replace the enclosing function's return label. `compile_apply`
+compares the callee with `ret.id` and sets `ret.triggered`
+(`compiler/core/lam_compile.ml:1745-1752`); the enclosing function is then
+wrapped in a loop (`compiler/core/lam_compile.ml:550-568`).
+
+The legacy Rust port lost this in two places: `function_has_self_tailcall`
+rejected `LetRec`, and `compile_tail_loop_return_output_inner` had no
+`LetRec` arm. Both now follow the body, preserving the outer `TailLoopState`
+after compiling the nested bindings. The fixture includes a captured outer
+parameter and a further nested recursive binding; all match the reference.
+
 Legacy differences from this design, all "read" unless marked:
 
 | Difference | Where | Consequence |
 | --- | --- | --- |
-| The body of a `LetRec` is not treated as tail position | `function_has_self_tailcall` (C:6772) returns false for `LetRec`; `compile_tail_loop_return_output_inner` (C:4174) has no `LetRec` arm | tested: `let rec g = x => { let rec even = ...; if even(x) { g(x - 1) } else { x } }` prints `return g(x - 1 \| 0);`, no loop. OCaml passes the continuation through `Lletrec` (`lam_compile.ml:2046-2056`), so by reading it makes the loop. Open (Q5) |
 | A conditional in a function compiled as a loop is lowered by row R6, otherwise by row R5 | 3.6 | Q3 |
 | The function is lowered twice when the pre-check says yes and nothing triggers | C:4027 | cost only, and the label counter (4.5) |
 
@@ -1961,8 +2000,28 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    (`compile_deps_program_in_arena` (C:663)), imported into a fresh `Bir`
    (`bridge::import_lambda`, S2.2). Until S4 switches on, this is the only source of
    level L for the lowering, so both sides start from the same tree.
+
+   The simplified cut can share source handles. `import_lambda` treats
+   binder-free shared subtrees as occurrences, copying once per incoming edge,
+   as the legacy lowering does. One memoized bottom-up pass establishes
+   binder-freedom. The expansion is bounded to four times the reachable source
+   nodes. A repeated subtree containing a binder returns
+   `Unsupported("shared Lambda subtree with binder")`; exceeding the budget
+   returns `Unsupported("shared Lambda expansion")`. These two bridge reasons
+   are permitted for the `lower` stage and counted separately. Earlier stage
+   baselines are unchanged. A concrete sharing producer is
+   `lam_pass_lets_dce::LetsState::simplif`: its Var arm reuses the replacement
+   handle installed by `simplif_alias`, demonstrated by the bridge regression
+   `simplify_lets_creates_shared_constant_occurrences`.
+
+   A static-catch label is itself a binder, including catches without handler
+   parameters. Shared catches therefore use the binder fallback; labels are
+   never freshened per occurrence. This also covers distinct rebuilt catch
+   nodes that retain the same label identity. The lower-stage report separately counts
+   units blocked only by shared catch labels, in addition to the total binder
+   fallback count. A catch-only share above 5% of a corpus is reported prominently.
 2. **New side.** Lower to J; export the J program, not flattened, to a
-   `JsArena` with plain constructors (`bridge::export_js`, new in S3.3: no
+   `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy
    pass 1 of the shared tail until S3.2 replaces it. Variables the lowering created get
    identifiers whose stamps follow their `order`, above every stamp of the
@@ -2119,8 +2178,7 @@ there, in the section named.
 9. The `TAIL` flag and `FuncHeader::SELF_TAILCALL` are not needed by the
    lowering: OCaml's `triggered` protocol decides after one lowering (5.1).
    As built, `mark_tail_positions` (D:729) and `tail_child` (D:777) also disagree
-   with the legacy rule: they follow a `LetRec` body (the legacy code does
-   not, Q5), and do not follow the right operand of `&&`/`||` or a `Try`
+   with the legacy rule: they do not follow the right operand of `&&`/`||` or a `Try`
    handler (the legacy code and OCaml do; tested, 5.2), and they treat a
    function bound by `Let` as able to call itself. The flags should be
    removed or left unused; they must not be read by S3.6.
@@ -2164,15 +2222,15 @@ there, in the section named.
 
 ## 10. Open questions
 
-Each with the experiment that settles it.
+Each with the experiment that settles it; resolved rows retain their measured result.
 
 | # | Question | Experiment |
 | --- | --- | --- |
 | Q1 | Is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
-| Q2 | Does OCaml number a loop label in a return-position conditional as the legacy code does? Legacy prints `loop_0` (tested), OCaml by reading `loop_1` (4.5) | compile the function `h` of 4.5 as a function body with the OCaml compiler; add it as a parity fixture either way |
+| Q2 | **Resolved:** the original variant dispatch needs no loop label; a return-position conditional retaining a real JS switch prints `loop_1`, including the discarded value probe (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
 | Q3 | Do rows R5 and R6 of 3.6 ever produce different J for one conditional, so that making a function a loop changes how its conditionals print? | a `Check` assertion in S3.6: lower each loop function's conditionals by both rows and compare |
 | Q4 | Is a `LetRec` reachable in the continuations where the legacy code lowers its body as a value (K2, K4, K5, K7; 3.4)? | count in a `Check` build; if reachable, compile one such unit with OCaml |
-| Q5 | Does OCaml turn a self call after a nested `let rec` into a loop jump? Legacy does not (tested: `g` of 5.1's table), OCaml by reading does | compile that function with the OCaml compiler; if it differs, fix the legacy code first |
+| Q5 | **Resolved:** the self call after nested `let rec` is a loop jump; the enclosing `Tail_with_name` return label survives the nested bindings (5.1) | OCaml/Rust parity: `tests/tests/src/lowering_nested_rec.res` and its `.mjs`, with and without capture; corrected the precheck and tail-loop body lowering. Reference: `compiler/core/lam_compile.ml:525-568,1745-1752,2046-2057` |
 | Q6 | Does the cross-module inline attempt in the lowering (3.3) fire after the three inlining rounds? | count with cross-module inlining on, over a corpus built that way |
 | Q7 | Is pairwise grouping of switch cases (7.3) ever a measurable cost? | the comparison count per corpus, reported by S3.4; a cached structural hash only if it is above 1% of lowering |
 | Q8 | How many units does each slice unlock? | the reason histogram of S3.3's first `Check` run |

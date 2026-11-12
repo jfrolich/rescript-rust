@@ -7078,20 +7078,25 @@ fn compile_source_to_js_with_options_inner(
     );
     compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
+    if options.backend == crate::bir::shadow::BackendMode::Check {
+        compiler.set_shadow_unit(filename);
+    }
     let mut all_possible_required_modules =
         crate::lambda::lam_compile::collect_possible_required_modules_in_arena(
             &lowered_arena,
             lowered_root,
         );
     all_possible_required_modules.extend(possible_required_modules.iter().cloned());
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_arena,
-        lowered_root,
-        all_possible_required_modules,
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_arena, lowered_root,
+        all_possible_required_modules, options, jsx_preserve, filename,
+    )?;
     #[cfg(test)]
     if let Some(trace) = discriminator_trace {
         trace.js_program = format!("{program:#?}");
+    }
+    if let Some(error) = compiler.take_shadow_error() {
+        return Err(error);
     }
     if let Some(diagnostic) = compiler.take_diagnostic() {
         // A location-free compilation has no range to report: recompile
@@ -10014,7 +10019,28 @@ fn js_backend_compiler(
     );
     compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
+    if options.backend == crate::bir::shadow::BackendMode::Check {
+        compiler.set_shadow_unit(options.source_filename.as_deref().unwrap_or("_none_"));
+    }
     compiler
+}
+
+// Keep the opt-in capture off the monomorphized legacy path.
+fn compile_with_lower_check(
+    compiler: &mut LambdaCompiler,
+    arena: crate::lambda::arena::LamArena,
+    root: crate::lambda::arena::Lam,
+    possible: AHashSet<ModuleId>,
+    options: &CompilerOptions,
+    jsx_preserve: bool,
+    unit: &str,
+) -> Result<DepsProgram> {
+    if options.backend == crate::bir::shadow::BackendMode::Legacy {
+        return Ok(compiler.compile_deps_program_in_arena(arena, root, possible));
+    }
+    let (program, check) = compiler.compile_deps_program_with_lower_check::<true>(arena, root, possible);
+    crate::bir::shadow::check_lower(check.expect("opt-in capture"), unit, jsx_preserve)?;
+    Ok(program)
 }
 
 fn finish_js_backend(
@@ -10022,6 +10048,9 @@ fn finish_js_backend(
     program: DepsProgram,
     options: &CompilerOptions,
 ) -> Result<JsBackendOutput> {
+    if let Some(error) = compiler.take_shadow_error() {
+        return Err(error);
+    }
     // lam_compile_main.ml reports a primitive's Location error before the
     // fatal-warnings check, as the file compile does.
     if let Some(diagnostic) = compiler.take_diagnostic() {
@@ -10090,11 +10119,11 @@ fn compile_js_program_for_output(
     );
     // `possible_required_modules` already holds the modules of the lowered
     // program (collected at the pre-JS boundary).
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_lambda.arena.clone(),
-        lowered_lambda.root,
-        possible_required_modules.clone(),
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_lambda.arena.clone(), lowered_lambda.root,
+        possible_required_modules.clone(), options, jsx_preserve,
+        options.source_filename.as_deref().unwrap_or("_none_"),
+    )?;
     finish_js_backend(compiler, program, options)
 }
 
@@ -10134,11 +10163,11 @@ fn compile_js_program_for_output_owned(
         cross_module_inline,
         lam_locs,
     );
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_lambda.arena,
-        lowered_lambda.root,
-        possible_required_modules,
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_lambda.arena, lowered_lambda.root,
+        possible_required_modules, options, jsx_preserve,
+        options.source_filename.as_deref().unwrap_or("_none_"),
+    )?;
     finish_js_backend(compiler, program, options)
 }
 
