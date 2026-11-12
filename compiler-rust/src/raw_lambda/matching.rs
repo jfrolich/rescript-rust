@@ -4,14 +4,13 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
-use super::key_encode::{KeyEncode, KeyOut};
+use super::key_encode::{KeyBuf, KeyEncode, KeyOut, count_steps, key_hash};
 use crate::fast_hash::AHashMap as HashMap;
 use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
@@ -49,14 +48,45 @@ use std::cell::RefCell;
 /// OCaml `compiler/ml/matching.ml:29-34,659-1090` keeps actions as immutable
 /// lambda values in lists, so copying case matrices shares those actions by
 /// pointer. Raw Lambda terms are arena handles, so an action is shared the
-/// same way; the action itself is shared so its `make_key` result is
-/// computed once.
+/// same way; the action itself is shared so its `make_key` result, the
+/// [`ActionKey`], is computed once.
 #[derive(Clone)]
 struct MatchAction(Arc<MatchActionData>);
 
 struct MatchActionData {
     kind: MatchActionKind,
-    normalized_key: OnceLock<Option<String>>,
+    normalized_key: OnceLock<Option<ActionKey>>,
+}
+
+/// An action's `Lambda.make_key` (`compiler/ml/lambda.ml:432-466`) as key
+/// bytes and their hash. Two actions have equal keys exactly when OCaml's
+/// normalized terms are structurally equal.
+///
+/// Cost: built once per action in one pass over the action, O(key bytes),
+/// at most `MAX_RAW` nodes. A comparison is O(1) when the hashes differ and
+/// one comparison of the bytes when they are equal.
+struct ActionKey {
+    hash: u64,
+    bytes: Box<[u8]>,
+}
+
+impl ActionKey {
+    fn new(bytes: &[u8]) -> Self {
+        ActionKey {
+            hash: key_hash(bytes),
+            bytes: bytes.into(),
+        }
+    }
+
+    fn same(&self, other: &ActionKey) -> bool {
+        self.hash == other.hash && same_key_bytes(&self.bytes, &other.bytes)
+    }
+}
+
+/// The comparison that confirms two keys of equal hash. O(key bytes).
+fn same_key_bytes(a: &[u8], b: &[u8]) -> bool {
+    count_steps(a.len().min(b.len()));
+    a == b
 }
 
 /// A case's right-hand side as translation hands it to matching
@@ -182,7 +212,7 @@ impl MatchAction {
         self.body_with(b, unit)
     }
 
-    fn normalized_key<B: RawLambdaBuilder>(&self, b: &B) -> Option<&str> {
+    fn normalized_key<B: RawLambdaBuilder>(&self, b: &B) -> Option<&ActionKey> {
         // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
         // `compiler/ml/matching.ml:489-500,708-846` compares those pure keys while
         // shuffling the same immutable actions through match matrices. Cache the
@@ -190,8 +220,18 @@ impl MatchAction {
         // materializing delayed `Llet` wrappers.
         self.0
             .normalized_key
-            .get_or_init(|| make_key_string_action(b, self))
-            .as_deref()
+            .get_or_init(|| action_key(b, self))
+            .as_ref()
+    }
+
+    /// Whether both actions have a key and the keys are equal
+    /// (`compiler/ml/matching.ml:522-528`). O(1) for one action against
+    /// itself or for different hashes, once both keys exist.
+    fn same_key<B: RawLambdaBuilder>(&self, b: &B, other: &MatchAction) -> bool {
+        match (self.normalized_key(b), other.normalized_key(b)) {
+            (Some(key1), Some(key2)) => Arc::ptr_eq(&self.0, &other.0) || key1.same(key2),
+            _ => false,
+        }
     }
 
     fn is_guarded(&self) -> bool {
@@ -2201,16 +2241,13 @@ fn make_key<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<RawLambda> {
     tr_rec(b, &mut Vec::new(), e, &mut 0, &mut 0)
 }
 
-/// Convert a RawLambda to a string key for comparison purposes.
-/// Returns None if the lambda cannot be normalized.
-fn make_key_string<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<String> {
-    let mut writer = MakeKeyWriter::new(b);
-    let mut out = KeyOut::new(128);
-    writer.write_raw(&*b.get(), e, &mut out)?;
-    Some(out.buf)
+/// Writes `e`'s `Lambda.make_key` to `out`; `None` when the term has no key.
+/// One pass over at most `MAX_RAW` nodes.
+fn write_key<B: RawLambdaBuilder>(b: &B, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
+    MakeKeyWriter::new(b).write_raw(&*b.get(), e, out)
 }
 
-/// Convert a delayed match action to the same structural key as
+/// The key of a delayed match action: the same structural key as
 /// `Lambda.make_key` without first expanding the delayed `Llet` chain.
 ///
 /// OCaml actions are immutable lambda values, so `matching.ml:489-500` can pass
@@ -2218,25 +2255,59 @@ fn make_key_string<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<String> {
 /// action lets as `MatchActionKind::Bind` to preserve that sharing; this
 /// traverses those wrappers as if they were `Llet` nodes while keeping the
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
-fn make_key_string_action<B: RawLambdaBuilder>(b: &B, action: &MatchAction) -> Option<String> {
+fn action_key<B: RawLambdaBuilder>(b: &B, action: &MatchAction) -> Option<ActionKey> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = KeyOut::new(128);
+    let mut out = KeyOut::new();
     writer.write_action(action, &mut out)?;
-    Some(out.buf)
+    Some(ActionKey::new(&out.buf))
 }
 
 /// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
 /// against `key` and stops at the first byte that differs, so unequal
-/// actions are rejected without normalizing them in full.
-fn make_key_equals<B: RawLambdaBuilder>(b: &B, e: RawLambda, key: &str) -> bool {
-    let mut writer = MakeKeyWriter::new(b);
+/// actions are rejected without normalizing them in full. O(common prefix).
+fn make_key_equals<B: RawLambdaBuilder>(b: &B, e: RawLambda, key: &[u8]) -> bool {
     let mut out = KeyOut::expecting(key);
-    writer.write_raw(&*b.get(), e, &mut out).is_some() && out.matches_all()
+    write_key(b, e, &mut out).is_some() && out.matches_all()
 }
 
 enum KeyBody<'a> {
     Raw(RawLambda),
     Action(&'a MatchAction),
+}
+
+/// What a bound variable is written as in a key.
+enum KeyBinding {
+    /// `Llet (Alias, x, ex, _)`: `x` is replaced by the key of `ex`
+    /// (`compiler/ml/lambda.ml:447-449`), these bytes of
+    /// [`MakeKeyWriter::alias_keys`].
+    Alias(std::ops::Range<usize>),
+    /// Any other kept `Llet`: `x` is renamed to its name with the stamp of
+    /// its position (`compiler/ml/lambda.ml:454-458`).
+    Renamed(i32),
+}
+
+/// The first byte of each node's key. A node's fields follow in a fixed
+/// order, each self-delimiting, and every list is preceded by its length,
+/// so the bytes of a term determine the term: two terms have equal keys
+/// exactly when they are structurally equal after normalization.
+mod key_tag {
+    pub(super) const VAR: u8 = 1;
+    pub(super) const CONST: u8 = 2;
+    pub(super) const GLOBAL_MODULE: u8 = 3;
+    pub(super) const APPLY: u8 = 4;
+    pub(super) const LET: u8 = 5;
+    pub(super) const PRIM: u8 = 6;
+    pub(super) const SWITCH: u8 = 7;
+    pub(super) const STRING_SWITCH: u8 = 8;
+    pub(super) const STATIC_RAISE: u8 = 9;
+    pub(super) const STATIC_CATCH: u8 = 10;
+    pub(super) const TRY_FINALLY: u8 = 11;
+    pub(super) const TRY_WITH: u8 = 12;
+    pub(super) const IF: u8 = 13;
+    pub(super) const SEQUENCE: u8 = 14;
+    pub(super) const ASSIGN: u8 = 15;
+    pub(super) const BREAK: u8 = 16;
+    pub(super) const CONTINUE: u8 = 17;
 }
 
 /// Writes `Lambda.make_key`. Reads hold the arena only inside
@@ -2246,7 +2317,10 @@ struct MakeKeyWriter<'b, B: RawLambdaBuilder> {
     b: &'b B,
     count: i32,
     next_id: i32,
-    env: Vec<(Ident, String)>,
+    /// The lets in scope, innermost last; rarely more than a few.
+    env: smallvec::SmallVec<[(Ident, KeyBinding); 4]>,
+    /// The keys of the aliases in scope, one after the other.
+    alias_keys: KeyBuf,
 }
 
 impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
@@ -2255,7 +2329,8 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             b,
             count: 0,
             next_id: 0,
-            env: Vec::new(),
+            env: smallvec::SmallVec::new(),
+            alias_keys: KeyBuf::new(),
         }
     }
 
@@ -2314,36 +2389,36 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
     ) -> Option<()> {
         match a.view(e) {
             View::Var(id) => {
-                if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(&id))
-                {
-                    out.push_str(replacement);
-                } else {
-                    out.push_str("Lvar(");
-                    write_ident_key(out, &id);
-                    out.push(')');
+                match self.env.iter().rev().find(|(key, _)| key.same(&id)) {
+                    Some((_, KeyBinding::Alias(replacement))) => {
+                        out.bytes(&self.alias_keys[replacement.clone()])
+                    }
+                    Some((bound, KeyBinding::Renamed(stamp))) => {
+                        out.byte(key_tag::VAR);
+                        write_renamed_ident_key(out, bound.name_atom(), *stamp);
+                    }
+                    None => {
+                        out.byte(key_tag::VAR);
+                        write_ident_key(out, &id);
+                    }
                 }
                 Some(())
             }
             View::Const(c) => {
-                out.push_str("Lconst(");
+                out.byte(key_tag::CONST);
                 c.encode(out);
-                out.push(')');
                 Some(())
             }
             View::GlobalModule(id) => {
-                out.push_str("LglobalModule(");
+                out.byte(key_tag::GLOBAL_MODULE);
                 write_ident_key(out, &id);
-                out.push(')');
                 Some(())
             }
             View::Apply { func, args, info } => {
-                out.push_str("Lapply(");
+                out.byte(key_tag::APPLY);
                 self.write_raw(a, func, out)?;
-                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                out.push_str("],");
                 info.status.encode(out);
-                out.push(')');
                 Some(())
             }
             View::Let(kind, x, ex, body) => {
@@ -2351,127 +2426,96 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             }
             View::Prim(primitive, args, _) => {
                 charge_logical_record_fields(&mut self.count, primitive, args.len())?;
-                out.push_str("Lprim(");
+                out.byte(key_tag::PRIM);
                 primitive.encode(out);
-                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                out.push_str("])");
                 Some(())
             }
             View::Switch(scrut, sw) => {
-                out.push_str("Lswitch(");
+                out.byte(key_tag::SWITCH);
                 self.write_raw(a, scrut, out)?;
-                write!(out, ",fullc={},consts=[", sw.payload.consts_full).ok()?;
-                for (idx, (tag, act)) in sw.consts().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
-                    write!(out, "{tag}:").ok()?;
+                sw.payload.consts_full.encode(out);
+                out.int(sw.const_keys.len() as i128);
+                for (tag, act) in sw.consts() {
+                    write_switch_key(out, tag);
                     self.write_raw(a, act, out)?;
                 }
-                write!(out, "],fullb={},blocks=[", sw.payload.blocks_full).ok()?;
-                for (idx, (tag, act)) in sw.blocks().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
-                    write!(out, "{tag}:").ok()?;
+                sw.payload.blocks_full.encode(out);
+                out.int(sw.block_keys.len() as i128);
+                for (tag, act) in sw.blocks() {
+                    write_switch_key(out, tag);
                     self.write_raw(a, act, out)?;
                 }
-                out.push_str("],fail=");
                 self.write_raw_opt(a, sw.actions.fail, out)?;
-                out.push_str(",names=");
                 sw.payload.dispatch.encode(out);
-                out.push(')');
                 Some(())
             }
             View::StringSwitch(scrut, sw) => {
-                out.push_str("LstringSwitch(");
+                out.byte(key_tag::STRING_SWITCH);
                 self.write_raw(a, scrut, out)?;
-                out.push_str(",[");
-                for (idx, (label, act)) in sw.cases().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
+                out.int(sw.len() as i128);
+                for (label, act) in sw.cases() {
                     label.encode(out);
-                    out.push(':');
                     self.write_raw(a, act, out)?;
                 }
-                out.push_str("],");
                 self.write_raw_opt(a, sw.default, out)?;
-                out.push(')');
                 Some(())
             }
             View::StaticRaise(i, args) => {
-                write!(out, "LstaticRaise({i},[").ok()?;
+                out.byte(key_tag::STATIC_RAISE);
+                out.int(i128::from(i));
                 self.write_raw_list(a, args, out)?;
-                out.push_str("])");
                 Some(())
             }
             View::StaticCatch(e1, i, vars, e2) => {
-                write!(out, "LstaticCatch(").ok()?;
+                out.byte(key_tag::STATIC_CATCH);
                 self.write_raw(a, e1, out)?;
-                write!(out, ",({i},[").ok()?;
-                for (idx, var) in vars.iter().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
+                out.int(i128::from(i));
+                out.int(vars.len() as i128);
+                for var in vars {
                     write_ident_key(out, var);
                 }
-                out.push_str("]),");
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::TryFinally(e1, e2) => {
-                out.push_str("LtryFinally(");
+                out.byte(key_tag::TRY_FINALLY);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::TryWith(e1, x, e2) => {
-                out.push_str("LtryWith(");
+                out.byte(key_tag::TRY_WITH);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 write_ident_key(out, &x);
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::If(cond, ifso, ifnot) => {
-                out.push_str("LifThenElse(");
+                out.byte(key_tag::IF);
                 self.write_raw(a, cond, out)?;
-                out.push(',');
                 self.write_raw(a, ifso, out)?;
-                out.push(',');
                 self.write_raw(a, ifnot, out)?;
-                out.push(')');
                 Some(())
             }
             View::Sequence(e1, e2) => {
-                out.push_str("Lsequence(");
+                out.byte(key_tag::SEQUENCE);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::Assign(x, e) => {
-                out.push_str("Lassign(");
+                out.byte(key_tag::ASSIGN);
                 write_ident_key(out, &x);
-                out.push(',');
                 self.write_raw(a, e, out)?;
-                out.push(')');
                 Some(())
             }
             View::Break => {
-                out.push_str("Lbreak");
+                out.byte(key_tag::BREAK);
                 Some(())
             }
             View::Continue => {
-                out.push_str("Lcontinue");
+                out.byte(key_tag::CONTINUE);
                 Some(())
             }
             View::LetRec(..)
@@ -2495,13 +2539,22 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
         if kind == LetKind::Alias {
-            let ex_key = match a {
-                Some(a) => self.raw_to_string(a, ex)?,
-                None => self.raw_to_string(&*self.b.get(), ex)?,
-            };
-            self.env.push((*x, ex_key));
+            // The replacement is always written in full, also when `out`
+            // only compares.
+            let mut ex_key = KeyOut::new();
+            match a {
+                Some(a) => self.write_raw(a, ex, &mut ex_key)?,
+                None => self.write_raw(&*self.b.get(), ex, &mut ex_key)?,
+            }
+            // Aliases inside `ex` have left scope, and `alias_keys` with
+            // them, so the keys of the aliases in scope stay contiguous.
+            let start = self.alias_keys.len();
+            self.alias_keys.extend_from_slice(&ex_key.buf);
+            let replacement = start..self.alias_keys.len();
+            self.env.push((*x, KeyBinding::Alias(replacement)));
             let result = self.write_body(a, body, out);
             self.env.pop();
+            self.alias_keys.truncate(start);
             return result;
         }
 
@@ -2516,34 +2569,19 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             };
         }
 
-        out.push_str("Llet(");
+        out.byte(key_tag::LET);
         kind.encode(out);
-        out.push(',');
-        let synthetic_stamp = self.next_id;
+        let renamed_stamp = self.next_id;
         self.next_id += 1;
-        write_synthetic_ident_key(out, x.name(), synthetic_stamp);
-        out.push(',');
+        write_renamed_ident_key(out, x.name_atom(), renamed_stamp);
         match a {
             Some(a) => self.write_raw(a, ex, out)?,
             None => self.write_raw(&*self.b.get(), ex, out)?,
         }
-        out.push(',');
-        let mut replacement = KeyOut::new(x.name().len() + 16);
-        replacement.push_str("Lvar(");
-        write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
-        replacement.push(')');
-        self.env.push((*x, replacement.buf));
+        self.env.push((*x, KeyBinding::Renamed(renamed_stamp)));
         let result = self.write_body(a, body, out);
         self.env.pop();
-        result?;
-        out.push(')');
-        Some(())
-    }
-
-    fn raw_to_string(&mut self, a: &B::Reader, e: RawLambda) -> Option<String> {
-        let mut out = KeyOut::new(64);
-        self.write_raw(a, e, &mut out)?;
-        Some(out.buf)
+        result
     }
 
     fn write_raw_list(
@@ -2552,10 +2590,8 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         items: &[RawLambda],
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
-        for (idx, item) in items.iter().enumerate() {
-            if idx > 0 {
-                out.push(',');
-            }
+        out.int(items.len() as i128);
+        for item in items {
             self.write_raw(a, *item, out)?;
         }
         Some(())
@@ -2568,11 +2604,10 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match item {
-            None => out.push_str("None"),
+            None => out.push('N'),
             Some(item) => {
-                out.push_str("Some(");
+                out.push('S');
                 self.write_raw(a, item, out)?;
-                out.push(')');
             }
         }
         Some(())
@@ -2590,41 +2625,136 @@ fn same_var_body(a: &impl RawLambdaRead, body: &KeyBody<'_>, id: &Ident) -> bool
 }
 
 fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
-    match id.stamp() {
-        0 => {
-            out.push_str(id.name());
-            out.push('!');
-        }
-        -1 => {
-            out.push_str(id.name());
-            out.push('#');
-        }
-        stamp => write_synthetic_ident_key_with_global(out, id.name(), stamp, id.is_global()),
-    }
+    write_ident_key_parts(out, id.name_atom(), id.stamp(), id.is_global());
 }
 
-fn write_synthetic_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
-    write_synthetic_ident_key_with_global(out, name, stamp, false);
+/// The identifier a kept `Llet` renames its variable to
+/// (`compiler/ml/lambda.ml:456`): never global.
+fn write_renamed_ident_key(out: &mut KeyOut<'_>, name: crate::name::Name, stamp: i32) {
+    write_ident_key_parts(out, name, stamp, false);
 }
 
-fn write_synthetic_ident_key_with_global(
+/// An identifier by name and stamp, as `Ident.unique_toplevel_name` printed
+/// it in the first keys: the stamps 0 and -1 carry no global flag, so a
+/// global and a local identifier of that name and stamp key the same.
+/// Thirteen bytes: the name's identity, the stamp, the flag.
+fn write_ident_key_parts(
     out: &mut KeyOut<'_>,
-    name: &str,
+    name: crate::name::Name,
     stamp: i32,
     is_global: bool,
 ) {
-    if stamp == 0 {
-        out.push_str(name);
-        out.push('!');
-    } else if stamp == -1 {
-        out.push_str(name);
-        out.push('#');
-    } else {
-        out.push_str(name);
-        // Fails only when a comparing sink has already diverged.
-        if write!(out, "/{stamp}").is_ok() && is_global {
-            out.push('g');
+    let mut bytes = [0u8; 13];
+    bytes[..8].copy_from_slice(&(name.identity() as u64).to_ne_bytes());
+    bytes[8..12].copy_from_slice(&stamp.to_ne_bytes());
+    bytes[12] = u8::from(is_global && stamp != 0 && stamp != -1);
+    out.bytes(&bytes);
+}
+
+/// A switch case's key by what its `Display` shows, which the first keys
+/// were written with: an integer, or a constructor by its name alone.
+fn write_switch_key(out: &mut KeyOut<'_>, key: &crate::lambda::SwitchKey) {
+    use crate::types::VariantConstructorCase;
+    match key {
+        crate::lambda::SwitchKey::Int(value) => {
+            out.tag(0);
+            out.int(i128::from(*value));
         }
+        crate::lambda::SwitchKey::Constructor(case) => {
+            out.tag(1);
+            match case {
+                VariantConstructorCase::Constant(tag) => out.str(&tag.name),
+                VariantConstructorCase::Block(block) => out.str(&block.tag().name),
+            }
+        }
+    }
+}
+
+/// Distinct keys of one sharing decision, each with a value: the table
+/// behind [`StoreExp`] and the grouping of polymorphic variant cases.
+///
+/// Cost of [`KeyTable::get_or_insert`], for a key of `m` bytes among `n`
+/// stored keys: one hash of the key, O(m); then a probe that compares hashes
+/// only, a scan of at most [`KeyTable::SCAN_MAX`] entries or one hash-table
+/// lookup, O(1) expected; then one comparison of the bytes, O(m), for each
+/// stored key of equal hash, which is the equal key if there is one and
+/// otherwise a 64-bit collision. Storing `n` keys of `m` bytes is therefore
+/// O(n * m), where comparing every pair would be O(n * n * m).
+struct KeyTable {
+    /// The bytes of every stored key, in insertion order.
+    bytes: Vec<u8>,
+    entries: Vec<KeyEntry>,
+    /// Entry indices by hash, once there are more than `SCAN_MAX` entries.
+    index: Option<hashbrown::HashTable<u32>>,
+}
+
+struct KeyEntry {
+    hash: u64,
+    /// The key is `bytes[start..end]`.
+    start: u32,
+    end: u32,
+    value: usize,
+}
+
+impl KeyTable {
+    /// Up to this many keys are found by scanning their hashes; most
+    /// switches have fewer actions, and a scan needs no second allocation.
+    const SCAN_MAX: usize = 8;
+
+    fn new() -> Self {
+        KeyTable {
+            bytes: Vec::new(),
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    fn key_bytes(&self, entry: &KeyEntry) -> &[u8] {
+        &self.bytes[entry.start as usize..entry.end as usize]
+    }
+
+    /// The value stored with `key`, or `None` after storing `key` with
+    /// `value`.
+    fn get_or_insert(&mut self, key: &[u8], value: usize) -> Option<usize> {
+        let hash = key_hash(key);
+        let same =
+            |entry: &KeyEntry| entry.hash == hash && same_key_bytes(self.key_bytes(entry), key);
+        let found = match &self.index {
+            None => self.entries.iter().find(|entry| same(entry)),
+            Some(index) => index
+                .find(hash, |&i| same(&self.entries[i as usize]))
+                .map(|&i| &self.entries[i as usize]),
+        };
+        if let Some(entry) = found {
+            return Some(entry.value);
+        }
+
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(key);
+        let end = self.bytes.len();
+        let position = self.entries.len() as u32;
+        self.entries.push(KeyEntry {
+            hash,
+            start: u32::try_from(start).expect("action keys below 4 GiB"),
+            end: u32::try_from(end).expect("action keys below 4 GiB"),
+            value,
+        });
+        let entries = &self.entries;
+        let hash_of = |&i: &u32| entries[i as usize].hash;
+        match &mut self.index {
+            Some(index) => {
+                index.insert_unique(hash, position, hash_of);
+            }
+            None if entries.len() > Self::SCAN_MAX => {
+                let mut index = hashbrown::HashTable::with_capacity(entries.len() * 2);
+                for (i, entry) in entries.iter().enumerate() {
+                    index.insert_unique(entry.hash, i as u32, hash_of);
+                }
+                self.index = Some(index);
+            }
+            None => {}
+        }
+        None
     }
 }
 
@@ -2636,18 +2766,23 @@ fn write_synthetic_ident_key_with_global(
 /// Action store for deduplicating lambda actions.
 /// Equivalent to OCaml's `StoreExp` (Switch.Store specialized for lambda).
 ///
-/// Uses string keys (from `make_key` normalization) for comparison,
-/// since RawLambda doesn't implement PartialEq/Ord.
+/// Two actions share a slot when their `make_key` keys are equal; an action
+/// without a key gets a slot of its own.
+///
+/// Cost of storing an action: one pass over it to write its key, at most
+/// `MAX_RAW` nodes, then one `KeyTable::get_or_insert`. Storing `n` actions
+/// with keys of `m` bytes is O(n * m); no action is compared with every
+/// other.
 pub struct StoreExp<'b, B: RawLambdaBuilder> {
     b: &'b B,
-    /// Map from normalized key string -> action index.
+    /// Normalized key -> action index.
     ///
     /// OCaml uses `AMap` for lookup in `Switch.Store.store`
     /// (`compiler/ml/switch.ml:55-65`) and iterates it only to mark shared
     /// action slots (`compiler/ml/switch.ml:67-76`). That iteration order does
     /// not feed the generated lambda, so Rust records the shared flag directly
     /// on the action slot when a key hits and keeps the map for lookup only.
-    map: HashMap<String, usize>,
+    map: KeyTable,
     /// Accumulated actions in index order: (shared, action).
     acts: Vec<(bool, RawLambda)>,
 }
@@ -2658,7 +2793,7 @@ impl<'b, B: RawLambdaBuilder> StoreExp<'b, B> {
     pub fn mk_store(b: &'b B) -> Self {
         StoreExp {
             b,
-            map: HashMap::new(),
+            map: KeyTable::new(),
             acts: Vec::new(),
         }
     }
@@ -2671,16 +2806,14 @@ impl<'b, B: RawLambdaBuilder> StoreExp<'b, B> {
 
     /// Internal: store an action, deduplicating if possible.
     fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
-        match make_key_string(self.b, act) {
-            Some(key) => {
-                if let Some(&i) = self.map.get(&key) {
-                    self.acts[i].0 = true;
-                    i
-                } else {
-                    let i = self.add(must_share, act);
-                    self.map.insert(key, i);
-                    i
-                }
+        let mut key = KeyOut::new();
+        if write_key(self.b, act, &mut key).is_none() {
+            return self.add(must_share, act);
+        }
+        match self.map.get_or_insert(&key.buf, self.acts.len()) {
+            Some(i) => {
+                self.acts[i].0 = true;
+                i
             }
             None => self.add(must_share, act),
         }
@@ -2846,10 +2979,7 @@ fn up_ok_action<B: RawLambdaBuilder>(
     if let Some(ctx) = ctx_ref {
         let _fail = ctx.create_ident("fallthrough");
     }
-    match (act1.normalized_key(b), act2.normalized_key(b)) {
-        (Some(raw1), Some(raw2)) => raw1 == raw2,
-        _ => false,
-    }
+    act1.same_key(b, act2)
 }
 
 // ============================================================================
@@ -6727,11 +6857,12 @@ fn all_actions_same_tagged<K, B: RawLambdaBuilder>(b: &B, cases: &[(K, RawLambda
         [] => false,
         [_] => true,
         [(_, act0), rem @ ..] => {
-            let Some(raw_act0) = make_key_string(b, *act0) else {
+            let mut raw_act0 = KeyOut::new();
+            if write_key(b, *act0, &mut raw_act0).is_none() {
                 return false;
-            };
+            }
             for (_, act) in rem {
-                if !make_key_equals(b, *act, &raw_act0) {
+                if !make_key_equals(b, *act, &raw_act0.buf) {
                     return false;
                 }
             }
@@ -7382,17 +7513,16 @@ fn convert_polyvar_list<B: RawLambdaBuilder>(
     // Group by normalized action equality, matching OCaml's make_key-based
     // sharing. Groups are created in first-occurrence order.
     let mut groups: Vec<(Vec<(i32, String)>, RawLambda)> = Vec::new();
-    let mut group_of_key: HashMap<String, usize> = HashMap::new();
+    let mut group_of_key = KeyTable::new();
 
     for (hash, (name, act)) in xs {
-        match make_key_string(b, act) {
-            Some(key) => match group_of_key.get(&key) {
-                Some(&idx) => groups[idx].0.push((hash, name)),
-                None => {
-                    group_of_key.insert(key, groups.len());
-                    groups.push((vec![(hash, name)], act));
-                }
-            },
+        let mut key = KeyOut::new();
+        let group = match write_key(b, act, &mut key) {
+            Some(()) => group_of_key.get_or_insert(&key.buf, groups.len()),
+            None => None,
+        };
+        match group {
+            Some(idx) => groups[idx].0.push((hash, name)),
             None => groups.push((vec![(hash, name)], act)),
         }
     }
@@ -9486,13 +9616,219 @@ mod tests {
             )
         };
         let first = key_term(x, one());
-        let key = make_key_string(&b, first).expect("small term has a key");
+        let mut key = KeyOut::new();
+        write_key(&b, first, &mut key).expect("small term has a key");
+        let key = key.buf;
         // A let of another identifier with the same name keys the same.
         let same_name = Ident::create_local("x");
         assert!(make_key_equals(&b, key_term(same_name, one()), &key));
         assert!(!make_key_equals(&b, key_term(x, b.var(y)), &key));
         assert!(!make_key_equals(&b, one(), &key));
         assert!(!make_key_equals(&b, b.var(y), &key));
+    }
+
+    /// Key bytes written, hashed and compared while `run` runs.
+    fn key_steps(run: impl FnOnce()) -> u64 {
+        use crate::raw_lambda::key_encode::KEY_STEPS;
+        let before = KEY_STEPS.with(|steps| steps.get());
+        run();
+        KEY_STEPS.with(|steps| steps.get()) - before
+    }
+
+    /// An action whose key is a little over `size` bytes; actions of
+    /// different `id` have different keys.
+    fn sized_action(b: &RawArena, size: usize, id: i32) -> RawLambda {
+        use crate::lambda::lam_constant::Constant;
+        b.seq(
+            b.const_(Constant::string("s".repeat(size))),
+            b.const_(Constant::int(id)),
+        )
+    }
+
+    fn switch_of(actions: Vec<RawLambda>) -> RawLambdaSwitch {
+        RawLambdaSwitch {
+            sw_consts_full: true,
+            sw_consts: actions
+                .into_iter()
+                .enumerate()
+                .map(|(i, act)| (crate::lambda::SwitchKey::Int(i as i32), act))
+                .collect(),
+            sw_blocks_full: true,
+            sw_blocks: Vec::new(),
+            sw_failaction: None,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+        }
+    }
+
+    /// Sharing the actions of a switch of `n` cases with actions of `m` key
+    /// bytes costs O(n * m), whether the actions are all different or all
+    /// equal: each is written and hashed once and compared with at most the
+    /// one stored action of its hash, never with every other action.
+    #[test]
+    fn sharing_switch_actions_is_linear_in_cases() {
+        const SIZE: usize = 4096;
+        // Bytes a key adds to the string constant in it.
+        const OVERHEAD: usize = 64;
+        let b = RawArena::new();
+        for distinct in [true, false] {
+            let steps_for = |n: usize| {
+                let actions = (0..n)
+                    .map(|i| sized_action(&b, SIZE, if distinct { i as i32 } else { 0 }))
+                    .collect();
+                let mut next_raise_count = 0;
+                let mut shared = None;
+                let steps = key_steps(|| {
+                    shared = Some(share_actions_sw(
+                        &b,
+                        switch_of(actions),
+                        &mut next_raise_count,
+                    ));
+                });
+                let (handlers, _) = shared.expect("shared");
+                // The sharing itself: no exit when all differ, one when all
+                // are equal.
+                assert_eq!(handlers.len(), if distinct { 0 } else { 1 });
+                steps
+            };
+            for n in [4, 64, 512] {
+                let steps = steps_for(n) as usize;
+                // Written and hashed, and compared once when equal.
+                let per_action = if distinct { 2 } else { 3 };
+                assert!(
+                    steps <= per_action * n * (SIZE + OVERHEAD),
+                    "{n} actions, distinct: {distinct}: {steps} steps"
+                );
+                assert!(steps >= n * SIZE);
+            }
+            // Far below the n * n * m / 2 of comparing every pair.
+            assert!((steps_for(512) as usize) < 512 * 512 * SIZE / 64);
+        }
+    }
+
+    /// `up_ok` compares a clause's action with the action of every clause
+    /// before it. The key of an action is built once, and comparing two
+    /// actions of different keys reads no key bytes, so the n * n / 2
+    /// comparisons of `n` different actions of `m` key bytes cost O(n * m).
+    #[test]
+    fn comparing_every_pair_of_actions_builds_each_key_once() {
+        const SIZE: usize = 4096;
+        const OVERHEAD: usize = 64;
+        const N: usize = 128;
+        let b = RawArena::new();
+        let actions: Vec<MatchAction> = (0..N)
+            .map(|i| MatchAction::new(sized_action(&b, SIZE, i as i32)))
+            .collect();
+        let steps = key_steps(|| {
+            for (i, act) in actions.iter().enumerate() {
+                for (j, other) in actions.iter().enumerate() {
+                    // A clone is the same shared action, as when a clause
+                    // is copied into two matrices.
+                    assert_eq!(up_ok_action(&b, None, &act.clone(), other), i == j);
+                }
+            }
+        }) as usize;
+        assert!(steps <= 2 * N * (SIZE + OVERHEAD), "{steps} steps");
+        // Two separate actions of equal key are confirmed on their bytes.
+        let twin = MatchAction::new(sized_action(&b, SIZE, 0));
+        let confirm = key_steps(|| assert!(up_ok_action(&b, None, &actions[0], &twin))) as usize;
+        assert!(
+            (SIZE..=3 * (SIZE + OVERHEAD)).contains(&confirm),
+            "{confirm} steps"
+        );
+    }
+
+    #[test]
+    fn key_table_finds_keys_by_scan_and_by_index() {
+        let mut table = KeyTable::new();
+        let key = |i: usize| format!("key {i}").into_bytes();
+        let count = KeyTable::SCAN_MAX * 8;
+        for i in 0..count {
+            assert_eq!(table.get_or_insert(&key(i), i), None);
+            // Every key stored so far is found, before and after the index
+            // replaces the scan.
+            for j in 0..=i {
+                assert_eq!(table.get_or_insert(&key(j), usize::MAX), Some(j));
+            }
+        }
+        assert!(table.index.is_some());
+        assert_eq!(table.entries.len(), count);
+    }
+
+    /// The classes of `Lambda.make_key` (`compiler/ml/lambda.ml:432-466`).
+    #[test]
+    fn keys_follow_make_key_normalization() {
+        use crate::lambda::lam_constant::Constant;
+        let b = RawArena::new();
+        let key = |e: RawLambda| {
+            let mut out = KeyOut::new();
+            write_key(&b, e, &mut out).map(|()| out.buf.to_vec())
+        };
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let z = Ident::create_local("z");
+        let w = Ident::create_local("w");
+        let int = |i: i32| b.const_(Constant::int(i));
+        let add = |l: RawLambda, r: RawLambda| b.prim(Primitive::Paddint, &[l, r], LamLoc::NONE);
+
+        // An alias is replaced by its definition.
+        let aliased = b.let_(
+            LetKind::Alias,
+            x,
+            add(b.var(y), int(1)),
+            add(b.var(x), b.var(x)),
+        );
+        let inlined = add(add(b.var(y), int(1)), add(b.var(y), int(1)));
+        assert_eq!(key(aliased), key(inlined));
+        assert!(key(aliased).is_some());
+        // An alias in scope is replaced inside a later alias's definition
+        // and after an alias nested in one.
+        let chained = b.let_(
+            LetKind::Alias,
+            x,
+            add(b.var(y), int(1)),
+            b.let_(
+                LetKind::Alias,
+                z,
+                b.let_(LetKind::Alias, w, int(2), add(b.var(x), b.var(w))),
+                add(b.var(z), b.var(x)),
+            ),
+        );
+        let chained_inlined = add(add(add(b.var(y), int(1)), int(2)), add(b.var(y), int(1)));
+        assert_eq!(key(chained), key(chained_inlined));
+        assert!(key(chained).is_some());
+        // A strict let of its own variable is its definition.
+        assert_eq!(
+            key(b.let_(LetKind::Strict, x, int(1), b.var(x))),
+            key(int(1))
+        );
+        // A kept let is renamed by position: the binder's stamp is dropped,
+        // its name and its kind are not.
+        let kept = |kind: LetKind, id: Ident| b.let_(kind, id, int(1), add(b.var(id), b.var(y)));
+        assert_eq!(
+            key(kept(LetKind::Strict, x)),
+            key(kept(LetKind::Strict, Ident::create_local("x")))
+        );
+        assert_ne!(key(kept(LetKind::Strict, x)), key(kept(LetKind::Strict, z)));
+        assert_ne!(
+            key(kept(LetKind::Strict, x)),
+            key(kept(LetKind::Variable, x))
+        );
+        // Free variables are compared by name and stamp.
+        assert_eq!(key(b.var(y)), key(b.var(y)));
+        assert_ne!(key(b.var(y)), key(b.var(Ident::create_local("y"))));
+        // Shapes that would run together without lengths and tags.
+        assert_ne!(
+            key(b.static_raise(1, &[int(2)])),
+            key(b.static_raise(1, &[]))
+        );
+        assert_ne!(key(b.seq(int(1), int(2))), key(add(int(1), int(2))));
+        assert_ne!(key(int(1)), key(b.const_(Constant::string("1"))));
+        // Locations are not part of a key.
+        let located = b.prim(Primitive::Paddint, &[int(1), int(2)], LamLoc::for_test(7));
+        assert_eq!(key(located), key(add(int(1), int(2))));
+        // A function has no key, and neither has a term above `MAX_RAW`.
+        let big = (0..MAX_RAW).fold(int(0), |acc, i| add(acc, int(i)));
+        assert_eq!(key(big), None);
     }
 
     #[test]

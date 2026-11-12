@@ -756,6 +756,10 @@ pub struct CompilerOptions {
     /// Run GenType only to register the module's type declarations (for the
     /// modules that import its types), without generating output.
     pub gentype_declarations_only: bool,
+    /// The build's conservative dependency closure can prove this module's
+    /// declarations unreachable from every genType output. Standalone compiles
+    /// default to true because they have no whole-build dependency graph.
+    pub gentype_declarations_needed: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -949,6 +953,7 @@ impl Default for CompilerOptions {
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
+            gentype_declarations_needed: true,
             capture_intermediates: false,
             dumps: Vec::new(),
             skip_js_render: false,
@@ -7022,6 +7027,7 @@ fn compile_source_to_js_with_options_inner(
 
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
 
     #[cfg(test)]
@@ -9622,6 +9628,7 @@ fn with_gentype_artifact<R>(
                 file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
                 is_interface,
                 declarations_only: options.gentype_declarations_only,
+                declarations_needed: options.gentype_declarations_needed,
                 render_escape: &render_escape,
             },
         )
@@ -11077,6 +11084,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     });
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
     let lowered_lambda = crate::lambda::arena::LamProgram {
         arena: lowered_arena,
