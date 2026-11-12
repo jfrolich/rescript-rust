@@ -79,7 +79,8 @@ impl ReadLog {
     }
 
     /// Record a root without observing its still-mutable descendants.
-    /// One bitset probe, and one amortized O(1) pool push for a new root.
+    /// One bitset probe (plus growth as described by `SeenTypes::insert`),
+    /// and one amortized O(1) pool push for a new root.
     #[inline]
     pub fn ty(&mut self, ty: TypeExprRef) {
         #[cfg(test)]
@@ -117,7 +118,8 @@ impl TypeReader<'_> {
     }
 
     /// Traverse the recorded roots in O(V + E) type steps: each reachable
-    /// node is expanded once and each outgoing edge is pushed once.
+    /// node is expanded once and each outgoing edge is pushed once. Bitset
+    /// growth additionally zeroes O(B) words, bounded by the largest node index.
     fn types(&mut self) {
         let ctx = self.ctx;
         let mut stack = std::mem::take(&mut self.stack);
@@ -175,8 +177,9 @@ impl TypeReader<'_> {
 }
 
 impl ReadLog {
-    /// Resolve a unit in O(R + V + E + P): roots, reachable type nodes,
-    /// type edges and path decoding. Reuses the recording buffers; no tree walk.
+    /// Drain a unit in O(B + R + V + E + P): bitset words, roots, reachable
+    /// type nodes, type edges and path decoding. Reuses the recording buffers;
+    /// no tree walk. This consumes the log's recorded reads.
     fn resolve(&mut self, ctx: &TypeContext, opens: &[String]) -> Vec<UnitRead> {
         for space in &mut self.seen.spaces {
             space.fill(0);
@@ -212,7 +215,7 @@ pub(crate) trait ReadNode {
 
 /// One option test when disabled; otherwise the node-specific `log_reads`
 /// cost. The node is moved through its construction site, not cloned or walked.
-#[inline]
+#[inline(always)]
 pub(crate) fn record<T: ReadNode>(node: T, log: &mut Option<ReadLog>, ta: &TypedArena) -> T {
     if let Some(log) = log {
         node.log_reads(log, ta);
@@ -389,13 +392,13 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 
 /// The reads of an implementation; `opens` are the units opened by the
 /// command line (read as whole modules). No typed tree is needed.
-/// O(roots + reachable type nodes and edges + decoded path segments).
+/// O(bitset words + roots + reachable type nodes/edges + decoded path segments).
 pub fn structure_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
 
 /// The reads of an interface. No typed tree is needed.
-/// O(roots + reachable type nodes and edges + decoded path segments).
+/// O(bitset words + roots + reachable type nodes/edges + decoded path segments).
 pub fn signature_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
