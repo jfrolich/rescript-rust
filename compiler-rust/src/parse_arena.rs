@@ -754,9 +754,9 @@ pub struct ParseArena {
     /// This lets marshal distinguish mapper-rebuilt expression attributes
     /// (fresh payload wrappers) from parser-preserved ones.
     rewritten_expr_locs: HashSet<LocIdx>,
-    /// One bit per expression, proved bottom-up at allocation: this subtree
-    /// has no builtin-rewrite targets. Unknown kinds and mutable slots are
-    /// deliberately not certified. See `expression_needs_no_rewrite`.
+    /// Two bits per expression, proved bottom-up at allocation: no builtin
+    /// rewrite/checker targets (bit 0), and no unused-attribute sweep targets
+    /// (bit 1). Unknown kinds and mutable slots are never certified.
     rewrite_free_exprs: Vec<u64>,
     /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
     dummy_loc: LocIdx,
@@ -2658,82 +2658,98 @@ impl ParseArena {
     /// Use this instead of `Box::new(expr)` for recursive AST references.
     #[inline]
     pub fn push_expr(&mut self, expr: Expression) -> ExprIdx {
-        let rewrite_free = self.expression_needs_no_rewrite(&expr);
+        let certificates = self.expression_certificates(&expr);
         let idx = self.expressions.push(expr);
-        if rewrite_free {
-            let word = idx.0 as usize / 64;
+        if certificates != 0 {
+            let word = idx.0 as usize / 32;
             self.rewrite_free_exprs.resize(word + 1, 0);
-            self.rewrite_free_exprs[word] |= 1 << (idx.0 % 64);
+            self.rewrite_free_exprs[word] |= certificates << (2 * (idx.0 % 32));
         }
         idx
     }
 
-    /// A conservative, allocation-time proof, not a scan of the subtree.
-    /// Attributes, types, patterns, module scopes and unknown constructs stay
-    /// on the full mapper path. The diagnostic pre-pass is never skipped.
-    fn expression_needs_no_rewrite(&self, expr: &Expression) -> bool {
+    /// Both proofs are computed together, inspecting only immediate children.
+    /// Bit 0 excludes attributes, pipes, types, patterns and module scopes;
+    /// bit 1 additionally excludes unsuffixed integers (overflow warnings).
+    fn expression_certificates(&self, expr: &Expression) -> u64 {
         if !expr.pexp_attributes.is_empty() {
-            return false;
+            return 0;
         }
-        let free = |idx| self.expr_needs_no_rewrite(idx);
+        let free = |idx| self.expr_certificates(idx);
+        let all = |items: &[ExprIdx]| items.iter().fold(3, |bits, idx| bits & free(*idx));
         match &expr.pexp_desc {
             ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_break
-            | ExpressionDesc::Pexp_continue => true,
-            ExpressionDesc::Pexp_constant(c) => {
-                !matches!(c, Constant::Integer(_, Some('l')))
-            }
+            | ExpressionDesc::Pexp_continue => 3,
+            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l'))) => 0,
+            ExpressionDesc::Pexp_constant(Constant::Integer(_, None)) => 1,
+            ExpressionDesc::Pexp_constant(_) => 3,
             ExpressionDesc::Pexp_apply(apply) => {
                 let is_pipe = matches!(&self.get_expr(apply.funct).pexp_desc,
                     ExpressionDesc::Pexp_ident(lid) if matches!(self.get_longident(lid.txt),
                         Longident::Lident(name) if self.get_string(*name) == "->"));
-                !is_pipe && free(apply.funct)
-                    && self.apply_args(apply.args).iter().all(|(_, idx)| free(*idx))
+                if is_pipe {
+                    return 0;
+                }
+                self.apply_args(apply.args)
+                    .iter()
+                    .fold(free(apply.funct), |bits, (_, idx)| bits & free(*idx))
             }
             ExpressionDesc::Pexp_tuple(items) | ExpressionDesc::Pexp_array(items) => {
-                self.expr_list(*items).iter().all(|idx| free(*idx))
+                all(self.expr_list(*items))
             }
-            ExpressionDesc::Pexp_construct(_, args) => {
-                self.expr_list(args.txt).iter().all(|idx| free(*idx))
+            ExpressionDesc::Pexp_construct(_, args) => all(self.expr_list(args.txt)),
+            ExpressionDesc::Pexp_variant(inner) => all(self.expr_list(inner.1.txt)),
+            ExpressionDesc::Pexp_field(child, _) | ExpressionDesc::Pexp_assert(child) => {
+                free(*child)
             }
-            ExpressionDesc::Pexp_variant(inner) => {
-                self.expr_list(inner.1.txt).iter().all(|idx| free(*idx))
-            }
-            ExpressionDesc::Pexp_field(child, _) | ExpressionDesc::Pexp_assert(child) => free(*child),
             ExpressionDesc::Pexp_sequence(left, right)
-            | ExpressionDesc::Pexp_while(left, right) => free(*left) && free(*right),
-            ExpressionDesc::Pexp_ternary(inner) => free(inner.0) && free(inner.1) && free(inner.2),
+            | ExpressionDesc::Pexp_while(left, right) => free(*left) & free(*right),
+            ExpressionDesc::Pexp_ternary(inner) => free(inner.0) & free(inner.1) & free(inner.2),
             ExpressionDesc::Pexp_ifthenelse(inner) => {
-                free(inner.0) && free(inner.1) && inner.2.is_none_or(free)
+                free(inner.0) & free(inner.1) & inner.2.map_or(3, free)
             }
-            ExpressionDesc::Pexp_record((fields, spread)) => {
-                self.expr_field_list(*fields).iter().all(|field| free(field.expr))
-                    && spread.is_none_or(free)
-            }
-            // Leave functions, braces (@this forwarding), awaits, raw
-            // nodes, JSX, extensions and bindings on the full mapper path.
-            _ => false,
+            ExpressionDesc::Pexp_record((fields, spread)) => self
+                .expr_field_list(*fields)
+                .iter()
+                .fold(spread.map_or(3, free), |bits, field| {
+                    bits & free(field.expr)
+                }),
+            // Functions, braces (@this forwarding), awaits, raw nodes, JSX,
+            // extensions and bindings remain on the full traversal paths.
+            _ => 0,
         }
     }
 
-    /// Whether a subtree was proved free of builtin rewrite targets.
+    #[inline]
+    fn expr_certificates(&self, idx: ExprIdx) -> u64 {
+        self.rewrite_free_exprs
+            .get(idx.0 as usize / 32)
+            .map_or(0, |word| (word >> (2 * (idx.0 % 32))) & 3)
+    }
+
+    /// No builtin rewrite, Checker diagnostic, or nested external can occur.
     #[inline]
     pub fn expr_needs_no_rewrite(&self, idx: ExprIdx) -> bool {
-        self.rewrite_free_exprs.get(idx.0 as usize / 64)
-            .is_some_and(|word| word & (1 << (idx.0 % 64)) != 0)
+        self.expr_certificates(idx) & 1 != 0
     }
 
-    /// Parents are allocated after children. A mutation invalidates the node
-    /// and all possible parents, without a reverse-edge table or tree walk.
-    /// Reserved slots were never certified, including at initialization.
+    /// No unused-attribute sweep diagnostic can occur in this subtree.
+    #[inline]
+    pub fn expr_needs_no_attribute_sweep(&self, idx: ExprIdx) -> bool {
+        self.expr_certificates(idx) & 2 != 0
+    }
+
+    /// Parents are allocated after children. A mutation invalidates both
+    /// proofs for the node and all possible parents, without a reverse-edge
+    /// table or tree walk. Reserved slots are never certified.
     fn invalidate_rewrite_free_exprs(&mut self, idx: ExprIdx) {
-        let word = idx.0 as usize / 64;
+        let word = idx.0 as usize / 32;
         if word < self.rewrite_free_exprs.len() {
             self.rewrite_free_exprs.truncate(word + 1);
-            self.rewrite_free_exprs[word] &= (1u64 << (idx.0 % 64)) - 1;
+            self.rewrite_free_exprs[word] &= (1u64 << (2 * (idx.0 % 32))) - 1;
         }
     }
-
     /// Reserve an expression index using a placeholder node.
     ///
     /// This is the first step of two-phase construction (`reserve -> initialize`),
@@ -4263,4 +4279,42 @@ mod tests {
         let seconds: Vec<_> = arena.apply_args(second).iter().map(|(_, e)| *e).collect();
         assert_eq!(seconds, vec![c]);
     }
+
+    #[test]
+    fn validation_certificates_preserve_overflow_and_invalidate_parents() {
+        let mut arena = ParseArena::new();
+        let text = arena.intern("2147483648");
+        let integer = arena.push_expr(Expression {
+            pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(text, None)),
+            pexp_loc: LocIdx::default(),
+            pexp_attributes: Attributes::new(),
+        });
+        assert!(arena.expr_needs_no_rewrite(integer));
+        assert!(!arena.expr_needs_no_attribute_sweep(integer));
+        let leaf = arena.push_expr(ParseArena::placeholder_expr());
+        // Cross packed-word boundaries, including invalidation at offset zero.
+        let mut parents = vec![leaf];
+        for _ in 0..100 {
+            let child = *parents.last().unwrap();
+            parents.push(arena.push_expr(Expression {
+                pexp_desc: ExpressionDesc::Pexp_sequence(child, leaf),
+                pexp_loc: LocIdx::default(),
+                pexp_attributes: Attributes::new(),
+            }));
+        }
+        for &idx in &parents {
+            assert!(arena.expr_needs_no_rewrite(idx));
+            assert!(arena.expr_needs_no_attribute_sweep(idx));
+        }
+        arena.get_expr_mut(ExprIdx(32)).pexp_desc = ExpressionDesc::Pexp_await(leaf);
+        for &idx in &parents {
+            assert_eq!(arena.expr_needs_no_rewrite(idx), idx.0 < 32);
+            assert_eq!(arena.expr_needs_no_attribute_sweep(idx), idx.0 < 32);
+        }
+        let reserved = arena.reserve_expr();
+        arena.initialize_expr(reserved, ParseArena::placeholder_expr());
+        assert!(!arena.expr_needs_no_rewrite(reserved));
+        assert!(!arena.expr_needs_no_attribute_sweep(reserved));
+    }
+
 }
