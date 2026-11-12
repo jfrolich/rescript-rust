@@ -11,6 +11,12 @@ changes carries a note that starts with "**Amended (I.n)**"; replaced numbers
 are struck through. Where a note and the text under it disagree, the note
 holds.
 
+**The world is planned in section J.** Sections B, F.6, F.7 and F.12
+describe a world that was not built as written. Section J is its build
+plan: the end state as checks on the code, the frozen pool, the slices with
+their prompts, and the saving re-derived from measurements. Where J and
+those sections disagree, J holds.
+
 ## 0. Summary
 
 ### The problem
@@ -1742,6 +1748,12 @@ build (I.5), with no long-lived branch.
 
 ### F.6 P4: process-wide component views; delete stamp replay
 
+> **Amended (J).** The stamp replay is deleted (#166). The rest is slices W3
+> to W7 of J.4: views are whole, immutable values in a world table, built on
+> a scratch context and adopted by compilations; store builds, pieces,
+> replay and the worker-store tier are deleted. Saving re-derived in J.6:
+> 1.2-1.8% with one worker, 2.7-4.0% with 8.
+
 - **Changes.** Views of persistent-rooted paths (`QualifiedModuleComponents`
   and its forcing tables) become process-wide: an immutable core plus
   per-entry `OnceLock`s, their nodes allocated into shared graphs. Binders
@@ -1766,6 +1778,12 @@ build (I.5), with no long-lived branch.
   can observe) and an audit for diagnostics raised inside store builds.
 
 ### F.7 P5: absolute paths in exports; no lookup copies
+
+> **Amended (J).** Absolute paths are not written into exported graphs
+> (J.3.7). Lookup copies are 2.41% of the build, measured, and have two
+> owners: the three copies made when a signature is saved (slice W8) and
+> the per-worker view work (W4, W5). The 3-4% below was never available
+> (J.6).
 
 - **Changes.** When a unit is published (P3's walk), its own identifiers
   are rewritten to absolute paths (B.4 step 2) and its constructor and label
@@ -1870,6 +1888,11 @@ dependency on sharing or order; the second kind is added to section D with
 its fix. Hand-off: no; this is triage.
 
 ### F.12 P10: segments, export tables, one checker per worker
+
+> **Amended (J).** Segments are today's shared graphs (J.3.1); export
+> tables are the views of W4; the checker per worker is W9 and W10; the
+> world's lifetime in watch mode is W11. Setup and teardown are 1.4% of the
+> build now, and the saving is 0.8-1.0% with W2 (J.6).
 
 > **Amended (I.3.3 rule 5, I.6).** Kept, on today's `TypeContext` and
 > without `Terms`: one context per worker whose containers are cleared
@@ -3770,3 +3793,1407 @@ either.
   genType files of the two.
 - Not measured: anything on the profile-guided build; the split of `unify`
   and of `expand_head` into their parts; memory.
+
+## J. The world: build plan
+
+Sections B, F.6, F.7 and F.12 describe a world that was not built. What
+merged for those stages are parts on the existing structures: signatures
+published on the checking worker (#119), the graph hash (#140), store binders
+out of the stamp counter and the stamp replay deleted (#166). #154 (open)
+publishes from the shared graph. This section is the plan for the rest: what
+the code looks like when it is done, the pool the shared data lives in, the
+slices in order, the prompt for every slice a less capable model can build,
+the saving re-derived from measurements, and the risks.
+
+The output contract is unchanged (section 0, rules 1 and 2), so the rules of
+I.3.3 stand and the new core stays dropped. B.1 and B.5 to B.8 are reused
+where J does not say otherwise. Five decisions differ from B and F; each is
+argued in J.3.7:
+
+1. There is no second kind of frozen storage. A view's nodes go into a
+   `SharedGraph` of the existing page table, like a unit's. B.4's `Segment`
+   is not built.
+2. Exported graphs keep local identifiers. F.7's absolute paths are not
+   written into a unit's graph. The view of a unit's own path is a world view
+   like any other, built once per build by substitution.
+3. A world view is built whole (every value, type, constructor and label of
+   one module path) the first time any worker needs the path. Child modules
+   stay separate views, built on demand. B.6 had one item per first use.
+4. Overlays are replaced by one exception table behind one flag, not by a
+   rewrite of `matches`. Type marking already has a visited set
+   (`types/type_marks.rs`); one caller pair is left.
+5. Nothing depends on P6's binding log. Opened layers stay the tables of
+   `types/env.rs`, built per worker from frozen views.
+
+### J.1 Measurements
+
+Machine: x86-64 Linux, 8 cores. `rescript` from trunk 22553dce8 (one
+backend-only commit after c5aea2381c), built with
+`CARGO_PROFILE_RELEASE_LTO=thin`. Projects: `tests/tests` and a 3,735-module
+application. "Probe" means throwaway code that was not committed (J.8).
+Numbers marked *given* were supplied with the task (trunk c5aea2381c, 10
+workers) and were not re-measured; everything else in this section was
+measured for it.
+
+**Views and replay** (`RESCRIPT_COMPILER_COUNTERS=1`, 8 workers):
+
+| Quantity | `tests/tests` | Application | Application, *given* (10 workers) |
+|---|---|---|---|
+| Distinct persistent-rooted views | 258 | 4,060 | 4,086 |
+| View builds | 751 | 15,853 | 14,323 |
+| Builds per view | 2.91 | 3.90 | 3.51 (1.01 with one worker) |
+| View cache hits | 3,175 | 114,000 | 115,145 |
+| Store builds (all kinds) | 4,663 | 420,447 | |
+| Store pieces with effects / empty / poisoned | 1,015 / 4,091 / 0 | 29,350 / 423,363 / 9 | 27,341 / 423,225 / |
+| Binders created in store builds | 826 | 48,766 | 43,481 |
+| Pieces replayed | 1,346 | 76,929 | 79,031 |
+| Replayed effects: components / prepare / rename / alias source / module declaration | 422 / 489 / 355 / 44,707 / 78 | 29,144 / 51,394 / 13,202 / 352,841 / 7,878 | 30,028 / 52,634 / 13,440 / 354,163 / 8,238 |
+| Type nodes: all / in store builds | 685,085 / 32,653 | 11,200,079 / 1,145,373 | |
+| Lookup-copy nodes | 185,338 (27.1%) | 2,670,572 (23.8%) | 2,699,388 (23.2%) |
+| Exported nodes / not ground | | 368,428 / 49,712 | same |
+
+**Where the lookup copies are made** (probe: nodes allocated under each
+caller of the `copy_lookup_*` entry points, application, 8 workers; a row
+includes copies nested in it, so rows overlap):
+
+| Caller | Nodes | Per | What it is |
+|---|---|---|---|
+| `freshened_signature_bound_idents_from_kind` (`cmi/persistent_env.rs`) | 521,099 | compilation | freshening a signature; 45,948 of its 66,036 items are the save of the module's own signature, 18,053 an `include` |
+| `compile_preprocessed_structure_in_process_until_js`, raw signature (`driver.rs`) | 323,282 | compilation | first save copy |
+| same, path finalisation | 323,282 | compilation | second save copy |
+| `new_with_child_components_arc_and_value_source_prefix_inner` (`types/env_lazy.rs`) | 301,478 + 53,614 local | worker | view construction |
+| `qualify_resolved_signature_for_access_path_inner` (`types/typecore.rs`) | 254,142 + 91,012 local | worker | view construction |
+| `freshen_component_module_declaration_bound_idents` (`cmi/persistent_env.rs`) | 239,246 | worker | forcing a child module declaration |
+| `lookup_value_for_access_inner` (`types/env_lazy.rs`) | 164,926 + 20,073 local | worker | forcing one value |
+| `build_module_signature_for_path` (`types/typecore.rs`) | 152,827 | worker | view construction |
+| `type_structure_item`, `include` (`types/typemod.rs`) | 142,247 | compilation | stays (B.6) |
+| `localize_scraped_signature_vec` (`types/typemod.rs`) | 34,164 | compilation | stays |
+| `typecheck_preprocessed_signature_in_process` (`driver.rs`) | 27,809 | compilation | interface raw copy |
+
+So about one million of the 2.67 M lookup-copy nodes are the three copies
+made when a module's own signature is saved, about 1.1 M are made in store
+builds (once per worker and view or name), and the rest are `include` and
+module-type instantiation, which stay. A lookup of `M.x` copies nothing when
+its entry is already forced. F.7's "no lookup copies" therefore has two
+parts with different owners: the save copies belong to publication (slice
+W8), the per-worker copies to views (W4 and W5).
+
+**Writes to frozen nodes** (probe in `TypeContext::write_desc_raw`,
+`write_level_raw`, `write_abbrev`, `write_row_field_raw` and
+`write_mutability_raw`, with a backtrace per write; application, 8 workers,
+3,845 checker contexts):
+
+| Write | Count | From |
+|---|---|---|
+| Link on a shared-pool node, restored | 2,784 | `ctype::matches` under `check_constraints_rec`. `tests/tests` has the same 2,784, so they come from modules both projects compile as dependencies |
+| Level write on a shared-pool node | 6,396 | the same `matches` calls (its unification lowers levels) |
+| Link on a shared-pool node, not restored | 5 | 2 are unifications (`link_type`), one of a node that is not generic and one of a generic node; 3 are written under functions that only read (`check_inlined_record_escape`, `subst_identity_copy_rec`), so they are path compression in `repr_chain` |
+| Link on a worker-store node, not restored | 124 | 54 are unifications (`link_type` under `unify_expression_types` and `unify_same_path_constructor_args`), every one of a node that is not generic; 70 are path compression (under `copy_type_cached`, `typeopt`, `parmatch`, `closed_schema_rec` and others that only read) |
+| Level write on a worker-store node | 12 | `generalize_rec` in `type_let_bindings` |
+| Abbreviation memo write, shared / worker store | 0 / 3 | `generalize_structure_rec` |
+| Row-field write on a stored row | 0 | |
+| Mutability-cell write on a stored cell | 99 | copy sessions (`copy_type_cached`) and `unify_object_fields` |
+
+Of 358,825 nodes published to the shared pool, 322 are not generic (links
+excluded): OCaml saves every node of an interface at the generic level
+(`Subst.newpersty`, `compiler/ml/subst.ml`), so `instance` copies almost
+everything a checker takes from a dependency before it unifies. No type
+marking writes a frozen node. Reads of stored nodes: 15.1 M descriptors and
+3.4 M levels of shared-pool nodes, 17.3 M descriptors and 4.3 M levels of
+worker-store nodes. Each of these 40 M reads tests an overlay first.
+
+**Shares of the build** (callgrind, application, one worker, 76.35 G
+instructions, inclusive unless "self"):
+
+| Function | Share |
+|---|---|
+| `TypeContext::touch_store_piece` (replay) | 0.73% |
+| of which `PersistentEnv::replay_cached_pers_struct` | 0.35% |
+| of which `register_component_alias_source` | 0.25% |
+| of which `trigger_module_sig_rename` | 0.12% |
+| `build_in_store_guarded`, views | 0.75% |
+| `build_in_store_guarded`, stored child components | 0.65% |
+| `build_in_store`, one value / one module declaration / label family | 0.44% / 0.29% / 0.08% |
+| `copy_lookup_signature_for_subst`, all callers | 1.63% |
+| `copy_lookup_signature_for_subst_with_paths_and_idents` (freshening) | 0.78% |
+| `TypeContext::store_desc` / `store_level` (reads of stored nodes) | 0.91% / 0.22% |
+| `in_process_type_check_context` (per-module setup) | 0.41% |
+| of which `load_pervasives` | 0.33% |
+| `drop_glue::<TypeContext>` / `<TypeCheckContext>` / `<TypedArena>` (teardown) | 0.41% / 0.28% / 0.29% |
+| `PersistentEnv::extract_module_update` | 1.19% |
+| of which `serialize_pers_struct` | 0.98% |
+| `internalize_signature_into_shared` | 0.20% |
+| `type_structure` (all of checking) | 41.6% |
+
+The store-build rows nest in each other, so their sum (2.3%) is an upper
+bound for one worker.
+
+**What the workers repeat** (cachegrind, application, the same executable):
+one worker 76.35 G instructions, 8 workers 78.20 G. The 1.85 G difference
+(2.4%) is work a build does again on each worker. With 2.9 extra builds per
+view, a view and its forcing cost about 0.64 G once (0.8% of the build).
+
+**The store-build test on local reads** (probe: delete the
+`poison_store_build()` call from the local branch of `TypeContext::desc` and
+`get_level`; `tests/tests`, cachegrind, one worker, smallest of three):
+4,409.4 M to 4,379.1 M instructions, -0.69%. The generated files were not
+compared; the number is the cost of the test, not a change to land.
+
+**The pool** (probe: a stand-alone program, 2^20 nodes of 32 bytes, 20 M
+random reads, cachegrind, loop overhead subtracted):
+
+| Structure | Instructions per read | Per append |
+|---|---|---|
+| Page table of `OnceLock<Arc<graph>>`, graph is a boxed slice (today's shared pool) | 27 | 13 (`Vec::push` by the one builder) |
+| The same behind today's overlay test | 40 | |
+| Chunks of `OnceLock<node>`, one cell per node | 41 | 64 |
+| `RwLock<Vec<node>>` | 40, two atomic writes to one shared cache line | |
+| `Cell` chunks of one compilation (today's local nodes), for scale | 31 | |
+
+Shared pool use today: 2,789 graphs take 3,061 of 65,536 pages (554,969
+indices used of 3,134,464 reserved). Peak resident memory of the build:
+1.44 to 1.46 GB with 8 workers, 0.88 GB with one.
+
+### J.2 The end state
+
+Facts about `compiler-rust/src` when the last slice has merged. `rg` is run
+from `compiler-rust/`; "0" means no match.
+
+**Exists.**
+
+| Fact | Check |
+|---|---|
+| One world per build: `pub(crate) struct World` in `types/world.rs`, holding the frozen pool, the unit table, the view table and the predefined environment | `rg -n 'pub\(crate\) struct World\b' src/types/world.rs` |
+| It is shared between threads | `rg -n 'assert_send_sync::<(World\|ModuleView)>' src/types/world.rs` gives two lines (a `const` item that fails to compile otherwise) |
+| A view is one immutable value: `pub(crate) struct ModuleView` in `types/module_view.rs`, with no `Rc`, `Cell`, `RefCell`, `OnceCell` or lock inside it | `rg -n 'Rc<\|RefCell<\|Cell<\|OnceCell<\|Mutex<' src/types/module_view.rs` gives 0 |
+| A view is built by a function that cannot see a compilation: `fn build_module_view(world: &World, scratch: &ViewScratch, key: &ViewKey)` | `rg -n 'fn build_module_view' -A3 src/types/module_view.rs` shows no `TypeCheckContext` and no `Env` parameter |
+| The view table: `ViewTable::get_or_build`, one `OnceLock` per path | `rg -n 'fn get_or_build' src/types/world.rs` |
+| Using a view in a compilation is one function | `rg -n 'fn adopt_view' src/types/context.rs` gives 1 |
+| Writes to frozen nodes go to one table: `struct FrozenWrites` | `rg -n 'struct FrozenWrites' src/types/context.rs` gives 1 |
+| A checker context is reused: `TypeContext::reset_for_module`, destructuring every field | `rg -n 'fn reset_for_module' src/types/context.rs` gives 1; `rg -n 'let TypeContext \{' -A120 src/types/context.rs` shows no `..` |
+| Handles have two tiers, local and frozen | `rg -n 'FROZEN_REF_TAG' src/types/type_expr.rs` |
+
+**Gone.**
+
+| What | Check, expecting 0 |
+|---|---|
+| Per-worker stores | `rg -n 'ThreadTypeStore\|StoreLease\|thread_store' src`; the file `src/types/thread_store.rs` does not exist |
+| The worker-store tier of handles | `rg -n 'STORE_REF_TAG\|SHARED_REF_TAG\|SHARED_REF_BITS\|from_store_index\|fn store_index\|fn is_shared' src` |
+| Store builds | `rg -n 'build_in_store\|in_store_build\|store_build_\|suspend_store_build' src` |
+| Replay | `rg -n 'StorePiece\|StoreEffect\|touch_store_piece\|replay_store_piece\|record_store_effect\|EMPTY_STORE_PIECE\|touched_store_pieces' src` |
+| Poisoning and guards | `rg -n 'poison_store_build\|store_guards_hold\|store_build_guards\|make_private\|forget_entry' src` |
+| Per-worker views and per-name forcing of shared tables | `rg -n 'shared_components\|publish_shared_components\|fn force_entry\|store_pieces\|in_store:' src` |
+| Their switches | `rg -n 'RESCRIPT_FRESH_STORE\|RESCRIPT_NO_SHARED_COMPONENTS\|RESCRIPT_STORE_DEBUG' src ../scripts ../rewatch` |
+| Overlays | `rg -n 'PagedOverlay\|_overlay\b\|set_shared_desc\|store_descs' src/types` |
+| Type marking in levels | `rg -n 'fn mark_type_node\|fn unmark_type\|PIVOT_LEVEL - ' src/types/btype.rs` |
+| Per-compilation registration tables for persistent paths | `rg -n 'component_alias_sources\|component_paths_by_alias_source\|qualified_module_decl_cache' src/types/context.rs` |
+| The three copies of a module's signature when it is saved | `rg -n 'copy_lookup_signature_for_subst' src/driver.rs` gives 1 (the interface check), not 4; `rg -n '"save_signature"' src` gives 0 (the save kind passed to `freshened_signature_bound_idents_from_kind`) |
+| A lookup copy when a value is read through a view | `rg -n 'copy_lookup_' src/types/module_view.rs` matches only inside `build_module_view` and the functions it calls; `rg -n 'copy_lookup_value_description_for_subst' src/types/env_lazy.rs` is reached only for local module paths |
+| A fresh checker context per module in a build | `rg -n 'fresh_type_context\(\)' src/driver.rs` matches only the tooling entry points (`typecheck_structure_for_tooling`, `typecheck_signature_for_tooling`) and tests |
+
+In the tables of this section the `|` of a pattern is written `\|`, as a
+Markdown table needs; type `|`.
+
+**Stays, on purpose.** `copy_lookup_type_expr_with_paths` and the rest of the
+`copy_lookup_*` family are the implementation of `Subst`. They remain for
+`include`, functor application, module-type instantiation and first-class
+modules (B.6), for views of local module paths, and inside
+`build_module_view`. `QualifiedModuleComponents` and
+`StoredModuleComponents` (`types/env_lazy.rs`) remain for module paths that
+are not rooted in a persistent unit (local modules, local aliases, functor
+arguments), without any store state. What is gone is that they are built
+once per worker for persistent paths and replayed.
+
+### J.3 The frozen pool
+
+#### J.3.1 Structure
+
+The pool is today's `types/shared_store.rs`, moved under `World`. Nothing
+about its layout changes:
+
+```rust
+/// One per build generation; workers and contexts hold `Arc<World>`.
+pub(crate) struct World {
+    generation: u64,
+    /// Page number -> the graph that owns the page.
+    pages: Arc<[OnceLock<Arc<SharedGraph>>]>,
+    next_index: AtomicU32,
+    /// Units internalised in this build, by the identity of their stored form.
+    units: Mutex<AHashMap<usize, Arc<UnitSlot>>>,     // today: SharedTypePool::pers
+    views: ViewTable,
+    predef: OnceLock<Arc<PredefView>>,
+}
+
+/// Immutable. Complete before any page slot names it.
+pub(crate) struct SharedGraph {
+    base: u32,
+    nodes: Box<[SharedTypeNode]>,   // desc (24 bytes), level, id: 32 bytes
+    lists: Box<[TypeExprRef]>,
+    args: Box<[TypeArg]>,
+    rows: Box<[RowDesc]>,
+    lids: Box<[Vec<Longident>]>,
+    layouts: Box<[Layout]>,
+    locations: DeclLocTable,
+}
+
+pub(crate) struct ViewTable {
+    /// 64 shards; a shard maps a path (compared with `Path::same`) to its cell.
+    shards: Box<[Mutex<AHashMap<SamePathKey, Arc<ViewCell>>>]>,
+    next_id: AtomicU32,
+}
+
+struct ViewCell {
+    id: ViewId,
+    /// The forced declaration of the module at this path (a child of its
+    /// parent's view), and the units forcing it loaded.
+    decl: OnceLock<Option<Arc<ViewModule>>>,
+    /// The components of the module at this path.
+    view: OnceLock<Option<Arc<ModuleView>>>,
+}
+
+pub(crate) struct ModuleView {
+    id: ViewId,
+    access_path: Path,
+    /// The module's signature as seen through `access_path`.
+    signature: Arc<Signature>,
+    index: SignatureIndex,
+    values: Box<[Option<ViewValue>]>,               // by signature item
+    constructors: AHashMap<Name, Arc<Vec<ConstructorDescription>>>,
+    labels: AHashMap<Name, Arc<Vec<LabelDescription>>>,
+    label_families: AHashMap<Name, LabelArrayRef>,
+    modtypes: AHashMap<Name, (Ident, ModtypeDeclaration)>,
+    /// Child modules by name: identifier, runtime position, the unforced
+    /// declaration. Forcing one is `ViewCell::decl` of the child's path.
+    children: AHashMap<Name, ViewChild>,
+    alias_sources: SmallVec<[Path; 1]>,
+    /// Everything adopting this view does to a compilation.
+    units: Box<[Name]>,        // units its build loaded
+    nested: Box<[ViewId]>,     // views its build adopted
+    graph: Option<u32>,        // base of the nodes its build created
+}
+```
+
+`UnitSlot` is today's `PersSlot` plus the unit's `SignatureIndex`.
+`ViewValue` is a value's runtime position, identifier and description;
+`ViewChild` a child module's identifier, runtime position and unforced
+declaration; `ViewModule` a forced child declaration with the units forcing
+it loaded. `PredefView` is the predefined declarations and their label
+arrays. `ViewKey` is a persistent-rooted path compared with `Path::same`
+(today's `QualifiedModuleComponentsCacheKey` when `is_worker_shareable`).
+`ViewScratch` is a `TypeContext` owned by a worker thread that no
+compilation uses, with its own persistent environment over the registry.
+
+No new `unsafe`. Every cross-thread write is `OnceLock::set` on a value that
+is complete, an atomic counter, or a short `Mutex` section around a hash
+table.
+
+Index space: a handle has 30 payload bits. `MAX_SHARED_INDEX` goes from
+2^26 to 2^28 (262,144 pages of 1,024 indices; the table of page slots is
+4 MB of address space, touched as pages are used). The application uses
+3,061 pages for 2,789 unit graphs; about 4,060 view graphs add at least as
+many pages again. At 2^26 an application ten times the size would not fit,
+and the fallback that handles overflow today is the worker-store tier, which
+is deleted. Running out of index space becomes a reported fatal error.
+
+#### J.3.2 Who appends and who reads
+
+| Data | Built by | Where it is built | Becomes visible | Read by |
+|---|---|---|---|---|
+| A unit's graph | the first worker that needs the unit this build (after W8: the worker that checked it) | plain vectors owned by that worker | `OnceLock::set` of its page slots, then of `UnitSlot::ps` | any thread |
+| A view's graph and its `ModuleView` | the first worker that needs the path | that worker's scratch context (local nodes), then one export walk into plain vectors | page slots, then `ViewCell::view` | any thread |
+| The predefined environment's graph | the first worker of the build | scratch, then export | page slots, then `World::predef` | any thread |
+| Opened layers of a view (`env::OpenedLayers`, `Rc` tables) | each worker, once per view it opens | worker-local, from the frozen view; allocates no type node | never leaves the worker | that worker |
+| A compilation's adopted views, exception table, local nodes | the compilation | the worker's checker context | never | that compilation, and the backend for that module |
+
+Nothing appends to a graph that another thread can see. "A node pool that
+several threads append to and read" (#166) is this: several threads build
+graphs, each in vectors only it owns, and the page table is where they meet.
+A reader can hold a frozen handle only if it read it from a published
+`ModuleView`, `PersStruct` or graph, and those are set after the pages
+(`OnceLock::set` is a release store, `get` an acquire load), so a reader
+never reaches an unpublished page.
+
+A waiter never deadlocks: thread A builds view V1 and needs V2 while thread
+B builds V2. B does not need V1, because "needs" is the nesting of today's
+builds, which terminate on one thread and so have no cycle. `get_or_build`
+calls `OnceLock::get_or_init`; a second thread asking for the same cell
+blocks until the first finishes.
+
+#### J.3.3 The cost of every operation
+
+Instruction counts are from J.1's pool probe where a number is given, and
+steps otherwise.
+
+**Reading a frozen node** (`TypeContext::desc(r)` with the frozen tag): test
+the tag; load `frozen_writes.any` and test it (2 instructions); load the
+page slot; test the `OnceLock` state; load the graph's base; subtract; bounds
+test; copy 24 bytes. 27 instructions measured for the pool part (with call
+and return), against 40 today with the overlay test in front. No lock, no
+atomic write, no hash.
+
+**Reading a frozen node this compilation has written** (`any` is true): one
+probe of `frozen_writes.descs` (a hash map keyed by the handle), then the
+read above on a miss. Only compilations that write frozen nodes pay it, and
+only while the table is not empty: 2,784 `matches` probes, all restored, and
+about 70 lasting writes in a build of 3,845 contexts once compression no
+longer writes (J.1).
+
+**Appending a node while building a graph**: `Vec::push` on a vector the
+builder owns. 13 instructions per node measured.
+
+**Publishing a graph** of *n* nodes: one `fetch_add` on `next_index`; six
+vectors turned into boxed slices; *n* nodes moved into place with their ids
+(about 10 instructions each); one `Arc` allocation; one `OnceLock::set` and
+one `Arc` clone per 1,024 indices (one page for most graphs: 199 indices per
+graph on average).
+
+**Publishing a module** (after W8): one walk over the signature that visits
+each exported node once (one probe of the handle map, one descriptor read,
+one push), 368,428 nodes on the application; then the hashes and the
+publication above. Today the same module is copied three times first (about
+1.0 M nodes, J.1) and walked again by `serialize_pers_struct`.
+
+**Looking a value up through a view** (`M.x`, steady state): probe the
+compilation's adopted-view map with the path; probe `index.values` with the
+name; read `values[i]`. The result holds frozen handles; `instance` then
+copies its generic nodes as it does today. No forcing test, no replay test,
+no allocation. Today the same lookup probes the compilation's component
+cache, probes `store_pieces` by name, probes the touched-piece set, runs
+`build_in_store` around the cached read (three vectors taken and put back),
+probes `component_values` and clones a `ValueDescription`.
+
+**Adopting a view** (first use of a path in a compilation): the visibility
+test of the root unit (`unit_visible`, as today); lock one shard and probe
+it; `OnceLock::get`; insert the view in the compilation's map; for each name
+in `units`, `PersistentEnv::replay_cached_pers_struct`; for each id in
+`nested`, the same steps unless it is adopted already; one push per alias
+source into the compilation's reverse index. Today this is the replay of a
+piece: 76,929 replays, 352,841 alias-source registrations and 51,394
+prepares per build.
+
+**Building a view** (once per build and path): on the worker's scratch
+context, the substitution today's builders do (`Subst` with the prefix of
+the access path, strengthening for an alias), for the whole signature; the
+constructor and label descriptions of its types; one export walk; one
+publication. Substitution costs about 1,000 instructions per copied node
+with its per-item work today (1.84 G for about 1.8 M nodes at one worker).
+J.6 bounds the total.
+
+**Looking up through an opened module** (`open M`, then `x`): the lookup in
+the layer tables of `types/env.rs`, unchanged. The entry holds the view's
+frozen value. The layer tables of a view are built once per worker that
+opens it: one hash insert per item, no type node.
+
+**A functor application or `include`**: unchanged in mechanism (B.6). The
+substituted copy is made in the including compilation, as local nodes. Its
+source nodes are frozen and are read as above. A functor applied to
+persistent paths is still built per compilation (`is_worker_shareable` is
+false for `Papply` today). W5 adds a counter for these; it decides whether
+they become world views later.
+
+#### J.3.4 Memory
+
+A frozen node is 32 bytes, as today. Units: 358,825 nodes, 11.5 MB, plus
+payload arrays. Views: built once, at most one substituted copy of each
+signature a build reaches by each path (J.6: at most about 0.5 M nodes,
+16 MB), against 1.15 M nodes in eight worker stores today (37 MB) and their
+per-worker tables. One scratch context per worker, reset after each view
+build. After W10 a worker keeps its checker context's capacity between
+modules: about the largest module it has checked. `reset_for_module`
+releases any vector whose capacity is more than four times what the last
+module used.
+
+#### J.3.5 What is frozen when, and how a frozen node is never written
+
+A graph's storage is immutable Rust data (`Box<[SharedTypeNode]>`, no
+`Cell`), so "never written" is a property of the types. What I.4 asks for is
+that no *read* pays for the writes the checker still wants to make.
+
+Three kinds of write reach frozen nodes today (J.1):
+
+1. **`matches`** (2,784 links and 6,396 level writes, all undone). It
+   unifies a declaration's type with a probe and backtracks.
+2. **Unification of a frozen node that is not generic** (55 per build, and
+   one of a generic node). OCaml makes the same write to its own copy of the interface, and
+   every later use in that compilation sees it, so it must stay visible to
+   this compilation and to no other.
+3. **Path compression** in `repr_chain` (73 per build) and the marks of
+   copy sessions on mutability cells.
+
+The design:
+
+```rust
+/// This compilation's writes to frozen cells. Empty in almost every
+/// compilation; `any` is false exactly when every table is empty.
+struct FrozenWrites {
+    any: Cell<bool>,
+    descs: RefCell<AHashMap<TypeExprRef, TypeDesc>>,
+    levels: RefCell<AHashMap<TypeExprRef, i32>>,
+    memos: RefCell<AHashMap<AbbrevMemoRef, AbbrevMemo>>,
+    row_fields: RefCell<AHashMap<RowFieldRef, Option<RowField>>>,
+    mutabilities: RefCell<AHashMap<MutabilityRef, FieldMutability>>,
+}
+```
+
+- A write to a frozen cell inserts into the table and sets `any`. When a
+  snapshot is live, the journal entry of such a write says whether the cell
+  had an entry before it (`TypeMutation::FrozenAbsent(cell)` in place of the
+  old value when it had none; descriptors have no equality to compare
+  with). Undoing that entry removes the cell from the table; when the last
+  entry of the last table goes, `any` is cleared. So `matches` needs no
+  replacement: its restore empties the table and the reads after it take the
+  fast path again. This is exact for kinds 1 and 2: the compilation sees
+  what it sees today.
+- `repr_chain` does not compress through a frozen node: it returns the
+  representative and writes nothing to frozen handles. Compression has no
+  meaning beyond speed, and a frozen chain is one or two links long.
+- Copy sessions keep their marks in the `CopySession` they already have
+  (`saved_mutabilities`), not in the cells.
+- Type marking: `generalizable_at_level` (`types/typecore.rs`) is the only
+  caller of `mark_type_node` and `unmark_type`. It gets a
+  `type_marks::TypeNodeTable`; the two functions are deleted.
+
+The seven paged overlays, the `store_descs` side arena and the mutability
+overlay go. I.3.4's invariant 5 becomes: a frozen cell is written only
+through `FrozenWrites`.
+
+#### J.3.6 Determinism
+
+B.8 holds, with these additions.
+
+1. A view is a function of its key. This is enforced by the builder's
+   signature (it receives the world and a scratch context, never a
+   compilation's context or environment), not by poisoning. Whichever worker
+   builds it, the content is the same.
+2. What depends on the schedule: page numbers, `ViewId`s, the stamps of
+   binders created in view builds (`next_store_stamp`, already
+   schedule-dependent since #166), node ids. None may be ordered, hashed
+   into output or printed. `ViewId` has no `Ord`. `nested` and `units` are
+   in build order, which is a function of the key.
+3. A compilation reads a world fact only through a view it has adopted. It
+   never asks "has some worker built this view" (that answer depends on the
+   schedule). Tables that today hold replayed registrations
+   (`component_alias_sources`, `component_paths_by_alias_source`,
+   `qualified_module_decl_cache`) become reads of adopted views; adoption is
+   transitive over `nested`, exactly as replay is over nested pieces.
+4. A view build that fails (a unit it needs is missing or inconsistent)
+   stores the failure in the cell. Every adopter gets the same failure and
+   reports it at its own location.
+
+The tests that prove it:
+
+- `scripts/test_worker_determinism.py` (W1): builds `tests/tests` with 1 and
+  with 8 workers, and with two values of `RESCRIPT_WORLD_SHUFFLE` (which
+  makes `World::reserve` skip a seeded number of pages before each
+  reservation, so page numbers differ between runs), and compares every
+  generated file, every diagnostic, the canonical signatures and the stored
+  interfaces. Run in CI; run on the application before each slice merges.
+- `view_is_built_once_under_contention` (W4): 16 threads ask for one path
+  behind a barrier; the build counter is 1 and all 16 hold the same `Arc`.
+- `RESCRIPT_WORLD_VERIFY=1` (W4): every adoption rebuilds the view on the
+  adopting worker's scratch context and compares its canonical print with
+  the published view's, aborting on a difference. One CI run of
+  `tests/tests` with 8 workers uses it. This tests point 1 directly.
+
+#### J.3.7 Alternatives rejected
+
+| Alternative | Why not |
+|---|---|
+| One append-only pool of write-once cells that all threads append to (P6 step 4's test-only log; B.3's `OnceLock` per slot) | 41 instructions per read against 27, 64 per append against 13, and 8 more bytes per node (measured). The per-read cost is the size of the overlay test this plan removes. It also needs the same publication order to keep readers away from unwritten cells, so it buys nothing |
+| A lock around a growing vector | 40 instructions per read, two of them atomic writes to a cache line all workers share, on 40 M reads |
+| A second handle scheme for views (view id and offset) | a third tier of handles and a table lookup per read; the page table already maps an index to its owner |
+| B.4's `Segment` with its own page list | the same data as `SharedGraph` with one more load per read |
+| Shared view cores with per-worker forcing tables and pieces that cross threads (`DEPENDENCY_COMPONENTS.md`, "Original slices") | keeps replay, guards and poisoning and adds a fourth mechanism; that note already found it needs process-wide forcing to stay consistent |
+| Per-item `OnceLock`s inside a world view (B.6: one item on first use) | one small graph and one page per forced item (56,497 forcings on the application), and forcing that nests across threads. It saves at most the surplus of building whole views, which J.6 bounds. Revisit only if W4's counter `world_view_nodes` shows the surplus above 0.2% of the build |
+| Absolute paths written into each unit's graph (F.7) | it changes what `ps_sig`, the inclusion check of an interface, genType's raw signature and the stored format see, to save one substitution of each unit's signature per build (at most 368,428 nodes). With whole views built once that substitution is already paid once. Revisit with W5's counters |
+| Rewriting `matches` to probe on copies | not needed: the exception table is empty again after its restore. It would also not cover the lasting writes of J.3.5, kind 2 |
+| Views as positions in P6's binding log | the log is dropped (H.2.11): 5.05 G instructions for what the tables do in 2.65 G |
+
+### J.4 The slices
+
+Every slice is one pull request against trunk that leaves all tests passing
+and the generated output identical. "Lines" is added plus deleted, an
+estimate. The gates of every slice, not repeated below: `cargo build` and
+`cargo test` for `compiler-rust` and `rewatch`; CI green, including the four
+output parity suites and the instruction count;
+`scripts/compare_checker_builds.py` with no difference on `tests/tests` and
+on the application; from W1 on, `scripts/test_worker_determinism.py`; the
+stored interfaces of base and candidate byte-identical on both projects
+(`scripts/test_stored_interface_determinism.py BASE_DIR CANDIDATE_DIR`),
+which also covers the unit reads the incremental build records.
+
+A slice that removes a mechanism removes it in the same pull request. Where
+an old and a new path exist side by side, the choice between them is the
+kind of key, never a flag or an environment variable, and the slice that
+deletes the old one is named.
+
+| # | Slice | Lines | Depends on | Less capable model | Saving, one worker | Saving, 8 workers |
+|---|---|---|---|---|---|---|
+| W1 | Worker-count and page-shuffle determinism gate; world counters | 400 | - | yes | 0 | 0 |
+| W2 | Frozen writes in one exception table; delete the overlays | 700 | W1 | yes | 0.3% (est.) | same |
+| W3 | The world object; unit table; frozen predefined environment | 1,200 | W2 | no | about 0 | below 0.1% |
+| W4 | `ModuleView` and the view table for paths without an alias | 1,500 | W3 | no | with W5 | with W5 |
+| W5 | Alias and namespace views; adoption replaces replay | 1,500 | W4 | no | 0.5-1.0% (est.) with W4 | plus 1.5-2.2% (est.; 2.4% measured as the bound) |
+| W6 | Delete store builds, pieces, replay, guards and poisoning | 1,500, nearly all deletions | W5 | yes | 0.7% (measured on `tests/tests`) | same |
+| W7 | Delete the worker-store tier of handles and `thread_store.rs` | 1,200, mostly deletions | W6 | yes | below 0.1% | same |
+| W8 | Publication is one export walk; delete the three save copies | 900 | #154, W3 | no | 0.9-1.4% (est.) | same |
+| W9 | One checker context per worker, reset between modules | 900 | W7 | yes | 0.2-0.4% (est.) | same |
+| W10 | The opened initial environment once per worker | 500 | W9 | no | 0.3% (est.) | same |
+| W11 | The world outlives a build in watch mode | 800 | W7 | no | 0 on a clean build | 0 |
+
+#### W1. Determinism gate and world counters
+
+- **Files.** `scripts/test_worker_determinism.py` (new),
+  `compiler-rust/src/types/shared_store.rs` (`SharedTypePool::reserve`),
+  `compiler-rust/src/perf_counters.rs`, `compiler-rust/src/types/context.rs`
+  (two counter calls).
+- **Added.** The script of J.3.6. `RESCRIPT_WORLD_SHUFFLE=<seed>`: `reserve`
+  skips `hash(seed, reservation number) % 4` pages before a reservation.
+  Counters under `RESCRIPT_COMPILER_COUNTERS`: `frozen_reads` (descriptor and
+  level reads of stored nodes) and `frozen_writes` by kind (the rows of
+  J.1's write table), printed as one `[compiler-counter] frozen ...` line.
+- **Deleted.** Nothing.
+- **Grep.** `rg -n 'RESCRIPT_WORLD_SHUFFLE' compiler-rust/src scripts` gives
+  the read in `shared_store.rs` and the uses in the script.
+- **Tests.** A unit test that two pools with different seeds give different
+  bases for the same sequence of publications and that reads still resolve.
+  The script exits 0 on trunk. Step count: the `frozen` counter line on
+  `tests/tests` reports the numbers of J.1 within 2% (2,784 restored links).
+- **Instructions.** 0 (one predictable branch in `reserve`; counters are
+  behind the existing cached flag).
+- **Less capable model.** Yes: a script modelled on
+  `scripts/test_stored_interface_determinism.py` and
+  `scripts/compare_checker_builds.py`, and two counters modelled on
+  `perf_counters::store_views`.
+
+#### W2. Frozen writes in one exception table
+
+- **Files.** `types/context.rs`, `types/thread_store.rs` (`PagedOverlay` and
+  its test), `types/typecore.rs` (`generalizable_at_level`),
+  `types/btype.rs`, `types/mod.rs`, `types/ctype.rs` only if a copy session
+  writes a persistent mutability cell from there.
+- **Added.** `FrozenWrites` (J.3.5) and its use in `store_desc`,
+  `store_level`, `write_desc_raw`, `write_level_raw`, `read_abbrev`,
+  `with_abbrev`, `write_abbrev`, `get_row_field`, `write_row_field_raw`,
+  `get_mutability`, `write_mutability_raw`. `repr_chain` skips compression of
+  stored nodes that the current store build does not own.
+- **Deleted, same slice.** Fields `store_desc_overlay`,
+  `store_level_overlay`, `store_abbrev_overlay`, `store_row_field_overlay`,
+  `shared_desc_overlay`, `shared_level_overlay`, `shared_abbrev_overlay`,
+  `mutability_overlay`, `store_descs`; `set_shared_desc`; `PagedOverlay`;
+  `btype::mark_type_node`, `btype::unmark_type`.
+- **Grep.** The "Overlays" and "Type marking" rows of J.2.
+- **Tests.** `frozen_read_does_not_probe_when_nothing_was_written`: a
+  test-only counter of exception-table probes stays 0 over 1,000 reads of
+  frozen nodes. `matches_on_frozen_types_leaves_no_exception`: after
+  `ctype::matches` on two frozen types, `any` is false and every table is
+  empty. `lasting_link_on_frozen_node_is_seen_by_later_reads_only_here`: two
+  contexts over one shared graph; a link written in one is read back there
+  and not in the other. The existing `store_access_and_overlay_backtracking`
+  test is rewritten against the table, not deleted.
+- **Instructions.** -0.3% on the application, estimated: `store_desc` and
+  `store_level` are 1.13% of the build (measured), and the overlay test is 13
+  of the 40 instructions of a stored read in isolation (measured). Verify
+  with `scripts/bench_project.sh`.
+- **Less capable model.** Yes. One file carries the change, the functions are
+  named, and the semantics are those of a hash map in place of a paged
+  array. The one judgement (when `any` is cleared) is specified.
+
+#### W3. The world object
+
+- **Files.** `types/world.rs` (new), `types/shared_store.rs`,
+  `types/thread_store.rs`, `types/env.rs` (`initial_env`),
+  `types/context.rs`, `cmi/persistent_env.rs` and `cmi/portable_types.rs`
+  (the callers of `SharedTypePool::pers_struct` and
+  `ThreadTypeStore::pers_struct`), `types/decl.rs` (`LabelArrayRef`).
+- **Added.** `World` with the pool, the unit table and `predef`; a
+  `World::current()` for the build generation, replacing
+  `shared_store::pool_for`. `UnitSlot` holds the `PersStruct` and its
+  `SignatureIndex`, built once per build. `world::freeze`: the export walk
+  from a scratch context into a `SharedGraph`, over a trait
+  (`FrozenExport`: enumerate the type handles of a value, then rewrite them)
+  implemented for `Signature`, `ValueDescription`, `TypeDeclaration`,
+  `ConstructorDescription`, `LabelDescription` and `ModuleDeclaration`. If
+  #154 has merged, the signature part is its `cmi/signature_builder.rs`.
+  `ViewScratch`: one `TypeContext` per worker thread that no compilation
+  uses. The predefined environment's declarations are built on the scratch
+  context, frozen once per build, and each worker builds its `Env` over them
+  once.
+- **Deleted, same slice.** `ThreadTypeStore::{pers, shared_signatures,
+  signature_indexes, initial_env}` and their methods (`pers_struct`,
+  `insert_pers_struct`, `owns_signature`, `signature_index`,
+  `cached_initial_env`, `publish_initial_env`); `PersEntry`;
+  `shared_store::{POOL, pool_for}`; the `build_in_store` call in
+  `env::initial_env`.
+- **Grep.** `rg -n 'cached_initial_env|publish_initial_env|owns_signature|pool_for' src`
+  gives 0; `rg -n 'build_in_store' src/types/env.rs` gives 0.
+- **Tests.** `predef_is_frozen_once_per_build`: 8 threads take the initial
+  environment; a build counter is 1; every predefined type's nodes carry the
+  frozen tag. `freeze_keeps_sharing_and_levels`: a scratch type with one node
+  at two positions and one non-generic node exports to as many nodes with
+  the same sharing and levels (I.3.3 rule 5). Step count: with the counters
+  on, `tests/tests` reports one predefined-environment build per build, not
+  one per worker.
+- **Instructions.** About 0 with one worker; `initial_env` is under 0.1%.
+- **Less capable model.** No. The export walk decides what a view may hold
+  and has to keep I.3.3's rules for every payload kind; the slices after it
+  rest on that.
+
+#### W4. Module views for paths without an alias
+
+- **Files.** `types/module_view.rs` (new), `types/world.rs` (`ViewTable`),
+  `types/typecore.rs` (`with_resolved_module_components_for_path_with_cache_mode`,
+  `build_shared_persistent_root_components`,
+  `build_module_components_from_parent_path`), `types/env_lazy.rs`,
+  `types/context.rs` (`adopt_view`, the adopted-view map),
+  `cmi/persistent_env.rs` (`open_components_into_env`), `perf_counters.rs`.
+- **Added.** `ModuleView`, `ViewCell`, `ViewTable::get_or_build`,
+  `build_module_view` for a key whose path is a persistent unit or a chain of
+  structure-typed children of one (no alias, no functor application on the
+  path), `TypeContext::adopt_view`, per-worker opened layers built from a
+  view. A two-case type for what a lookup callback receives
+  (`Components::World(&ModuleView)` or
+  `Components::Local(&QualifiedModuleComponents)`) with the lookup methods
+  both need. An item whose types name nothing the substitution rewrites, and
+  whose nodes are all generic, is taken from the unit's graph without a
+  copy; the counter `world_view_nodes` reports copied and shared nodes.
+  `RESCRIPT_WORLD_VERIFY` (J.3.6). Counters `world_views`
+  (built, adopted) replace `store_views` for these keys.
+- **Deleted, same slice.** `build_shared_persistent_root_components`; for
+  keys of this kind, the store build, the piece and the entry in
+  `ThreadTypeStore::shared_components`. The first commit of the slice is an
+  inventory, in the pull request, of every read of compilation state that a
+  view build can reach today (the named `poison_store_build_for` reasons and
+  the five `StoreEffect` kinds), each with its world replacement.
+- **Old path still present.** Store builds, for keys with an alias or a
+  functor application on the path. W5 moves the alias keys; W6 deletes the
+  mechanism.
+- **Grep.** `rg -n 'build_shared_persistent_root_components' src` gives 0.
+  `rg -n 'Rc<|RefCell<|Cell<|OnceCell<|Mutex<' src/types/module_view.rs`
+  gives 0.
+- **Tests.** `view_is_built_once_under_contention` (J.3.6).
+  `second_lookup_through_a_view_allocates_nothing`: after one lookup of
+  `M.x`, a second leaves `type_expr_count`, the view-build counter and the
+  adoption counter unchanged. `adoption_loads_the_views_units_once`.
+  `super_errors_multi` fixtures that print a type through a nested module of
+  another unit. Fixture 8 of I.2.3 as a multi-file test.
+- **Instructions.** See W5; the two are measured together. Building whole
+  views can cost more than forcing by name with one worker (J.6). If
+  `tests/tests` rises above the 0.1% gate at this slice, the commit carries
+  an `Instruction-count-increase:` trailer that names W5 and W6 as where it
+  is repaid, with the 8-worker cachegrind count beside it.
+- **Less capable model.** No. It replaces the lazy tables' semantics with a
+  different evaluation order and must show the order is unobservable (which
+  unit loads happen, D.8's lookup-time warnings, D.10's printed paths).
+
+#### W5. Alias and namespace views; adoption replaces replay
+
+- **Files.** `types/module_view.rs`, `types/typecore.rs`
+  (`qualify_resolved_signature_for_access_path_inner`,
+  `build_module_signature_for_path`), `types/env_lazy.rs`
+  (`strengthen_view_types`, `lookup_qualified_module_shared_inner`),
+  `cmi/persistent_env.rs` (`freshen_component_module_declaration_bound_idents`,
+  the alias-rewrite helpers), `types/context.rs`.
+- **Added.** `build_module_view` for a path that crosses a module alias
+  (including the alias modules of a namespace and `Stdlib.Array`): the
+  target's signature strengthened and prefixed as B.6 says. `ViewCell::decl`
+  for forced child declarations. `alias_sources`, `units` and `nested` in the
+  view; `adopt_view` applies them. A counter of component views built per
+  compilation for `Papply` paths.
+- **Deleted, same slice.** `ThreadTypeStore::{shared_components,
+  publish_shared_components}`; the fields `component_alias_sources`,
+  `component_paths_by_alias_source` and `qualified_module_decl_cache` of
+  `TypeContext` and their `register_*` functions (their readers read adopted
+  views); `StoreEffect::{RegisterComponents, RegisterAliasSource,
+  RegisterQualifiedModuleDecl, TriggerRename}`; the worker-shared branch of
+  `with_resolved_module_components_for_path_with_cache_mode`;
+  `shared_components_enabled` and `RESCRIPT_NO_SHARED_COMPONENTS`. After this
+  slice no store build starts: the code that could start one (`force_entry`
+  and the other callers of `build_in_store`) is unreachable, because no
+  table is store-resident, and W6 deletes it.
+- **Grep.** The "registration tables" rows of J.2, and
+  `rg -n 'shared_components|publish_shared_components' src` gives 0. With
+  the counters on, both projects report `store_build_count=0`.
+- **Tests.** `adoption_is_transitive_and_happens_once`. Step count on the
+  application with the counters on: views built equals distinct views
+  (4,060, not 15,853); no replay line. `super_errors_multi` fixtures of F.7's
+  gate (a type printed through a namespace alias and through a local alias
+  of another unit). The 1-against-8-worker instruction comparison of J.1,
+  repeated: the difference falls from 1.85 G.
+- **Instructions.** With W4: -0.5% to -1.0% with one worker, estimated
+  (replay is 0.73% measured and goes; adoption and the surplus of whole
+  views come back). With 8 workers a further -1.5% to -2.2%, estimated from
+  the measured 2.4% that workers repeat.
+- **Less capable model.** No: G.3's judgement (what of a lazily renamed
+  signature is observable) and the alias strengthening rules.
+
+#### W6. Delete store builds
+
+- **Files.** `types/context.rs`, `types/env_lazy.rs`, `types/thread_store.rs`,
+  `types/typecore.rs`, `types/decl_loc.rs`, `cmi/persistent_env.rs`,
+  `perf_counters.rs`, `docs/DEPENDENCY_COMPONENTS.md` (a note that the
+  mechanism is gone).
+- **Added.** Nothing.
+- **Deleted.** `build_in_store`, `build_in_store_guarded`,
+  `build_in_store_with_guards`, `in_store_build`, `suspend_store_build`,
+  `store_build_owns`, `store_build_owns_row_field`, `check_store_desc`,
+  `check_store_row_field`, `store_desc_lists`; `StorePiece`, `StoreEffect`,
+  `EMPTY_STORE_PIECE`, `NEXT_STORE_PIECE_ID`, `touch_store_piece`,
+  `replay_store_piece`, `record_store_effect`, `store_guards_hold`;
+  `poison_store_build`, `poison_store_build_for`, `poison_store_build_slow`
+  and every call; the fields `store_build_depth`, `store_build_type_start`,
+  `store_build_row_start`, `store_build_poisoned`, `store_build_effects`,
+  `store_build_guards`, `touched_store_pieces`, `local_stored_components`;
+  in `env_lazy.rs` `force_entry`, `forget_entry`, `make_private`, `in_store`,
+  `store_pieces`, `check_signature_store_resident` and the piece halves of
+  `FunctorResultSubst` and `opened_layers`; in `thread_store.rs`
+  `STORE_BUILD_ACTIVE`, `store_build_active`, `set_store_build_depth`,
+  `fresh_store_per_compilation`; `store_debug_enabled`;
+  `perf_counters::store_views`.
+- **Grep.** The "Store builds", "Replay", "Poisoning and guards" and
+  "switches" rows of J.2.
+- **Tests.** The tests of the deleted functions are deleted with them and
+  listed in the pull request; no other test changes. Step count: the
+  instruction count of `tests/tests` falls by at least 0.5%.
+- **Instructions.** -0.69% on `tests/tests`, measured for the two read paths
+  alone (J.1); the write paths and `record_type_mutation` add to it.
+- **Less capable model.** Yes: after W5 nothing reaches the mechanism, the
+  compiler finds every remaining use, and the acceptance is the greps.
+
+#### W7. Delete the worker-store tier
+
+- **Files.** `types/type_expr.rs`, `types/context.rs`,
+  `types/thread_store.rs` (deleted), `types/shared_store.rs`,
+  `types/type_marks.rs`, `types/variant_runtime.rs`, `types/decl_loc.rs`,
+  `types/ctype.rs`, `cmi/portable_types.rs`, `rewatch/src/build/compile.rs`
+  (`begin_build`).
+- **Added.** `FROZEN_REF_TAG` (bit 31) as the only tier tag;
+  `TypeExprRef::is_frozen`. `MAX_SHARED_INDEX = 1 << 28`. Pool exhaustion is
+  a fatal error. `world::begin_build` in place of `thread_store::begin_build`.
+- **Deleted.** `thread_store.rs` whole (`ThreadTypeStore`, `StoreLease`,
+  `current`, `next_store_stamp` moves to `world.rs`); `STORE_REF_TAG`,
+  `SHARED_REF_TAG`, `SHARED_REF_BITS`; `from_store_index`, `store_index` and
+  `is_shared` on `TypeExprRef`, `RowFieldRef`, `AbbrevMemoRef`, `LayoutRef`;
+  `DeclLocKind::Store`; the worker-store branch of `internalize_pers_struct`
+  (a graph that cannot be shared is internalised into the compilation, the
+  third branch that exists today); the `store` field of `TypeContext`.
+- **Grep.** The "Per-worker stores" and "worker-store tier" rows of J.2.
+- **Tests.** `handles_have_two_tiers`: a size and bit-layout test for
+  `TypeExprRef`. `unshareable_graph_is_internalised_locally`. The three
+  `thread_store` tests are deleted with the file.
+- **Instructions.** Below 0.1%: one test less on reads of frozen nodes.
+- **Less capable model.** Yes: renames and deletions that the compiler
+  checks, with one behaviour to keep (the local fallback) that has a test.
+
+#### W8. Publication is one export walk
+
+- **Files.** `driver.rs` (`compile_preprocessed_structure_in_process_until_js`),
+  `cmi/persistent_env.rs` (`freshened_signature_bound_idents_from_kind`,
+  `extract_module_update`, `register_in_memory_signature`),
+  `cmi/portable_types.rs`, `cmi/signature_builder.rs` (from #154),
+  `gentype/`.
+- **Added.** The module's signature goes from the checker's nodes into its
+  frozen graph in one walk (B.4 step 1 with I.3.3 rule 5; H.1.6 gives the
+  order of operations). The walk applies the path finalisation and the
+  generic level of `Subst.for_saving` as it copies. The raw signature genType
+  reads is made from the frozen graph, and only for a module in the genType
+  closure (`gentype_closure` counters).
+- **Deleted, same slice.** The two `copy_lookup_signature_for_subst` calls
+  that save a signature in `driver.rs`; the save kind of
+  `freshened_signature_bound_idents_from_kind`.
+- **Grep.** The "three copies" row of J.2.
+- **Tests.** `scripts/test_signature_equality.py`: fingerprint, item hashes
+  and stored bytes equal to the base on every unit. Fixtures 7b and 8 of
+  I.2.3. Step count: `lookup_copy` nodes on the application fall by about
+  1.0 M; `signature_freshen kind=save_signature` is gone.
+- **Instructions.** -0.9% to -1.4%, estimated from measured shares: the save
+  callers are 55% of `copy_lookup_signature_for_subst`'s 1.63% by nodes and
+  70% of the freshening's 0.78% by items. This is the rest of P3, not of P4
+  or P5.
+- **Less capable model.** No, until #154 has merged: the walk is #154's and
+  its final shape decides the steps. Then H.1 plus this entry may be enough;
+  decide when writing that prompt.
+
+#### W9. One checker context per worker
+
+- **Files.** `types/context.rs`, `driver.rs` (`fresh_type_context` and its
+  callers), `types/tast_arena.rs`, `rewatch/src/build/compile.rs` only if the
+  worker loop has to own the slot.
+- **Added.** `TypeContext::reset_for_module`: it destructures the context
+  with every field named and no `..`, and clears each field or keeps it. A
+  thread-local slot holding the worker's context between modules. A context
+  that the backend or editor tooling still holds is not returned to the
+  slot. In debug builds the node arrays are truncated, so a handle of the
+  previous module panics on use.
+- **Deleted, same slice.** The construction of a `TypeContext` per module in
+  the build path (`fresh_type_context` stays for the tooling entry points
+  and tests).
+- **Grep.** The last two "Exists" rows and the last "Gone" row of J.2.
+- **Tests.** `reset_context_checks_like_a_fresh_one`: for each pair of
+  modules of a fixture set, checking B after A on a reset context gives the
+  same canonical signature, diagnostics and counter line as on a fresh one.
+  `reset_keeps_capacity_and_bounds_it`. Step count: with the counters on,
+  `type_contexts` on `tests/tests` is the number of workers, not of modules.
+- **Instructions.** -0.2% to -0.4%, estimated: teardown of the three
+  per-module structures is 0.98% (measured), most of it their contents,
+  which a reset still clears; the saving is the containers and their
+  regrowth.
+- **Less capable model.** Yes, after W7 has removed the store fields. The
+  exhaustive destructuring turns a forgotten field into a compile error, and
+  the gate is output identity on every suite.
+
+#### W10. The opened initial environment once per worker
+
+- **Files.** `driver.rs` (`in_process_type_check_context`,
+  `load_pervasives`), `types/env.rs`, `cmi/persistent_env.rs`.
+- **Added.** Per worker, the environment after `initial_env` and the opens
+  of `load_pervasives`, keyed by what it depends on (the open modules,
+  `nopervasives`, the JSX settings, the visible package roots). A module
+  starts from a clone and applies the per-compilation part: adopting the
+  opened views and creating its open slots.
+- **Deleted, same slice.** The per-module rebuild of that environment.
+- **Tests.** `opened_prefix_is_built_once_per_worker_and_key`. The unused-open
+  and shadowing fixtures of D.7. Step count: `load_pervasives` falls from
+  0.33% of the build to under 0.05% in a callgrind run.
+- **Instructions.** -0.3%, estimated from the measured 0.41% of
+  `in_process_type_check_context`.
+- **Less capable model.** No: which effects of an `open` belong to the
+  compilation is a judgement about D.7 and D.8.
+
+#### W11. The world outlives a build in watch mode
+
+- **Files.** `types/world.rs`, `rewatch/src/build/compile.rs`,
+  `rewatch/src/build/tooling.rs`, `rewatch/src/watcher.rs`.
+- **Added.** B.7: the world persists across the builds of a watch session.
+  Before a build, the units about to be recompiled are retired with their
+  views (a view is retired when any unit in its `units` or its root is).
+  Page slots become `RwLock`-guarded for retirement only, or a retired
+  build's world is rebuilt from the kept units, whichever the measurement of
+  a no-change rebuild favours.
+- **Deleted, same slice.** The discard of every graph at `begin_build`.
+- **Tests.** The watch tests of F.12's gate. Step count: a rebuild after an
+  edit that changes no interface internalises one unit and builds no view.
+- **Instructions.** 0 on a clean build. It is a latency change for watch
+  rebuilds; measure with the watch benchmarks.
+- **Less capable model.** No: B.7's soundness argument (no live handle into
+  a retired page) has to be made against editor tooling that keeps typed
+  modules.
+
+### J.5 Worker prompts
+
+One prompt per slice marked "yes", ready to send. Whoever sends one appends
+the usual sections on repository, gates, pull request and report.
+
+#### J.5.1 Prompt for W1
+
+```text
+Task W1: the worker-count determinism gate and the world counters.
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections B.8, J.1, J.3.6 and
+J.4 (W1); scripts/test_stored_interface_determinism.py;
+scripts/compare_checker_builds.py; compiler-rust/src/types/shared_store.rs;
+the module `store_views` in compiler-rust/src/perf_counters.rs.
+
+Do, in three commits in this order:
+
+1. "Shuffle shared pool page numbers on request". In
+   SharedTypePool::reserve (types/shared_store.rs): when the environment
+   variable RESCRIPT_WORLD_SHUFFLE holds an integer seed, skip
+   hash(seed, n) % 4 pages before reservation number n (n counts
+   reservations in this pool; use a fixed-seed hash, not RandomState). Read
+   the variable once, through a OnceLock, like fresh_store_per_compilation
+   in types/thread_store.rs. Unit test in shared_store.rs: two pools built
+   with seeds 1 and 2 (pass the seed to the constructor so the test does not
+   set process environment) publish the same three graphs; at least one base
+   differs; every node reads back the same descriptor and level.
+
+2. "Count reads and writes of stored type nodes". In perf_counters.rs add a
+   module `frozen` beside `store_views`: counters for descriptor reads and
+   level reads of stored nodes, and for writes by kind: link on a shared
+   node, other descriptor write on a shared node, link on a worker-store
+   node, level write shared, level write worker-store, memo write, row-field
+   write, mutability write. Call them from TypeContext::store_desc,
+   store_level, write_desc_raw, write_level_raw, write_abbrev,
+   write_row_field_raw and write_mutability_raw (types/context.rs), only in
+   the branches that handle stored nodes not owned by the current store
+   build, and only when self.compiler_counters_enabled is true. Print one
+   line "[compiler-counter] frozen ..." from print_report; reset in reset.
+
+3. "Add the worker-count determinism test". scripts/test_worker_determinism.py:
+   with one `rescript` executable, build a project (default tests/tests)
+   from clean four times: RAYON_NUM_THREADS=1; RAYON_NUM_THREADS=8; 8 with
+   RESCRIPT_WORLD_SHUFFLE=1; 8 with RESCRIPT_WORLD_SHUFFLE=2. After each
+   build collect: every generated file outside lib/ (path and sha256), the
+   compiler log's diagnostics per source file in order, the canonical
+   signatures (`rescript build --dump sig`, as compare_checker_builds.py
+   does), and the stored interfaces (as test_stored_interface_determinism.py
+   reads them). Compare builds 2, 3 and 4 with build 1. Print the first
+   differences of each kind; exit 1 on any difference, 2 if a build fails.
+   Reuse the functions of the two existing scripts by importing them; do not
+   copy them.
+
+You must not: change what any counter that already exists reports; change
+`reserve` when the variable is unset (the only added work is one cached
+boolean test); touch .github/workflows (put the step to add in the pull
+request body: `python3 scripts/test_worker_determinism.py` next to the
+stored-interface determinism step).
+
+These count as failure: a script that compares fewer than the four kinds of
+output; a script that compares a build with itself; a shuffle that changes
+only the first reservation; counters that are called when the counters flag
+is off; a "frozen" line whose numbers on tests/tests do not include 2,784
+restored links on shared nodes (the `matches` probes of section J.1; report
+what you get).
+
+The reviewer will run: the script on trunk (exit 0); the script with a
+deliberate schedule dependence patched in (ordering one output by
+TypeExprRef value) and expect exit 1; `RESCRIPT_COMPILER_COUNTERS=1 rescript
+build` on tests/tests and read the frozen line; cargo test for both crates;
+the instruction count check (no change above 0.1%).
+```
+
+#### J.5.2 Prompt for W2
+
+```text
+Task W2: one exception table for writes to frozen type nodes; delete the
+overlays.
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections A.1, I.3.3 (rule
+6), I.4, J.1 (the table of writes to frozen nodes), J.3.5 and J.4 (W2). Then
+read in compiler-rust/src/types/context.rs: store_desc, store_level,
+write_desc_raw, set_shared_desc, write_level_raw, read_abbrev, with_abbrev,
+write_abbrev, get_row_field, write_row_field_raw, get_mutability,
+set_mutability, write_mutability_raw, repr_chain, begin_copy_session,
+end_copy_session, and the test store_access_and_overlay_backtracking.
+
+The change. Today a write to a stored node (a worker-store node the current
+store build does not own, or a shared-pool node) goes to one of eight
+per-compilation overlays, and every read of a stored node tests an overlay
+first. Replace all eight by one struct:
+
+    struct FrozenWrites {
+        any: Cell<bool>,
+        descs: RefCell<AHashMap<TypeExprRef, TypeDesc>>,
+        levels: RefCell<AHashMap<TypeExprRef, i32>>,
+        memos: RefCell<AHashMap<AbbrevMemoRef, AbbrevMemo>>,
+        row_fields: RefCell<AHashMap<RowFieldRef, Option<RowField>>>,
+        mutabilities: RefCell<AHashMap<MutabilityRef, FieldMutability>>,
+    }
+
+Rules:
+- `any` is true if and only if at least one of the five maps is not empty.
+- A read of a stored cell does `if self.frozen_writes.any.get() { probe the
+  map }` and otherwise reads the published value. No other test.
+- Undo must leave the table as it was before the write. TypeDesc, AbbrevMemo
+  and RowField have no equality, so do not compare values: when a write to
+  a stored cell is journaled (record_type_mutation, record_mutation,
+  record_row_field_mutation, set_mutability) and the cell has no entry in
+  the table, push a new journal entry `TypeMutation::FrozenAbsent(cell)`
+  (cell: a small Copy enum over the five handle kinds) instead of the entry
+  that carries the old value. Undoing FrozenAbsent removes the cell's entry.
+  When the cell already has an entry, journal the old value as today, and
+  undo re-inserts it. After any removal, if all five maps are empty, clear
+  `any`. (This is what makes the reads after `ctype::matches` fast again:
+  its restore empties the table.) size_of::<TypeMutation>() must not grow;
+  add a test that pins it.
+- A write to a store node that the current store build owns
+  (store_build_owns) still goes to the store in place, as today.
+- repr_chain: do not compress a stored node that the current store build
+  does not own. Follow the links and return the representative; write
+  nothing to such a node and journal nothing for it. Compression of local
+  nodes is unchanged.
+- Copy sessions: if a copy session writes a mutability link to a persistent
+  cell, it must go through the same table (it is restored by
+  end_copy_session, which then removes the entry).
+
+Commits, in this order:
+1. "Give generalizable_at_level a visited set". In types/typecore.rs replace
+   the mark_type_node / unmark_type pair in generalizable_at_level by a
+   types::type_marks::TypeNodeTable (see how ctype.rs uses it). Delete
+   btype::mark_type_node and btype::unmark_type and their re-exports in
+   types/mod.rs. The function must return the same boolean for every input:
+   keep its unit tests and add one with a type that has one node at two
+   positions and one below the level.
+2. "Add FrozenWrites and route stored-cell reads and writes through it". Add
+   the struct and switch the eleven functions listed above. Delete the
+   fields store_desc_overlay, store_level_overlay, store_abbrev_overlay,
+   store_row_field_overlay, shared_desc_overlay, shared_level_overlay,
+   shared_abbrev_overlay, mutability_overlay and store_descs, and the
+   function set_shared_desc.
+3. "Delete PagedOverlay". Remove it and its test from types/thread_store.rs.
+4. "Test the exception table". Add to context.rs tests:
+   frozen_read_does_not_probe_when_nothing_was_written (a #[cfg(test)]
+   counter of map probes stays 0 over 1,000 reads of nodes of a published
+   shared graph); matches_on_frozen_types_leaves_no_exception (publish a
+   graph holding `'a -> int` and `int -> int` as generic nodes, call
+   ctype::matches on them, assert the result and that `any` is false and all
+   maps are empty); lasting_link_on_frozen_node_is_seen_only_here (two
+   TypeContexts over one graph); rewrite
+   store_access_and_overlay_backtracking against the table.
+
+You must not: keep PagedOverlay or any per-index array under another name;
+add a second flag or a per-kind flag (one `any`); make `any` sticky (it must
+clear when the maps empty); derive or hand-write equality on TypeDesc to
+decide removal; test `any` on reads of local nodes; change
+link_type, unify_types or matches in ctype.rs; change what a compilation
+observes (a link written to a stored node must be read back by the same
+compilation until it is restored).
+
+These count as failure: a read path that borrows a RefCell before testing
+`any`; `any` set by a write that the store build owns; compression still
+writing to stored nodes; a test deleted instead of rewritten; any difference
+reported by scripts/compare_checker_builds.py on tests/tests.
+
+The reviewer will run, from compiler-rust/:
+  rg -n 'PagedOverlay|_overlay\b|set_shared_desc|store_descs' src/types   (0)
+  rg -n 'fn mark_type_node|fn unmark_type' src                            (0)
+  rg -n 'frozen_writes.any' src/types/context.rs     (every stored read/write)
+then cargo test, scripts/compare_checker_builds.py on tests/tests and on a
+3,735-module application, scripts/test_worker_determinism.py, and
+scripts/bench_project.sh on the application, expecting fewer instructions
+than the base (about 0.3% fewer; report the number, whatever it is).
+```
+
+#### J.5.3 Prompt for W6
+
+```text
+Task W6: delete store builds, pieces, replay, guards and poisoning.
+
+Precondition, check it before anything else and stop if it fails: build
+tests/tests from clean with RESCRIPT_COMPILER_COUNTERS=1; the line
+"[compiler-counter] type_nodes ..." must end with store_builds=0 and
+store_build_count=0, and `rg -n 'shared_components' compiler-rust/src` must
+print nothing. (Slice W5 made store builds unreachable. If one still runs,
+this task is not ready: report the counter line and stop. Do not convert
+the caller.)
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections J.2 and J.4 (W5,
+W6); compiler-rust/docs/DEPENDENCY_COMPONENTS.md; in
+compiler-rust/src/types/context.rs the functions build_in_store_with_guards,
+touch_store_piece, replay_store_piece, poison_store_build_for.
+
+The change is deletion only. After W5 no table is store-resident, so no
+store build starts, `in_store_build()` is always false, and everything that
+tests it is dead.
+
+Commits, in this order (each must build and pass cargo test):
+1. "Delete the store-build entry points and replay". In types/context.rs
+   delete: build_in_store, build_in_store_guarded,
+   build_in_store_with_guards, suspend_store_build, touch_store_piece,
+   replay_store_piece, record_store_effect, store_guards_hold; the types
+   StorePiece and StoreEffect; EMPTY_STORE_PIECE, NEXT_STORE_PIECE_ID; the
+   fields store_build_effects, store_build_guards, touched_store_pieces,
+   local_stored_components and their accessors. In types/env_lazy.rs delete
+   force_entry (each caller calls its closure directly), forget_entry,
+   make_private, the fields in_store and store_pieces,
+   check_signature_store_resident, and the StorePiece halves of
+   FunctorResultSubst and of the opened_layers cell.
+2. "Delete poisoning". Delete poison_store_build, poison_store_build_for,
+   poison_store_build_slow and every call of them (about 45, in
+   types/context.rs, types/env_lazy.rs and cmi/persistent_env.rs); the field
+   store_build_poisoned; store_debug_enabled and every RESCRIPT_STORE_DEBUG
+   use.
+3. "Delete in-place store writes". Delete in_store_build, store_build_owns,
+   store_build_owns_row_field, check_store_desc, check_store_row_field,
+   store_desc_lists, the fields store_build_depth, store_build_type_start,
+   store_build_row_start, and in every function that tested them keep only
+   the branch that ran when no store build was active. In
+   types/thread_store.rs delete STORE_BUILD_ACTIVE, store_build_active,
+   set_store_build_depth, fresh_store_per_compilation and the allocation
+   functions that only store builds called (the compiler reports them as
+   unused).
+4. "Delete the store-view counters". Delete perf_counters::store_views and
+   its report lines, and record_store_build_nodes with the store_builds and
+   store_build_count fields of the type_nodes line. Add a short note at the top of
+   docs/DEPENDENCY_COMPONENTS.md that the mechanism it describes was removed
+   by this slice and that CHECKER_REDESIGN.md section J replaces its plan.
+
+You must not: leave any deleted name behind as a stub, a no-op, a
+`#[allow(dead_code)]` item, a type alias or a comment-only shell; add a
+feature flag or environment variable; change a function that is not
+simplified by a deleted test (if a branch you remove was the only user of a
+helper, delete the helper; do not edit anything else); weaken or delete a
+test other than the unit tests of the deleted functions (list those in the
+pull request).
+
+These count as failure: any match of the greps below; `#[allow(unused` or
+`#[allow(dead_code` added anywhere; a diff with more than 150 added lines;
+any difference in scripts/compare_checker_builds.py on tests/tests or on the
+application.
+
+The reviewer will run, from compiler-rust/ (each must print nothing):
+  rg -n 'build_in_store|in_store_build|store_build_|suspend_store_build' src
+  rg -n 'StorePiece|StoreEffect|touch_store_piece|replay_store_piece|record_store_effect|EMPTY_STORE_PIECE|touched_store_pieces' src
+  rg -n 'poison_store_build|store_guards_hold|make_private|forget_entry|fn force_entry|store_pieces' src
+  rg -n 'RESCRIPT_FRESH_STORE|RESCRIPT_STORE_DEBUG' src ../scripts ../rewatch
+then `git diff --stat` (deletions dominate), cargo test for both crates,
+scripts/test_worker_determinism.py, and the instruction count check, which
+must show a decrease of at least 0.5% on tests/tests (the measured cost of
+the poison test on two read paths alone is 0.69%). If it does not decrease,
+report that; do not look for other savings in this task.
+```
+
+#### J.5.4 Prompt for W7
+
+```text
+Task W7: delete the worker-store tier of type handles and thread_store.rs.
+
+Precondition, check first and stop if it fails: from compiler-rust/,
+`rg -n 'build_in_store|StorePiece|poison_store_build' src` prints nothing
+(slice W6 has merged).
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections A.1, J.2, J.3.1
+and J.4 (W7); compiler-rust/src/types/type_expr.rs around STORE_REF_TAG;
+types/thread_store.rs; types/shared_store.rs; in cmi/portable_types.rs the
+function internalize_pers_struct and graph_is_shareable.
+
+The change. A handle today has three tiers: local (bit 31 clear), worker
+store (bit 31 set, bit 30 clear), shared pool (bits 31 and 30 set). Nothing
+allocates in the worker store any more. Make it two tiers: local, and frozen
+(bit 31 set). The frozen tier is the shared pool.
+
+Commits, in this order:
+1. "Internalise an unshareable graph into the compilation". In
+   internalize_pers_struct (cmi/portable_types.rs) remove the branch that
+   internalises into the worker store; a graph that cannot go to the shared
+   pool takes the existing compilation-local branch. Add the test
+   unshareable_graph_is_internalised_locally (a portable graph with a Tsubst
+   entry; every node of the result is a local handle).
+2. "Move build generation and store stamps to the world". Move begin_build,
+   build_generation and next_store_stamp from types/thread_store.rs to
+   types/world.rs unchanged; update rewatch/src/build/compile.rs and the
+   other callers.
+3. "Delete ThreadTypeStore". Delete types/thread_store.rs and its `mod`
+   line, the `store` field of TypeContext, thread_store(), StoreLease, and
+   in every TypeContext accessor the branch for a worker-store handle
+   (desc, level, id, type_list, type_args, row_desc, package_lids, abbrev,
+   row_field, variant layouts, declaration locations: DeclLocKind::Store
+   goes too).
+4. "One frozen tag". In types/type_expr.rs: FROZEN_REF_TAG = 1 << 31 replaces
+   STORE_REF_TAG, SHARED_REF_TAG and SHARED_REF_BITS; is_frozen() replaces
+   is_store() and is_shared(); from_shared_index/shared_index become
+   from_frozen_index/frozen_index; delete from_store_index and store_index.
+   The same for RowFieldRef, AbbrevMemoRef, LayoutRef, MutabilityRef and the
+   payload list handles, wherever they have the corresponding functions. In types/shared_store.rs set
+   MAX_SHARED_INDEX = 1 << 28 and make exhaustion a panic with the message
+   "the type pool of this build is full" (it returned None before, for the
+   fallback that commit 1 removed from the store). Add the test
+   handles_have_two_tiers (size_of::<TypeExprRef>() == 4; a frozen handle
+   with index 2^28 - 1 round-trips; a local handle is never frozen).
+
+You must not: keep a third tier under another name; keep `is_shared` as an
+alias of `is_frozen`; change the layout of SharedGraph or of a node; change
+PAGE_BITS; change any published or stored byte (handles are never stored);
+edit ctype.rs beyond the renames the compiler demands.
+
+These count as failure: any match of the greps below; a `todo!()` or
+`unreachable!()` put where a worker-store branch was, instead of removing
+the branch; scripts/compare_checker_builds.py reporting a difference;
+scripts/test_stored_interface_determinism.py reporting a differing entry
+between base and candidate.
+
+The reviewer will run, from compiler-rust/ (each must print nothing):
+  rg -n 'ThreadTypeStore|StoreLease|thread_store' src ../rewatch/src
+  rg -n 'STORE_REF_TAG|SHARED_REF_TAG|SHARED_REF_BITS|from_store_index|fn store_index|fn is_shared|fn is_store' src
+  test ! -e src/types/thread_store.rs
+then cargo test for both crates, scripts/test_worker_determinism.py, and the
+instruction count check (no increase).
+```
+
+#### J.5.5 Prompt for W9
+
+```text
+Task W9: one checker context per worker, reset between modules.
+
+Precondition, check first and stop if it fails: from compiler-rust/,
+`test ! -e src/types/thread_store.rs` (slice W7 has merged).
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections A.6, F.12 (with
+its amendment), J.1 (teardown and setup shares), J.3.4 and J.4 (W9);
+compiler-rust/docs/DEPENDENCY_COMPONENTS.md, "Per-module state reuse"; in
+compiler-rust/src/driver.rs fresh_type_context and every caller; the whole
+struct TypeContext and TypeContext::new in types/context.rs.
+
+The change. Today every module of a build constructs a TypeContext and drops
+it. Keep one per worker thread and reset it.
+
+Commits, in this order:
+1. "Classify every field of TypeContext". No behaviour change. Add
+   TypeContext::reset_for_module(&mut self, id_gen: Arc<IdGenerator>). Its
+   body starts with `let TypeContext { field_a, field_b, ... } = self;`
+   naming every field, with no `..`, so that adding a field without
+   deciding its reset does not compile. Then one statement per field, in
+   declaration order: either a clear that leaves the field equal to what
+   TypeContext::new gives it, or `let _keep = field;` with a comment that
+   says why its content is independent of the module (the only allowed
+   reasons: it is the world handle or a handle to world data; it is a cached
+   process-wide switch such as compiler_counters_enabled; it is an empty
+   container whose capacity is reused). A container is cleared with clear()
+   so that its capacity stays; a container whose capacity is more than four
+   times its length before the clear is replaced by an empty one. Put the
+   full table (field, cleared or kept, reason) in the pull request body.
+   Unit test reset_matches_new: build a context, run a fixture module's
+   type check on it, reset it, and compare with a new context through a
+   #[cfg(test)] function that reports every observable quantity (lengths of
+   every container, the level counters, the next node id, the stamp
+   counter); they must be equal.
+2. "Check modules on a reset context in tests". Test
+   reset_context_checks_like_a_fresh_one: write at least twelve fixture
+   modules as source strings in the test (together they must use GADTs,
+   objects, polymorphic variants, first-class modules, functors, records
+   and a module that fails to type-check); for each ordered pair, check B
+   after A on a reset context and B on a new context; the canonical signature (types/canonical_sig.rs), the
+   diagnostics and the compiler-counter line must be equal.
+3. "Keep one checker context per worker". In driver.rs the in-process build
+   path (compile_preprocessed_structure_in_process_until_js and the
+   interface path typecheck_preprocessed_signature_in_process) takes its
+   context from a thread_local slot and resets it; when the module is done
+   the context goes back to the slot. If the context has been moved into a
+   value that outlives the module (the tooling entry points
+   typecheck_structure_for_tooling and typecheck_signature_for_tooling keep
+   it in ToolingTypedModule), nothing is returned and the next module makes
+   a new one. A panic while a context is out of the slot must leave the slot
+   empty. fresh_type_context stays only for the tooling entry points and
+   tests. In debug builds reset_for_module truncates the node arrays so that
+   a stale handle panics on use.
+4. "Count contexts". The counter type_contexts reports contexts
+   constructed; on tests/tests with the counters on it must equal the number
+   of worker threads that checked a module (plus tooling, none in a build).
+
+You must not: write `..` in the destructuring; mark a field kept for a
+reason outside the three allowed ones; reuse a context across threads; keep
+any table keyed by a local type handle, an EnvId, a ScopeId or an identifier
+stamp across the reset; change TypeContext::new's result; add a switch that
+turns reuse off (if reuse is wrong, the slice is wrong).
+
+These count as failure: a field handled by `mem::take` followed by a drop
+where a clear would keep capacity, without a stated reason; the pair test
+run on fewer than twelve modules or comparing fewer than the three outputs;
+scripts/compare_checker_builds.py reporting any difference on tests/tests
+or on a 3,735-module application; scripts/test_worker_determinism.py
+failing; peak resident memory of the application build (8 workers,
+/usr/bin/time -v) more than 3% above the base.
+
+The reviewer will run, from compiler-rust/:
+  rg -n 'fn reset_for_module' src/types/context.rs            (1 match)
+  rg -n 'fresh_type_context\(\)' src/driver.rs   (tooling and tests only)
+and read the destructuring for `..`; then cargo test for both crates, the
+two comparison scripts on both projects, the instruction count check, and
+scripts/bench_project.sh on the application (report the difference; the
+estimate is 0.2% to 0.4% fewer instructions).
+```
+
+### J.6 The saving, re-derived
+
+Shares of the application's build instructions. "Measured" is a count or a
+profile share from J.1; "est." rests on the measured inputs named.
+
+| Slice | One worker | 8 workers, in addition | Rests on |
+|---|---|---|---|
+| W2 | 0.3% est. | | 1.13% in `store_desc` and `store_level` (measured); the overlay test is 13 of 40 instructions per read (measured in isolation) |
+| W4 and W5 | 0.5-1.0% est. | 1.5-2.2% est. | replay 0.73% (measured) goes. Workers repeat 2.4% of the build (measured, 78.20 G against 76.35 G), mostly views built 3.9 times. Against it: building whole views. Views and forcing cost about 0.64 G once today, for about 0.3 M nodes; whole views copy at most one substituted signature per path, bounded by the 368,428 exported nodes for unit paths plus the alias paths, about 0.5 M nodes or 0.5 G at today's 1,000 instructions per copied node, less every item that W4 shares without a copy. The surplus is at most about 0.3% and W4's counter measures it |
+| W6 | 0.7% | | measured on `tests/tests` for two read paths (probe); the application spends more of its build in checking (41.6% against 34.5%) |
+| W7 | below 0.1% | | one branch on stored reads |
+| W8 | 0.9-1.4% est. | | save callers: 55% of 1.63% and 70% of 0.78% (measured shares, split by measured node and item counts) |
+| W9 | 0.2-0.4% est. | | teardown 0.98% (measured), mostly contents that a reset still clears |
+| W10 | 0.3% est. | | setup 0.41% (measured) |
+| Total | 2.9-4.2% | 1.5-2.2% | |
+| Total without W8 (which is the rest of P3) | 2.0-2.8% | 1.5-2.2% | |
+
+Against I.5:
+
+| Stage | I.5 | Already taken | This plan | Why it differs |
+|---|---|---|---|---|
+| P4 (views, replay) | 2.5-3.5% | 0.42% measured (#166: stamp replay) | W4 to W7: 1.2-1.8% with one worker, 2.7-4.0% with 8 | I.5's base was a 10-core profile of busy time, which contains the per-worker repeats. One-worker instruction counts, which the CI gate and `bench_project.sh` use, do not: with one worker a view is built 1.01 times. The saving is real for users and mostly invisible to the gate |
+| P5 (lookup copies) | 3-4% | 0 | W8: 0.9-1.4%; the rest is inside W4 and W5 | all lookup copying is 2.41% of the build (measured), so 3-4% was never available. About 1.0 M of the 2.67 M nodes are the save copies (publication, W8), about 1.1 M are per-worker view work (W4, W5; 0.29 M with one worker), and `include` and module-type instantiation stay. A lookup through a forced view already copies nothing |
+| P10 (segments, export tables, checker per worker) | 2-3% | 0 | W2, W9, W10: 0.8-1.0% | setup and teardown are 1.4% now, not 3.6% (A.6): earlier work shrank them. P6's log, which was to remove the contents that teardown drops, is not built, so a reset saves containers only. Export tables are the views of W4 |
+| Sum | 7.5-10.5% | 0.42% | 2.9-4.2% with one worker, 4.4-6.4% with 8 | |
+
+The whole of it is well above 1% of the build on either count, so the plan
+is to be built. It is smaller than I.5 promised. On the estimates of I.5's
+total (21-29%) this takes about 4 to 6 points off the top of the range when
+measured with one worker.
+
+One consequence for the gate: the instruction count check runs with one
+worker and so cannot see the main effect of W4 and W5. Each of those two
+pull requests reports, beside the gate, the cachegrind count of the
+application with 8 workers for base and candidate (the measurement of J.1).
+
+### J.7 Risks
+
+1. **Watch mode.** Until W11 the world is per build, as the pool is today:
+   `begin_build` starts a new generation and every graph and view of the old
+   one is dropped when its last holder goes. W9 adds a holder: the worker's
+   reset context keeps `Arc<World>`. `reset_for_module` must take the
+   current generation's world, or a watch session keeps a dead world alive
+   per worker. W11's retirement is sound only if no live handle names a
+   retired page; a view names its units (`units`, the root) and is retired
+   with them.
+2. **Peak memory.** Down: views once instead of once per worker (37 MB of
+   nodes today). Up: whole views (at most 16 MB), a scratch context per
+   worker, and after W9 each worker's retained capacity. The W9 gate bounds
+   the total (not more than 3% above the base at 8 workers; today 1.44 to
+   1.46 GB).
+3. **Editor tooling.** `ToolingTypedModule` owns a `TypeContext` and reads
+   environments and types long after the build (A.7). It must keep working
+   on a context that is never reset (W9 leaves the tooling entry points on
+   `fresh_type_context`), and its context keeps its world alive. Analysis
+   code that walks a dependency's components through an environment takes
+   the `Components` type of W4; `analysis/` and
+   `rewatch/src/build/tooling.rs` are compiled and tested in the gates of W4
+   and W5 (`make test-analysis`).
+4. **The stored format.** Schema 22 (23 if #154 takes it). No slice here
+   changes a stored byte: views are derived data and are never stored, and
+   graphs keep local identifiers (decision 2). W8 changes how the bytes are
+   produced and must produce the same bytes
+   (`scripts/test_signature_equality.py`); if it cannot, it bumps the
+   schema once, after #154.
+5. **Evaluation order of whole views.** Forcing by name is lazy; a whole view
+   is not. It must not load a unit that forcing by name would not load
+   (the incremental build records unit reads, and a missing unit is an error
+   in OCaml only when reached). Child module declarations therefore stay
+   lazy (`ViewCell::decl`). The gate is the byte-identical stored package
+   databases and the `super_errors_multi` fixtures for a missing alias
+   target. Lookup-time warnings (D.8) are raised at the lookup, as today.
+6. **The few lasting writes.** About 70 writes per build survive in
+   `FrozenWrites`, nearly all on nodes that are not generic. They are exact by
+   construction (the same compilation-local visibility as today), but they
+   are the least tested path: W2's third test covers it, and W1's counter
+   line shows if a change makes them frequent.
+7. **The one-worker gate.** W4 may raise the one-worker count before W5 and
+   W6 repay it. The trailer mechanism exists for this; the 8-worker count is
+   reported with it.
+8. **#154.** W3 and W8 touch the code #154 changes. W3 reuses its
+   `signature_builder` if merged and otherwise carries its own walk (about
+   430 lines by #154's measure). W8 does not start before #154 is merged or
+   closed.
+9. **Things not determined.** Which of the 13,202 lazy-rename triggers per
+   build are observable once binders are out of the stamp counter (W5's
+   inventory decides; if none, `trigger_module_sig_rename` goes with it).
+   How many items of a view W4 can share without a copy. Whether functor
+   applications on persistent paths are frequent enough to become world
+   views (W5's counter).
+
+### J.8 How the numbers were measured
+
+- Counters: `rescript clean`, then `RESCRIPT_COMPILER_COUNTERS=1 rescript
+  build`, 8 workers. The application's counts are over 3,845 checker
+  contexts: its 3,735 modules and the dependency modules the build compiles
+  with them.
+- Shares: `valgrind --tool=callgrind`, `RAYON_NUM_THREADS=1`, on the
+  application; `callgrind_annotate --inclusive=yes`. Functions the compiler
+  inlined are counted in their callers.
+- Worker repeats: `valgrind --tool=cachegrind --cache-sim=no` on the same
+  clean build with `RAYON_NUM_THREADS=1` and `=8`.
+- Probes (not committed): `#[track_caller]` on the seven `copy_lookup_*`
+  entry points, recording nodes allocated per caller and whether a store
+  build was active; a counter and a backtrace in each write path for stored
+  cells, with the node's level, keeping the links that are never restored; a
+  count of non-generic nodes in `SharedTypePool::publish` and of pages
+  reserved; the two `poison_store_build()` calls removed for one cachegrind
+  comparison on `tests/tests` (three runs a side, smallest taken); a
+  stand-alone program for the pool structures, each run under cachegrind.
+- Peak memory: `/usr/bin/time -v`, two runs with 8 workers, one with one.
+- Not measured: anything on the fat-LTO or profile-guided executable; the
+  saving of any slice (no slice is built); the node count of whole views
+  (bounded, not counted); watch-mode rebuilds.
