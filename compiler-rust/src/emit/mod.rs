@@ -203,8 +203,32 @@ mod oracle_tests {
         }
     }
     #[test]
-    fn comment_bearing_raw_snippets_fall_back_without_loss() {
+    fn text_payloads_source_oracle() {
         for source in [
+            "let value = `hello`",
+            "let f = x => `hello ${x}!`",
+            "let f = x => `a\\n${x}\\`end`",
+            "@val external tag: taggedTemplate<string, string> = \"tag\"; let f = x => tag`hello ${x}!`",
+            "@val external consume: (@as(json`{hello: [1, 2]}`) _) => int = \"consume\"; let value = consume()",
+            "let f = @directive(\"'use server'\") x => x",
+            "let f = x => { let g = @directive(\"'use cache'\") y => y; g(x) }",
+            "@module({from: `./data.json`, with: {type_: `json`, \\\"some-key\": `value`}}) external data: int = \"default\"; let value = data",
+            "type t = A | B; let value = A",
+            "exception E",
+            "let value = `café 😀`",
+            "@val external tag: taggedTemplate<string, string> = \"tag\"; let f = x => tag`\\unicode ${x} end`",
+        ] {
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
+        }
+    }
+    #[test]
+    fn verbatim_raw_snippets_fall_back_without_loss() {
+        for source in [
+            "let value = %raw(`({answer:42})`)",
+            "let value = %raw(`function(x){return x}`)",
+            "%%raw(`console.log(  1 )`)\nlet value = 1",
             "%%raw(`// leading comment`)\nlet value = 1",
             "%%raw(`/* block comment */`)\nlet value = 1",
             "let f = () => %raw(`(/* inside function */ doSomething())`)",

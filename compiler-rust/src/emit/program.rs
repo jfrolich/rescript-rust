@@ -84,15 +84,26 @@ pub(super) fn emit(
                 }),
             ));
         } else {
-            if matches!(
-                module.kind,
-                Kind::External {
-                    import_attributes: Some(_),
-                    ..
+            // Attributes meet no identifiers and retain source entry order.
+            // Legacy quotes every key and value; oxc supplies `with` and braces.
+            let attributes = if let Kind::External {
+                import_attributes: Some(attributes),
+                ..
+            } = &module.kind
+            {
+                let mut entries = b.vec();
+                for (key, value) in &attributes.entries {
+                    entries.push(ImportAttribute::new(
+                        SPAN,
+                        ImportAttributeKey::StringLiteral(build.string(key)),
+                        build.string(value),
+                        b,
+                    ));
                 }
-            ) {
-                return Err(Unsupported("import attributes"));
-            }
+                Some(WithClause::boxed(SPAN, WithClauseKeyword::With, entries, b))
+            } else {
+                None
+            };
             let binding = build.binding(name);
             let specifier = if default {
                 ImportDeclarationSpecifier::new_import_default_specifier(SPAN, binding, b)
@@ -104,7 +115,7 @@ pub(super) fn emit(
                 Some(b.vec1(specifier)),
                 build.string(&path),
                 None,
-                None,
+                attributes,
                 ImportOrExportKind::Value,
                 b,
             ));

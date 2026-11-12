@@ -72,11 +72,11 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
     if f.is_method {
         return Err(Unsupported("method function"));
     }
-    if f.directive.is_some() {
-        return Err(Unsupported("function directive"));
-    }
     if top {
         return Ok(FunctionForm::Declaration);
+    }
+    if f.directive.is_some() {
+        return Ok(FunctionForm::ArrowBlock);
     }
     if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
@@ -229,4 +229,47 @@ pub(super) fn block_elements<'a>(
         (!matches!(tag, TagInfo::PolyVar(_)) || i < 2)
             && !optional_fields.is_some_and(|fields| fields[i].1 && undefined(a, e))
     })
+}
+
+/// Expression decorations precede the expression and introduce no identifiers.
+/// S0 drops block comments directly before numeric literals (also through
+/// parentheses); other comments must survive and remain a whole-file fallback.
+pub(super) fn expression_comment(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    if a.expr_comment(e).is_some() && !numeric_decoration(a, e) && !pure_call(a, e) {
+        return Err(Unsupported("non-decoration expression comment"));
+    }
+    Ok(())
+}
+
+/// Templates print the tag first, then substitutions from left to right. Raw
+/// quasi spelling is preserved; oxc supplies backticks, `${}`, and parentheses.
+/// A malformed segment/value count cannot be represented by a template AST.
+pub(super) fn template_supported(segments: usize, values: usize) -> Result<(), Unsupported> {
+    if segments != values + 1 {
+        return Err(Unsupported("template segment count"));
+    }
+    Ok(())
+}
+
+/// The exception-creation annotation is semantic, not a numeric decoration.
+/// It prints immediately before the call; callee and arguments retain their
+/// ordinary left-to-right naming order. Codegen owns its spelling and spacing.
+pub(super) fn pure_call(a: &JsArena, e: Expr) -> bool {
+    a.expr_comment(e) == Some("@__PURE__") && matches!(a.ek(e), ExprKind::Call(..))
+}
+
+fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
+    // A minus, Infinity, NaN, or bigint suffix is not the numeric-literal
+    // adjacency S0 removes. Be conservative rather than discarding a comment.
+    matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
+}
+
+/// Legacy raw expressions carry programmer text, with classification-dependent
+/// grouping; raw statements have surrounding newlines and a statement-level
+/// semicolon except for comment-only snippets. Neither introduces IR identifiers.
+/// The classifier discards its parsed AST today. Until verbatim assembly can
+/// satisfy the unchanged fixed-point oracle, retain the whole-file legacy path:
+/// reparsing and formatting here would not preserve the programmer's text.
+pub(super) fn raw_supported<T>() -> Result<T, Unsupported> {
+    Err(Unsupported("verbatim raw JavaScript"))
 }
