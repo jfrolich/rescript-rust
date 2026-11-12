@@ -205,6 +205,9 @@ impl Importer {
             self.ids.push(id);
             v
         });
+        if id.is_js() || (id.is_global() && id.stamp() == 0) {
+            self.b.vars.flags[v.index()].0 |= VarFlags::JS_IDENT;
+        }
         // Ident equality deliberately ignores names on stamped locals and all
         // flags. The bridge cannot silently unify different printed identities.
         if self.ids[v.index()].cmp(&id) != std::cmp::Ordering::Equal {
@@ -1602,21 +1605,35 @@ mod tests {
         );
         assert_eq!(imported.arena.pools.j_modules, again.arena.pools.j_modules);
     }
-    fn expression(build: impl FnOnce(&mut j::JsArena, j::Expr, j::Expr) -> E) {
-        let mut a = j::JsArena::new();
-        let x = a.expr(E::Bool(true));
-        let y = a.expr(E::Bool(false));
-        let kind = build(&mut a, x, y);
-        let comment = a.str("retained comment");
-        let e = a.expr_with(
-            kind,
-            j::Cold {
-                comment: Some(comment),
-                source_loc: Some(LamLoc::for_test(17)),
-            },
-        );
-        let s = a.stmt(S::Exp(e));
-        roundtrip(&program(a, vec![s]));
+    fn expression(mut build: impl FnMut(&mut j::JsArena, j::Expr, j::Expr) -> E) {
+        for effects in 0..4 {
+            let mut a = j::JsArena::new();
+            let mut operand = |impure| {
+                if impure {
+                    let raw = a.raw_id(js::JsRawInfo { code: "effect()".into(), is_stmt: false });
+                    a.expr(E::RawJsCode(raw))
+                } else { a.expr(E::Bool(true)) }
+            };
+            let x = operand(effects & 1 != 0);
+            let y = operand(effects & 2 != 0);
+            let kind = build(&mut a, x, y);
+            let comment = a.str("retained comment");
+            let e = a.expr_with(kind, j::Cold {
+                comment: Some(comment), source_loc: Some(LamLoc::for_test(17)),
+            });
+            let expected_pure = js::build::expression_has_no_side_effects(&a, e);
+            let expected_strict = crate::lambda::js_exp_make::js_expr_no_side_effects(&a, e);
+            let expected_equal = js::build::ocaml_eq_expression(&a, e, e);
+            let s = a.stmt(S::Exp(e));
+            let p = program(a, vec![s]);
+            let imported = import_js(&p).unwrap();
+            let View::SBlock { statements } = imported.arena.view(imported.root) else { panic!() };
+            let View::SExp { value } = imported.arena.view(statements[0]) else { panic!() };
+            assert_eq!(imported.arena.node(value).flags().contains(NodeFlags::PURE), expected_pure);
+            assert_eq!(crate::bir::j::facts::strictly_pure(&imported.arena, value), expected_strict);
+            assert_eq!(crate::bir::j::equal::equal(&imported.arena, value, value, &mut 0), expected_equal);
+            roundtrip(&p);
+        }
     }
     macro_rules! expr_case {
         ($name:ident,|$a:ident,$x:ident,$y:ident|$body:expr) => {

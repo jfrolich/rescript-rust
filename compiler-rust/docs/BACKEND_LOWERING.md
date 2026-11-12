@@ -1778,14 +1778,22 @@ builds its node as given.
 
 Purity. Two predicates exist and differ: `expression_has_no_side_effects` (B:102)
 ("pure" below) and `js_expr_no_side_effects` (E:15) ("strictly pure"), which is
-the same except that `**`, `/` and `%` are pure only with a literal right
-operand that cannot throw (a non-zero number, a positive bigint exponent).
+the same except that `**`, `/` and `%` require a literal right operand:
+for integers, `**` accepts any exponent while `/` and `%` require nonzero;
+float literals always qualify (including zero); bigint `**` requires the
+positive-sign marker, while bigint `/` and `%` reject the digit spelling
+`"0"`. These are the legacy predicate's exact syntactic tests, not a general
+JavaScript exception analysis.
 The E and S rows use the first, the M rows and the lowering the second,
 except where a row says otherwise. Both are node flags in `Bir` (section 7).
 
 "Equal" is `ocaml_eq_expression` (B:237) for expressions and `ocaml_eq_block` (B:217)
 for statement lists: structural equality on a fixed set of kinds, false for
 the others (a string append is never equal to anything).
+`j/facts.rs::purity` computes both flags from immediate child facts in O(arity).
+`j/equal.rs::equal` uses an explicit pair stack, stops at the first mismatch,
+and counts compared node pairs. Like the legacy predicate it has no depth
+limit: the bound is the smaller tree's node count plus compared literal bytes.
 
 ### 6.1 Expressions (`build::exp`)
 

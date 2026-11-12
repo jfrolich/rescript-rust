@@ -177,9 +177,19 @@ impl Bir {
             }
         }
         let mut effects = vec![(false, false); self.nodes.len()];
+        let mut strict = vec![false; self.nodes.len()];
         for &id in order.iter().rev() {
             let actual = self.effects(id, |c| effects[c.index()]);
             effects[id.index()] = actual;
+            if let Some(actual) = j::facts::purity(self, id, true, |c| strict[c.index()]) {
+                strict[id.index()] = actual;
+                // L tail marking owns the aliased bit until lowering.
+                if !self.tails_valid && !matches!(self.view(id), View::Var { .. })
+                    && self.node(id).flags().contains(NodeFlags::STRICT) != actual
+                {
+                    return fail("stale strict purity flag");
+                }
+            }
             let flags = self.node(id).flags();
             if flags.contains(NodeFlags::PURE) != actual.0
                 || flags.contains(NodeFlags::NO_ALLOC) != actual.1

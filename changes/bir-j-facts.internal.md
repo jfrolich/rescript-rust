@@ -1,0 +1,1 @@
+- Maintain JavaScript purity facts and iterative structural equality for the opt-in backend.

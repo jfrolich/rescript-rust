@@ -1,6 +1,8 @@
 //! J construction for the first lowering slice. Plain constructors stay plain;
 //! only reachable normalization rows live in `norm`.
 pub mod norm;
+pub mod facts;
+pub mod equal;
 
 use super::{Bir, NodeFlags, NodeId, VarFlags, VarId, View};
 use crate::lambda::lam_compat::LetKind;
@@ -54,3 +56,6 @@ pub(crate) fn assign(bir: &mut Bir, var: VarId, value: NodeId) -> NodeId {
 pub(crate) fn return_value(bir: &mut Bir, value: NodeId) -> NodeId {
     bir.new_node(View::SReturn { value }, 0)
 }
+
+#[cfg(test)]
+mod facts_tests;
