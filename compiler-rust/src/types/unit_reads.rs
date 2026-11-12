@@ -407,6 +407,80 @@ pub fn signature_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -
 mod tests {
     use super::*;
 
+    /// A top-level signature item is not an exact read identity: distinct
+    /// suffixes through one alias must reach distinct target items.
+    #[test]
+    fn top_level_item_bit_cannot_deduplicate_alias_suffixes() {
+        use crate::cmi::item_deps::{ItemKey, UnitRefs, UnitSource, resolve_reads};
+        use std::sync::Arc;
+
+        struct Source {
+            alias: Name,
+            target: Name,
+            alias_refs: Arc<UnitRefs>,
+            target_refs: Arc<UnitRefs>,
+        }
+        impl UnitSource for Source {
+            fn ignored(&self, _: Name) -> bool {
+                false
+            }
+            fn lambda_units(&self, _: Name, _: &str) -> Vec<Name> {
+                Vec::new()
+            }
+            fn refs(&self, unit: Name) -> Option<Arc<UnitRefs>> {
+                if unit == self.alias {
+                    Some(self.alias_refs.clone())
+                } else if unit == self.target {
+                    Some(self.target_refs.clone())
+                } else {
+                    None
+                }
+            }
+        }
+
+        // AliasUnit's signature has one item: module M = Target.
+        // Both paths have (unit number 0, signature item index 0).
+        let alias = Name::new("AliasUnit");
+        let target = Name::new("Target");
+        let module = Name::new("M");
+        let mut aliases = ahash::AHashMap::new();
+        aliases.insert(
+            (Kind::Module, module),
+            vec![UnitRead {
+                unit: target,
+                segs: Segs::new(),
+                kind: Kind::Module,
+            }],
+        );
+        let source = Source {
+            alias,
+            target,
+            alias_refs: Arc::new(UnitRefs {
+                refs: Default::default(),
+                aliases,
+            }),
+            target_refs: Arc::new(UnitRefs {
+                refs: Default::default(),
+                aliases: Default::default(),
+            }),
+        };
+        let prefix = Path::pdot(
+            Path::pident(crate::ident::Ident::create_persistent(alias)),
+            module,
+        );
+        let mut reads = Vec::new();
+        read_of_path(&Path::pdot(prefix, "x"), Kind::Value, None, &mut reads);
+        read_of_path(&Path::pdot(prefix, "y"), Kind::Value, None, &mut reads);
+        assert_eq!(reads.len(), 2);
+        assert_ne!(reads[0], reads[1]);
+        let full = resolve_reads(reads.clone(), &source);
+        // Simulate pushing only the first read of AliasUnit's M item.
+        let collapsed = resolve_reads(reads.into_iter().take(1), &source);
+        let y = ItemKey::Item(Kind::Value, Name::new("y"));
+        assert!(full[&target].contains(&y));
+        assert!(!collapsed[&target].contains(&y));
+    }
+
     #[test]
     fn ten_thousand_immediate_fields_extras_and_constraints_are_linear() {
         use crate::parse_arena::{LidentIdx, LocIdx, Located};
