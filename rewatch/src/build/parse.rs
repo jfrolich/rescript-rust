@@ -21,6 +21,7 @@ struct GeneratedAst {
     stderr: Option<helpers::StdErr>,
     stored_ast: Option<super::build_types::StoredAst>,
     deps: Option<Dependencies>,
+    gentype_annotations: Option<bool>,
 }
 
 /// Whether parsing appends a source's warnings to its package log.
@@ -81,6 +82,7 @@ pub fn generate_asts(
                             stderr: None,
                             stored_ast: None,
                             deps: None,
+                            gentype_annotations: None,
                         }),
                         Ok(None),
                         false,
@@ -130,11 +132,13 @@ pub fn generate_asts(
                                     stderr: None,
                                     stored_ast: None,
                                     deps: None,
+                                    gentype_annotations: None,
                                 }),
                                 Ok(source_file.interface.as_ref().map(|_| GeneratedAst {
                                     stderr: None,
                                     stored_ast: None,
                                     deps: None,
+                                    gentype_annotations: None,
                                 })),
                                 false,
                             )
@@ -178,6 +182,7 @@ pub fn generate_asts(
                 let sinks = ParseSinks {
                     stored_asts: &build_state.stored_asts,
                     in_memory_deps: &build_state.in_memory_deps,
+                    gentype_annotations: &build_state.gentype_annotations,
                     parse_warnings: &build_state.parse_warnings,
                     warning_log,
                 };
@@ -427,11 +432,41 @@ fn generate_ast(
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
     }
+    let gentype_annotations = package.config.gentype_config.is_some()
+        && parsed_gentype_annotations(&stored_ast);
     Ok(GeneratedAst {
+        gentype_annotations: Some(gentype_annotations),
         stderr,
         stored_ast: Some(stored_ast),
         deps: Some(deps),
     })
+}
+
+/// Scan the post-frontend parse tree, including nested and file-level attributes.
+/// Only genType-enabled packages pay for this walk. It deliberately accepts
+/// more than the typed annotation walk (for example attributes on record fields).
+fn parsed_gentype_annotations(ast: &StoredAst) -> bool {
+    use rescript_compiler::binary_ast::ast_iter::{self, AstIter};
+    use rescript_compiler::gentype::annotation;
+    struct Flags(bool);
+    impl AstIter for Flags {
+        fn attribute(
+            &mut self,
+            arena: &rescript_compiler::parse_arena::ParseArena,
+            attr: &rescript_compiler::parser::ast::Attribute,
+        ) {
+            let name = arena.get_string(attr.0.txt);
+            self.0 |= annotation::tag_is_one_of_the_gentype_annotations(name)
+                || annotation::tag_is_gentype_ignore_interface(name);
+            ast_iter::walk_attribute(self, arena, attr);
+        }
+    }
+    let mut flags = Flags(false);
+    match ast {
+        StoredAst::Structure(ast) => ast_iter::walk_structure(&mut flags, &ast.arena, &ast.structure),
+        StoredAst::Signature(ast) => ast_iter::walk_signature(&mut flags, &ast.arena, &ast.signature),
+    }
+    flags.0
 }
 
 fn parse_saved_source(
@@ -639,6 +674,7 @@ fn filter_ppx_flags(
 struct ParseSinks<'a> {
     stored_asts: &'a std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>,
     in_memory_deps: &'a std::sync::Mutex<ahash::AHashMap<String, Dependencies>>,
+    gentype_annotations: &'a std::sync::Mutex<ahash::AHashMap<String, bool>>,
     parse_warnings: &'a ParseWarnings,
     warning_log: ParseWarningLog,
 }
@@ -694,6 +730,9 @@ impl ParseSinks<'_> {
             }
             None => (ParseState::Success, false),
         };
+        if let Some(annotated) = generated.gentype_annotations {
+            self.gentype_annotations.lock().unwrap().insert(key.clone(), annotated);
+        }
         if let Some(ast) = generated.stored_ast {
             self.stored_asts.lock().unwrap().insert(key.clone(), ast);
         }
@@ -713,10 +752,44 @@ fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_na
 
 #[cfg(test)]
 mod tests {
+    use super::{parsed_gentype_annotations, Parser, module, StoredAst, StoredStructureAst, StoredSignatureAst, Arc};
     use super::{
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
     use crate::config::Config;
+
+    #[test]
+    fn parsed_gentype_flags_cover_all_names_and_nested_attributes() {
+        for prefix in ["genType", "gentype"] {
+            for suffix in ["", ".as", ".import", ".opaque", ".ignoreInterface"] {
+                for source in [
+                    format!("@{prefix}{suffix} type t = int"),
+                    format!("@@{prefix}{suffix}\ntype t = int"),
+                    format!("module M = {{type t = {{@{prefix}{suffix} field: int}}}}"),
+                ] {
+                    let mut parser = Parser::new("Flags.res", &source);
+                    let structure = module::parse_structure(&mut parser);
+                    assert!(!parser.has_errors(), "{source}");
+                    let ast = StoredAst::Structure(Arc::new(StoredStructureAst {
+                        arena: parser.into_arena(), structure, source_len: source.len(), retry_source: None,
+                    }));
+                    assert!(parsed_gentype_annotations(&ast), "{source}");
+                }
+                let source = format!("@{prefix}{suffix} type t = int");
+                let mut parser = Parser::new("Flags.resi", &source);
+                let signature = module::parse_signature(&mut parser);
+                assert!(!parser.has_errors());
+                assert!(parsed_gentype_annotations(&StoredAst::Signature(Arc::new(StoredSignatureAst {
+                    arena: parser.into_arena(), signature, source_len: source.len(), retry_source: None,
+                }))));
+            }
+        }
+        let mut parser = Parser::new("Plain.res", "type t = int\nlet x = 1");
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parsed_gentype_annotations(&StoredAst::Structure(Arc::new(StoredStructureAst {
+            arena: parser.into_arena(), structure, source_len: 0, retry_source: None,
+        }))));
+    }
 
     #[test]
     fn location_free_frontend_keeps_ast_and_dependencies_for_compilation() {

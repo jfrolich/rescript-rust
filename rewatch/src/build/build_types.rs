@@ -368,6 +368,8 @@ pub struct BuildCommandState {
     // Keyed by "{module_name}:impl" or "{module_name}:intf" (matching stored_asts convention).
     // Values are the raw module names extracted from the parsed AST.
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
+    /// Conservative genType annotation flags, keyed like the parse results.
+    pub gentype_annotations: Mutex<AHashMap<String, bool>>,
     // The units each module's last compile in this process read the
     // interface of (type checking its interface and implementation, plus
     // the modules its generated code may require). Interned: every module
@@ -527,6 +529,7 @@ impl BuildCommandState {
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
+            gentype_annotations: Mutex::new(AHashMap::new()),
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
