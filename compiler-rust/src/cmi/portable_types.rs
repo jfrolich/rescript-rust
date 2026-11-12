@@ -206,7 +206,7 @@ pub struct PortablePersStruct {
 /// if their earlier `encoded.get()` saw an empty slot.
 #[derive(Debug)]
 enum RawSignature {
-    Decoded(Option<PortableRawSignature>),
+    Decoded(Option<Box<PortableRawSignature>>),
     Encoded,
 }
 
@@ -414,7 +414,10 @@ impl PortablePersStruct {
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
-            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(Box::new(sig)), RawSignature::Decoded(raw)))),
+            decoded: std::sync::Mutex::new(Some((
+                PublishedSignature::Portable(Box::new(sig)),
+                RawSignature::Decoded(raw.map(Box::new)),
+            ))),
         }
     }
 
@@ -444,8 +447,10 @@ impl PortablePersStruct {
                     PublishedSignature::Shared(graph) => graph.encode(),
                 },
                 raw: match raw {
-                    RawSignature::Decoded(raw) => raw.as_ref().map(crate::binser::Encoded::encode),
-                    RawSignature::Encoded => unreachable!("raw signature encoded before its publication"),
+                    RawSignature::Decoded(raw) => raw.as_deref().map(crate::binser::Encoded::encode),
+                    RawSignature::Encoded => {
+                        unreachable!("raw signature encoded before its publication")
+                    }
                 },
             };
             if matches!(sig, PublishedSignature::Portable(_)) {
@@ -505,7 +510,7 @@ impl PortablePersStruct {
                 // GenType may read a dependency's raw signature while publishing
                 // the current unit. Do not encode either signature just to read
                 // this graph; byte production belongs to the storage reader.
-                return raw.clone();
+                return raw.as_deref().cloned();
             }
         }
         self.encoded()
@@ -1902,7 +1907,9 @@ pub(crate) fn publish_signature(
         ps_name: ps.ps_name.clone(), ps_filename: ps.ps_filename.clone(),
         ps_deprecated: ps.ps_deprecated.clone(), ps_crcs: ps.ps_crcs.clone(),
         shareable: true, fingerprint, summary: Default::default(), shared_item_hashes: Some(hashes),
-        decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), RawSignature::Decoded(raw)))),
+        decoded: std::sync::Mutex::new(Some((
+            PublishedSignature::Shared(graph), RawSignature::Decoded(raw.map(Box::new)),
+        ))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
         publication_counter_id: crate::perf_counters::signature_publication_id(),
     });
@@ -2992,12 +2999,12 @@ mod identity_tests {
             let mut decoded = portable.decoded.lock().unwrap();
             let (source, raw) = decoded.as_mut().unwrap();
             let sig = source.portable();
-            *raw = RawSignature::Decoded(Some(PortableRawSignature {
+            *raw = RawSignature::Decoded(Some(Box::new(PortableRawSignature {
                 raw_ps_sig: sig.ps_sig.clone(),
                 cmi_longident_names: sig.cmi_longident_names.clone(),
                 raw_type_graph: sig.type_graph.clone(),
                 raw_locations: sig.locations.clone(),
-            }));
+            })));
         }
         assert!(portable.has_raw_signature());
         assert!(portable.encoded.get().is_none());
