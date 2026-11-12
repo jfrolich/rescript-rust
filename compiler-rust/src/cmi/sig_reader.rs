@@ -1190,19 +1190,19 @@ impl SigReadContext<'_> {
         let address = block_address(value).expect("a shape block");
         self.shape_blocks
             .entry(address)
-            .or_insert_with(|| (value.clone(), crate::types::ShapeAllocation::fresh()))
+            .or_insert_with(|| (value.clone(), self.ctx.fresh_shape_allocation()))
             .1
     }
 
     /// A class name: the payload string of an `@instanceOf` read before it,
     /// or a string of its own.
     fn shape_string(&mut self, value: &OcamlValue) -> crate::types::ShapeString {
-        use crate::types::{ShapeAllocation, ShapeString};
+        use crate::types::ShapeString;
         let OcamlValue::String(string) = value else {
             panic!("a class name string")
         };
         let Some(allocation) = string.allocation() else {
-            return ShapeString::Allocation(ShapeAllocation::fresh());
+            return ShapeString::Allocation(self.ctx.fresh_shape_allocation());
         };
         if let Some(string) = self.attribute_strings.get(&allocation) {
             return *string;
@@ -1210,7 +1210,7 @@ impl SigReadContext<'_> {
         *self
             .shape_strings
             .entry(allocation)
-            .or_insert_with(|| ShapeString::Allocation(ShapeAllocation::fresh()))
+            .or_insert_with(|| ShapeString::Allocation(self.ctx.fresh_shape_allocation()))
     }
 
     fn read_arg_label(&mut self, value: &OcamlValue) -> ArgLabel {

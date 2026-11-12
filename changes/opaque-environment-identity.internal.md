@@ -1,0 +1,1 @@
+- Narrow the type checker environment API, pass open usage slots explicitly, and use opaque environment identity keys without changing clone behavior.

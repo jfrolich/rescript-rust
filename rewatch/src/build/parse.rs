@@ -102,7 +102,7 @@ pub fn generate_asts(
                                 state,
                                 state.get_warn_error_override(),
                                 &parse_span,
-                                !state.diagnostic_locations && state.dump.is_none(),
+                                !state.parses_with_locations(),
                             )
                             .map_err(|e| e.to_string());
 
@@ -114,7 +114,7 @@ pub fn generate_asts(
                                         state,
                                         state.get_warn_error_override(),
                                         &parse_span,
-                                        !state.diagnostic_locations && state.dump.is_none(),
+                                        !state.parses_with_locations(),
                                     ) {
                                         Ok(v) => Ok(Some(v)),
                                         Err(e) => Err(e.to_string()),

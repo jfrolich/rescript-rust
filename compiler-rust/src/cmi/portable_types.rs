@@ -1543,6 +1543,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                 &portable.locations,
                 &files,
                 pool,
+                Some(&pps.ps_filename),
             )?;
             Some(Arc::new(PersStruct {
                 ps_name: pps.ps_name.clone(),
@@ -1563,7 +1564,11 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         let intern = |name: &str| store.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
         let map = |file| files.map(file);
-        let locs = store.import_portable_decl_locs(&portable.locations, &map);
+        let locs = store.import_portable_decl_locs(
+            &portable.locations,
+            &map,
+            Some(interface_namespace(&pps.ps_filename)),
+        );
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
         let portable = pps.signature_for_dependent();
@@ -1613,7 +1618,10 @@ fn internalize_signature_into_store(
             "thread store arena grew during internalization"
         );
     }
-    let mut shapes = crate::types::variant_runtime::ShapeImport::new(&locs.scopes);
+    let mut shapes = crate::types::variant_runtime::ShapeImport::with_namespace(
+        &locs.scopes,
+        locs.namespace,
+    );
     let layout_remap: Vec<_> = graph
         .variant_layouts
         .iter()
@@ -1720,6 +1728,14 @@ fn shared_graph_sizes(graph: &PortableTypeGraph) -> crate::types::shared_store::
     sizes
 }
 
+/// The same dependency import has the same namespace in either persistent
+/// storage tier. It is independent of which worker first requests it.
+fn interface_namespace(unit: &str) -> u64 {
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    ("persistent interface", unit).hash(&mut hash);
+    hash.finish()
+}
+
 /// Internalize a graph into the process-wide shared pool. The graph is built
 /// completely before it is published, and is immutable afterwards. `None`
 /// when the pool has no room.
@@ -1729,6 +1745,7 @@ fn internalize_signature_into_shared(
     locations: &DeclLocTable,
     files: &FileRemap<'_>,
     pool: &crate::types::shared_store::SharedTypePool,
+    unit: Option<&str>,
 ) -> Option<Signature> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
@@ -1764,8 +1781,17 @@ fn internalize_signature_into_shared(
             })
             .collect();
         let mut table = locations.clone();
-        scopes = table.remap_for_import(&map);
-        let mut shapes = crate::types::variant_runtime::ShapeImport::new(&scopes);
+        let namespace = unit.map(interface_namespace);
+        scopes = match namespace {
+            Some(namespace) => table.remap_for_import_with(&map, |scope| {
+                crate::types::variant_runtime::identity_in_namespace(namespace, scope)
+            }),
+            None => table.remap_for_import(&map),
+        };
+        let mut shapes = crate::types::variant_runtime::ShapeImport::with_namespace(
+            &scopes,
+            namespace,
+        );
         let layouts = graph
             .variant_layouts
             .iter()
@@ -1804,6 +1830,7 @@ fn shared_decl_locs<'a>(
         instances: Vec::new(),
         files,
         scopes: Default::default(),
+        namespace: None,
     }
 }
 
@@ -1909,7 +1936,10 @@ fn internalize_signature(
         ctx.set_desc(remap[i], desc);
     }
 
-    let mut shapes = crate::types::variant_runtime::ShapeImport::new(&locs.scopes);
+    let mut shapes = crate::types::variant_runtime::ShapeImport::with_namespace(
+        &locs.scopes,
+        locs.namespace,
+    );
     let layout_remap: Vec<_> = graph
         .variant_layouts
         .iter()
@@ -2216,6 +2246,50 @@ mod identity_tests {
     use crate::context::IdGenerator;
 
     #[test]
+    fn named_units_allocate_identities_independently_of_other_contexts() {
+        let allocate = |unit: &str| {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            ctx.set_location_namespace(unit);
+            let scopes = [ctx.fresh_location_scope(), ctx.fresh_location_scope()];
+            let shapes = [ctx.fresh_shape_allocation(), ctx.fresh_shape_allocation()];
+            assert_ne!(scopes[0], scopes[1]);
+            assert_ne!(shapes[0], shapes[1]);
+            (scopes, shapes)
+        };
+        let first = allocate("Unit.res");
+        let other = allocate("Other.res");
+        assert_ne!(first, other);
+        assert_ne!(first, allocate("Unit.resi"));
+        assert_eq!(first, allocate("Unit.res"));
+    }
+
+    #[test]
+    fn named_imports_are_reproducible_but_separate_loads_remain_distinct() {
+        use crate::types::decl_loc::LocationIdentity;
+        let mut table = DeclLocTable::default();
+        let location = table.intern_with_identity(
+            crate::location::Location::none(),
+            LocationIdentity {
+                scope: 7,
+                location: 1,
+                start: 2,
+                end: 3,
+            },
+        );
+        let load = || {
+            let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+            ctx.set_location_namespace("Consumer.res");
+            let files = |file| file;
+            let first = ctx.import_portable_decl_locs(&table, &files);
+            let second = ctx.import_portable_decl_locs(&table, &files);
+            assert_ne!(first.scopes[&7], second.scopes[&7]);
+            assert_ne!(first.import(location), second.import(location));
+            (first.scopes[&7], second.scopes[&7])
+        };
+        assert_eq!(load(), load());
+    }
+
+    #[test]
     fn location_allocations_survive_cold_warm_store_and_shared_imports() {
         use crate::types::decl_loc::LocationIdentity;
         let source = TypeContext::new(Arc::new(IdGenerator::new()));
@@ -2299,7 +2373,7 @@ mod identity_tests {
         let store_load = |ctx: &TypeContext| {
             let locs = ctx
                 .thread_store()
-                .import_portable_decl_locs(&saved.2, &identity);
+                .import_portable_decl_locs(&saved.2, &identity, None);
             internalize_signature_into_store(&saved.0, &saved.1, &locs, ctx.thread_store())
         };
         let a = store_load(&worker_a);
@@ -2322,12 +2396,42 @@ mod identity_tests {
             &saved.2,
             &files,
             target.thread_store().shared_pool(),
+            None,
         )
         .unwrap();
         let shared_scope = verify(&target, &shared);
         assert_ne!(shared_scope, warm_scope);
         let roundtrip = load(&save(&target, &shared));
         assert_ne!(verify(&target, &roundtrip), shared_scope);
+
+        // Both persistent storage tiers represent the same dependency import,
+        // even when a worker falls back because the shared pool is full.
+        let unit = "Producer.cmi";
+        let locs = target.thread_store().import_portable_decl_locs(
+            &saved.2,
+            &identity,
+            Some(interface_namespace(unit)),
+        );
+        let stored = internalize_signature_into_store(
+            &saved.0,
+            &saved.1,
+            &locs,
+            target.thread_store(),
+        );
+        let shared = internalize_signature_into_shared(
+            &saved.0,
+            &saved.1,
+            &saved.2,
+            &files,
+            target.thread_store().shared_pool(),
+            Some(unit),
+        )
+        .unwrap();
+        assert_eq!(verify(&target, &stored), verify(&target, &shared));
+        assert_eq!(
+            crate::binser::to_vec(&save(&target, &stored)).unwrap(),
+            crate::binser::to_vec(&save(&target, &shared)).unwrap(),
+        );
 
         let digest = |value: &(Signature, PortableTypeGraph, DeclLocTable)| {
             let mut hash = std::collections::hash_map::DefaultHasher::new();

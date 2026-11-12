@@ -279,7 +279,7 @@ pub struct BuildArgs {
 
     /// Debugging: write these intermediate representations of every compiled
     /// module (comma-separated: typedtree, typedtree-locs, rawlambda, lambda,
-    /// lambda-locs) to `--dump-dir`. Forces a full build.
+    /// lambda-locs, sig) to `--dump-dir`. Forces a full build.
     #[arg(long, hide = true, value_delimiter = ',', value_parser = parse_dump_kind, requires = "dump_dir")]
     pub dump: Vec<rescript_compiler::driver::DumpKind>,
 

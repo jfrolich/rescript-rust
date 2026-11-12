@@ -2479,16 +2479,23 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
 /// Update the level of a type and its children.
 pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
-    let current = ctx.get_level(ty);
-
-    if level < current {
-        ctx.set_level(ty, level);
-
-        // Recursively update children
-        iter_type_expr(ctx, ty, |child| {
-            update_level(ctx, level, child);
-        });
+    if level < ctx.get_level(ty) {
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_update_level(ctx, level, ty);
+        }
+        update_level_rec(ctx, level, ty);
     }
+}
+
+/// `ty` is a representative above `level`.
+fn update_level_rec(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
+    ctx.set_level(ty, level);
+    iter_type_expr(ctx, ty, |child| {
+        let child = ctx.repr(child);
+        if level < ctx.get_level(child) {
+            update_level_rec(ctx, level, child);
+        }
+    });
 }
 
 /// Environment-aware update_level matching OCaml ctype.ml:652-676.
@@ -2539,6 +2546,22 @@ pub(crate) fn update_level_checked(
     if ctx.get_level(ty) <= level {
         return Ok(());
     }
+    update_level_checked_above(ctx, env, level, ty)
+}
+
+/// [`update_level_checked`] of a representative above `level`.
+fn update_level_checked_above(
+    ctx: &TypeContext,
+    env: &Env,
+    level: i32,
+    ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_update_level(ctx, level, ty);
+    }
+    if lower_plain_levels(ctx, env, level, ty) {
+        return Ok(());
+    }
     let snapshot = ctx.snapshot_type_state();
     if update_level_pass(ctx, env, level, false, ty).is_ok() {
         return Ok(());
@@ -2548,7 +2571,196 @@ pub(crate) fn update_level_checked(
         .map_err(|escaping| TypeError::Unify(vec![(escaping, new_var_at_level(ctx, level))]))
 }
 
+/// Whether a level update that meets a constructor or row name `path` has
+/// to look the path up: OCaml `get_level env p` (ctype.ml:666-673) is the
+/// declaration's newtype level, or the binding time of the path's head, and
+/// the update expands or fails when that is above the target level.
+///
+/// This is the `HAS_SCOPED` flag of docs/CHECKER_REDESIGN.md C.2, made
+/// conservative. The design calls a path scoped when it is bound above the
+/// level `init_def` set for the current structure item. That is not enough:
+/// a weak variable of an earlier item keeps that item's level, which is
+/// below the binding time of every type declared later, so lowering a later
+/// type to it must fail
+/// (`tests/build_tests/super_errors/fixtures/weak_variable_escapes_later_type.res`).
+/// Only the two kinds of path whose level is a constant that no level in use
+/// can be below are unscoped:
+///
+/// - A path rooted in another compilation unit: binding time 0, and its
+///   declaration never has a newtype level ([`get_level_in_env`]).
+/// - A predefined type: binding time at most `PREDEF_STAMP_BARRIER`, no
+///   newtype level. [`lower_plain_levels`] is not used for a target level at
+///   or below the barrier.
+fn path_is_scoped(path: &Path) -> bool {
+    match path.view() {
+        // Only a stamp up to the barrier can be one of `Predef`'s: test the
+        // range before the name.
+        PathView::Pident(id) => {
+            id.stamp() > super::predef::PREDEF_STAMP_BARRIER
+                || !(id.is_persistent() || super::predef::is_predef_type_ident(id))
+        }
+        PathView::Pdot(parent, _, _) => !path_root_is_persistent(parent),
+        PathView::Papply(_, _) => true,
+    }
+}
+
+/// The level update of a plain type: lower to `level` every node of `ty`
+/// above it, with no snapshot, no declaration lookup and no retry. Returns
+/// `false`, having changed nothing, when `ty` is not plain; the caller then
+/// runs the general update.
+///
+/// A type is plain when every node the update would lower is a variable, a
+/// tuple, an arrow, or a constructor whose path is not scoped
+/// ([`path_is_scoped`]). That covers the ground types of
+/// docs/CHECKER_REDESIGN.md F.3 that name no type of the unit being
+/// compiled, and the same types with variables in them.
+///
+/// The design has a level update *return* on a ground type, deciding from a
+/// flags byte kept on the node. Neither part survives on this
+/// representation:
+///
+/// - The levels must still be written. A node's level decides whether
+///   `instance` copies or shares it, and so which nodes a later unification
+///   links, and through that the name an inferred type is printed with
+///   (`tests/build_tests/super_errors/fixtures/alias_name_follows_unification.res`).
+///   What a plain type saves is everything `update_level_pass` does besides
+///   writing levels.
+/// - The decision is made per node, from the node's descriptor, as the walk
+///   reaches it. A flag stored on a node says nothing about what is behind a
+///   link below it: a variable may have been bound since, and a structure
+///   node may have been linked to another (a unification links before it
+///   unifies the children; a failed or undone one restores the node). And a
+///   flags byte costs more than it returns here: nodes are copied, not
+///   shared, so each is lowered about once, and computing its flags is a
+///   second walk.
+///
+/// Why this equals `update_level_pass(ctx, env, level, false, ty)` followed
+/// by a commit:
+///
+/// - That pass fails or expands only at a `Tconstr` or a row name whose path
+///   level ([`get_level_in_env`]) is above `level`. Every constructor
+///   lowered here has an unscoped path, whose level is at most
+///   `PREDEF_STAMP_BARRIER`, and `level` is above the barrier. For every
+///   other shape lowered here that pass writes the level and visits the
+///   children in the same order.
+/// - Any other node above `level` (a row, an object, a universal variable,
+///   a package, a scoped constructor, a node of a dependency) makes the walk
+///   give up.
+/// - Giving up restores the levels written so far, in reverse, so the
+///   general update starts from the state it would have seen.
+/// - That pass runs under a snapshot of its own, so each level it writes is
+///   journaled for an enclosing snapshot whatever the node's age. The
+///   levels are written the same way here
+///   (`TypeContext::set_level_as_under_new_snapshot`).
+fn lower_plain_levels(ctx: &TypeContext, env: &Env, level: i32, ty: TypeExprRef) -> bool {
+    fn lower(
+        ctx: &TypeContext,
+        level: i32,
+        ty: TypeExprRef,
+        lowered: &mut smallvec::SmallVec<[(TypeExprRef, i32); 16]>,
+    ) -> bool {
+        let ty = ctx.repr(ty);
+        let current = ctx.get_level(ty);
+        if current <= level {
+            return true;
+        }
+        // A dependency's node: its level is written to an overlay.
+        if ty.is_store() {
+            return false;
+        }
+        let desc = ctx.borrow_desc(ty);
+        match &*desc {
+            TypeDesc::Tvar(_) => {
+                lowered.push((ty, current));
+                ctx.set_level_as_under_new_snapshot(ty, level);
+                true
+            }
+            TypeDesc::Tconstr { path, args, .. } => {
+                if path_is_scoped(path) {
+                    return false;
+                }
+                lowered.push((ty, current));
+                ctx.set_level_as_under_new_snapshot(ty, level);
+                ctx.type_list(args)
+                    .iter()
+                    .all(|arg| lower(ctx, level, arg, lowered))
+            }
+            TypeDesc::Ttuple(types) => {
+                lowered.push((ty, current));
+                ctx.set_level_as_under_new_snapshot(ty, level);
+                ctx.type_list(types)
+                    .iter()
+                    .all(|ty| lower(ctx, level, ty, lowered))
+            }
+            TypeDesc::Tarrow { args, ret } => {
+                lowered.push((ty, current));
+                ctx.set_level_as_under_new_snapshot(ty, level);
+                ctx.type_args(args)
+                    .iter()
+                    .all(|arg| lower(ctx, level, arg.typ, lowered))
+                    && lower(ctx, level, *ret, lowered)
+            }
+            _ => false,
+        }
+    }
+
+    if level <= super::predef::PREDEF_STAMP_BARRIER {
+        return false;
+    }
+    // Debug builds run the general update's decisions on the side
+    // (docs/CHECKER_REDESIGN.md C.2): where the fast path applies, they must
+    // find nothing to expand and nothing that escapes.
+    let general_is_plain = cfg!(debug_assertions)
+        .then(|| level_update_is_plain(ctx, env, level, ty, &mut TypeExprRefSet::new()));
+    let mut lowered = smallvec::SmallVec::new();
+    if lower(ctx, level, ty, &mut lowered) {
+        assert!(
+            general_is_plain != Some(false),
+            "plain level update skipped an expansion or an escaping constructor"
+        );
+        return true;
+    }
+    for (node, old) in lowered.into_iter().rev() {
+        ctx.set_level_as_under_new_snapshot(node, old);
+    }
+    false
+}
+
+/// Whether `update_level_pass(ctx, env, level, false, ty)` would only write
+/// levels: it meets no constructor and no row name bound above `level`.
+/// Reads what that pass reads, writes nothing. For the debug cross-check of
+/// [`lower_plain_levels`].
+fn level_update_is_plain(
+    ctx: &TypeContext,
+    env: &Env,
+    level: i32,
+    ty: TypeExprRef,
+    visited: &mut TypeExprRefSet,
+) -> bool {
+    let ty = ctx.repr(ty);
+    if ctx.get_level(ty) <= level || !visited.insert(ty) {
+        return true;
+    }
+    let scoped_path = match &*ctx.borrow_desc(ty) {
+        TypeDesc::Tconstr { path, .. } => Some(*path),
+        TypeDesc::Tvariant(row) => row_repr_ref(ctx, &ctx.row_desc(row))
+            .row_name
+            .as_ref()
+            .map(|(path, _)| *path),
+        _ => None,
+    };
+    if scoped_path.is_some_and(|path| level < get_level_in_env(ctx, env, &path)) {
+        return false;
+    }
+    let mut children: smallvec::SmallVec<[TypeExprRef; 8]> = smallvec::SmallVec::new();
+    iter_type_expr(ctx, ty, |child| children.push(child));
+    children
+        .into_iter()
+        .all(|child| level_update_is_plain(ctx, env, level, child, visited))
+}
+
 /// OCaml `newvar2 level`.
+#[track_caller]
 fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
     let var = ctx.new_var(None);
     ctx.set_level(var, level);
@@ -2736,7 +2948,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
     }
 
     let cache_key = module_path.name();
-    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key, None) {
         if cached_path.same(module_path) {
             return Some(cached_sig);
         }
@@ -2810,7 +3022,7 @@ pub(crate) fn resolve_module_signature_through_cmi_shared(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, *module_path, sig.clone());
+        ctx.register_resolved_module_sig(&cache_key, None, *module_path, sig.clone());
     }
 
     result
@@ -2824,7 +3036,7 @@ fn resolve_module_signature_through_persistent_env_shared(
     use crate::types::decl::{ModuleType, SignatureItem};
 
     let cache_key = module_path.name();
-    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key) {
+    if let Some((cached_path, cached_sig)) = ctx.find_resolved_module_sig(&cache_key, None) {
         if cached_path.same(module_path) {
             return Some(cached_sig);
         }
@@ -2877,7 +3089,7 @@ fn resolve_module_signature_through_persistent_env_shared(
     };
 
     if let Some(sig) = result.as_ref() {
-        ctx.register_resolved_module_sig(&cache_key, *module_path, sig.clone());
+        ctx.register_resolved_module_sig(&cache_key, None, *module_path, sig.clone());
     }
 
     result
@@ -4681,6 +4893,11 @@ pub(crate) fn instance_declaration(
     ctx: &crate::types::context::TypeContext,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> crate::types::decl::TypeDeclaration {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Instance, || {
+            instance_declaration(ctx, decl)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     let mut copy = |ty: TypeExprRef| copy_type_cached(ctx, ty, &mut cache);
     let type_kind = match &decl.type_kind {
@@ -7332,8 +7549,12 @@ pub fn unify(
     }
     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
     // failure can `undo_compress` before expanding the trace.
-    let top_snapshot =
-        (state.recursion_depth == 1).then(|| ctx.snapshot_type_state_for_undo_compress());
+    let top_snapshot = (state.recursion_depth == 1).then(|| {
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_unify(ctx, t1, t2);
+        }
+        ctx.snapshot_type_state_for_undo_compress()
+    });
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);
@@ -10021,6 +10242,9 @@ fn generalize_rec(ctx: &TypeContext, ty: TypeExprRef) {
 /// OCaml `Ctype.generalize`: raise to the generic level every node of `ty`
 /// above the current level.
 pub fn generalize(ctx: &TypeContext, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.current_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_rec(ctx, ty);
@@ -10356,6 +10580,9 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
 /// OCaml `Ctype.generalize_structure`: generalize the nodes above
 /// `var_level`, but leave type variables at their level.
 pub fn generalize_structure(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.current_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_structure_rec(ctx, var_level, ty);
@@ -10454,6 +10681,9 @@ fn generalize_expansive_rec(
 /// appears in an expansive position (contravariant or under a mutable
 /// constructor), which is lowered to the non-generalizable level.
 pub fn generalize_expansive(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.nongen_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     let mut visited = TypeExprRefSet::new();
@@ -11476,8 +11706,25 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
 pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || instance(ctx, ty));
+    }
     let mut cache = CopyCache::new(ctx);
     copy_type_cached(ctx, ty, &mut cache)
+}
+
+/// For the compiler counters (see `TypeContext::counts_this_call`): count
+/// the instantiation of `roots` that `again`, the caller called again,
+/// runs.
+#[cold]
+#[inline(never)]
+fn counted_instance<R>(
+    ctx: &TypeContext,
+    roots: impl IntoIterator<Item = TypeExprRef>,
+    again: impl FnOnce() -> R,
+) -> R {
+    crate::perf_counters::census_instance(ctx, roots);
+    ctx.counted_copy(crate::perf_counters::CopyCause::Instance, again)
 }
 
 /// Create an instance using OCaml `Ctype.instance ~partial`.
@@ -11486,6 +11733,9 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// are forgotten as fresh variables at the current level instead of being
 /// copied structurally. This is used by polymorphic variant pattern typing.
 pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || instance_partial(ctx, ty, keep));
+    }
     let mut cache = CopyCache::new_partial(ctx, ty, keep);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -11494,6 +11744,9 @@ pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeE
 /// Instantiate a list of types, sharing variable substitutions across all of them.
 /// Matches OCaml's Ctype.instance_list.
 pub fn instance_list(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, types.iter().copied(), || instance_list(ctx, types));
+    }
     let mut cache = CopyCache::new(ctx);
     types
         .iter()
@@ -11513,6 +11766,11 @@ pub fn instance_parameterized_type(
     params: &[TypeExprRef],
     body: TypeExprRef,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, params.iter().copied().chain([body]), || {
+            instance_parameterized_type(ctx, params, body)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     let fresh_params: Vec<TypeExprRef> = params
         .iter()
@@ -11974,6 +12232,11 @@ pub fn instance_poly(
     univars: crate::types::type_expr::TypeSlice<'_>,
     sch: TypeExprRef,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, univars.iter().chain([sch]), || {
+            instance_poly(ctx, keep_names, fixed, univars, sch)
+        });
+    }
     let univars = univars.to_smallvec::<4>();
     ctx.with_copy_session(|| instance_poly_in_session(ctx, keep_names, fixed, &univars, sch))
 }
@@ -12047,6 +12310,10 @@ pub fn instance_constructor(
     ctx: &TypeContext,
     cstr: &super::ConstructorDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        let roots = cstr.cstr_args.iter().copied().chain([cstr.cstr_res]);
+        return counted_instance(ctx, roots, || instance_constructor(ctx, cstr));
+    }
     let mut cache = CopyCache::new(ctx);
     let ty_res = copy_type_cached(ctx, cstr.cstr_res, &mut cache);
     let ty_args: Vec<TypeExprRef> = cstr
@@ -12068,6 +12335,12 @@ pub fn instance_constructor_in_pattern(
     newtype_lev: i32,
     cstr: &super::ConstructorDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        let roots = cstr.cstr_args.iter().copied().chain([cstr.cstr_res]);
+        return counted_instance(ctx, roots, || {
+            instance_constructor_in_pattern(ctx, env, newtype_lev, cstr)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
 
     // Process existential type variables before copying cstr_res/cstr_args.
@@ -12217,6 +12490,11 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [lbl.lbl_res, lbl.lbl_arg], || {
+            instance_label(ctx, fixed, lbl)
+        });
+    }
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
     //   let vars, ty_arg = match repr lbl.lbl_arg with
@@ -12384,6 +12662,11 @@ pub(crate) fn instance_label_arg_at(
     lbl_arg: TypeExprRef,
     subst: &LabelParamSubst,
 ) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [lbl_arg], || {
+            instance_label_arg_at(ctx, lbl_arg, subst)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     cache.param_subst = Some(subst);
     copy_type_cached(ctx, lbl_arg, &mut cache)
@@ -12711,6 +12994,9 @@ struct CopyRowMoreMarker {
 
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || copy_type(ctx, ty));
+    }
     let mut cache = CopyCache::new(ctx);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -12727,6 +13013,11 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// [`subst_identity_copy`] of several types in one copy session, so nodes
 /// they share stay shared in the copies.
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::SubstIdentity, || {
+            subst_identity_copy_many(ctx, types)
+        });
+    }
     let mut seen = super::type_marks::ref_table();
     // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
     // in a declaration before the single `cleanup_types` call, so temporary
@@ -12810,6 +13101,11 @@ fn subst_identity_copy_with_mode(
     ty: TypeExprRef,
     mode: SubstCopyMode,
 ) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::SubstIdentity, || {
+            subst_identity_copy_with_mode(ctx, ty, mode)
+        });
+    }
     let mut seen = super::type_marks::ref_table();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
@@ -12862,7 +13158,7 @@ fn subst_identity_copy_rec(
             // OCaml Subst.typexp creates a generic-level stub (`newgenvar`) for
             // every non-variable node. Keeping this at current_level allows the
             // copied manifest to be reused and mutated by later unification.
-            let placeholder = ctx.new_generic_var(None);
+            let placeholder = ctx.new_generic_type(TypeDesc::Tvar(None));
             seen.insert(ty, placeholder);
 
             let desc = ctx.borrow_desc(ty);
@@ -13362,7 +13658,7 @@ pub(crate) fn copy_type_cached(
         // Generic structural nodes must be registered before recursion so
         // recursive references can reuse the same node.
         structural => {
-            let placeholder = ctx.new_var(None);
+            let placeholder = ctx.new_type(TypeDesc::Tvar(None));
             if level != GENERIC_LEVEL {
                 ctx.set_level(placeholder, level);
             }
@@ -13977,6 +14273,11 @@ pub fn nondep_type(
     mid: &Ident,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Nondep, || {
+            nondep_type(ctx, env, mid, ty)
+        });
+    }
     let mut cache: HashMap<TypeExprRef, TypeExprRef> = HashMap::new();
     // ctype.ml `with_nondep_copy_session`.
     ctx.with_copy_session(|| nondep_type_rec(ctx, env, mid, ty, &mut cache))
@@ -14921,6 +15222,122 @@ mod tests {
         let with_univar = ctx.new_tuple(vec![ctx.new_var(None), ctx.new_univar(None)]);
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, with_univar, &mut budget));
+    }
+
+    /// `(int, 'a) => array<string>` at the current level, with its nodes.
+    fn plain_type(ctx: &TypeContext) -> (TypeExprRef, Vec<TypeExprRef>) {
+        let int = ctx.new_constr(super::super::predef::path_int(), vec![]);
+        let var = ctx.new_var(None);
+        let pair = ctx.new_tuple(vec![int, var]);
+        let string = ctx.new_constr(super::super::predef::path_string(), vec![]);
+        let array = ctx.new_constr(
+            Path::pdot(Path::pident(Ident::create_persistent("Stdlib_Array")), "t"),
+            vec![string],
+        );
+        let arrow = ctx.new_arrow_simple(pair, array);
+        (arrow, vec![int, var, pair, string, array, arrow])
+    }
+
+    #[test]
+    fn scoped_paths_are_those_a_level_update_must_look_up() {
+        assert!(!path_is_scoped(&super::super::predef::path_int()));
+        let unit = Path::pident(Ident::create_persistent("Unit"));
+        assert!(!path_is_scoped(&Path::pdot(unit, "t")));
+        assert!(!path_is_scoped(&Path::pdot(Path::pdot(unit, "Inner"), "t")));
+
+        // A type of the unit being compiled, whatever its stamp: a stamp in
+        // `Predef`'s range does not make an identifier predefined.
+        let barrier = super::super::predef::PREDEF_STAMP_BARRIER;
+        for stamp in [1, barrier, barrier + 1, 5000] {
+            let local = Ident::new("t", stamp, crate::ident::IdentFlags::NONE);
+            assert!(path_is_scoped(&Path::pident(local)));
+        }
+        assert!(path_is_scoped(&Path::pdot(
+            Path::pident(Ident::create_local("M")),
+            "t"
+        )));
+        assert!(path_is_scoped(&Path::papply(unit, unit)));
+    }
+
+    #[test]
+    fn plain_level_update_writes_the_levels_of_the_general_update() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        ctx.init_def(5000);
+        let (fast, fast_nodes) = plain_type(&ctx);
+        let (general, general_nodes) = plain_type(&ctx);
+        // One node of each is already at the target and stops the walk.
+        ctx.set_level(fast_nodes[2], 2000);
+        ctx.set_level(general_nodes[2], 2000);
+
+        assert!(lower_plain_levels(&ctx, &env, 3000, fast));
+        update_level_pass(&ctx, &env, 3000, false, general).expect("nothing escapes");
+
+        let levels = |nodes: &[TypeExprRef]| -> Vec<i32> {
+            nodes.iter().map(|node| ctx.get_level(*node)).collect()
+        };
+        assert_eq!(levels(&fast_nodes), levels(&general_nodes));
+        assert_eq!(levels(&fast_nodes), [5000, 5000, 2000, 3000, 3000, 3000]);
+    }
+
+    #[test]
+    fn plain_level_update_gives_up_and_leaves_no_trace() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        ctx.init_def(5000);
+        let levels = |nodes: &[TypeExprRef]| -> Vec<i32> {
+            nodes.iter().map(|node| ctx.get_level(*node)).collect()
+        };
+
+        // A type of the unit being compiled, met after other nodes were
+        // lowered.
+        let (plain, mut nodes) = plain_type(&ctx);
+        let local = ctx.new_constr(Path::pident(Ident::create_local("t")), vec![]);
+        let scoped = ctx.new_tuple(vec![plain, local]);
+        nodes.extend([local, scoped]);
+        assert!(!lower_plain_levels(&ctx, &env, 3000, scoped));
+        assert_eq!(levels(&nodes), [5000; 8]);
+
+        // Shapes the general update handles.
+        let univar = ctx.new_univar(None);
+        for other in [
+            ctx.new_poly(ctx.new_tuple(vec![univar]), vec![univar]),
+            ctx.new_type(TypeDesc::Tobject {
+                fields: ctx.new_type(TypeDesc::Tnil),
+            }),
+        ] {
+            let (plain, mut nodes) = plain_type(&ctx);
+            let ty = ctx.new_tuple(vec![plain, other]);
+            nodes.push(ty);
+            assert!(!lower_plain_levels(&ctx, &env, 3000, ty));
+            assert_eq!(levels(&nodes), [5000; 7]);
+        }
+
+        // A target level a predefined type's binding time may be above.
+        let (plain, nodes) = plain_type(&ctx);
+        let barrier = super::super::predef::PREDEF_STAMP_BARRIER;
+        assert!(!lower_plain_levels(&ctx, &env, barrier, plain));
+        assert_eq!(levels(&nodes), [5000; 6]);
+        assert!(lower_plain_levels(&ctx, &env, barrier + 1, plain));
+        assert_eq!(levels(&nodes), [barrier + 1; 6]);
+    }
+
+    #[test]
+    fn plain_level_update_is_undone_with_an_enclosing_snapshot() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        ctx.init_def(5000);
+        let (old, old_nodes) = plain_type(&ctx);
+        let snapshot = ctx.snapshot_type_state();
+        // Nodes younger than the snapshot: `set_level` alone would not
+        // journal them, the general update's own snapshot does.
+        let (young, young_nodes) = plain_type(&ctx);
+        assert!(lower_plain_levels(&ctx, &env, 3000, old));
+        assert!(lower_plain_levels(&ctx, &env, 3000, young));
+        ctx.restore_type_state(snapshot);
+        for node in old_nodes.into_iter().chain(young_nodes) {
+            assert_eq!(ctx.get_level(node), 5000);
+        }
     }
 
     #[test]
