@@ -43,6 +43,7 @@ const NONE: u32 = u32::MAX;
 
 pub(super) struct Plan {
     source: NodeId,
+    operands: crate::bir::ListId,
     start: Span,
     cont: Cont,
     target: Option<VarId>,
@@ -136,6 +137,7 @@ impl State {
         let finished = vec![Finished::False; actions.len()];
         self.untagged.push(Some(Plan {
             source,
+            operands,
             start,
             cont: cx.cont,
             target: binding.map(|(_, v)| v),
@@ -300,6 +302,7 @@ impl State {
                 start: out.stmts.start,
                 len: 0,
             });
+            self.locate_switch_run(p.actions[action as usize].source, out.stmts);
             p.finished[action as usize] = out.finished;
             if p.actions[action as usize].uses > 1 {
                 let list = self.statements.take_list(&mut self.arena, out.stmts);
@@ -458,13 +461,18 @@ impl State {
                 && (!matches!(p.cont, Cont::Effect(Tail::Return(_)))
                     || self.switch_has_exit(p.actions[out.action as usize].source))
         };
+        let loc = if out.action != NONE && !p.actions[out.action as usize].fallback {
+            self.switch_location(p.actions[out.action as usize].source)
+        } else {
+            None
+        };
         let list = self.statements.take_list(&mut self.arena, out.run);
         (
             self.arena.block_from_list(list),
             ClauseMeta {
                 should_break,
                 comment: None,
-                loc: None,
+                loc,
             },
         )
     }
@@ -514,7 +522,15 @@ impl State {
         let mut actions = Vec::with_capacity(keys.len() + usize::from(has_default));
         let mut clauses = Vec::with_capacity(actions.capacity());
         for i in 0..keys.len() {
-            let (body, meta) = self.untagged_clause(p, p.outputs[base + 1 + i]);
+            let (body, mut meta) = self.untagged_clause(p, p.outputs[base + 1 + i]);
+            let clause = match p.dispatch.tree(tree) {
+                Tree::SwitchValue(c, _) => &p.dispatch.value_clauses(*c)[i].1,
+                Tree::SwitchTypeof(c, _) => &p.dispatch.typeof_clauses(*c)[i].1,
+                _ => unreachable!(),
+            };
+            if let Clause::FallsThrough(Some(arm)) = clause {
+                meta.loc = self.switch_location(self.source.lists.get(p.operands)[*arm as usize]);
+            }
             actions.push(body);
             clauses.push(meta);
         }
@@ -893,7 +909,7 @@ mod tests {
 
     #[test]
     fn program_element_sizes() {
-        assert_eq!(std::mem::size_of::<Plan>(), 328);
+        assert_eq!(std::mem::size_of::<Plan>(), 336);
         assert_eq!(std::mem::size_of::<Untagged>(), 4);
         assert_eq!(std::mem::size_of::<Op>(), 8);
         assert_eq!(std::mem::size_of::<Work>(), 12);

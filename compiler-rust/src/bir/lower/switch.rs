@@ -28,6 +28,7 @@ pub(super) enum Kind {
 /// Cold per-switch data, not copied down the source walk.
 pub(super) struct Plan {
     pub(super) scrutinee: NodeId,
+    operands: crate::bir::ListId,
     pub(super) header: SwitchId,
     groups: Vec<usize>,
     next: Vec<usize>,
@@ -159,6 +160,7 @@ impl State {
         let frame = Switch(self.switches.len() as u32);
         self.switches.push(Some(Plan {
             scrutinee,
+            operands,
             header,
             groups,
             next,
@@ -549,6 +551,7 @@ impl State {
         into.push((
             Cx {
                 cont: Cont::Value(Tail::No),
+                switch_depth: cx.switch_depth + u32::from(plan.kind != Kind::Named),
                 ..cx
             },
             plan.scrutinee,
@@ -595,6 +598,21 @@ impl State {
             if let Some(value) = out.value.take() {
                 self.drop_pure_effect(value);
             }
+            let p = self.switch_plan(frame);
+            let is_default = index > p.bodies.len();
+            let source = if is_default {
+                p.default.unwrap()
+            } else {
+                p.bodies[index - 1]
+            };
+            let located = if is_default {
+                !matches!(cx.cont, Cont::Effect(Tail::Return(_)))
+            } else {
+                p.form == Form::General
+            };
+            if located {
+                self.locate_switch_run(source, self.statements.since(Span { start, len: 0 }));
+            }
             if self.switch_plan(frame).form != Form::General {
                 let run = self.statements.trim(Span { start, len: 0 });
                 self.switches[frame.0 as usize].as_mut().unwrap().runs[index - 1] = run;
@@ -627,12 +645,13 @@ impl State {
             let run = self.statements.since(Span { start, len: 0 });
             let list = self.statements.take_list(&mut self.arena, run);
             let block = self.arena.block_from_list(list);
+            let loc = self.switch_location(source);
             let plan = self.switches[frame.0 as usize].as_mut().unwrap();
             plan.output.push(block);
             plan.clauses.push(ClauseMeta {
                 should_break: should_break && !explicit,
                 comment: None,
-                loc: None,
+                loc,
             });
         }
         // All child statements now belong to their group, except the scrutinee
@@ -686,10 +705,12 @@ impl State {
                     }
                     let empty = self.arena.lists.push(&[]);
                     actions.push(self.arena.block_from_list(empty));
+                    let source = self.source.lists.get(plan.operands)[case];
+                    let loc = self.switch_location(source);
                     clauses.push(ClauseMeta {
                         should_break: false,
                         comment: None,
-                        loc: None,
+                        loc,
                     });
                     case = plan.next[case];
                 }
@@ -1088,20 +1109,84 @@ mod tests {
     }
 
     #[test]
+    fn unsupported_child_keeps_its_own_reason() {
+        for string in [false, true] {
+            let mut a = LamArena::new();
+            let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+            let body = a.prim_raw(
+                crate::lambda::lam_primitive::Primitive::Pawait,
+                &[x],
+                crate::lambda::LamLoc::NONE,
+            );
+            let root = if string {
+                a.string_switch(x, &[("case", body)], None)
+            } else {
+                let info = a.add_switch(
+                    true,
+                    [SwitchKey::Int(0)],
+                    true,
+                    [],
+                    false,
+                    SwitchDispatch::Direct,
+                );
+                let actions = a.add_list(&[body]);
+                a.switch_raw(x, actions, info)
+            };
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            assert!(matches!(
+                state.probe(Cx::returning(), root),
+                Err(Unsupported("await"))
+            ));
+        }
+    }
+
+    #[test]
+    fn direct_dispatch_ignores_its_unused_block_partition() {
+        let mut a = LamArena::new();
+        let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+        let body = a.const_(C::Int {
+            i: 42,
+            comment: None,
+        });
+        let ignored = a.prim_raw(
+            crate::lambda::lam_primitive::Primitive::Pawait,
+            &[x],
+            crate::lambda::LamLoc::NONE,
+        );
+        let info = a.add_switch(
+            true,
+            [SwitchKey::Int(0)],
+            false,
+            [SwitchKey::Int(1)],
+            false,
+            SwitchDispatch::Direct,
+        );
+        let actions = a.add_list(&[body, ignored]);
+        let root = a.switch_raw(x, actions, info);
+        oracle_tests::compare(a, root);
+    }
+
+    #[test]
     fn frames_and_facts_are_small() {
         assert_eq!(std::mem::size_of::<Switch>(), 4);
         assert_eq!(std::mem::size_of::<Facts>(), 16);
-        assert_eq!(std::mem::size_of::<Plan>(), 192);
+        assert_eq!(std::mem::size_of::<Plan>(), 200);
     }
     #[test]
     fn ten_thousand_cases_have_linear_comparison_counts() {
-        for pairs in [false, true] {
+        for mode in 0..3 {
             let mut a = LamArena::new();
             let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
             let actions: Vec<_> = (0..10_000)
                 .map(|i| {
                     a.const_(C::Int {
-                        i: if pairs { i / 2 } else { i },
+                        i: match mode {
+                            0 => i,
+                            1 => i / 2,
+                            _ => 0,
+                        },
                         comment: None,
                     })
                 })
@@ -1121,9 +1206,10 @@ mod tests {
             let mut state = State::new(input);
             let out = state.probe(Cx::returning(), root).unwrap();
             assert_eq!(state.switch_visits, 10_000);
-            assert_eq!(state.switch_comparisons, if pairs { 5_000 } else { 0 });
-            assert_eq!(state.switch_compared, if pairs { 5_000 } else { 0 });
-            assert_eq!(state.source_steps, if pairs { 5_002 } else { 10_002 });
+            let comparisons = [0, 5_000, 9_999][mode];
+            assert_eq!(state.switch_comparisons, comparisons);
+            assert_eq!(state.switch_compared, comparisons);
+            assert_eq!(state.source_steps, [10_002, 5_002, 3][mode]);
             let result = state.complete(Cx::returning(), out);
             result
                 .program

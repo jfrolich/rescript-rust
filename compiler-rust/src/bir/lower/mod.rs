@@ -11,6 +11,7 @@ mod prim_block;
 mod switch;
 mod variant;
 mod untagged;
+mod location;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -329,6 +330,9 @@ struct State {
     cross_module_inline: bool,
     check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
+    switch_locations: Vec<location::Fact>,
+    location_work: Vec<(NodeId,bool)>,
+    location_steps: usize,
     sequence_steps: usize,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
@@ -382,6 +386,7 @@ impl State {
             cross_module_inline: false,
             check_div_by_zero: true,
             locations: None,
+            switch_locations: Vec::new(), location_work: Vec::new(), location_steps: 0,
             sequence_steps: 0,
             primitive_steps: 0,
             spine_steps: 0,

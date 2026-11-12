@@ -754,6 +754,21 @@ impl State {
                 unreachable!("PextensionSlotEq is lowered in raw_lambda::lower")
             }
         };
+        // C: primitive_uses_default_compilation / with_source_loc. Preserve
+        // a child's existing location when a normalizer returns that child.
+        let located = match primitive {
+            Primitive::Pdebugger => false,
+            Primitive::Pfield(_,crate::lambda::FieldDbgInfo::Module { .. }) =>
+                !matches!(self.source.lists.get(prim.operands),[arg] if matches!(self.source.view(*arg),View::Global { .. })),
+            _ => true,
+        };
+        if located && !self.arena.node(value).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
+            && self.locations.as_ref().and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
+            let comment = self.arena.cold(value).and_then(|c|c.comment);
+            self.arena.set_cold(value,crate::bir::Cold { loc:payload.loc,comment });
+            let mut flags = self.arena.node(value).flags(); flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+            self.arena.nodes[value.index()].set_flags(flags);
+        }
         Ok(self.primitive_result(
             cx,
             self.statements.since(Span {
