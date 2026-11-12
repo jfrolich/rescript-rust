@@ -4,12 +4,18 @@
  * and prints what the page would show. Fails when an example does not
  * compile or its program raises.
  *
- *   node scripts/smoke.mjs [example-id] [--show]
+ * It also runs the session the read-eval-print loop of the RFC page opens
+ * with, and the inputs it offers after that: none may fail, and the opening
+ * session has to be the transcript docs/comptime/README.md shows
+ * (`--write-transcript` puts it there).
+ *
+ *   node scripts/smoke.mjs [example-id] [--show] [--write-transcript]
  */
-import { readFile } from "fs/promises";
+import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import * as wasm from "../crate/pkg/rescript_playground_wasm.js";
 import { createEngine } from "../src/engine.js";
+import { runSession, sessionLibraries, transcriptOf } from "../src/repl-transcript.js";
 
 const root = join(import.meta.dirname, "..");
 wasm.initSync({ module: await readFile(join(root, "crate/pkg/rescript_playground_wasm_bg.wasm")) });
@@ -51,5 +57,32 @@ for (const example of examples) {
   }
   if (logs) console.log(logs.map((log) => `  | ${log.text}`).join("\n"));
   failed ||= !ok;
+}
+
+if (!only) {
+  const session = JSON.parse(await readFile(join(root, "examples/repl.json"), "utf-8"));
+  const inputs = [...session.intro, ...session.tries.map((entry) => entry.source)];
+  const started = performance.now();
+  const entries = await runSession(engine, sessionLibraries(examples), inputs);
+  const broken = entries.filter((entry) => entry.output.some((line) => line.kind === "problem" || line.kind === "warn"));
+  console.log(`${broken.length === 0 ? "ok  " : "FAIL"} repl (${Math.round(performance.now() - started)} ms)`);
+  if (showAll || broken.length > 0) console.log(transcriptOf(showAll ? entries : broken));
+  failed ||= broken.length > 0;
+
+  // The opening session is in the RFC as text.
+  const readmePath = join(root, "../docs/comptime/README.md");
+  const readme = await readFile(readmePath, "utf-8");
+  const block = /(<!-- repl -->\n\n```text\n)([\s\S]*?)(\n```\n\n<!-- \/repl -->)/;
+  const transcript = transcriptOf(entries.slice(0, session.intro.length));
+  const found = readme.match(block);
+  if (process.argv.includes("--write-transcript") && found) {
+    await writeFile(readmePath, readme.replace(block, (_, before, _old, after) => before + transcript + after));
+    console.log("ok   repl transcript written to docs/comptime/README.md");
+  } else if (!found || found[2] !== transcript) {
+    console.log(`FAIL repl transcript: docs/comptime/README.md does not show this session\n${transcript}`);
+    failed = true;
+  } else {
+    console.log("ok   repl transcript");
+  }
 }
 process.exit(failed ? 1 : 0);

@@ -75,6 +75,41 @@ Every example here is a project in `playground/examples`, compiled by the
 tests. On the web version of this page each one is live: edit the code and
 the expansion, the JavaScript and the output follow.
 
+### A session
+
+A read-eval-print loop with the macro modules of the examples below loaded
+(`Debug`, `Json`, `Enum`, `Power` and the others) and the whole standard
+library. Each input is compiled as a file of its own, with the earlier
+inputs opened, and run once: a name, a type or a module that an input
+defines is there for the next one, and `it` is the value of the last
+expression. A macro cannot be used in the file that defines it, and an input
+is a file: write a macro in a module in one input, and use it in the next.
+
+<!-- repl -->
+
+```text
+> let price = 12.5 and quantity = 3
+let price: float = 12.5
+let quantity: int = 3
+
+> %Debug.log(price *. Int.toFloat(quantity))
+price *. Int.toFloat(quantity) = 37.5
+- : float = 37.5
+
+> type user = {name: string, age: int, email?: string}
+type user = {name: string, age: int, email?: string}
+
+> Json.encode({name: "Ada", age: 36})
+- : JSON.t =
+  Object(dict{"name": String("Ada"), "age": Number(36.), "email": Null})
+```
+
+<!-- /repl -->
+
+The loop prints a value as the ReScript that makes it, which the JavaScript
+value alone does not say (`Some(3)` is `3` at run time): the compiler gives
+the shape of each value's type with the compiled input.
+
 ### Quotes and holes
 
 `%code(...)` is a quote: a piece of ReScript that is not evaluated, a value
@@ -1070,5 +1105,6 @@ npm run build:wasm
 npm run dev
 ```
 
-The playground's main page is this document with the examples live; the
-full playground, with any number of files, is `playground.html`.
+The playground's main page is this document with the examples and the
+read-eval-print loop live; the full playground, with any number of files, is
+`playground.html`.
