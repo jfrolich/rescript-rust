@@ -1,0 +1,1 @@
+- Add an opt-in Bir deep-flatten rewrite round with legacy diagnostic comparisons, fresh-identifier checks, and coverage and step-count tests.

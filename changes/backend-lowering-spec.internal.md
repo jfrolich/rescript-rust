@@ -1,0 +1,1 @@
+- Specify the lowering from level L to level J of the backend redesign (`compiler-rust/docs/BACKEND_LOWERING.md`): the continuation each context of today's Lambda-to-JS compiler maps to, every construct in every context, the J normalising rules, and the slices S3.3 to S3.9.
