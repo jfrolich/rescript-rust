@@ -2879,7 +2879,7 @@ fn expression_stmt_is_trivial(a: &JsArena, expr: Expr) -> bool {
 }
 
 pub(crate) fn call_argument_needs_extra_group_indent(
-    a: &JsArena,
+    a: &impl crate::emit::view::View,
     expr: Expr,
     call_level: u8,
     current_indent: usize,
@@ -3677,7 +3677,7 @@ fn printed_ident_name(id: &Ident) -> Cow<'_, str> {
     }
 }
 
-fn is_jsx_member_expression(a: &JsArena, e: Expr) -> bool {
+fn is_jsx_member_expression(a: &impl crate::emit::view::View, e: Expr) -> bool {
     match a.ek(e) {
         ExprKind::Var(_) | ExprKind::Qualified(_) => true,
         ExprKind::StaticIndex(obj, name, _) => {
@@ -3687,7 +3687,7 @@ fn is_jsx_member_expression(a: &JsArena, e: Expr) -> bool {
     }
 }
 
-fn is_jsx_tag(a: &JsArena, tag: Expr) -> bool {
+fn is_jsx_tag(a: &impl crate::emit::view::View, tag: Expr) -> bool {
     match a.ek(tag) {
         ExprKind::Str(name) => match a.text(name).as_bytes() {
             [first, rest @ ..] => {
@@ -3714,11 +3714,11 @@ fn is_jsx_tag(a: &JsArena, tag: Expr) -> bool {
     }
 }
 
-pub(crate) fn is_empty_fragment(a: &JsArena, jsx: &JsxInfo) -> bool {
+pub(crate) fn is_empty_fragment(a: &impl crate::emit::view::View, jsx: &JsxInfo) -> bool {
     jsx.fragment && jsx.spread.is_none() && a.props(jsx.props).is_empty() && jsx.key.is_none()
 }
 
-pub(crate) fn jsx_printable(a: &JsArena, jsx: &JsxInfo, jsx_preserve: bool) -> bool {
+pub(crate) fn jsx_printable(a: &impl crate::emit::view::View, jsx: &JsxInfo, jsx_preserve: bool) -> bool {
     jsx_preserve
         && (is_empty_fragment(a, jsx) || is_jsx_tag(a, jsx.tag))
         && a.props(jsx.props).iter().all(|(name, _)| match name {

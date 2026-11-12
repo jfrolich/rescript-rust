@@ -7,6 +7,7 @@ mod raw;
 pub use raw::RawSegment;
 pub mod sourcemap;
 mod walk;
+pub(crate) mod view;
 
 use crate::js_ir::{ModulePathResolver, arena::JsDepsProgram};
 use std::collections::BTreeMap;

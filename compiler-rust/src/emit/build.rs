@@ -1,6 +1,8 @@
 //! The only expression/statement layer that knows oxc AST types.
-use super::{Unsupported, literal, naming::Names, walk};
-use crate::js_ir::arena::{Expr, ExprKind, FunId, JsArena, PropName, Stmt, StmtKind};
+#[cfg(test)]
+use crate::js_ir::arena::JsArena;
+use super::{Unsupported, literal, naming::Names, view::View, walk};
+use crate::js_ir::arena::{Expr, ExprKind, FunId, PropName, Stmt, StmtKind};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
@@ -11,9 +13,9 @@ use oxc_syntax::{
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
 };
 
-pub(super) struct Build<'a, 'r> {
+pub(super) struct Build<'a, 'r, V: View> {
     pub b: AstBuilder<'a>,
-    pub arena: &'r JsArena,
+    pub arena: &'r V,
     pub names: &'r Names,
     pub debug: bool,
     pub jsx_preserve: bool,
@@ -28,8 +30,8 @@ pub(super) struct Build<'a, 'r> {
     // S1.2: absent on the default, location-free path.
     pub source_map: Option<&'r super::sourcemap::Spans>,
 }
-impl<'a, 'r> Build<'a, 'r> {
-    pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
+impl<'a, 'r, V: View> Build<'a, 'r, V> {
+    pub fn new(alloc: &'a Allocator, arena: &'r V, names: &'r Names) -> Self {
         let mut prefix = oxc_allocator::StringBuilder::from_str_in(super::raw::PREFIX, alloc);
         let prefix_len = names.raw_prefix_len();
         while prefix.len() < prefix_len {
