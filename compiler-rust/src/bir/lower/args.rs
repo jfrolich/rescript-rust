@@ -210,7 +210,8 @@ impl State {
                     }
                 });
             if !held.is_empty() {
-                self.statements.fill_held(arg.stmts.start + arg.stmts.len - 1, held);
+                self.statements
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, held);
             }
             values.push(value);
         }
@@ -236,7 +237,14 @@ mod tests {
     /// sequence_arguments_holds_method_object_not_property_read.
     #[test]
     fn sequencing_matches_legacy_and_allocates_right_to_left() {
-        for method in [false, true] {
+        for (shape, method) in [
+            (0, false),
+            (0, true),
+            (1, false),
+            (2, false),
+            (3, false),
+            (4, false),
+        ] {
             let mut source = LamArena::new();
             let root = source.const_(crate::lambda::lam_constant::Constant::JsNull);
             let mut state = State::new(bridge::import_lambda(&source, root).unwrap());
@@ -257,6 +265,59 @@ mod tests {
                     crate::js_ir::arena::FieldPos::NONE,
                     0,
                 );
+                let obj = exp::var(object, &mut legacy.j);
+                let old_value = exp::static_index(obj, name, None, &mut legacy.j);
+                use crate::js_ir::arena::{ExprKind, PropName};
+                use crate::js_ir::op::MutableFlag;
+                let (value, old_value) = match shape {
+                    0 => (value, old_value),
+                    1 => (
+                        state.pure_expression(View::JOptional { value }, 1),
+                        legacy.j.expr(ExprKind::OptionalBlock(old_value, true)),
+                    ),
+                    2 => (
+                        state.pure_expression(View::JArray { values: &[value] }, 0),
+                        exp::array(&[old_value], MutableFlag::Immutable, &mut legacy.j),
+                    ),
+                    3 => {
+                        let tag = crate::lambda::lam_tag_info::TagInfo::Tuple;
+                        let info = state.arena.js_info(JsPayload::Block(tag.clone()));
+                        (
+                            state.pure_expression(
+                                View::JBlockLit {
+                                    values: &[value],
+                                    info,
+                                },
+                                0,
+                            ),
+                            exp::caml_block(
+                                &[old_value],
+                                MutableFlag::Immutable,
+                                tag,
+                                &mut legacy.j,
+                            ),
+                        )
+                    }
+                    4 => {
+                        let key = state.arena.intern_text("field");
+                        let info = state.arena.js_info(JsPayload::Object(vec![
+                            crate::bir::PropertyKey::Literal(key),
+                        ]));
+                        let key = legacy.j.str("field");
+                        let props = legacy.j.prop_list(&[(PropName::Lit(key), old_value)]);
+                        (
+                            state.pure_expression(
+                                View::JObject {
+                                    values: &[value],
+                                    info,
+                                },
+                                0,
+                            ),
+                            legacy.j.expr(ExprKind::Object(props)),
+                        )
+                    }
+                    _ => unreachable!(),
+                };
                 let start = state.statements.mark();
                 state.statements.reserve();
                 args.push(Out {
@@ -264,8 +325,7 @@ mod tests {
                     value: Some(value),
                     finished: Finished::False,
                 });
-                let obj = exp::var(object, &mut legacy.j);
-                expected_args.push((vec![], exp::static_index(obj, name, None, &mut legacy.j)));
+                expected_args.push((vec![], old_value));
             }
             let effect_id = Ident::new("effect", 20, crate::ident::IdentFlags::NONE);
             let effect_var = state.arena.new_var_id(effect_id.name_atom(), 20);
@@ -298,7 +358,7 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let (span, values) = state.sequence_arguments(method, args);
-            if !method {
+            if !method && shape == 0 {
                 let View::Var { var: first } = state.arena.view(values[0]) else {
                     panic!("held first")
                 };
