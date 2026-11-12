@@ -537,6 +537,68 @@ pub(crate) mod store_views {
     }
 }
 
+/// Reads and overlay writes of published type data. Callers gate these on
+/// the context's cached counters flag and exclude nodes still being built.
+pub(crate) mod frozen {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Kind {
+        DescReadShared,
+        DescReadWorker,
+        LevelReadShared,
+        LevelReadWorker,
+        LinkShared,
+        DescWriteShared,
+        LinkWorker,
+        LevelWriteShared,
+        LevelWriteWorker,
+        MemoWrite,
+        RowFieldWrite,
+        MutabilityWrite,
+    }
+
+    static COUNTS: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+    const NAMES: [&str; 12] = [
+        "desc_read_shared",
+        "desc_read_worker",
+        "level_read_shared",
+        "level_read_worker",
+        "link_shared",
+        "desc_write_shared",
+        "link_worker",
+        "level_write_shared",
+        "level_write_worker",
+        "memo_write",
+        "row_field_write",
+        "mutability_write",
+    ];
+
+    pub(crate) fn record(kind: Kind) {
+        COUNTS[kind as usize].fetch_add(1, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn count(kind: Kind) -> u64 {
+        COUNTS[kind as usize].load(Ordering::Relaxed)
+    }
+
+    pub(super) fn reset() {
+        for counter in &COUNTS {
+            counter.store(0, Ordering::Relaxed);
+        }
+    }
+
+    pub(super) fn print_report() {
+        let fields: Vec<_> = NAMES
+            .iter()
+            .zip(&COUNTS)
+            .map(|(name, counter)| format!("{name}={}", counter.load(Ordering::Relaxed)))
+            .collect();
+        eprintln!("[compiler-counter] frozen {}", fields.join(" "));
+    }
+}
+
 /// Returns whether compiler counters are enabled.
 #[inline]
 pub fn enabled() -> bool {
@@ -557,6 +619,7 @@ pub fn reset() {
     }
 
     store_views::reset();
+    frozen::reset();
     for counts in &GENTYPE_COUNTS {
         counts.modules.store(0, Ordering::Relaxed);
         counts.declarations.store(0, Ordering::Relaxed);
@@ -887,6 +950,7 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
     );
     store_views::print_report();
+    frozen::print_report();
     eprintln!(
         "[compiler-counter] stored_components cached={} build_find_module={}",
         STORED_COMPONENT_CACHED.load(Ordering::Relaxed),
