@@ -85,6 +85,11 @@ pub enum Phase {
     RecordSqlDeps,
     /// Detailed persistence subphase: SqlCommit.
     RecordSqlCommit,
+    RecordRename,
+    RecordRecover,
+    RecordPublishLock,
+    RecordImageWrite,
+    RecordSerialize,
     /// GenType child buckets. They are reported separately, not added again
     /// to the top-level recorded total. Counts are artifact-phase invocations.
     GentypePrepare,
@@ -152,6 +157,11 @@ impl PhaseTimingSnapshot {
             record_sql_warnings: phase(Phase::RecordSqlWarnings),
             record_sql_deps: phase(Phase::RecordSqlDeps),
             record_sql_commit: phase(Phase::RecordSqlCommit),
+            record_rename: phase(Phase::RecordRename),
+            record_recover: phase(Phase::RecordRecover),
+            record_publish_lock: phase(Phase::RecordPublishLock),
+            record_image_write: phase(Phase::RecordImageWrite),
+            record_serialize: phase(Phase::RecordSerialize),
 
         }
     }
@@ -230,6 +240,11 @@ pub struct PhaseTimingSnapshot {
     pub record_sql_deps: Duration,
     /// Detailed persistence subphase (SqlCommit); nested in record_write.
     pub record_sql_commit: Duration,
+    pub record_rename: Duration,
+    pub record_recover: Duration,
+    pub record_publish_lock: Duration,
+    pub record_image_write: Duration,
+    pub record_serialize: Duration,
 
 }
 
@@ -494,6 +509,11 @@ pub fn print_report() {
     print_phase("record_sql_warnings", snapshot.record_sql_warnings, total);
     print_phase("record_sql_deps", snapshot.record_sql_deps, total);
     print_phase("record_sql_commit", snapshot.record_sql_commit, total);
+    print_phase("record_rename", snapshot.record_rename, total);
+    print_phase("record_recover", snapshot.record_recover, total);
+    print_phase("record_publish_lock", snapshot.record_publish_lock, total);
+    print_phase("record_image_write", snapshot.record_image_write, total);
+    print_phase("record_serialize", snapshot.record_serialize, total);
     print_phase("overhead", snapshot.overhead(), total);
     for (name, phase) in [
         ("gentype_prepare", Phase::GentypePrepare),

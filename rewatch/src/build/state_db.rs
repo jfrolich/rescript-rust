@@ -791,6 +791,157 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     {
         return;
     }
+    let db = path(package);
+    let pending = pending_path(&db);
+    // Two roots can share a dependency database. A pending marker is stale
+    // only after its writer has released this per-database lock (also on kill).
+    let _guard = match lock_writer(&db) {
+        Ok(guard) => guard,
+        Err(err) => {
+            log::warn!("Could not lock the build state of {}: {err}", package.name);
+            return;
+        }
+    };
+    let write = || -> anyhow::Result<()> {
+        discard_incomplete(&db)?;
+        std::fs::write(&pending, b"incomplete")?;
+        let mut conn = timing::measure(Phase::RecordSqlOpen, ||
+            open_path_for_write_with_journal(&db, Some("MEMORY")))?;
+        let tx = conn.transaction()?;
+        timing::measure(Phase::RecordSqlMeta, || tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')",
+            [META_RECORD_COMPLETE],
+        ))?;
+        apply_record_rows(&tx, previous, new, &package.name)?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
+            std::process::abort();
+        }
+        // Keep the in-database completion row too. The external marker protects
+        // the commit itself, which a memory journal cannot recover after a kill.
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
+            [META_RECORD_COMPLETE],
+        )?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_AFTER_RECORD_MARKER").ok().as_deref() == Some(&package.name) {
+            tx.cache_flush()?;
+            std::process::abort();
+        }
+        timing::measure(Phase::RecordSqlCommit, || tx.commit())?;
+        // This is the trust boundary, after all SQLite pages have been written.
+        // No fsync: loss of this cache is allowed; process-crash reuse is not.
+        std::fs::remove_file(&pending)?;
+        Ok(())
+    };
+    if let Err(err) = write() {
+        log::warn!("Could not record the build state of {}: {err}", package.name);
+        // A half-known record is worse than none.
+        let _ = std::fs::remove_file(path(package));
+    }
+}
+
+/// An unpublished whole record. Its transaction and pages never touch disk.
+/// Batches are inserted on the preparation thread; publication owns the
+/// connection and may run concurrently with other packages' publication.
+pub(super) struct MemoryRecord {
+    conn: Connection,
+}
+
+impl MemoryRecord {
+    pub(super) fn new(seed: &PackageState, runtime: &[(String, Vec<u8>)]) -> anyhow::Result<Self> {
+        let conn = timing::measure(Phase::RecordSqlOpen, || -> rusqlite::Result<Connection> {
+            ensure_sqlite_initialized();
+            let conn = Connection::open_in_memory()?;
+            conn.set_prepared_statement_cache_capacity(32);
+            conn.pragma_update(None, "page_size", 16384)?;
+            conn.pragma_update(None, "synchronous", "OFF")?;
+            conn.execute_batch(&format!("{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nBEGIN;"))?;
+            Ok(conn)
+        })?;
+        apply_record_rows(&conn, &PackageState::default(), seed, "")?;
+        {
+            let mut insert = conn.prepare_cached("INSERT INTO runtime_interfaces (module, data) VALUES (?1, ?2)")?;
+            for (name, data) in runtime {
+                insert.execute(params![name, data])?;
+            }
+        }
+        Ok(Self { conn })
+    }
+
+    pub(super) fn insert(&self, rows: &PackageState) -> anyhow::Result<()> {
+        debug_assert!(rows.partial);
+        apply_record_rows(&self.conn, &PackageState::default(), rows, "")
+    }
+
+    pub(super) fn publish(self, package: &Package) -> anyhow::Result<()> {
+        use std::io::Write;
+        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')", [META_RECORD_COMPLETE])?;
+        timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
+        let image = timing::measure(Phase::RecordSerialize, || self.conn.serialize(rusqlite::DatabaseName::Main))?;
+        let db = path(package);
+        std::fs::create_dir_all(package.get_build_path())?;
+        let mut temp = tempfile::NamedTempFile::new_in(package.get_build_path())?;
+        timing::measure(Phase::RecordImageWrite, || temp.write_all(&image))?;
+        drop(image);
+        drop(self);
+        let _guard = timing::measure(Phase::RecordPublishLock, || lock_writer(&db))?;
+        timing::measure(Phase::RecordRecover, || recover_before_replace(&db))?;
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_BEFORE_RENAME").ok().as_deref() == Some(&package.name) {
+            std::process::abort();
+        }
+        timing::measure(Phase::RecordRename, || temp.persist(&db))?;
+        // Compatibility with a killed writer using the incremental path's
+        // external marker. This path never creates a marker of its own.
+        match std::fs::remove_file(pending_path(&db)) {
+            Ok(()) => (),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+            Err(e) => return Err(e.into()),
+        }
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_AFTER_RENAME").ok().as_deref() == Some(&package.name) {
+            std::process::abort();
+        }
+        Ok(())
+    }
+}
+
+/// The caller holds the same writer guard as every in-place writer. Side files
+/// therefore belong to dead writers, not live transactions. Recover against the
+/// OLD inode: replaying its journal after rename would overwrite the new image.
+fn recover_before_replace(db: &Path) -> anyhow::Result<()> {
+    let side = |suffix: &str| {
+        let mut path = db.as_os_str().to_owned();
+        path.push(suffix);
+        PathBuf::from(path)
+    };
+    let journal = side("-journal");
+    let wal = side("-wal");
+    let has_journal = journal.try_exists()?;
+    let has_wal = wal.try_exists()?;
+    if has_journal || has_wal {
+        let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        conn.busy_timeout(Duration::from_secs(1))?;
+        // Opening alone is lazy; reading the schema forces hot-journal recovery.
+        conn.query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get::<_, i64>(0))?;
+        if has_wal {
+            conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);")?;
+        }
+        conn.close().map_err(|(_, err)| err)?;
+        // A reader can keep a WAL alive. Do not replace underneath that reader
+        // or delete SQLite's side files by hand; leave the old database intact.
+        anyhow::ensure!(!journal.try_exists()? && !wal.try_exists()?, "SQLite side files remain after recovery");
+    }
+    Ok(())
+}
+
+// Apply a batch inside the caller's transaction. Streaming batches are partial;
+// the file-backed incremental path also uses deletions against its prior record.
+fn apply_record_rows(
+    tx: &Connection, previous: &PackageState, new: &PackageState, package_name: &str,
+) -> anyhow::Result<()> {
+    let partial = new.partial;
     // Encode the rows to set up front, in parallel: the transaction below
     // runs on one thread, and a large package sets ~100k rows.
     let reads: Vec<(&String, String)> = timing::measure(Phase::RecordReadsEncode, || new
@@ -815,30 +966,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             };
             (key, row, encoded)
         }).collect::<Vec<_>>());
-    let db = path(package);
-    let pending = pending_path(&db);
-    // Two roots can share a dependency database. A pending marker is stale
-    // only after its writer has released this per-database lock (also on kill).
-    let _guard = match lock_writer(&db) {
-        Ok(guard) => guard,
-        Err(err) => {
-            log::warn!("Could not lock the build state of {}: {err}", package.name);
-            return;
-        }
-    };
-    let write = || -> anyhow::Result<()> {
-        discard_incomplete(&db)?;
-        std::fs::write(&pending, b"incomplete")?;
-        let mut conn = timing::measure(Phase::RecordSqlOpen, ||
-            open_path_for_write_with_journal(&db, Some("MEMORY")))?;
-        let tx = conn.transaction()?;
-        timing::measure(Phase::RecordSqlMeta, || tx.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')",
-            [META_RECORD_COMPLETE],
-        ))?;
         {
             let table_timer = RecordTimer::start(Phase::RecordSqlMeta);
-            let mut set_meta = tx.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
+            let mut set_meta = tx.prepare_cached("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
             for (key, value) in &new.meta {
                 if previous.meta.get(key) != Some(value) {
                     set_meta.execute(params![key, value])?;
@@ -847,9 +977,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlSources);
-            let mut delete_source = tx.prepare("DELETE FROM sources WHERE path = ?1")?;
+            let mut delete_source = tx.prepare_cached("DELETE FROM sources WHERE path = ?1")?;
             let mut set_source =
-                tx.prepare("INSERT OR REPLACE INTO sources (path, module) VALUES (?1, ?2)")?;
+                tx.prepare_cached("INSERT OR REPLACE INTO sources (path, module) VALUES (?1, ?2)")?;
             sync_rows(
                 &previous.sources,
                 &new.sources,
@@ -864,7 +994,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlReads);
-            let mut set_reads = tx.prepare("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
+            let mut set_reads = tx.prepare_cached("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
             for (module, reads) in &reads {
                 set_reads.execute(params![module, reads])?;
             }
@@ -873,7 +1003,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             }
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlItems);
-            let mut set_items = tx.prepare("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
+            let mut set_items = tx.prepare_cached("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
             for (module, items) in &items {
                 set_items.execute(params![module, items])?;
             }
@@ -883,10 +1013,10 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlInterfaces);
             let mut set_interface =
-                tx.prepare("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
+                tx.prepare_cached("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
             let mut set_extras =
-                tx.prepare("INSERT OR REPLACE INTO interface_extras (module, data) VALUES (?1, ?2)")?;
-            let mut delete_extras = tx.prepare("DELETE FROM interface_extras WHERE module = ?1")?;
+                tx.prepare_cached("INSERT OR REPLACE INTO interface_extras (module, data) VALUES (?1, ?2)")?;
+            let mut delete_extras = tx.prepare_cached("DELETE FROM interface_extras WHERE module = ?1")?;
             for (module, interface) in &new.interface_updates {
                 set_interface.execute(params![module, interface.hash as i64, interface.core])?;
                 match &interface.extras {
@@ -896,11 +1026,11 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             }
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlModules);
-            let mut delete_interface = tx.prepare("DELETE FROM interfaces WHERE module = ?1")?;
-            let mut delete_reads = tx.prepare("DELETE FROM reads WHERE module = ?1")?;
-            let mut delete_items = tx.prepare("DELETE FROM items WHERE module = ?1")?;
-            let mut delete_module = tx.prepare("DELETE FROM modules WHERE module = ?1")?;
-            let mut set_module = tx.prepare(
+            let mut delete_interface = tx.prepare_cached("DELETE FROM interfaces WHERE module = ?1")?;
+            let mut delete_reads = tx.prepare_cached("DELETE FROM reads WHERE module = ?1")?;
+            let mut delete_items = tx.prepare_cached("DELETE FROM items WHERE module = ?1")?;
+            let mut delete_module = tx.prepare_cached("DELETE FROM modules WHERE module = ?1")?;
+            let mut set_module = tx.prepare_cached(
                 "INSERT OR REPLACE INTO modules
                  (module, js_confirmed_at, implementation_warnings, interface_warnings,
                   interface_digest, imports)
@@ -929,7 +1059,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                             imports
                         ])?;
                     #[cfg(debug_assertions)]
-                    if std::env::var("RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
+                    if std::env::var("RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE").ok().as_deref() == Some(package_name) {
                         // Spill partial updates before the other modules' rows.
                         tx.cache_flush()?;
                         std::process::abort();
@@ -940,9 +1070,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlWarnings);
-            let mut delete_warning = tx.prepare("DELETE FROM parse_warnings WHERE source = ?1")?;
+            let mut delete_warning = tx.prepare_cached("DELETE FROM parse_warnings WHERE source = ?1")?;
             let mut set_warning =
-                tx.prepare("INSERT OR REPLACE INTO parse_warnings (source, text) VALUES (?1, ?2)")?;
+                tx.prepare_cached("INSERT OR REPLACE INTO parse_warnings (source, text) VALUES (?1, ?2)")?;
             sync_rows(
                 &previous.parse_warnings,
                 &new.parse_warnings,
@@ -953,9 +1083,9 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlDeps);
-            let mut delete_deps = tx.prepare("DELETE FROM deps WHERE source = ?1")?;
+            let mut delete_deps = tx.prepare_cached("DELETE FROM deps WHERE source = ?1")?;
             let mut set_deps =
-                tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps, gentype_annotations, gentype_declarations) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+                tx.prepare_cached("INSERT OR REPLACE INTO deps (source, mtime, deps, gentype_annotations, gentype_declarations) VALUES (?1, ?2, ?3, ?4, ?5)")?;
             sync_encoded_rows(
                 &previous.deps,
                 &new.deps,
@@ -976,32 +1106,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             )?;
             drop(table_timer);
         }
-        #[cfg(debug_assertions)]
-        if std::env::var("RESCRIPT_TEST_ABORT_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
-            std::process::abort();
-        }
-        // Keep the in-database completion row too. The external marker protects
-        // the commit itself, which a memory journal cannot recover after a kill.
-        tx.execute(
-            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
-            [META_RECORD_COMPLETE],
-        )?;
-        #[cfg(debug_assertions)]
-        if std::env::var("RESCRIPT_TEST_ABORT_AFTER_RECORD_MARKER").ok().as_deref() == Some(&package.name) {
-            tx.cache_flush()?;
-            std::process::abort();
-        }
-        timing::measure(Phase::RecordSqlCommit, || tx.commit())?;
-        // This is the trust boundary, after all SQLite pages have been written.
-        // No fsync: loss of this cache is allowed; process-crash reuse is not.
-        std::fs::remove_file(&pending)?;
-        Ok(())
-    };
-    if let Err(err) = write() {
-        log::warn!("Could not record the build state of {}: {err}", package.name);
-        // A half-known record is worse than none.
-        let _ = std::fs::remove_file(path(package));
-    }
+    Ok(())
 }
 
 /// The rows of `new` that differ from `previous`, in key order, each with
@@ -1135,6 +1240,91 @@ mod tests {
             },
         );
         state
+    }
+
+    #[test]
+    fn memory_image_matches_file_pragmas_and_accepts_incremental_updates() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let first = state(17, Some("warning"));
+        write_record(&package, None, &first);
+        let old_reader = Connection::open(path(&package)).unwrap();
+        let pragmas = |conn: &Connection| ["page_size", "user_version", "auto_vacuum", "encoding", "application_id", "journal_mode"]
+            .map(|key| conn.query_row(&format!("PRAGMA {key}"), [], |row| Ok(format!("{:?}", row.get_ref(0)?))).unwrap());
+        let file_pragmas = pragmas(&old_reader);
+        let second = state(23, None);
+        MemoryRecord::new(&second, &[]).unwrap().publish(&package).unwrap();
+        let conn = Connection::open(path(&package)).unwrap();
+        assert_eq!(pragmas(&conn), file_pragmas);
+        assert_eq!(read(&package).as_ref(), Some(&second));
+        // The held reader stays on the old inode, including between statements.
+        assert_eq!(read_modules(&old_reader).unwrap(), first.modules);
+        let third = state(31, None);
+        write_record(&package, Some(&second), &third);
+        assert_eq!(read(&package).as_ref(), Some(&third));
+    }
+
+    // Subprocess entry point: the parent kills the writer while its transaction
+    // is open, then lets a real MemoryRecord publisher recover under the guard.
+    #[test]
+    fn publication_process() {
+        let Ok(root) = std::env::var("RESCRIPT_PUBLICATION_TEST_ROOT") else { return };
+        let package = test_package(Path::new(&root));
+        match std::env::var("RESCRIPT_PUBLICATION_TEST_ROLE").unwrap().as_str() {
+            "writer" => {
+                let (_guard, mut conn) = open_for_write(&package).unwrap();
+                let tx = conn.transaction().unwrap();
+                tx.execute("UPDATE modules SET js_confirmed_at = 99", []).unwrap();
+                std::fs::write(Path::new(&root).join("writer-ready"), b"").unwrap();
+                let mut line = String::new();
+                std::io::stdin().read_line(&mut line).unwrap();
+                panic!("parent should kill writer");
+            }
+            "publisher" => {
+                let record = MemoryRecord::new(&state(23, None), &[]).unwrap();
+                std::fs::write(Path::new(&root).join("publisher-ready"), b"").unwrap();
+                record.publish(&package).unwrap();
+            }
+            role => panic!("unknown test role {role}"),
+        }
+    }
+
+    #[test]
+    fn publisher_waits_for_writer_and_recovers_its_journal_before_rename() {
+        use std::process::{Command, Stdio};
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        write_record(&package, None, &state(17, None));
+        let spawn = |role: &str| Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "build::state_db::tests::publication_process", "--nocapture"])
+            .env("RESCRIPT_PUBLICATION_TEST_ROOT", dir.path())
+            .env("RESCRIPT_PUBLICATION_TEST_ROLE", role)
+            .stdin(Stdio::piped()).spawn().unwrap();
+        let wait_ready = |name: &str| {
+            let start = std::time::Instant::now();
+            while !dir.path().join(name).exists() {
+                assert!(start.elapsed() < Duration::from_secs(10), "child did not become ready");
+                std::thread::yield_now();
+            }
+        };
+        let mut writer = spawn("writer");
+        wait_ready("writer-ready");
+        let mut publisher = spawn("publisher");
+        wait_ready("publisher-ready");
+        assert!(publisher.try_wait().unwrap().is_none());
+        writer.kill().unwrap();
+        writer.wait().unwrap();
+        let start = std::time::Instant::now();
+        loop {
+            if let Some(status) = publisher.try_wait().unwrap() {
+                assert!(status.success());
+                break;
+            }
+            assert!(start.elapsed() < Duration::from_secs(10), "publisher did not finish");
+            std::thread::yield_now();
+        }
+        assert_eq!(read(&package).as_ref(), Some(&state(23, None)));
+        assert!(!PathBuf::from(format!("{}-journal", path(&package).display())).exists());
     }
 
     #[test]
