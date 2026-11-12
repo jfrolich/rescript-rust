@@ -36,7 +36,8 @@ env:
 #   build ──────────────┬─> parity (4 suites)
 #   ocaml ──────────────┘
 #   compiler-tests: compiles its tests, then waits for build and ocaml
-#   build-system-tests, script-tests, compiler-warnings: on their own
+#   build-system-tests, script-tests, compiler-warnings, playground-wasm: on
+#   their own
 #
 # Rust target directories are cached by trunk runs and restored by pull
 # requests (build-system-tests saves the release one, compiler-tests the dev
@@ -82,6 +83,47 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             compiler-rust/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  # The playground calls the compiler as a library and builds only for wasm,
+  # so nothing else here notices when a compiler API change breaks it.
+  playground-wasm:
+    name: Playground wasm check
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the pinned Rust toolchain with the wasm target
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            playground/crate/target
+          key: validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'playground/crate/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'playground/crate/Cargo.lock') }}
+            validation-playground-wasm-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - name: Check the playground crate against the compiler API
+        env:
+          RUSTFLAGS: --cfg getrandom_backend="wasm_js"
+        run: cargo check --locked --manifest-path playground/crate/Cargo.toml --target wasm32-unknown-unknown
+
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            playground/crate/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
   build:
@@ -324,6 +366,20 @@ jobs:
       # those benchmarks do not compete with one another for CPU time.
       - name: Test Rust compiler
         run: cargo test --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+
+  backend-coverage:
+    name: Backend bridge coverage
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Check Lambda bridge identity and coverage ratchet
+        run: |
+          python3 -m unittest discover -s scripts -p test_backend_coverage_test.py
+          python3 scripts/test_backend_coverage.py
 
   # The parity suites that gate a change (see "The Correctness Contract" in
   # AGENTS.md), each its own check so that a pull request shows which one

@@ -1,0 +1,1 @@
+- Avoid a spurious unused-value warning for private relative-path externals in location-free builds.

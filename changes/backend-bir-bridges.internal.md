@@ -1,0 +1,1 @@
+- Add bulk construction and migration bridges for the dormant backend arena, with explicit unsupported cases and identity checks.

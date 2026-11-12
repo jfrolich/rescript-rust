@@ -81,7 +81,15 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
     if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
-            StmtKind::Return(e) | StmtKind::Exp(e) => return Ok(FunctionForm::ArrowExpression(e)),
+            StmtKind::Return(e) | StmtKind::Exp(e) => {
+                // Newly reachable with scoped naming: the reference reformat
+                // retains parentheses around an arrow returned by an arrow.
+                // Leave that separate token-shape slice to its own change.
+                if matches!(a.ek(e), ExprKind::Fun(_)) {
+                    return Err(Unsupported("nested arrow expression body"));
+                }
+                return Ok(FunctionForm::ArrowExpression(e));
+            }
             _ => {}
         }
     }
