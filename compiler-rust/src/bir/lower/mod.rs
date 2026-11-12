@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod assign;
+mod try_;
 mod ffi_args;
 mod external;
 mod call;
@@ -371,6 +372,7 @@ struct State {
     /// The handlers of the catches being lowered, a stack of flattened tables.
     catch_table: Vec<(NodeId, crate::bir::CatchId)>,
     catches: Vec<Option<exit::Plan>>,
+    tries: Vec<try_::Plan>,
     catch_work: Vec<NodeId>,
     /// `HAS_EXIT` reads that decided a flattening or a form.
     catch_flag_reads: usize,
@@ -439,6 +441,7 @@ impl State {
             jumps: Vec::new(),
             catch_table: Vec::new(),
             catches: Vec::new(),
+            tries: Vec::new(),
             catch_work: Vec::new(),
             catch_flag_reads: 0,
             catch_walk_steps: 0,
@@ -629,7 +632,8 @@ impl ProbeRules for State {
                 let args = self.source.node(node).exit_arguments();
                 return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
             }
-            View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
+            View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, exception, handler)?))),
+            View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
             | View::For { .. }
             | View::ForOf { .. }
