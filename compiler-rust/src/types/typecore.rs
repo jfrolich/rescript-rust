@@ -26138,10 +26138,7 @@ fn with_resolved_child_module_components<R>(
         );
         return stored.with_components(pers_env, ctx, cache_mode, |components| {
             (f.take()
-                .expect("qualified child module components callback reused"))(
-                pos,
-                crate::types::env_lazy::Components::Local(components),
-            )
+                .expect("qualified child module components callback reused"))(pos, components)
         });
     }
 
@@ -26510,10 +26507,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                     if let Some(result) = env
                         .with_local_module_components(&pident_path, |stored| {
                             stored.with_components(pers_env, ctx, api, |components| {
-                                f(
-                                    lookup_path.as_ref(),
-                                    crate::types::env_lazy::Components::Local(components),
-                                )
+                                f(lookup_path.as_ref(), components)
                             })
                         })
                         .flatten()
@@ -26769,8 +26763,11 @@ fn build_module_components_from_parent_path(
         cache_mode,
         |components| components.lookup_child_components(module_name.as_str(), ctx),
     ) {
+        // Reached for a key no world view answers (one scoped to an
+        // environment, or a view the pool had no room for): the tables are
+        // built for this compilation.
         if let Some(components) =
-            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+            stored.with_local_components(pers_env, ctx, cache_mode, |child| child.clone())
         {
             return Some(components);
         }
@@ -26816,7 +26813,7 @@ fn build_module_components_from_parent_path(
             Some((parent_access_path, parent_sig)),
         );
         if let Some(components) =
-            stored.with_components(pers_env, ctx, cache_mode, |child| child.clone())
+            stored.with_local_components(pers_env, ctx, cache_mode, |child| child.clone())
         {
             return Some(components);
         }
@@ -26992,6 +26989,66 @@ fn adopt_persistent_root_view(
     adopt_unit_view(&ps, key.clone(), ctx)
 }
 
+/// The world's view of child `ordinal` of `parent`, a child declared with a
+/// signature (`ModuleView::structure_child`), adopted by this compilation;
+/// `None` when the pool had no room for it. One load of the child's cell
+/// and one probe of the compilation's component cache when the view is
+/// built and adopted already.
+pub(crate) fn adopt_child_view(
+    parent: &std::sync::Arc<crate::types::module_view::ModuleView>,
+    ordinal: u32,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    use crate::types::module_view::{ViewKey, verify_view, world_verify_enabled};
+    let world = ctx.world();
+    let view_key = ViewKey::Child(parent, ordinal);
+    let view = world.views().get_or_build(world, &view_key)?;
+    if world_verify_enabled() {
+        verify_view(world, &view_key, &view);
+    }
+    ctx.adopt_view(
+        crate::types::context::QualifiedModuleComponentsCacheKey::new(*view.access_path(), None),
+        view.clone(),
+    );
+    Some(view)
+}
+
+/// The world's view of `module_path` when it is a child path whose parent
+/// has a world view and declares the child with a signature. Resolves the
+/// parent as any lookup of the child does.
+///
+/// Cost: the lookup of the parent's components, one probe of the parent's
+/// name index, and [`adopt_child_view`].
+fn adopt_structure_child_view(
+    module_path: &Path,
+    key: &crate::types::context::QualifiedModuleComponentsCacheKey,
+    env: &Env,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+    cache_mode: ComponentLookupApi,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    if !ctx.persistent_env_is_in_process() || !key.is_worker_shareable() {
+        return None;
+    }
+    let PathView::Pdot(parent, name, _) = module_path.view() else {
+        return None;
+    };
+    let (parent, ordinal) = with_resolved_module_components_for_path_with_cache_mode(
+        parent,
+        env,
+        pers_env,
+        ctx,
+        cache_mode,
+        |components| match components {
+            crate::types::env_lazy::Components::World(view) => view
+                .structure_child(name.as_str())
+                .map(|ordinal| (view.clone(), ordinal)),
+            crate::types::env_lazy::Components::Local(_) => None,
+        },
+    )??;
+    adopt_child_view(&parent, ordinal, ctx)
+}
+
 /// The components of a unit only this compilation holds (the world owns no
 /// copy of it): built for this compilation, like any other local path.
 fn build_private_unit_components(
@@ -27063,9 +27120,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         .with_local_module_components(module_path, |stored| {
             stored.with_components(pers_env, ctx, cache_mode, |components| {
                 (f.take()
-                    .expect("qualified module components callback reused"))(
-                    crate::types::env_lazy::Components::Local(components),
-                )
+                    .expect("qualified module components callback reused"))(components)
             })
         })
         .flatten()
@@ -27090,6 +27145,19 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     // the world holds it, built once per build.
     if let Some(module_key) = module_key.as_ref()
         && let Some(view) = adopt_persistent_root_view(module_path, module_key, pers_env, ctx)
+    {
+        return Some((f
+            .take()
+            .expect("qualified module components callback reused"))(
+            crate::types::env_lazy::Components::World(&view),
+        ));
+    }
+
+    // So is the view of a child that a world view declares with a
+    // signature (env.ml:1573-1578): it is the parent's, built once.
+    if let Some(module_key) = module_key.as_ref()
+        && let Some(view) =
+            adopt_structure_child_view(module_path, module_key, env, pers_env, ctx, cache_mode)
     {
         return Some((f
             .take()

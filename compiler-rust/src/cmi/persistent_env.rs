@@ -4278,6 +4278,8 @@ thread_local! {
     /// Component substitutions built on this thread (one pass over a
     /// signature each).
     pub(crate) static SUBST_MAP_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Signature items those builds visited.
+    pub(crate) static SUBST_MAP_ITEMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn build_subst_maps(
@@ -4286,7 +4288,10 @@ fn build_subst_maps(
     ctx: &TypeContext,
 ) -> SubstMaps {
     #[cfg(test)]
-    SUBST_MAP_BUILDS.with(|builds| builds.set(builds.get() + 1));
+    {
+        SUBST_MAP_BUILDS.with(|builds| builds.set(builds.get() + 1));
+        SUBST_MAP_ITEMS.with(|items| items.set(items.get() + sig_items.len() as u64));
+    }
     let mut maps = SubstMaps {
         protected_module_head: nonpersistent_path_head(module_path),
         ..SubstMaps::default()
@@ -5310,6 +5315,42 @@ impl ComponentSubst {
         }
         md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
         freshen_module_type_bound_idents_with_maps(&mut md.md_type, &self.0, ctx);
+    }
+
+    /// What a child component table's signature gets from its parent's
+    /// substitution (this one, of `parent_sig` at `parent_module_path`):
+    /// [`substitute_type_paths_in_child_sig`] and
+    /// [`substitute_module_alias_paths_in_child_sig`] without building the
+    /// parent's maps again. One walk of the child's type nodes and one of
+    /// its items; a child type whose manifest is its own name also scans
+    /// the parent's items for a type of that name.
+    pub(crate) fn substitute_child_signature(
+        &self,
+        child_sig: &mut [SignatureItem],
+        parent_sig: &[SignatureItem],
+        parent_module_path: &Path,
+        ctx: &TypeContext,
+    ) {
+        substitute_type_paths_in_sig_with_maps(child_sig, &self.0, ctx);
+        restore_child_self_manifests_from_parent_scope(
+            child_sig,
+            parent_sig,
+            parent_module_path,
+            ctx,
+        );
+        for item in child_sig.iter_mut() {
+            if let SignatureItem::SigModule(_, md, _) = item
+                && let ModuleType::MtyAlias(_, path) = &mut md.md_type
+            {
+                *path = substitute_shared_module_path(
+                    ctx,
+                    path,
+                    &self.0.module_stamp_map,
+                    &self.0.module_name_map,
+                    self.0.protected_module_head.as_ref(),
+                );
+            }
+        }
     }
 
     /// [`substitute_component_module_type_path`]: one walk of the target.

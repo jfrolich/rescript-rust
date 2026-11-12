@@ -35,8 +35,8 @@ pub(crate) struct SignatureIndex {
     /// By name: item index, runtime position, and ordinal among the module
     /// items (the index of the module's cell in a view's child table).
     modules: HashMap<smol_str::SmolStr, (usize, usize, u32)>,
-    /// Number of module items.
-    module_count: u32,
+    /// By ordinal among the module items: item index and runtime position.
+    module_items: Vec<(u32, u32)>,
     /// Alias/ident module items, as (item index, runtime position), in order.
     alias_modules: Vec<(usize, usize)>,
     /// Module type items, in order.
@@ -78,7 +78,15 @@ impl SignatureIndex {
     /// Number of module items, shadowed ones included.
     #[inline]
     pub(crate) fn module_count(&self) -> usize {
-        self.module_count as usize
+        self.module_items.len()
+    }
+
+    /// (item index, runtime position) of the module item with `ordinal`.
+    /// One read of a table indexed by the ordinal.
+    #[inline]
+    pub(crate) fn module_item(&self, ordinal: usize) -> (usize, usize) {
+        let (idx, runtime_pos) = self.module_items[ordinal];
+        (idx as usize, runtime_pos as usize)
     }
 
     /// Number of child modules whose type is a path.
@@ -103,6 +111,7 @@ impl SignatureIndex {
             values: HashMap::with_capacity(values),
             types: HashMap::with_capacity(types),
             modules: HashMap::with_capacity(modules),
+            module_items: Vec::with_capacity(modules),
             ..SignatureIndex::default()
         };
         let mut runtime_pos = 0usize;
@@ -133,9 +142,9 @@ impl SignatureIndex {
                     }
                     index.modules.insert(
                         smol_str::SmolStr::new_static(id.name()),
-                        (idx, runtime_pos, index.module_count),
+                        (idx, runtime_pos, index.module_items.len() as u32),
                     );
-                    index.module_count += 1;
+                    index.module_items.push((idx as u32, runtime_pos as u32));
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
@@ -693,6 +702,8 @@ struct ChildScanCursor {
     working_env: Option<super::env::Env>,
     next_index: usize,
     runtime_pos: usize,
+    /// Module items scanned so far: the next module's ordinal.
+    modules: u32,
 }
 
 impl ChildScanCursor {
@@ -849,10 +860,21 @@ fn strengthened_child_env_decl(
     }
 }
 
+/// Continue the scan of a component table's children up to `child_name`.
+/// `signature` is the table's; `declared` is the same signature as the
+/// module declares it (the table's own unless it is a world view of a child
+/// module), which the evolving environment and each child's thunk are made
+/// from. A child of the world view `view` that is declared with a signature
+/// is marked as that view's child: its components are a world view too.
+///
+/// Cost: one step per item scanned; all calls together scan each item once.
+#[allow(clippy::too_many_arguments)]
 fn scan_child_component_from_signature(
     access_path: &Arc<Path>,
     source_prefix: Option<&Arc<Path>>,
     signature: &Arc<Signature>,
+    declared: &Arc<Signature>,
+    view: Option<&Arc<super::module_view::ModuleView>>,
     child_components: &mut HashMap<String, Option<(usize, Rc<StoredModuleComponents>)>>,
     state: &mut ChildComponentScanState,
     child_name: &str,
@@ -870,8 +892,8 @@ fn scan_child_component_from_signature(
     // env.ml:1573-1578. Persistent signatures need the same split so
     // qualified value lookup can descend through child components without
     // forcing `Subst.modtype` on the module declaration thunk.
-    while cursor.next_index < signature.len() {
-        let item = &signature[cursor.next_index];
+    while cursor.next_index < declared.len() {
+        let item = &declared[cursor.next_index];
         cursor.next_index += 1;
         match item {
             SignatureItem::SigValue(_, desc) => {
@@ -910,6 +932,12 @@ fn scan_child_component_from_signature(
                         runtime_pos as i32,
                     ));
                 }
+                if let (Some(view), Some((_, stored))) = (view, &stored)
+                    && matches!(md.md_type, ModuleType::MtySignature(_))
+                {
+                    let _ = stored.world_child.set((view.clone(), cursor.modules));
+                }
+                cursor.modules += 1;
                 // OCaml `Tbl.add` shadows earlier entries with the same name
                 // (compiler/ml/env.ml:1577-1578), so keep the latest scanned
                 // child component for this name.
@@ -929,7 +957,7 @@ fn scan_child_component_from_signature(
     }
 
     let scanned_items = cursor.next_index - start_index;
-    if cursor.next_index >= signature.len() {
+    if cursor.next_index >= declared.len() {
         *state = ChildComponentScanState::Complete;
         child_components
             .entry(child_name.to_string())
@@ -1640,6 +1668,8 @@ impl QualifiedModuleComponents {
             &self.access_path,
             self.value_source_prefix.as_ref(),
             &self.signature,
+            &self.signature,
+            None,
             &mut child_components,
             &mut scan,
             name,
@@ -2378,6 +2408,10 @@ pub(crate) struct StoredModuleComponents {
     /// in-process unit (`Unit.Sub.t`), that unit-rooted path of this child.
     source_prefix: OnceCell<Path>,
     cached: OnceCell<Rc<QualifiedModuleComponents>>,
+    /// The world view this module is a child of, and its ordinal there,
+    /// when the module's own path is a view key
+    /// (`ModuleView::structure_child`): its components are that view.
+    world_child: OnceCell<(Arc<super::module_view::ModuleView>, u32)>,
     /// Built during a store build (see `StructureComponentTables::in_store`).
     in_store: bool,
     /// Key of this module's compilation-private components (see
@@ -2425,6 +2459,7 @@ impl StoredModuleComponents {
             parent_context,
             source_prefix: OnceCell::new(),
             cached: OnceCell::new(),
+            world_child: OnceCell::new(),
             in_store: super::thread_store::store_build_active(),
             local_id: {
                 static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -2437,7 +2472,36 @@ impl StoredModuleComponents {
         }
     }
 
+    /// The components of this module: the world's view of its path when it
+    /// has one (one load of the child's cell and one probe of the
+    /// compilation's component cache once the view is built), else the
+    /// tables built for this compilation or worker.
     pub(crate) fn with_components<R>(
+        &self,
+        pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+        ctx: &super::context::TypeContext,
+        cache_mode: super::typecore::ComponentLookupApi,
+        f: impl FnOnce(Components<'_>) -> R,
+    ) -> Option<R> {
+        if let Some((parent, ordinal)) = self.world_child.get()
+            && let Some(view) = super::typecore::adopt_child_view(parent, *ordinal, ctx)
+        {
+            return Some(f(Components::World(&view)));
+        }
+        self.with_local_components(pers_env, ctx, cache_mode, |components| {
+            f(Components::Local(components))
+        })
+    }
+
+    /// The seed environment of this module's tables: what the scan of its
+    /// parent had installed when it reached the module.
+    pub(crate) fn seed_env(&self) -> &super::env::Env {
+        &self.seed_env
+    }
+
+    /// The tables built for this compilation or worker, whatever view the
+    /// world has of the module's path.
+    pub(crate) fn with_local_components<R>(
         &self,
         pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
         ctx: &super::context::TypeContext,
@@ -2620,7 +2684,7 @@ impl ViewTables {
     /// stopped, so all lookups together visit each signature item once.
     pub(crate) fn child_components(
         &self,
-        view: &super::module_view::ModuleView,
+        view: &Arc<super::module_view::ModuleView>,
         name: &str,
         ctx: &super::context::TypeContext,
     ) -> Option<(usize, Rc<StoredModuleComponents>)> {
@@ -2631,6 +2695,24 @@ impl ViewTables {
             self.children.borrow_mut().insert(name.to_string(), None);
             return None;
         }
+        // env.ml:1548-1578: the thunks of a child view's children close over
+        // the environment the scan of its ancestors had built when it
+        // reached the child. This worker's scan of the parent holds it.
+        let unseeded = matches!(
+            &*self.scan.borrow(),
+            ChildComponentScanState::Pending(cursor)
+                if cursor.next_index == 0 && cursor.working_env.is_none()
+        );
+        if unseeded
+            && let Some((parent, own_name)) = view.parent()
+            && let Some((_, stored)) = ctx
+                .thread_store()
+                .view_tables(&parent)
+                .child_components(&parent, own_name, ctx)
+            && let ChildComponentScanState::Pending(cursor) = &mut *self.scan.borrow_mut()
+        {
+            cursor.working_env = Some(stored.seed_env().clone());
+        }
         // The children's tables are shared by the compilations of this
         // worker: they are created in a store build, like their contents.
         let ((found, _scanned), _) = ctx.build_in_store(|| {
@@ -2638,6 +2720,8 @@ impl ViewTables {
                 &self.access_path,
                 None,
                 view.signature_ref(),
+                view.raw_signature(),
+                Some(view),
                 &mut self.children.borrow_mut(),
                 &mut self.scan.borrow_mut(),
                 name,
@@ -2653,7 +2737,7 @@ impl ViewTables {
     /// once per worker: one hash insert per opened item, no type node.
     pub(crate) fn opened_layers(
         &self,
-        view: &super::module_view::ModuleView,
+        view: &Arc<super::module_view::ModuleView>,
         ctx: &super::context::TypeContext,
     ) -> Rc<super::env::OpenedLayers> {
         self.opened

@@ -80,21 +80,36 @@ impl std::fmt::Debug for ViewCell {
 }
 
 /// What a view is a function of.
+#[derive(Clone, Copy)]
 pub(crate) enum ViewKey<'a> {
     /// The path of a unit the world owns.
     Unit(&'a Arc<PersStruct>),
+    /// The path of a structure-typed child module of a view: the parent
+    /// view and the child's ordinal among the parent's module items
+    /// ([`ModuleView::structure_child`]).
+    Child(&'a Arc<ModuleView>, u32),
 }
 
 impl ViewKey<'_> {
-    fn name(&self) -> &str {
+    fn name(&self) -> String {
         match self {
-            ViewKey::Unit(unit) => &unit.ps_name,
+            ViewKey::Unit(unit) => unit.ps_name.clone(),
+            ViewKey::Child(parent, ordinal) => {
+                let (idx, _) = parent.index.module_item(*ordinal as usize);
+                match &parent.signature[idx] {
+                    SignatureItem::SigModule(id, ..) => {
+                        format!("{}.{}", parent.access_path.name(), id.name())
+                    }
+                    _ => parent.access_path.name(),
+                }
+            }
         }
     }
 
     fn cell(&self) -> Option<&ViewCell> {
         match self {
             ViewKey::Unit(unit) => unit.ps_view.get().map(|cell| cell.as_ref()),
+            ViewKey::Child(parent, ordinal) => parent.children.get(*ordinal as usize),
         }
     }
 }
@@ -203,9 +218,18 @@ impl std::fmt::Debug for ModuleView {
 pub(crate) struct ModuleView {
     id: ViewId,
     access_path: Path,
-    /// The module's signature (a unit's own: its items name each other by
-    /// local identifier).
+    /// The signature the tables are built from. A unit's own: its items
+    /// name each other by local identifier. A child's: its declared
+    /// signature with its own items at the access path and its ancestors'
+    /// at theirs (`Subst.signature sub sg` and `prefix_idents`,
+    /// env.ml:1516-1531), created by the view's build.
     signature: Arc<Signature>,
+    /// The signature as the unit declares it: a unit's own again, a child's
+    /// as it stands inside the unit's. A worker's tables for the children
+    /// whose paths have no view are seeded from it.
+    raw: Arc<Signature>,
+    /// The view this one is a child of, and its ordinal there.
+    parent: Option<(std::sync::Weak<ModuleView>, u32)>,
     index: Arc<SignatureIndex>,
     /// By signature item: `Some` for the value item a name lookup reaches.
     values: Box<[Option<ViewValue>]>,
@@ -235,10 +259,13 @@ pub(crate) struct ModuleView {
     nodes: usize,
 }
 
-/// Rewrites every handle the view's tables hold, each once: the signature
-/// is the unit's and is frozen already.
+/// Rewrites every handle the view's tables hold, each once. A unit's
+/// signature is frozen already; a child's was created by its build.
 impl FrozenExport for ModuleView {
     fn rewrite_handles(&mut self, map: &impl SignatureRefMap) {
+        if self.parent.is_some() {
+            self.signature.rewrite_handles(map);
+        }
         for value in self.values.iter_mut().flatten() {
             value.desc.rewrite_handles(map);
         }
@@ -306,7 +333,7 @@ pub(crate) fn build_module_view(
     let frozen = match freeze(world, scratch, view) {
         Ok(frozen) => frozen,
         Err(failure) => {
-            debug_assert_unfreezable_is_pool_full(failure, key.name());
+            debug_assert_unfreezable_is_pool_full(failure, &key.name());
             crate::perf_counters::world::record_view_failure();
             return None;
         }
@@ -349,7 +376,75 @@ fn debug_assert_unfreezable_is_pool_full(failure: super::world::Unfreezable, nam
 /// The tables of the view of `key`, described on `scratch`: what the build
 /// created is still the scratch context's, and nothing is published.
 ///
-/// What OCaml does when it forces a unit's `ps_comps` (env.ml:1513-1588),
+/// Cost: [`describe_tables`] for the signature of the key's module; for a
+/// child also one copy of its declared signature and one walk of it under
+/// the parent's substitution, which is the parent view's and built once.
+fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Option<ModuleView> {
+    let ctx = scratch.ctx();
+    match key {
+        ViewKey::Unit(unit) => {
+            let access_path = Path::pident(Ident::create_persistent(&unit.ps_name));
+            let signature = unit.ps_sig.clone();
+            let index = world
+                .unit_signature_index(&signature)
+                .unwrap_or_else(|| Arc::new(SignatureIndex::build(&signature)));
+            Some(describe_tables(
+                access_path,
+                signature.clone(),
+                index,
+                signature,
+                None,
+                ctx,
+            ))
+        }
+        ViewKey::Child(parent, ordinal) => {
+            let (idx, runtime_pos) = parent.index.module_item(*ordinal as usize);
+            let SignatureItem::SigModule(id, md, _) = &parent.raw[idx] else {
+                return None;
+            };
+            let ModuleType::MtySignature(raw) = &md.md_type else {
+                return None;
+            };
+            // env.ml:1573-1578: the child's component thunk holds its
+            // declared signature and the parent's substitution;
+            // env.ml:1516-1531 applies that substitution and prefixes the
+            // child's own items with its path.
+            let access_path = ctx.dotted_from_ident(
+                Arc::new(parent.access_path),
+                *id,
+                runtime_pos as i32,
+            );
+            let mut signature = super::typecore::qualify_resolved_signature_for_local_components(
+                &access_path,
+                &md.md_type,
+                raw,
+                None,
+                &mut None,
+                ctx,
+            );
+            parent.component_subst(ctx).substitute_child_signature(
+                &mut signature,
+                &parent.signature,
+                &parent.access_path,
+                ctx,
+            );
+            let signature = Arc::new(signature);
+            let index = Arc::new(SignatureIndex::build(&signature));
+            Some(describe_tables(
+                access_path,
+                signature,
+                index,
+                raw.clone(),
+                Some((Arc::downgrade(parent), *ordinal)),
+                ctx,
+            ))
+        }
+    }
+}
+
+/// The tables of the view of the module with `signature` at `access_path`.
+///
+/// What OCaml does when it forces a module's components (env.ml:1513-1588),
 /// for every item instead of on first use: the component substitution
 /// (`prefix_idents`) applied to each value and module type, the constructor
 /// and label descriptions of each type (`Datarepr`), and the tables `open`
@@ -359,14 +454,14 @@ fn debug_assert_unfreezable_is_pool_full(failure: super::world::Unfreezable, nam
 /// proportion to the item it visits (one copy of a value's type, one
 /// description per constructor and label); the component substitution is
 /// built at most three times, each one pass.
-fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Option<ModuleView> {
-    let ViewKey::Unit(unit) = key;
-    let ctx = scratch.ctx();
-    let access_path = Path::pident(Ident::create_persistent(&unit.ps_name));
-    let signature = unit.ps_sig.clone();
-    let index = world
-        .unit_signature_index(&signature)
-        .unwrap_or_else(|| Arc::new(SignatureIndex::build(&signature)));
+fn describe_tables(
+    access_path: Path,
+    signature: Arc<Signature>,
+    index: Arc<SignatureIndex>,
+    raw: Arc<Signature>,
+    parent: Option<(std::sync::Weak<ModuleView>, u32)>,
+    ctx: &TypeContext,
+) -> ModuleView {
     let shared_access_path = Arc::new(access_path);
 
     let mut values: Vec<Option<ViewValue>> = Vec::with_capacity(signature.len());
@@ -505,6 +600,8 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
             .collect(),
         subst: subst.map(OnceLock::from).unwrap_or_default(),
         signature,
+        raw,
+        parent,
         index,
         values: values.into_boxed_slice(),
         constructors,
@@ -524,7 +621,7 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
     let opened = crate::cmi::persistent_env::opened_items_of_view(&view, ctx);
     let mut view = Arc::into_inner(view).expect("the view under construction has one owner");
     view.opened = opened;
-    Some(view)
+    view
 }
 
 impl ModuleView {
@@ -551,6 +648,45 @@ impl ModuleView {
     #[inline]
     pub(crate) fn signature_ref(&self) -> &Arc<Signature> {
         &self.signature
+    }
+
+    /// The signature as the unit declares it (see the field).
+    #[inline]
+    pub(crate) fn raw_signature(&self) -> &Arc<Signature> {
+        &self.raw
+    }
+
+    /// The view this one is a child of and the child's name there; `None`
+    /// for a unit's view. One upgrade of a weak reference.
+    pub(crate) fn parent(&self) -> Option<(Arc<ModuleView>, &str)> {
+        let (parent, _) = self.parent.as_ref()?;
+        // A child view is reached through its parent, which the unit holds.
+        let parent = parent.upgrade()?;
+        Some((parent, self.access_path.last()))
+    }
+
+    /// The component substitution of this view (`prefix_idents`,
+    /// env.ml:1530). One load of a write-once cell once it is built; the
+    /// build is one pass over the signature.
+    fn component_subst(&self, ctx: &TypeContext) -> &crate::cmi::persistent_env::ComponentSubst {
+        self.subst.get_or_init(|| {
+            crate::cmi::persistent_env::ComponentSubst::new(&self.signature, &self.access_path, ctx)
+        })
+    }
+
+    /// The ordinal of child module `name` when its path is a view key of
+    /// its own: the child is declared with a signature. A child that is a
+    /// path, or a functor, has none. One probe of the name index.
+    pub(crate) fn structure_child(&self, name: &str) -> Option<u32> {
+        let (idx, _, ordinal) = self.index.module_cell(name)?;
+        match &self.raw[idx] {
+            SignatureItem::SigModule(_, md, _)
+                if matches!(md.md_type, ModuleType::MtySignature(_)) =>
+            {
+                Some(ordinal as u32)
+            }
+            _ => None,
+        }
     }
 
     #[inline]
@@ -661,13 +797,7 @@ impl ModuleView {
         let forced = self.children[ordinal].decl.get_or_init(|| {
             let scratch = ViewScratch::fresh();
             let ctx = scratch.ctx();
-            let subst = self.subst.get_or_init(|| {
-                crate::cmi::persistent_env::ComponentSubst::new(
-                    &self.signature,
-                    &self.access_path,
-                    ctx,
-                )
-            });
+            let subst = self.component_subst(ctx);
             let mut md = md.clone();
             subst.freshen_module_declaration(&mut md, ctx);
             match freeze(world, &scratch, Arc::new(md)) {
@@ -837,6 +967,8 @@ mod tests {
         records: usize,
         /// Child modules `M<n>: { type u }`.
         children: usize,
+        /// A chain `Chain: { module Chain: { ... { type u } } }` this deep.
+        chain: usize,
         /// Leave out the module type `S` and the modules `Alias` and
         /// `Inner`: no item of the unit then needs the component
         /// substitution when the view is built.
@@ -976,15 +1108,40 @@ mod tests {
                 RecStatus::TrecNot,
             ));
         }
+        let value = |name: &str, ty| {
+            SignatureItem::SigValue(
+                Ident::create_local(name.to_string()),
+                ValueDescription {
+                    val_type: ty,
+                    val_kind: ValueKind::ValReg,
+                    val_loc: crate::types::DeclLoc::none(),
+                    val_attributes: Default::default(),
+                    val_path: None,
+                },
+            )
+        };
         for n in 0..shape.children {
+            // `M<n>: { type u; let own: u; let outer: t }`.
+            let u = Ident::create_local("u");
             signature.push(module(
                 &format!("M{n}"),
-                ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
-                    Ident::create_local("u"),
-                    Arc::new(abstract_decl()),
-                    RecStatus::TrecNot,
-                )])),
+                ModuleType::MtySignature(Arc::new(vec![
+                    SignatureItem::SigType(u, Arc::new(abstract_decl()), RecStatus::TrecNot),
+                    value("own", ctx.new_generic_constr(Path::pident(u), vec![])),
+                    value("outer", t_type()),
+                ])),
             ));
+        }
+        if shape.chain > 0 {
+            let mut inner = ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
+                Ident::create_local("u"),
+                Arc::new(abstract_decl()),
+                RecStatus::TrecNot,
+            )]));
+            for _ in 1..shape.chain {
+                inner = ModuleType::MtySignature(Arc::new(vec![module("Chain", inner)]));
+            }
+            signature.push(module("Chain", inner));
         }
         if !shape.bare {
             signature.push(SignatureItem::SigModtype(
@@ -1262,7 +1419,7 @@ mod tests {
     fn sizes_are_pinned() {
         assert_eq!(std::mem::size_of::<ViewId>(), 4);
         assert_eq!(std::mem::size_of::<Components<'static>>(), 16);
-        assert_eq!(std::mem::size_of::<ViewKey<'static>>(), 8);
+        assert_eq!(std::mem::size_of::<ViewKey<'static>>(), 16);
         // Stored per child module of a view.
         // (and, in a test build, its 8-byte build counter).
         assert_eq!(std::mem::size_of::<ViewCell>(), 32 + 8);
@@ -1389,6 +1546,7 @@ mod tests {
             records: 5_000,
             children: 10,
             bare: false,
+            chain: 0,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -1553,6 +1711,166 @@ mod tests {
         assert_eq!(lookup(&failed), (false, format!("{}.t", failed.ps_name)));
         assert_eq!(lookup(&fits), (true, format!("{}.t", fits.ps_name)));
         assert_eq!(ctx.view_adoptions.get(), 1);
+    }
+
+    fn child_view_of(parent: &Arc<ModuleView>, name: &str) -> Arc<ModuleView> {
+        let world = World::current();
+        let ordinal = parent
+            .structure_child(name)
+            .expect("the child is declared with a signature");
+        world
+            .views()
+            .get_or_build(&world, &ViewKey::Child(parent, ordinal))
+            .expect("the child view builds")
+    }
+
+    fn printed_type(ctx: &TypeContext, desc: &ValueDescription) -> String {
+        match ctx.get_desc(desc.val_type).into_desc() {
+            crate::types::type_expr::TypeDesc::Tconstr { path, .. } => path.name(),
+            _ => panic!("a constructor type"),
+        }
+    }
+
+    #[test]
+    fn a_child_view_is_built_once_under_contention() {
+        let shape = Shape {
+            children: 1,
+            ..Shape::default()
+        };
+        let parent = view_of(&unit_of("Contended_parent", shape));
+        let barrier = Arc::new(std::sync::Barrier::new(16));
+        let threads: Vec<_> = (0..16)
+            .map(|_| {
+                let (parent, barrier) = (parent.clone(), barrier.clone());
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    child_view_of(&parent, "M0")
+                })
+            })
+            .collect();
+        let views: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
+        let ordinal = parent.structure_child("M0").unwrap();
+        let cell = &parent.children[ordinal as usize];
+        assert_eq!(cell.builds.load(Ordering::Relaxed), 1);
+        for view in &views {
+            assert!(Arc::ptr_eq(view, &views[0]));
+        }
+        // A child that is a path, and one that does not exist, are no
+        // view keys.
+        assert!(parent.structure_child("Alias").is_none());
+        assert!(parent.structure_child("Missing").is_none());
+    }
+
+    #[test]
+    fn a_child_view_names_its_items_and_its_parents_through_their_paths() {
+        let shape = Shape {
+            children: 2,
+            ..Shape::default()
+        };
+        let unit = unit_of("Family", shape);
+        let parent = view_of(&unit);
+        let ctx = compilation();
+        ctx.adopt_view(key_of(&unit), parent.clone());
+        let ordinal = parent.structure_child("M1").unwrap();
+        let child = crate::types::typecore::adopt_child_view(&parent, ordinal, &ctx)
+            .expect("the child view builds");
+        assert_eq!(
+            child.access_path().name(),
+            format!("{}.M1", unit.ps_name)
+        );
+        let (_, _, own) = child.lookup_value_for_access("own").unwrap();
+        let (_, _, outer) = child.lookup_value_for_access("outer").unwrap();
+        assert_eq!(printed_type(&ctx, &own), format!("{}.M1.u", unit.ps_name));
+        assert_eq!(printed_type(&ctx, &outer), format!("{}.t", unit.ps_name));
+        assert!(own.val_type.is_shared() && outer.val_type.is_shared());
+        // Adopted once, and found again through the compilation's cache
+        // under the child's path.
+        let adoptions = ctx.view_adoptions.get();
+        let again = crate::types::typecore::adopt_child_view(&parent, ordinal, &ctx).unwrap();
+        assert!(Arc::ptr_eq(&again, &child));
+        assert_eq!(ctx.view_adoptions.get(), adoptions);
+        let key = QualifiedModuleComponentsCacheKey::new(*child.access_path(), None);
+        let cached = ctx
+            .with_qualified_module_components(&key, |components| {
+                matches!(components, Components::World(view) if Arc::ptr_eq(view, &child))
+            })
+            .expect("the child view is in the component cache");
+        assert!(cached);
+        // The published view prints as a rebuild on another context does.
+        let world = World::current();
+        verify_view(&world, &ViewKey::Child(&parent, ordinal), &child);
+    }
+
+    #[test]
+    fn child_views_of_one_parent_read_its_substitution() {
+        // 10,000 children of one parent, each with its own view: the
+        // parent's substitution (10,000 items) is built once, not once per
+        // child, so the substitution builds of all the children together
+        // visit items in proportion to the children.
+        let shape = Shape {
+            children: 10_000,
+            ..Shape::default()
+        };
+        let parent = view_of(&unit_of("Siblings", shape));
+        let items = || crate::cmi::persistent_env::SUBST_MAP_ITEMS.with(|items| items.get());
+        let (before, steps) = (items(), build_steps());
+        for n in 0..10_000 {
+            let child = child_view_of(&parent, &format!("M{n}"));
+            assert!(child.lookup_value_for_access("outer").is_some(), "child {n}");
+        }
+        // Three items per child, visited by a constant number of
+        // substitution builds of the child's own signature.
+        let visited = items() - before;
+        assert!(visited <= 10_000 * 3 * 8, "{visited} items visited");
+        assert_eq!(build_steps() - steps, 10_000 * 3);
+        for n in [0, 9_999] {
+            let ordinal = parent.structure_child(&format!("M{n}")).unwrap();
+            assert_eq!(
+                parent.children[ordinal as usize]
+                    .builds
+                    .load(Ordering::Relaxed),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn a_chain_of_children_costs_one_build_per_link() {
+        // 500 deep is what the representation allows here: a nested
+        // signature is copied, substituted and frozen by recursion over the
+        // nesting, and a chain 1,000 deep overflows a test thread's 2 MB
+        // stack in a debug build. One view is built per link and none
+        // twice. A link's build copies the signature declared below it
+        // (`Subst.signature sub sg`, env.ml:1516), so the items copied by
+        // the whole chain grow with the square of its depth, as they do
+        // when OCaml forces each level.
+        const DEPTH: usize = 500;
+        let shape = Shape {
+            chain: DEPTH,
+            bare: true,
+            ..Shape::default()
+        };
+        let unit = unit_of("Chained", shape);
+        let mut view = view_of(&unit);
+        let steps = build_steps();
+        let mut links = Vec::new();
+        for _ in 0..DEPTH {
+            let child = child_view_of(&view, "Chain");
+            links.push((view.clone(), child.clone()));
+            view = child;
+        }
+        // One item per link (the next module; the last link holds the type).
+        assert_eq!(build_steps() - steps, DEPTH as u64);
+        assert_eq!(view.access_path().name().matches(".Chain").count(), DEPTH);
+        assert!(view.lookup_type("u").is_some());
+        for (parent, child) in &links {
+            let ordinal = parent.structure_child("Chain").unwrap();
+            let cell = &parent.children[ordinal as usize];
+            assert_eq!(cell.builds.load(Ordering::Relaxed), 1);
+            // Asking again reads the cell.
+            assert!(Arc::ptr_eq(&child_view_of(parent, "Chain"), child));
+            assert_eq!(cell.builds.load(Ordering::Relaxed), 1);
+        }
     }
 
     #[test]
