@@ -494,6 +494,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         .and_then(|spec| parse_package_output(spec));
 
     let compiler_opts = CompilerOptions {
+        derived_census: CompilerOptions::derived_census_from_env(),
         backend: crate::bir::shadow::BackendMode::from_env(),
         signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
         js_printer: crate::emit::PrinterMode::from_env(),

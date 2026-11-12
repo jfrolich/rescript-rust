@@ -488,6 +488,8 @@ struct ExprOverrides {
 /// indices.
 #[derive(Debug)]
 pub struct ParseArena {
+    /// Optional module-owned census, absent on the default compilation path.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// Location-free builds retain node identity and generated/source provenance,
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
@@ -542,6 +544,9 @@ pub struct ParseArena {
     type_lists: ListPool<CoreTypeIdx>,
     /// Pool behind `let` value binding lists (`Pexp_let`, `Pstr_value`).
     vb_lists: ListPool<ValueBinding>,
+    /// Derived structure-value groups, indexed by their binding-list start.
+    /// Only group starts have a bit; no source-location or identifier keys.
+    derived_value_groups: Vec<u64>,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -1059,6 +1064,8 @@ impl Default for ParseArena {
             pat_lists: ListPool::default(),
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
+            derived_value_groups: Vec::new(),
+            derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
@@ -2957,6 +2964,27 @@ impl ParseArena {
         self.type_lists.get(list)
     }
 
+    /// Mark a structure value group produced by a derive.
+    /// Cost: one bitmap write plus O(new words) zero initialization on growth.
+    /// Across all marks, at most ceil(highest binding slot / 64) words are
+    /// initialized; remarking a group never grows or scans the table.
+    pub(crate) fn mark_derived_value_group(&mut self, list: VbList) {
+        assert!(!list.is_empty());
+        let index = list.start() as usize;
+        self.derived_value_groups.resize(
+            self.derived_value_groups.len().max(index / 64 + 1), 0,
+        );
+        self.derived_value_groups[index / 64] |= 1 << (index % 64);
+    }
+
+    /// Provenance of a structure value group, independent of names and locations.
+    /// Cost: O(1), at most one word read, with no allocation or synchronization.
+    pub fn is_derived_value_group(&self, list: VbList) -> bool {
+        let index = list.start() as usize;
+        !list.is_empty() && self.derived_value_groups.get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
+    }
+
     /// Store the value bindings of a `let`.
     pub fn push_vb_list(&mut self, items: &[ValueBinding]) -> VbList {
         self.vb_lists.push(items)
@@ -4540,4 +4568,29 @@ mod tests {
         assert!(!arena.expr_needs_no_attribute_sweep(reserved));
     }
 
+}
+
+#[cfg(test)]
+#[test]
+fn derived_group_bitmap_growth_is_linear_at_ten_thousand_slots() {
+    let mut arena = ParseArena::new();
+    let mut initialized_words = 0;
+    for slot in 0..10_000 {
+        let before = arena.derived_value_groups.len();
+        let group = VbList::from_range(slot, 1);
+        arena.mark_derived_value_group(group);
+        initialized_words += arena.derived_value_groups.len() - before;
+        assert!(arena.is_derived_value_group(group));
+        assert!(!arena.is_derived_value_group(VbList::from_range(slot + 1, 1)));
+    }
+    // 10,000 direct bit writes; resize initializes each word exactly once.
+    assert_eq!(initialized_words, 157);
+    assert_eq!(arena.derived_value_groups.len(), 157);
+    for slot in 0..10_000 {
+        arena.mark_derived_value_group(VbList::from_range(slot, 1));
+    }
+    assert_eq!(arena.derived_value_groups.len(), initialized_words);
+    assert!(!arena.is_derived_value_group(VbList::EMPTY));
+    // Provenance does not enlarge the handle passed through the frontend.
+    assert_eq!(std::mem::size_of::<VbList>(), 8);
 }
