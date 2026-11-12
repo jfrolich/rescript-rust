@@ -536,6 +536,8 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
+        package_root: (!opts.gentype_flags.project_root.is_empty())
+            .then(|| PathBuf::from(&opts.gentype_flags.project_root)),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
         gentype_config: opts.gentype.then(|| {
@@ -613,6 +615,8 @@ fn compile_in_process(
         nopervasives: opts.nopervasives,
         module_name: opts.module_name.clone(),
         package_name: opts.package_name.clone(),
+        package_root: (!opts.gentype_flags.project_root.is_empty())
+            .then(|| PathBuf::from(&opts.gentype_flags.project_root)),
         gentype_config: opts.gentype.then(|| {
             std::sync::Arc::new(crate::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),

@@ -392,6 +392,9 @@ pub struct CompilerOptions {
     pub module_name: Option<String>,
     /// Current npm package name from `-bs-package-name`.
     pub package_name: Option<String>,
+    /// Source package root, used only to derive relocation-stable declaration
+    /// identities as package name plus the path within the package.
+    pub package_root: Option<PathBuf>,
     /// Compile the runtime package (`-make-runtime`).
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
@@ -552,6 +555,28 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 }
 
 impl CompilerOptions {
+    /// O(path bytes), one owned identity per compilation when package metadata
+    /// exists, otherwise borrow the standalone filename. Never called per node.
+    fn location_identity<'a>(&self, filename: &'a str) -> std::borrow::Cow<'a, str> {
+        let (Some(package), Some(root)) = (&self.package_name, &self.package_root) else {
+            return std::borrow::Cow::Borrowed(filename);
+        };
+        // Package discovery supplies normalized roots and source paths. Check
+        // the separator boundary in bytes instead of walking every component
+        // again for every implementation/interface compilation.
+        let relative = root.to_str().and_then(|root| {
+            let suffix = filename.strip_prefix(root)?;
+            if root.ends_with(std::path::is_separator) || suffix.is_empty() {
+                Some(suffix)
+            } else {
+                suffix.strip_prefix(std::path::is_separator)
+            }
+        }).unwrap_or(filename);
+        #[cfg(windows)]
+        let relative = relative.replace('\\', "/");
+        std::borrow::Cow::Owned(format!("{package}/{relative}"))
+    }
+
     /// Read the census switch once per process. Subsequent option creation is
     /// O(1) when disabled, or O(path bytes) to copy an enabled output path.
     pub fn derived_census_from_env() -> Option<PathBuf> {
@@ -608,6 +633,7 @@ impl Default for CompilerOptions {
             nopervasives: false,
             module_name: None,
             package_name: None,
+            package_root: None,
             make_runtime: false,
             assume_compiled_interface: false,
             gentype_config: None,
@@ -6286,7 +6312,7 @@ fn compile_source_to_js_with_options_inner(
 
     // Type check
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7538,7 +7564,7 @@ pub fn typecheck_interface_source(
 
     // Type check
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -10156,7 +10182,7 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10207,7 +10233,7 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10300,7 +10326,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -11356,7 +11382,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
-    type_ctx.set_location_namespace(filename);
+    type_ctx.set_location_namespace(&options.location_identity(filename));
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -12354,5 +12380,28 @@ let value: M.t = {M.x: 3, y: 4}
                 "second directive;".to_string()
             ]
         );
+    }
+}
+
+#[cfg(test)]
+mod package_location_identity_tests {
+    use super::*;
+
+    #[test]
+    fn package_relative_identity_survives_relocation_without_collisions() {
+        let mut options = CompilerOptions {
+            package_name: Some("@rescript/runtime".into()),
+            package_root: Some(PathBuf::from("build/runtime")),
+            ..Default::default()
+        };
+        assert_eq!(options.location_identity("build/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
+        assert_eq!(options.location_identity("build/runtime-other/Module.res"), "@rescript/runtime/build/runtime-other/Module.res");
+        assert_eq!(options.location_identity("src/Module.res"), "@rescript/runtime/src/Module.res");
+        options.package_root = Some(PathBuf::from("installed/runtime"));
+        assert_eq!(options.location_identity("installed/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
+        assert_ne!(options.location_identity("installed/runtime/src/Module.resi"), options.location_identity("installed/runtime/src/Module.res"));
+        assert_ne!(options.location_identity("installed/runtime/other/Module.res"), options.location_identity("installed/runtime/src/Module.res"));
+        options.package_name = Some("other-package".into());
+        assert_eq!(options.location_identity("installed/runtime/src/Module.res"), "other-package/src/Module.res");
     }
 }
