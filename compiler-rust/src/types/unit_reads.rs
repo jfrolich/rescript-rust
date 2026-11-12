@@ -45,14 +45,23 @@ impl SeenTypes {
     }
 }
 
+/// Namespace-segregated path handles: each entry is just the existing 8-byte
+/// handle. The namespace is carried by its vector, not by each entry.
+type PathReads = [Vec<Path>; 5];
+const KINDS: [Kind; 5] = [
+    Kind::Value,
+    Kind::Type,
+    Kind::Module,
+    Kind::Modtype,
+    Kind::Extension,
+];
+
 /// Reads recorded as typed nodes are constructed. Type roots are retained until
 /// checking finishes: unification can change their descendants after creation.
 /// Paths are immutable, process-interned pointers, not dense arena indices.
 #[derive(Default)]
 pub struct ReadLog {
-    paths: ahash::AHashSet<(usize, Kind)>,
-    out: Vec<UnitRead>,
-    seen: SeenTypes,
+    paths: PathReads,
     types: Vec<TypeExprRef>,
     #[cfg(test)]
     root_events: usize,
@@ -62,46 +71,43 @@ pub struct ReadLog {
     type_steps: usize,
     #[cfg(test)]
     expanded_nodes: usize,
+    #[cfg(test)]
+    path_comparisons: usize,
+    #[cfg(test)]
+    decoded_paths: usize,
 }
 
 impl ReadLog {
-    /// Record a path: expected O(1) for a duplicate; for a fresh path, the
-    /// cost of `read_of_path` (its path edges plus emitted segments).
+    /// Append an existing path handle in amortized O(1); no lookup, decoding
+    /// or deduplication occurs while checking.
     #[inline]
     pub fn path(&mut self, path: &Path, kind: Kind) {
         #[cfg(test)]
         {
             self.path_events += 1;
         }
-        if self.paths.insert((path.node_addr(), kind)) {
-            read_of_path(path, kind, None, &mut self.out);
-        }
+        self.paths[kind as usize].push(*path);
     }
 
     /// Record a root without observing its still-mutable descendants.
-    /// One bitset probe (plus growth as described by `SeenTypes::insert`),
-    /// and one amortized O(1) pool push for a new root.
+    /// One amortized O(1) pool push, including for a duplicate root.
     #[inline]
     pub fn ty(&mut self, ty: TypeExprRef) {
         #[cfg(test)]
         {
             self.root_events += 1;
         }
-        if self.seen.insert(ty) {
-            self.types.push(ty);
-        }
+        self.types.push(ty);
     }
 }
 
 struct TypeReader<'a> {
     ctx: &'a TypeContext,
     seen: SeenTypes,
-    /// The walk stack of [`TypeReader::ty`], kept to reuse its buffer.
+    /// Work stack initialized with the recorded roots.
     stack: Vec<TypeExprRef>,
-    /// The paths already read, by interned node and kind: a path's reads
-    /// depend only on those, and many type nodes share a path.
-    paths: ahash::AHashSet<(usize, Kind)>,
-    out: Vec<UnitRead>,
+    /// All paths, including duplicates, decoded only after the type walk.
+    paths: PathReads,
     #[cfg(test)]
     steps: usize,
     #[cfg(test)]
@@ -109,12 +115,10 @@ struct TypeReader<'a> {
 }
 
 impl TypeReader<'_> {
-    /// Expected O(1) deduplication, plus `read_of_path` for a fresh path.
+    /// One amortized O(1) path-handle push. Deduplication is at handover.
     #[inline]
     fn path(&mut self, path: &Path, kind: Kind) {
-        if self.paths.insert((path.node_addr(), kind)) {
-            read_of_path(path, kind, None, &mut self.out);
-        }
+        self.paths[kind as usize].push(*path);
     }
 
     /// Traverse the recorded roots in O(V + E) type steps: each reachable
@@ -177,32 +181,46 @@ impl TypeReader<'_> {
 }
 
 impl ReadLog {
-    /// Drain a unit in O(B + R + V + E + P): bitset words, roots, reachable
-    /// type nodes, type edges and path decoding. Reuses the recording buffers;
-    /// no tree walk. This consumes the log's recorded reads.
+    /// Drain in O(B + R + V + E + P log P + D): visited-bitset words,
+    /// recorded roots, reachable type nodes/edges, path handles and decoding.
+    /// Only this final type-graph walk needs visited state, to terminate cycles.
+    /// No recording bitset exists and no bitset is cleared between phases.
     fn resolve(&mut self, ctx: &TypeContext, opens: &[String]) -> Vec<UnitRead> {
-        for space in &mut self.seen.spaces {
-            space.fill(0);
-        }
         let mut reader = TypeReader {
             ctx,
-            seen: std::mem::take(&mut self.seen),
+            seen: SeenTypes::default(),
             stack: std::mem::take(&mut self.types),
             paths: std::mem::take(&mut self.paths),
-            out: std::mem::take(&mut self.out),
             #[cfg(test)]
             steps: 0,
             #[cfg(test)]
             expanded: 0,
         };
-        reader.out.extend(opened(opens));
         reader.types();
         #[cfg(test)]
         {
             self.type_steps = reader.steps;
             self.expanded_nodes = reader.expanded;
         }
-        reader.out
+        let mut out: Vec<UnitRead> = opened(opens).collect();
+        for (paths, kind) in reader.paths.iter_mut().zip(KINDS) {
+            paths.sort_unstable_by(|a, b| {
+                #[cfg(test)]
+                {
+                    self.path_comparisons += 1;
+                }
+                a.node_addr().cmp(&b.node_addr())
+            });
+            paths.dedup_by_key(|path| path.node_addr());
+            for path in paths {
+                #[cfg(test)]
+                {
+                    self.decoded_paths += 1;
+                }
+                read_of_path(path, kind, None, &mut out);
+            }
+        }
+        out
     }
 }
 
@@ -392,20 +410,105 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 
 /// The reads of an implementation; `opens` are the units opened by the
 /// command line (read as whole modules). No typed tree is needed.
-/// O(bitset words + roots + reachable type nodes/edges + decoded path segments).
+/// O(bitset words + roots + reachable type nodes/edges + paths log paths + decoding).
 pub fn structure_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
 
 /// The reads of an interface. No typed tree is needed.
-/// O(bitset words + roots + reachable type nodes/edges + decoded path segments).
+/// O(bitset words + roots + reachable type nodes/edges + paths log paths + decoding).
 pub fn signature_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
 
 #[cfg(test)]
+#[path = "unit_reads_reference.rs"]
+mod reference;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn log_matches_reference_for_types_linked_after_node_construction() {
+        use crate::parse_arena::{LocIdx, Located};
+        let ctx = TypeContext::new(std::sync::Arc::new(crate::IdGenerator::new()));
+        let mut ta = TypedArena::new();
+        let root = ctx.new_var(None);
+        let core_type = TypedCoreType {
+            ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+            ctyp_type: root,
+            ctyp_env: EnvRef(0),
+            ctyp_loc: LocIdx(0),
+            ctyp_attributes: Default::default(),
+        };
+        let mut log = ReadLog::default();
+        core_type.log_reads(&mut log, &ta);
+        let typ = ta.push_core_type(core_type);
+        let value = ta.push_value_description(TypedValueDescription {
+            val_id: ctx.create_ident("value"),
+            val_name: Located {
+                txt: "value".into(),
+                loc: LocIdx(0),
+            },
+            val_desc: typ,
+            val_prim: None,
+            val_kind: crate::types::decl::ValueKind::ValReg,
+            val_loc: LocIdx(0),
+            val_attributes: Default::default(),
+        });
+        let signature = TypedSignature {
+            sig_items: ta.push_signature_items([TypedSignatureItem {
+                sig_desc: TypedSignatureItemDesc::Tsig_value(value),
+                sig_env: EnvRef(0),
+                sig_loc: LocIdx(0),
+            }]),
+        };
+        let structure = Structure {
+            str_items: ta.push_structure_items([StructureItem {
+                str_desc: StructureItemDesc::Tstr_primitive(value),
+                str_env: EnvRef(0),
+                str_loc: LocIdx(0),
+            }]),
+            str_type: vec![],
+            str_final_env: EnvRef(0),
+        };
+        let path = Path::pdot(
+            Path::pident(crate::ident::Ident::create_persistent("Dependency")),
+            "t",
+        );
+        let target = ctx.new_constr(path, vec![]);
+        ctx.set_desc(root, TypeDesc::Tlink(target));
+        let expected: ahash::AHashSet<_> = reference::signature_reads(&ctx, &ta, &signature, &[])
+            .into_iter()
+            .collect();
+        assert_eq!(expected.len(), 1);
+        let structure_reads: ahash::AHashSet<_> =
+            reference::structure_reads(&ctx, &ta, &structure, &[])
+                .into_iter()
+                .collect();
+        assert_eq!(structure_reads, expected);
+        let logged: ahash::AHashSet<_> = log.resolve(&ctx, &[]).into_iter().collect();
+        assert_eq!(logged, expected);
+    }
+
+    #[test]
+    fn ten_thousand_duplicate_paths_are_appended_then_decoded_once() {
+        let ctx = TypeContext::new(std::sync::Arc::new(crate::IdGenerator::new()));
+        let path = Path::pdot(
+            Path::pident(crate::ident::Ident::create_persistent("Unit")),
+            "value",
+        );
+        let mut log = ReadLog::default();
+        for _ in 0..10_000 {
+            log.path(&path, Kind::Value);
+        }
+        assert_eq!(log.path_events, 10_000);
+        assert_eq!(log.paths[Kind::Value as usize].len(), 10_000);
+        assert_eq!(log.resolve(&ctx, &[]).len(), 1);
+        assert_eq!(log.decoded_paths, 1);
+        assert!(log.path_comparisons <= 20_000);
+    }
 
     /// A top-level signature item is not an exact read identity: distinct
     /// suffixes through one alias must reach distinct target items.
@@ -600,7 +703,7 @@ mod tests {
         let mut log = ReadLog::default();
         module.log_reads(&mut log, &ta);
         assert_eq!(log.path_events, N);
-        assert_eq!(log.paths.len(), 1);
+        assert_eq!(log.paths[Kind::Module as usize].len(), N);
 
         let constructor = ConstructorDescription {
             cstr_name: "Extension".into(),
@@ -633,17 +736,17 @@ mod tests {
             log.ty(root);
         }
         assert_eq!(log.root_events, 20_000);
-        assert_eq!(log.types.len(), 10_000);
+        assert_eq!(log.types.len(), 20_000);
         assert!(log.resolve(&ctx, &[]).is_empty());
         assert_eq!(log.expanded_nodes, 10_001);
-        assert_eq!(log.type_steps, 30_000); // 10,000 roots + 20,000 edges
+        assert_eq!(log.type_steps, 40_000); // 20,000 roots + 20,000 edges
     }
 
     #[test]
     fn read_walk_handles_fit_in_sixteen_bytes() {
         assert_eq!(std::mem::size_of::<TypeExprRef>(), 4);
         assert_eq!(std::mem::size_of::<Path>(), 8);
-        assert_eq!(std::mem::size_of::<(usize, Kind)>(), 16);
+        assert_eq!(std::mem::size_of::<<Vec<Path> as IntoIterator>::Item>(), 8);
         assert_eq!(std::mem::size_of::<&mut ReadLog>(), 8);
         assert_eq!(std::mem::size_of::<&mut TypeReader<'_>>(), 8);
         // ReadLog/TypeReader are per-compilation buffers, never per-node values.
@@ -663,7 +766,7 @@ mod tests {
         ctx.set_desc(root, TypeDesc::Tlink(target));
         log.path(&path, Kind::Value);
         log.path(&path, Kind::Value);
-        assert_eq!(log.paths.len(), 1);
+        assert_eq!(log.paths[Kind::Value as usize].len(), 2);
         let reads: ahash::AHashSet<_> = log.resolve(&ctx, &[]).into_iter().collect();
         let expected: ahash::AHashSet<_> = [Kind::Type, Kind::Value]
             .into_iter()
@@ -677,13 +780,13 @@ mod tests {
     }
 
     #[test]
-    fn read_log_deduplicates_each_type_reference_space() {
+    fn read_log_appends_duplicates_in_each_type_reference_space() {
         let mut log = ReadLog::default();
         for ty in [TypeExprRef(7), TypeExprRef(STORE_REF_TAG | 7),
                    TypeExprRef(STORE_REF_TAG | SHARED_REF_TAG | 7)] {
             log.ty(ty);
             log.ty(ty);
         }
-        assert_eq!(log.types.len(), 3);
+        assert_eq!(log.types.len(), 6);
     }
 }
