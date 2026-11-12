@@ -298,6 +298,7 @@ fn belt_sources_digest(root: &Path) -> Result<blake3::Hash> {
     flags.sort();
     let mut hasher = blake3::Hasher::new();
     let mut add = |bytes: &[u8]| { hasher.update(&(bytes.len() as u64).to_le_bytes()); hasher.update(bytes); };
+    add(config.name.as_bytes());
     for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&flags) { add(flag.as_bytes()); }
     let mut paths = std::fs::read_dir(root.join("src"))?.map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -468,6 +469,7 @@ fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> R
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
+    add(config.name.as_bytes());
     for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&features) {
         add(flag.as_bytes());
     }
@@ -851,6 +853,10 @@ mod tests {
         let mut config: serde_json::Value = serde_json::from_str(include_str!("../../../packages/@rescript/runtime/rescript.json")).unwrap();
         std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
         assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
+        config["name"] = serde_json::json!("different-runtime-package");
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+        config["name"] = serde_json::json!("@rescript/runtime");
         config["compiler-flags"] = serde_json::json!(["-nostdlib"]);
         std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
