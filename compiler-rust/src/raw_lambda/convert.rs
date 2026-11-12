@@ -4401,7 +4401,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         use crate::types::decl::{SignatureItem as DeclSigItem, ValueKind as DeclValueKind};
 
         let mut result = Vec::new();
-        let mut env = env.clone_preserve_id();
+        let mut env = env.clone();
 
         for item in sg {
             match item {

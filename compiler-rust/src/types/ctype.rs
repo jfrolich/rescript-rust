@@ -498,7 +498,7 @@ impl UnifyState {
         {
             return;
         }
-        self.env = Some(env.clone_preserve_id());
+        self.env = Some(env.clone());
     }
 
     /// Get the environment reference, if set.
@@ -519,7 +519,7 @@ impl UnifyState {
             mode: self.mode,
             generate_equations: self.generate_equations,
             assume_injective: self.assume_injective,
-            env: self.env.as_ref().map(Env::clone_preserve_id),
+            env: self.env.as_ref().cloned(),
             recursion_depth: self.recursion_depth,
             newtype_level: self.newtype_level,
         }
@@ -7484,7 +7484,7 @@ pub(crate) fn package_type_lists_have_ocaml_same_label_completion_side_effect(
     // instead of raw arena ids.
     let pkg_id = ctx.create_ident("Pkg");
     if let Some(env) = env {
-        let mut env_prime = env.clone_preserve_id();
+        let mut env_prime = env.clone();
         env_prime.add_module(
             pkg_id,
             super::decl::ModuleDeclaration {
@@ -8593,7 +8593,7 @@ fn unify_types(
             let args1 = *args1;
             let args2 = *args2;
 
-            let unify_env = state.env().map(Env::clone_preserve_id);
+            let unify_env = state.env().cloned();
             let labels_2_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
                 ctx,
                 unify_env.as_ref(),

@@ -1365,7 +1365,7 @@ impl TypeContext {
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
             let env_ref = EnvRef::from_usize(typed_envs.len());
-            typed_envs.push(Rc::new(env.clone_preserve_id()));
+            typed_envs.push(Rc::new(env.clone()));
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
@@ -5234,8 +5234,9 @@ mod tests {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let env = Env::empty();
         let env_ref = ctx.store_typed_env(&env);
+        assert_eq!(ctx.store_typed_env(&env.clone()), env_ref);
         let first = ctx.get_typed_env(env_ref).expect("stored environment");
-        let other = Env::empty();
+        let other = env.implicit_coercion();
         ctx.store_typed_env(&other);
         assert_eq!(ctx.store_typed_env(&env), env_ref);
         let second = ctx.get_typed_env(env_ref).expect("same environment");
