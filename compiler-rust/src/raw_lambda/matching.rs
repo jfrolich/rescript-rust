@@ -2278,8 +2278,9 @@ enum KeyBody<'a> {
 /// What a bound variable is written as in a key.
 enum KeyBinding {
     /// `Llet (Alias, x, ex, _)`: `x` is replaced by the key of `ex`
-    /// (`compiler/ml/lambda.ml:447-449`).
-    Alias(KeyBuf),
+    /// (`compiler/ml/lambda.ml:447-449`), these bytes of
+    /// [`MakeKeyWriter::alias_keys`].
+    Alias(std::ops::Range<usize>),
     /// Any other kept `Llet`: `x` is renamed to its name with the stamp of
     /// its position (`compiler/ml/lambda.ml:454-458`).
     Renamed(i32),
@@ -2317,7 +2318,9 @@ struct MakeKeyWriter<'b, B: RawLambdaBuilder> {
     count: i32,
     next_id: i32,
     /// The lets in scope, innermost last; rarely more than a few.
-    env: smallvec::SmallVec<[(Ident, KeyBinding); 2]>,
+    env: smallvec::SmallVec<[(Ident, KeyBinding); 4]>,
+    /// The keys of the aliases in scope, one after the other.
+    alias_keys: KeyBuf,
 }
 
 impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
@@ -2327,6 +2330,7 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             count: 0,
             next_id: 0,
             env: smallvec::SmallVec::new(),
+            alias_keys: KeyBuf::new(),
         }
     }
 
@@ -2386,7 +2390,9 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         match a.view(e) {
             View::Var(id) => {
                 match self.env.iter().rev().find(|(key, _)| key.same(&id)) {
-                    Some((_, KeyBinding::Alias(replacement))) => out.bytes(replacement),
+                    Some((_, KeyBinding::Alias(replacement))) => {
+                        out.bytes(&self.alias_keys[replacement.clone()])
+                    }
                     Some((bound, KeyBinding::Renamed(stamp))) => {
                         out.byte(key_tag::VAR);
                         write_renamed_ident_key(out, bound.name_atom(), *stamp);
@@ -2540,9 +2546,15 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
                 Some(a) => self.write_raw(a, ex, &mut ex_key)?,
                 None => self.write_raw(&*self.b.get(), ex, &mut ex_key)?,
             }
-            self.env.push((*x, KeyBinding::Alias(ex_key.buf)));
+            // Aliases inside `ex` have left scope, and `alias_keys` with
+            // them, so the keys of the aliases in scope stay contiguous.
+            let start = self.alias_keys.len();
+            self.alias_keys.extend_from_slice(&ex_key.buf);
+            let replacement = start..self.alias_keys.len();
+            self.env.push((*x, KeyBinding::Alias(replacement)));
             let result = self.write_body(a, body, out);
             self.env.pop();
+            self.alias_keys.truncate(start);
             return result;
         }
 
@@ -2758,7 +2770,7 @@ impl KeyTable {
 /// without a key gets a slot of its own.
 ///
 /// Cost of storing an action: one pass over it to write its key, at most
-/// `MAX_RAW` nodes, then one [`KeyTable::get_or_insert`]. Storing `n` actions
+/// `MAX_RAW` nodes, then one `KeyTable::get_or_insert`. Storing `n` actions
 /// with keys of `m` bytes is O(n * m); no action is compared with every
 /// other.
 pub struct StoreExp<'b, B: RawLambdaBuilder> {
