@@ -201,6 +201,7 @@ pub fn build_in_memory(path: &Path) -> Result<rescript_compiler::cmi::persistent
     let mut build_state = parsed_state(path, false)?;
     build_state.in_memory_only = true;
     let (errors, _warnings, _) = compile::compile(&mut build_state, false, || (), |_| ())?;
+    compile::finish_record_preparation(&build_state);
     if !errors.is_empty() {
         return Err(anyhow!("{errors}"));
     }

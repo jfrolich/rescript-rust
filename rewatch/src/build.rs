@@ -839,6 +839,7 @@ pub fn incremental_build_without_lock(
     })?;
 
     if retry_with_locations {
+        compile::finish_record_preparation(build_state);
         pb.finish_and_clear();
         // No first-pass diagnostic escapes. Discard the speculative registry
         // and recompile its dependencies too: inclusion/type errors can quote
