@@ -1,0 +1,1 @@
+- Lease a contiguous array for the first local type nodes and access them with one comparison outside store builds.

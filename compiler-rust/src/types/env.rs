@@ -2588,20 +2588,26 @@ impl Default for Env {
 /// The initial environment (OCaml `Predef.build_initial_env`,
 /// compiler/ml/predef.ml:239-424, as installed by `Env.initial_safe_string`).
 ///
-/// OCaml builds the predefined declarations once per process. The worker
-/// store keeps one copy per worker: the first compilation builds it as a
-/// store build, and later compilations clone the environment and replay
-/// the build's effects instead of rebuilding every predefined type.
+/// OCaml builds the predefined declarations once per process. Here they are
+/// built once per build and frozen in the world; each worker builds its
+/// tables over them once and every compilation starts from a copy.
 pub fn initial_env(ctx: &TypeContext) -> Env {
-    if let Some((env, piece)) = ctx.thread_store().cached_initial_env() {
-        ctx.touch_store_piece(&piece);
-        return env;
+    ctx.world().initial_env()
+}
+
+/// The additions `Predef.build_initial_env` makes, in its order.
+struct PredefDeclarations(Vec<crate::types::world::PredefItem>);
+
+impl PredefDeclarations {
+    fn add_type(&mut self, id: Ident, decl: TypeDeclaration) {
+        self.0
+            .push(crate::types::world::PredefItem::Type(id, Arc::new(decl)));
     }
-    let (env, piece) = ctx.build_in_store(|| build_initial_env(ctx));
-    if let Some(piece) = piece {
-        ctx.thread_store().publish_initial_env(env.clone(), piece);
+
+    fn add_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
+        self.0
+            .push(crate::types::world::PredefItem::Constructor(id, desc));
     }
-    env
 }
 
 /// The blocks of the shape of the builtin declaration numbered `block`:
@@ -2612,8 +2618,10 @@ fn predef_shape(block: u32) -> crate::types::ShapeBlocks {
     }
 }
 
-fn build_initial_env(ctx: &TypeContext) -> Env {
-    let mut env = Env::empty();
+/// The predefined declarations, built on `ctx` (a scratch context: the world
+/// freezes them, see `World::predef`).
+pub(crate) fn predef_declarations(ctx: &TypeContext) -> Vec<crate::types::world::PredefItem> {
+    let mut env = PredefDeclarations(Vec::new());
 
     // Helper: create an abstract type declaration
     let decl_abstr = |arity: i32, immediate: bool| TypeDeclaration {
@@ -2660,12 +2668,11 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
     // Helper: add a type with its constructors to the environment
     // This matches OCaml's Env.store_type which calls Datarepr.constructors_of_type
-    let add_type_with_constrs = |env: &mut Env,
+    let add_type_with_constrs = |env: &mut PredefDeclarations,
                                  id: Ident,
                                  decl: TypeDeclaration,
                                  ctx: &TypeContext| {
         let type_path = Path::pident(id);
-        let mut record_family = None;
 
         // Extract constructors/labels from predef declarations so they are
         // available for disambiguation just like OCaml's initial environment.
@@ -2722,22 +2729,11 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
                     env.add_constructor(cd.cd_id, cstr_desc);
                 }
             }
-            TypeKind::TypeRecord(labels, _) => {
-                let res_ty = ctx.new_generic_constr(type_path, decl.type_params.clone());
-                // `Datarepr.label_descrs` (compiler/ml/datarepr.ml:261-288).
-                for (ld, label_desc) in labels.iter().zip(crate::types::env_lazy::label_descrs(
-                    res_ty, &decl, decl.type_private, ctx, |_| {},
-                )) {
-                    record_family = Some(label_desc.lbl_all);
-                    env.add_label(ld.ld_id, label_desc);
-                }
-            }
-            _ => {}
+            // predef.ml:239-424 declares no record type.
+            TypeKind::TypeRecord(..) => unreachable!("a predefined record type"),
+            TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
         }
         env.add_type(id, decl);
-        if let Some(family) = record_family {
-            env.add_type_label_family(id, family);
-        }
     };
 
     use super::predef;
@@ -3007,7 +3003,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
         let int_ty_for_exn = ctx.new_generic_predef_constr(predef::path_int(), vec![]);
 
         let add_exception =
-            |env: &mut Env, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
+            |env: &mut PredefDeclarations, id: Ident, args: Vec<TypeExprRef>, exn_ty: TypeExprRef| {
                 let path = Path::pident(id);
                 let warn_on_literal_pattern_attr = crate::types::decl::Attribute {
                     attr_name: crate::types::asttypes::Located::noloc(
@@ -3096,7 +3092,7 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     // (compiler/ml/predef.ml:419-424). Pervasives values enter through
     // implicit opens (compiler/core/res_compmisc.ml:56-62,
     // compiler/ml/env.ml:1874-1877).
-    env
+    env.0
 }
 
 /// The environment as a version log, built beside the tables and compared
@@ -3262,30 +3258,43 @@ mod tests {
     }
 
     #[test]
-    fn initial_env_is_built_once_per_worker_store() {
+    fn initial_env_is_a_copy_of_the_workers_tables_over_frozen_declarations() {
         use crate::context::IdGenerator;
         use crate::types::predef;
         let first_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
         let first = initial_env(&first_ctx);
-        assert!(
-            first_ctx.thread_store().cached_initial_env().is_some(),
-            "building the predefined environment must not touch compilation-local state"
-        );
         let second_ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        assert!(std::sync::Arc::ptr_eq(first_ctx.world(), second_ctx.world()));
+        let before = second_ctx.type_expr_count();
         let second = initial_env(&second_ctx);
-        assert_ne!(first.id(), second.id());
+        // The worker's tables are built once; a compilation takes a copy
+        // and allocates no type node for it.
+        assert_eq!(first.id(), second.id());
+        assert_eq!(second_ctx.type_expr_count(), before);
         let int_path = Path::pident(predef::ident_int());
         assert!(first.lookup_type(&int_path).is_ok());
         assert!(second.lookup_type(&int_path).is_ok());
         let option = second
             .lookup_type(&Path::pident(predef::ident_option()))
             .expect("option");
+        assert_eq!(option.type_params.len(), 1);
         for param in &option.type_params {
-            assert!(
-                param.is_store(),
-                "predef declarations live in the worker store"
-            );
+            assert!(param.is_shared(), "predefined declarations are frozen");
+            // Any compilation of the build reads the frozen node.
+            for ctx in [&first_ctx, &second_ctx] {
+                assert!(matches!(
+                    ctx.get_desc(*param).into_desc(),
+                    crate::types::type_expr::TypeDesc::Tvar(None)
+                ));
+                assert_eq!(
+                    ctx.get_level(*param),
+                    crate::types::type_expr::GENERIC_LEVEL
+                );
+            }
         }
+        let some = second.find_constructor("Some").expect("Some");
+        // `Some`'s argument is the declaration's parameter: one node.
+        assert_eq!(some.cstr_args, option.type_params);
     }
 
     /// Everything a reader can ask an `IdTbl`, in a comparable form.
