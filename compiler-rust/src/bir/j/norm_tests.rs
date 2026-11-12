@@ -314,3 +314,227 @@ fn je9_ten_thousand_term_chain_has_bounded_attempt_work() {
         b.release(right);
     }
 }
+
+fn stmt_oracle(
+    make: impl FnOnce(&mut JsArena) -> Stmt,
+    old: impl FnOnce(&mut JsArena, Stmt) -> Stmt,
+    new: impl FnOnce(&mut Bir, NodeId) -> NodeId,
+) {
+    let mut a = JsArena::new();
+    let input = make(&mut a);
+    let mut source = JsDepsProgram {
+        program: JsProgram::new_in(vec![input], vec![], a),
+        modules: vec![],
+        side_effect: None,
+    };
+    let mut imported = bridge_j::import_js(&source).unwrap();
+    let View::SBlock { statements } = imported.arena.view(imported.root) else {
+        panic!()
+    };
+    let input_b = statements[0];
+    imported.arena.detach(input_b);
+    imported.arena.release(imported.root);
+    let output = new(&mut imported.arena, input_b);
+    imported.root = p::list(&mut imported.arena, &[output]);
+    imported.arena.validate(Some(imported.root), false).unwrap();
+    let actual = bridge_j::export_js(&imported).unwrap();
+    let expected = old(&mut source.program.arena, input);
+    source.program.block = vec![expected];
+    let print = |p: &JsDepsProgram| {
+        crate::js_ir::print_deps_program_with_directives_and_options(
+            p,
+            None,
+            &[],
+            false,
+            false,
+            false,
+        )
+    };
+    assert_eq!(print(&actual), print(&source));
+}
+#[test]
+fn js1_statement_and_comma_boundaries() {
+    for i in 0..12 {
+        for j in 0..12 {
+            stmt_oracle(
+                |a| {
+                    let l = atom(a, i);
+                    let r = atom(a, j);
+                    let value = e::seq(l, r, a);
+                    a.stmt(StmtKind::Exp(value))
+                },
+                |a, s| {
+                    let StmtKind::Exp(v) = a.sk(s) else { panic!() };
+                    crate::js_ir::build::stmt::exp(v, a)
+                },
+                |b, s| {
+                    let View::SExp { value } = b.view(s) else {
+                        panic!()
+                    };
+                    p::retain(b, &[s], &[value]);
+                    n::js1_exp(b, value)
+                },
+            );
+        }
+    }
+}
+#[test]
+fn js2_js5_singleton_and_wide_blocks() {
+    for depth in 0..4 {
+        for width in 0..4 {
+            for unnest in [false, true] {
+                stmt_oracle(
+                    |a| {
+                        let mut ss = vec![];
+                        for _ in 0..width {
+                            ss.push(a.stmt(StmtKind::Debugger));
+                        }
+                        for _ in 0..depth {
+                            let list = a.stmt_list(&ss);
+                            ss = vec![a.stmt(StmtKind::Block(list))];
+                        }
+                        let list = a.stmt_list(&ss);
+                        a.stmt(StmtKind::Block(list))
+                    },
+                    |a, s| {
+                        let StmtKind::Block(list) = a.sk(s) else {
+                            panic!()
+                        };
+                        let ss = a.stmts(list).to_vec();
+                        if unnest {
+                            let ss = crate::js_ir::build::stmt::unnest_block(ss, a);
+                            let list = a.stmt_list(&ss);
+                            a.stmt(StmtKind::Block(list))
+                        } else {
+                            crate::js_ir::build::stmt::block(&ss, a)
+                        }
+                    },
+                    |b, s| {
+                        let View::SBlock { statements } = b.view(s) else {
+                            panic!()
+                        };
+                        let ss = statements.to_vec();
+                        p::retain(b, &[s], &ss);
+                        if unnest {
+                            let ss = n::js5_unnest_block(b, ss);
+                            p::node(b, View::SBlock { statements: &ss }, 1)
+                        } else {
+                            n::js2_block(b, ss)
+                        }
+                    },
+                );
+            }
+        }
+    }
+}
+fn branch(a: &mut JsArena, kind: usize) -> Vec<Stmt> {
+    match kind {
+        0 => vec![],
+        1 | 2 => {
+            let value = e::int(kind as i32, a);
+            vec![a.stmt(StmtKind::Return(value))]
+        }
+        3 => {
+            let value = var(a, "x");
+            vec![a.stmt(StmtKind::Exp(value))]
+        }
+        4 => {
+            let value = var(a, "y");
+            vec![a.stmt(StmtKind::Throw(value))]
+        }
+        5 => vec![a.stmt(StmtKind::Break(None))],
+        6 => vec![a.stmt(StmtKind::Continue(None))],
+        7..=9 => {
+            let left = var(a, if kind == 9 { "y" } else { "x" });
+            let right = e::int(kind as i32, a);
+            let value = e::raw_bin(BinOp::Eq, left, right, a);
+            vec![a.stmt(StmtKind::Exp(value))]
+        }
+        10 => {
+            let empty = a.stmt_list(&[]);
+            vec![a.stmt(StmtKind::Block(empty))]
+        }
+        11 => vec![a.stmt(StmtKind::Debugger)],
+        _ => panic!(),
+    }
+}
+#[test]
+fn js3_ordered_branch_matrix() {
+    for test in 0..12 {
+        for yes in 0..12 {
+            for no in 0..12 {
+                stmt_oracle(
+                    |a| {
+                        let c = atom(a, test);
+                        let y = branch(a, yes);
+                        let z = branch(a, no);
+                        let y = a.stmt_list(&y);
+                        let z = a.stmt_list(&z);
+                        a.stmt(StmtKind::If(c, y, z))
+                    },
+                    |a, s| {
+                        let StmtKind::If(c, y, z) = a.sk(s) else {
+                            panic!()
+                        };
+                        let (y, z) = (a.stmts(y).to_vec(), a.stmts(z).to_vec());
+                        crate::js_ir::build::stmt::if_(c, &y, &z, a)
+                    },
+                    |b, s| {
+                        let View::SIf {
+                            condition,
+                            then_,
+                            else_: Some(no),
+                        } = b.view(s)
+                        else {
+                            panic!()
+                        };
+                        let View::SBlock { statements: ys } = b.view(then_) else {
+                            panic!()
+                        };
+                        let ys = ys.to_vec();
+                        let View::SBlock { statements: ns } = b.view(no) else {
+                            panic!()
+                        };
+                        let ns = ns.to_vec();
+                        let mut keep = vec![condition];
+                        keep.extend_from_slice(&ys);
+                        keep.extend_from_slice(&ns);
+                        p::retain(b, &[s], &keep);
+                        n::js3_simplify_if(b, condition, ys, ns)
+                    },
+                );
+            }
+        }
+    }
+}
+#[test]
+fn js4_literal_integer_switch_match_and_default() {
+    for value in [0, 1, 2] {
+        stmt_oracle(
+            |a| {
+                let c = e::int(value, a);
+                let one = e::int(10, a);
+                let two = e::int(20, a);
+                let ret = a.stmt(StmtKind::Return(one));
+                let alt = a.stmt(StmtKind::Return(two));
+                let body = a.stmt_list(&[ret]);
+                let default = a.stmt_list(&[alt]);
+                let info = a.int_switch_id(IntSwitchInfo {
+                    clauses: vec![(
+                        1,
+                        Clause {
+                            body,
+                            should_break: false,
+                            comment: None,
+                            source_loc: None,
+                        },
+                    )],
+                    default: Some(default),
+                });
+                a.stmt(StmtKind::IntSwitch(c, info))
+            },
+            |a, s| crate::js_ir::build::stmt::new(a.sk(s), a),
+            n::js4_normalize,
+        );
+    }
+}

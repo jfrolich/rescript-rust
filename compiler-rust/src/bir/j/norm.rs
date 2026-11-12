@@ -491,6 +491,363 @@ pub fn je10_simplify_or(
     super::logic::simplify(b, left, right, true, steps)
 }
 
+/// J-S1, B:1207 exp. Trivial comma arms are stripped iteratively; a surviving
+/// comma loses its location but keeps its comment, exactly like the legacy row.
+pub fn js1_exp(b: &mut Bir, mut value: NodeId) -> NodeId {
+    loop {
+        if let View::JSeq { first, second } = b.view(value) {
+            let trivial = |id| matches!(b.view(id), View::JNumber { .. } | View::JUndefined);
+            let selected = if trivial(first) {
+                Some(second)
+            } else if trivial(second) {
+                Some(first)
+            } else {
+                None
+            };
+            if let Some(selected) = selected {
+                p::retain(b, &[value], &[selected]);
+                value = selected;
+                continue;
+            }
+            let mut flags = b.node(value).flags();
+            flags.0 &= !NodeFlags::JS_LOC_PRESENT;
+            b.nodes[value.index()].set_flags(flags);
+        }
+        if matches!(b.view(value), View::JNumber { .. } | View::JUndefined) {
+            b.release(value);
+            return js2_block(b, vec![]);
+        }
+        return p::node(b, View::SExp { value }, 0);
+    }
+}
+
+/// J-S2, B:1225 block. Singleton block shells are consumed, never recursively
+/// revisited. Empty/multiple statements produce an explicit block (aux=1).
+pub fn js2_block(b: &mut Bir, statements: Vec<NodeId>) -> NodeId {
+    let statements = js5_unnest_block(b, statements);
+    if let [statement] = statements.as_slice() {
+        *statement
+    } else {
+        p::node(
+            b,
+            View::SBlock {
+                statements: &statements,
+            },
+            1,
+        )
+    }
+}
+
+/// J-S5, B:1565 unnest_block. Only a single explicit block is flattened.
+pub fn js5_unnest_block(b: &mut Bir, mut statements: Vec<NodeId>) -> Vec<NodeId> {
+    loop {
+        let [statement] = statements.as_slice() else {
+            return statements;
+        };
+        let statement = *statement;
+        let View::SBlock { statements: inner } = b.view(statement) else {
+            return statements;
+        };
+        let inner = inner.to_vec();
+        p::retain(b, &[statement], &inner);
+        statements = inner;
+    }
+}
+
+/// J-S4, B:1268 normalize. A nonmatching literal switch without a default is
+/// invalid in the legacy API too. All nonliteral statements are returned as-is.
+pub fn js4_normalize(b: &mut Bir, statement: NodeId) -> NodeId {
+    let View::SSwitch {
+        scrutinee,
+        actions,
+        header,
+    } = b.view(statement)
+    else {
+        return statement;
+    };
+    let h = b.switch(header);
+    let selected = if b.node(statement).aux() == 0 {
+        let Some(value) = p::int_of(b, scrutinee) else { return statement; };
+        h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::Lambda(crate::lambda::SwitchKey::Int(n)) if *n == value))
+    } else {
+        let View::JStr { text } = b.view(scrutinee) else { return statement; };
+        h.keys.iter().position(|key| matches!(key, crate::bir::CaseKey::JavaScript(crate::lambda::SwitchCaseTag::String(s)) if s == b.text(text)))
+    }.or_else(|| h.has_default.then_some(h.keys.len())).expect("literal switch must match a clause or default");
+    let action = actions[selected];
+    let View::SBlock { statements } = b.view(action) else {
+        panic!("switch body must be a statement list");
+    };
+    let statements = statements.to_vec();
+    let comment = b.cold(statement).and_then(|c| c.comment);
+    p::retain(b, &[statement], &statements);
+    let statements = js5_unnest_block(b, statements);
+    if let [statement] = statements.as_slice() {
+        return *statement;
+    }
+    let result = p::node(
+        b,
+        View::SBlock {
+            statements: &statements,
+        },
+        1,
+    );
+    if let Some(comment) = comment {
+        b.set_cold(
+            result,
+            crate::bir::Cold {
+                comment: Some(comment),
+                loc: crate::lambda::LamLoc::NONE,
+            },
+        );
+    }
+    result
+}
+
+fn single_value(b: &Bir, statements: &[NodeId], return_: bool) -> Option<NodeId> {
+    let [statement] = statements else {
+        return None;
+    };
+    match b.view(*statement) {
+        View::SReturn { value } if return_ => Some(value),
+        View::SExp { value } if !return_ => Some(value),
+        _ => None,
+    }
+}
+fn same_assignment_target(b: &Bir, left: NodeId, right: NodeId) -> bool {
+    let mut work = vec![(left, right)];
+    while let Some((l, r)) = work.pop() {
+        match (b.view(l), b.view(r)) {
+            (View::Var { .. }, View::Var { .. }) if p::same_var(b, l, r) => {}
+            (
+                View::JQualified {
+                    module: l,
+                    member: lm,
+                },
+                View::JQualified {
+                    module: r,
+                    member: rm,
+                },
+            ) if b.pools.j_modules[l.index()] == b.pools.j_modules[r.index()] && lm == rm => {}
+            (
+                View::JDot {
+                    object: l1,
+                    property: lp,
+                    position: li,
+                },
+                View::JDot {
+                    object: r1,
+                    property: rp,
+                    position: ri,
+                },
+            ) if b.node(l).aux() == 0 && b.node(r).aux() == 0 && lp == rp && li == ri => {
+                work.push((l1, r1))
+            }
+            (
+                View::JIndex {
+                    object: l,
+                    index: li,
+                },
+                View::JIndex {
+                    object: r,
+                    index: ri,
+                },
+            ) => {
+                work.push((li, ri));
+                work.push((l, r));
+            }
+            _ => return false,
+        }
+    }
+    true
+}
+fn equal_statements(b: &Bir, left: &[NodeId], right: &[NodeId]) -> bool {
+    left.len() == right.len() && left.iter().zip(right).all(|(&l, &r)| p::equal(b, l, r))
+}
+fn nested_if(b: &Bir, statements: &[NodeId]) -> Option<(NodeId, Vec<NodeId>, Vec<NodeId>)> {
+    let [statement] = statements else {
+        return None;
+    };
+    let View::SIf {
+        condition,
+        then_,
+        else_,
+    } = b.view(*statement)
+    else {
+        return None;
+    };
+    let View::SBlock { statements: yes } = b.view(then_) else {
+        panic!("if body list");
+    };
+    let no = else_.map_or(&[][..], |no| match b.view(no) {
+        View::SBlock { statements } => statements,
+        _ => panic!("if body list"),
+    });
+    Some((condition, yes.to_vec(), no.to_vec()))
+}
+fn raw_if(b: &mut Bir, condition: NodeId, yes: Vec<NodeId>, no: Vec<NodeId>) -> NodeId {
+    let then_ = p::list(b, &yes);
+    let else_ = p::list(b, &no);
+    p::node(
+        b,
+        View::SIf {
+            condition,
+            then_,
+            else_: Some(else_),
+        },
+        0,
+    )
+}
+fn release_list(b: &mut Bir, statements: &[NodeId]) {
+    for &s in statements {
+        b.release(s);
+    }
+}
+fn remove_empty(b: &mut Bir, statements: &mut Vec<NodeId>) {
+    statements.retain(|&s| {
+        if matches!(b.view(s), View::SBlock { statements } if statements.is_empty()) {
+            b.release(s);
+            false
+        } else {
+            true
+        }
+    });
+}
+
+/// J-S3, B:1575 simplify_if, rules 0..10 in order. Each loop removes a test
+/// negation, swaps an empty then branch once, or removes a nested if. The other
+/// rules return immediately. Statement lists are moved, not re-lowered.
+pub fn js3_simplify_if(
+    b: &mut Bir,
+    mut test: NodeId,
+    mut yes: Vec<NodeId>,
+    mut no: Vec<NodeId>,
+) -> NodeId {
+    loop {
+        remove_empty(b, &mut yes);
+        remove_empty(b, &mut no);
+        if let Some(value) = p::bool_of(b, test) {
+            b.release(test);
+            if value {
+                release_list(b, &no);
+                return js2_block(b, yes);
+            }
+            release_list(b, &yes);
+            return js2_block(b, no);
+        }
+        if let View::JNot { value } = b.view(test) {
+            if !no.is_empty() {
+                p::retain(b, &[test], &[value]);
+                test = value;
+                std::mem::swap(&mut yes, &mut no);
+                continue;
+            }
+        }
+        if yes.is_empty() {
+            if no.is_empty() {
+                return if p::pure(b, test) {
+                    b.release(test);
+                    js2_block(b, vec![])
+                } else {
+                    js1_exp(b, test)
+                };
+            }
+            test = je8_not(b, test);
+            std::mem::swap(&mut yes, &mut no);
+            continue;
+        }
+        let (yr, nr) = (single_value(b, &yes, true), single_value(b, &no, true));
+        if let (Some(y), Some(n)) = (yr, nr) {
+            p::retain(b, &yes, &[y]);
+            p::retain(b, &no, &[n]);
+            let value = je7_cond(b, test, y, n);
+            return p::node(b, View::SReturn { value }, 0);
+        }
+        if let Some(n) = nr {
+            p::retain(b, &no, &[n]);
+            let test = je8_not(b, test);
+            let ret = p::node(b, View::SReturn { value: n }, 0);
+            let guard = raw_if(b, test, vec![ret], vec![]);
+            yes.insert(0, guard);
+            return js2_block(b, yes);
+        }
+        if yes.last().is_some_and(|&s| {
+            matches!(
+                b.view(s),
+                View::SReturn { .. }
+                    | View::SThrow { .. }
+                    | View::SContinue { .. }
+                    | View::SBreak { .. }
+            )
+        }) {
+            let guard = raw_if(b, test, yes, vec![]);
+            no.insert(0, guard);
+            return js2_block(b, no);
+        }
+        if let (Some(y), Some(n)) = (single_value(b, &yes, false), single_value(b, &no, false)) {
+            if let (Some((yl, yr)), Some((nl, nr))) =
+                (p::binary(b, y, BinOp::Eq), p::binary(b, n, BinOp::Eq))
+            {
+                if same_assignment_target(b, yl, nl) {
+                    p::retain(b, &yes, &[yl, yr]);
+                    p::retain(b, &no, &[nr]);
+                    let value = je7_cond(b, test, yr, nr);
+                    let value = je4_bin(b, BinOp::Eq, yl, value);
+                    return js1_exp(b, value);
+                }
+            }
+            p::retain(b, &yes, &[y]);
+            p::retain(b, &no, &[n]);
+            let value = je7_cond(b, test, y, n);
+            return js1_exp(b, value);
+        }
+        if let Some((c, y, n)) = nested_if(b, &yes) {
+            let merge = if equal_statements(b, &n, &no) {
+                Some(false)
+            } else if !y.is_empty() && equal_statements(b, &y, &no) {
+                Some(true)
+            } else {
+                None
+            };
+            if let Some(negate) = merge {
+                let mut kept = vec![c];
+                kept.extend_from_slice(&y);
+                kept.extend_from_slice(&n);
+                p::retain(b, &yes, &kept);
+                release_list(b, &no);
+                let c = if negate { je8_not(b, c) } else { c };
+                test = je5_js_and(b, test, c);
+                if negate {
+                    yes = n;
+                    no = y;
+                } else {
+                    yes = y;
+                    no = n;
+                }
+                continue;
+            }
+        }
+        if let Some((c, y, n)) = nested_if(b, &no) {
+            let merge = if !yes.is_empty() && !y.is_empty() && equal_statements(b, &yes, &y) {
+                Some(false)
+            } else if !yes.is_empty() && !n.is_empty() && equal_statements(b, &yes, &n) {
+                Some(true)
+            } else {
+                None
+            };
+            if let Some(negate) = merge {
+                let other = if negate { y } else { n };
+                let mut kept = vec![c];
+                kept.extend_from_slice(&other);
+                p::retain(b, &no, &kept);
+                let c = if negate { je8_not(b, c) } else { c };
+                test = je6_js_or(b, test, c);
+                no = other;
+                continue;
+            }
+        }
+        return raw_if(b, test, yes, no);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -111,3 +111,10 @@ pub(super) fn copy_cold(b: &mut Bir, from: NodeId, to: NodeId) {
         b.nodes[to.index()].set_flags(flags);
     }
 }
+
+/// Statement construction applies J-S4; `node` remains available for intentionally
+/// raw statements such as the lowering's unswapped If.
+pub fn statement(b: &mut Bir, view: View<'_>, aux: u16) -> NodeId {
+    let value = node(b, view, aux);
+    super::norm::js4_normalize(b, value)
+}

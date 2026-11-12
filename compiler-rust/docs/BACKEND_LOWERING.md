@@ -1925,8 +1925,11 @@ Negation and equality use explicit stacks, never expression-depth recursion.
 The 10,000-term chain test measures 8,188 inspected pairs/planner steps (one
 step when a true operand immediately selects the chain). Successful recipes
 move disjoint subtrees and copy only repeated/overlapping occurrences; failed
-attempts leave both operands untouched. J-S3's measure is specified with its
-implementation below.
+attempts leave both operands untouched. J-S3 loops only when it removes a leading test negation, swaps an empty then
+branch into the else position, or removes a nested if. The empty-branch swap
+cannot repeat without removing a negation or nested if. All other rules return.
+J-S1/J-S2/J-S5 strip a comma/block shell per iteration; J-S4 scans the switch
+keys once and consumes the selected statement list.
 
 ## 7. Cost
 
