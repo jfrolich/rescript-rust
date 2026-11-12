@@ -2937,13 +2937,17 @@ fn transl_type_inner(
             }
             // Wildcard type: create a fresh type variable
             let ty = ctx.new_var(None);
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
-                ctyp_type: ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(None),
+                    ctyp_type: ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, ty))
         }
 
@@ -2972,13 +2976,17 @@ fn transl_type_inner(
                 tctx.used_variable_locs.insert(name_str.clone(), loc);
                 v
             };
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name_str)),
-                ctyp_type: ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_var(Some(name_str)),
+                    ctyp_type: ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, ty))
         }
 
@@ -3011,16 +3019,20 @@ fn transl_type_inner(
                 ret,
             });
             Ok((
-                TypedCoreType {
-                    ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(
-                        typed_args,
-                        tctx.typed.push_core_type(typed_ret),
-                    ),
-                    ctyp_type: arrow,
-                    ctyp_env: EnvRef(0),
-                    ctyp_loc: loc,
-                    ctyp_attributes: styp.ptyp_attributes.clone(),
-                },
+                super::unit_reads::record(
+                    TypedCoreType {
+                        ctyp_desc: TypedCoreTypeDesc::Ttyp_arrow(
+                            typed_args,
+                            tctx.typed.push_core_type(typed_ret),
+                        ),
+                        ctyp_type: arrow,
+                        ctyp_env: EnvRef(0),
+                        ctyp_loc: loc,
+                        ctyp_attributes: styp.ptyp_attributes.clone(),
+                    },
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                ),
                 arrow,
             ))
         }
@@ -3038,13 +3050,19 @@ fn transl_type_inner(
 
             let tuple_ty = ctx.new_tuple(type_refs);
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_tuple(tctx.typed.push_core_types(typed_types)),
-                ctyp_type: tuple_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_tuple(
+                        tctx.typed.push_core_types(typed_types),
+                    ),
+                    ctyp_type: tuple_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, tuple_ty))
         }
 
@@ -3148,17 +3166,21 @@ fn transl_type_inner(
                 });
             }
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
-                    path,
-                    *lid,
-                    tctx.typed.push_core_types(typed_args),
-                ),
-                ctyp_type: constr_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_constr(
+                        path,
+                        *lid,
+                        tctx.typed.push_core_types(typed_args),
+                    ),
+                    ctyp_type: constr_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, constr_ty))
         }
 
@@ -3248,16 +3270,20 @@ fn transl_type_inner(
                 }
             };
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(
-                    tctx.typed.push_core_type(inner_ctyp),
-                    name_str,
-                ),
-                ctyp_type: alias_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_alias(
+                        tctx.typed.push_core_type(inner_ctyp),
+                        name_str,
+                    ),
+                    ctyp_type: alias_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, alias_ty))
         }
 
@@ -3353,16 +3379,20 @@ fn transl_type_inner(
                         .map(|env| tctx.type_ctx.store_typed_env(env)),
                 })?;
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
-                    var_names,
-                    tctx.typed.push_core_type(body_ctyp),
-                ),
-                ctyp_type: poly_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                        var_names,
+                        tctx.typed.push_core_type(body_ctyp),
+                    ),
+                    ctyp_type: poly_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, poly_ty))
         }
 
@@ -3451,16 +3481,20 @@ fn transl_type_inner(
                             TypedCoreTypeDesc::Ttyp_poly(_, _) => (inner_ctyp, inner_ty),
                             _ => {
                                 let poly_ty = ctx.new_poly(inner_ty, vec![]);
-                                let poly_ctyp = TypedCoreType {
-                                    ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
-                                        vec![],
-                                        tctx.typed.push_core_type(inner_ctyp),
-                                    ),
-                                    ctyp_type: poly_ty,
-                                    ctyp_env: EnvRef(0),
-                                    ctyp_loc: field_ct.ptyp_loc,
-                                    ctyp_attributes: Attributes::new(),
-                                };
+                                let poly_ctyp = super::unit_reads::record(
+                                    TypedCoreType {
+                                        ctyp_desc: TypedCoreTypeDesc::Ttyp_poly(
+                                            vec![],
+                                            tctx.typed.push_core_type(inner_ctyp),
+                                        ),
+                                        ctyp_type: poly_ty,
+                                        ctyp_env: EnvRef(0),
+                                        ctyp_loc: field_ct.ptyp_loc,
+                                        ctyp_attributes: Attributes::new(),
+                                    },
+                                    &mut tctx.read_log,
+                                    &tctx.typed,
+                                );
                                 (poly_ctyp, poly_ty)
                             }
                         };
@@ -3609,13 +3643,17 @@ fn transl_type_inner(
             // Wrap in Tobject
             let obj_ty = ctx.new_type(TypeDesc::Tobject { fields: fields_ty });
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_object(typed_fields, *closed),
-                ctyp_type: obj_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_object(typed_fields, *closed),
+                    ctyp_type: obj_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, obj_ty))
         }
 
@@ -3886,19 +3924,23 @@ fn transl_type_inner(
             }
             let variant_ty = ctx.new_variant(row);
 
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(
-                    typed_rows,
-                    *closed,
-                    labels
-                        .as_ref()
-                        .map(|v| v.iter().map(|s| s.to_string()).collect()),
-                ),
-                ctyp_type: variant_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_variant(
+                        typed_rows,
+                        *closed,
+                        labels
+                            .as_ref()
+                            .map(|v| v.iter().map(|s| s.to_string()).collect()),
+                    ),
+                    ctyp_type: variant_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, variant_ty))
         }
 
@@ -4001,19 +4043,25 @@ fn transl_type_inner(
                 lids: ctx.new_package_lids(lids),
                 args: ctx.new_type_list(&args),
             });
-            let ctyp = TypedCoreType {
-                ctyp_desc: TypedCoreTypeDesc::Ttyp_package(crate::types::typedtree::PackageType {
-                    pack_path,
-                    pack_fields: typed_fields
-                        .into_iter()
-                        .map(|(l, ct)| (l, tctx.typed.push_core_type(ct)))
-                        .collect(),
-                }),
-                ctyp_type: package_ty,
-                ctyp_env: EnvRef(0),
-                ctyp_loc: loc,
-                ctyp_attributes: styp.ptyp_attributes.clone(),
-            };
+            let ctyp = super::unit_reads::record(
+                TypedCoreType {
+                    ctyp_desc: TypedCoreTypeDesc::Ttyp_package(
+                        crate::types::typedtree::PackageType {
+                            pack_path,
+                            pack_fields: typed_fields
+                                .into_iter()
+                                .map(|(l, ct)| (l, tctx.typed.push_core_type(ct)))
+                                .collect(),
+                        },
+                    ),
+                    ctyp_type: package_ty,
+                    ctyp_env: EnvRef(0),
+                    ctyp_loc: loc,
+                    ctyp_attributes: styp.ptyp_attributes.clone(),
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             Ok((ctyp, package_ty))
         }
 
@@ -4207,11 +4255,15 @@ fn build_or_pat(
                 ));
             }
             RowField::Rpresent(Some(ty)) => {
-                let arg_pat = Pattern::new(
-                    PatternDesc::Tpat_any,
-                    LocIdx::none(),
-                    ty,
-                    tctx.type_ctx.store_typed_env(env),
+                let arg_pat = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_any,
+                        LocIdx::none(),
+                        ty,
+                        tctx.type_ctx.store_typed_env(env),
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 pats.push((label.to_string(), Some(Box::new(arg_pat))));
                 fields.push((
@@ -4253,15 +4305,19 @@ fn build_or_pat(
     let typed_pats: Vec<Pattern> = pats
         .into_iter()
         .map(|(label, arg)| {
-            Pattern::new(
-                PatternDesc::Tpat_variant(
-                    label,
-                    arg.map(|p| tctx.typed.push_pattern(*p)),
-                    RowDescRef(0),
+            super::unit_reads::record(
+                Pattern::new(
+                    PatternDesc::Tpat_variant(
+                        label,
+                        arg.map(|p| tctx.typed.push_pattern(*p)),
+                        RowDescRef(0),
+                    ),
+                    ghost_loc,
+                    ty,
+                    tctx.type_ctx.store_typed_env(env),
                 ),
-                ghost_loc,
-                ty,
-                tctx.type_ctx.store_typed_env(env),
+                &mut tctx.read_log,
+                &tctx.typed,
             )
         })
         .collect();
@@ -4271,23 +4327,31 @@ fn build_or_pat(
     let mut iter = typed_pats.into_iter();
     let first = iter.next().unwrap();
     let or_pat = iter.fold(first, |acc, pat0| {
-        Pattern::new(
-            PatternDesc::Tpat_or(
-                tctx.typed.push_pattern(pat0),
-                tctx.typed.push_pattern(acc),
-                None,
+        super::unit_reads::record(
+            Pattern::new(
+                PatternDesc::Tpat_or(
+                    tctx.typed.push_pattern(pat0),
+                    tctx.typed.push_pattern(acc),
+                    None,
+                ),
+                ghost_loc,
+                ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            ghost_loc,
-            ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         )
     });
 
     // Set the location to the original pattern location
-    let result = Pattern {
-        pat_loc: loc,
-        ..or_pat
-    };
+    let result = super::unit_reads::record(
+        Pattern {
+            pat_loc: loc,
+            ..or_pat
+        },
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
 
     Ok((path, result, ty))
 }
@@ -4622,7 +4686,11 @@ fn type_pattern_inner(
             }
 
             Ok({
-                let typed_node = Pattern::new(PatternDesc::Tpat_any, loc, expected_ty, pat_env_ref);
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(PatternDesc::Tpat_any, loc, expected_ty, pat_env_ref),
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
             })
@@ -4645,11 +4713,15 @@ fn type_pattern_inner(
                 )?
             };
             Ok({
-                let typed_node = Pattern::new(
-                    PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
-                    loc,
-                    expected_ty,
-                    pat_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4665,11 +4737,15 @@ fn type_pattern_inner(
             unify_pattern_types(tctx, loc, ty, expected_ty)?;
 
             Ok({
-                let typed_node = Pattern::new(
-                    PatternDesc::Tpat_constant(constant),
-                    loc,
-                    expected_ty,
-                    pat_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_constant(constant),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4708,11 +4784,15 @@ fn type_pattern_inner(
             }
 
             Ok({
-                let typed_node = Pattern::new(
-                    PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
-                    loc,
-                    expected_ty,
-                    pat_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_tuple(tctx.typed.push_patterns(typed_pats)),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4762,15 +4842,19 @@ fn type_pattern_inner(
             )?;
 
             Ok({
-                let typed_node = Pattern::new(
-                    PatternDesc::Tpat_alias(
-                        tctx.typed.push_pattern(typed_inner),
-                        id,
-                        convert_located_stridx(name, tctx.arena),
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_alias(
+                            tctx.typed.push_pattern(typed_inner),
+                            id,
+                            convert_located_stridx(name, tctx.arena),
+                        ),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
                     ),
-                    loc,
-                    expected_ty,
-                    pat_env_ref,
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4878,15 +4962,19 @@ fn type_pattern_inner(
                             .extend(p1_module_vars.iter().cloned());
 
                         Ok({
-                            let typed_node = Pattern::new(
-                                PatternDesc::Tpat_or(
-                                    tctx.typed.push_pattern(typed_p1),
-                                    tctx.typed.push_pattern(typed_p2),
-                                    None,
+                            let typed_node = super::unit_reads::record(
+                                Pattern::new(
+                                    PatternDesc::Tpat_or(
+                                        tctx.typed.push_pattern(typed_p1),
+                                        tctx.typed.push_pattern(typed_p2),
+                                        None,
+                                    ),
+                                    loc,
+                                    expected_ty,
+                                    pat_env_ref,
                                 ),
-                                loc,
-                                expected_ty,
-                                pat_env_ref,
+                                &mut tctx.read_log,
+                                &tctx.typed,
                             );
                             tctx.typed
                                 .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -4949,11 +5037,15 @@ fn type_pattern_inner(
             }
 
             Ok({
-                let typed_node = Pattern::new(
-                    PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
-                    loc,
-                    expected_ty,
-                    pat_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_array(tctx.typed.push_patterns(typed_pats)),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -5006,12 +5098,18 @@ fn type_pattern_inner(
             }
             let dict_ty = ctx.new_predef_constr(crate::types::predef::path_dict(), vec![ty_value]);
             unify_pattern_types(tctx, loc, dict_ty, expected_ty)?;
-            Ok(tctx.typed.with_pat_attributes(Pattern::new(
-                PatternDesc::Tpat_dict(typed_entries),
-                loc,
-                expected_ty,
-                pat_env_ref,
-                ), pat.ppat_attributes.clone(),
+            Ok(tctx.typed.with_pat_attributes(
+                super::unit_reads::record(
+                    Pattern::new(
+                        PatternDesc::Tpat_dict(typed_entries),
+                        loc,
+                        expected_ty,
+                        pat_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                ),
+                pat.ppat_attributes.clone(),
             ))
         }
 
@@ -5152,11 +5250,15 @@ fn type_pattern_inner(
                 PatternVariableKind::Module,
                 tctx.arena,
             )?;
-            let mut typed_pat = Pattern::new(
-                PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
-                loc,
-                expected_ty,
-                pat_env_ref,
+            let mut typed_pat = super::unit_reads::record(
+                Pattern::new(
+                    PatternDesc::Tpat_var(id, convert_located_stridx(name, tctx.arena)),
+                    loc,
+                    expected_ty,
+                    pat_env_ref,
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
             tctx.typed.push_pat_extra(
                 &mut typed_pat,
@@ -5176,6 +5278,9 @@ fn type_pattern_inner(
             // OCaml typecore.ml:1663-1671: build_or_pat expands into Tpat_variant or-patterns
             let (path, or_pat, ty) = build_or_pat(tctx, env, loc, lid)?;
             unify_pattern_types(tctx, loc, ty, expected_ty)?;
+            if let Some(log) = &mut tctx.read_log {
+                log.path(&path, crate::cmi::item_deps::Kind::Type);
+            }
             let mut result = or_pat;
             tctx.typed.set_pat_extra(
                 &mut result,
@@ -6053,15 +6158,19 @@ fn type_pattern_construct(
     }
 
     Ok({
-        let typed_node = Pattern::new(
-            PatternDesc::Tpat_construct(
-                *lid,
-                Arc::new(cstr_desc),
-                tctx.typed.push_patterns(typed_args),
+        let typed_node = super::unit_reads::record(
+            Pattern::new(
+                PatternDesc::Tpat_construct(
+                    *lid,
+                    Arc::new(cstr_desc),
+                    tctx.typed.push_patterns(typed_args),
+                ),
+                loc,
+                expected_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -6150,15 +6259,19 @@ fn type_pattern_variant(
     };
 
     Ok({
-        let typed_node = Pattern::new(
-            PatternDesc::Tpat_variant(
-                label.to_string(),
-                typed_arg.map(|p| tctx.typed.push_pattern(*p)),
-                RowDescRef(0),
+        let typed_node = super::unit_reads::record(
+            Pattern::new(
+                PatternDesc::Tpat_variant(
+                    label.to_string(),
+                    typed_arg.map(|p| tctx.typed.push_pattern(*p)),
+                    RowDescRef(0),
+                ),
+                loc,
+                expected_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -6613,15 +6726,19 @@ fn type_pattern_record(
                 loc: tctx.arena.none_loc(),
             };
             let some_cstr = make_some_constructor(ctx);
-            Pattern::new(
-                PatternDesc::Tpat_construct(
-                    some_lid,
-                    Arc::new(some_cstr),
-                    tctx.typed.push_patterns(vec![typed_inner]),
+            super::unit_reads::record(
+                Pattern::new(
+                    PatternDesc::Tpat_construct(
+                        some_lid,
+                        Arc::new(some_cstr),
+                        tctx.typed.push_patterns(vec![typed_inner]),
+                    ),
+                    parsed_pat.ppat_loc,
+                    field_ty,
+                    tctx.type_ctx.store_typed_env(env),
                 ),
-                parsed_pat.ppat_loc,
-                field_ty,
-                tctx.type_ctx.store_typed_env(env),
+                &mut tctx.read_log,
+                &tctx.typed,
             )
         } else {
             type_pattern_inner(tctx, env, parsed_pat, field_ty, options, state, explode)?
@@ -6733,20 +6850,24 @@ fn type_pattern_record(
     };
 
     Ok({
-        let typed_node = Pattern::new(
-            PatternDesc::Tpat_record(
-                typed_fields
-                    .into_iter()
-                    .map(|(lid, lbl, field_pat, optional)| {
-                        (lid, lbl, tctx.typed.push_pattern(field_pat), optional)
-                    })
-                    .collect(),
-                closed_flag,
-                typed_rest.map(Box::new),
+        let typed_node = super::unit_reads::record(
+            Pattern::new(
+                PatternDesc::Tpat_record(
+                    typed_fields
+                        .into_iter()
+                        .map(|(lid, lbl, field_pat, optional)| {
+                            (lid, lbl, tctx.typed.push_pattern(field_pat), optional)
+                        })
+                        .collect(),
+                    closed_flag,
+                    typed_rest.map(Box::new),
+                ),
+                loc,
+                expected_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_pat_attributes(typed_node, pat.ppat_attributes.clone())
@@ -7362,27 +7483,38 @@ fn type_pattern_constraint(
         crate::types::typedtree::PatternDesc::Tpat_var(id, name) => {
             // Use typed_inner.pat_type (= inner_expected_ty, instance 2)
             // to match OCaml's {p with pat_desc = Tpat_any} behavior.
-            let any_pat = Pattern {
-                pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
-                pat_type: typed_inner.pat_type,
-                ..typed_inner.clone()
-            };
+            let any_pat = super::unit_reads::record(
+                Pattern {
+                    pat_desc: crate::types::typedtree::PatternDesc::Tpat_any,
+                    pat_type: typed_inner.pat_type,
+                    ..typed_inner.clone()
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             let any_pat = tctx.typed.with_pat_attributes(any_pat, Attributes::new());
-            let mut alias = Pattern {
-                pat_desc: crate::types::typedtree::PatternDesc::Tpat_alias(
-                    tctx.typed.push_pattern(any_pat),
-                    id,
-                    name,
-                ),
-                pat_type: constraint_ty,
-                ..typed_inner
-            };
+            let mut alias = super::unit_reads::record(
+                Pattern {
+                    pat_desc: crate::types::typedtree::PatternDesc::Tpat_alias(
+                        tctx.typed.push_pattern(any_pat),
+                        id,
+                        name,
+                    ),
+                    pat_type: constraint_ty,
+                    ..typed_inner
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             tctx.typed.set_pat_extra(&mut alias, vec![constraint_extra]);
             alias
         }
         _ => {
             let mut typed_inner = typed_inner;
             typed_inner.pat_type = constraint_ty;
+            if let Some(log) = &mut tctx.read_log {
+                log.ty(typed_inner.pat_type);
+            }
             tctx.typed
                 .prepend_pat_extra(&mut typed_inner, constraint_extra);
             typed_inner
@@ -7461,11 +7593,15 @@ fn type_pattern_constraint_poly_var(
                 pat.ppat_attributes.clone(),
             );
 
-            let mut typed_pat = Pattern::new(
-                PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
-                lloc,
-                ctype_ty,
-                tctx.type_ctx.store_typed_env(env),
+            let mut typed_pat = super::unit_reads::record(
+                Pattern::new(
+                    PatternDesc::Tpat_var(id, convert_located_stridx(&name, tctx.arena)),
+                    lloc,
+                    ctype_ty,
+                    tctx.type_ctx.store_typed_env(env),
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
             tctx.typed.push_pat_extra(&mut typed_pat, constraint_extra);
             Ok(typed_pat)
@@ -7518,12 +7654,13 @@ fn type_pattern_interval(
     } else {
         PatternDesc::Tpat_interval(crate::types::typedtree::IntervalBound::from_constant(lo), crate::types::typedtree::IntervalBound::from_constant(hi))
     };
-    Ok(tctx.typed.with_pat_attributes(Pattern::new(
-        desc,
-        loc,
-        expected_ty,
-        tctx.type_ctx.store_typed_env(env),
-        ), pat.ppat_attributes.clone(),
+    Ok(tctx.typed.with_pat_attributes(
+        super::unit_reads::record(
+            Pattern::new(desc, loc, expected_ty, tctx.type_ctx.store_typed_env(env)),
+            &mut tctx.read_log,
+            &tctx.typed,
+        ),
+        pat.ppat_attributes.clone(),
     ))
 }
 
@@ -7977,7 +8114,11 @@ fn type_expect_full<'a>(
     if typed.exp_env == EnvRef(0) {
         typed.exp_env = tctx.type_ctx.store_typed_env(env);
     }
-    Ok(typed)
+    Ok(super::unit_reads::record(
+        typed,
+        &mut tctx.read_log,
+        &tctx.typed,
+    ))
 }
 
 fn type_expect_with_recarg_unscoped<'a>(
@@ -8026,13 +8167,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                 debug_assert_eq!(ctx.get_level(ctx.repr(ty)), level);
             }
         }
-        let node = Expression::new(
-            ExpressionDesc::Texp_constant(constant),
-            loc,
-            ty,
-            exp_env_ref,
+        let node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_constant(constant),
+                loc,
+                ty,
+                exp_env_ref,
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
-        return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
+        return Ok(tctx
+            .typed
+            .with_exp_attributes(node, expr.pexp_attributes.clone()));
     }
     if let ED::Pexp_ident(lid) = &expr.pexp_desc {
         let longident = tctx.arena.get_longident(lid.txt);
@@ -8113,11 +8260,15 @@ fn type_expect_with_recarg_unscoped<'a>(
         finish_expected(tctx, expr, ty, &mut expected_ty, context)?;
 
         return Ok({
-            let typed_node = Expression::new(
-                ExpressionDesc::Texp_ident(path, *lid, desc),
-                loc,
-                ty,
-                tctx.type_ctx.store_typed_env(env),
+            let typed_node = super::unit_reads::record(
+                Expression::new(
+                    ExpressionDesc::Texp_ident(path, *lid, desc),
+                    loc,
+                    ty,
+                    tctx.type_ctx.store_typed_env(env),
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
             tctx.typed
                 .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8175,8 +8326,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
             rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
             Ok({
-                let typed_node =
-                    Expression::new(ExpressionDesc::Texp_break, loc, unit_ty, exp_env_ref);
+                let typed_node = super::unit_reads::record(
+                    Expression::new(ExpressionDesc::Texp_break, loc, unit_ty, exp_env_ref),
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
             })
@@ -8194,8 +8348,11 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `rue`: `unify env unit (instance ty_expected)` (typecore.ml:3051-3074).
             rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
             Ok({
-                let typed_node =
-                    Expression::new(ExpressionDesc::Texp_continue, loc, unit_ty, exp_env_ref);
+                let typed_node = super::unit_reads::record(
+                    Expression::new(ExpressionDesc::Texp_continue, loc, unit_ty, exp_env_ref),
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
             })
@@ -8230,11 +8387,15 @@ fn type_expect_with_recarg_unscoped<'a>(
             // (matches OCaml: exp_type = newty (Ttuple (List.map (fun e -> e.exp_type) expl)))
             let result_ty = ctx.new_tuple(typed_exprs.iter().map(|e| e.exp_type).collect());
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_tuple(tctx.typed.push_exprs(typed_exprs)),
-                    loc,
-                    result_ty,
-                    exp_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_tuple(tctx.typed.push_exprs(typed_exprs)),
+                        loc,
+                        result_ty,
+                        exp_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8319,15 +8480,19 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
 
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_let(
-                        *rec_flag,
-                        tctx.typed.push_value_bindings(typed_bindings),
-                        tctx.push_expr(typed_body),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_let(
+                            *rec_flag,
+                            tctx.typed.push_value_bindings(typed_bindings),
+                            tctx.push_expr(typed_body),
+                        ),
+                        loc,
+                        body_type,
+                        exp_env_ref,
                     ),
-                    loc,
-                    body_type,
-                    exp_env_ref,
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8352,14 +8517,18 @@ fn type_expect_with_recarg_unscoped<'a>(
             let e2_type = typed_e2.exp_type;
 
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_sequence(
-                        tctx.push_expr(typed_e1),
-                        tctx.push_expr(typed_e2),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_sequence(
+                            tctx.push_expr(typed_e1),
+                            tctx.push_expr(typed_e2),
+                        ),
+                        loc,
+                        e2_type,
+                        exp_env_ref,
                     ),
-                    loc,
-                    e2_type,
-                    exp_env_ref,
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8413,15 +8582,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                     let then_exp_type = typed_then.exp_type;
 
                     Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                Some(tctx.push_expr(typed_else)),
+                        let typed_node = super::unit_reads::record(
+                            Expression::new(
+                                ExpressionDesc::Texp_ifthenelse(
+                                    tctx.push_expr(typed_cond),
+                                    tctx.push_expr(typed_then),
+                                    Some(tctx.push_expr(typed_else)),
+                                ),
+                                loc,
+                                then_exp_type,
+                                exp_env_ref,
                             ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
+                            &mut tctx.read_log,
+                            &tctx.typed,
                         );
                         tctx.typed
                             .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8439,15 +8612,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                     rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
 
                     Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                None,
+                        let typed_node = super::unit_reads::record(
+                            Expression::new(
+                                ExpressionDesc::Texp_ifthenelse(
+                                    tctx.push_expr(typed_cond),
+                                    tctx.push_expr(typed_then),
+                                    None,
+                                ),
+                                loc,
+                                then_exp_type,
+                                exp_env_ref,
                             ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
+                            &mut tctx.read_log,
+                            &tctx.typed,
                         );
                         tctx.typed
                             .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8479,14 +8656,18 @@ fn type_expect_with_recarg_unscoped<'a>(
             rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_while(
-                        tctx.push_expr(typed_cond),
-                        tctx.push_expr(typed_body),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_while(
+                            tctx.push_expr(typed_cond),
+                            tctx.push_expr(typed_body),
+                        ),
+                        loc,
+                        result_unit_ty,
+                        exp_env_ref,
                     ),
-                    loc,
-                    result_unit_ty,
-                    exp_env_ref,
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8519,11 +8700,15 @@ fn type_expect_with_recarg_unscoped<'a>(
             };
 
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_assert(tctx.push_expr(typed_e)),
-                    loc,
-                    exp_type,
-                    exp_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_assert(tctx.push_expr(typed_e)),
+                        loc,
+                        exp_type,
+                        exp_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8558,11 +8743,15 @@ fn type_expect_with_recarg_unscoped<'a>(
             // than the temporary array node.
             let exp_type = crate::types::instance(ctx, expected_ty);
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
-                    loc,
-                    exp_type,
-                    exp_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_array(tctx.typed.push_exprs(typed_exprs)),
+                        loc,
+                        exp_type,
+                        exp_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8600,13 +8789,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                 });
             }
             let exp_type = crate::types::instance(ctx, expected_ty);
-            let node = Expression::new(
-                ExpressionDesc::Texp_dict(tctx.typed.push_dict_entries(typed_entries)),
-                loc,
-                exp_type,
-                exp_env_ref,
+            let node = super::unit_reads::record(
+                Expression::new(
+                    ExpressionDesc::Texp_dict(tctx.typed.push_dict_entries(typed_entries)),
+                    loc,
+                    exp_type,
+                    exp_env_ref,
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
-            Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()))
+            Ok(tctx
+                .typed
+                .with_exp_attributes(node, expr.pexp_attributes.clone()))
         }
 
         // compiler/ml/typecore.ml Pexp_spread: the literal is typed as the
@@ -8645,13 +8840,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                 )?);
             }
             let exp_type = crate::types::instance(ctx, expected_ty);
-            let node = Expression::new(
-                ExpressionDesc::Texp_spread(kind, tctx.typed.push_exprs(parts)),
-                loc,
-                exp_type,
-                exp_env_ref,
+            let node = super::unit_reads::record(
+                Expression::new(
+                    ExpressionDesc::Texp_spread(kind, tctx.typed.push_exprs(parts)),
+                    loc,
+                    exp_type,
+                    exp_env_ref,
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
-            Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()))
+            Ok(tctx
+                .typed
+                .with_exp_attributes(node, expr.pexp_attributes.clone()))
         }
 
         // compiler/ml/typecore.ml Pexp_template: validate every segment, type
@@ -8683,14 +8884,18 @@ fn type_expect_with_recarg_unscoped<'a>(
             let exp_type = crate::types::instance(ctx, env.type_string(ctx));
             rue_unify(tctx, loc, exp_type, expected_ty, context)?;
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_template {
-                        segments,
-                        values: tctx.typed.push_exprs(values),
-                    },
-                    loc,
-                    exp_type,
-                    exp_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_template {
+                            segments,
+                            values: tctx.typed.push_exprs(values),
+                        },
+                        loc,
+                        exp_type,
+                        exp_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -8744,15 +8949,19 @@ fn type_expect_with_recarg_unscoped<'a>(
                 .map(|source| tctx.arena.get_string(source.txt).to_string())
                 .collect();
             Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_tagged_template {
-                        tag: tctx.push_expr(tag),
-                        raw_sources,
-                        values: tctx.typed.push_exprs(values),
-                    },
-                    loc,
-                    output_ty,
-                    exp_env_ref,
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_tagged_template {
+                            tag: tctx.push_expr(tag),
+                            raw_sources,
+                            values: tctx.typed.push_exprs(values),
+                        },
+                        loc,
+                        output_ty,
+                        exp_env_ref,
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
@@ -9454,16 +9663,20 @@ fn translate_unified_ops(
             ];
 
             Some(Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_apply {
-                        funct: tctx.push_expr(typed_funct.clone()),
-                        args: tctx.typed.push_apply_args(typed_args),
-                        partial: false,
-                        transformed_jsx,
-                    },
-                    loc,
-                    result_ty,
-                    tctx.type_ctx.store_typed_env(env),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_apply {
+                            funct: tctx.push_expr(typed_funct.clone()),
+                            args: tctx.typed.push_apply_args(typed_args),
+                            partial: false,
+                            transformed_jsx,
+                        },
+                        loc,
+                        result_ty,
+                        tctx.type_ctx.store_typed_env(env),
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -9504,16 +9717,20 @@ fn translate_unified_ops(
             }];
 
             Some(Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_apply {
-                        funct: tctx.push_expr(typed_funct.clone()),
-                        args: tctx.typed.push_apply_args(typed_args),
-                        partial: false,
-                        transformed_jsx,
-                    },
-                    loc,
-                    result_ty,
-                    tctx.type_ctx.store_typed_env(env),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_apply {
+                            funct: tctx.push_expr(typed_funct.clone()),
+                            args: tctx.typed.push_apply_args(typed_args),
+                            partial: false,
+                            transformed_jsx,
+                        },
+                        loc,
+                        result_ty,
+                        tctx.type_ctx.store_typed_env(env),
+                    ),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -10302,19 +10519,23 @@ fn type_application(
                     let wrapped_loc = typed_arg.exp_loc;
                     let wrapped_env = typed_arg.exp_env;
                     let option_ty = env.type_option(ctx, typed_arg.exp_type);
-                    Expression::new(
-                        // typecore.ml:298-302 `option_some`: `mknoloc (Lident "Some")`.
-                        ExpressionDesc::Texp_construct(
-                            Located {
-                                txt: tctx.arena.plain_some_lid(),
-                                loc: tctx.arena.none_loc(),
-                            },
-                            std::sync::Arc::new(make_some_constructor(ctx)),
-                            tctx.typed.push_exprs(vec![typed_arg]),
+                    super::unit_reads::record(
+                        Expression::new(
+                            // typecore.ml:298-302 `option_some`: `mknoloc (Lident "Some")`.
+                            ExpressionDesc::Texp_construct(
+                                Located {
+                                    txt: tctx.arena.plain_some_lid(),
+                                    loc: tctx.arena.none_loc(),
+                                },
+                                std::sync::Arc::new(make_some_constructor(ctx)),
+                                tctx.typed.push_exprs(vec![typed_arg]),
+                            ),
+                            wrapped_loc,
+                            option_ty,
+                            wrapped_env,
                         ),
-                        wrapped_loc,
-                        option_ty,
-                        wrapped_env,
+                        &mut tctx.read_log,
+                        &tctx.typed,
                     )
                 } else {
                     typed_arg
@@ -10326,18 +10547,22 @@ fn type_application(
             }
             ApplyArgThunk::SynthOptionalNone { label, option_ty } => {
                 let none_loc = tctx.arena.none_loc();
-                let none_expr = Expression::new(
-                    ExpressionDesc::Texp_construct(
-                        Located {
-                            txt: tctx.arena.none_lid(),
-                            loc: none_loc,
-                        },
-                        std::sync::Arc::new(make_none_constructor(ctx)),
-                        TExprList::EMPTY,
+                let none_expr = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_construct(
+                            Located {
+                                txt: tctx.arena.none_lid(),
+                                loc: none_loc,
+                            },
+                            std::sync::Arc::new(make_none_constructor(ctx)),
+                            TExprList::EMPTY,
+                        ),
+                        none_loc,
+                        option_ty,
+                        tctx.type_ctx.store_typed_env(env),
                     ),
-                    none_loc,
-                    option_ty,
-                    tctx.type_ctx.store_typed_env(env),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 typed_args.push(ApplyArg {
                     label,
@@ -10398,16 +10623,20 @@ fn type_application(
     finish_expected(tctx, sexp, result_ty, expected_ty, context)?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: tctx.push_expr(typed_funct),
-                args: tctx.typed.push_apply_args(typed_args),
-                partial,
-                transformed_jsx,
-            },
-            loc,
-            result_ty,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_apply {
+                    funct: tctx.push_expr(typed_funct),
+                    args: tctx.typed.push_apply_args(typed_args),
+                    partial,
+                    transformed_jsx,
+                },
+                loc,
+                result_ty,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -11430,10 +11659,14 @@ fn type_match_cases_batch_non_gadt<'a>(
             // Match OCaml type_cases: `exp_type = instance env ty_res'` where
             // `ty_res'` is corrected per-case when the pattern contains GADTs.
             let case_exp_ty = crate::types::instance(ctx, case_body_ty);
-            let typed_body = Expression {
-                exp_type: case_exp_ty,
-                ..typed_body
-            };
+            let typed_body = super::unit_reads::record(
+                Expression {
+                    exp_type: case_exp_ty,
+                    ..typed_body
+                },
+                &mut tctx.read_log,
+                &tctx.typed,
+            );
             typed_cases.push(crate::types::typedtree::Case {
                 c_lhs: tctx.typed.push_pattern(pending.typed_pat),
                 c_guard: typed_guard.map(|e| tctx.push_expr(e)),
@@ -11766,16 +11999,20 @@ fn type_match(
     // Keep sharing: match OCaml's `exp_type = instance env ty_expected`
     let result_ty = crate::types::instance(ctx, expected_ty);
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_match(
-                tctx.push_expr(typed_scrutinee),
-                tctx.typed.push_cases(typed_val_cases),
-                tctx.typed.push_cases(typed_exn_cases),
-                partial,
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_match(
+                    tctx.push_expr(typed_scrutinee),
+                    tctx.typed.push_cases(typed_val_cases),
+                    tctx.typed.push_cases(typed_exn_cases),
+                    partial,
+                ),
+                loc,
+                result_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            result_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -12647,10 +12884,14 @@ fn type_pending_case_body(
         body_context,
     )?;
     let case_exp_ty = crate::types::instance(tctx.type_ctx, case_body_ty);
-    let typed_body = Expression {
-        exp_type: case_exp_ty,
-        ..typed_body
-    };
+    let typed_body = super::unit_reads::record(
+        Expression {
+            exp_type: case_exp_ty,
+            ..typed_body
+        },
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
     Ok(crate::types::typedtree::Case {
         c_lhs: tctx.typed.push_pattern(pending.typed_pat),
         c_guard: typed_guard.map(|e| tctx.push_expr(e)),
@@ -12730,11 +12971,23 @@ fn type_try(
     // Keep sharing: use typed_body.exp_type instead of expected_ty
     // (matches OCaml: exp_type = body.exp_type)
     let result_ty = typed_body.exp_type;
-    let node = Expression::new(
-        ExpressionDesc::Texp_try(tctx.push_expr(typed_body), tctx.typed.push_cases(typed_handlers), typed_finally.map(|e| tctx.push_expr(*e))),
-        loc, result_ty, tctx.type_ctx.store_typed_env(env),
+    let node = super::unit_reads::record(
+        Expression::new(
+            ExpressionDesc::Texp_try(
+                tctx.push_expr(typed_body),
+                tctx.typed.push_cases(typed_handlers),
+                typed_finally.map(|e| tctx.push_expr(*e)),
+            ),
+            loc,
+            result_ty,
+            tctx.type_ctx.store_typed_env(env),
+        ),
+        &mut tctx.read_log,
+        &tctx.typed,
     );
-    Ok(tctx.typed.with_exp_attributes(node, attributes.to_vec().into()))
+    Ok(tctx
+        .typed
+        .with_exp_attributes(node, attributes.to_vec().into()))
 }
 
 fn desugar_nary_function_defaults(
@@ -13035,11 +13288,15 @@ fn type_function_nary_with_newtypes(
                     &mut seen,
                     &mut used,
                 );
-                Ok(Expression {
-                    exp_loc: loc,
-                    exp_type: rewritten_ty,
-                    ..typed_body
-                })
+                Ok(super::unit_reads::record(
+                    Expression {
+                        exp_loc: loc,
+                        exp_type: rewritten_ty,
+                        ..typed_body
+                    },
+                    &mut tctx.read_log,
+                    &tctx.typed,
+                ))
             })();
             ctx.end_def();
             result
@@ -13442,10 +13699,14 @@ fn type_function_nary(
         &unpacks,
         None,
     )?;
-    let mut typed_body = Expression {
-        exp_type: crate::types::instance(ctx, body_result_type),
-        ..typed_body
-    };
+    let mut typed_body = super::unit_reads::record(
+        Expression {
+            exp_type: crate::types::instance(ctx, body_result_type),
+            ..typed_body
+        },
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
     if has_gadts {
         // typecore.ml:4136-4138.
         let shared_result = crate::types::instance(ctx, result_type);
@@ -13460,15 +13721,19 @@ fn type_function_nary(
     }
     for (typed_bindings, _let_env) in default_lets.into_iter().rev() {
         let body_type = typed_body.exp_type;
-        typed_body = Expression::new(
-            ExpressionDesc::Texp_let(
-                RecFlag::Nonrecursive,
-                tctx.typed.push_value_bindings(typed_bindings),
-                tctx.push_expr(typed_body),
+        typed_body = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_let(
+                    RecFlag::Nonrecursive,
+                    tctx.typed.push_value_bindings(typed_bindings),
+                    tctx.push_expr(typed_body),
+                ),
+                loc,
+                body_type,
+                EnvRef(0),
             ),
-            loc,
-            body_type,
-            EnvRef(0),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
     }
 
@@ -13569,17 +13834,23 @@ fn type_function_nary(
     );
     tctx.loop_depth = saved_loop_depth;
     tctx.in_finally = saved_in_finally;
-    let node = Expression::new(
-        ExpressionDesc::Texp_function {
-            params: tctx.typed.push_function_params(typed_params),
-            body: tctx.push_expr(typed_body),
-            async_: is_async,
-        },
-        loc,
-        exp_type,
-        EnvRef(0),
+    let node = super::unit_reads::record(
+        Expression::new(
+            ExpressionDesc::Texp_function {
+                params: tctx.typed.push_function_params(typed_params),
+                body: tctx.push_expr(typed_body),
+                async_: is_async,
+            },
+            loc,
+            exp_type,
+            EnvRef(0),
+        ),
+        &mut tctx.read_log,
+        &tctx.typed,
     );
-    Ok(tctx.typed.with_exp_attributes(node, attributes.to_vec().into()))
+    Ok(tctx
+        .typed
+        .with_exp_attributes(node, attributes.to_vec().into()))
 }
 
 /// The payload of `Pexp_for`: index pattern, bounds, direction and body.
@@ -13701,18 +13972,22 @@ fn type_for(
     rue_unify(tctx, loc, result_unit_ty, expected_ty, context)?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_for(
-                loop_var_id,
-                tctx.typed.push_pattern(typed_pat),
-                tctx.push_expr(typed_start),
-                tctx.push_expr(typed_end),
-                direction,
-                tctx.push_expr(typed_body),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_for(
+                    loop_var_id,
+                    tctx.typed.push_pattern(typed_pat),
+                    tctx.push_expr(typed_start),
+                    tctx.push_expr(typed_end),
+                    direction,
+                    tctx.push_expr(typed_body),
+                ),
+                loc,
+                result_unit_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            result_unit_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -13935,11 +14210,15 @@ fn type_for_of(
     };
 
     Ok({
-        let typed_node = Expression::new(
-            desc,
-            loc,
-            result_unit_ty,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                desc,
+                loc,
+                result_unit_ty,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -14238,15 +14517,19 @@ fn type_construct(
     }
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_construct(
-                *lid,
-                std::sync::Arc::new(cstr_desc),
-                tctx.typed.push_exprs(typed_args),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_construct(
+                    *lid,
+                    std::sync::Arc::new(cstr_desc),
+                    tctx.typed.push_exprs(typed_args),
+                ),
+                loc,
+                result_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            result_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -14308,14 +14591,18 @@ fn type_variant(
             let typed_arg = type_expect(tctx, env, arg_expr, arg_ty, None)?;
             unify_expression_types(tctx, loc, typed_arg.exp_type, arg_ty0, None)?;
             return Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_variant(
-                        label.to_string(),
-                        Some(tctx.push_expr(typed_arg)),
+                let typed_node = super::unit_reads::record(
+                    Expression::new(
+                        ExpressionDesc::Texp_variant(
+                            label.to_string(),
+                            Some(tctx.push_expr(typed_arg)),
+                        ),
+                        loc,
+                        expected_inst,
+                        tctx.type_ctx.store_typed_env(env),
                     ),
-                    loc,
-                    expected_inst,
-                    tctx.type_ctx.store_typed_env(env),
+                    &mut tctx.read_log,
+                    &tctx.typed,
                 );
                 tctx.typed
                     .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -14340,11 +14627,18 @@ fn type_variant(
         // OCaml: rue { ... exp_type = variant_row; ... }
         rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
         return Ok({
-            let typed_node = Expression::new(
-                ExpressionDesc::Texp_variant(label.to_string(), Some(tctx.push_expr(typed_arg))),
-                loc,
-                variant_ty,
-                tctx.type_ctx.store_typed_env(env),
+            let typed_node = super::unit_reads::record(
+                Expression::new(
+                    ExpressionDesc::Texp_variant(
+                        label.to_string(),
+                        Some(tctx.push_expr(typed_arg)),
+                    ),
+                    loc,
+                    variant_ty,
+                    tctx.type_ctx.store_typed_env(env),
+                ),
+                &mut tctx.read_log,
+                &tctx.typed,
             );
             tctx.typed
                 .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -14367,11 +14661,15 @@ fn type_variant(
     rue_unify(tctx, loc, variant_ty, expected_ty, context)?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_variant(label.to_string(), None),
-            loc,
-            variant_ty,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_variant(label.to_string(), None),
+                loc,
+                variant_ty,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -15558,15 +15856,19 @@ fn type_record(
             // (for `{ open M; body }` the block's, not the body's).
             let wrapped_loc = tctx.arena.get_expr(field.expr).pexp_loc;
             let wrapped_env = typed_expr.exp_env;
-            Expression::new(
-                ExpressionDesc::Texp_construct(
-                    some_lid,
-                    std::sync::Arc::new(some_cstr),
-                    tctx.typed.push_exprs(vec![typed_expr]),
+            super::unit_reads::record(
+                Expression::new(
+                    ExpressionDesc::Texp_construct(
+                        some_lid,
+                        std::sync::Arc::new(some_cstr),
+                        tctx.typed.push_exprs(vec![typed_expr]),
+                    ),
+                    wrapped_loc,
+                    label_desc.lbl_arg,
+                    wrapped_env,
                 ),
-                wrapped_loc,
-                label_desc.lbl_arg,
-                wrapped_env,
+                &mut tctx.read_log,
+                &tctx.typed,
             )
         } else {
             typed_expr
@@ -15576,6 +15878,9 @@ fn type_record(
         // mutate the owned Rust expression instead of deep-cloning its desc.
         let mut final_expr = final_expr;
         final_expr.exp_type = crate::types::ctype::instance(ctx, final_expr.exp_type);
+        if let Some(log) = &mut tctx.read_log {
+            log.ty(final_expr.exp_type);
+        }
 
         explicit_entries.push((std::sync::Arc::new(label_desc), field.lid, tctx.push_expr(final_expr)));
     }
@@ -15683,6 +15988,9 @@ fn type_record(
             }
         }
         typed_base_expr.exp_type = ty_exp;
+        if let Some(log) = &mut tctx.read_log {
+            log.ty(typed_base_expr.exp_type);
+        }
 
         // `unify_kept` over `lbl.lbl_all` of the first written label
         // (typecore.ml:3137-3151); a spread literal writes at least one field.
@@ -15742,6 +16050,9 @@ fn type_record(
             }
         }
         base_expr.exp_type = output_ty;
+        if let Some(log) = &mut tctx.read_log {
+            log.ty(base_expr.exp_type);
+        }
     }
 
     // OCaml compiler/ml/typecore.ml:2788 unifies `ty_record` with
@@ -15776,11 +16087,15 @@ fn type_record(
     };
 
     Ok({
-        let typed_node = Expression::new(
-            exp_desc,
-            loc,
-            record_exp_ty,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                exp_desc,
+                loc,
+                record_exp_ty,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -16282,15 +16597,19 @@ fn type_field(
         None,
     )?;
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_field(
-                tctx.push_expr(typed_record),
-                *field_lid,
-                std::sync::Arc::new(label_desc),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_field(
+                    tctx.push_expr(typed_record),
+                    *field_lid,
+                    std::sync::Arc::new(label_desc),
+                ),
+                loc,
+                field_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            field_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -16524,6 +16843,9 @@ fn type_setfield(
     // OCaml compiler/ml/typecore.ml:3779 returns `{arg with exp_type =
     // instance env arg.exp_type}` from `type_label_exp`.
     typed_value.exp_type = crate::types::ctype::instance(ctx, typed_value.exp_type);
+    if let Some(log) = &mut tctx.read_log {
+        log.ty(typed_value.exp_type);
+    }
     // OCaml typecore.ml:2953: `unify_exp env record ty_record`.
     unify_expression_types(
         tctx,
@@ -16561,16 +16883,20 @@ fn type_setfield(
     rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_setfield(
-                tctx.push_expr(typed_record),
-                *field_lid,
-                std::sync::Arc::new(label_desc),
-                tctx.push_expr(typed_value),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_setfield(
+                    tctx.push_expr(typed_record),
+                    *field_lid,
+                    std::sync::Arc::new(label_desc),
+                    tctx.push_expr(typed_value),
+                ),
+                loc,
+                unit_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            unit_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -16625,6 +16951,9 @@ fn type_constraint(
 
     let mut result = typed_inner;
     result.exp_type = result_ty;
+    if let Some(log) = &mut tctx.read_log {
+        log.ty(result.exp_type);
+    }
     let extra = (
         crate::types::typedtree::ExpExtra::Texp_constraint(tctx.typed.push_core_type(typed_ctype)),
         loc,
@@ -16746,6 +17075,9 @@ fn type_coerce(
         attributes.to_vec().into(),
     );
     result.exp_type = to_ty;
+    if let Some(log) = &mut tctx.read_log {
+        log.ty(result.exp_type);
+    }
     Ok(result)
 }
 
@@ -17010,11 +17342,15 @@ fn type_newtype(
         // OCaml: rue { ... exp_type = ety; ... }
         rue_unify(tctx, loc, rewritten_ty, expected_ty, None)?;
 
-        Ok(Expression {
-            exp_loc: loc,
-            exp_type: rewritten_ty,
-            ..typed_body
-        })
+        Ok(super::unit_reads::record(
+            Expression {
+                exp_loc: loc,
+                exp_type: rewritten_ty,
+                ..typed_body
+            },
+            &mut tctx.read_log,
+            &tctx.typed,
+        ))
     })();
     ctx.end_def();
     result
@@ -17042,16 +17378,20 @@ fn type_await(
     // Return the expression - await just unwraps the promise
     // In JavaScript, this is a runtime operation
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: tctx.push_expr(typed_inner),
-                args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
-                partial: false,
-                transformed_jsx: false,
-            },
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_apply {
+                    funct: tctx.push_expr(typed_inner),
+                    args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
+                    partial: false,
+                    transformed_jsx: false,
+                },
+                loc,
+                expected_ty,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -17144,6 +17484,9 @@ fn type_object_get(
                 && matches!(&*val_desc, TypeDesc::Tconstr { args, .. } if args.is_empty())
             {
                 typed_obj.exp_type = desc.val_type;
+                if let Some(log) = &mut tctx.read_log {
+                    log.ty(typed_obj.exp_type);
+                }
             }
         }
     }
@@ -17167,17 +17510,21 @@ fn type_object_get(
     rue_unify(tctx, loc, field_ty, expected_ty, context)?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_object_get(
-                tctx.push_expr(typed_obj),
-                Located {
-                    txt: field.txt.to_string(),
-                    loc: field.loc,
-                },
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_object_get(
+                    tctx.push_expr(typed_obj),
+                    Located {
+                        txt: field.txt.to_string(),
+                        loc: field.loc,
+                    },
+                ),
+                loc,
+                field_ty,
+                EnvRef(0),
             ),
-            loc,
-            field_ty,
-            EnvRef(0),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -17234,18 +17581,22 @@ fn type_object_set(
     let unit_ty = env.type_unit(ctx);
     rue_unify(tctx, loc, unit_ty, expected_ty, context)?;
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_object_set(
-                tctx.push_expr(typed_obj),
-                Located {
-                    txt: field.txt.to_string(),
-                    loc: field.loc,
-                },
-                tctx.push_expr(value),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_object_set(
+                    tctx.push_expr(typed_obj),
+                    Located {
+                        txt: field.txt.to_string(),
+                        loc: field.loc,
+                    },
+                    tctx.push_expr(value),
+                ),
+                loc,
+                unit_ty,
+                EnvRef(0),
             ),
-            loc,
-            unit_ty,
-            EnvRef(0),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -17278,6 +17629,9 @@ fn type_object_field_value(
             let mut value = value?;
             check_univars_or_less_general(tctx, env, true, "field value", &value, typ, &vars)?;
             value.exp_type = crate::types::ctype::instance(ctx, value.exp_type);
+            if let Some(log) = &mut tctx.read_log {
+                log.ty(value.exp_type);
+            }
             Ok(value)
         }
         None => {
@@ -17351,11 +17705,15 @@ fn type_object_literal(
     let exp_type = ctx.new_type(TypeDesc::Tobject { fields: row });
     rue_unify(tctx, loc, exp_type, expected_ty, context)?;
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_object_literal(fields),
-            loc,
-            exp_type,
-            EnvRef(0),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_object_literal(fields),
+                loc,
+                exp_type,
+                EnvRef(0),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -17411,16 +17769,20 @@ fn type_letexception(
                         let (typed_ct, ty_ref) =
                             transl_type(tctx, env, arena.get_core_type(label.pld_type))?;
                         let poly_ty_ref = ctx.new_poly(ty_ref, vec![]);
-                        let poly_typed_ct = crate::types::typedtree::TypedCoreType {
-                            ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
-                                vec![],
-                                tctx.typed.push_core_type(typed_ct.clone()),
-                            ),
-                            ctyp_type: poly_ty_ref,
-                            ctyp_env: typed_ct.ctyp_env,
-                            ctyp_loc: typed_ct.ctyp_loc,
-                            ctyp_attributes: Attributes::new(),
-                        };
+                        let poly_typed_ct = super::unit_reads::record(
+                            crate::types::typedtree::TypedCoreType {
+                                ctyp_desc: crate::types::typedtree::TypedCoreTypeDesc::Ttyp_poly(
+                                    vec![],
+                                    tctx.typed.push_core_type(typed_ct.clone()),
+                                ),
+                                ctyp_type: poly_ty_ref,
+                                ctyp_env: typed_ct.ctyp_env,
+                                ctyp_loc: typed_ct.ctyp_loc,
+                                ctyp_attributes: Attributes::new(),
+                            },
+                            &mut tctx.read_log,
+                            &tctx.typed,
+                        );
                         let label_id = ctx.create_ast_ident(arena, label.pld_name.txt);
                         typed_labels.push(crate::types::typedtree::LabelDeclaration {
                             ld_id: label_id,
@@ -17567,40 +17929,48 @@ fn type_letexception(
 
     let typed_body = type_expect(tctx, &new_env, body, expected_ty, None)?;
 
-    let typed_ext_constr = crate::types::typedtree::ExtensionConstructor {
-        ext_id: id,
-        ext_name: crate::parse_arena::Located {
-            txt: name_str,
-            loc: ext_constr.pext_name.loc,
+    let typed_ext_constr = super::unit_reads::record(
+        crate::types::typedtree::ExtensionConstructor {
+            ext_id: id,
+            ext_name: crate::parse_arena::Located {
+                txt: name_str,
+                loc: ext_constr.pext_name.loc,
+            },
+            ext_type: crate::types::ExtensionConstructor {
+                ext_type_path: crate::types::predef::path_exn(),
+                ext_type_params: vec![],
+                ext_args,
+                ext_ret_type: ext_ret_ty,
+                ext_private: crate::types::PrivateFlag::Public,
+                ext_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
+                ext_attributes: vec![],
+                ext_is_exception: true,
+            },
+            ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
+                typed_args,
+                typed_ret.map(|ct| tctx.typed.push_core_type(ct)),
+            ),
+            ext_loc: ext_constr.pext_loc,
+            ext_attributes: ext_constr.pext_attributes.clone(),
         },
-        ext_type: crate::types::ExtensionConstructor {
-            ext_type_path: crate::types::predef::path_exn(),
-            ext_type_params: vec![],
-            ext_args,
-            ext_ret_type: ext_ret_ty,
-            ext_private: crate::types::PrivateFlag::Public,
-            ext_loc: tctx.intern_ast_loc(arena, ext_constr.pext_loc),
-            ext_attributes: vec![],
-            ext_is_exception: true,
-        },
-        ext_kind: crate::types::typedtree::ExtensionConstructorKind::Text_decl(
-            typed_args,
-            typed_ret.map(|ct| tctx.typed.push_core_type(ct)),
-        ),
-        ext_loc: ext_constr.pext_loc,
-        ext_attributes: ext_constr.pext_attributes.clone(),
-    };
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
     let body_ty = typed_body.exp_type;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_letexception(
-                tctx.typed.push_extension_constructor(typed_ext_constr),
-                tctx.push_expr(typed_body),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_letexception(
+                    tctx.typed.push_extension_constructor(typed_ext_constr),
+                    tctx.push_expr(typed_body),
+                ),
+                loc,
+                body_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            loc,
-            body_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -18332,19 +18702,23 @@ fn type_letmodule(
     unify_expression_types(tctx, loc, letmodule_ty, rewritten_ty, None)?;
 
     Ok({
-        let typed_node = Expression::new(
-            crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-                mod_id,
-                Located {
-                    txt: mod_name_str.clone(),
-                    loc: name.loc,
-                },
-                tctx.typed.push_module_expr(typed_mod),
-                tctx.push_expr(typed_body),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+                    mod_id,
+                    Located {
+                        txt: mod_name_str.clone(),
+                        loc: name.loc,
+                    },
+                    tctx.typed.push_module_expr(typed_mod),
+                    tctx.push_expr(typed_body),
+                ),
+                loc,
+                letmodule_ty,
+                EnvRef(0),
             ),
-            loc,
-            letmodule_ty,
-            EnvRef(0),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -18741,18 +19115,22 @@ fn type_pack(
     } else {
         ctx.store_typed_env(&package_env)
     };
-    let wrapped_module = crate::types::typedtree::ModuleExpr {
-        mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
-            tctx.typed.push_module_expr(typed_module),
-            decl_package_mty.clone(),
-            crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
-            coercion,
-        ),
-        mod_loc: typed_module_loc,
-        mod_type: decl_package_mty,
-        mod_env: wrapped_env,
-        mod_attributes: Attributes::new(),
-    };
+    let wrapped_module = super::unit_reads::record(
+        crate::types::typedtree::ModuleExpr {
+            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_constraint(
+                tctx.typed.push_module_expr(typed_module),
+                decl_package_mty.clone(),
+                crate::types::typedtree::ModuleTypeConstraint::Tmodtype_implicit,
+                coercion,
+            ),
+            mod_loc: typed_module_loc,
+            mod_type: decl_package_mty,
+            mod_env: wrapped_env,
+            mod_attributes: Attributes::new(),
+        },
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
     let packed_type = ctx.new_type(TypeDesc::Tpackage {
         path: pack_path,
         lids: pack_lids_ref,
@@ -18773,11 +19151,15 @@ fn type_pack(
     rue_result?;
 
     Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_pack(tctx.typed.push_module_expr(wrapped_module)),
-            loc,
-            packed_type,
-            tctx.type_ctx.store_typed_env(env),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                ExpressionDesc::Texp_pack(tctx.typed.push_module_expr(wrapped_module)),
+                loc,
+                packed_type,
+                tctx.type_ctx.store_typed_env(env),
+            ),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, attributes.to_vec().into())
@@ -18917,22 +19299,30 @@ fn type_expect_with_module_unpacks(
     // OCaml's wrap_unpacks types the unpack as Pexp_ident through type_expect,
     // which calls instance() on the looked-up type. Match that by instancing here.
     let unpack_inst_ty = crate::types::instance(tctx.type_ctx, unpack.ty);
-    let unpack_expr = Expression::new(
-        ExpressionDesc::Texp_ident(Path::pident(unpack.id), located_lid, Arc::new(value_desc)),
-        unpack.loc_idx,
-        unpack_inst_ty,
-        tctx.type_ctx.store_typed_env(env),
-    );
-    let unpack_module = crate::types::typedtree::ModuleExpr {
-        mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
-            tctx.push_expr(unpack_expr),
-            decl_mty.clone(),
+    let unpack_expr = super::unit_reads::record(
+        Expression::new(
+            ExpressionDesc::Texp_ident(Path::pident(unpack.id), located_lid, Arc::new(value_desc)),
+            unpack.loc_idx,
+            unpack_inst_ty,
+            tctx.type_ctx.store_typed_env(env),
         ),
-        mod_loc: unpack.loc_idx,
-        mod_type: decl_mty,
-        mod_env: EnvRef(0),
-        mod_attributes: Attributes::new(),
-    };
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
+    let unpack_module = super::unit_reads::record(
+        crate::types::typedtree::ModuleExpr {
+            mod_desc: crate::types::typedtree::ModuleExprDesc::Tmod_unpack(
+                tctx.push_expr(unpack_expr),
+                decl_mty.clone(),
+            ),
+            mod_loc: unpack.loc_idx,
+            mod_type: decl_mty,
+            mod_env: EnvRef(0),
+            mod_attributes: Attributes::new(),
+        },
+        &mut tctx.read_log,
+        &tctx.typed,
+    );
 
     // OCaml `wrap_unpacks` uses the source expression location (`sexp.pexp_loc`)
     // for each generated `let module` wrapper.
@@ -18960,19 +19350,23 @@ fn type_expect_with_module_unpacks(
     }
     let wrapped_ty = letmodule_ty;
     Ok({
-        let typed_node = Expression::new(
-            crate::types::typedtree::ExpressionDesc::Texp_letmodule(
-                letmod_id,
-                Located {
-                    txt: unpack.name.txt.to_string(),
-                    loc: unpack.name.loc,
-                },
-                tctx.typed.push_module_expr(unpack_module),
-                tctx.push_expr(typed_body),
+        let typed_node = super::unit_reads::record(
+            Expression::new(
+                crate::types::typedtree::ExpressionDesc::Texp_letmodule(
+                    letmod_id,
+                    Located {
+                        txt: unpack.name.txt.to_string(),
+                        loc: unpack.name.loc,
+                    },
+                    tctx.typed.push_module_expr(unpack_module),
+                    tctx.push_expr(typed_body),
+                ),
+                body.pexp_loc,
+                wrapped_ty,
+                tctx.type_ctx.store_typed_env(env),
             ),
-            body.pexp_loc,
-            wrapped_ty,
-            tctx.type_ctx.store_typed_env(env),
+            &mut tctx.read_log,
+            &tctx.typed,
         );
         tctx.typed
             .with_exp_attributes(typed_node, modulepat_attrs.into())
@@ -20902,10 +21296,14 @@ fn type_let_bindings(
                         )?;
                         // OCaml: {exp with exp_type = instance env exp.exp_type}
                         let new_exp_type = crate::types::ctype::instance(ctx, exp.exp_type);
-                        Ok(Expression {
-                            exp_type: new_exp_type,
-                            ..exp
-                        })
+                        Ok(super::unit_reads::record(
+                            Expression {
+                                exp_type: new_exp_type,
+                                ..exp
+                            },
+                            &mut tctx.read_log,
+                            &tctx.typed,
+                        ))
                     }
                     _ => {
                         // OCaml: type_expect ~context exp_env sexp pat.pat_type

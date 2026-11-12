@@ -152,6 +152,157 @@ impl Collector<'_> {
     }
 }
 
+// These callbacks inspect only the node just constructed, never its children.
+pub(crate) trait ReadNode {
+    fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena);
+}
+
+#[inline]
+pub(crate) fn record<T: ReadNode>(node: T, log: &mut Option<ReadLog>, ta: &TypedArena) -> T {
+    if let Some(log) = log {
+        node.log_reads(log, ta);
+    }
+    node
+}
+
+impl ReadNode for Expression {
+    fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena) {
+        let e = self;
+        for (extra, _, _) in ta.exp_extra(e).iter() {
+            if let ExpExtra::Texp_open(_, path, _, _) = extra {
+                log.path(path, Kind::Module);
+            }
+        }
+        match &e.exp_desc {
+            ExpressionDesc::Texp_ident(path, _, _) => log.path(path, Kind::Value),
+            ExpressionDesc::Texp_construct(_, cd, _) => log.constructor(cd),
+            ExpressionDesc::Texp_field(_, _, ld) | ExpressionDesc::Texp_setfield(_, _, ld, _) => {
+                log.label(ld)
+            }
+            ExpressionDesc::Texp_record { fields, .. } => {
+                for (ld, _, _) in ta.record_fields(*fields) {
+                    log.label(ld);
+                }
+            }
+            _ => {}
+        }
+        log.ty(e.exp_type);
+    }
+}
+
+impl ReadNode for Pattern {
+    fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena) {
+        let p = self;
+        for (extra, _, _) in ta.pat_extra(p).iter() {
+            if let PatExtra::Tpat_type(path, _) = extra {
+                log.path(path, Kind::Type);
+            }
+        }
+        match &p.pat_desc {
+            PatternDesc::Tpat_construct(_, cd, _) => log.constructor(cd),
+            PatternDesc::Tpat_record(fields, _, rest) => {
+                for (_, ld, _, _) in fields {
+                    log.label(ld);
+                }
+                if let Some(rest) = rest {
+                    log.ty(rest.rest_type);
+                }
+            }
+            _ => {}
+        }
+        log.ty(p.pat_type);
+    }
+}
+
+impl ReadNode for TypedCoreType {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let t = self;
+        match &t.ctyp_desc {
+            TypedCoreTypeDesc::Ttyp_constr(path, _, _) => log.path(path, Kind::Type),
+            TypedCoreTypeDesc::Ttyp_package(pack) => log.path(&pack.pack_path, Kind::Modtype),
+            _ => {}
+        }
+        log.ty(t.ctyp_type);
+    }
+}
+
+impl ReadNode for ModuleExpr {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let m = self;
+        if let ModuleExprDesc::Tmod_ident(path, _) = &m.mod_desc {
+            log.path(path, Kind::Module);
+        }
+    }
+}
+
+impl ReadNode for ModuleType {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let m = self;
+        match &m.mty_desc {
+            ModuleTypeDesc::Tmty_ident(path, _) => log.path(path, Kind::Modtype),
+            ModuleTypeDesc::Tmty_alias(path, _) => log.path(path, Kind::Module),
+            ModuleTypeDesc::Tmty_with(_, constraints) => {
+                for (_, _, constraint) in constraints {
+                    if let WithConstraint::Twith_module(path, _)
+                    | WithConstraint::Twith_modsubst(path, _) = constraint
+                    {
+                        log.path(path, Kind::Module);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl ReadNode for StructureItem {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let item = self;
+        match &item.str_desc {
+            StructureItemDesc::Tstr_open(od) => log.path(&od.open_path, Kind::Module),
+            StructureItemDesc::Tstr_typext(te) => log.path(&te.tyext_path, Kind::Type),
+            _ => {}
+        }
+    }
+}
+
+impl ReadNode for TypedSignatureItem {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let item = self;
+        match &item.sig_desc {
+            TypedSignatureItemDesc::Tsig_open(od) => log.path(&od.open_path, Kind::Module),
+            TypedSignatureItemDesc::Tsig_typext(te) => log.path(&te.tyext_path, Kind::Type),
+            _ => {}
+        }
+    }
+}
+
+impl ReadNode for ExtensionConstructor {
+    fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
+        let ext = self;
+        if let ExtensionConstructorKind::Text_rebind(path, _) = &ext.ext_kind {
+            log.path(path, Kind::Extension);
+        }
+    }
+}
+
+impl ReadLog {
+    fn constructor(&mut self, cd: &ConstructorDescription) {
+        if let ConstructorKind::Extension(path) = &cd.cstr_kind {
+            self.path(path, Kind::Extension);
+        }
+        self.ty(cd.cstr_res);
+        for arg in &cd.cstr_args {
+            self.ty(*arg);
+        }
+    }
+
+    fn label(&mut self, ld: &LabelDescription) {
+        self.ty(ld.lbl_res);
+        self.ty(ld.lbl_arg);
+    }
+}
+
 impl<'a> TastIterator<'a> for Collector<'a> {
     fn arena(&self) -> &'a TypedArena {
         self.ta
