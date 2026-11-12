@@ -78,7 +78,7 @@ flip false 2
 
 completed_builds=$(grep -c "Finished .*compilation" rewatch.log || true)
 rm -f "$flag_source" "$use_source"
-wait_for_pattern_count rewatch.log "Finished .*compilation\|Failed to Compile" "$((completed_builds + 1))" 30
+wait_for_pattern_count rewatch.log "Finished .*compilation\|Build failed" "$((completed_builds + 1))" 30
 
 if ! exit_watcher; then
   cleanup_sources

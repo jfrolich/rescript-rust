@@ -22,7 +22,7 @@ static GLOBAL_ALLOCATOR: alloc_stats::CountingAlloc = alloc_stats::CountingAlloc
 
 use rescript::{
     build, cli, cmd, format,
-    lock::{LockKind, drop_lock, get_lock_or_exit},
+    lock::{LockKind, drop_lock, get_clean_lock_or_exit, get_lock_or_exit},
     telemetry, watcher,
 };
 
@@ -94,15 +94,10 @@ fn main() {
     let telemetry_guard = telemetry::init_telemetry();
     let otel_enabled = telemetry_guard.otel_enabled();
     let exit_code = match run_main(otel_enabled) {
-        Ok(()) => 0,
+        Ok(status) => status,
         Err(err) => {
             eprintln!("{:#}", err);
-            // A dependency that cannot be resolved exits with 2.
-            if err.is::<rescript::build::packages::DependencyError>() {
-                2
-            } else {
-                1
-            }
+            1
         }
     };
     rescript::build::phase_mark("run-main-end");
@@ -112,20 +107,21 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run_main(otel_enabled: bool) -> Result<()> {
+/// Run the command; its exit status on success.
+fn run_main(otel_enabled: bool) -> Result<i32> {
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 
     let log_level_filter = cli.verbose.log_level_filter();
 
     if !otel_enabled {
         let stdout_logger = env_logger::Builder::new()
-            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .format(write_log_record)
             .filter_level(log_level_filter)
             .target(env_logger::fmt::Target::Stdout)
             .build();
 
         let stderr_logger = env_logger::Builder::new()
-            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .format(write_log_record)
             .filter_level(log_level_filter)
             .target(env_logger::fmt::Target::Stderr)
             .build();
@@ -168,11 +164,11 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             if !built {
                 std::process::exit(1);
             }
-            Ok(())
+            Ok(0)
         }
         cli::Command::CompilerArgs { path } => {
             println!("{}", build::get_compiler_args(Path::new(&path))?);
-            Ok(())
+            Ok(0)
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
@@ -210,7 +206,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                         // wall time; let the OS reclaim it at process exit instead.
                         std::mem::forget(build_state);
                     }
-                    Ok(())
+                    Ok(0)
                 }
             }
         }
@@ -231,19 +227,21 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     features,
                 )
             });
-            match watch_result {
-                Err(e) => Err(e),
-                Ok(_) => Ok(()),
-            }
+            // 0, or 128 plus the number of the signal that stopped it.
+            watch_result
         }
         cli::Command::Clean { folder, prod } => {
+            // The watch lock first, as `rescript watch` takes it: a watcher
+            // keeps reading the artifacts the clean removes.
+            let _watch_lock = get_clean_lock_or_exit(&folder);
             let _lock = get_lock_or_exit(LockKind::Build, &folder);
             let result = build::clean::clean(folder.as_ref(), show_progress, plain_output, prod);
             let _ = drop_lock(LockKind::Build, &folder);
+            let _ = drop_lock(LockKind::Watch, &folder);
 
-            result
+            result.map(|()| 0)
         }
-        cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+        cli::Command::Format { stdin, check, files } => format::format(stdin, check, files).map(|()| 0),
         cli::Command::Analysis { args } => {
             let cwd = std::env::current_dir()?;
             std::process::exit(rescript::tooling_server::run_client(&cwd, &args))
@@ -278,6 +276,17 @@ where
             Err(panic) => std::panic::resume_unwind(panic),
         }
     })
+}
+
+/// A log record as printed: verbose logs are labeled inline (`debug: …`,
+/// `trace: …`, as rewatch-ocaml's `Output.log`), the others on a line of
+/// their own (`WARN:`).
+fn write_log_record(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> std::io::Result<()> {
+    match record.level() {
+        log::Level::Debug => writeln!(buf, "debug: {}", record.args()),
+        log::Level::Trace => writeln!(buf, "trace: {}", record.args()),
+        level => writeln!(buf, "{level}:\n{}", record.args()),
+    }
 }
 
 struct SplitLogger {

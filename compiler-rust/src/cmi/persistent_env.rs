@@ -754,6 +754,15 @@ impl ModuleRegistry {
         self.local_cached_modules.contains_key(name) || self.cached_modules.contains_key(name)
     }
 
+    /// Prepare the signature summary on a worker before metadata wakes dependents.
+    pub fn prepare_signature_summary(&self, name: &str) {
+        if let Some(pers) = self.local_cached_modules.get(name).cloned()
+            .or_else(|| self.cached_modules.get_cloned(name))
+        {
+            pers.summary();
+        }
+    }
+
     /// A digest of everything another module's compile can read about
     /// `name`: its published signature and its JS metadata (purity,
     /// constants, arities, inlinable lambdas, package).
@@ -1643,10 +1652,17 @@ impl PersistentEnv {
         module_name: &str,
         ctx: &TypeContext,
         arena: Option<&crate::parse_arena::ParseArena>,
-    ) -> Option<PortablePersStruct> {
+        publication: portable_types::SignaturePublicationMode,
+    ) -> Option<Arc<PortablePersStruct>> {
         self.cache_lookup(module_name)
             .and_then(|opt| opt)
-            .map(|ps| portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena))
+            .map(|ps| {
+                portable_types::publish_pers_struct(
+                    portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena),
+                    ctx,
+                    publication,
+                )
+            })
     }
 
     /// Extract all currently-cached modules as portable structs, plus the full

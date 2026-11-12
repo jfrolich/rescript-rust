@@ -871,7 +871,7 @@ let deep: Inner.Deep.v = (1, inner)
         for _ in 0..1000 {
             ctx.new_var(None);
         }
-        let stored = internalize_pers_struct(Arc::new(portable), &ctx);
+        let stored = internalize_pers_struct(portable, &ctx);
         let reprinted = canonical_signature(
             &ctx,
             "Sample",
