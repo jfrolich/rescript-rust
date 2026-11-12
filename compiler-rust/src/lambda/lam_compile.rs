@@ -5173,13 +5173,15 @@ impl LambdaCompiler {
         // branches contain no statement-valued forms. Switches/static catches
         // stay excluded because OCaml's NeedValue pass keeps their prelude,
         // which must fall through to `S.if_` below.
-        if !Self::lambda_contains_statement_value_form(a, then_)
-            && !Self::lambda_contains_statement_value_form(a, else_)
-        {
-            if let (Some(then_seq), Some(else_seq)) = (
-                self.try_fold_effect_only_return_tail(&then_block_raw),
-                self.try_fold_effect_only_return_tail(&else_block_raw),
-            ) {
+        if let (Some(then_seq), Some(else_seq)) = (
+            self.try_fold_effect_only_return_tail(&then_block_raw),
+            self.try_fold_effect_only_return_tail(&else_block_raw),
+        ) {
+            // The existing return blocks decide whether folding is possible.
+            // Only check its Lambda-side restriction when it actually is.
+            if !Self::lambda_contains_statement_value_form(a, then_)
+                && !Self::lambda_contains_statement_value_form(a, else_)
+            {
                 let mut block = cond_compiled.prelude;
                 let expr = JE::cond(cond_compiled.expr, then_seq, else_seq, &mut self.j);
                 block.push(JS::return_(expr, &mut self.j));

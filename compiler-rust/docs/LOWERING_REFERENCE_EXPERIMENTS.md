@@ -213,3 +213,19 @@ instructions respectively: **-0.0030%**. This is within measurement spread,
 not evidence of a speedup. Hyperfine (10 runs, 2 warmups, clean before each
 build, one worker) measured base 549.7 ± 9.5 ms (532.2–567.5 ms) and candidate
 548.9 ± 13.8 ms (531.8–574.5 ms). No application performance claim is made here.
+
+The first counter-driven revision passed CI but measured **+0.025%** there
+(4,283,011,674 → 4,284,096,319), above the tighter +0.01% target. The final
+revision also checks the already-lowered return blocks for foldability before
+running the existing Lambda-side folding restriction. Non-foldable blocks
+now avoid that unnecessary traversal. This does not change the restriction
+or add a new scan. Inclusive `compile_if_return_output` cost becomes
+41,538,169 instructions (base 42,483,230); the folding restriction's
+non-recursive inclusive cost becomes 484,221 (base 1,519,589).
+
+Another ten alternating Cachegrind pairs measured minima 4,275,960,581 for
+base and 4,276,433,656 for this final revision (**+0.0111%**); totals remain
+within run-to-run spread. Hyperfine (same method) measured base 602.8 ± 26.3 ms
+(564.0–657.6 ms) and final revision 594.1 ± 16.9 ms (564.2–617.0 ms).
+These local totals are reported rather than treated as proof of meeting the
+tighter CI target; the PR records the final CI result separately.
