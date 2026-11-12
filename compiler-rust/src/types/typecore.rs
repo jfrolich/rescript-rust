@@ -26933,11 +26933,17 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
             if crate::types::context::store_debug_enabled() {
                 eprintln!("[store-guard-miss] {}", module_path.name());
             }
+            if ctx.compiler_counters_enabled() {
+                crate::perf_counters::store_views::record_view_guard_miss();
+            }
             false
         })
     {
         if crate::types::context::store_debug_enabled() {
             eprintln!("[store-hit] {}", module_path.name());
+        }
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::store_views::record_view_hit();
         }
         ctx.touch_store_piece(&piece);
         let result =
@@ -26981,6 +26987,12 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
                 "[store-build] {} published={}",
                 module_path.name(),
                 piece.is_some()
+            );
+        }
+        if shared_key.is_some() && ctx.compiler_counters_enabled() {
+            crate::perf_counters::store_views::record_view_build(
+                module_path.name(),
+                piece.is_some(),
             );
         }
         if let (Some(shared_key), Some(piece)) = (shared_key, piece) {

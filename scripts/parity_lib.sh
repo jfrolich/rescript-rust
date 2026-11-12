@@ -15,10 +15,12 @@ parity_default_ocaml_bsc() {
     fi
 }
 
-OCAML_BSC="${OCAML_BSC:-$(parity_default_ocaml_bsc)}"
-RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/rescript}"
-PARITY_RUNTIME="$PROJECT_ROOT/packages/@rescript/runtime"
-PARITY_BELT="$PROJECT_ROOT/packages/@rescript/belt"
+if [[ "${PARITY_PARSE_ONLY:-0}" != 1 ]]; then
+    OCAML_BSC="${OCAML_BSC:-$(parity_default_ocaml_bsc)}"
+    RESCRIPT_CLI="${RESCRIPT_CLI:-$PROJECT_ROOT/rewatch/target/$RUST_TARGET/rescript}"
+    PARITY_RUNTIME="$PROJECT_ROOT/packages/@rescript/runtime"
+    PARITY_BELT="$PROJECT_ROOT/packages/@rescript/belt"
+fi
 
 # Build the runtime, Belt and project $1 with the OCaml bsc. Run it after any
 # in-process build of the same folders: a build by another compiler identity
@@ -77,4 +79,46 @@ parity_compare_js() {
     find "$temp" -type f -delete
     find "$temp" -depth -type d -empty -delete
     return "$status"
+}
+
+# Shared optional mode parsing. Call before each suite's existing parser; all
+# unrecognized options stay in PARITY_ARGS for that parser to validate as before.
+parity_parse_printer_args() {
+    PARITY_JS_PRINTER="${PARITY_JS_PRINTER:-legacy}"
+    PARITY_RECORD="${PARITY_RECORD:-0}"
+    PARITY_ARGS=()
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --printer)
+                if [[ $# -lt 2 ]]; then echo '--printer requires legacy or oxc' >&2; return 2; fi
+                PARITY_JS_PRINTER="$2"; shift 2 ;;
+            --record) PARITY_RECORD=1; shift ;;
+            *) PARITY_ARGS+=("$1"); shift ;;
+        esac
+    done
+    case "$PARITY_JS_PRINTER" in
+        legacy|oxc) ;;
+        *) echo "Unknown JS printer: $PARITY_JS_PRINTER" >&2; return 2 ;;
+    esac
+    if [[ "$PARITY_RECORD" == 1 && "$PARITY_JS_PRINTER" != oxc ]]; then
+        echo '--record requires --printer oxc' >&2; return 2
+    fi
+    export PARITY_JS_PRINTER PARITY_RECORD
+}
+
+# The alternate runner batches reformatting, records the actual Rust emissions,
+# and compares fresh OCaml builds. The legacy branches below remain unchanged.
+parity_run_oxc_suite() {
+    local corpus="$1"; shift
+    local target="${RUST_TARGET:-debug}"
+    for arg in "$@"; do
+        case "$arg" in
+            --release) target=release ;;
+            --reformat) ;;
+            *) echo "--printer oxc runs the complete corpus; unsupported option: $arg" >&2; return 2 ;;
+        esac
+    done
+    local -a args=(--suite "$corpus" --target "$target")
+    if [[ "$PARITY_RECORD" == 1 ]]; then args+=(--record); fi
+    python3 "$PROJECT_ROOT/scripts/test_printer_parity.py" "${args[@]}"
 }

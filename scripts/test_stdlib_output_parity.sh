@@ -8,12 +8,24 @@
 #   ./scripts/test_stdlib_output_parity.sh [OPTIONS] [FILE|PATTERN]
 #
 # Options:
+#   --printer oxc    Use oxc, batch reformat comparison, and coverage ratchet
+#   --record         Update printer coverage (oxc only)
 #   --reformat       Normalize JavaScript (default: exact)
 #   -q, --quick       Stop on first failure
 #   -v, --verbose     Show progress for each file
 #   -h, --help        Show this help message
 
 set -e
+
+PROJECT_ROOT=$(cd "$(dirname "$0")/.."; pwd -P)
+RUST_TARGET="${RUST_TARGET:-debug}"
+PARITY_PARSE_ONLY=1 source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_parse_printer_args "$@" || exit $?
+set -- "${PARITY_ARGS[@]}"
+if [[ "$PARITY_JS_PRINTER" == oxc && "${PARITY_PRINTER_INNER:-0}" != 1 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+    parity_run_oxc_suite "stdlib" "$@"
+    exit $?
+fi
 
 QUICK_MODE=false
 VERBOSE=false
@@ -34,7 +46,7 @@ while [[ $# -gt 0 ]]; do
             shift
             ;;
         -h|--help)
-            sed -n '4,14p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '4,16p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)

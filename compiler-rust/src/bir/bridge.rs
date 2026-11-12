@@ -601,6 +601,26 @@ pub(super) fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> 
 }
 
 impl Imported {
+    /// Register a round-created rename, in creation order. The variable's
+    /// explicit order is the stamp allocated from the round's private counter;
+    /// the imported source supplies its name and flags. Amortized O(1), with
+    /// no access to the legacy counter and no change to imported identities.
+    pub fn register_rename(&mut self, var: VarId, source: VarId) -> Result<(), Unsupported> {
+        if var.index() != self.idents.len() {
+            return Err(Unsupported("fresh identities registered out of order"));
+        }
+        let source = self.ident(source)?;
+        if self.arena.vars().name(var) != source.name_atom() {
+            return Err(Unsupported("fresh identity is not a rename"));
+        }
+        self.idents.push(Ident::new(
+            source.name_atom(),
+            self.arena.vars().order(var) as i32,
+            source.flags(),
+        ));
+        Ok(())
+    }
+
     fn ident(&self, var: VarId) -> Result<Ident, Unsupported> {
         self.idents
             .get(var.index())
@@ -787,6 +807,26 @@ mod roundtrip_tests {
             String::from_utf8(before).unwrap(),
             String::from_utf8(after).unwrap()
         );
+    }
+
+    #[test]
+    fn round_created_renames_preserve_names_flags_and_stamp_order() {
+        let source = Ident::new("temporary", 40, crate::ident::IdentFlags::NONE);
+        let mut a = LamArena::new();
+        let root = a.var(source);
+        let mut imported = import_lambda(&a, root).unwrap();
+        let View::Var { var: original } = imported.arena.view(imported.root) else {
+            panic!("expected variable");
+        };
+        let generator = crate::context::IdGenerator::new();
+        generator.set_current_stamp(100);
+        for stamp in [101, 102] {
+            let fresh = imported.arena.new_var_id(source.name_atom(), stamp);
+            assert!(imported.ident(fresh).is_err());
+            imported.register_rename(fresh, original).unwrap();
+            assert_eq!(imported.ident(fresh).unwrap(), source.rename(&generator));
+            assert_eq!(imported.ident(original).unwrap(), source);
+        }
     }
 
     #[test]

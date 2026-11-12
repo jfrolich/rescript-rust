@@ -185,6 +185,7 @@ pub(super) fn build(
     ps: &PersStruct,
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
+    stamps: &PublicationStamps<'_>,
 ) -> Option<(
     super::super::shared_reader::PublishedGraph,
     Option<PortableRawSignature>,
@@ -212,14 +213,8 @@ pub(super) fn build(
             cmi_longident_names: files.names.clone(),
         },
     );
-    if ctx.has_saved_store_stamps() {
-        let stamps = std::cell::OnceCell::new();
-        let saved = |stamp| {
-            stamps
-                .get_or_init(|| ctx.saved_store_stamps())
-                .get(&stamp)
-                .copied()
-        };
+    {
+        let saved = |stamp| stamps.get(stamp);
         remap_saved_stamps(
             &mut sig,
             &mut PortableTypeGraph {
@@ -234,12 +229,12 @@ pub(super) fn build(
                 TypeDesc::Tconstr { path, .. } | TypeDesc::Tpackage { path, .. } => {
                     remap_saved_path(path, &saved)
                 }
+                TypeDesc::Tvariant(row) => {
+                    if let Some((path, _)) = &mut sink.payloads.rows[row.raw() as usize].row_name {
+                        remap_saved_path(path, &saved);
+                    }
+                }
                 _ => {}
-            }
-        }
-        for row in &mut sink.payloads.rows {
-            if let Some((path, _)) = &mut row.row_name {
-                remap_saved_path(path, &saved);
             }
         }
         if let Some(raw) = &mut raw {

@@ -148,10 +148,14 @@ jobs:
             validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-
             validation-release-v1-${{ runner.os }}-${{ runner.arch }}-
 
-      - name: Build release Rust compiler and build system
+      # js-reformat is what the oxc printer parity suites compare with. It
+      # shares the target directory so that it is cached and shipped with
+      # the compiler.
+      - name: Build release Rust compiler, build system and JS reformatter
         run: |
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
-          tar -cf rescript.tar rewatch/target/release/rescript
+          cargo build --release --locked --manifest-path scripts/js-reformat/Cargo.toml --target-dir rewatch/target
+          tar -cf rescript.tar rewatch/target/release/rescript rewatch/target/release/js-reformat
 
       - uses: actions/upload-artifact@v7
         with:
@@ -292,6 +296,9 @@ jobs:
       - name: Test build comparison layouts
         run: python3 scripts/test_build_comparison_layouts.py
 
+      - name: Test printer parity aggregation and ratchets
+        run: python3 -m unittest discover -s scripts -p test_printer_parity_test.py
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
@@ -396,6 +403,44 @@ jobs:
         run: |
           python3 -m unittest discover -s scripts -p test_signature_equality_test.py
           python3 scripts/test_signature_equality.py
+
+  # The output suites again with the Rust side printed by the opt-in oxc
+  # printer: JavaScript is compared with the OCaml reference after
+  # reformatting both, and a per-corpus ratchet
+  # (compiler-rust/tests/printer_coverage.json) fails when fewer outputs go
+  # through oxc or a new fallback reason appears.
+  printer-parity:
+    name: oxc parity (${{ matrix.suite }})
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [js, stdlib, gentype]
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+
+      - name: Oxc output parity and coverage ratchet
+        run: |
+          export PARITY_REFORMAT_BIN="$PWD/rewatch/target/release/js-reformat"
+          export RUST_TARGET=release
+          export REWATCH_BIN="$PWD/rewatch/target/release/rescript"
+          export RUST_BSC="$PWD/rewatch/target/release/bsc"
+          export GENTYPE_PARITY_WITHOUT_TELLA=1
+          ./scripts/test_${{ matrix.suite }}_output_parity.sh --printer oxc
+
+      - name: Preserve failed printer comparison diagnostics
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: printer-parity-${{ matrix.suite }}-${{ github.event.pull_request.number || github.sha }}
+          path: .parity-cache/printer
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 7
 
   # The parity suites that gate a change (see "The Correctness Contract" in
   # AGENTS.md), each its own check so that a pull request shows which one

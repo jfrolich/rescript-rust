@@ -961,7 +961,7 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
-    serialize_pers_struct_inner(ps, ctx, arena, true)
+    serialize_pers_struct_inner(ps, ctx, arena, true, &PublicationStamps::new(ctx))
 }
 
 /// Publication computes hashes after the shared graph is built, not here.
@@ -970,7 +970,24 @@ pub(crate) fn serialize_for_publication(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
-    serialize_pers_struct_inner(ps, ctx, arena, false)
+    serialize_pers_struct_inner(ps, ctx, arena, false, &PublicationStamps::new(ctx))
+}
+
+/// Naming input shared by the direct builder and check-only oracle. Each
+/// store binder consumes one fresh compilation stamp, independent of which
+/// representation reads it. This is not a replay of store-building effects.
+struct PublicationStamps<'a> {
+    ctx: &'a TypeContext,
+    assigned: std::cell::RefCell<AHashMap<i32, i32>>,
+}
+impl<'a> PublicationStamps<'a> {
+    fn new(ctx: &'a TypeContext) -> Self {
+        Self { ctx, assigned: Default::default() }
+    }
+    fn get(&self, stamp: i32) -> Option<i32> {
+        Some(*self.assigned.borrow_mut().entry(stamp)
+            .or_insert_with(|| self.ctx.published_binder_stamp()))
+    }
 }
 
 fn serialize_pers_struct_inner(
@@ -978,6 +995,7 @@ fn serialize_pers_struct_inner(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
     hash_portable: bool,
+    stamps: &PublicationStamps<'_>,
 ) -> PortablePersStruct {
     // The file names of the signatures' locations travel with them, keyed
     // in order of first use (see `PortableFileNames`).
@@ -1001,16 +1019,8 @@ fn serialize_pers_struct_inner(
             cmi_longident_names: sig.cmi_longident_names.clone(),
         },
     );
-    if ctx.has_saved_store_stamps() {
-        // Most exported signatures mention no store binders. Building the replay
-        // map eagerly would traverse every imported store piece even for those.
-        let stamps = std::cell::OnceCell::new();
-        let saved_stamp = |stamp| {
-            stamps
-                .get_or_init(|| ctx.saved_store_stamps())
-                .get(&stamp)
-                .copied()
-        };
+    {
+        let saved_stamp = |stamp| stamps.get(stamp);
         remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
         if let Some(raw) = &mut raw {
             remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
@@ -1033,7 +1043,7 @@ fn serialize_pers_struct_inner(
     )
 }
 
-/// Apply the same store-binder mapping as Ident's saving serializer, before
+/// Apply the publication's deterministic store-binder mapping before
 /// either shared nodes or bytes are produced. Graph indices are untouched.
 fn remap_saved_ident(id: &mut crate::ident::Ident, stamps: &dyn Fn(i32) -> Option<i32>) {
     if id.stamp() >= crate::ident::STORE_STAMP_BASE
@@ -1063,6 +1073,9 @@ fn remap_saved_path(p: &mut Path, stamps: &dyn Fn(i32) -> Option<i32>) {
         }
     };
 }
+/// Give every identifier with a store stamp the stamp `stamps` maps it to,
+/// before either shared nodes or bytes are produced. Graph indices are
+/// untouched. `stamps` is asked only for stamps of the store range.
 fn remap_saved_stamps(
     sig: &mut Signature,
     graph: &mut PortableTypeGraph,
@@ -1809,7 +1822,8 @@ pub(crate) fn publish_signature(
     ps: &PersStruct, ctx: &TypeContext, arena: Option<&ParseArena>,
     mode: SignaturePublicationMode, checked: bool,
 ) -> (Arc<PortablePersStruct>, Option<super::signature_check::Comparison>) {
-    let Some((graph, raw)) = signature_builder::build(ps, ctx, arena) else {
+    let stamps = PublicationStamps::new(ctx);
+    let Some((graph, raw)) = signature_builder::build(ps, ctx, arena, &stamps) else {
         let portable = serialize_for_publication(ps, ctx, arena);
         return if checked {
             let (pps, comparison) = publish_pers_struct_checked(portable, ctx, mode);
@@ -1821,7 +1835,7 @@ pub(crate) fn publish_signature(
     let hashes = super::item_deps::item_declaration_hashes(&reader, &graph.signature);
     let comparison = checked.then(|| {
         use super::signature_check::{Comparison, Outcome};
-        let oracle = serialize_pers_struct(ps, ctx, arena);
+        let oracle = serialize_pers_struct_inner(ps, ctx, arena, true, &stamps);
         let decoded = oracle.decoded.lock().unwrap();
         let portable = decoded.as_ref().unwrap().0.portable();
         let oracle_hashes = super::item_deps::item_declaration_hashes(&HashGraph::of(&portable.type_graph), &portable.ps_sig);
@@ -2778,7 +2792,7 @@ mod identity_tests {
     }
 
     #[test]
-    fn decoded_stamp_mapping_matches_the_saving_serializer() {
+    fn store_stamps_are_remapped_everywhere_a_signature_holds_them() {
         use crate::ident::{Ident, IdentFlags, STORE_STAMP_BASE};
         use crate::types::decl::{RecStatus, signature_mut};
         let id = Ident::new("bound", STORE_STAMP_BASE + 7, IdentFlags::NONE);
@@ -2819,19 +2833,25 @@ mod identity_tests {
             variant_layouts: vec![],
             mutabilities: vec![],
         };
-        let stamps = AHashMap::from_iter([(id.stamp(), 42)]);
-        let (expected, unmapped) = crate::ident::saving_store_stamps(stamps.clone(), || {
-            crate::binser::to_vec(&(&sig, &graph)).unwrap()
+        let asked = std::cell::Cell::new(0);
+        remap_saved_stamps(&mut sig, &mut graph, &|stamp| {
+            assert_eq!(stamp, STORE_STAMP_BASE + 7);
+            asked.set(asked.get() + 1);
+            Some(42)
         });
-        assert!(!unmapped);
-        remap_saved_stamps(&mut sig, &mut graph, &|stamp| stamps.get(&stamp).copied());
-        assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
-        // Once mapped, ordinary binders and paths must not ask for a store
-        // replay table at all (the common publication path).
+        assert!(asked.get() > 0);
+        // No identifier of the store range is left, in binders or in paths:
+        // the encoding mentions the mapped stamp only, and a second pass
+        // (the common publication path) never asks for a stamp.
+        let mapped = Ident::new("bound", 42, IdentFlags::NONE);
+        let debug = format!("{sig:?}{graph:?}");
+        assert!(!debug.contains(&(STORE_STAMP_BASE + 7).to_string()), "{debug}");
+        let expected = crate::binser::to_vec(&(&sig, &graph)).unwrap();
         remap_saved_stamps(&mut sig, &mut graph, &|_| {
-            panic!("ordinary binder requested store stamps")
+            panic!("ordinary binder requested a store stamp")
         });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
+        assert!(matches!(&sig[0], SignatureItem::SigModule(id, ..) if id.same(&mapped)));
     }
 
     #[test]
@@ -2876,6 +2896,46 @@ mod identity_tests {
             crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
         };
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn direct_publication_preserves_first_mention_store_binder_order() {
+        fn source(ctx: &TypeContext) -> PersStruct {
+            let id = |name, n| crate::ident::Ident::new(
+                name, crate::ident::STORE_STAMP_BASE + n, crate::ident::IdentFlags::NONE,
+            );
+            let nil = ctx.new_type(TypeDesc::Tnil);
+            let row = ctx.new_row_desc(RowDesc {
+                row_fields: Default::default(), row_more: nil, row_closed: true, row_fixed: true,
+                row_name: Some((Path::pident(id("row", 8)), vec![])),
+            });
+            let variant = ctx.new_type(TypeDesc::Tvariant(row));
+            let constr = ctx.new_type(TypeDesc::Tconstr {
+                path: Path::pident(id("t", 9)), args: ctx.new_type_list(&[]),
+                abbrev: AbbrevMemoRef::nil(),
+            });
+            let typ = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[variant, constr])));
+            let sig = Arc::new(vec![SignatureItem::SigValue(id("value", 7), ValueDescription {
+                val_type: typ, val_kind: ValueKind::ValReg,
+                val_loc: crate::types::DeclLoc::none(), val_attributes: Default::default(), val_path: None,
+            })]);
+            ctx.register_raw_module_sig("Binders", sig.clone());
+            PersStruct {
+                ps_name: "Binders".into(), ps_filename: "Binders.res".into(), ps_sig: sig,
+                ps_deprecated: None, ps_crcs: vec![], ps_alias_rewrites: Default::default(),
+            }
+        }
+        let reference = TypeContext::new(Arc::new(IdGenerator::new()));
+        let expected = serialize_pers_struct(&source(&reference), &reference, None);
+        let direct = TypeContext::new(Arc::new(IdGenerator::new()));
+        let (actual, comparison) = publish_signature(
+            &source(&direct), &direct, None, SignaturePublicationMode::OnDemand, true,
+        );
+        assert!(comparison.unwrap().outcomes.iter().all(|outcome|
+            matches!(outcome, super::super::signature_check::Outcome::Equal)));
+        assert_eq!(crate::binser::to_vec(&expected).unwrap(), crate::binser::to_vec(actual.as_ref()).unwrap());
+        assert_eq!(reference.published_binder_stamp(), direct.published_binder_stamp(),
+            "the oracle must not consume additional publication stamps");
     }
 
     #[test]
