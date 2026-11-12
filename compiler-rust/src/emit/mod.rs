@@ -206,6 +206,25 @@ pub(crate) fn emit_audited(
     )
 }
 
+/// Emit directly through a borrowed J-level view; no migration exporter runs.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_bir(
+    imported: &crate::bir::bridge_j::Imported,
+    resolver: &ModulePathResolver, directives: &[String],
+    debug: bool, jsx_preserve: bool, header: bool,
+    source_map: Option<&sourcemap::Options<'_>>,
+    audit: Option<&mut Vec<RawSegment>>,
+) -> Result<(String, Option<String>), Unsupported> {
+    let view = crate::bir::emit_view::EmitterView::new(imported)?;
+    let block = view.root();
+    let names = naming::Names::collect_bir(&view, &block, resolver, jsx_preserve)?;
+    program::emit_named(
+        program::Unit { arena: &view, block: &block, modules: view.modules(),
+            exports: view.exports(), reservations: view.reservations(), side_effect: view.side_effect() },
+        &names, resolver, directives, program::FileOptions { debug, jsx_preserve, header }, source_map, audit,
+    )
+}
+
 /// Emit with source maps, retaining whole-file fallback on unsupported mappings.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
@@ -256,7 +275,9 @@ mod tests {
         let expected = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
         let stats = Arc::new(PrinterStats::default());
         options.js_printer = PrinterMode::OxcBir(stats.clone());
+        let exports = crate::bir::bridge_j::export_calls();
         let actual = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
+        assert_eq!(crate::bir::bridge_j::export_calls(), exports, "direct emission must not export a JS arena");
         assert_eq!(actual, expected);
         assert_eq!(stats.snapshot().supported, 1);
         assert!(stats.snapshot().bridge_unsupported.is_empty());

@@ -39,7 +39,7 @@ macro_rules! handle {
 
         impl $name {
             #[inline]
-            fn new(index: usize) -> Self {
+            pub(crate) fn new(index: usize) -> Self {
                 $name(NonZeroU32::new(checked_u32(index)).expect("slot 0 is reserved"))
             }
             /// The slot index of this handle in its table (never 0).

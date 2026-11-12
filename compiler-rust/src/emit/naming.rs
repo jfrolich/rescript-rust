@@ -42,7 +42,7 @@
 //! than doing quadratic work. Supported inputs therefore take expected linear
 //! work in nodes/identifier occurrences/scopes (plus identifier spelling bytes).
 //! The deep-nesting test counts this work, including environment preparation.
-use super::{Unsupported, walk};
+use super::{Unsupported, view::View, walk};
 use crate::ident::Ident;
 use crate::js_ir::printer::convert_ident_atom;
 use crate::js_ir::walk::{Visitor, walk_block};
@@ -88,7 +88,7 @@ impl Names {
 
     fn string_leaves(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         root: Expr,
         mut visit: impl FnMut(&mut Self, Expr) -> Result<(), Unsupported>,
     ) -> Result<(), Unsupported> {
@@ -341,25 +341,47 @@ impl Names {
         }
         Ok(names)
     }
+    pub(super) fn collect_bir(
+        a: &crate::bir::emit_view::EmitterView<'_>,
+        block: &[Stmt], resolver: &ModulePathResolver, jsx_preserve: bool,
+    ) -> Result<Self, Unsupported> {
+        let mut names = Self {
+            jsx_preserve,
+            budget: 64 * (a.unit.steps + a.identities().len() + a.modules().len() + a.exports().len() + a.reservations().len() + 1),
+            raw: a.identities().iter().filter(|id| crate::js_ir::arena::is_raw_js_name(id)).map(|id| id.name_atom()).collect(),
+            scopes: vec![Scope::default()],
+            ..Self::default()
+        };
+        names.analyze_block(a, block, &mut HashSet::new(), &mut HashSet::new())?;
+        for module in a.modules() {
+            if !module.dynamic_import && resolver.resolve_module_path(module).is_some() {
+                names.add(module.id, true)?;
+            }
+        }
+        names.reserve(a.reservations())?;
+        names.block(a, block, true, None)?;
+        for id in a.exports() { names.add(*id, false)?; }
+        Ok(names)
+    }
     fn sorted(&mut self, ids: HashSet<Ident>) -> Result<Vec<Ident>, Unsupported> {
         self.charge(ids.len() * (ids.len().max(1).ilog2() as usize + 1))?;
         let mut ids: Vec<_> = ids.into_iter().collect();
         ids.sort();
         Ok(ids)
     }
-    fn analyze_fun(&mut self, a: &JsArena, f: FunId) -> Result<(), Unsupported> {
+    fn analyze_fun(&mut self, a: &impl View, f: FunId) -> Result<(), Unsupported> {
         if self.free.contains_key(&f) {
             return Ok(());
         }
         let info = a.fun(f);
-        let params = a.ident_slice(info.params);
+        let params = &*a.ident_slice(info.params);
         let mut defined: HashSet<_> = params
             .iter()
             .skip(usize::from(info.is_method))
             .copied()
             .collect();
         let mut used = HashSet::new();
-        self.analyze_block(a, a.stmts(info.body), &mut defined, &mut used)?;
+        self.analyze_block(a, &a.stmts(info.body), &mut defined, &mut used)?;
         self.charge(used.len() + defined.len())?;
         used.retain(|id| !defined.contains(id));
         if info.is_method
@@ -374,7 +396,7 @@ impl Names {
     }
     fn analyze_expr(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         e: Expr,
         defined: &mut HashSet<Ident>,
         used: &mut HashSet<Ident>,
@@ -400,7 +422,7 @@ impl Names {
                 used.extend(self.free[&f].iter().copied());
             }
             ExprKind::CamlBlock(items, _, tag) => {
-                let (items, tag) = (a.exprs(items), a.tag(tag));
+                let (items, tag) = ((&*a.exprs(items)), a.tag(tag));
                 walk::block_supported(items, tag)?;
                 for (_, e) in walk::block_elements(a, items, tag) {
                     self.analyze_expr(a, e, defined, used)?;
@@ -424,7 +446,7 @@ impl Names {
     }
     fn analyze_block(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         block: &[Stmt],
         defined: &mut HashSet<Ident>,
         used: &mut HashSet<Ident>,
@@ -432,11 +454,11 @@ impl Names {
         for s in block {
             self.charge(1)?;
             match a.sk(*s) {
-                StmtKind::Block(b) => self.analyze_block(a, a.stmts(b), defined, used)?,
+                StmtKind::Block(b) => self.analyze_block(a, &a.stmts(b), defined, used)?,
                 StmtKind::Variable(v) => {
-                    let d = a.var(v);
+                    let d = &*a.var(v);
                     if let Some((fields, _)) = walk::rest_declaration(a, d) {
-                        for field in a.rest(fields) {
+                        for field in &*a.rest(fields) {
                             if let Some(id) = field.ident {
                                 defined.insert(id);
                             }
@@ -450,8 +472,8 @@ impl Names {
                 StmtKind::Exp(e) | StmtKind::Return(e) => self.analyze_expr(a, e, defined, used)?,
                 StmtKind::If(c, t, f) => {
                     self.analyze_expr(a, c, defined, used)?;
-                    self.analyze_block(a, a.stmts(t), defined, used)?;
-                    self.analyze_block(a, a.stmts(f), defined, used)?;
+                    self.analyze_block(a, &a.stmts(t), defined, used)?;
+                    self.analyze_block(a, &a.stmts(f), defined, used)?;
                 }
                 StmtKind::Debugger => {}
                 _ => walk::statement_children(a, *s, |child| {
@@ -464,7 +486,7 @@ impl Names {
                             self.analyze_expr(a, e, defined, used)?
                         }
                         walk::StatementChild::Block(b) => {
-                            self.analyze_block(a, a.stmts(b), defined, used)?
+                            self.analyze_block(a, &a.stmts(b), defined, used)?
                         }
                     }
                     Ok(())
@@ -475,7 +497,7 @@ impl Names {
     }
     fn function(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         f: FunId,
         binding: Option<Ident>,
         top: bool,
@@ -511,7 +533,7 @@ impl Names {
                     walk::FunctionForm::ArrowEmpty => {}
                     _ => self.block(
                         a,
-                        walk::function_body(a, a.stmts(info.body)),
+                        walk::function_body(a, &a.stmts(info.body)),
                         false,
                         Some(info.return_unit),
                     )?,
@@ -521,7 +543,7 @@ impl Names {
         self.leave();
         Ok(())
     }
-    fn expr(&mut self, a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    fn expr(&mut self, a: &impl View, e: Expr) -> Result<(), Unsupported> {
         self.charge(1)?;
         // collect analyzes the entire immutable arena before assigning names;
         // analyze_expr already validated these comments, including unprinted
@@ -536,7 +558,7 @@ impl Names {
     }
     fn block(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         b: &[Stmt],
         top: bool,
         tail: Option<bool>,
@@ -548,16 +570,16 @@ impl Names {
     }
     fn stmt(
         &mut self,
-        a: &JsArena,
+        a: &impl View,
         s: Stmt,
         top: bool,
         tail: Option<bool>,
     ) -> Result<(), Unsupported> {
         self.charge(1)?;
         match a.sk(s) {
-            StmtKind::Block(b) => self.block(a, a.stmts(b), false, None)?,
+            StmtKind::Block(b) => self.block(a, &a.stmts(b), false, None)?,
             StmtKind::Variable(v) => {
-                let d = a.var(v);
+                let d = &*a.var(v);
                 match walk::prints_declaration(d) {
                     walk::Declaration::Omit => return Ok(()),
                     walk::Declaration::Effect(e) => {
@@ -575,7 +597,7 @@ impl Names {
                     return self.function(a, f, Some(d.ident), top);
                 }
                 if let Some((fields, _)) = walk::rest_declaration(a, d) {
-                    for field in a.rest(fields) {
+                    for field in &*a.rest(fields) {
                         if let Some(id) = field.ident {
                             self.add(id, false)?;
                         }
@@ -605,8 +627,8 @@ impl Names {
             }
             StmtKind::If(c, t, f) => {
                 self.expr(a, c)?;
-                self.block(a, a.stmts(t), false, None)?;
-                let f = a.stmts(f);
+                self.block(a, &a.stmts(t), false, None)?;
+                let f = &*a.stmts(f);
                 if !walk::else_omitted(a, f)
                     && !(tail.is_some() && matches!(f,[s] if walk::return_undefined(a,*s)))
                 {
@@ -635,7 +657,7 @@ impl Names {
                         }
                     }
                     walk::StatementChild::Expression(e) => self.expr(a, e)?,
-                    walk::StatementChild::Block(b) => self.block(a, a.stmts(b), false, None)?,
+                    walk::StatementChild::Block(b) => self.block(a, &a.stmts(b), false, None)?,
                 }
                 Ok(())
             })?,
@@ -647,7 +669,7 @@ impl Names {
 // Child order is the legacy printer's order. Shape decisions remain in walk;
 // constructs not yet handled by Build keep exactly their existing fallback.
 fn children(
-    a: &JsArena,
+    a: &impl View,
     e: Expr,
     jsx_preserve: bool,
     mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
@@ -696,30 +718,30 @@ fn children(
         ExprKind::Call(f, args, _) => {
             walk::call_supported(a, f)?;
             visit(f)?;
-            for e in a.exprs(args) {
+            for e in &*a.exprs(args) {
                 visit(*e)?;
             }
         }
         ExprKind::New(f, args) => {
             visit(f)?;
             if let Some(args) = args {
-                for e in a.exprs(args) {
+                for e in &*a.exprs(args) {
                     visit(*e)?;
                 }
             }
         }
         ExprKind::Array(items, _) => {
-            for e in a.exprs(items) {
+            for e in &*a.exprs(items) {
                 visit(*e)?;
             }
         }
         ExprKind::Object(props) => {
-            for (_, e) in a.props(props) {
+            for (_, e) in &*a.props(props) {
                 visit(*e)?;
             }
         }
         ExprKind::CamlBlock(items, _, tag) => {
-            let (items, tag) = (a.exprs(items), a.tag(tag));
+            let (items, tag) = ((&*a.exprs(items)), a.tag(tag));
             walk::block_supported(items, tag)?;
             for (_, e) in walk::block_elements(a, items, tag) {
                 visit(e)?;
@@ -742,11 +764,11 @@ fn children(
             if let Some(spread) = jsx.spread {
                 visit(spread)?;
             }
-            for (_, value) in a.props(jsx.props) {
+            for (_, value) in &*a.props(jsx.props) {
                 visit(*value)?;
             }
             if let Some(children) = jsx.children {
-                for child in a.exprs(children) {
+                for child in &*a.exprs(children) {
                     visit(*child)?;
                 }
             }
@@ -759,14 +781,14 @@ fn children(
         ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
         ExprKind::InterpolatedTemplate(segments, values) => {
             walk::template_supported(a.segments(segments).len(), a.exprs(values).len())?;
-            for e in a.exprs(values) {
+            for e in &*a.exprs(values) {
                 visit(*e)?;
             }
         }
         ExprKind::TaggedTemplate(tag, strings, values) => {
             walk::template_supported(a.tagged(strings).len(), a.exprs(values).len())?;
             visit(tag)?;
-            for e in a.exprs(values) {
+            for e in &*a.exprs(values) {
                 visit(*e)?;
             }
         }

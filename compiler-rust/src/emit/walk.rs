@@ -22,7 +22,7 @@ pub(super) fn eta_target(a: &impl View, f: FunId) -> Option<Expr> {
     if f.is_method || f.async_ || f.directive.is_some() {
         return None;
     }
-    let [stmt] = a.stmts(f.body) else { return None };
+    let [stmt] = &*a.stmts(f.body) else { return None };
     let StmtKind::Return(e) = a.sk(*stmt) else {
         return None;
     };
@@ -32,8 +32,8 @@ pub(super) fn eta_target(a: &impl View, f: FunId) -> Option<Expr> {
     if !matches!(a.ek(callee), ExprKind::Var(_) | ExprKind::Qualified(_)) {
         return None;
     }
-    let params = a.ident_slice(f.params);
-    let args = a.exprs(args);
+    let params = &*a.ident_slice(f.params);
+    let args = &*a.exprs(args);
     if args.len() != params.len()
         || !args
             .iter()
@@ -82,7 +82,7 @@ pub(super) fn function_form(a: &impl View, f: FunId, top: bool) -> Result<Functi
     if f.directive.is_some() {
         return Ok(FunctionForm::ArrowBlock);
     }
-    if let [stmt] = a.stmts(f.body) {
+    if let [stmt] = &*a.stmts(f.body) {
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
             StmtKind::Return(e) | StmtKind::Exp(e) => {
@@ -131,7 +131,7 @@ pub(super) fn else_if(a: &impl View, body: &[Stmt]) -> Option<Stmt> {
     match body {
         [s] => match a.sk(*s) {
             StmtKind::If(..) => Some(*s),
-            StmtKind::Block(b) => match a.stmts(b) {
+            StmtKind::Block(b) => match &*a.stmts(b) {
                 [s] if matches!(a.sk(*s), StmtKind::If(..)) => Some(*s),
                 _ => None,
             },
@@ -148,7 +148,7 @@ pub(super) fn arguments<'a>(a: &impl View, args: &'a [Expr]) -> &'a [Expr] {
 }
 pub(super) fn negation_form(a: &impl View, op: BinOp, left: Expr) -> bool {
     op == BinOp::Minus
-        && matches!(a.ek(left), ExprKind::Number(n) if match a.number(n) {
+        && matches!(a.ek(left), ExprKind::Number(n) if match &*a.number(n) {
             Number::Int { i: 0, .. } => true,
             Number::Float(f) => f.f == "0.",
             _ => false,
@@ -287,7 +287,7 @@ pub(super) fn pure_call(a: &impl View, e: Expr) -> bool {
 fn numeric_decoration(a: &impl View, e: Expr) -> bool {
     // A minus, Infinity, NaN, or bigint suffix is not the numeric-literal
     // adjacency S0 removes. Be conservative rather than discarding a comment.
-    matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
+    matches!(a.ek(e), ExprKind::Number(n) if matches!( &*a.number(n), Number::Int { i, .. } if *i >= 0))
 }
 
 /// Raw text meets no IR identifiers. Statements keep surrounding newlines and
@@ -440,7 +440,7 @@ pub(super) fn statement_children(
         }
         StmtKind::IntSwitch(e, id) => {
             visit(Expression(e))?;
-            let t = a.int_switch(id);
+            let t = &*a.int_switch(id);
             for (_, c) in &t.clauses {
                 visit(Block(c.body))?;
             }
@@ -450,7 +450,7 @@ pub(super) fn statement_children(
         }
         StmtKind::StringSwitch(e, id) => {
             visit(Expression(e))?;
-            let t = a.string_switch(id);
+            let t = &*a.string_switch(id);
             for c in &t.clauses {
                 switch_tag_supported(&c.tag_type)?;
                 visit(Block(c.clause.body))?;
@@ -562,7 +562,7 @@ pub(super) fn jsx_form(
         .chain(
             jsx.children
                 .into_iter()
-                .flat_map(|c| a.exprs(c).iter().copied()),
+                .flat_map(|c| a.exprs(c).into_owned()),
         )
     {
         let mut value = value;

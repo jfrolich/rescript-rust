@@ -16,12 +16,12 @@ pub struct Imported {
     pub arena: Bir,
     /// Synthetic top-level statement list.
     pub root: NodeId,
-    idents: Vec<Ident>,
-    modules: Vec<js::ModuleId>,
-    exports: Vec<Ident>,
+    pub(super) idents: Vec<Ident>,
+    pub(super) modules: Vec<js::ModuleId>,
+    pub(super) exports: Vec<Ident>,
     export_set: ahash::AHashSet<Ident>,
-    reservations: Vec<Ident>,
-    side_effect: Option<String>,
+    pub(super) reservations: Vec<Ident>,
+    pub(super) side_effect: Option<String>,
     /// Number of source occurrences decoded, including statement lists.
     pub steps: usize,
 }
@@ -878,7 +878,7 @@ impl Output {
 // Explicit discriminant inventories: no transmute and no unsafe. The bridge
 // doesn't cast an untrusted aux back into an enum.
 macro_rules! decode {
-    ($name:ident,$ty:ty,[$($variant:path),+])=>{fn $name(n:u16)->Result<$ty,Unsupported>{$(if n==$variant as u16{return Ok($variant);})+Err(Unsupported(concat!("invalid J encoding: ",stringify!($name))))}};
+    ($name:ident,$ty:ty,[$($variant:path),+])=>{pub(super) fn $name(n:u16)->Result<$ty,Unsupported>{$(if n==$variant as u16{return Ok($variant);})+Err(Unsupported(concat!("invalid J encoding: ",stringify!($name))))}};
 }
 decode!(
     bin,
@@ -957,7 +957,7 @@ decode!(
         UsedStats::NA
     ]
 );
-fn mutability(n: u16) -> Result<MutableFlag, Unsupported> {
+pub(super) fn mutability(n: u16) -> Result<MutableFlag, Unsupported> {
     match n {
         0 => Ok(MutableFlag::Immutable),
         1 => Ok(MutableFlag::Mutable),
@@ -1484,8 +1484,18 @@ impl Exporter<'_> {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    static EXPORT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn export_calls() -> usize { EXPORT_CALLS.get() }
+
 /// Export to a fresh JS arena without running any smart constructors.
 pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
+    #[cfg(test)]
+    EXPORT_CALLS.set(EXPORT_CALLS.get() + 1);
     enum Work {
         Enter(NodeId),
         Finish(NodeId, usize),
@@ -1613,7 +1623,7 @@ mod tests {
     macro_rules! expr_case {
         ($name:ident,|$a:ident,$x:ident,$y:ident|$body:expr) => {
             #[test]
-            fn $name() {
+            pub(super) fn $name() {
                 expression(|$a, $x, $y| $body);
             }
         };
@@ -1799,7 +1809,7 @@ mod tests {
     macro_rules! stmt_case {
         ($name:ident,|$a:ident,$x:ident,$b:ident|$body:expr) => {
             #[test]
-            fn $name() {
+            pub(super) fn $name() {
                 statement(|$a, $x, $b| $body);
             }
         };
