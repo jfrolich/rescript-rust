@@ -1962,14 +1962,18 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    (`bridge::import_lambda`, S2.2). Until S4 switches on, this is the only source of
    level L for the lowering, so both sides start from the same tree.
 
-   Integration blocker found by S3.3a: `bridge::import_lambda` currently
-   rejects every repeated Lambda handle (`bridge.rs`, `import_lambda`),
-   including a shared leaf. The simplified input at this cut is not always
-   a tree, unlike the earlier `lambda-bridge` cut. Importing
-   `seq_raw(c, c)` for one constant handle `c` reproduces the rejection.
-   The `lower` gate must report this as an input error, not introduce an
-   unlisted fallback. The bridge's sharing policy must be resolved before
-   recording this stage's baseline or enabling supported construct lowering.
+   The simplified cut can share source handles. `import_lambda` treats
+   binder-free shared subtrees as occurrences, copying once per incoming edge,
+   as the legacy lowering does. One memoized bottom-up pass establishes
+   binder-freedom. The expansion is bounded to four times the reachable source
+   nodes. A repeated subtree containing a binder returns
+   `Unsupported("shared Lambda subtree with binder")`; exceeding the budget
+   returns `Unsupported("shared Lambda expansion")`. These two bridge reasons
+   are permitted for the `lower` stage and counted separately. Earlier stage
+   baselines are unchanged. A concrete sharing producer is
+   `lam_pass_lets_dce::LetsState::simplif`: its Var arm reuses the replacement
+   handle installed by `simplif_alias`, demonstrated by the bridge regression
+   `simplify_lets_creates_shared_constant_occurrences`.
 2. **New side.** Lower to J; export the J program, not flattened, to a
    `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy

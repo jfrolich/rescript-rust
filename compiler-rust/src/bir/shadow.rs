@@ -431,11 +431,14 @@ mod lower_tests {
     fn simplified_shared_input_is_an_error_not_a_new_fallback() {
         let mut arena = LamArena::new();
         let constant = arena.const_(crate::lambda::lam_constant::Constant::JsNull);
-        let root = arena.seq_raw(constant, constant);
+        let id = crate::ident::Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let body = arena.var(id);
+        let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
+        let root = arena.seq_raw(binding, binding);
         let result = prepare_lower(&arena, root);
         match result {
             Err(LowerFailure::Error(error)) => {
-                assert_eq!(error.to_string(), "lower input import: shared Lambda node")
+                assert_eq!(error.to_string(), "lower input import: shared Lambda subtree with binder")
             }
             Err(LowerFailure::Unsupported(reason)) => panic!("unlisted fallback: {reason}"),
             Ok(_) => panic!("update this regression when the bridge supports shared input"),
