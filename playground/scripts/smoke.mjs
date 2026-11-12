@@ -70,6 +70,15 @@ if (!only) {
   if (showAll || broken.length > 0) console.log(transcriptOf(showAll ? entries : broken));
   failed ||= broken.length > 0;
 
+  // A function prints where it is called, not where it was defined.
+  const printed = await runSession(engine, [], ['let shout = text => Console.log(text ++ "!")', 'shout("hi")']);
+  const wanted = '> let shout = text => Console.log(text ++ "!")\nlet shout: string => unit = <fun>\n\n> shout("hi")\nhi!\n- : unit = ()';
+  const same = transcriptOf(printed) === wanted;
+  console.log(`${same ? "ok  " : "FAIL"} repl output of a function of an earlier input${same ? "" : `\n${transcriptOf(printed)}`}`);
+  failed ||= !same;
+  engine.replStart(sessionLibraries(examples));
+  for (const input of inputs) await engine.replEval(input);
+
   // What the editors offer after those inputs, and in a file of a project.
   const missing = [];
   const offered = (request, label) => {

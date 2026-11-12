@@ -214,10 +214,19 @@ export function createEngine(wasm, stdlib) {
   // input defined, and what it did, stays.
 
   let session = null;
+  // Counts the inputs of every session: the compiler keeps what it knows of
+  // an opened module by its name, so a name is not used a second time.
+  let inputs = 0;
   const asyncFunction = Object.getPrototypeOf(async () => {}).constructor;
   const inputModules = /\bRepl\d+(_open\d+)?\./g;
   const hideInputModules = (text) => text.replace(inputModules, "");
   hideModules(inputModules);
+
+  /** End the session: its inputs are gone. */
+  function replEnd() {
+    for (const name of session?.files ?? []) wasm.forget_module(name);
+    session = null;
+  }
 
   /**
    * Start a session with the modules of `libraries` (`[{name, source}]`)
@@ -225,9 +234,11 @@ export function createEngine(wasm, stdlib) {
    * finished (a timer, a promise). Returns `{modules, problems}`.
    */
   function replStart(libraries, onLog = () => {}) {
+    replEnd();
     const { order, results } = build(libraries, { execute: false });
     session = {
-      count: 0,
+      // The modules the inputs were compiled as.
+      files: [],
       // What the inputs defined, by name: the names an input can use.
       scope: new Map(),
       // What every input opens: earlier inputs, and the modules they opened.
@@ -235,8 +246,19 @@ export function createEngine(wasm, stdlib) {
       // The modules an input defined: `open` of one is not `open` of a file.
       defined: new Set(),
       loaded: Object.create(null),
-      onLog,
+      // The output of the input that is running, or null between inputs.
+      printing: null,
     };
+    // One console for the whole session: a function prints where it is
+    // called, which is not always the input that defined it. Between inputs
+    // (a timer, a promise) the line goes to `onLog`.
+    const current = session;
+    const log = (kind) => (...values) => {
+      const line = { kind, text: values.map((value) => show(value)).join(" ") };
+      if (current.printing) current.printing.push(line);
+      else onLog(line);
+    };
+    session.console = { log: log("log"), info: log("log"), debug: log("log"), warn: log("warn"), error: log("error") };
     return {
       modules: order.filter((name) => results[name].type === "success").map(moduleNameOf),
       problems: order
@@ -245,8 +267,8 @@ export function createEngine(wasm, stdlib) {
     };
   }
 
-  function replLoad(name, console) {
-    const loaded = session.loaded;
+  function replLoad(name) {
+    const { loaded, console } = session;
     if (loaded[name]) return loaded[name].exports;
     const source = javascriptOf(name);
     if (source === undefined) throw new Error(`The module ${name} is not part of this session.`);
@@ -254,7 +276,7 @@ export function createEngine(wasm, stdlib) {
     loaded[name] = module;
     try {
       new Function("require", "exports", "module", "console", toCommonJs(source))(
-        (specifier) => replLoad(moduleNameOf(specifier), console),
+        (specifier) => replLoad(moduleNameOf(specifier)),
         module.exports,
         module,
         console,
@@ -294,7 +316,7 @@ export function createEngine(wasm, stdlib) {
   }
 
   /** Keep `open Path` of an input open for the inputs after it. */
-  function replKeepOpen(text, input, console) {
+  function replKeepOpen(text, input) {
     const path = text.replace(/^open!?\s*/, "").trim();
     const root = path.split(".")[0];
     const isFile = !session.defined.has(root) && (stdlibModules.has(root) || projectJs[root] !== undefined);
@@ -307,7 +329,8 @@ export function createEngine(wasm, stdlib) {
     const result = JSON.parse(wasm.compile_input(`include ${path}`, `${name}.res`, session.opens));
     if (result.type !== "success") return `\`${text}\` is not kept open for the inputs after this one.`;
     projectJs[name] = result.js;
-    replLoad(name, console);
+    session.files.push(name);
+    replLoad(name);
     session.opens.push(name);
     return null;
   }
@@ -321,8 +344,9 @@ export function createEngine(wasm, stdlib) {
   async function replEval(source) {
     if (!session) replStart([]);
     const current = session;
-    current.count += 1;
-    const name = `Repl${current.count}`;
+    inputs += 1;
+    const name = `Repl${inputs}`;
+    current.files.push(name);
     const filename = `${name}.res`;
     const output = [];
 
@@ -343,31 +367,26 @@ export function createEngine(wasm, stdlib) {
     }
     projectJs[name] = result.js;
 
-    let finished = false;
-    const log = (kind) => (...values) => {
-      const line = { kind, text: values.map((value) => show(value)).join(" ") };
-      if (finished) current.onLog(line);
-      else output.push(line);
-    };
-    const console = { log: log("log"), info: log("log"), debug: log("log"), warn: log("warn"), error: log("error") };
     const module = { exports: {} };
+    // What is printed while the input runs is its output, whoever prints it.
+    current.printing = output;
     try {
       // An input can `await` at the top level.
       await new asyncFunction("require", "exports", "module", "console", toCommonJs(result.js))(
-        (specifier) => replLoad(moduleNameOf(specifier), console),
+        (specifier) => replLoad(moduleNameOf(specifier)),
         module.exports,
         module,
-        console,
+        current.console,
       );
     } catch (error) {
-      finished = true;
+      current.printing = null;
       // What it defined before it raised is not kept: part of it is missing.
       wasm.forget_module(name);
       delete projectJs[name];
       output.push({ kind: "problem", text: `Uncaught ${formatException(error)}` });
       return { output, expanded: result.expanded ?? null, javascript: result.js };
     }
-    finished = true;
+    current.printing = null;
     current.loaded[name] = module;
     current.opens.push(name);
 
@@ -393,7 +412,7 @@ export function createEngine(wasm, stdlib) {
       output.push({ kind: "value", text: joined });
     }
     for (const open of prepared.opens ?? []) {
-      const note = replKeepOpen(open, name, console);
+      const note = replKeepOpen(open, name);
       if (note) output.push({ kind: "note", text: note });
     }
     return { output, expanded: result.expanded ?? null, javascript: result.js };
@@ -457,7 +476,7 @@ export function createEngine(wasm, stdlib) {
             file.name === projectFiles[index].name && (file.name === name || file.source === projectFiles[index].source),
         );
       if (!built) {
-        session = null;
+        replEnd();
         const outcome = build(files, { execute: false });
         if (outcome.crashed) return { crashed: outcome.crashed };
       }
