@@ -761,17 +761,13 @@ fn hash_type_kind<G: TypeGraph>(
                 } => {
                     name.hash(hasher);
                     representation.position.hash(hasher);
-                    format!(
-                        "{:?}",
-                        walk.graph().layout(representation.variant)
-                    )
-                    .hash(hasher);
+                    hash_layout(hasher, walk.graph().layout(representation.variant));
                 }
                 _ => {}
             }
         }
         TypeKind::TypeVariant(ctors, layout) => {
-            format!("{:?}", walk.graph().layout(*layout)).hash(hasher);
+            hash_layout(hasher, walk.graph().layout(*layout));
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
@@ -788,6 +784,23 @@ fn hash_type_kind<G: TypeGraph>(
             }
         }
     }
+}
+
+/// A variant layout, as its equality compares it. The allocation identities
+/// of its shapes take no part (`variant_runtime::Instance`'s `Hash`): no
+/// dependent reads them, and an import gives them new values, so the layout
+/// of a stored interface and of its shared graph hash alike.
+fn hash_layout(hasher: &mut impl Hasher, layout: Option<&crate::types::VariantLayout>) {
+    let Some(layout) = layout else {
+        false.hash(hasher);
+        return;
+    };
+    true.hash(hasher);
+    layout.unboxed.hash(hasher);
+    layout.constructors.hash(hasher);
+    layout.matching_facts.tag_name.hash(hasher);
+    layout.matching_facts.block_types.hash(hasher);
+    layout.matching_facts.literal_tags.hash(hasher);
 }
 
 fn hash_label_decls<G: TypeGraph>(
