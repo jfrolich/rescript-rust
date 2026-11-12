@@ -19,6 +19,8 @@ pub(super) struct Build<'a, 'r> {
     pub jsx_preserve: bool,
     rest_name: std::cell::RefCell<String>,
     chain_tasks: std::cell::RefCell<Vec<Expr>>,
+    jsx_indent: std::cell::Cell<usize>,
+    suppress_call_indent: std::cell::Cell<bool>,
     string_tasks: std::cell::RefCell<Vec<(Expr, bool)>>,
     string_values: std::cell::RefCell<Vec<Expression<'a>>>,
     pub raw_prefix: &'a str,
@@ -43,6 +45,8 @@ impl<'a, 'r> Build<'a, 'r> {
             jsx_preserve: false,
             rest_name: Default::default(),
             chain_tasks: Default::default(),
+            jsx_indent: Default::default(),
+            suppress_call_indent: Default::default(),
             string_tasks: Default::default(),
             string_values: Default::default(),
             source_map: None,
@@ -157,7 +161,17 @@ impl<'a, 'r> Build<'a, 'r> {
             e
         })
     }
-    fn args(&self, args: &[Expr]) -> Result<ArenaVec<'a, Argument<'a>>, Unsupported> {
+    fn argument(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
+        let extra = !self.suppress_call_indent.get()
+            && crate::js_ir::printer::call_argument_needs_extra_group_indent(
+                self.arena,
+                e,
+                level,
+                self.jsx_indent.get(),
+            );
+        self.indented_expr(e, usize::from(extra))
+    }
+    fn args(&self, args: &[Expr], level: u8) -> Result<ArenaVec<'a, Argument<'a>>, Unsupported> {
         let mut result = self.b.vec();
         for e in args {
             result.push(if let ExprKind::Spread(inner) = self.arena.ek(*e) {
@@ -167,7 +181,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     &self.b,
                 )))
             } else {
-                Argument::from(self.expr(*e)?)
+                Argument::from(self.argument(*e, level)?)
             });
         }
         Ok(result)
@@ -267,14 +281,18 @@ impl<'a, 'r> Build<'a, 'r> {
     /// Runtime JSX prints callee(tag, props[, key]). Names are encountered in
     /// that order, with spread before properties and children. oxc supplies
     /// call/object/array parentheses, matching printer::print_jsx_call.
-    fn jsx_call(&self, id: crate::js_ir::arena::JsxId) -> Result<Expression<'a>, Unsupported> {
+    fn jsx_call(
+        &self,
+        id: crate::js_ir::arena::JsxId,
+        level: u8,
+    ) -> Result<Expression<'a>, Unsupported> {
         let (jsx, form) = walk::jsx_form(self.arena, id, self.jsx_preserve)?;
         match form {
             walk::JsxForm::Fragment => {
                 return Ok(Expression::new_jsx_fragment(
                     SPAN,
                     JSXOpeningFragment::new(SPAN, &self.b),
-                    self.b.vec(),
+                    self.jsx_children(&jsx, false)?,
                     JSXClosingFragment::new(SPAN, &self.b),
                     &self.b,
                 ));
@@ -282,38 +300,49 @@ impl<'a, 'r> Build<'a, 'r> {
             walk::JsxForm::Element => return self.jsx_element(&jsx),
             walk::JsxForm::Runtime => {}
         }
-        let callee = self.expr(jsx.callee)?;
-        let mut args = self.b.vec1(Argument::from(self.expr(jsx.tag)?));
+        let callee = self.expr_at(jsx.callee, 15)?;
+        let mut args = self.b.vec1(Argument::from(self.argument(jsx.tag, level)?));
         let props = self.arena.props(jsx.props);
+        let extra = usize::from(
+            level == 15 && self.jsx_indent.get() == 0 && !self.suppress_call_indent.get(),
+        );
         let value = if let Some(spread) = jsx
             .spread
             .filter(|_| props.is_empty() && jsx.children.is_none())
         {
-            self.expr(spread)?
+            self.argument(spread, level)?
         } else {
             let mut properties = self.b.vec();
             if let Some(spread) = jsx.spread {
-                properties.push(ObjectPropertyKind::SpreadProperty(
-                    self.b
-                        .alloc(SpreadElement::new(SPAN, self.expr(spread)?, &self.b)),
-                ));
+                properties.push(ObjectPropertyKind::SpreadProperty(self.b.alloc(
+                    SpreadElement::new(
+                        SPAN,
+                        self.with_indent(1 + extra, || self.high_expr(spread))?,
+                        &self.b,
+                    ),
+                )));
             }
             for (key, value) in props {
                 let PropName::Lit(name) = key else {
                     return Err(Unsupported("symbol JSX key"));
                 };
-                properties.push(self.block_property(self.arena.text(*name), self.expr(*value)?));
+                properties.push(self.block_property(
+                    self.arena.text(*name),
+                    self.indented_expr(*value, 1 + extra)?,
+                ));
             }
             if let Some(children) = jsx.children {
                 let children = self.arena.exprs(children);
                 let value = if let [child] = children
                     && !jsx.multi
                 {
-                    self.expr(*child)?
+                    self.indented_expr(*child, 1 + extra)?
                 } else {
                     let mut elements = self.b.vec();
                     for child in children {
-                        elements.push(ArrayExpressionElement::from(self.expr(*child)?));
+                        elements.push(ArrayExpressionElement::from(
+                            self.indented_expr(*child, 2 + extra)?,
+                        ));
                     }
                     Expression::new_array_expression(SPAN, elements, &self.b)
                 };
@@ -323,7 +352,7 @@ impl<'a, 'r> Build<'a, 'r> {
         };
         args.push(Argument::from(value));
         if let Some(key) = jsx.key {
-            args.push(Argument::from(self.expr(key)?));
+            args.push(Argument::from(self.argument(key, level)?));
         }
         Ok(self.call(callee, args))
     }
@@ -382,7 +411,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     Some(JSXAttributeValue::ExpressionContainer(self.b.alloc(
                         JSXExpressionContainer::new(
                             SPAN,
-                            JSXExpression::from(self.expr(value)?),
+                            JSXExpression::from(self.indented_expr(value, 1)?),
                             &self.b,
                         ),
                     ))),
@@ -395,10 +424,13 @@ impl<'a, 'r> Build<'a, 'r> {
             attributes.push(attribute("key", key)?);
         }
         if let Some(spread) = jsx.spread {
-            attributes
-                .push(JSXAttributeItem::SpreadAttribute(self.b.alloc(
-                    JSXSpreadAttribute::new(SPAN, self.expr(spread)?, &self.b),
-                )));
+            attributes.push(JSXAttributeItem::SpreadAttribute(self.b.alloc(
+                JSXSpreadAttribute::new(
+                    SPAN,
+                    self.with_indent(1, || self.high_expr(spread))?,
+                    &self.b,
+                ),
+            )));
         }
         for (key, value) in self.arena.props(jsx.props) {
             let PropName::Lit(key) = key else {
@@ -409,6 +441,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 *value,
             )?);
         }
+        let children = self.jsx_children(jsx, !attributes.is_empty())?;
         let closing = if jsx.children.is_some() {
             Some(self.b.alloc(JSXClosingElement::new(
                 SPAN,
@@ -423,10 +456,46 @@ impl<'a, 'r> Build<'a, 'r> {
             self.b.alloc(JSXOpeningElement::new(
                 SPAN, name, None, attributes, &self.b,
             )),
-            self.b.vec(),
+            children,
             closing,
             &self.b,
         ))
+    }
+
+    fn jsx_children(
+        &self,
+        jsx: &crate::js_ir::arena::JsxInfo,
+        has_attrs: bool,
+    ) -> Result<ArenaVec<'a, JSXChild<'a>>, Unsupported> {
+        let mut children = self.b.vec();
+        let Some(list) = jsx.children else {
+            return Ok(children);
+        };
+        let expressions = self.arena.exprs(list);
+        let whitespace = |indent: usize| {
+            let text = self.text(&format!("\n{}", "  ".repeat(indent)));
+            JSXChild::Text(
+                self.b
+                    .alloc(JSXText::new(SPAN, text, Some(text.into()), &self.b)),
+            )
+        };
+        for e in expressions {
+            children.push(whitespace(self.jsx_indent.get() + 1));
+            let expression = self.indented_expr(*e, 1)?;
+            children.push(match expression {
+                Expression::JSXElement(element) => JSXChild::Element(element),
+                Expression::JSXFragment(fragment) => JSXChild::Fragment(fragment),
+                value => JSXChild::ExpressionContainer(self.b.alloc(JSXExpressionContainer::new(
+                    SPAN,
+                    JSXExpression::from(value),
+                    &self.b,
+                ))),
+            });
+        }
+        if has_attrs || !expressions.is_empty() {
+            children.push(whitespace(self.jsx_indent.get()));
+        }
+        Ok(children)
     }
 
     fn call(&self, callee: Expression<'a>, args: ArenaVec<'a, Argument<'a>>) -> Expression<'a> {
@@ -457,7 +526,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         tasks.push((left, false));
                     }
                 } else {
-                    values.push(self.expr(expr)?);
+                    values.push(self.high_expr(expr)?);
                 }
             }
             Ok(values.pop().unwrap())
@@ -480,12 +549,12 @@ impl<'a, 'r> Build<'a, 'r> {
     }
     fn bin(&self, op: BinOp, l: Expr, r: Expr) -> Result<Expression<'a>, Unsupported> {
         if walk::negation_form(self.arena, op, l) {
-            return Ok(self.unary(U::UnaryNegation, self.expr(r)?));
+            return Ok(self.unary(U::UnaryNegation, self.high_expr(r)?));
         }
         if let Some(target) = walk::nullish_target(self.arena, op, l, r)? {
             return Ok(self.binary(
                 B::Equality,
-                self.expr(target)?,
+                self.high_expr(target)?,
                 Expression::new_null_literal(SPAN, &self.b),
             ));
         }
@@ -499,7 +568,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         pending.extend([r, l]);
                         continue;
                     }
-                    let right = self.expr(e)?;
+                    let right = self.high_expr(e)?;
                     value = Some(match value {
                         None => right,
                         Some(left) if op == BinOp::Bor => self.binary(B::BitwiseOR, left, right),
@@ -546,7 +615,7 @@ impl<'a, 'r> Build<'a, 'r> {
             BinOp::InstanceOf => B::Instanceof,
             BinOp::And | BinOp::Or | BinOp::Bor => unreachable!(),
         };
-        Ok(self.binary(operator, self.expr(l)?, self.expr(r)?))
+        Ok(self.binary(operator, self.high_expr(l)?, self.high_expr(r)?))
     }
     /// Shapes from `js_ir::printer::print_caml_block` (OCaml js_dump.ml:859-947).
     ///
@@ -765,8 +834,50 @@ impl<'a, 'r> Build<'a, 'r> {
             T::Undefined => self.id("undefined"),
         })
     }
+    /// Layout matters only to preserved JSXText. Mirror legacy grouping at
+    /// construction edges, not codegen formatting (which has different layout).
+    fn with_indent<T>(&self, extra: usize, f: impl FnOnce() -> T) -> T {
+        let previous = self.jsx_indent.get();
+        self.jsx_indent.set(previous + extra);
+        let result = f();
+        self.jsx_indent.set(previous);
+        result
+    }
+    fn high_expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        self.expr_at(e, 3)
+    }
+    fn dot_target(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let previous = self.suppress_call_indent.replace(true);
+        let result = self.expr_at(e, 15);
+        self.suppress_call_indent.set(previous);
+        result
+    }
+    fn indented_expr(&self, e: Expr, extra: usize) -> Result<Expression<'a>, Unsupported> {
+        self.with_indent(extra, || self.expr(e))
+    }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
-        let mut expression = self.expr_unmapped(e)?;
+        self.expr_at(e, 0)
+    }
+    fn expr_at(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
+        let extra = match self.arena.ek(e) {
+            ExprKind::Cond(..) => usize::from(level > 2),
+            ExprKind::CamlBlock(items, _, tag)
+                if self.arena.exprs(items).len() == 2
+                    && matches!(self.arena.tag(tag), crate::lambda::TagInfo::Constructor(c) if c.name == "::") =>
+            {
+                0
+            }
+            ExprKind::Array(..) | ExprKind::CamlBlock(..) => 1,
+            ExprKind::Object(props) => usize::from(
+                !self
+                    .arena
+                    .props(props)
+                    .iter()
+                    .all(|(key, _)| matches!(key, PropName::Spread | PropName::RecordSpread)),
+            ),
+            _ => 0,
+        };
+        let mut expression = self.with_indent(extra, || self.expr_unmapped(e, level))?;
         // S1.2: only kinds with a codegen start-token mapping are supported.
         if let Some(maps) = self.source_map {
             if maps.is_located(self.arena.expr_loc(e)) {
@@ -781,7 +892,7 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(expression)
     }
-    fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+    fn expr_unmapped(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
         let a = self.arena;
         walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
@@ -815,14 +926,14 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.expr(e)?,
                 Expression::new_null_literal(SPAN, &self.b),
             ),
-            ExprKind::JsNot(e) => self.unary(U::LogicalNot, self.expr(e)?),
-            ExprKind::JsBnot(e) => self.unary(U::BitwiseNot, self.expr(e)?),
-            ExprKind::Typeof(e) => self.unary(U::Typeof, self.expr(e)?),
+            ExprKind::JsNot(e) => self.unary(U::LogicalNot, self.high_expr(e)?),
+            ExprKind::JsBnot(e) => self.unary(U::BitwiseNot, self.high_expr(e)?),
+            ExprKind::Typeof(e) => self.unary(U::Typeof, self.high_expr(e)?),
             ExprKind::Cond(c, t, f) => Expression::new_conditional_expression(
                 SPAN,
-                self.expr(c)?,
-                self.expr(t)?,
-                self.expr(f)?,
+                self.high_expr(c)?,
+                self.with_indent(1, || self.high_expr(t))?,
+                self.with_indent(1, || self.high_expr(f))?,
                 &self.b,
             ),
             ExprKind::Seq(..) => {
@@ -836,7 +947,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     SPAN,
                     self.expr(f)?,
                     None,
-                    self.args(walk::arguments(a, a.exprs(args)))?,
+                    self.args(walk::arguments(a, a.exprs(args)), level)?,
                     false,
                     &self.b,
                 );
@@ -845,21 +956,23 @@ impl<'a, 'r> Build<'a, 'r> {
             }
             ExprKind::New(f, args) => Expression::new_new_expression(
                 SPAN,
-                self.expr(f)?,
+                self.expr_at(f, 16)?,
                 None,
-                self.args(args.map_or(&[], |args| a.exprs(args)))?,
+                self.args(args.map_or(&[], |args| a.exprs(args)), level)?,
                 &self.b,
             ),
             ExprKind::StaticIndex(e, s, _) => {
                 walk::static_member_supported(a.text(s))?;
-                self.member(self.expr(e)?, a.text(s))
+                self.member(self.dot_target(e)?, a.text(s))
             }
-            ExprKind::CamlBlockTag(e, s) => self.member(self.expr(e)?, a.text(s)),
-            ExprKind::Length(e, _) => self.member(self.expr(e)?, "length"),
+            ExprKind::CamlBlockTag(e, s) => {
+                self.member(self.with_indent(1, || self.expr_at(e, 15))?, a.text(s))
+            }
+            ExprKind::Length(e, _) => self.member(self.dot_target(e)?, "length"),
             ExprKind::ArrayIndex(e, i) => Expression::new_computed_member_expression(
                 SPAN,
-                self.expr(e)?,
-                self.expr(i)?,
+                self.with_indent(1, || self.expr_at(e, 15))?,
+                self.indented_expr(i, 2)?,
                 false,
                 &self.b,
             ),
@@ -918,8 +1031,10 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_object_expression(SPAN, properties, &self.b)
             }
             ExprKind::Fun(f) => self.function_expr(f)?,
-            ExprKind::Await(e) => Expression::new_await_expression(SPAN, self.expr(e)?, &self.b),
-            ExprKind::OptionalBlock(e, true) => self.expr(e)?,
+            ExprKind::Await(e) => {
+                Expression::new_await_expression(SPAN, self.high_expr(e)?, &self.b)
+            }
+            ExprKind::OptionalBlock(e, true) => self.expr_at(e, level)?,
             ExprKind::OptionalBlock(inner, false) => {
                 let mut args = self.b.vec();
                 if let Some(inner) = walk::optional_argument(a, inner) {
@@ -929,7 +1044,7 @@ impl<'a, 'r> Build<'a, 'r> {
             }
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(id) => self.raw(id, walk::RawContext::Expression)?,
-            ExprKind::Jsx(id) => self.jsx_call(id)?,
+            ExprKind::Jsx(id) => self.jsx_call(id, level)?,
             ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
                 self.b
                     .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
@@ -1062,6 +1177,12 @@ impl<'a, 'r> Build<'a, 'r> {
         &self,
         f: FunId,
     ) -> Result<oxc_allocator::Box<'a, FunctionBody<'a>>, Unsupported> {
+        self.with_indent(1, || self.function_body_inner(f))
+    }
+    fn function_body_inner(
+        &self,
+        f: FunId,
+    ) -> Result<oxc_allocator::Box<'a, FunctionBody<'a>>, Unsupported> {
         let info = self.arena.fun(f);
         let body = walk::function_body(self.arena, self.arena.stmts(info.body));
         let mut statements = self.b.vec();
@@ -1189,7 +1310,7 @@ impl<'a, 'r> Build<'a, 'r> {
     ) -> Result<oxc_allocator::Box<'a, BlockStatement<'a>>, Unsupported> {
         Ok(self.b.alloc(BlockStatement::new(
             SPAN,
-            self.block(self.arena.stmts(b), false)?,
+            self.with_indent(1, || self.block(self.arena.stmts(b), false))?,
             &self.b,
         )))
     }
@@ -1296,7 +1417,7 @@ impl<'a, 'r> Build<'a, 'r> {
         test: Expression<'a>,
         c: &crate::js_ir::arena::Clause,
     ) -> Result<SwitchCase<'a>, Unsupported> {
-        let mut body = self.block(self.arena.stmts(c.body), false)?;
+        let mut body = self.with_indent(2, || self.block(self.arena.stmts(c.body), false))?;
         if c.should_break {
             body.push(Statement::new_break_statement(SPAN, None, &self.b));
         }
@@ -1531,14 +1652,18 @@ impl<'a, 'r> Build<'a, 'r> {
                 } else {
                     Some(Statement::new_block_statement(
                         SPAN,
-                        self.block(f, false)?,
+                        self.with_indent(1, || self.block(f, false))?,
                         &self.b,
                     ))
                 };
                 out.push(Statement::new_if_statement(
                     SPAN,
-                    self.expr(c)?,
-                    Statement::new_block_statement(SPAN, self.block(a.stmts(t), false)?, &self.b),
+                    self.indented_expr(c, 1)?,
+                    Statement::new_block_statement(
+                        SPAN,
+                        self.with_indent(1, || self.block(a.stmts(t), false))?,
+                        &self.b,
+                    ),
                     alternate,
                     &self.b,
                 ));
@@ -1549,7 +1674,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     label,
                     Statement::new_while_statement(
                         SPAN,
-                        self.expr(cond)?,
+                        self.indented_expr(cond, 1)?,
                         Statement::BlockStatement(self.brace(body)?),
                         &self.b,
                     ),
@@ -1573,7 +1698,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         SPAN,
                         matches!(a.sk(s), StmtKind::ForAwaitOf(_)),
                         ForStatementLeft::VariableDeclaration(self.b.alloc(decl)),
-                        self.expr(f.iterable)?,
+                        self.indented_expr(f.iterable, 1)?,
                         Statement::BlockStatement(self.brace(f.body)?),
                         &self.b,
                     ),
@@ -1589,7 +1714,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.block(a.stmts(b), false)?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }
@@ -1610,7 +1735,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.block(a.stmts(b), false)?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }

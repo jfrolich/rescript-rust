@@ -537,8 +537,8 @@ pub(super) enum JsxForm {
 }
 
 /// Legacy JSX meets tag, key, spread, props, children (never the runtime
-/// callee). Whitespace between children is literal JSXText, not layout:
-/// retain fallback until its exact legacy indentation can be represented.
+/// callee). Sequence containers remain unsupported: codegen drops their
+/// required parentheses, including explicit ParenthesizedExpression nodes.
 pub(super) fn jsx_form(
     a: &JsArena,
     id: crate::js_ir::arena::JsxId,
@@ -554,20 +554,16 @@ pub(super) fn jsx_form(
     if !crate::js_ir::printer::jsx_printable(a, &jsx, preserve) {
         return Ok((jsx, JsxForm::Runtime));
     }
-    if jsx.children.is_some_and(|c| !a.exprs(c).is_empty()) {
-        return Err(Unsupported("JSX children whitespace"));
-    }
     let fragment = crate::js_ir::printer::is_empty_fragment(a, &jsx);
-    if !fragment
-        && jsx.children.is_some()
-        && (jsx.key.is_some() || jsx.spread.is_some() || !a.props(jsx.props).is_empty())
-    {
-        return Err(Unsupported("JSX children whitespace"));
-    }
     for value in jsx
         .key
         .into_iter()
         .chain(a.props(jsx.props).iter().map(|(_, v)| *v))
+        .chain(
+            jsx.children
+                .into_iter()
+                .flat_map(|c| a.exprs(c).iter().copied()),
+        )
     {
         let mut value = value;
         while let ExprKind::OptionalBlock(inner, true) = a.ek(value) {

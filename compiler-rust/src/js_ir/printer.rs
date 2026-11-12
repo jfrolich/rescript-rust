@@ -2878,7 +2878,7 @@ fn expression_stmt_is_trivial(a: &JsArena, expr: Expr) -> bool {
     matches!(a.ek(expr), ExprKind::Number(_) | ExprKind::Undefined { .. })
 }
 
-fn call_argument_needs_extra_group_indent(
+pub(crate) fn call_argument_needs_extra_group_indent(
     a: &JsArena,
     expr: Expr,
     call_level: u8,
