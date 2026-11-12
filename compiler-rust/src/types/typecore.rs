@@ -15618,7 +15618,7 @@ fn type_record(
                 };
 
             let field_context = Some(ClashSite::RecordField {
-                field_name: crate::name::Name::new(&field_name),
+                field_name: crate::name::Name::new(field_name),
                 optional: label_desc.lbl_optional && !field.opt,
                 jsx: jsx_component_error_info
                     .as_ref()
