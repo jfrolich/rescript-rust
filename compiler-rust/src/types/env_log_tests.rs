@@ -1070,7 +1070,7 @@ macro_rules! same {
 macro_rules! same_result {
     ($what:expr, $tables:expr, $log:expr) => {{
         let (tables, log) = ($tables, $log);
-        same!($what, text(&tables), text(&log));
+        same!(format!("{}, the error", $what), text(&tables), text(&log));
         same!($what, tables.ok(), log.ok());
     }};
 }
