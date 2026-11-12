@@ -1528,7 +1528,6 @@ pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
         }
     }
     let block = e.a.stmts(values[0].block()?).to_vec();
-    super::j::write_stats(p.arena.j_stats).map_err(|_| Unsupported("cannot write J normalisation stats"))?;
     Ok(j::JsDepsProgram {
         program: j::JsProgram {
             arena: e.a,
