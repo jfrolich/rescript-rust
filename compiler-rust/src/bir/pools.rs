@@ -55,6 +55,14 @@ impl Lists {
         self.0.extend_from_slice(items);
         id
     }
+    /// Consume a statement-stack run directly, without an intermediate vector.
+    pub(super) fn push_iter(&mut self, len: usize, items: impl Iterator<Item = NodeId>) -> ListId {
+        let id = ListId(index(self.0.len()));
+        self.0.push(NodeId(index(len)));
+        self.0.extend(items);
+        assert_eq!(self.0.len(), id.index() + 1 + len);
+        id
+    }
     pub(super) fn get(&self, id: ListId) -> &[NodeId] {
         let start = id.index();
         &self.0[start + 1..start + 1 + self.0[start].index()]
