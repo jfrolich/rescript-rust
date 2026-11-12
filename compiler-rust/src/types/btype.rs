@@ -14,7 +14,7 @@
 use super::context::TypeContext;
 use super::decl::{ConstructorArguments, TypeKind};
 use super::type_expr::{
-    AbbrevMemo, AbbrevMemoRef, LOWEST_LEVEL, PIVOT_LEVEL, RowDesc, RowField, RowFieldRef, TypeDesc,
+    AbbrevMemo, AbbrevMemoRef, RowDesc, RowField, RowFieldRef, TypeDesc,
     TypeExprRef,
 };
 use crate::types::path::PathView;
@@ -439,29 +439,6 @@ where
 }
 
 // ============================================================================
-// Type Marking (for traversal)
-// ============================================================================
-
-/// Mark just the type node (not its children).
-pub fn mark_type_node(ctx: &TypeContext, ty: TypeExprRef) {
-    let ty = ctx.repr(ty);
-    let level = ctx.get_level(ty);
-    if level >= LOWEST_LEVEL {
-        ctx.set_level(ty, PIVOT_LEVEL - level);
-    }
-}
-
-/// Unmark a type by reversing the mark operation.
-pub fn unmark_type(ctx: &TypeContext, ty: TypeExprRef) {
-    let ty = ctx.repr(ty);
-    let level = ctx.get_level(ty);
-    if level < LOWEST_LEVEL {
-        ctx.set_level(ty, PIVOT_LEVEL - level);
-        iter_type_expr(ctx, ty, |t| unmark_type(ctx, t));
-    }
-}
-
-// ============================================================================
 // Proxy and Row Utilities
 // ============================================================================
 
@@ -643,21 +620,6 @@ mod tests {
         assert!(!is_row_name("row"));
         assert!(!is_row_name("foo"));
         assert!(!is_row_name(""));
-    }
-
-    #[test]
-    fn test_mark_unmark() {
-        let id_gen = IdGenerator::new();
-        let ctx = TypeContext::new(std::sync::Arc::new(id_gen));
-
-        let tvar = ctx.new_var(None);
-        let original_level = ctx.get_level(tvar);
-
-        mark_type_node(&ctx, tvar);
-        assert!(ctx.get_level(tvar) < LOWEST_LEVEL);
-
-        unmark_type(&ctx, tvar);
-        assert_eq!(ctx.get_level(tvar), original_level);
     }
 
     #[test]

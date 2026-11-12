@@ -194,27 +194,24 @@ fn ocaml_hash_final_mix(mut h: u32) -> u32 {
 }
 
 fn generalizable_at_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) -> bool {
-    fn check(ctx: &TypeContext, level: i32, ty: TypeExprRef) -> bool {
+    fn check(ctx: &TypeContext, level: i32, ty: TypeExprRef,
+        visited: &mut crate::types::type_marks::TypeNodeTable<()>) -> bool {
         let ty = ctx.repr(ty);
         let ty_level = ctx.get_level(ty);
-        if ty_level < crate::types::type_expr::LOWEST_LEVEL {
+        if ty_level < crate::types::type_expr::LOWEST_LEVEL || !visited.visit(ty) {
             return true;
         }
         if ty_level <= level {
             return false;
         }
-        crate::types::btype::mark_type_node(ctx, ty);
         let mut children = Vec::new();
         crate::types::iter_type_expr(ctx, ty, |child| children.push(child));
-        children.into_iter().all(|child| check(ctx, level, child))
+        children.into_iter().all(|child| check(ctx, level, child, visited))
     }
 
-    // OCaml compiler/ml/typecore.ml:2104-2120 marks visited nodes while
-    // checking whether any reachable type level is at or below `level`, then
-    // always unmarks the original type graph.
-    let result = check(ctx, level, ty);
-    crate::types::btype::unmark_type(ctx, ty);
-    result
+    // compiler/ml/typecore.ml:2104-2120: visit each node once without
+    // changing the levels of the graph being checked.
+    check(ctx, level, ty, &mut crate::types::type_marks::visit_set())
 }
 
 fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
@@ -29691,6 +29688,28 @@ fn parmatch_check_unused(
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn generalizable_at_level_preserves_levels() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let node = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 5);
+        assert!(generalizable_at_level(&ctx, 4, node));
+        assert!(!generalizable_at_level(&ctx, 5, node));
+        assert_eq!(ctx.get_level(node), 5);
+    }
+
+    #[test]
+    fn generalizable_at_level_checks_shared_and_lower_children() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let shared = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 5);
+        let low = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 2);
+        let root = ctx.alloc_type_at_level(TypeDesc::Ttuple(ctx.new_type_list(&[shared, shared, low])), 5);
+        assert!(!generalizable_at_level(&ctx, 3, root));
+        assert!(generalizable_at_level(&ctx, 1, root));
+        assert_eq!(ctx.get_level(shared), 5);
+        assert_eq!(ctx.get_level(low), 2);
+        assert_eq!(ctx.get_level(root), 5);
+    }
 
     /// typetexp.ml:419-426 names every unnamed proxy, including an instance
     /// of a copied variable; descriptor allocation is not a naming condition.
