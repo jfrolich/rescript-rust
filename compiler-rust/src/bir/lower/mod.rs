@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod ffi_args;
+mod external;
 mod call;
 mod cond;
 mod expr;
@@ -340,6 +341,8 @@ struct State {
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    external_references: Vec<Option<crate::bir::ImportId>>,
+    external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
@@ -393,6 +396,8 @@ impl State {
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
+            external_references: Vec::new(),
+            external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
@@ -568,9 +573,8 @@ impl ProbeRules for State {
                     Primitive::Psequand | Primitive::Psequor => {
                         unreachable!("short circuits are lowered above")
                     }
-                    Primitive::PjsCall(_)
-                    | Primitive::PjsApply
-                    | Primitive::PjsObjectCreate(_)
+                    Primitive::PjsCall(call) if call.ffi.variadic => "external",
+                    Primitive::PjsObjectCreate(_)
                     | Primitive::PjsObjectGet(_)
                     | Primitive::PjsObjectSet(_)
                     | Primitive::PjsFnMethod => "external",

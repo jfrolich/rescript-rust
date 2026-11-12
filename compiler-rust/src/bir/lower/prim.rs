@@ -120,6 +120,10 @@ impl State {
                 Probed::Free(_) => unreachable!("argument realized before its next sibling"),
             })
             .collect();
+        let outputs = match &payload.primitive {
+            Primitive::PjsCall(call) => self.hold_external_args(cx, &call.arg_types, outputs),
+            _ => outputs,
+        };
         let (statements, values) = self.sequence_arguments(false, outputs);
         self.primitive_steps += values.len() + 1;
         let primitive = &payload.primitive;
@@ -728,10 +732,13 @@ impl State {
             Primitive::Parraylength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
             }
+            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, values),
+            Primitive::PjsApply => match values.split_first() {
+                Some((&callee, args)) => self.call_node(callee, args, Default::default()),
+                None => plain::node(&mut self.arena, View::JUndefined, 0),
+            },
             Primitive::Psequand
             | Primitive::Psequor
-            | Primitive::PjsCall(_)
-            | Primitive::PjsApply
             | Primitive::PjsObjectCreate(_)
             | Primitive::PjsObjectGet(_)
             | Primitive::PjsObjectSet(_)

@@ -1113,11 +1113,7 @@ mod tests {
         for string in [false, true] {
             let mut a = LamArena::new();
             let x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
-            let body = a.prim_raw(
-                crate::lambda::lam_primitive::Primitive::PjsApply,
-                &[x],
-                crate::lambda::LamLoc::NONE,
-            );
+            let body = a.while_(x, x);
             let root = if string {
                 a.string_switch(x, &[("case", body)], None)
             } else {
@@ -1137,7 +1133,7 @@ mod tests {
             let mut state = State::new(input);
             assert!(matches!(
                 state.probe(Cx::returning(), root),
-                Err(Unsupported("external"))
+                Err(Unsupported("loop"))
             ));
         }
     }
