@@ -6624,7 +6624,7 @@ fn rewrite_value_binding(
             let module_longident = arena.get_longident(module_lid.txt).clone();
             let mut flattened = Vec::with_capacity(fields.len());
             for field in 0..fields.len() {
-                let field = arena.pat_field_list(fields)[field].clone();
+                let field = arena.pat_field_list(fields)[field];
                 let Longident::Lident(field_name) = arena.get_longident(field.lid.txt) else {
                     unreachable!("every field name was checked to be unqualified")
                 };
