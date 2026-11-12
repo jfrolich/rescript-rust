@@ -83,7 +83,10 @@ impl Outcome {
         let printed = self.notes.concat();
         Ok(match self.result {
             Ok(Some(output)) => {
-                output.apply()?;
+                // File actions happen after the driver's GenType scope.
+                crate::timing::measure(crate::timing::Phase::Gentype, || {
+                    crate::timing::measure(crate::timing::Phase::GentypeFiles, || output.apply())
+                })?;
                 (printed, Ok(()))
             }
             Ok(None) => (printed, Ok(())),
@@ -258,7 +261,9 @@ fn register_in_process_type_declarations(
     type_declarations: InProcessTypeDeclarations,
 ) {
     let key = normalize_cmt_cache_key(cmt_file);
-    let type_declarations = EncodedTypeDeclarations::encode(&type_declarations);
+    let type_declarations = crate::timing::measure(crate::timing::Phase::GentypeEncoding, || {
+        EncodedTypeDeclarations::encode(&type_declarations)
+    });
     let replaced = in_process_type_declarations_cache()
         .lock()
         .ok()
@@ -408,29 +413,31 @@ pub fn typed_artifact_check_annotations(
     ) -> crate::gentype::annotation::Read<bool>,
     artifact: &TypedArtifact<'_>,
 ) -> crate::gentype::annotation::Read<bool> {
-    // Mirrors compiler/gentype/GenTypeMain.ml:3-10 for in-memory typed
-    // artifacts, using the same Annotation traversal that CMT decoding feeds.
-    match artifact.annots {
-        TypedArtifactAnnots::Implementation(structure) => {
-            crate::gentype::annotation::structure_check_annotation(
-                artifact.arena,
-                artifact.ta,
-                &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
-                structure,
-            )
+    crate::timing::measure(crate::timing::Phase::GentypeAnnotations, || {
+        // Mirrors compiler/gentype/GenTypeMain.ml:3-10 for in-memory typed
+        // artifacts, using the same Annotation traversal that CMT decoding feeds.
+        match artifact.annots {
+            TypedArtifactAnnots::Implementation(structure) => {
+                crate::gentype::annotation::structure_check_annotation(
+                    artifact.arena,
+                    artifact.ta,
+                    &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
+                    structure,
+                )
+            }
+            TypedArtifactAnnots::Interface(signature) => {
+                crate::gentype::annotation::signature_check_annotation(
+                    artifact.arena,
+                    artifact.ta,
+                    &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
+                    signature,
+                )
+            }
+            TypedArtifactAnnots::Packed
+            | TypedArtifactAnnots::PartialImplementation
+            | TypedArtifactAnnots::PartialInterface => Ok(false),
         }
-        TypedArtifactAnnots::Interface(signature) => {
-            crate::gentype::annotation::signature_check_annotation(
-                artifact.arena,
-                artifact.ta,
-                &|loc, attributes| check_annotation(artifact.arena, loc, attributes),
-                signature,
-            )
-        }
-        TypedArtifactAnnots::Packed
-        | TypedArtifactAnnots::PartialImplementation
-        | TypedArtifactAnnots::PartialInterface => Ok(false),
-    }
+    })
 }
 
 /// Whether the artifact is the partial tree of a module with type errors.
@@ -790,41 +797,44 @@ fn prepare(
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
     artifact: &TypedArtifact<'_>,
 ) -> Prepared {
-    if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
-        crate::gentype::log_::item(&format!(
-            "Typed artifact {}\n",
-            crate::gentype::module_name::to_string(&artifact.file_name)
-        ));
-    }
-    let source_file = artifact
-        .source_file
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            format!(
-                "{}{}",
-                crate::gentype::module_name::to_string(&artifact.file_name),
-                match artifact.is_interface {
-                    true => ".resi",
-                    false => ".res",
-                }
+    crate::timing::measure(crate::timing::Phase::GentypePrepare, || {
+
+        if crate::gentype::debug::basic.load(std::sync::atomic::Ordering::Relaxed) {
+            crate::gentype::log_::item(&format!(
+                "Typed artifact {}\n",
+                crate::gentype::module_name::to_string(&artifact.file_name)
+            ));
+        }
+        let source_file = artifact
+            .source_file
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| {
+                format!(
+                    "{}{}",
+                    crate::gentype::module_name::to_string(&artifact.file_name),
+                    match artifact.is_interface {
+                        true => ".resi",
+                        false => ".res",
+                    }
+                )
+            });
+        let output_file = crate::gentype::paths::get_output_file(config, &source_file);
+        let output_file_relative =
+            crate::gentype::paths::get_output_file_relative(config, &source_file);
+        let local_resolver = shared_resolver.is_none().then(|| {
+            crate::gentype::module_resolver::create_lazy_resolver(
+                config,
+                &[".res".to_string(), ".shim.ts".to_string()],
+                |fname| fname == "React.res",
             )
         });
-    let output_file = crate::gentype::paths::get_output_file(config, &source_file);
-    let output_file_relative =
-        crate::gentype::paths::get_output_file_relative(config, &source_file);
-    let local_resolver = shared_resolver.is_none().then(|| {
-        crate::gentype::module_resolver::create_lazy_resolver(
-            config,
-            &[".res".to_string(), ".shim.ts".to_string()],
-            |fname| fname == "React.res",
-        )
-    });
-    Prepared {
-        source_file,
-        output_file,
-        output_file_relative,
-        local_resolver,
-    }
+        Prepared {
+            source_file,
+            output_file,
+            output_file_relative,
+            local_resolver,
+        }
+    })
 }
 
 /// Register the artifact's type declarations for importers. An exception
@@ -838,13 +848,11 @@ fn register_type_declarations(
     artifact: &TypedArtifact<'_>,
 ) -> bool {
     let notes = std::rc::Rc::new(crate::gentype::log_::Notes::default());
-    let result = typed_artifact_translate_type_declarations(
-        config,
-        &prepared.output_file_relative,
-        resolver,
-        &notes,
-        artifact,
-    )
+    let result = crate::timing::measure(crate::timing::Phase::GentypeDeclarations, || {
+        typed_artifact_translate_type_declarations(
+            config, &prepared.output_file_relative, resolver, &notes, artifact,
+        )
+    })
     .map(|translation| {
         if crate::perf_counters::enabled() || cfg!(test) {
             let ignore_interface = std::cell::Cell::new(false);
@@ -860,10 +868,11 @@ fn register_type_declarations(
                 translation.type_declarations.len(),
             );
         }
-        crate::gentype::code_item::TypeDeclarations::portable(
-            translation.type_declarations,
-            artifact.ctx,
-        )
+        crate::timing::measure(crate::timing::Phase::GentypePortable, || {
+            crate::gentype::code_item::TypeDeclarations::portable(
+                translation.type_declarations, artifact.ctx,
+            )
+        })
     })
     .map_err(artifact.render_escape);
     let type_declarations = InProcessTypeDeclarations {
@@ -895,53 +904,55 @@ fn plan_output(
 ) -> Result<Output, String> {
     let output_file = prepared.output_file.clone();
     if has_gentype_annotations {
-        let translation = translate_typed_artifact(
-            config,
-            &prepared.output_file_relative,
-            resolver,
-            notes,
-            artifact,
-        )
-        .map_err(artifact.render_escape)?;
-        let decl_file = |loc: crate::types::DeclLoc| {
-            crate::gentype::annotation::decl_file(artifact.ctx, artifact.arena, loc)
-        };
-        let emit_notes = crate::gentype::emit_js::EmitNotes {
-            notes,
-            file: &decl_file,
-        };
-        let project_root = config.project_root.clone();
-        let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
-        let read_declarations = |notes: &crate::gentype::log_::Notes,
-                                 config: &mut crate::gentype::config::T,
-                                 output: &str,
-                                 resolver: &crate::gentype::module_resolver::Resolver,
-                                 cmt: &str| {
-            if let Some(error) = skipped_declaration_error(cmt, &artifact.compiler_module_name) {
-                return Err(error);
-            }
-            input_cmt_translate_type_declarations(notes, config, output, resolver, cmt)
-        };
-        // Only emitting mutates the config; modules without GenType
-        // annotations skip the copy.
-        let mut config = config.clone();
-        let contents = emit_translation_contents(
-            artifact.ctx,
-            &mut config,
-            crate::gentype::emit_js::EmitTarget {
-                notes: &emit_notes,
-                file_name: &artifact.file_name,
-                output_file_relative: &prepared.output_file_relative,
+        crate::timing::measure(crate::timing::Phase::GentypeEmission, || {
+            let translation = translate_typed_artifact(
+                config,
+                &prepared.output_file_relative,
                 resolver,
-                get_cmt_file: &get_cmt_file,
-                input_cmt_translate_type_declarations: &read_declarations,
-            },
-            &prepared.source_file,
-            &translation,
-        )?;
-        Ok(Output::Write {
-            output_file,
-            contents,
+                notes,
+                artifact,
+            )
+            .map_err(artifact.render_escape)?;
+            let decl_file = |loc: crate::types::DeclLoc| {
+                crate::gentype::annotation::decl_file(artifact.ctx, artifact.arena, loc)
+            };
+            let emit_notes = crate::gentype::emit_js::EmitNotes {
+                notes,
+                file: &decl_file,
+            };
+            let project_root = config.project_root.clone();
+            let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
+            let read_declarations = |notes: &crate::gentype::log_::Notes,
+                                     config: &mut crate::gentype::config::T,
+                                     output: &str,
+                                     resolver: &crate::gentype::module_resolver::Resolver,
+                                     cmt: &str| {
+                if let Some(error) = skipped_declaration_error(cmt, &artifact.compiler_module_name) {
+                    return Err(error);
+                }
+                input_cmt_translate_type_declarations(notes, config, output, resolver, cmt)
+            };
+            // Only emitting mutates the config; modules without GenType
+            // annotations skip the copy.
+            let mut config = config.clone();
+            let contents = emit_translation_contents(
+                artifact.ctx,
+                &mut config,
+                crate::gentype::emit_js::EmitTarget {
+                    notes: &emit_notes,
+                    file_name: &artifact.file_name,
+                    output_file_relative: &prepared.output_file_relative,
+                    resolver,
+                    get_cmt_file: &get_cmt_file,
+                    input_cmt_translate_type_declarations: &read_declarations,
+                },
+                &prepared.source_file,
+                &translation,
+            )?;
+            Ok(Output::Write {
+                output_file,
+                contents,
+            })
         })
     } else if typed_artifact_has_type_errors(artifact) {
         Ok(Output::TypeError { output_file })
