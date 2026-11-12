@@ -7,6 +7,7 @@ pub(super) enum Resume {
     If(super::cond::Conditional),
     Call(super::call::Call),
     Prim(super::prim::Prim),
+    Record(super::record::Record),
     Let {
         var: VarId,
         kind: LetKind,
@@ -31,6 +32,10 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Record(record) = resume {
+            self.record_children(cx, record, into);
+            return;
+        }
         if let Resume::Prim(prim) = resume {
             let cont = if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
                 Cont::Effect(Tail::No)
@@ -48,7 +53,7 @@ impl State {
         }
         match *resume {
             Resume::If(_) => unreachable!("conditional handled above"),
-            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
+            Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
                 kind,
@@ -96,7 +101,7 @@ impl State {
         if let Resume::If(conditional) = resume {
             return self.conditional_child(cx, conditional, index, child);
         }
-        if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
+        if matches!(resume, Resume::Call(_) | Resume::Prim(_) | Resume::Record(_)) {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
                 if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
@@ -120,7 +125,7 @@ impl State {
         }
         let force = match resume {
             Resume::If(_) => unreachable!("conditional handled above"),
-            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
+            Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -141,7 +146,7 @@ impl State {
         match resume {
             Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
-            Resume::Prim(_) => unreachable!("primitive finished by dispatch"),
+            Resume::Prim(_) | Resume::Record(_) => unreachable!("primitive finished by dispatch"),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {
                     Probed::Out(out) => out,

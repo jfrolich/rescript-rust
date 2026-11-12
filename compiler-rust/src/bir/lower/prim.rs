@@ -8,7 +8,6 @@ use crate::lambda::lam_primitive::Primitive;
 
 pub(super) struct Prim {
     pub primitive: PrimId,
-    pub source: NodeId,
     pub operands: crate::bir::ListId,
 }
 
@@ -109,18 +108,6 @@ impl State {
         self.primitive_steps += values.len() + 1;
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
-        // P: compile_flat_make_field. Cache module-path membership per source
-        // occurrence, so a deep chain is inspected once, not walked per field.
-        if let Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) = &primitive {
-            if let [arg] = self.source.lists.get(prim.operands) {
-                let nested = self.module_paths[arg.index()];
-                if nested && name.as_str() == "make" {
-                    return Err(Unsupported("flat make"));
-                }
-                self.module_paths[prim.source.index()] =
-                    nested || matches!(self.source.view(*arg), View::Global { .. });
-            }
-        }
         let value = match primitive {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
@@ -713,6 +700,12 @@ impl State {
                     finished: Finished::True,
                 }));
             }
+            Primitive::Pjsx(jsx) => self.compile_jsx(&jsx, values),
+            Primitive::Pimport(source) => self.compile_import(&source),
+            Primitive::Pduprecord => self.duplicate_record(values[0]),
+            Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
+            // P: compile_primitive_js, Pawait. O(1): one owned J node.
+            Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
             Primitive::Pstringlength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::String)
             }
@@ -727,11 +720,7 @@ impl State {
             | Primitive::PjsObjectGet(_)
             | Primitive::PjsObjectSet(_)
             | Primitive::PjsFnMethod
-            | Primitive::Pjsx(_)
-            | Primitive::Pimport(_)
-            | Primitive::Pawait
-            | Primitive::Pduprecord
-            | Primitive::PrecordRest(_) => {
+            => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }
             Primitive::PextensionSlotEq => {
@@ -750,7 +739,7 @@ impl State {
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.
     /// O(s) to inspect the s statement slots, then O(1) conversion.
-    fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
+    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
             self.probe_leaf(cx, value)
@@ -773,8 +762,8 @@ mod tests {
     use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant};
 
     #[test]
-    fn primitive_resume_is_three_handles() {
-        assert_eq!(std::mem::size_of::<Prim>(), 12);
+    fn primitive_resume_is_two_handles() {
+        assert_eq!(std::mem::size_of::<Prim>(), 8);
         assert_eq!(std::mem::size_of::<ModuleConstants>(), 16);
         assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
     }
@@ -959,6 +948,43 @@ mod tests {
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
                 super::super::oracle_tests::compare(a, root);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod await_tests {
+    use super::*;
+    use crate::lambda::{LamLoc, arena::LamArena};
+
+    #[test]
+    fn ten_thousand_awaits_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = a.var(Ident::new("promise", 10, crate::ident::IdentFlags::NONE));
+        for _ in 0..10_000 { root = a.prim_raw(Primitive::Pawait, &[root], LamLoc::NONE); }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 10_001);
+        assert_eq!(state.sequence_steps, 10_000);
+        assert_eq!(state.primitive_steps, 20_000);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
+    #[test]
+    fn await_all_continuations_and_conditional_match_legacy() {
+        for conditional in [false, true] {
+            let mut a = LamArena::new();
+            let value = a.var(Ident::new("promise", 10, crate::ident::IdentFlags::NONE));
+            let awaited = a.prim_raw(Primitive::Pawait, &[value], LamLoc::NONE);
+            let root = if conditional {
+                let test = a.var(Ident::new("test", 11, crate::ident::IdentFlags::NONE));
+                let other = a.var(Ident::new("other", 12, crate::ident::IdentFlags::NONE));
+                a.if_(test, awaited, other)
+            } else { awaited };
+            super::super::oracle_tests::compare(a, root);
         }
     }
 }
