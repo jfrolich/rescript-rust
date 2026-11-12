@@ -1,0 +1,1 @@
+- CI checks that the playground's wasm crate compiles against the compiler's current API.
