@@ -1186,18 +1186,6 @@ pub fn collect_or_pattern_chain<'a>(arena: &'a ParseArena, pat: &'a Pattern) -> 
     result
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_operator_precedence() {
-        assert!(operator_precedence("*") > operator_precedence("+"));
-        assert!(operator_precedence("**") > operator_precedence("*"));
-        assert!(operator_precedence("&&") > operator_precedence("||"));
-    }
-}
-
 /// Recognize the two unguarded, nullary boolean cases in boolean order.
 /// Cost: at most four pattern/identifier reads; no loop or allocation.
 pub(crate) fn boolean_match_arms(arena: &ParseArena, cases: crate::parse_arena::CaseList) -> Option<(ExprIdx, ExprIdx)> {
@@ -1248,4 +1236,16 @@ pub(crate) fn single_record_binding(
         return None;
     }
     Some(binding)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_operator_precedence() {
+        assert!(operator_precedence("*") > operator_precedence("+"));
+        assert!(operator_precedence("**") > operator_precedence("*"));
+        assert!(operator_precedence("&&") > operator_precedence("||"));
+    }
 }

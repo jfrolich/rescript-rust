@@ -11520,6 +11520,7 @@ fn type_match_cases_batch_non_gadt<'a>(
 /// Type a conditional, including the two-case boolean match rule.
 /// Cost: one condition and at most two branch checks, then one typed node;
 /// no parsed node, list, lookup table or traversal is allocated here.
+#[allow(clippy::too_many_arguments)]
 fn type_conditional(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
@@ -11611,6 +11612,7 @@ fn type_conditional(
 }
 
 /// Type check match expression.
+#[allow(clippy::too_many_arguments)]
 fn type_match(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,

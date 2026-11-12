@@ -7415,17 +7415,14 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
     MAPPER_STEPS.with(|steps| steps.set(steps.get() + 1));
     let expr = arena.get_expr(idx);
     let loc = expr.pexp_loc;
-    match &expr.pexp_desc {
-        ExpressionDesc::Pexp_apply(apply) => {
-            if let Some((a, f)) = pipe_operands(arena, apply) {
-                let attrs = expr.pexp_attributes.clone();
-                rewrite_expr(a, arena);
-                rewrite_expr(f, arena);
-                let expanded = desugar_pipe(loc, &attrs, a, f, arena);
-                return expand(arena, idx, expanded);
-            }
-        }
-        _ => {}
+    if let ExpressionDesc::Pexp_apply(apply) = &expr.pexp_desc
+        && let Some((a, f)) = pipe_operands(arena, apply)
+    {
+        let attrs = expr.pexp_attributes.clone();
+        rewrite_expr(a, arena);
+        rewrite_expr(f, arena);
+        let expanded = desugar_pipe(loc, &attrs, a, f, arena);
+        return expand(arena, idx, expanded);
     }
     arena.mark_rewritten_expr_loc(loc);
 
