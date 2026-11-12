@@ -899,18 +899,18 @@ impl MemoryRecord {
 
     fn from_previous(package: &Package, previous: &PackageState) -> anyhow::Result<Self> {
         if !previous.modules.is_empty() {
-            if let Some(old) = open_existing(&path(package)) {
-                // Whole-record fallback can keep unchanged interfaces that
-                // are intentionally absent from interface_updates. Copy their
-                // pages into memory, never update the live database in place.
-                let mut record = Self::new(&PackageState::default(), &[])?;
-                record.conn.execute_batch("ROLLBACK")?;
-                let backup = rusqlite::backup::Backup::new(&old, &mut record.conn)?;
-                anyhow::ensure!(backup.step(-1)? == rusqlite::backup::StepResult::Done, "database snapshot busy");
-                drop(backup);
-                record.conn.execute_batch("BEGIN")?;
-                return Ok(record);
-            }
+            let old = open_existing(&path(package))
+                .ok_or_else(|| anyhow::anyhow!("previous database unavailable for whole-record snapshot"))?;
+            // Whole-record fallback can keep unchanged interfaces that
+            // are intentionally absent from interface_updates. Copy their
+            // pages into memory, never update the live database in place.
+            let mut record = Self::new(&PackageState::default(), &[])?;
+            record.conn.execute_batch("ROLLBACK")?;
+            let backup = rusqlite::backup::Backup::new(&old, &mut record.conn)?;
+            anyhow::ensure!(backup.step(-1)? == rusqlite::backup::StepResult::Done, "database snapshot busy");
+            drop(backup);
+            record.conn.execute_batch("BEGIN")?;
+            return Ok(record);
         }
         let meta = read_meta(package).unwrap_or_default();
         let runtime = meta.get(META_RUNTIME_KEY)
@@ -919,30 +919,99 @@ impl MemoryRecord {
     }
 
     pub(super) fn insert(&self, rows: &PackageState) -> anyhow::Result<()> {
-        debug_assert!(rows.partial);
-        apply_record_rows(&self.conn, &PackageState::default(), rows, "")
+        // Fresh batches only add rows. Do not build a difference against an
+        // empty record or prepare deletion statements for each completed module.
+        debug_assert!(rows.partial && rows.meta.is_empty() && rows.reads_updates.is_empty()
+            && rows.items_updates.is_empty() && rows.parse_warnings.is_empty());
+        let conn = &self.conn;
+        if !rows.sources.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlSources);
+            let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO sources (path, module) VALUES (?1, ?2)")?;
+            for (path, module) in &rows.sources {
+                stmt.execute(params![path.to_string_lossy(), module])?;
+            }
+        }
+        if !rows.encoded_reads.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlReads);
+            let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
+            for (module, data) in &rows.encoded_reads { stmt.execute(params![module, data])?; }
+        }
+        if !rows.encoded_items.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlItems);
+            let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
+            for (module, data) in &rows.encoded_items { stmt.execute(params![module, data])?; }
+        }
+        if !rows.interface_updates.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlInterfaces);
+            let mut core = conn.prepare_cached("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
+            for (module, interface) in &rows.interface_updates {
+                core.execute(params![module, interface.hash as i64, interface.core])?;
+                if let Some(extras) = &interface.extras {
+                    conn.prepare_cached("INSERT OR REPLACE INTO interface_extras (module, data) VALUES (?1, ?2)")?
+                        .execute(params![module, extras])?;
+                }
+            }
+        }
+        if !rows.modules.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlModules);
+            let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO modules
+                (module, js_confirmed_at, implementation_warnings, interface_warnings, interface_digest, imports)
+                VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
+            for (module, row) in &rows.modules {
+                stmt.execute(params![module, row.js_confirmed_at.map(nanos_from_time),
+                    row.implementation_warnings, row.interface_warnings,
+                    row.interface_digest.map(|digest| digest as i64), row.imports.as_ref().map(Imports::encode)])?;
+            }
+        }
+        if !rows.deps.is_empty() {
+            let _timer = RecordTimer::start(Phase::RecordSqlDeps);
+            let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO deps
+                (source, mtime, deps, gentype_annotations, gentype_declarations) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+            for (source, row) in &rows.deps {
+                stmt.execute(params![source, row.mtime, rows.encoded_deps.get(source).expect("encoded fresh dependencies"),
+                    row.gentype_annotations, row.gentype_declarations])?;
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn publish(self, package: &Package) -> anyhow::Result<()> {
         use std::io::Write;
+        let mut last = timing::enabled().then(std::time::Instant::now);
+        let mut checkpoints = Vec::new();
+        let mut checkpoint = |name| {
+            if let Some(start) = &mut last {
+                let now = std::time::Instant::now();
+                checkpoints.push((name, now.duration_since(*start)));
+                *start = now;
+            }
+        };
         publication_test_hook(package, "before-commit");
         self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')", [META_RECORD_COMPLETE])?;
         timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
+        checkpoint("commit");
         publication_test_hook(package, "after-commit");
         let image = timing::measure(Phase::RecordSerialize, || self.conn.serialize(rusqlite::DatabaseName::Main))?;
+        checkpoint("serialize");
+        let bytes = image.len();
         publication_test_hook(package, "after-serialize");
         let db = path(package);
         std::fs::create_dir_all(package.get_build_path())?;
         let mut temp = tempfile::NamedTempFile::new_in(package.get_build_path())?;
         timing::measure(Phase::RecordImageWrite, || temp.write_all(&image))?;
+        checkpoint("write");
         drop(image);
         drop(self);
+        checkpoint("close");
         publication_test_hook(package, "after-write");
         let _guard = timing::measure(Phase::RecordPublishLock, || lock_writer(&db))?;
+        checkpoint("lock");
         publication_test_hook(package, "after-lock");
         timing::measure(Phase::RecordRecover, || recover_before_replace(&db))?;
+        checkpoint("recover");
         publication_test_hook(package, "before-rename");
         timing::measure(Phase::RecordRename, || temp.persist(&db))?;
+        checkpoint("rename");
         publication_test_hook(package, "after-rename");
         // Compatibility with a killed writer using the incremental path's
         // external marker. This path never creates a marker of its own.
@@ -950,6 +1019,12 @@ impl MemoryRecord {
             Ok(()) => (),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
+        }
+        if !checkpoints.is_empty() {
+            let phases = checkpoints.iter().map(|(name, duration)|
+                format!("{name}_ms={:.3}", duration.as_secs_f64() * 1000.0))
+                .collect::<Vec<_>>().join(" ");
+            eprintln!("[store-publish] bytes={bytes} {phases}");
         }
         Ok(())
     }
@@ -995,7 +1070,7 @@ fn recover_before_replace(db: &Path) -> anyhow::Result<()> {
 // Apply a batch inside the caller's transaction. Streaming batches are partial;
 // the file-backed incremental path also uses deletions against its prior record.
 fn apply_record_rows(
-    tx: &Connection, previous: &PackageState, new: &PackageState, package_name: &str,
+    tx: &Connection, previous: &PackageState, new: &PackageState, _package_name: &str,
 ) -> anyhow::Result<()> {
     let partial = new.partial;
     // Encode the rows to set up front, in parallel: the transaction below
@@ -1115,7 +1190,7 @@ fn apply_record_rows(
                             imports
                         ])?;
                     #[cfg(debug_assertions)]
-                    if std::env::var("RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE").ok().as_deref() == Some(package_name) {
+                    if std::env::var("RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE").ok().as_deref() == Some(_package_name) {
                         // Spill partial updates before the other modules' rows.
                         tx.cache_flush()?;
                         std::process::abort();
@@ -1333,6 +1408,8 @@ mod tests {
         match std::env::var("RESCRIPT_PUBLICATION_TEST_ROLE").unwrap().as_str() {
             "writer" => {
                 let (_guard, mut conn) = open_for_write(&package).unwrap();
+                let mode = std::env::var("RESCRIPT_PUBLICATION_TEST_JOURNAL").unwrap();
+                conn.pragma_update(None, "journal_mode", mode).unwrap();
                 let tx = conn.transaction().unwrap();
                 tx.execute("UPDATE modules SET js_confirmed_at = 99", []).unwrap();
                 std::fs::write(Path::new(&root).join("writer-ready"), b"").unwrap();
@@ -1351,6 +1428,12 @@ mod tests {
 
     #[test]
     fn publisher_waits_for_writer_and_recovers_its_journal_before_rename() {
+        for mode in ["DELETE", "WAL"] {
+            publication_after_killed_writer(mode);
+        }
+    }
+
+    fn publication_after_killed_writer(mode: &str) {
         use std::process::{Command, Stdio};
         let dir = TempDir::new().unwrap();
         let package = test_package(dir.path());
@@ -1359,6 +1442,7 @@ mod tests {
             .args(["--exact", "build::state_db::tests::publication_process", "--nocapture"])
             .env("RESCRIPT_PUBLICATION_TEST_ROOT", dir.path())
             .env("RESCRIPT_PUBLICATION_TEST_ROLE", role)
+            .env("RESCRIPT_PUBLICATION_TEST_JOURNAL", mode)
             .stdin(Stdio::piped()).spawn().unwrap();
         let wait_ready = |name: &str| {
             let start = std::time::Instant::now();
@@ -1385,6 +1469,7 @@ mod tests {
         }
         assert_eq!(read(&package).as_ref(), Some(&state(23, None)));
         assert!(!PathBuf::from(format!("{}-journal", path(&package).display())).exists());
+        assert!(!PathBuf::from(format!("{}-wal", path(&package).display())).exists());
     }
 
     #[test]

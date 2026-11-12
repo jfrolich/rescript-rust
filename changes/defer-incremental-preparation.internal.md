@@ -1,1 +1,1 @@
-- Report build results before waiting for incremental-store preparation, and reject interrupted store writes.
+- Stream fresh-build incremental-store rows into private in-memory SQLite databases and atomically publish each completed package, preserving sparse incremental updates and recovery from interrupted writers.
