@@ -8,12 +8,14 @@ Builds PROJECT from clean with BASE, then with CANDIDATE, and compares:
                node identity or identifier stamps
   diagnostics  every warning and error of the compiler logs, with its
                location, per source file and in order
-  javascript   every file the build generates outside `lib/bs` and
-               `lib/ocaml`: JavaScript, genType output, source maps
+  javascript   every file the build generates outside `lib/rescript`,
+               `lib/bs` and `lib/ocaml`: JavaScript, genType output, source maps
 
 It prints the first differences of each kind and exits with 1 when there is
 any, 0 when there is none, 2 when it could not run. It works on any ReScript
-project.
+project. Compiler logs are read from `lib/rescript` (or the older `lib/bs`);
+a build with no compiler log is an error, not an empty diagnostics comparison.
+Signature dumps use an explicit temporary `--dump-dir`, outside the build layout.
 
   scripts/compare_checker_builds.py PROJECT BASE_RESCRIPT CANDIDATE_RESCRIPT
 
@@ -97,7 +99,7 @@ def walk(project):
 def is_build_internal(relative):
     parts = relative.parts
     return any(
-        parts[index] == "lib" and parts[index + 1] in ("bs", "ocaml")
+        parts[index] == "lib" and parts[index + 1] in ("rescript", "bs", "ocaml")
         for index in range(len(parts) - 1)
     )
 
@@ -114,7 +116,10 @@ def generated_candidates(project):
 
 
 def compiler_logs(project):
-    return [path for path in walk(project) if path.name == ".compiler.log" and path.parent.name == "bs"]
+    return [path for path in walk(project)
+            if path.name == ".compiler.log"
+            and path.parent.name in ("rescript", "bs")
+            and path.parent.parent.name == "lib"]
 
 
 def diagnostics_of(project, text):
@@ -202,7 +207,12 @@ class Side:
 
         for path in sorted(self.sig_directory.rglob("*.sig")) if with_signatures else []:
             self.signatures[str(path.relative_to(self.sig_directory))[: -len(".sig")]] = path
-        for log in compiler_logs(self.project):
+        logs = compiler_logs(self.project)
+        if not logs:
+            fail(f"{self.name}: build produced no compiler log under {self.project}; "
+                 "expected lib/rescript/.compiler.log or lib/bs/.compiler.log "
+                 "in a ReScript package")
+        for log in logs:
             text = log.read_text(errors="replace")
             for source, blocks in diagnostics_of(self.project, text).items():
                 self.diagnostics.setdefault(source, []).extend(blocks)
