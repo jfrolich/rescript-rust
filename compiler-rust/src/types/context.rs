@@ -5198,6 +5198,142 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
+    fn frozen_arrows(ctx: &TypeContext) -> [TypeExprRef; 4] {
+        use super::super::shared_store::{SharedGraphParts, SharedGraphPayloads, SharedGraphSizes, shared_ref};
+        let sizes = SharedGraphSizes { nodes: 4, arg_items: 2, ..Default::default() };
+        let base = ctx.store.shared_pool().publish(sizes, |base| {
+            let var = shared_ref(base, 0);
+            let int = shared_ref(base, 1);
+            SharedGraphParts {
+                nodes: vec![
+                    (TypeDesc::Tvar(None), GENERIC_LEVEL),
+                    (TypeDesc::Tconstr {
+                        path: Path::pident(Ident::create_persistent("int")),
+                        args: TypeRefList::EMPTY,
+                        abbrev: AbbrevMemoRef::nil(),
+                    }, GENERIC_LEVEL),
+                    (TypeDesc::Tarrow {
+                        args: TypeArgList::from_parts(shared_ref(base, sizes.args_start()).0, 1),
+                        ret: int,
+                    }, GENERIC_LEVEL),
+                    (TypeDesc::Tarrow {
+                        args: TypeArgList::from_parts(shared_ref(base, sizes.args_start() + 1).0, 1),
+                        ret: int,
+                    }, GENERIC_LEVEL),
+                ],
+                payloads: SharedGraphPayloads {
+                    args: vec![TypeArg::new(ArgLabel::Nolabel, var), TypeArg::new(ArgLabel::Nolabel, int)],
+                    ..Default::default()
+                },
+                layouts: Vec::new(),
+                locations: Default::default(),
+                carried: Default::default(),
+            }
+        }).unwrap();
+        std::array::from_fn(|i| shared_ref(base, i))
+    }
+
+    fn assert_no_frozen_writes(ctx: &TypeContext) {
+        assert!(!ctx.frozen_writes.any.get());
+        assert!(ctx.frozen_writes.descs.borrow().is_empty());
+        assert!(ctx.frozen_writes.levels.borrow().is_empty());
+        assert!(ctx.frozen_writes.memos.borrow().is_empty());
+        assert!(ctx.frozen_writes.row_fields.borrow().is_empty());
+        assert!(ctx.frozen_writes.mutabilities.borrow().is_empty());
+    }
+
+    #[test]
+    fn type_mutation_size_stays_40_bytes() {
+        assert_eq!(std::mem::size_of::<TypeMutation>(), 40);
+    }
+
+    #[test]
+    fn frozen_read_does_not_probe_when_nothing_was_written() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let nodes = frozen_arrows(&ctx);
+        for i in 0..1_000 {
+            ctx.get_desc(nodes[i % nodes.len()]);
+            assert_eq!(ctx.get_level(nodes[i % nodes.len()]), GENERIC_LEVEL);
+        }
+        assert_eq!(ctx.frozen_writes.probes.get(), 0);
+        assert_no_frozen_writes(&ctx);
+        // Positive control: the counter really sees exception-table probes.
+        ctx.set_level(nodes[0], 1);
+        ctx.get_level(nodes[0]);
+        assert_eq!(ctx.frozen_writes.probes.get(), 1);
+        let local = ctx.new_var(None);
+        ctx.get_level(local);
+        ctx.get_desc(local);
+        assert_eq!(ctx.frozen_writes.probes.get(), 1);
+    }
+
+    #[test]
+    fn matches_on_frozen_types_leaves_no_exception() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let [var, _, generic, concrete] = frozen_arrows(&ctx);
+        // A rigid 'a cannot match int, but int can match an instantiable 'a.
+        assert!(!super::super::ctype::matches(&ctx, &Env::empty(), generic, concrete));
+        assert_no_frozen_writes(&ctx);
+        assert!(super::super::ctype::matches(&ctx, &Env::empty(), concrete, generic));
+        assert_no_frozen_writes(&ctx);
+        assert!(matches!(*ctx.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert_eq!(ctx.get_level(var), GENERIC_LEVEL);
+    }
+
+    #[test]
+    fn lasting_link_on_frozen_node_is_seen_only_here() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let [var, int, _, _] = frozen_arrows(&ctx);
+        let other = TypeContext::new(Arc::new(IdGenerator::new()));
+        super::super::ctype::link_type(&ctx, var, int);
+        assert_eq!(ctx.repr(var), int);
+        assert_eq!(other.repr(var), var);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_desc(var, TypeDesc::Tnil);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(ctx.repr(var), int);
+        assert!(ctx.frozen_writes.any.get());
+        assert_eq!(ctx.frozen_writes.descs.borrow().len(), 1);
+        assert_no_frozen_writes(&other);
+    }
+
+    #[test]
+    fn frozen_mutabilities_restore_absence_and_existing_entries() {
+        use super::super::asttypes::MutableFlag;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let cell = MutabilityRef::new_persistent(MutableFlag::Immutable);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_mutability(cell, FieldMutability::Value(MutableFlag::Mutable));
+        ctx.with_copy_session(|| {
+            let copy = ctx.dup_mutability(cell);
+            assert_eq!(ctx.mutability_ref_repr(cell), copy);
+            ctx.with_copy_session(|| { ctx.dup_mutability(cell); });
+            assert_eq!(ctx.mutability_ref_repr(cell), copy);
+        });
+        assert_eq!(ctx.mutability_repr(cell), MutableFlag::Mutable);
+        ctx.restore_type_state(snapshot);
+        assert_no_frozen_writes(&ctx);
+        ctx.with_copy_session(|| { ctx.dup_mutability(cell); });
+        assert_no_frozen_writes(&ctx);
+        assert_eq!(ctx.mutability_repr(cell), MutableFlag::Immutable);
+    }
+
+    #[test]
+    fn store_build_writes_do_not_create_exceptions() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        ctx.build_in_store(|| {
+            let ty = ctx.new_generic_var(None);
+            let row = ctx.alloc_row_field(Some(RowField::Rabsent));
+            let memo = ctx.alloc_abbrev_nil();
+            ctx.set_desc(ty, TypeDesc::Tnil);
+            ctx.set_level(ty, 12);
+            ctx.clear_row_field(row);
+            ctx.write_abbrev(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+            assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mlink(_)));
+            assert_no_frozen_writes(&ctx);
+        });
+    }
+
     #[test]
     fn module_signature_cache_separates_scope_keys() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
@@ -5496,7 +5632,7 @@ mod tests {
     }
 
     #[test]
-    fn store_access_and_overlay_backtracking() {
+    fn store_access_and_exception_backtracking() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let local = ctx.new_var(None);
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
@@ -5516,7 +5652,14 @@ mod tests {
         assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
         assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        let nested = ctx.snapshot_type_state();
+        ctx.clear_row_field(row);
+        ctx.restore_type_state(nested);
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
         ctx.restore_type_state(snapshot);
+        assert!(ctx.frozen_writes.row_fields.borrow().is_empty());
+        assert_eq!(ctx.frozen_writes.memos.borrow().len(), 1);
+        assert!(ctx.frozen_writes.any.get());
         // Memo contents are not part of the trail (btype.ml:692-700); store
         // memos stay in this compilation's exception table.
         assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
@@ -5727,7 +5870,12 @@ mod tests {
         let middle = ctx.new_link(target);
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
         super::super::ctype::link_type(&ctx, stored, middle);
+        let snapshot = ctx.snapshot_type_state();
+        let entries = ctx.mutation_journal.borrow().entries.len();
         assert_eq!(ctx.repr(stored), target);
+        assert_eq!(ctx.mutation_journal.borrow().entries.len(), entries);
+        assert_eq!(ctx.frozen_writes.descs.borrow().len(), 1);
+        ctx.restore_type_state(snapshot);
         assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == middle));
         assert!(matches!(ctx.store.desc(stored), TypeDesc::Tnil));
     }
