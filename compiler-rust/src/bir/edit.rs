@@ -15,8 +15,17 @@ impl Bir {
     /// Attach a finalized lowering statement list without copying its elements
     /// a second time. Bulk construction owns each detached statement once.
     pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
+        self.attach_list(Node::block_list(list), list)
+    }
+
+    /// [`Self::block_from_list`] for an explicit block statement (B:1225).
+    pub(crate) fn explicit_block_from_list(&mut self, list: ListId) -> NodeId {
+        self.attach_list(Node::explicit_block_list(list), list)
+    }
+
+    fn attach_list(&mut self, node: Node, list: ListId) -> NodeId {
         assert!(self.bulk, "statement-stack blocks require bulk construction");
-        let id = self.allocate(Node::block_list(list));
+        let id = self.allocate(node);
         for i in 0..self.lists.get(list).len() {
             let child = self.lists.get(list)[i];
             self.node(child);

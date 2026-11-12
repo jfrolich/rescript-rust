@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 711,
-      "units": 711,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 718,
-      "units": 718,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 711,
-      "units": 711,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 711,
-      "units": 711,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 711,
-      "units": 711,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
@@ -96,64 +96,64 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 711,
-      "units": 711,
+      "identical": 721,
+      "units": 721,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 40,
+      "identical": 56,
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
-        "external": 208,
+        "await": 8,
+        "external": 248,
         "flat make": 8,
-        "if": 87,
-        "jsx": 16,
+        "jsx": 24,
         "let rec": 8,
-        "loop": 9,
+        "loop": 16,
         "record copy": 32,
-        "static catch": 8,
+        "static catch": 16,
         "switch": 48,
         "try": 16
       }
     },
     "runtime": {
-      "identical": 61,
+      "identical": 72,
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
+        "assign": 1,
         "await": 2,
-        "external": 13,
-        "if": 20,
+        "external": 19,
         "let rec": 2,
-        "loop": 2,
+        "loop": 3,
+        "string switch": 1,
         "switch": 3,
         "try": 10
       }
     },
     "tests/tests": {
-      "identical": 157,
+      "identical": 181,
       "shared_catch_only": 1,
       "units": 721,
       "unsupported": {
         "assign": 9,
         "await": 13,
-        "external": 289,
+        "external": 322,
         "flat make": 3,
-        "if": 85,
         "import": 3,
-        "jsx": 4,
-        "let rec": 50,
-        "loop": 15,
+        "jsx": 5,
+        "let rec": 53,
+        "loop": 19,
         "record copy": 3,
         "record rest": 2,
         "shared Lambda subtree with binder": 1,
-        "static catch": 11,
-        "string switch": 8,
-        "switch": 57,
-        "try": 11
+        "static catch": 14,
+        "string switch": 10,
+        "switch": 70,
+        "try": 13
       }
     }
   }
