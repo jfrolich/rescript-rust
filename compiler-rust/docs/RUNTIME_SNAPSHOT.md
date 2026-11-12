@@ -1,9 +1,9 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1 implemented. Section A records the baseline before S1. Sections B
-through E describe the full staged design; runtime changes beyond the shared
-container, verification memoisation, snapshot commands and watch integration
-remain future stages. Section F.1 records S1's implementation and evidence.
+Status: S1 implemented; S2/S3 implementation and local evidence are recorded
+below, with final CI validation pending. Section A is historical, not a
+statement of the current layout. Snapshot commands and watch integration
+remain future stages. Sections F.1–F.3 record implementation and evidence.
 
 ## 0. Summary
 
@@ -281,8 +281,9 @@ snapshot fails.
 
 ### B.4 Paths
 
-The snapshot stores paths as the producer saw them, plus the recorded root.
-The consumer rewrites the prefix `recorded root` to the package's actual root
+The producer normalizes paths to `@rescript/runtime` or `@rescript/belt` and
+records that logical root, never its checkout path. The consumer rewrites the
+prefix `recorded root` to the package's actual root
 in the three places a path is kept: `PortablePersStruct::ps_filename`,
 `InMemoryModuleInfo::source_path`, and the file-name tables of the signature
 and of `CmjExportLambdas` when they are decoded. `package_name`,
@@ -304,13 +305,28 @@ incremental store, and it is the test that proves the rebasing complete.
 | Package options | the flags the package was compiled with | part of the sources digest, taken from the parsed configuration, not the file's bytes. A runtime directory without `rescript.json` (the published layout, D1) is accepted as having the producer's options |
 | Root options that reach a dependency | Belt's output | module format and suffix: any, through the template. In-source: any, proven at production. Source maps, dump flags: not supported, fall back (section D). JSX settings and `LetUnwrap`: proven irrelevant at production by a second compile with them set |
 
-Verification cost: the digest reads and hashes 857 KB for the runtime, about
-2.8 M instructions measured, and about 600 KB more for Belt. Estimated under
-2 ms warm; the wall time was not measured on its own. To keep incremental
-builds below that, the root package's database memoises
-`(path, size, modification time of each source) -> verified digest`, the key
-`RuntimeStore::key` already computes, so an incremental build only calls
-`stat`.
+Verification cost: a clean one-module fixture with Belt measured 4,165,175
+instructions in runtime BLAKE3 updates and 2,427,067 in Belt BLAKE3 updates
+(Callgrind, x86-64), exceeding the 5 M threshold for retaining the memo.
+Runtime registration added 69,796 inclusive instructions; the whole runtime
+precompile function cost 5,692,270 and Belt verification 3,312,620. These are
+nested measurements, not values to sum indiscriminately.
+
+The root build directory now holds `snapshot-runtime.verified` and
+`snapshot-belt.verified`, beside `rescript.sqlite`. Each key covers the compiler
+identity, expected embedded sources/options digest, ordered full source and
+configuration paths, sizes, and nanosecond modification times. Missing optional
+interfaces/configurations have distinct markers. A hit performs one stat per
+listed path and no source-file reads. Failed metadata reads do not reuse a memo;
+failed verification never writes one. Writes are atomic and best-effort. Clean
+removes the memo with the build directory.
+
+Soundness has the same boundary as the incremental planner: source files are
+stable during the build, and an edit changes size or modification time. This is
+not a cryptographic guarantee against edits that deliberately preserve metadata.
+There is no dense compiler handle for filesystem paths, so a fixed-size hash is
+used for the memo key. Unchanged projects without Belt already return before
+runtime verification; they gain no runtime verification saving.
 
 ### B.6 Loading
 
@@ -673,6 +689,30 @@ runtime sources (and on Belt verification when Belt is present).
   `RESCRIPT_SNAPSHOT=require`.
 
 ### F.3 S3: index lookup, memoised verification, cheaper fallback
+
+#### Code/document corrections found by SN2
+
+- Current published runtime sources are flat `*.res`/`*.resi`, already listed in
+  `package.json`; they are not read from `lib/ocaml`. `rescript.json` is now also
+  published, and a missing configuration uses the producer's parsed defaults.
+- The embedded runtime loop used `register_stored_parts`, not
+  `register_stored_static`. That loop is deleted. The latter API remains for
+  non-snapshot stored-interface callers; from-source runtime storage still has
+  its existing per-module registration path.
+- The registry originally held only one snapshot index: attaching runtime would
+  replace Belt. It now retains both package indexes, without per-module entries.
+- Filenames were also hashed into declaration allocation identities. Source
+  scopes now use the filename with extension, and imported scopes use the
+  qualified persistent module name, keeping namespaces separate but allowing
+  relocation. Every runtime stored core is compared against source compilation
+  in a copied runtime with no configuration file.
+- Rebasing must not eagerly decode unused raw signatures. A stored unit retains
+  its prefix mapping and applies it to filename side tables during the existing
+  signature decode. Storage materializes rebased bytes only when requested.
+- Whole-executable `strings` also finds Rust diagnostic/build metadata. The
+  invariant test searches the entire embedded container, where there are zero
+  checkout-path matches; it does not claim to remove unrelated Rust paths.
+
 
 D6 inspection at SN2: `runtime_compiler_options` already sets
 `skip_js_render: true`. In
