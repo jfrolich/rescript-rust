@@ -208,3 +208,42 @@ mod dict_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+    use crate::lambda::{arena::LamArena, lam_constant::Constant as C, lam_primitive::{Primitive as P, Mutable}, LamLoc, TagInfo};
+
+    #[test]
+    fn finished_output_releases_unreachable_tail() {
+        for sequence in [false, true] {
+            let mut a = LamArena::new();
+            let value = a.const_(C::JsNull);
+            let raised = a.prim_raw(P::Praise, &[value], LamLoc::NONE);
+            let tail = a.const_(C::JsTrue);
+            let id = Ident::new("value", 10, crate::ident::IdentFlags::NONE);
+            let root = if sequence { a.seq_raw(raised, tail) } else { a.let_(LetKind::Strict, id, raised, tail) };
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn block_mutability_survives_export_and_shared_passes() {
+        for mutable in [Mutable::Mutable, Mutable::Immutable] {
+            let mut a = LamArena::new();
+            let one = a.const_(C::JsTrue);
+            let two = a.const_(C::JsNull);
+            let inner = a.prim_raw(P::Pmakeblock(TagInfo::Tuple, mutable), &[one, two], LamLoc::NONE);
+            let id = Ident::new("Module", 10, crate::ident::IdentFlags::NONE);
+            let block = a.prim_raw(P::Pmakeblock(TagInfo::Module(vec!["inner".into()]), Mutable::Immutable), &[inner], LamLoc::NONE);
+            let value = a.var(id);
+            let exports = a.prim_raw(P::Pmakeblock(TagInfo::ModuleExport(vec![id]), Mutable::Immutable), &[value], LamLoc::NONE);
+            let root = a.let_(LetKind::Strict, id, block, exports);
+            let mut compiler = crate::lambda::lam_compile::LambdaCompiler::new();
+            let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+            let check = check.unwrap();
+            assert!(matches!(check, crate::bir::shadow::LowerCheck::Supported(_)));
+            crate::bir::shadow::check_lower(check, "Block.res", false).unwrap();
+        }
+    }
+}

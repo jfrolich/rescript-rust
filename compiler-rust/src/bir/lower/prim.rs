@@ -142,13 +142,13 @@ impl State {
             Primitive::Pmakeblock(tag, mutable) => {
                 let info = self.arena.js_info(crate::bir::JsPayload::Block(tag));
                 plain::node(&mut self.arena, View::JBlockLit { values: &values, info },
-                    if matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable) { 0 } else { 1 })
+                    if matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable) { 1 } else { 0 })
             }
             Primitive::Pmakelist => {
                 let info = self.arena.js_info(crate::bir::JsPayload::Block(crate::lambda::TagInfo::constructor("::", 1)));
-                plain::node(&mut self.arena, View::JBlockLit { values: &values, info }, 0)
+                plain::node(&mut self.arena, View::JBlockLit { values: &values, info }, 1)
             }
-            Primitive::Pmakearray => plain::node(&mut self.arena, View::JArray { values: &values }, 0),
+            Primitive::Pmakearray => plain::node(&mut self.arena, View::JArray { values: &values }, 1),
             Primitive::Pfield(idx, info) => self.primitive_field(idx, info, values[0]),
             Primitive::Psetfield(idx, info) => self.primitive_set_field(idx, info.name(), values[0], values[1]),
             Primitive::Pobjtag => {

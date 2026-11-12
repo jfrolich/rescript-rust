@@ -63,9 +63,25 @@ pub(super) fn lower(
                 out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }
+        if out.finished == Finished::True {
+            if let Some(next) = next {
+                // C: compile_expr Let keeps the body's value after a finished
+                // declaration. The shared export coercion still needs that block.
+                let tail = state.probe(Cx::value(), next)?;
+                let mut tail = state.realize(Cx::value(), tail);
+                let value = if matches!(cx.cont, Cont::Declare(_, _)) { tail.value.take() } else { None };
+                out = state.append_outputs(out, tail, None);
+                out.value = value;
+                if let Some(first) = accumulated.take() {
+                    let value = out.value;
+                    out = state.append_outputs(first, out, value);
+                }
+                return Ok(state.complete(Cx::value(), Probed::Out(out)));
+            }
+        }
         let value = out.value;
         let out = match accumulated.take() {
-            Some(first) => state.statements.append(first, out, value),
+            Some(first) => state.append_outputs(first, out, value),
             None => out,
         };
         if let Some(next) = next {

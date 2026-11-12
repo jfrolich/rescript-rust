@@ -362,6 +362,17 @@ impl State {
         self.free = free;
         out
     }
+    /// K0: append_output drops the tail of finished output. Release its J
+    /// ownership as well as truncating its statement run.
+    fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+        if first.finished == Finished::True {
+            let discarded: Vec<_> = self.statements.statements(second.stmts).collect();
+            for statement in discarded { self.arena.release(statement); }
+            if let Some(value) = second.value { self.arena.release(value); }
+        }
+        self.statements.append(first, second, value)
+    }
+
     /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
     /// in a plain sentinel SExp removed before export extraction and coercion.
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {

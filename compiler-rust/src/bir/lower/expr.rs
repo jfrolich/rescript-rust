@@ -140,10 +140,19 @@ impl State {
                     Probed::Out(out) => out,
                     Probed::Free(_) => unreachable!("binding was realized before body"),
                 });
-                let body = self.realize(cx, children.next().expect("let body"));
+                let mut body = self.realize(cx, children.next().expect("let body"));
+                if first.as_ref().is_some_and(|first| first.finished == Finished::True)
+                    && matches!(cx.cont, Cont::Value(_)) {
+                    // C: compile_expr Let retains the unreachable body's value,
+                    // unlike compile_effect_output and append_effect_output.
+                    let value = body.value.take();
+                    let mut out = self.append_outputs(first.unwrap(), body, None);
+                    out.value = value;
+                    return Probed::Out(out);
+                }
                 let value = body.value;
                 Probed::Out(match first {
-                    Some(first) => self.statements.append(first, body, value),
+                    Some(first) => self.append_outputs(first, body, value),
                     None => body,
                 })
             }
@@ -152,6 +161,9 @@ impl State {
                     unreachable!("head realized before tail")
                 };
                 let mut second = self.realize(cx, children.next().expect("sequence tail"));
+                if first.finished == Finished::True {
+                    return Probed::Out(self.append_outputs(first, second, None));
+                }
                 if let Some(value) = first.value.take() {
                     if !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
@@ -167,7 +179,7 @@ impl State {
                     }
                 }
                 let value = second.value;
-                let out = self.statements.append(first, second, value);
+                let out = self.append_outputs(first, second, value);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
                     self.probe_leaf(cx, value)
