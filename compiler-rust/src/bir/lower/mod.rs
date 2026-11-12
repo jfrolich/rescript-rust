@@ -273,10 +273,20 @@ impl SourceProbe {
 
 /// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
 /// SExp carrying Out::value for the migration exporter, not an emitted effect.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct SwitchStats {
+    pub source_visits: usize,
+    pub fingerprint_visits: usize,
+    pub comparisons: usize,
+    pub compared_pairs: usize,
+    pub location_visits: usize,
+}
+
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
     pub finished: Finished,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    pub switch_stats: SwitchStats,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
@@ -463,6 +473,13 @@ impl State {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             finished: out.finished,
             dynamic_imports: self.dynamic_imports,
+            switch_stats: SwitchStats {
+                source_visits: self.source_steps,
+                fingerprint_visits: self.switch_visits,
+                comparisons: self.switch_comparisons,
+                compared_pairs: self.switch_compared,
+                location_visits: self.location_steps,
+            },
         }
     }
 }
