@@ -13,8 +13,18 @@
 
 set -uo pipefail
 
+PROJECT_ROOT=$(cd "$(dirname "$0")/.."; pwd -P)
+RUST_TARGET="${RUST_TARGET:-debug}"
+PARITY_PARSE_ONLY=1 source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_parse_printer_args "$@" || exit $?
+set -- "${PARITY_ARGS[@]}"
+if [[ "$PARITY_JS_PRINTER" == oxc && "${PARITY_PRINTER_INNER:-0}" != 1 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+    parity_run_oxc_suite "gentype" "$@"
+    exit $?
+fi
+
 if [[ $# -ne 0 ]]; then
-    echo "Usage: $0" >&2
+    echo "Usage: $0 [--printer legacy|oxc] [--record]" >&2
     echo "Runs all GenType output parity suites: react example, stdlib-no-shims, and Tella." >&2
     exit 2
 fi

@@ -1,0 +1,1 @@
+- Add opt-in oxc parity suites with batched JavaScript comparison, per-corpus emission coverage ratchets, and an external-application comparison mode; default suites and source-map output remain on the legacy printer.

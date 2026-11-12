@@ -96,6 +96,55 @@ impl PrinterStats {
         }
     }
 
+    /// Opt-in per-output evidence for build-level parity coverage. Immutable
+    /// outcomes prevent repeated invocations from hiding an earlier fallback.
+    pub(crate) fn report_output(
+        &self,
+        result: &Result<(String, Option<String>), Unsupported>,
+        source: Option<&std::path::Path>,
+        output: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        use std::hash::{Hash, Hasher};
+        let Some(directory) = std::env::var_os("RESCRIPT_JS_PRINTER_STATS") else {
+            return Ok(());
+        };
+        let Some(output) = output else {
+            return Ok(());
+        };
+        let absolute = |p: &std::path::Path| -> std::io::Result<std::path::PathBuf> {
+            Ok(if p.is_absolute() {
+                p.into()
+            } else {
+                std::env::current_dir()?.join(p)
+            })
+        };
+        let output = absolute(output)?;
+        let source = source.map(absolute).transpose()?;
+        let reason = result.as_ref().err().map(|e| e.0);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        output.hash(&mut hash);
+        reason.hash(&mut hash);
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join(format!("{:016x}.json", hash.finish()));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "source": source, "output": output, "emitted": result.is_ok(), "unsupported": reason,
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Read counters without resetting them.
     pub fn snapshot(&self) -> Coverage {
         self.coverage

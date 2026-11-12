@@ -1,0 +1,39 @@
+{
+  "gentype-example": {
+    "emitted": 150,
+    "outputs": 166,
+    "unsupported": {
+      "JSX": 4,
+      "string concatenation association": 12
+    }
+  },
+  "gentype-stdlib": {
+    "emitted": 1,
+    "outputs": 1,
+    "unsupported": {}
+  },
+  "runtime": {
+    "emitted": 208,
+    "outputs": 226,
+    "unsupported": {
+      "delete call syntax": 2,
+      "nullish comparison rewrite": 2,
+      "optional block helper": 10,
+      "string concatenation association": 4
+    }
+  },
+  "tests/tests": {
+    "emitted": 628,
+    "outputs": 711,
+    "unsupported": {
+      "JSX": 11,
+      "method function": 3,
+      "nested arrow expression body": 7,
+      "nullish comparison rewrite": 8,
+      "optional block helper": 22,
+      "raw literal expression statement elision": 1,
+      "record rest": 2,
+      "string concatenation association": 29
+    }
+  }
+}
