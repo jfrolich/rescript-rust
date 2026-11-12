@@ -684,3 +684,26 @@ fn a_return_conditional_does_not_fold_over_a_statement_form() {
     let root = a.if_(x, branch, two);
     compare(a, root);
 }
+
+#[test]
+fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument() {
+    // A:28 delay_safe reads C:404 `assignable`, the targets of level-L
+    // assignments: the temporary of the first argument is passed as it is.
+    use crate::lambda::lam_primitive::Primitive as P;
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    let mut a = LamArena::new();
+    let arg = |a: &mut LamArena, name: &str, stamp: i32| {
+        let test = a.var(Ident::new(name, stamp, IdentFlags::NONE));
+        let thrown = a.const_(C::Int { i: stamp, comment: None });
+        let yes = a.prim_raw(P::Praise, &[thrown], LamLoc::NONE);
+        let value = a.const_(C::Int { i: stamp + 1, comment: None });
+        let no = a.prim_raw(P::PinitMod, &[value], LamLoc::NONE);
+        a.if_(test, yes, no)
+    };
+    let first = arg(&mut a, "x", 10);
+    let second = arg(&mut a, "y", 20);
+    let f = a.var(Ident::new("f", 30, IdentFlags::NONE));
+    let info = ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE };
+    let root = a.apply_raw(f, &[first, second], info);
+    compare(a, root);
+}

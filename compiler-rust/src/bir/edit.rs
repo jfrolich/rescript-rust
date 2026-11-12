@@ -397,6 +397,13 @@ impl Bir {
         if let View::Assign { var, .. } = self.view(id) {
             self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
         }
+        // The lowering's arena keeps `ASSIGNED` as level L recorded it
+        // (C:404 `assignable`, the targets of L assignments): a result
+        // temporary or handler parameter the lowering assigns stays
+        // delay-safe (A:28), as it is for the legacy lowering.
+        if self.js_scope.is_some() {
+            return changed;
+        }
         if let View::JBin { left, .. } = self.view(id) {
             if self.node(id).aux() == crate::js_ir::op::BinOp::Eq as u16 {
                 if let View::Var { var } = self.view(left) {
