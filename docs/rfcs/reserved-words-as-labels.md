@@ -1,12 +1,13 @@
-# RFC: Reserved words as record field names, argument labels and JSX props
+# RFC: Reserved words as field names, argument labels, variant tags and JSX names
 
 Status: draft, not yet posted.
 
 ## Summary
 
 Allow a reserved word (`type`, `open`, `in`, `as`, `for`, `module`, ...) wherever
-the grammar expects a **label**: a record field name, a labelled-argument name
-or a JSX prop name.
+the grammar expects a **label** (a record field name, a labelled-argument name
+or a JSX prop name), a **polymorphic variant tag** or a **lowercase JSX tag
+name**.
 
 ```rescript
 type input = {type: string, mutable open: bool, in?: int}
@@ -24,6 +25,9 @@ let isText = input =>
 let button = (~type as kind, ~for as target=?) => ...
 let submit = button(~type="submit")
 let el = <input type="text" />
+
+type token = [#type | #module | #if]
+let icon = <svg> <switch> ... </switch> </svg>
 ```
 
 Reserved words stay reserved wherever a name is **bound or looked up**: as a
@@ -77,6 +81,13 @@ adding a keyword would only affect variables of that name.
 `<div data-type="a" />`, `<label aria-for="x" />` and `<div data-open />` are
 rejected today with "JSX identifier cannot end with a hyphen", because the
 segment after the hyphen is scanned as a keyword.
+
+### Variant tags and JSX elements have the same restriction
+
+A polymorphic variant that mirrors a JavaScript string union cannot contain
+`#type`, `#module`, `#if` or `#true`; these have to be written `#"type"`. The
+SVG element `<switch>` cannot be written at all without the escape
+(`<\"switch">`), although JSX in JavaScript accepts it.
 
 ### The compiler already supports these names
 
@@ -138,10 +149,12 @@ keyword `type` as a record field name", and recovers by building a field named
 ### The rule
 
 > A reserved word is reserved only where a name is bound or looked up as a
-> variable, type or module. Where the grammar expects a label, any
-> identifier-shaped word is a name.
+> variable, type or module. Where the grammar expects a label, a polymorphic
+> variant tag or a lowercase JSX tag name, any identifier-shaped word is a
+> name.
 
-"Reserved word" means the 28 word-shaped keywords of `Res_token.keyword_table`:
+"Reserved word" means the 28 word-shaped keywords of `Res_token.keyword_table`,
+`true` and `false` included:
 
 ```
 and as assert await break constraint continue else exception external false
@@ -152,7 +165,7 @@ when while
 `list{` and `dict{` are not included: `list` and `dict` are ordinary
 identifiers already, and only the form glued to `{` is a token.
 
-### Label positions
+### Positions
 
 | Position | Accepted | How the parser knows |
 |---|---|---|
@@ -165,6 +178,8 @@ identifiers already, and only the form glued to `{` is a token.
 | Argument | `f(~type=v)`, `f(~type=?v)` | word directly after `~` |
 | Function type | `(~type: t) => u`, `(~type: t=?) => u` | word directly after `~` |
 | JSX prop | `<input type="a" />`, `<input type=?v />`, `<div data-type="a" />` | word where a prop starts, or after a `-` inside a prop name |
+| Variant tag | `#type`, `#type(payload)`, `\| #type => e`, `[#type \| #module]`, `[> #type]` | word directly after `#` |
+| JSX tag name | `<switch>`, `</switch>`, `<switch />`, `<my-for />` | word directly after `<` or `</` where an element starts, or after a `-` inside a tag name |
 
 Every form in the "Accepted" column is a syntax error in ReScript 12.3.1
 (tested, with `type`), so no program that compiles today changes meaning.
@@ -186,7 +201,8 @@ that shows the long form:
 
 Unchanged, and still errors: `let type = 1`, a function parameter or pattern
 variable named `type`, a type or module named `type`, a value path `M.type`,
-and a type variable `'type`.
+a type variable `'type`, and a qualified JSX tag `<M.type />`, which looks up
+the value `M.type`.
 
 The escape `\"type"` keeps working everywhere it works today. It is still
 needed for a variable named like a keyword and for names that are not
@@ -195,8 +211,8 @@ identifier-shaped.
 ## Why this is unambiguous
 
 The parser is recursive descent and always knows which production it is in.
-Each label position is entered on a token that is not a keyword (`.`, `~`, `{`,
-`,`, a JSX tag name), and inside it a keyword token currently has no meaning:
+Each position is entered on a token that is not a keyword (`.`, `~`, `#`, `<`,
+`{`, `,`, a JSX tag name), and inside it a keyword token currently has no meaning:
 the parser reports an error. The proposal gives that slot a meaning without
 taking one away. Per position:
 
@@ -209,6 +225,16 @@ parameter starts, never after an operand, so `f(. true)` is unaffected.
 
 **JSX props** After the tag name, only prop names, `?`, `{...spread}`, `/` and
 `>` can appear.
+
+**After `#`** `#` starts a polymorphic variant tag and nothing else, in
+expressions, patterns and types. The variant spread `#...t` and the operator
+`#=` do not start with a word.
+
+**JSX tag names** `<` where an operand is expected always starts a JSX
+element; `<` as "less than" only follows an operand. So the word after that
+`<`, or after the `</` of a closing tag, is a tag name. A lowercase tag is not
+a variable: `<switch />` compiles to `ReactDOM.jsx("switch", {})`, as
+`<\"switch" />` does today.
 
 **Record patterns and record types** The row or field starts after `{` or `,`.
 A keyword cannot start anything else there, apart from the `mutable` modifier
@@ -236,8 +262,9 @@ Three details need care:
    `{mutable mutable: bool}` all parse.
 
 2. **`let?`** is scanned as a single token when `?` directly follows `let`.
-   Where a label is expected, the parser reads it as the name `let` followed
-   by `?`. This matters for `type t = {let?: int}`.
+   Where a label or tag is expected, the parser reads it as the name `let`
+   followed by `?`. This matters for `type t = {let?: int}` and for
+   `x == #let? a : b`.
 
 3. **Line breaks after `.`** A reserved word is taken as a field name only if
    it is on the same line as the `.`. No valid program needs the other form,
@@ -292,6 +319,8 @@ in place of the consumed `let?`.
 | `parse_type_parameter`, `parse_es6_arrow_type` | `parse_lident` after `~` | `parse_label_name` |
 | `peek_ident`, used by `read_local_jsx_name` and `read_hyphen_chain` | `Lident` or `Uident` | for prop names and for segments after `-`, also a reserved word |
 | `parse_jsx_prop` | starts on `Lident` or `?` | also on a reserved word; require `=` and report the punning error otherwise |
+| `parse_hash_ident`, and the `Hash` branch of `parse_pattern` | a string, an integer or `parse_ident`, which reports "`type` is a reserved keyword" | accept a reserved word as the tag |
+| `read_jsx_tag_name` | starts on `Lident` or `Uident` through `peek_ident`, otherwise "A jsx name must be a lowercase or uppercase name" | a reserved word starts a lowercase tag name; after `M.` it is still rejected |
 
 Qualified labels (`{M.type: v}`, `{M.type: p}`, `r.M.type`) go through a
 `parse_field_path` that accepts a reserved word as the last segment.
@@ -310,7 +339,8 @@ the tokens between, so `(~type as kind) => ...` needs no change there.
 
 The predicates that gate list parsing get the reserved words:
 `is_pattern_record_item_start`, `is_record_decl_start` and
-`is_jsx_attribute_start`. `is_record_row_start` and `is_field_decl_start` have
+`is_jsx_attribute_start`. `#` and `<` already start an expression, a pattern
+and a type where they need to. `is_record_row_start` and `is_field_decl_start` have
 them already, for today's error recovery.
 
 ## Printer changes
@@ -321,6 +351,10 @@ used where labels are printed: field declarations, record expression and
 pattern rows, field access and update, argument labels in definitions, calls
 and types, and JSX prop names.
 
+`print_poly_var_ident` prints `#"type"` today and prints `#type` instead; tags
+that are not identifier-shaped keep their quotes (`#"ease-in"`). Lowercase JSX
+tag names are printed bare as well.
+
 A punned row, argument or prop keeps its escape, because the pun names a
 variable: `{\"type": \"type", name}` is printed as `{\"type", name}` today and
 stays that way.
@@ -328,8 +362,9 @@ stays that way.
 `res_outcome_printer.ml`, which prints types in error messages, hovers and
 generated interfaces, gets the same treatment for record fields and labels.
 
-The formatter therefore rewrites `{\"type": x}` to `{type: x}`. Parsing the
-printed form gives the same AST.
+The formatter therefore rewrites `{\"type": x}` to `{type: x}`, `#"type"` to
+`#type` and `<\"switch" />` to `<switch />`. Parsing the printed form gives
+the same AST.
 
 ## What does not change
 
@@ -374,6 +409,9 @@ of this RFC.
   properties.
 - **TypeScript**: the same, plus a line-break check after `.` for error
   recovery.
+- **JSX**: a tag name or attribute name may be any identifier-shaped word.
+  `<switch>`, `<if />`, `<input type="a" class="b" for="c" in="d" />` and
+  `<div data-type="a" />` all parse in TypeScript.
 - **Swift**: SE-0001 allowed keywords as argument labels, and SE-0071 allowed
   them after `.` in member references.
 - **ReScript**: attribute and extension names already accept keywords
@@ -388,12 +426,8 @@ of this RFC.
 - **Mangle `type_` to `type` automatically.** JSX v3 did this for props, and
   JSX v4 removed it in favour of `@as`. Implicit renaming is hard to discover
   and hits names that really end in an underscore.
-- **Make keywords fully contextual**, so `let type = 1` works. This is the
-  ambiguous part of the grammar (`type` at the start of a block item, `open`
-  before a module path) and would need unbounded lookahead or rules that
-  depend on line breaks.
-- **Allow punning by inventing a variable name.** `{type}` would have to bind
-  something other than `type`; any choice is a surprise.
+- **Un-reserve keywords, so `let type = 1` and punning work.** See "Variables
+  and punning" below.
 - **Field access only.** Smallest change, but a field that can be read and not
   declared or constructed does not remove the workaround.
 
@@ -401,31 +435,88 @@ of this RFC.
 
 - The same word is a keyword in one place and a name in another, which is
   harder to highlight with regular expressions.
-- Punning does not work for these fields. JavaScript has the same asymmetry.
+- Punning does not work for these names. JavaScript has the same asymmetry
+  for its own reserved words; see "Variables and punning".
 - Postfix syntax of the form `expr.keyword` (such as Rust's `.await`) can no
   longer be added later.
 
+## Variables and punning
+
+This RFC does not let a reserved word name a variable, so `{type}`, `(~type)`
+and `<input type />` stay errors. That is what JavaScript does with its
+reserved words (checked in Node 24):
+
+```js
+let o = {class: 1}; o.class   // ok
+let {class: cls} = o          // ok
+let class = 1                 // SyntaxError
+let o = {class}               // SyntaxError
+let {class} = o               // SyntaxError
+function f({class}) {}        // SyntaxError
+```
+
+But JavaScript reserves far fewer words. Of ReScript's 28, these 14 are
+never reserved in JavaScript:
+
+```
+and as assert constraint exception external include module mutable of open
+rec type when
+```
+
+So `let type = 1` and `const {type} = action` are valid JavaScript, not
+because a reserved word can be punned but because `type` is not reserved.
+TypeScript, which has `type`, `module`, `as` and `of` as keywords, keeps them
+contextual: `type` starts a declaration only when an identifier follows it on
+the same line, and is a variable otherwise. ReScript does the same for
+`async`, `catch`, `finally`, `unpack` and `nonrec`, which are scanned as
+identifiers and recognised by the parser in position.
+
+Doing this for more words is possible, but it is a different kind of change
+from the one proposed here. A label sits in a slot where no keyword can
+appear. A variable can appear at the start of a statement, which is exactly
+where keywords live, so each word needs its own rule. From reading
+`res_core.ml` (not prototyped):
+
+| Words | As a variable | Why |
+|---|---|---|
+| `mutable`, `private`, `of`, `when` | possible | the keyword only appears inside a record type, after the `=` of a type declaration, in a `for` header or after a pattern, where no variable can appear |
+| `type`, `open`, `external`, `exception`, `rec`, `constraint`, `as` | possible with one token of lookahead | the token after the keyword (`type t`, `open M`, `external f`, `exception E`, `let rec f`, `constraint 'a`, `as 'a`) cannot follow a variable |
+| `module`, `include`, `assert`, `await`, `if`, `switch`, `while`, `for`, `try` | not possible | `module(M)`, `include(M)`, `assert(x)`, `await(x)` and `if(x) {...}` are valid today and look exactly like a call |
+| `and` | not possible with bounded lookahead | `let a = b` followed by `and(c)` is a call, or the start of `and (c, d) = ...` |
+| `break`, `continue`, `true`, `false` | not possible | the bare word is itself the statement or the literal |
+
+`let`, `else` and `in` are left out of the table: they are reserved in
+JavaScript as well.
+
+The lookahead rule has a cost. `type` followed by a line break and then `t =
+int` parses as a declaration today (so do `open` and `external`). Either that
+stops being a declaration, as in TypeScript, or a variable named `type` alone
+on a line, followed by a line that starts with a name, is read as a
+declaration.
+
+The two steps compose. The punning errors in this RFC apply to words that are
+reserved. If a later change un-reserves `type`, then `{type}`, `(~type)` and
+`<input type />` start working with no further change to the label rules.
+
+## Resolved in this draft
+
+- Argument labels and JSX props are in scope, not record fields alone.
+- Polymorphic variant tags are in scope.
+- `true` and `false` are included, as in JavaScript.
+- Lowercase JSX tag names are in scope, because JSX in JavaScript accepts
+  them.
+- A reserved word after `.` must be on the same line as the `.`.
+
 ## Open questions
 
-1. **Polymorphic variant tags.** `#type` is rejected today and has to be
-   written `#"type"`. A keyword after `#` is as unambiguous as after `~`.
-   Include it here, or leave it, since the string form exists and is what the
-   formatter prints?
-2. **Scope of the first step.** Record fields alone, or record fields together
-   with labels and JSX props as proposed? Record fields alone do not let a
-   component take a `type` prop without the escape.
-3. **`true` and `false`** as labels: included for uniformity with JavaScript.
-   Is there a reason to exclude them?
-4. **Lowercase JSX tag names.** `<switch>` is an SVG element and is rejected
-   today. It could be allowed by the same reasoning (`<` in operand position
-   always starts JSX), but it is not a label and is left out for now.
-5. **The line-break rule after `.`**: keep it as proposed, or accept any
-   position and live with worse recovery while typing?
+1. **Un-reserving `type`.** Should this RFC also make `type` (and possibly
+   the other words in the first two rows of the table above) usable as a
+   variable, or is that a follow-up?
 
 ## Implementation plan
 
 1. Parser, printer and outcome printer, with syntax tests for every row of
-   both tables above, round-trip tests through the formatter, and updated
+   the "Positions" and "What stays an error" tables, round-trip tests through the formatter, and updated
    snapshots for the existing keyword-field error tests.
 2. Editor completion and the two highlighting grammars.
 3. Documentation.
