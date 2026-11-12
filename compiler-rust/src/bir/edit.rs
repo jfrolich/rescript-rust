@@ -12,6 +12,21 @@ impl Bir {
         self.new_node_in(view, aux, 1)
     }
 
+    /// Attach a finalized lowering statement list without copying its elements
+    /// a second time. Bulk construction owns each detached statement once.
+    pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
+        assert!(self.bulk, "statement-stack blocks require bulk construction");
+        let id = self.allocate(Node::block_list(list));
+        for i in 0..self.lists.get(list).len() {
+            let child = self.lists.get(list)[i];
+            self.node(child);
+            assert!(self.parents[child.index()].is_none(), "statement already attached");
+            self.parents[child.index()] = Some(id);
+        }
+        self.repair(id);
+        id
+    }
+
     /// [`Self::new_node`] for a root that will fill a slot of use weight
     /// `weight` ([`Self::weight_of`] of the slot). Children that already carry
     /// the weight the new node gives them (see [`Self::detach`]) are attached
@@ -526,6 +541,7 @@ impl Bir {
         match self.view(id) {
             View::Var { .. }
             | View::Global { .. }
+            | View::JQualified { .. }
             | View::JNumber { .. }
             | View::JStr { .. }
             | View::JBool
