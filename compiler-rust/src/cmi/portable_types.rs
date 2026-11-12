@@ -2084,7 +2084,7 @@ fn shared_pers_struct_at(
         &portable.locations,
         &files,
         pool,
-        Some(&pps.ps_filename),
+        Some(&pps.ps_name),
     )?;
     let ps = PersStruct {
         ps_name: pps.ps_name.clone(),
@@ -2126,7 +2126,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                     return shared_pers_struct(&pps, &graph.portable(), pool);
                 }
                 if graph.graph.is_detached() {
-                    *graph = signature_builder::promote(graph, &pps.ps_filename, pool)?;
+                    *graph = signature_builder::promote(graph, &pps.ps_name, pool)?;
                 }
                 return Some(Arc::new(PersStruct {
                     ps_name: pps.ps_name.clone(), ps_sig: graph.signature.clone(),
@@ -2152,7 +2152,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         let locs = store.import_portable_decl_locs(
             &portable.locations,
             &map,
-            Some(interface_namespace(&pps.ps_filename)),
+            Some(interface_namespace(&pps.ps_name)),
         );
         internalize_signature_into_store(&portable.ps_sig, &portable.type_graph, &locs, store)
     } else {
@@ -2319,6 +2319,8 @@ fn shared_graph_sizes(graph: &PortableTypeGraph) -> crate::types::shared_store::
 /// storage tier. It is independent of which worker first requests it.
 fn interface_namespace(unit: &str) -> u64 {
     let mut hash = std::collections::hash_map::DefaultHasher::new();
+    // The qualified module name separates namespaces without tying allocation
+    // identity to the installation directory. O(unit-name bytes), per import.
     ("persistent interface", unit).hash(&mut hash);
     hash.finish()
 }

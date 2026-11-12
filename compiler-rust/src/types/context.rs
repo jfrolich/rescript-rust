@@ -4484,12 +4484,17 @@ impl TypeContext {
     }
 
     /// Select the stable namespace before allocating this unit's locations,
-    /// shape blocks or private interface imports.
+    /// shape blocks or private interface imports. O(filename bytes), once per
+    /// compilation, not per location. Installation directories are not identity:
+    /// snapshot relocation must preserve scopes as well as displayed filenames.
+    /// The extension distinguishes implementation and interface arenas; imports
+    /// separately namespace these source-local identities by persistent unit.
     pub(crate) fn set_location_namespace(&self, unit: &str) {
         use std::hash::{Hash, Hasher};
         assert_eq!(self.next_identity_scope.get(), 1);
         let mut hash = std::collections::hash_map::DefaultHasher::new();
-        ("source unit", unit).hash(&mut hash);
+        let filename = std::path::Path::new(unit).file_name().unwrap_or_else(|| std::ffi::OsStr::new(unit));
+        ("source unit", filename).hash(&mut hash);
         self.location_namespace.set(Some(hash.finish()));
     }
 

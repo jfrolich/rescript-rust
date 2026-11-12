@@ -728,6 +728,39 @@ mod tests {
     }
 
     #[test]
+    fn relocated_runtime_cores_equal_source_compilation_without_config() {
+        std::thread::Builder::new().stack_size(256 * 1024 * 1024).spawn(|| {
+            use rescript_compiler::cmi::persistent_env::SnapshotModules;
+            let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
+            let packages = Box::leak(decode(leak(compile(&runtime).unwrap())).unwrap().into_boxed_slice());
+            let index = packages.iter().find(|p| p.name == "@rescript/runtime").unwrap();
+            let installed = tempfile::tempdir().unwrap();
+            for entry in std::fs::read_dir(&runtime).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().extension().is_some_and(|ext| ext == "res" || ext == "resi") {
+                    std::fs::copy(entry.path(), installed.path().join(entry.file_name())).unwrap();
+                }
+            }
+            let config = runtime_config(installed.path()).unwrap();
+            let paths = compile::runtime_source_paths(installed.path()).unwrap();
+            assert_eq!(sources_digest(installed.path(), &paths).unwrap(), index.sources_digest);
+            rescript_compiler::types::thread_store::begin_build();
+            let registry = Mutex::new(ModuleRegistry::new());
+            let modules = compile::compile_runtime_sources(&registry, installed.path(),
+                &packages::get_build_path(installed.path()), &config, paths).unwrap();
+            let source = compile::encode_runtime_interfaces(&registry, &modules).unwrap();
+            let provider = RuntimePackage { index, root: installed.path().to_path_buf() };
+            for (name, bytes) in source {
+                let core = provider.decode(provider.find(&name).unwrap()).unwrap();
+                let encoded = stored_module::encode_parts(&stored_module::StoredModuleRef {
+                    pers_struct: core.pers_struct.as_ref(), info: &core.info, gentype_declarations: &[],
+                }).1;
+                assert!(encoded == stored_module::split(&bytes).unwrap().1, "runtime core differs: {name}");
+            }
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
     fn require_rejects_every_runtime_fallback_reason() {
         for reason in ["the snapshot is absent", "its sources differ", "dump flags are not supported", "RESCRIPT_FULL_BUILD is enabled"] {
             let error = fallback("@rescript/runtime", "require", reason).unwrap_err();
