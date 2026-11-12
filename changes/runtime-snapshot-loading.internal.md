@@ -1,0 +1,1 @@
+- Make runtime snapshots relocatable, load referenced modules through the shared package index, memoize source verification, and report fallback consistently with Belt.

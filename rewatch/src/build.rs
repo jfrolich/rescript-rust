@@ -699,6 +699,7 @@ pub fn incremental_build_without_lock(
         let runtime_root = build_state.build_state.compiler_info.runtime_path.clone();
         let runtime_store = compile::RuntimeStore::of_build(build_state);
         let check_only = build_state.check_only;
+        let dump = build_state.dump.is_some();
         let (result_asts, precompile_result) = std::thread::scope(|scope| {
             let handle = compile::spawn_runtime_precompile(scope, || {
                 let result = compile::pre_compile_runtime_modules_with_mode(
@@ -706,6 +707,7 @@ pub fn incremental_build_without_lock(
                     &runtime_root,
                     runtime_store.as_ref(),
                     check_only,
+                    dump,
                 );
                 phase_mark("runtime-precompile-done");
                 result
