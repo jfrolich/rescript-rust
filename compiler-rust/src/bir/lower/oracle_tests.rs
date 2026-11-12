@@ -418,3 +418,16 @@ fn local_applications_in_all_five_contexts() {
         }
     }
 }
+
+#[test]
+fn cross_module_applications_without_summary_in_all_contexts() {
+    use crate::lambda::{ApInfo, ApplyStatus, FieldDbgInfo, LamLoc, lam_primitive::Primitive};
+    for status in [ApplyStatus::Na, ApplyStatus::InferFull, ApplyStatus::Uncurry] {
+        let mut a = LamArena::new();
+        let global = a.global_module(Ident::create_persistent("Other"));
+        let callee = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("run") }), &[global], LamLoc::NONE);
+        let arg = a.const_(C::JsNull);
+        let root = a.apply_raw(callee, &[arg], ApInfo { status, loc: LamLoc::NONE });
+        compare(a, root);
+    }
+}

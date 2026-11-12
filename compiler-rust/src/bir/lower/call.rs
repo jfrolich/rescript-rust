@@ -7,6 +7,11 @@ use crate::lambda::ApplyStatus;
 pub(super) struct Call {
     pub operands: Vec<NodeId>,
     pub status: ApplyStatus,
+    pub external: Option<(
+        crate::bir::ImportId,
+        crate::bir::StrId,
+        Option<crate::lambda::lam_arity::Arity>,
+    )>,
 }
 
 impl State {
@@ -17,7 +22,7 @@ impl State {
         mut callee: NodeId,
         args: &[NodeId],
         info: ApplyId,
-    ) -> Call {
+    ) -> Result<Call, Unsupported> {
         let status = self.arena.pools.apply[info.index()].status;
         let mut groups = vec![args.to_vec()];
         if status == ApplyStatus::Na {
@@ -40,7 +45,37 @@ impl State {
         for group in groups.into_iter().rev() {
             operands.extend(group);
         }
-        Call { operands, status }
+        let external = self.module_field_apply_target(callee);
+        let external = if let Some((module, member)) = external {
+            let name = self.arena.text(member);
+            let module_name = self.arena.pools.j_modules[module.index()].id.name();
+            if self.cross_module_inline {
+                if let Some(exports) = self
+                    .resolver
+                    .as_ref()
+                    .and_then(|r| r.module_cmj_export_lambdas(module_name))
+                {
+                    if let Some(crate::lambda::Lambda::Lfunction(function)) = exports.get(name) {
+                        if function.params.len() == operands.len() - 1
+                            && crate::lambda::lam_analysis::attr_can_be_inlined(&function.attr)
+                        {
+                            return Err(Unsupported("cross-module inline"));
+                        }
+                    }
+                }
+            }
+            let arity = self.resolve_cmj_module_field_arity(module, name);
+            operands.remove(0);
+            self.source_steps += 2; // recognized field and global callee
+            Some((module, member, arity))
+        } else {
+            None
+        };
+        Ok(Call {
+            operands,
+            status,
+            external,
+        })
     }
 
     /// C:320 call_info_of_apply_status. Local calls never consult export arity.
@@ -73,17 +108,35 @@ impl State {
             })
             .collect();
         let (statements, values) = self.sequence_arguments(false, outputs);
-        let info = self.arena.js_info(crate::bir::JsPayload::Call(
-            Self::call_info_of_apply_status(call.status),
-        ));
-        let value = self.arena.new_node(
-            View::JCall {
-                callee: values[0],
-                args: &values[1..],
-                info,
-            },
-            0,
-        );
+        let value = if let Some((module, member, arity)) = call.external {
+            let callee = self.pure_expression(
+                View::JQualified {
+                    module,
+                    member: Some(member),
+                },
+                0,
+            );
+            match call.status {
+                ApplyStatus::InferFull | ApplyStatus::Uncurry => self.call_node(
+                    callee,
+                    &values,
+                    Self::call_info_of_apply_status(call.status),
+                ),
+                ApplyStatus::Na => {
+                    if let Some(arity) = arity.filter(|arity| !arity.is_na()) {
+                        self.apply_with_arity(callee, arity, values)
+                    } else {
+                        self.call_node(callee, &values, crate::js_ir::CallInfo::default())
+                    }
+                }
+            }
+        } else {
+            self.call_node(
+                values[0],
+                &values[1..],
+                Self::call_info_of_apply_status(call.status),
+            )
+        };
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
             self.statements.remove_empty(statements);
@@ -97,6 +150,193 @@ impl State {
                 }),
                 ..out
             })
+        }
+    }
+    /// C:1243 module_field_apply_target: only named module exports of globals.
+    fn module_field_apply_target(
+        &mut self,
+        callee: NodeId,
+    ) -> Option<(crate::bir::ImportId, crate::bir::StrId)> {
+        let View::Prim { args, primitive } = self.source.view(callee) else {
+            return None;
+        };
+        let crate::lambda::lam_primitive::Primitive::Pfield(
+            _,
+            crate::lambda::FieldDbgInfo::Module { name },
+        ) = self.arena.primitive(primitive).primitive
+        else {
+            return None;
+        };
+        let [global] = args else {
+            return None;
+        };
+        let View::Global { module } = self.source.view(*global) else {
+            return None;
+        };
+        Some((module, self.arena.intern_text(name.as_str())))
+    }
+
+    /// C:1222 resolve_cmj_module_field_arity. Missing and submodule entries are
+    /// unknown arity; no hash iteration contributes to output order.
+    fn resolve_cmj_module_field_arity(
+        &self,
+        module: crate::bir::ImportId,
+        field: &str,
+    ) -> Option<crate::lambda::lam_arity::Arity> {
+        let name = self.arena.pools.j_modules[module.index()].id.name();
+        let table = self.resolver.as_ref()?.module_cmj_export_arities(name)?;
+        match table.get(field)? {
+            crate::cmi::persistent_env::CmjExportArity::Single(arity) => Some(arity.clone()),
+            crate::cmi::persistent_env::CmjExportArity::Submodule(_) => None,
+        }
+    }
+
+    /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
+    fn call_node(
+        &mut self,
+        callee: NodeId,
+        args: &[NodeId],
+        info: crate::js_ir::CallInfo,
+    ) -> NodeId {
+        let info = self.arena.js_info(crate::bir::JsPayload::Call(info));
+        self.arena.new_node(View::JCall { callee, args, info }, 0)
+    }
+
+    /// C:1341 apply_with_arity: consume saturated groups once, then eta-expand
+    /// a strictly pure partial application with fresh parameters left to right.
+    fn apply_with_arity(
+        &mut self,
+        mut callee: NodeId,
+        arity: crate::lambda::lam_arity::Arity,
+        args: Vec<NodeId>,
+    ) -> NodeId {
+        let mut offset = 0;
+        let full = Self::call_info_of_apply_status(ApplyStatus::InferFull);
+        for group in arity.extract_arity() {
+            if offset == args.len() {
+                return callee;
+            }
+            let count = if group == 0 { 1 } else { group as usize };
+            let remaining = &args[offset..];
+            if remaining.len() >= count {
+                callee = self.call_node(callee, &remaining[..count], full.clone());
+                offset += count;
+            } else if remaining.iter().all(|&node| {
+                self.arena
+                    .node(node)
+                    .flags()
+                    .contains(crate::bir::NodeFlags::STRICT)
+            }) {
+                let missing = count - remaining.len();
+                let params = crate::bir::VarSpan {
+                    start: self.arena.vars.len() as u32,
+                    len: missing as u32,
+                };
+                let mut full_args = remaining.to_vec();
+                for _ in 0..missing {
+                    let var = self.fresh_variable("param");
+                    full_args.push(self.pure_expression(View::Var { var }, 0));
+                }
+                let call = self.call_node(callee, &full_args, full);
+                let ret = crate::bir::j::return_value(&mut self.arena, call);
+                let body = self.arena.new_node(View::SBlock { statements: &[ret] }, 0);
+                let header = self.arena.function_header(
+                    params,
+                    Default::default(),
+                    crate::lambda::LamLoc::NONE,
+                );
+                return self.pure_expression(View::JFun { body, header }, 0);
+            } else {
+                return self.call_node(callee, remaining, crate::js_ir::CallInfo::default());
+            }
+        }
+        if offset == args.len() {
+            callee
+        } else {
+            self.call_node(callee, &args[offset..], crate::js_ir::CallInfo::default())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::bir::{bridge, bridge_j};
+    use crate::js_ir::{
+        arena::{JsDepsProgram, JsProgram, StmtKind},
+        build::exp,
+    };
+    use crate::lambda::{
+        arena::LamArena, lam_arity::Arity, lam_compile::LambdaCompiler, lam_constant::Constant,
+    };
+
+    /// C:1341 apply_with_arity: saturation, partial expansion and unknown tails.
+    #[test]
+    fn arity_groups_match_legacy() {
+        for groups in [vec![], vec![0], vec![2], vec![1, 2], vec![2, 1, 3]] {
+            for count in 0..7 {
+                for effectful in [false, true] {
+                    let mut source = LamArena::new();
+                    let root = source.const_(Constant::JsNull);
+                    let mut state = State::new(bridge::import_lambda(&source, root).unwrap());
+                    let var = state.fresh_variable("f");
+                    let id = state.idents[var.index()];
+                    let func = state.pure_expression(View::Var { var }, 0);
+                    let mut legacy = LambdaCompiler::new();
+                    let old_func = exp::var(id, &mut legacy.j);
+                    let mut args = Vec::new();
+                    let mut old_args = Vec::new();
+                    for _ in 0..count {
+                        let value = state.pure_expression(View::JNull, 0);
+                        let old = exp::null(&mut legacy.j);
+                        if effectful {
+                            args.push(state.call_node(value, &[], Default::default()));
+                            old_args.push(exp::call(old, &[], Default::default(), &mut legacy.j));
+                        } else {
+                            args.push(value);
+                            old_args.push(old);
+                        }
+                    }
+                    let arity = Arity::info(groups.clone(), false);
+                    let value = state.apply_with_arity(func, arity.clone(), args);
+                    let lowered = state.complete(
+                        Cx::value(),
+                        Probed::Out(Out {
+                            stmts: Span::default(),
+                            value: Some(value),
+                            finished: Finished::False,
+                        }),
+                    );
+                    lowered
+                        .program
+                        .arena
+                        .validate(Some(lowered.program.root), false)
+                        .unwrap();
+                    let actual = bridge_j::export_js(&lowered.program).unwrap();
+                    let expected = legacy.bir_apply_arity_oracle(old_func, arity, old_args);
+                    let statement = legacy.j.stmt(StmtKind::Exp(expected));
+                    let expected = JsDepsProgram {
+                        program: JsProgram::new_in(vec![statement], vec![], legacy.j),
+                        modules: vec![],
+                        side_effect: None,
+                    };
+                    let print = |p: &JsDepsProgram| {
+                        crate::js_ir::print_deps_program_with_directives_and_options(
+                            p,
+                            None,
+                            &[],
+                            false,
+                            false,
+                            false,
+                        )
+                    };
+                    assert_eq!(
+                        print(&actual),
+                        print(&expected),
+                        "groups={groups:?} count={count} effectful={effectful}"
+                    );
+                }
+            }
         }
     }
 }

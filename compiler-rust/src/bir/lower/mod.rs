@@ -248,12 +248,24 @@ pub(crate) struct Lowered {
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
+#[cfg(test)]
 pub(crate) fn lower(
     input: super::bridge::Imported,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct)
+    unit::lower(input, locations, direct, None, false)
+}
+
+/// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
+pub(crate) fn lower_with_resolver(
+    input: super::bridge::Imported,
+    locations: Option<&crate::lambda::LamLocTable>,
+    direct: bool,
+    resolver: Option<&crate::js_ir::ModulePathResolver>,
+    cross_module_inline: bool,
+) -> Result<Lowered, Unsupported> {
+    unit::lower(input, locations, direct, resolver, cross_module_inline)
 }
 
 struct State {
@@ -266,6 +278,8 @@ struct State {
     direct: bool,
     located_functions: Vec<bool>,
     next_order: u32,
+    resolver: Option<crate::js_ir::ModulePathResolver>,
+    cross_module_inline: bool,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -303,6 +317,8 @@ impl State {
             direct: false,
             located_functions: Vec::new(),
             next_order,
+            resolver: None,
+            cross_module_inline: false,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -373,7 +389,7 @@ impl ProbeRules for State {
             View::Const { value } => self.constant(value),
             View::Apply { callee, args, info } => {
                 let args = args.to_vec();
-                let call = self.application(callee, &args, info);
+                let call = self.application(callee, &args, info)?;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
