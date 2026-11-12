@@ -660,6 +660,28 @@ pub fn get_closing_token(token: &Token<'_>) -> Token<'static> {
 
 /// Skip to the closing token, handling nested brackets.
 pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
+    go_to_closing_impl(closing_token, p, false);
+}
+
+fn go_to_closing_impl(closing_token: &Token<'_>, p: &mut Parser<'_>, cache: bool) {
+    let kind = match closing_token {
+        Token::Rparen => 0,
+        Token::Rbrace => 1,
+        Token::Rbracket => 2,
+        Token::GreaterThan => 3,
+        _ => unreachable!("expected closing bracket"),
+    };
+    let key = (p.start_pos.cnum, kind);
+    if cache && p.arrow_closing(key) {
+        return;
+    }
+    go_to_closing_uncached(closing_token, p, cache);
+    if cache {
+        p.save_arrow_closing(key);
+    }
+}
+
+fn go_to_closing_uncached(closing_token: &Token<'_>, p: &mut Parser<'_>, cache: bool) {
     loop {
         // A `<`/`>` that extends into a shift or comparison operator is
         // skipped like any other token, unless `>` is the closing token.
@@ -691,7 +713,7 @@ pub fn go_to_closing(closing_token: &Token<'_>, p: &mut Parser<'_>) {
             ) => {
                 let opening = p.token.clone();
                 p.next();
-                go_to_closing(&get_closing_token(&opening), p);
+                go_to_closing_impl(&get_closing_token(&opening), p, cache);
             }
             (Token::Rparen | Token::Rbrace | Token::Rbracket | Token::Eof, _) => {
                 return;
@@ -1196,6 +1218,17 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
     ) {
         return false;
     }
+    let result = match &p.token {
+        Token::Lident(name) if name != "async" => p.followed_by_arrow(),
+        Token::Underscore => p.followed_by_arrow(),
+        _ => arrow_expression_probe(p, in_ternary, true),
+    };
+    #[cfg(debug_assertions)]
+    assert_eq!(result, arrow_expression_probe(p, in_ternary, false));
+    result
+}
+
+fn arrow_expression_probe(p: &mut Parser<'_>, in_ternary: bool, cache: bool) -> bool {
     p.lookahead(|state| {
         // Check for async prefix
         if let Token::Lident(ref s) = state.token {
@@ -1223,7 +1256,7 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                                         state.next();
                                         if state.token == Token::LessThan {
                                             state.next();
-                                            go_to_closing(&Token::GreaterThan, state);
+                                            go_to_closing_impl(&Token::GreaterThan, state, cache);
                                         }
                                         matches!(state.token, Token::EqualGreater)
                                     }
@@ -1237,7 +1270,7 @@ pub fn is_es6_arrow_expression(p: &mut Parser<'_>, in_ternary: bool) -> bool {
                     Token::Dot => true, // uncurried
                     Token::Backtick => false,
                     _ => {
-                        go_to_closing(&Token::Rparen, state);
+                        go_to_closing_impl(&Token::Rparen, state, cache);
                         match &state.token {
                             Token::EqualGreater => true,
                             Token::Colon if !in_ternary => true,
@@ -1470,6 +1503,51 @@ mod tests {
     fn test_expr_context_default() {
         let ctx = ExprContext::default();
         assert_eq!(ctx, ExprContext::Ordinary);
+    }
+
+    #[test]
+    fn arrow_cache_agrees_at_every_token_including_malformed_input() {
+        let pieces = [
+            "(", ")", "[", "]", "{", "}", "<", ">", ">>", "=>", ":", ".",
+            "x", "async", "_", "`", "\"(=>)\"", "/* ) */", "\n", "/",
+        ];
+        // Exercise both freshly scanned and cached suffixes, different ternary
+        // contexts, unmatched delimiters and lexical errors deterministically.
+        let mut seed = 1u32;
+        for _ in 0..512 {
+            let mut source = String::from("((");
+            for _ in 0..32 {
+                seed = seed.wrapping_mul(1664525).wrapping_add(1013904223);
+                source.push_str(pieces[(seed as usize) % pieces.len()]);
+                source.push(' ');
+            }
+            let mut parser = Parser::new("test.res", &source);
+            while !matches!(parser.token, Token::Eof) {
+                for in_ternary in [false, true, false] {
+                    let expected = arrow_expression_probe(&mut parser, in_ternary, false);
+                    assert_eq!(
+                        is_es6_arrow_expression(&mut parser, in_ternary), expected,
+                        "source: {source:?}, position: {:?}", parser.start_pos
+                    );
+                }
+                parser.next();
+            }
+        }
+    }
+
+    #[test]
+    fn arrow_cache_handles_nested_parentheses_and_return_types() {
+        for suffix in [" => x", ": int => x", "", ") => x", "\n=> x"] {
+            let source = format!("{}x{}{suffix}", "(".repeat(128), ")".repeat(128));
+            let mut parser = Parser::new("test.res", &source);
+            while !matches!(parser.token, Token::Eof) {
+                for in_ternary in [false, true] {
+                    let expected = arrow_expression_probe(&mut parser, in_ternary, false);
+                    assert_eq!(is_es6_arrow_expression(&mut parser, in_ternary), expected);
+                }
+                parser.next();
+            }
+        }
     }
 
     #[test]
