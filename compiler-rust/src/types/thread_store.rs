@@ -74,6 +74,9 @@ type SharedComponents = (
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
+    /// The private store of a view build's scratch context: dropped with
+    /// it, never kept as the worker's store.
+    scratch: bool,
     types: TypeNodes,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
     /// internalization, like `compiler/ml/subst.ml:173-177` on save). Writes go
@@ -91,6 +94,8 @@ pub(crate) struct ThreadTypeStore {
     >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
+    /// What this worker derived from each world view, by view id.
+    view_tables: RefCell<Vec<Option<Rc<crate::types::env_lazy::ViewTables>>>>,
     generation: u64,
     /// The build's world; holding it keeps every frozen node this store's
     /// data refers to alive.
@@ -105,18 +110,30 @@ impl ThreadTypeStore {
 
 
     fn new() -> Self {
+        Self::with_storage(
+            TypeNodes::new(),
+            super::type_expr::TypePayloadPool::with_tag(super::type_expr::STORE_REF_TAG),
+            false,
+        )
+    }
+
+    fn with_storage(
+        types: TypeNodes,
+        type_lists: super::type_expr::TypePayloadPool,
+        scratch: bool,
+    ) -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
-            types: TypeNodes::new(),
+            scratch,
+            types,
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            type_lists: super::type_expr::TypePayloadPool::with_tag(
-                super::type_expr::STORE_REF_TAG,
-            ),
+            type_lists,
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
+            view_tables: RefCell::new(Vec::new()),
             generation,
             world: super::world::World::current(),
             decl_locs: Default::default(),
@@ -213,6 +230,22 @@ impl ThreadTypeStore {
     #[inline]
     pub(crate) fn shared_pool(&self) -> &super::shared_store::SharedTypePool {
         self.world.pool()
+    }
+
+    /// This worker's tables for `view`, created on first use. One read of
+    /// a table indexed by the view's id.
+    pub(crate) fn view_tables(
+        &self,
+        view: &crate::types::module_view::ModuleView,
+    ) -> Rc<crate::types::env_lazy::ViewTables> {
+        let index = view.id().index();
+        let mut tables = self.view_tables.borrow_mut();
+        if tables.len() <= index {
+            tables.resize(index + 1, None);
+        }
+        tables[index]
+            .get_or_insert_with(|| Rc::new(crate::types::env_lazy::ViewTables::new(view)))
+            .clone()
     }
 
     pub(crate) fn shared_components(
@@ -471,7 +504,7 @@ impl Deref for StoreLease {
 impl Drop for StoreLease {
     fn drop(&mut self) {
         // A panic may leave a mark traversal unfinished. Do not reuse its graph.
-        if !std::thread::panicking() {
+        if !std::thread::panicking() && !self.scratch {
             let store = self.0.take();
             // TLS may already be gone during thread shutdown.
             let _returned = THREAD_TYPE_STORE.try_with(|slot| slot.replace(store));
@@ -485,6 +518,18 @@ impl Drop for StoreLease {
 fn fresh_store_per_compilation() -> bool {
     static FRESH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FRESH.get_or_init(|| std::env::var_os("RESCRIPT_FRESH_STORE").is_some())
+}
+
+/// The private store of a view build's scratch context: empty, ladder-only
+/// (no first array is initialised) and dropped with the context, so the
+/// worker's own store, leased by the compilation that started the build,
+/// is not replaced. One store is created per view build.
+pub(crate) fn scratch() -> StoreLease {
+    StoreLease(Some(Box::new(ThreadTypeStore::with_storage(
+        TypeNodes::ladder_only(),
+        super::type_expr::TypePayloadPool::ladder_only(super::type_expr::STORE_REF_TAG),
+        true,
+    ))))
 }
 
 pub(crate) fn current() -> StoreLease {

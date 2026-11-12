@@ -355,6 +355,9 @@ pub(crate) trait ListElem: Copy + 'static {
     /// One thread-local acquisition, then O(retained arrays) lease probes;
     /// a fresh allocation initializes LIST_FIRST_LEN elements, reuse none.
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]>;
+    /// An array for a ladder-only pool to hold and never touch. One list
+    /// read; a thread without an array yet initializes one.
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]>;
 }
 
 // Smallest measured size within 0.2% of 65,536 slots on both workloads.
@@ -367,12 +370,26 @@ thread_local! {
     static LIST_WRITES: Cell<usize> = const { Cell::new(0) };
 }
 
+/// Number of first list arrays this thread has created (items, arguments).
+#[cfg(test)]
+pub(crate) fn first_list_arrays() -> (usize, usize) {
+    (
+        FIRST_TYPE_LISTS.with(|arrays| arrays.borrow().len()),
+        FIRST_ARG_LISTS.with(|arrays| arrays.borrow().len()),
+    )
+}
+
 impl ListElem for TypeExprRef {
     const FILL: Self = TypeExprRef(0);
     /// One acquisition and a linear lease scan; initializes only a fresh array.
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
         FIRST_TYPE_LISTS
             .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_TYPE_LISTS.with(|arrays| {
+            super::context::placeholder_first_array(arrays, || Cell::new(Self::FILL))
+        })
     }
 }
 
@@ -387,6 +404,11 @@ impl ListElem for TypeArg {
     fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
         FIRST_ARG_LISTS
             .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+    fn placeholder_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_ARG_LISTS.with(|arrays| {
+            super::context::placeholder_first_array(arrays, || Cell::new(Self::FILL))
+        })
     }
 }
 
@@ -409,6 +431,17 @@ impl<T: ListElem> Default for ListChunks<T> {
 }
 
 impl<T: ListElem> ListChunks<T> {
+    /// A pool whose lists are all in the ladder (see
+    /// `TypeNodes::ladder_only`): its positions start at `LIST_FIRST_LEN`
+    /// and the first array it holds is never touched. One list read.
+    fn ladder_only() -> Self {
+        Self {
+            first: T::placeholder_chunk(),
+            far: PayloadChunks::default(),
+            len: Cell::new(LIST_FIRST_LEN),
+        }
+    }
+
     /// Append a nonempty list: exactly items.len() writes, with no allocation
     /// in the first array. The ladder may scan O(log n) chunk sizes and
     /// initialize a new chunk (O(chunk size)); lists never cross boundaries.
@@ -670,6 +703,17 @@ impl TypePayloadPool {
         TypePayloadPool {
             tag,
             ..Default::default()
+        }
+    }
+
+    /// A pool that takes no first arrays (see `TypeNodes::ladder_only`).
+    pub(crate) fn ladder_only(tag: u32) -> Self {
+        TypePayloadPool {
+            items: ListChunks::ladder_only(),
+            args: ListChunks::ladder_only(),
+            rows: Default::default(),
+            lids: Default::default(),
+            tag,
         }
     }
 
