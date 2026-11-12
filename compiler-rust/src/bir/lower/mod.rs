@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod expr;
 mod konst;
+mod unit;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -246,10 +247,7 @@ pub(crate) struct Lowered {
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
 pub(crate) fn lower(input: super::bridge::Imported) -> Result<Lowered, Unsupported> {
-    let root = input.root;
-    let mut state = State::new(input);
-    let probed = state.probe(Cx::value(), root)?;
-    Ok(state.complete(Cx::value(), probed))
+    unit::lower(input)
 }
 
 struct State {
