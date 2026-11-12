@@ -190,12 +190,10 @@ pub struct FuncHeader {
     /// Source location.
     pub loc: LamLoc,
     pub(super) attr: u32,
-    /// Function properties, including self tail calls.
+    /// Function properties.
     pub flags: u32,
 }
 impl FuncHeader {
-    /// A tail-position application calls the function's own binding.
-    pub const SELF_TAILCALL: u32 = 1;
     /// Print as a method-capable function, preserving `this`.
     pub const METHOD: u32 = 2;
 }

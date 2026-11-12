@@ -663,10 +663,10 @@ model" says whether the slice can be handed to one with this document.
 
 | Slice | Change | Files | Deletes in the same pull request | End state (`rg` in `compiler-rust/src`) | Extra gate | Lines | Less capable model |
 | --- | --- | --- | --- | --- | --- | ---: | --- |
-| T1 | JavaScript use counts (built, remaining) and block facts per variable in the lowering; dead declarations and block-field substitution decided at `Declare` and at scope close; record rest at block close. The new side of the `lower` gate runs without legacy passes 4 and 5 | `bir/lower/{out,expr,unit,mod}.rs`, new `bir/lower/scope.rs`, `bir/shadow.rs`, `bir/edit.rs` | `Bir::mark_tail_positions`, `tail_child`, `NodeFlags::TAIL`, `FuncHeader::SELF_TAILCALL` (unused by the lowering, BACKEND_LOWERING 9 item 9) | `rg 'mark_tail_positions\|SELF_TAILCALL' bir` is empty; `rg 'apply_js_record_rest_pass\|apply_js_flatten_and_mark_dead_pass' bir/shadow.rs` shows the legacy side only | both texts of BACKEND_LOWERING 8.1 identical on the runtime library, `tests/tests` and the fixtures; fallback counts do not grow | 1,200 | no: 1.3's two counts need judgement |
+| T1 | JavaScript use counts (built, remaining) in dense VarId tables, checked against the legacy UseCounts visitor; remove unused tail-position analysis. Block facts and transformations move to T4 (boundary finding below) | `bir/lower/{scope,mod,oracle_tests}.rs`, `bir/{edit,node,pools,validate}.rs` and validator callers | `Bir::mark_tail_positions`, `tail_child`, `NodeFlags::TAIL`, `FuncHeader::SELF_TAILCALL` | `rg 'mark_tail_positions\|SELF_TAILCALL' bir` is empty | both existing lower texts remain identical; fallback counts do not grow; 10,000-occurrence accounting test | 200 | yes: counters only |
 | T2 | Expansion table: the mapper appends desugared constructs and records `original -> expanded`; no ancestor is rebuilt; readers resolve | `parse_arena.rs`, `binary_ast/ppx.rs`, `binary_ast/deps.rs`, `binary_ast/ast_iter.rs`, `types/typecore.rs`, `types/typemod.rs` | the rebuild arms of `rewrite_expression_generic` and `rewrite_child` and its `Rewritten::New` path for expressions | `rg 'fn rewrite_child' binary_ast/ppx.rs` is empty; `rg 'fn expanded' parse_arena.rs` has one hit | `scripts/test_error_output_parity.sh`, the `super_errors` fixtures, `make test-syntax`; instruction count falls by at least 1% | 1,500 | no: order of diagnostics |
 | T3 | Unit reads without the typed-tree walk: the checker logs a read where it resolves a path | `types/unit_reads.rs`, `types/env.rs`, `types/typecore.rs`, `types/typemod.rs`, `driver.rs` | `unit_reads::Collector` and its `TastIterator` implementation | `rg 'TastIterator' types/unit_reads.rs` is empty | the read sets of old and new equal on the runtime library and `tests/tests` before the old one is deleted; `scripts/test_stored_interface_determinism.py`; rewatch incremental tests | 600 | yes, with the prompt below |
-| T4 | Tail-call inlining at scope close (1.1); top-level rows, the shake filter and export coercion on them (1.4, S3.9b). New side runs without legacy passes 3 and 6 | `bir/lower/{scope,tail,export}.rs`, `bir/shadow.rs` | the planned `bir/j/{inline_return,shake}.rs` are never created | `rg 'apply_js_tailcall_inline_pass\|apply_js_shake_pass' bir/shadow.rs` shows the legacy side only | the two-text gate; a counter of inlines where the level L count is not one | 1,500 | no: strong reviewer |
+| T4 | Tail-call inlining at scope close (1.1); top-level rows, the shake filter and export coercion on them (1.4, S3.9b). Also owns original T1 items 3–6: block facts/substitution, dead declarations, record rest and the gate split. New side runs without legacy passes 3–6 | `bir/lower/{scope,tail,export}.rs`, `bir/shadow.rs` | the planned `bir/j/{inline_return,shake}.rs` are never created | `rg 'apply_js_tailcall_inline_pass\|apply_js_shake_pass' bir/shadow.rs` shows the legacy side only | the two-text gate; a counter of inlines where the level L count is not one | 1,500 | no: strong reviewer |
 | T5 | Naming events logged by the lowering; names assigned at scope close by the tables of `emit/naming.rs`; compared with the names the pass computes | `bir/lower/scope.rs`, `emit/naming.rs`, `bir/shadow.rs` | nothing yet (the pass is the oracle) | `rg 'fn replay' emit/naming.rs` has one hit | name tables equal on every supported unit of the corpora | 900 | no |
 | T6 | The builder over oxc nodes (section 3): `bir::j` reimplemented on oxc storage and the facts table; `RESCRIPT_BACKEND=new` prints from it | new `emit/builder.rs`, `bir/j/*`, `bir/lower/*` (types only), `driver.rs` | `bir/bridge_j.rs`, the J opcodes of `bir/node.rs`, the `Bir` view of `emit/walk.rs` | `rg 'JSeq\|JBlockLit' bir/node.rs` is empty; `rg bridge_j .` is empty | reformat-and-compare suites; instruction count of `new` below legacy | 3,000 | no |
 | T7 | Direct typing for the node-local rows of section 5 (`l` integers, boolean match, single record `let`, `async`/`await`) | `types/typecore.rs`, `binary_ast/ppx.rs`, the core IR builder | their arms in the mapper | `rg 'fn transform_await' binary_ast/ppx.rs` is empty | diagnostics parity | 800 | yes, one row per commit |
@@ -675,6 +675,36 @@ model" says whether the slice can be handed to one with this document.
 | T10 | Patterns: `parmatch.rs` and `matching.rs` read a view over syntax pattern, table row and overlay | `types/parmatch.rs`, `raw_lambda/matching.rs`, `types/dict_pattern.rs` | `TypedArena`'s pattern pools | `rg 'push_pattern' types` is empty | diagnostics and JavaScript parity; the exhaustiveness fixtures | 4,000 | no |
 | T11 | genType from the tables; the batch build stops building typed expressions | `gentype/*`, `driver.rs` | `tctx.typed` in the batch path | `rg 'tctx.typed' driver.rs` hits only the tooling functions | genType parity | 2,000 | yes for genType |
 | T12 | Editor analysis on the tables; delete the typed tree | `analysis/*`, `types/{typedtree,tast_arena,tast_iterator,sexp_typedtree}.rs` | those four files | `rg 'TypedArena' .` is empty | analysis tests | 3,000 | yes, arm by arm |
+
+### T1/T4 boundary finding
+
+**T1 ends at items 1 and 2 of the original worker prompt below. Items 3–6
+move into T4**, together with tail-call inlining; they cannot independently
+move ahead of the legacy tail-call pass while preserving final JavaScript.
+
+The test `bir/lower/oracle_tests.rs::
+block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining`
+constructs this smallest Lambda-level shape (shown as JavaScript, bypassing
+source simplification):
+
+```js
+const pair = [x => x, 1];
+const run = () => pair[0](2);
+// export run
+```
+
+In legacy order, tail-call inlining sees a field call. Later substitution
+hoists `pair_0` and replaces that field read; final output retains
+`function pair_0(x) { return x; }` and
+`function run() { return pair_0(2); }`. If substitution and physical removal
+of the dead `pair` declaration happen first, the retained tail-call pass
+counts only one use of `pair_0` and inlines it: the final output is instead
+`function run() { return 2; }`. The test asserts both outputs, without
+changing the byte-exact gate.
+
+T4 must preserve the original inlining decisions while coordinating these
+transformations. T1 keeps both existing comparison points and all six legacy
+passes on both sides; its counters add no intended default-backend saving.
 
 Order: T1, T2 and T3 can start now and in parallel (they share no file except
 `typecore.rs` between T2 and T3, in different functions). T4 and T5 follow

@@ -1559,7 +1559,7 @@ mod tests {
                 )
             };
             assert_eq!(print(&actual), print(&expected));
-            imported.arena.validate(Some(imported.root), false).unwrap();
+            imported.arena.validate(Some(imported.root)).unwrap();
         }
     }
 }
@@ -1603,7 +1603,7 @@ mod application_tests {
             let value = jm1_js_seq(&mut candidate.arena, a, b);
             let statement = candidate.arena.new_node(View::SExp { value }, 0);
             candidate.root = candidate.arena.new_node(View::SBlock { statements: &[statement] }, 0);
-            candidate.arena.validate(Some(candidate.root), false).unwrap();
+            candidate.arena.validate(Some(candidate.root)).unwrap();
             let actual = bridge_j::export_js(&candidate).unwrap();
             let value = crate::lambda::js_exp_make::js_seq(left, right, &mut expected.program.arena);
             let statement = expected.program.arena.stmt(StmtKind::Exp(value));

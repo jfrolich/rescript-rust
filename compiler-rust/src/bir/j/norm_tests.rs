@@ -34,7 +34,7 @@ fn oracle(
     let value = new(&mut imported.arena, &inputs);
     let statement = p::node(&mut imported.arena, View::SExp { value }, 0);
     imported.root = p::list(&mut imported.arena, &[statement]);
-    imported.arena.validate(Some(imported.root), false).unwrap();
+    imported.arena.validate(Some(imported.root)).unwrap();
     let actual = bridge_j::export_js(&imported).unwrap();
     let expected = old(&mut source.program.arena, &args);
     source.program.block = vec![source.program.arena.stmt(StmtKind::Exp(expected))];
@@ -338,7 +338,7 @@ fn stmt_oracle(
     imported.arena.release(imported.root);
     let output = new(&mut imported.arena, input_b);
     imported.root = p::list(&mut imported.arena, &[output]);
-    imported.arena.validate(Some(imported.root), false).unwrap();
+    imported.arena.validate(Some(imported.root)).unwrap();
     let actual = bridge_j::export_js(&imported).unwrap();
     let expected = old(&mut source.program.arena, input);
     source.program.block = vec![expected];
@@ -1839,7 +1839,7 @@ fn je8_js2_jm0_jm1_jm14_ten_thousand_deep_and_wide() {
         println!("J deep kind {kind}: {steps} node reads");
         assert!(steps <= 1_500_000, "{steps}");
         b.finish_bulk(result);
-        b.validate(Some(result), false).unwrap();
+        b.validate(Some(result)).unwrap();
     }
     let mut b = Bir::default();
     b.begin_bulk();
@@ -1863,7 +1863,7 @@ fn je8_js2_jm0_jm1_jm14_ten_thousand_deep_and_wide() {
     println!("J-S2 deep/wide: {steps} node reads");
     assert!(steps <= 400_000);
     b.finish_bulk(root);
-    b.validate(Some(root), false).unwrap();
+    b.validate(Some(root)).unwrap();
 }
 #[test]
 fn je10_ten_thousand_term_chain_uses_iterative_negation() {
@@ -1886,7 +1886,7 @@ fn je10_ten_thousand_term_chain_uses_iterative_negation() {
     assert_eq!(b.j_stats.max_or_steps, steps);
     let result = result.unwrap_or_else(|| p::bin(&mut b, BinOp::Or, left, right));
     b.finish_bulk(result);
-    b.validate(Some(result), false).unwrap();
+    b.validate(Some(result)).unwrap();
 }
 
 #[test]
@@ -1964,7 +1964,7 @@ fn je1_je7_js3_ten_thousand_reassociations() {
         println!("J reassociation kind {kind}: {reads} node reads");
         assert!(reads < 3_000_000, "{reads}");
         b.finish_bulk(root);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 }
 
