@@ -413,6 +413,7 @@ impl SharedTypePool {
             sizes.layouts,
             "shared graph layout count changed"
         );
+        crate::perf_counters::record_signature_nodes_frozen(sizes.nodes);
         let graph = Arc::new(SharedGraph {
             base,
             nodes: descs

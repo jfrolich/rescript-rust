@@ -229,6 +229,12 @@ pub struct GraphWalk<'g, G: TypeGraph + ?Sized> {
     records: u64,
 }
 
+impl<G: TypeGraph + ?Sized> Drop for GraphWalk<'_, G> {
+    fn drop(&mut self) {
+        crate::perf_counters::record_signature_nodes_hashed(self.records);
+    }
+}
+
 impl<'g, G: TypeGraph + ?Sized> GraphWalk<'g, G> {
     /// A walk over `graph`, in its first scope. Allocates one number per
     /// node of the graph, once.

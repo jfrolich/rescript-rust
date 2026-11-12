@@ -338,6 +338,14 @@ pub struct PortableRawSignature {
 }
 
 impl PortablePersStruct {
+    fn record_access(&self, imported: bool) {
+        if let Some(generation) = self.published_generation {
+            crate::perf_counters::record_signature_access(
+                self as *const Self as usize, generation, imported,
+            );
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn has_decoded_signatures(&self) -> bool {
         self.decoded.lock().unwrap().is_some()
@@ -1825,6 +1833,7 @@ pub(crate) fn publish_signature(
         decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), raw))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
     });
+    pps.record_access(false);
     let store = ctx.thread_store();
     let cached = store.shared_pool().pers_struct(&pps, || Some(shared_ps))
         .expect("direct publication graph exists");
@@ -1871,6 +1880,7 @@ fn prepare_publication(
     pps.fingerprint = fingerprint;
     pps.shared_item_hashes = hashes;
     let pps = Arc::new(pps);
+    pps.record_access(false);
     if pps.shareable && let Some((ps, _)) = &shared {
         let cached = pool.pers_struct(&pps, || Some(ps.clone()))
             .expect("a prepared shared graph is registered once");
@@ -2003,6 +2013,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
 
     let store = ctx.thread_store();
     if let Some(ps) = store.pers_struct(&pps) {
+        pps.record_access(true);
         return ps;
     }
 
@@ -2016,6 +2027,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
             shared_pers_struct(&pps, &portable, pool)
         });
         if let Some(ps) = shared {
+            pps.record_access(true);
             store.insert_pers_struct(pps, ps.clone());
             return ps;
         }
