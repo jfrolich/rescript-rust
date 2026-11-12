@@ -18,7 +18,7 @@ TABLES = ("interfaces", "interface_extras", "runtime_interfaces")
 def read_interfaces(path):
     path = Path(path)
     if path.is_dir():
-        path = next((p for p in (path / "rescript.sqlite", path / "lib/bs/rescript.sqlite")
+        path = next((p for p in (path / "rescript.sqlite", path / "lib/rescript/rescript.sqlite")
                      if p.is_file()), path / "rescript.sqlite")
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         result = {(table, module): bytes(data) for table in TABLES
@@ -55,7 +55,7 @@ def clean_builds(binary):
             for command in ("clean", "build"):
                 subprocess.run([str(binary), command], cwd=package, env=env,
                                check=True, timeout=300)
-            source = package / "lib/bs/rescript.sqlite"
+            source = package / "lib/rescript/rescript.sqlite"
             target = Path(tmp) / f"{index}.sqlite"
             with sqlite3.connect(source) as src, sqlite3.connect(target) as dst:
                 src.backup(dst)
