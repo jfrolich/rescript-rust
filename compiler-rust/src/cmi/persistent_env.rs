@@ -4223,11 +4223,17 @@ struct SubstMaps {
 
 /// Fixed hasher keys: `AHashMap::default()` derives fresh random keys per
 /// map, and substitution maps are built for every qualified signature.
+///
+/// The seeds must not be ahash's own second constant table: `with_seeds`
+/// combines its arguments with that table by exclusive or, which leaves all
+/// four keys zero, and the hasher used where the target has no AES
+/// instructions then gives every key the hash 0 (one bucket, quadratic
+/// inserts). `subst_map_hashes_are_distinct` checks it.
 static SUBST_MAP_STATE: ahash::RandomState = ahash::RandomState::with_seeds(
-    0x452821e6_38d01377,
-    0xbe5466cf_34e90c6c,
-    0xc0ac29b7_c97c50dd,
-    0x3f84d5b5_b5470917,
+    0x9e37_79b9_7f4a_7c15,
+    0xf39c_c060_5ced_c834,
+    0x1082_276b_f3a2_7251,
+    0xf86c_6a11_d0c1_8e95,
 );
 
 fn subst_map<K, V>() -> HashMap<K, V> {
@@ -8888,5 +8894,23 @@ mod snapshot_index_tests {
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
         assert!(registry.module_info.with_value("M10000", |_| ()).is_none());
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[cfg(test)]
+mod subst_map_hash_tests {
+    /// 10,000 integers and 10,000 names must not share a hash: a seed that
+    /// zeroes the keys gives one hash for all of them on targets without AES
+    /// instructions, and every substitution map becomes one bucket.
+    #[test]
+    fn subst_map_hashes_are_distinct() {
+        use std::hash::BuildHasher;
+        let ints: std::collections::HashSet<u64> =
+            (0..10_000i32).map(|n| super::SUBST_MAP_STATE.hash_one(n)).collect();
+        assert!(ints.len() >= 9_990, "{} distinct hashes of 10,000 integers", ints.len());
+        let names: std::collections::HashSet<u64> = (0..10_000)
+            .map(|n| super::SUBST_MAP_STATE.hash_one(format!("t{n}")))
+            .collect();
+        assert!(names.len() >= 9_990, "{} distinct hashes of 10,000 names", names.len());
     }
 }
