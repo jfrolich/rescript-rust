@@ -21,7 +21,7 @@ fn main() {
                 println!("cargo:rerun-if-changed={}", belt.join("rescript.json").display());
                 println!("cargo:rerun-if-changed={}", belt.join("src").display());
             }
-            rescript::build::snapshot::compile(&root).unwrap_or_else(|err| {
+            rescript::build::snapshot::produce(&root).unwrap_or_else(|err| {
                 if rescript::build::snapshot::is_belt_proof_failure(&err) {
                     panic!("snapshot production and proof builds: {err:#}");
                 }

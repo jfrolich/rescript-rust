@@ -3,7 +3,7 @@
 //! Every process that compiles anything needs `@rescript/runtime` compiled
 //! into its module registry, and the runtime that ships with a compiler is
 //! always the same. So the `rescript` executable's build script compiles the
-//! runtime in the repository with [`compile`] and the executable hands the
+//! runtime in the repository with [`produce`] and the executable hands the
 //! result to [`install`]: a build whose runtime has the same sources then
 //! registers these interfaces, borrowed from the executable's memory and
 //! decoded on first lookup, instead of compiling the runtime.
@@ -44,7 +44,7 @@ pub fn install(bytes: &'static [u8]) {
 /// Compile the runtime and, when present, its sibling Belt package into the
 /// container accepted by [`install`]. Producer only: one runtime compile and
 /// four Belt proof compiles; allocation is proportional to their outputs.
-pub fn compile(runtime_root: &Path) -> Result<Vec<u8>> {
+pub fn produce(runtime_root: &Path) -> Result<Vec<u8>> {
     let runtime_root = runtime_root.to_path_buf();
     // Like a build's runtime pre-compilation, on a thread with a large stack.
     std::thread::Builder::new()
@@ -710,8 +710,8 @@ mod tests {
     #[test]
     fn producer_is_deterministic_and_packages_have_no_build_paths() {
         let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
-        let first = compile(&runtime).unwrap();
-        assert_eq!(first, compile(&runtime).unwrap());
+        let first = produce(&runtime).unwrap();
+        assert_eq!(first, produce(&runtime).unwrap());
         let checkout = runtime.parent().unwrap().parent().unwrap().parent().unwrap();
         assert!(!contains_bytes(&first, checkout.to_string_lossy().as_bytes()));
         let packages = decode(leak(first)).unwrap();
@@ -737,7 +737,7 @@ mod tests {
         std::thread::Builder::new().stack_size(256 * 1024 * 1024).spawn(|| {
             use rescript_compiler::cmi::persistent_env::SnapshotModules;
             let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
-            let packages = Box::leak(decode(leak(compile(&runtime).unwrap())).unwrap().into_boxed_slice());
+            let packages = Box::leak(decode(leak(produce(&runtime).unwrap())).unwrap().into_boxed_slice());
             let index = packages.iter().find(|p| p.name == "@rescript/runtime").unwrap();
             let installed = tempfile::tempdir().unwrap();
             for entry in std::fs::read_dir(&runtime).unwrap() {
