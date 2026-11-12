@@ -33,6 +33,14 @@ pub fn expand_structure_item_with_mapper(
     if arena.derived_census.is_none() {
         return super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
     }
+    expand_with_census(item, arena, active)
+}
+
+/// O(1) census bookkeeping plus the existing expansion and optional key encoder.
+/// Keeping this cold leaves no profiling locals in the ordinary mapper's frame.
+#[cold]
+#[inline(never)]
+fn expand_with_census(item: &StructureItem, arena: &mut ParseArena, active: bool) -> Result<Vec<StructureItem>, String> {
     let start = census::start(true);
     let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
     let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);

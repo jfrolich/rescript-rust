@@ -4742,15 +4742,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 if self.derived_census.is_none() {
                     return self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
                 }
-                let census_start = crate::derived_census::start(true);
-                let census_before = self.derived_census.as_ref().map_or(0, |c| c.conversion.total());
-                let result = self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
-                if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
-                    let children = census.conversion.total() - census_before;
-                    census.conversion.add(census.typed_group(bindings.start()),
-                        crate::derived_census::nanos(start.elapsed()).saturating_sub(children));
-                }
-                result
+                self.convert_let_with_census(*rec_flag, self.ta.value_bindings(*bindings), body, bindings.start())
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -6122,6 +6114,33 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             }
             _ => unreachable!("expected irrefutable pattern"),
         }
+    }
+
+    /// O(1) accounting around ordinary conversion; no profiling locals in the
+    /// disabled structure traversal. The conversion itself is unchanged.
+    #[cold]
+    #[inline(never)]
+    fn convert_let_with_census(
+        &mut self,
+        rec_flag: crate::parser::ast::RecFlag,
+        bindings: &[ValueBinding],
+        body: RawLambda,
+        group_start: u32,
+    ) -> RawLambda {
+        let census_start = crate::derived_census::start(true);
+        let census_before = self
+            .derived_census
+            .as_ref()
+            .map_or(0, |c| c.conversion.total());
+        let result = self.convert_let_with_body_raw(rec_flag, bindings, body);
+        if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
+            let children = census.conversion.total() - census_before;
+            census.conversion.add(
+                census.typed_group(group_start),
+                crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
+            );
+        }
+        result
     }
 
     fn convert_let_with_body_raw(

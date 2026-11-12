@@ -38,7 +38,8 @@ censuses and allocation-site counters are expensive and perturb timings.
 Runtime compilation may use a separate pool; these process-counter deltas are
 not an isolation guarantee for arbitrary concurrent compilation clients.
 
-The variable is read in one source location, at compiler-option creation.
+The variable is read in one source location, once per process through a
+`OnceLock<Option<PathBuf>>`; compiler options copy the cached result.
 Each compilation owns its record, carries it through the worker boundary and
 appends one JSON line under one output lock. No timer is called by census
 probes when the option is absent. Records identify module basenames and the
@@ -58,7 +59,7 @@ Remaining module-level work is explicitly distinguished:
 - Frontend rewrite/validation, remaining Lambda lowering, Lambda passes,
   JavaScript lowering and printing use the module's syntax-node proportions.
   They are **estimates**, not per-function profiler samples.
-- Typechecking overhead outside the item loop, environment setup and signature
+- Typechecking overhead outside the item checker, environment setup and signature
   publication are charged to other work.
 - JavaScript byte and line totals are actual emitted totals, but their split is
   estimated using syntax weights. Syntax weight is not a source map and cannot
@@ -362,3 +363,17 @@ pointer identity), name-sort comparison bounds, spelling iteration, qualified
 paths, function parameters, application arguments, records, patterns and types.
 The visitor remains 16 bytes; virtual-name entries and their spelling tag have
 size assertions as well.
+
+
+### Disabled-path isolation
+
+The ordinary unused-attribute visitor retains trunk's inline fields and callback
+set. Only an enabled census uses the separate 16-byte counting wrapper; a macro
+shares validation bodies without an extra state-pointer load in ordinary visits.
+The environment switch is cached once per process. Item-checking and conversion
+snapshots live in cold, non-inlined helpers, so the ordinary checker loop has one
+option test and no timer/counter snapshot locals. Name checking and environment
+setup remain uninstrumented there and are charged to other work by reconciliation.
+No identifier-table lookup or typechecking algorithm was changed. Instruction
+measurements, rather than a presumed inlining explanation, decide whether this
+removes the reported default-path cost.

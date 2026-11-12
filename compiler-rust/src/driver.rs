@@ -552,12 +552,15 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 }
 
 impl CompilerOptions {
-    /// Read the census switch at option creation. O(path length), once per options
-    /// instance, never at an item or node lookup.
+    /// Read the census switch once per process. Subsequent option creation is
+    /// O(1) when disabled, or O(path bytes) to copy an enabled output path.
     pub fn derived_census_from_env() -> Option<PathBuf> {
-        let path = std::env::var_os("RESCRIPT_DERIVED_CENSUS").map(PathBuf::from);
-        if path.is_some() { crate::timing::enable_for_census(); }
-        path
+        static OUTPUT: std::sync::OnceLock<Option<PathBuf>> = std::sync::OnceLock::new();
+        OUTPUT.get_or_init(|| {
+            let path = std::env::var_os("RESCRIPT_DERIVED_CENSUS").map(PathBuf::from);
+            if path.is_some() { crate::timing::enable_for_census(); }
+            path
+        }).clone()
     }
 }
 
