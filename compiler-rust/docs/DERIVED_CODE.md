@@ -77,10 +77,14 @@ Remaining module-level work is explicitly distinguished:
   sum of one body size per distinct supported key divided by all generated
   binding-body nodes. Unsupported bodies still have to be processed individually.
 
-The census-only observer is currently separate from validation. It does not
-meet a strict requirement to record all facts during an existing first walk.
-Likewise, the provenance bitmap uses binding-pool start slots, not a newly
-introduced structure-item index. These are explicit limitations of this draft.
+Syntax counts are recorded during the existing validation traversal, not in a
+second observer pass. The ordinary compiler specializes counting away; the
+census specialization visits certified expression subtrees to count them. If
+builtin validation is disabled, the same visitor only counts syntax, without
+issuing warnings. Attribute payloads are metadata and excluded from these
+module syntax weights. Shape/body keys are collected together at generation.
+The provenance bitmap uses binding-pool start slots, not a newly introduced
+structure-item index.
 
 ## Fixture project
 
@@ -335,10 +339,11 @@ parity passes **721/721**. The full local compiler test run reports 1,810 passed
 48 reference-dependent failures and 25 ignored; it is not a green full-suite
 claim. CI must verify the published final head.
 
-Signature-generated declarations remain charged to other work. The separate
-census observer still does not meet the strict first-walk collection standard;
-the dense provenance bitmap is indexed by binding-pool starts rather than
-structure-item slots. Unsupported templates are individually reported rather
+Signature-generated declarations remain charged to other work. Syntax counting now shares the validation walk, whose visitor is pinned to
+16 bytes and tested on 10,000 elements with and without validation. The dense
+provenance bitmap is indexed by binding-pool starts rather than structure-item
+slots. Earlier tables predate this fusion and included attribute payload nodes;
+they remain labelled observations, not silently updated measurements. Unsupported templates are individually reported rather
 than guessed. These limitations are not hidden by the phase reconciliation
 or the small allocation saving. The stricter +0.02% default-path CI budget also
 must be verified on the final published head, not inferred from fixture data.

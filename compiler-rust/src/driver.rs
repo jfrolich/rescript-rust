@@ -6184,23 +6184,25 @@ pub fn run_implementation_frontend(
         );
         let rewritten =
             rewritten.map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-        // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
-        // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
-        let (unused_attribute_warnings, invariant_error) =
-            ppx::collect_unused_attribute_warnings_structure(&rewritten, parser.arena());
-        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
-            parser.arena(),
-            source,
-            filename,
-            &file_warning_config,
-            &unused_attribute_warnings,
-            out,
-        );
-        if let Some(e) = invariant_error {
-            return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
-        }
         rewritten
     };
+    let mut census = parser.arena_mut().derived_census.take();
+    // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
+    // the rewritten structure (compiler/frontend/ppx_entry.ml:60-63).
+    let (unused_attribute_warnings, invariant_error) =
+        ppx::collect_unused_attribute_warnings_structure(&structure, parser.arena(), census.as_deref_mut(), !file_config.no_builtin_ppx(options));
+    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &unused_attribute_warnings,
+        out,
+    );
+    if let Some(e) = invariant_error {
+        return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
+    }
+    parser.arena_mut().derived_census = census;
     // js_implementation.ml:125-129: `after_parsing_impl` runs the second
     // `Ast_config.process_str` after the builtin ppx.
     for (warning, config) in &config_processing.late_warnings {
@@ -6220,7 +6222,6 @@ pub fn run_implementation_frontend(
     if let Some(start) = census_start {
         let elapsed = crate::derived_census::nanos(start.elapsed());
         if let Some(mut census) = parser.arena_mut().derived_census.take() {
-            census.observe(parser.arena(), &structure);
             census.account_frontend(elapsed);
             parser.arena_mut().derived_census = Some(census);
         }
@@ -7447,20 +7448,22 @@ pub fn run_interface_frontend(
     if !file_config.no_builtin_ppx(options) {
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
-        let (unused_attribute_warnings, invariant_error) =
-            ppx::collect_unused_attribute_warnings_signature(&signature, parser.arena());
-        ppx_warnings_have_errors |= format_ppx_warnings_with_config(
-            parser.arena(),
-            source,
-            filename,
-            &file_warning_config,
-            &unused_attribute_warnings,
-            out,
-        );
-        if let Some(e) = invariant_error {
-            return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
-        }
     }
+    let mut census = parser.arena_mut().derived_census.take();
+    let (unused_attribute_warnings, invariant_error) =
+        ppx::collect_unused_attribute_warnings_signature(&signature, parser.arena(), census.as_deref_mut(), !file_config.no_builtin_ppx(options));
+    ppx_warnings_have_errors |= format_ppx_warnings_with_config(
+        parser.arena(),
+        source,
+        filename,
+        &file_warning_config,
+        &unused_attribute_warnings,
+        out,
+    );
+    if let Some(e) = invariant_error {
+        return Err(ppx_error_to_anyhow(e, parser.arena(), source, filename));
+    }
+    parser.arena_mut().derived_census = census;
     // js_implementation.ml:36-38: the second `Ast_config.process_sig`.
     for (warning, config) in &config_processing.late_warnings {
         ppx_warnings_have_errors |= format_ppx_warnings_with_config(
@@ -7475,7 +7478,6 @@ pub fn run_interface_frontend(
     if let Some(start) = census_start {
         let elapsed = crate::derived_census::nanos(start.elapsed());
         if let Some(mut census) = parser.arena_mut().derived_census.take() {
-            census.observe_signature(parser.arena(), &signature);
             census.account_frontend(elapsed);
             parser.arena_mut().derived_census = Some(census);
         }

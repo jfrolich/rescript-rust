@@ -4,7 +4,6 @@ use std::time::Instant;
 use serde::Serialize;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{StructureItem, StructureItemDesc};
-use crate::binary_ast::ast_iter::{self, AstIter};
 
 /// Exact item attribution or an explicitly labelled whole-module estimate.
 #[derive(Clone, Copy, Debug, Default, Serialize)]
@@ -169,14 +168,6 @@ impl Census {
         let _guard = OUTPUT.lock().unwrap_or_else(|e| e.into_inner());
         std::fs::OpenOptions::new().create(true).append(true).open(&self.output)?.write_all(&encoded)
     }
-    /// O(node occurrences), one read-only observer pass. No per-node allocations;
-    /// a nested structure changes attribution without charging its body twice.
-    pub fn observe(&mut self, arena: &ParseArena, items: &[StructureItem]) {
-        let mut totals = CountTotals::default();
-        ast_iter::walk_structure(&mut Counts { totals: &mut totals, side: 1 }, arena, items);
-        self.syntax_nodes = totals.nodes;
-        self.bindings = totals.bindings;
-    }
     /// O(1): copy the three parse buckets before a location retry discards its AST.
     pub fn parse_work(&self) -> [Pair; 3] { [self.parse_other, self.generation, self.frontend] }
     /// O(1): account actual work of a discarded parse without duplicating its
@@ -192,13 +183,6 @@ impl Census {
     pub fn account_parse(&mut self, total: u64) {
         self.parse_other.other = total.saturating_sub(self.frontend.total() + self.generation.total());
     }
-    /// O(node occurrences): count signature syntax; signatures currently have no
-    /// structure provenance and are reported entirely on the other side.
-    pub fn observe_signature(&mut self, arena: &ParseArena, items: &[crate::parser::ast::SignatureItem]) {
-        let mut totals = CountTotals::default();
-        ast_iter::walk_signature(&mut Counts { totals: &mut totals, side: 1 }, arena, items);
-        self.syntax_nodes = totals.nodes;
-    }
     /// O(1): remove measured generation from the frontend interval and partition
     /// the remaining module-wide walk time by node count.
     pub fn account_frontend(&mut self, elapsed: u64) {
@@ -211,54 +195,28 @@ pub fn nanos(d: std::time::Duration) -> u64 { d.as_nanos().min(u64::MAX as u128)
 /// O(1): no clock read when disabled.
 pub fn start(enabled: bool) -> Option<Instant> { enabled.then(Instant::now) }
 
-#[derive(Default)]
-struct CountTotals { nodes: [u64; 2], bindings: [u64; 2] }
-struct Counts<'a> { totals: &'a mut CountTotals, side: usize }
-impl AstIter for Counts<'_> {
-    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
-        let previous = self.side;
+/// Module-owned counters; only references to this block travel down the walk.
+pub(crate) struct SyntaxCounts { pub nodes: [u64; 2], pub bindings: [u64; 2], pub side: usize }
+impl Default for SyntaxCounts {
+    /// O(1): initialize a module on the handwritten side.
+    fn default() -> Self { Self { nodes: [0; 2], bindings: [0; 2], side: 1 } }
+}
+impl SyntaxCounts {
+    /// O(1): count one occurrence, with no allocation or synchronization.
+    pub fn node(&mut self) { self.nodes[self.side] += 1; }
+    /// O(1): select provenance and count the item and its binding-list length.
+    pub fn item(&mut self, arena: &ParseArena, item: &StructureItem) {
         self.side = usize::from(!super::is_derived_item(item, arena));
-        self.totals.nodes[self.side] += 1;
+        self.node();
         if let StructureItemDesc::Pstr_value((_, group)) = item.pstr_desc {
-            self.totals.bindings[self.side] += group.len() as u64;
+            self.bindings[self.side] += group.len() as u64;
         }
-        ast_iter::walk_structure_item(self, arena, item);
-        self.side = previous;
-    }
-    fn expr(&mut self, a: &ParseArena, i: crate::parse_arena::ExprIdx) {
-        self.totals.nodes[self.side] += 1; ast_iter::walk_expr(self, a, i);
-    }
-    fn pat(&mut self, a: &ParseArena, i: crate::parse_arena::PatIdx) {
-        self.totals.nodes[self.side] += 1; ast_iter::walk_pat(self, a, i);
-    }
-    fn typ(&mut self, a: &ParseArena, i: crate::parse_arena::CoreTypeIdx) {
-        self.totals.nodes[self.side] += 1; ast_iter::walk_typ(self, a, i);
-    }
-    fn module_expr(&mut self, a: &ParseArena, i: crate::parse_arena::ModExprIdx) {
-        self.totals.nodes[self.side] += 1; ast_iter::walk_module_expr(self, a, i);
-    }
-    fn module_type(&mut self, a: &ParseArena, i: crate::parse_arena::ModTypeIdx) {
-        self.totals.nodes[self.side] += 1; ast_iter::walk_module_type(self, a, i);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn observer_visits_ten_thousand_array_elements_once() {
-        assert_eq!(std::mem::size_of::<Counts<'_>>(), 16);
-        let source = format!("let xs = [{}]", vec!["0"; 10_000].join(","));
-        let mut parser = crate::parser::Parser::new("count.res", &source);
-        let items = crate::parser::module::parse_structure(&mut parser);
-        assert!(!parser.has_errors());
-        let mut census = Census::new(std::path::Path::new("unused"), "count.res");
-        census.observe(parser.arena(), &items);
-        // 10,000 constant occurrences + array + variable pattern + structure item.
-        assert_eq!(census.syntax_nodes, [0, 10_003]);
-        assert_eq!(census.bindings, [0, 1]);
-    }
-
     #[test]
     fn splits_preserve_totals_at_ten_thousand_sizes() {
         for n in 0..10_000 {
