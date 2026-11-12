@@ -4399,6 +4399,9 @@ impl LambdaCompiler {
                 &plan,
             );
         }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_tail_loop_switch_return_block_inner(a, scrut, sw, tail_loop);
+        }
         self.with_switch_depth(|this| {
             this.compile_tail_loop_switch_return_block_inner(a, scrut, sw, tail_loop)
         })
@@ -5157,6 +5160,10 @@ impl LambdaCompiler {
         else_: Lam,
     ) -> BlockOutput {
         let cond_compiled = self.compile_expr(a, cond);
+        // compiler/core/lam_compile.ml:1636-1644 probes values before
+        // lowering return branches; discarded loop labels still consume IDs.
+        let then_value = self.compile_expr(a, then_);
+        let else_value = self.compile_expr(a, else_);
         let then_block_raw = self.compile_return_block(a, then_);
         let else_block_raw = self.compile_return_block(a, else_);
 
@@ -5190,8 +5197,6 @@ impl LambdaCompiler {
         // reconstructing a value from later return blocks: switches and other
         // statement-producing forms must keep their prelude, which makes OCaml
         // fall through to `S.if_` below.
-        let then_value = self.compile_expr(a, then_);
-        let else_value = self.compile_expr(a, else_);
         if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
             let expr = JE::cond(
@@ -5509,6 +5514,9 @@ impl LambdaCompiler {
                 &plan,
             );
         }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_assignment_block_inner(a, result, scrut, sw);
+        }
         self.with_switch_depth(|this| {
             this.compile_switch_assignment_block_inner(a, result, scrut, sw)
         })
@@ -5668,6 +5676,9 @@ impl LambdaCompiler {
                 &plan,
             );
         }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_return_block_inner(a, scrut, sw);
+        }
         self.with_switch_depth(|this| this.compile_switch_return_block_inner(a, scrut, sw))
     }
 
@@ -5815,6 +5826,9 @@ impl LambdaCompiler {
                 sw,
                 &plan,
             );
+        }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_effect_block_inner(a, scrut, sw);
         }
         self.with_switch_depth(|this| this.compile_switch_effect_block_inner(a, scrut, sw))
     }
