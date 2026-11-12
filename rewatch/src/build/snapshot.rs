@@ -321,26 +321,39 @@ pub(crate) fn register(
     runtime_root: &Path,
     runtime_paths: &[(String, PathBuf)],
     store: Option<&compile::RuntimeStore>,
-) -> bool {
+    dump: bool,
+) -> Result<bool> {
+    let mode = std::env::var("RESCRIPT_SNAPSHOT").unwrap_or_default();
+    anyhow::ensure!(matches!(mode.as_str(), "" | "off" | "require"),
+        "RESCRIPT_SNAPSHOT must be off or require (or unset)");
+    let mismatch = |reason| fallback("@rescript/runtime", &mode, reason);
+    if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
+    if dump { return mismatch("dump flags are not supported"); }
+    if std::env::var_os("RESCRIPT_FULL_BUILD").is_some() { return mismatch("RESCRIPT_FULL_BUILD is enabled"); }
+    if let Some(option) = alternate_backend_option() { return mismatch(option); }
     let Some(Some(embedded)) = EMBEDDED.get() else {
-        return false;
+        return mismatch("the snapshot is absent");
     };
     let Some(embedded) = embedded.iter().find(|package| package.name == "@rescript/runtime") else {
-        return false;
+        return mismatch("the snapshot is absent");
     };
     if embedded.len() != runtime_paths.len()
         || !verify_runtime(embedded.sources_digest, runtime_root, runtime_paths, store).unwrap_or(false)
     {
-        log::debug!(
-            "The runtime at {} is not the embedded one",
-            runtime_root.display()
-        );
-        return false;
+        return mismatch("its sources differ from the ones this compiler was built with");
     }
     registry.lock().unwrap().register_snapshot(std::sync::Arc::new(RuntimePackage {
         index: embedded, root: runtime_root.to_path_buf(),
     }));
-    true
+    Ok(true)
+}
+
+/// O(message bytes), one allocation on a package fallback, never per module.
+fn fallback(package: &str, mode: &str, reason: &str) -> Result<bool> {
+    let message = format!("Not using the prebuilt {package}: {reason}. Compiling it from source.");
+    anyhow::ensure!(mode != "require", "{message}");
+    log::info!("{message}");
+    Ok(false)
 }
 
 /// O(file count + path bytes), one stat per path and no source reads. Missing
@@ -434,11 +447,11 @@ fn rebased_runtime_core(bytes: &[u8], from: &Path, to: &Path) -> Option<Vec<u8>>
 /// O(configuration bytes), once per verification. An absent configuration uses
 /// the producer's parsed options; malformed or unreadable configurations fail.
 pub(crate) fn runtime_config(root: &Path) -> Result<crate::config::Config> {
-    match std::fs::read(root.join("rescript.json")) {
-        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+    match std::fs::metadata(root.join("rescript.json")) {
+        Ok(_) => packages::read_config(root),
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             if root.join("bsconfig.json").exists() { return packages::read_config(root); }
-            Ok(serde_json::from_str(include_str!("../../../packages/@rescript/runtime/rescript.json"))?)
+            crate::config::Config::new_from_json_string(include_str!("../../../packages/@rescript/runtime/rescript.json"))
         }
         Err(error) => Err(error.into()),
     }
@@ -715,6 +728,17 @@ mod tests {
     }
 
     #[test]
+    fn require_rejects_every_runtime_fallback_reason() {
+        for reason in ["the snapshot is absent", "its sources differ", "dump flags are not supported", "RESCRIPT_FULL_BUILD is enabled"] {
+            let error = fallback("@rescript/runtime", "require", reason).unwrap_err();
+            assert!(error.to_string().contains(reason));
+            assert!(error.to_string().contains("@rescript/runtime"));
+            assert!(!fallback("@rescript/runtime", "", reason).unwrap());
+        }
+        assert!(!fallback("@rescript/runtime", "off", "disabled by RESCRIPT_SNAPSHOT=off").unwrap());
+    }
+
+    #[test]
     fn memo_stats_each_of_ten_thousand_paths_once() {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("source.res");
@@ -862,10 +886,7 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     anyhow::ensure!(matches!(mode.as_str(), "" | "off" | "require"),
         "RESCRIPT_SNAPSHOT must be off or require (or unset)");
     let mismatch = |reason: &str| -> Result<()> {
-        let message = format!("Not using the prebuilt @rescript/belt: {reason}. Compiling it from source.");
-        if mode == "require" { anyhow::bail!("{message}"); }
-        log::info!("{message}");
-        Ok(())
+        fallback("@rescript/belt", &mode, reason).map(|_| ())
     };
     if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
     if state.check_only { return mismatch("check-only is not supported"); }

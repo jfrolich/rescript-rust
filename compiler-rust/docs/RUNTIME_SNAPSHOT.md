@@ -674,6 +674,16 @@ runtime sources (and on Belt verification when Belt is present).
 
 ### F.3 S3: index lookup, memoised verification, cheaper fallback
 
+D6 inspection at SN2: `runtime_compiler_options` already sets
+`skip_js_render: true`. In
+`finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_hook`,
+that skips rendering, but JS lowering still computes purity and exported
+constants, arities and inlinable lambdas. These are consumed by dependents, so
+stopping before that lowering would lose required metadata. No additional early
+return is introduced; the document's claim that discarded JavaScript text is
+produced is stale.
+
+
 - **Changes.** B.6 steps 2 to 4 for both packages, replacing the per-module
   `register_stored_static` loop. The verification memo of B.5. On a
   from-source runtime compile, stop before code generation (D6).
