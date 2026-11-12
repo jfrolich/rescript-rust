@@ -572,6 +572,7 @@ pub fn incremental_build_without_lock(
     plain_output: bool,
     compiler_info_write: CompilerInfoWrite,
 ) -> Result<CompilationOutcome, IncrementalBuildError> {
+    compile::finish_record_preparation(build_state);
     let phase_timing_enabled = rescript_compiler::timing::enabled();
     if phase_timing_enabled {
         rescript_compiler::timing::reset();
@@ -1124,6 +1125,13 @@ pub fn build(
                         );
                     }
                 }
+                // Publish the result before waiting for persistence preparation.
+                use std::io::Write;
+                if let Err(err) = std::io::stdout().flush().and_then(|()| std::io::stderr().flush()) {
+                    log::warn!("Could not flush build diagnostics: {err}");
+                }
+                phase_mark("result-reported");
+                compile::finish_record_preparation(&build_state);
                 if !check_only {
                     clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 }
@@ -1131,6 +1139,7 @@ pub fn build(
                 Ok(build_state)
             }
             Err(e) => {
+                compile::finish_record_preparation(&build_state);
                 if !check_only {
                     clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 }

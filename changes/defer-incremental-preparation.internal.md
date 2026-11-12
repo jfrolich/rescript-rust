@@ -1,0 +1,1 @@
+- Report build results before waiting for incremental-store preparation, and reject interrupted store writes.

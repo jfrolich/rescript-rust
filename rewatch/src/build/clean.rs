@@ -84,6 +84,7 @@ pub fn write_in_process_record(
     build_state: &BuildCommandState,
     compiler_info_write: build::CompilerInfoWrite,
 ) {
+    build::compile::finish_record_preparation(build_state);
     if build_state.build_run.stopped_at_parse() {
         return;
     }
@@ -279,9 +280,12 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
 pub fn cleanup_after_build(build_state: &BuildCommandState, compiler_info_write: build::CompilerInfoWrite) {
     // Recording a large build encodes and hashes every module it compiled.
     build::pools::with_pool_for(build_state.compiled_modules.len(), || {
-        write_in_process_record(build_state, compiler_info_write)
+        rescript_compiler::timing::measure(rescript_compiler::timing::Phase::RecordWrite, || {
+            write_in_process_record(build_state, compiler_info_write)
+        })
     });
     crate::build::phase_mark("record-written");
+    rescript_compiler::timing::print_report();
 }
 
 #[instrument(name = "clean.clean", skip_all)]

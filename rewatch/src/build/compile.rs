@@ -1332,22 +1332,10 @@ pub fn compile(
         counters.print_report(capacity);
     }
     let js_write_failures = js_writer.finish();
-    // Every module's last registration is the one its last completion saw:
-    // only completing modules register (see `apply_pending_registry_updates`).
-    {
-        let mut item_digests = build_state.published_item_digests.lock().unwrap();
-        let mut interfaces = build_state.prepared_interfaces.lock().unwrap();
-        for prepared in digest_prep.finish() {
-            match prepared.item_digests {
-                Some(items) => item_digests.insert(prepared.module_name.clone(), items),
-                None => item_digests.remove(&prepared.module_name),
-            };
-            match prepared.interface {
-                Some(interface) => interfaces.insert(prepared.module_name, interface),
-                None => interfaces.remove(&prepared.module_name),
-            };
-        }
-    }
+    // Only persistence consumes this preparation. Keep it running while the
+    // caller reports diagnostics and the result; join before recording or
+    // allowing the next build to mutate the registry.
+    *build_state.pending_record_prep.lock().unwrap() = Some(digest_prep);
 
     trace!(
         "compiled {} of the {} modules to check",
@@ -2567,9 +2555,32 @@ fn write_js_output(
 /// they complete, for recording the build (see `incremental::UnitDigests`):
 /// otherwise recording a large build decodes and hashes every signature at
 /// the end, when nothing else runs.
-struct DigestPrep {
+pub(crate) struct DigestPrep {
     tx: mpsc::Sender<String>,
     handle: std::thread::JoinHandle<Vec<PreparedRecord>>,
+}
+
+/// Finish persistence preparation before recording or reusing the registry.
+pub fn finish_record_preparation(build_state: &BuildCommandState) {
+    let pending = build_state.pending_record_prep.lock().unwrap().take();
+    let Some(pending) = pending else { return };
+    super::phase_mark("record-preparation-join-start");
+    {
+        let mut item_digests = build_state.published_item_digests.lock().unwrap();
+        let mut interfaces = build_state.prepared_interfaces.lock().unwrap();
+        for prepared in pending.finish() {
+            match prepared.item_digests {
+                Some(items) => item_digests.insert(prepared.module_name.clone(), items),
+                None => item_digests.remove(&prepared.module_name),
+            };
+            match prepared.interface {
+                Some(interface) => interfaces.insert(prepared.module_name, interface),
+                None => interfaces.remove(&prepared.module_name),
+            };
+        }
+    }
+
+    super::phase_mark("record-preparation-join-end");
 }
 
 /// What [`DigestPrep`] computed of a completed module.
@@ -2589,13 +2600,17 @@ impl DigestPrep {
             .spawn(move || {
                 rx.into_iter()
                     .map(|module_name| PreparedRecord {
-                        item_digests: registry
-                            .item_digests(&module_name)
-                            .filter(|items| items.contains_key(rescript_compiler::cmi::item_deps::WHOLE))
-                            .map(Arc::new),
-                        interface: registry
-                            .encode_stored_module_parts(&module_name)
-                            .map(|(extras, core)| super::state_db::StoredInterface::new(extras, core)),
+                        item_digests: rescript_compiler::timing::measure(
+                            rescript_compiler::timing::Phase::RecordDigests,
+                            || registry.item_digests(&module_name)
+                                .filter(|items| items.contains_key(rescript_compiler::cmi::item_deps::WHOLE))
+                                .map(Arc::new),
+                        ),
+                        interface: rescript_compiler::timing::measure(
+                            rescript_compiler::timing::Phase::RecordInterfaces,
+                            || registry.encode_stored_module_parts(&module_name)
+                                .map(|(extras, core)| super::state_db::StoredInterface::new(extras, core)),
+                        ),
                         module_name,
                     })
                     .collect()

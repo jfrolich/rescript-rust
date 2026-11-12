@@ -33,10 +33,16 @@ pub enum Phase {
     Gentype,
     /// JavaScript IR generation and JavaScript text rendering.
     Codegen,
+    /// Digests prepared for the next process, concurrently with compilation.
+    RecordDigests,
+    /// Stored-interface encoding prepared for the next process.
+    RecordInterfaces,
+    /// Package record construction, encoding and SQLite persistence.
+    RecordWrite,
 }
 
 impl Phase {
-    const COUNT: usize = Phase::Codegen as usize + 1;
+    const COUNT: usize = Phase::RecordWrite as usize + 1;
 }
 
 /// Nanoseconds per phase, indexed by `Phase as usize`.
@@ -55,6 +61,9 @@ impl PhaseTimingSnapshot {
             lambda_optimization: phase(Phase::LambdaOptimization),
             gentype: phase(Phase::Gentype),
             codegen: phase(Phase::Codegen),
+            record_digests: phase(Phase::RecordDigests),
+            record_interfaces: phase(Phase::RecordInterfaces),
+            record_write: phase(Phase::RecordWrite),
         }
     }
 }
@@ -80,6 +89,12 @@ pub struct PhaseTimingSnapshot {
     pub gentype: Duration,
     /// Aggregate codegen phase time.
     pub codegen: Duration,
+    /// Aggregate next-process digest preparation time.
+    pub record_digests: Duration,
+    /// Aggregate stored-interface encoding time.
+    pub record_interfaces: Duration,
+    /// Aggregate package-record construction and persistence time.
+    pub record_write: Duration,
 }
 
 impl PhaseTimingSnapshot {
@@ -93,6 +108,9 @@ impl PhaseTimingSnapshot {
             .saturating_add(self.lambda_optimization)
             .saturating_add(self.gentype)
             .saturating_add(self.codegen)
+            .saturating_add(self.record_digests)
+            .saturating_add(self.record_interfaces)
+            .saturating_add(self.record_write)
     }
 
     /// Wall time that was not attributed to an explicit phase bucket.
@@ -304,6 +322,9 @@ pub fn print_report() {
     print_phase("lambda_optimization", snapshot.lambda_optimization, total);
     print_phase("gentype", snapshot.gentype, total);
     print_phase("codegen", snapshot.codegen, total);
+    print_phase("record_digests", snapshot.record_digests, total);
+    print_phase("record_interfaces", snapshot.record_interfaces, total);
+    print_phase("record_write", snapshot.record_write, total);
     print_phase("overhead", snapshot.overhead(), total);
 }
 

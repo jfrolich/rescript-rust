@@ -26,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 pub const DB_FILE: &str = "rescript.sqlite";
+const META_RECORD_COMPLETE: &str = "record_complete";
 
 /// Bump when the schema changes; an older database is then discarded.
 // 19: the database moved from lib/bs to lib/rescript, whose build records
@@ -422,7 +423,7 @@ pub fn read_meta(package: &Package) -> Option<BTreeMap<String, String>> {
 }
 
 fn read_meta_from(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String>> {
-    let mut stmt = conn.prepare("SELECT key, value FROM meta")?;
+    let mut stmt = conn.prepare("SELECT key, value FROM meta WHERE key != 'record_complete'")?;
     let rows = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
     rows.collect()
 }
@@ -432,6 +433,14 @@ fn read_meta_from(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String
 pub fn read(package: &Package) -> Option<PackageState> {
     let db = path(package);
     let conn = open_existing(&db)?;
+    // Check before reading any build rows. An interrupted writer leaves zero
+    // committed outside its transaction, even if SQLite rolls back the rows.
+    let complete: String = conn.query_row(
+        "SELECT value FROM meta WHERE key = ?1", [META_RECORD_COMPLETE], |row| row.get(0),
+    ).ok()?;
+    if complete != "1" {
+        return None;
+    }
     let db = db.as_path();
     // The large tables are read on their own connections in parallel: a big
     // package's record is thousands of rows in each.
@@ -652,7 +661,7 @@ pub fn write_meta_over(
         tx.commit()
     };
     if let Err(err) = write() {
-        log::error!("Could not record the build state of {}: {err}", package.name);
+        log::warn!("Could not record the build state of {}: {err}", package.name);
     }
 }
 
@@ -700,6 +709,10 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     let deps_rows = changed_rows(&previous.deps, &new.deps, |row| row.deps.join("\n"));
     let write = || -> rusqlite::Result<()> {
         let mut conn = open_for_write(package)?;
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')",
+            [META_RECORD_COMPLETE],
+        )?;
         let tx = conn.transaction()?;
         {
             let mut set_meta = tx.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
@@ -803,10 +816,20 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 |source, row, deps| set_deps.execute(params![source, row.mtime, deps]).map(drop),
             )?;
         }
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
+            std::process::abort();
+        }
+        // Last row in the transaction: neither partially updated rows nor the
+        // previous successful record can be trusted after an interrupted write.
+        tx.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
+            [META_RECORD_COMPLETE],
+        )?;
         tx.commit()
     };
     if let Err(err) = write() {
-        log::error!("Could not record the build state of {}: {err}", package.name);
+        log::warn!("Could not record the build state of {}: {err}", package.name);
         // A half-known record is worse than none.
         let _ = std::fs::remove_file(path(package));
     }
@@ -961,10 +984,9 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         drop(conn);
-        let rebuilt = read(&package).expect("fresh schema is readable");
-        assert!(rebuilt.meta.is_empty());
-        assert!(rebuilt.modules.is_empty());
-        assert!(rebuilt.stored_interfaces.is_empty());
+        // A schema alone is not a completed build.
+        assert!(read(&package).is_none());
+        assert!(read_meta(&package).unwrap().is_empty());
     }
 
     #[test]
