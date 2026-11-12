@@ -9855,17 +9855,17 @@ fn render_js_program(
     if let crate::emit::PrinterMode::Oxc(stats) | crate::emit::PrinterMode::OxcBir(stats) = &options.js_printer {
         // Transitional wiring: the byte-equality gate is established before
         // replacing this round trip with a direct J-level emitter view.
-        let bridged = if matches!(options.js_printer, crate::emit::PrinterMode::OxcBir(_)) {
+        let (bridged, bridge_reason) = if matches!(options.js_printer, crate::emit::PrinterMode::OxcBir(_)) {
             match crate::bir::bridge_j::import_js(program) {
-                Ok(imported) => Some(crate::bir::bridge_j::export_js(&imported)
-                    .expect("an unmodified J import must export")),
+                Ok(imported) => (Some(crate::bir::bridge_j::export_js(&imported)
+                    .expect("an unmodified J import must export")), None),
                 Err(reason) => {
                     stats.record_bridge_unsupported(reason.0);
-                    None
+                    (None, Some(reason.0))
                 }
             }
         } else {
-            None
+            (None, None)
         };
         let program = bridged.as_ref().unwrap_or(program);
         let mut raw_audit = stats.raw_audit_buffer();
@@ -9902,6 +9902,7 @@ fn render_js_program(
         stats.record(&result);
         if let Err(error) = stats.report_output(
             &result,
+            bridge_reason,
             options.source_filename.as_deref().map(FsPath::new),
             output_path,
         ) {

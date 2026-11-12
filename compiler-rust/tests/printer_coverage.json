@@ -1,16 +1,19 @@
 {
   "gentype-example": {
     "emitted": 166,
+    "emitted_from_bir": 166,
     "outputs": 166,
     "unsupported": {}
   },
   "gentype-stdlib": {
     "emitted": 1,
+    "emitted_from_bir": 1,
     "outputs": 1,
     "unsupported": {}
   },
   "runtime": {
     "emitted": 224,
+    "emitted_from_bir": 224,
     "outputs": 226,
     "unsupported": {
       "delete call syntax": 2
@@ -18,6 +21,7 @@
   },
   "tests/tests": {
     "emitted": 714,
+    "emitted_from_bir": 714,
     "outputs": 716,
     "unsupported": {
       "JSX sequence container": 1,

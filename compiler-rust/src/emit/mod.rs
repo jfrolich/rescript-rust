@@ -111,6 +111,7 @@ impl PrinterStats {
     pub(crate) fn report_output(
         &self,
         result: &Result<(String, Option<String>), Unsupported>,
+        bridge_reason: Option<&'static str>,
         source: Option<&std::path::Path>,
         output: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
@@ -134,6 +135,7 @@ impl PrinterStats {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         output.hash(&mut hash);
         reason.hash(&mut hash);
+        bridge_reason.hash(&mut hash);
         let directory = std::path::Path::new(&directory);
         std::fs::create_dir_all(directory)?;
         let path = directory.join(format!("{:016x}.json", hash.finish()));
@@ -150,6 +152,7 @@ impl PrinterStats {
             &mut file,
             &serde_json::json!({
                 "source": source, "output": output, "emitted": result.is_ok(), "unsupported": reason,
+                "bridge_unsupported": bridge_reason,
             }),
         )?;
         Ok(())
@@ -292,6 +295,11 @@ mod oracle_tests {
         options.js_printer = PrinterMode::Oxc(stats.clone());
         let actual = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
         assert_eq!(stats.snapshot().supported, 1, "{source}: {:?}", stats.snapshot());
+        let bir_stats = Arc::new(PrinterStats::default());
+        options.js_printer = PrinterMode::OxcBir(bir_stats.clone());
+        let from_bir = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
+        assert_eq!(actual, from_bir, "Bir emission bytes: {source}");
+        assert!(bir_stats.snapshot().bridge_unsupported.is_empty(), "{source}");
         let mode = ReformatOptions {
             split_file: true,
             drop_decoration_comments: true,
