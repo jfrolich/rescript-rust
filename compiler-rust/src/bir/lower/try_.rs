@@ -11,19 +11,24 @@ pub(super) struct Plan {
     blocks: [Option<NodeId>; 3],
     exception: Option<VarId>,
     start: Span,
+    target: Option<VarId>,
 }
 
 impl State {
     /// C:1503 try_statement / C:3129 compile_return_output. O(1), with no
     /// inspection of the body or handler to select their form.
     pub(super) fn try_statement(&mut self, cx: Cx, body: NodeId, exception: VarId, handler: NodeId) -> Result<Try, Unsupported> {
-        if matches!(cx.cont, Cont::Value(_) | Cont::Declare(..)) {
-            return Err(Unsupported("try"));
-        }
+        let start = self.statements.mark();
+        let target = match cx.cont {
+            Cont::Value(_) => Some((LetKind::Variable, self.fresh_variable("tmp"))),
+            Cont::Declare(kind, var) => Some((kind, var)),
+            _ => None,
+        };
+        if let Some((kind, var)) = target { self.declare_empty(kind, var); }
         let frame = Try(self.tries.len() as u32);
         self.tries.push(Plan {
             nodes: [Some(body), Some(handler), None],
-            blocks: [None; 3], exception: Some(exception), start: self.statements.mark(),
+            blocks: [None; 3], exception: Some(exception), start, target: target.map(|(_, var)| var),
         });
         Ok(frame)
     }
@@ -35,7 +40,7 @@ impl State {
             if let Some(node) = node {
                 let cont = if index == 0 && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
                     Cont::Effect(Tail::Return(Ret::InTry))
-                } else { cx.cont };
+                } else { plan.target.map(Cont::Assign).unwrap_or(cx.cont) };
                 into.push((Cx { cont, ..cx }, *node));
             }
         }
@@ -57,10 +62,13 @@ impl State {
     pub(super) fn finish_try(&mut self, cx: Cx, frame: Try) -> Probed {
         let plan = &self.tries[frame.0 as usize];
         let start = plan.start;
+        let target = plan.target;
         let parts = [plan.blocks[0].unwrap(), plan.blocks[1].unwrap()];
         let statement = self.arena.new_node(View::STry { parts: &parts, exception: plan.exception }, 0);
         self.statements.push(statement);
-        let value = if matches!(cx.cont, Cont::Effect(Tail::No)) {
+        let value = if matches!(cx.cont, Cont::Value(_)) {
+            Some(self.pure_expression(View::Var { var: target.expect("value temporary") }, 0))
+        } else if matches!(cx.cont, Cont::Effect(Tail::No)) {
             Some(self.pure_expression(View::JUndefined, 0))
         } else { None };
         Probed::Out(Out { stmts: self.statements.since(start), value, finished: Finished::False })
@@ -80,12 +88,12 @@ mod tests {
         let body = a.const_(Constant::Int { i: 1, comment: None });
         let handler = a.const_(Constant::Int { i: 2, comment: None });
         let root = a.try_(body, Ident::new("exn", 10, IdentFlags::NONE), handler);
-        super::super::oracle_tests::compare_in_contexts(a, root, None, true, &[1, 3, 4]);
+        super::super::oracle_tests::compare_in_contexts(a, root, None, true, &[0, 1, 2, 3, 4]);
     }
 
     #[test]
     fn frame_sizes() {
         assert_eq!(std::mem::size_of::<Try>(), 4);
-        assert_eq!(std::mem::size_of::<Plan>(), 64);
+        assert_eq!(std::mem::size_of::<Plan>(), 72);
     }
 }

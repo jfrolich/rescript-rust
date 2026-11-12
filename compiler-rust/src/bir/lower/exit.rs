@@ -185,7 +185,7 @@ impl State {
     }
 
     /// `let var;` with a declaration kind (B: variable, no value). Constant.
-    fn declare_empty(&mut self, kind: LetKind, var: VarId) {
+    pub(super) fn declare_empty(&mut self, kind: LetKind, var: VarId) {
         let declaration = plain::node(
             &mut self.arena,
             View::SDecl { var, value: None },
