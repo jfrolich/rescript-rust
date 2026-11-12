@@ -1150,7 +1150,12 @@ fn run_call(
             return None;
         }
     };
-    let (module, value) = split_macro_name(name);
+    // The file the macro is in is where its name leads, which is not always
+    // its first part: the name can go through an alias (`module D = Debug`)
+    // or name a module of an opened file.
+    let resolved =
+        lookup_value(tctx, env, name).map(|(path, _)| env.normalize_path_prefix(&path).name());
+    let (module, value) = split_macro_name(resolved.as_deref().unwrap_or(name));
     let request = json!({
         "kind": "call",
         "module": module,
