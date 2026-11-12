@@ -1143,6 +1143,22 @@ mod inventory_tests {
     }
 
     primitive_cases! { cases {
+        PjsCall(..) => pjs_call(PjsCall(Box::new(crate::lambda::lam_primitive::JsCall {
+            prim_name: "call".into(),
+            arg_types: vec![],
+            ffi: crate::lambda::lam_primitive::ExternalDecl {
+                kind: crate::lambda::lam_primitive::DeclKind::DeclVal { name: "call".into() },
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: 0,
+            },
+        })), 0);
+        PjsObjectCreate(..) => pjs_object_create(PjsObjectCreate(vec![]), 0);
+        PjsApply => pjs_apply(PjsApply, 2);
+        PjsObjectGet(..) => pjs_object_get(PjsObjectGet("field".into()), 1);
+        PjsObjectSet(..) => pjs_object_set(PjsObjectSet("field".into()), 2);
+        PjsFnMethod => pjs_fn_method(PjsFnMethod, 1);
         Pmakeblock(..) => pmakeblock(Pmakeblock(crate::lambda::TagInfo::Tuple, crate::lambda::lam_primitive::Mutable::Immutable), 2);
         Pfield(..) => pfield(Pfield(0, crate::lambda::FieldDbgInfo::Tuple), 1);
         Psetfield(..) => psetfield(Psetfield(0, crate::lambda::SetFieldDbgInfo::RecordSet(crate::name::Name::new("field"))), 2);
@@ -1260,9 +1276,7 @@ mod inventory_tests {
         PhashMixint => phash_mixint(PhashMixint, 2);
         PhashFinalmix => phash_finalmix(PhashFinalmix, 1);
     }
-        // These do not reach finish_primitive_payload on this dispatch:
-        // external forms are unsupported; extension-slot equality is lowered
-        // before Bir import. Short circuits have test rows above.
-        unsupported { PjsCall(..), PjsObjectCreate(..), PjsApply, PjsObjectGet(..), PjsObjectSet(..), PjsFnMethod, PextensionSlotEq }
+        // Extension-slot equality is lowered before Bir import.
+        unsupported { PextensionSlotEq }
     }
 }

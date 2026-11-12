@@ -186,12 +186,9 @@ impl State {
             let value = self.add_external_effect(cx, effect, value);
             let assign = plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value);
             let statement = crate::bir::j::norm::js1_exp(&mut self.arena, assign);
-            let branch = crate::bir::j::norm::js3_simplify_if(
-                &mut self.arena,
-                test,
-                vec![statement],
-                vec![],
-            );
+            let yes = self.arena.lists.push(&[statement]);
+            let no = self.arena.lists.push(&[]);
+            let branch = crate::bir::j::norm::js3_simplify_if(&mut self.arena, test, yes, no);
             self.statements.push(branch);
         }
         self.pure_expression(View::Var { var: obj }, 0)
