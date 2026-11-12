@@ -41,8 +41,8 @@ claims that these moves have been implemented.
 | Simple tuple binding with matching tuple RHS (possibly under opens) | Separate bindings, preserving opens | `rewrite_value_binding`, `destruct_open_tuple`, `restore_exp` | Complete pattern/RHS; recursive bindings excluded; value-constraint side data | Parser completed binding group or checker binding entry |
 | Record pattern binding to packed module identifier | Separate bindings referring to module fields | `rewrite_value_binding` | Complete RHS and unqualified field patterns | Checker binding entry |
 | Two unguarded true/false match cases | Typed conditional with arms in boolean order | `parsetree_viewer::boolean_match_arms`, `typecore::type_conditional` | Both cases | Direct (implemented) |
-| `async` function | Function body wrapped with promise/unsafe-async operations | `rewrite_fun`, `wrap_with_unsafe_async` | N-ary parameter/default/newtype side tables, parameter location | Checker function entry |
-| `await e` | `Primitive_promise.unsafe_await` application | `transform_await` | Validation needs enclosing async function; generated ghost location comes from operand | Checker expression entry |
+| `async` function | Existing typed promise application, without a parsed wrapper | `typecore::type_body_with_module_unpacks`, `type_promise_application` | Parameter/module-unpack scope and parameter location | Direct (implemented) |
+| `await e` | Existing typed `Primitive_promise.unsafe_await` application, without a parsed wrapper | `typecore::type_promise_application`, `ParseArena::ghost_location` | Validation needs enclosing async function; ghost location comes from operand | Direct (implemented); `transform_await` serves module await only |
 | Awaited module alias, with optional module-type constraint | Dynamic import expression, module unpack and module type declaration | `transform_module_await`, `create_await_module_expression`, `local_module_type_decl` | Per-structure module-type-name deduplication | Checker module entry; not node-local parser work |
 | Local awaited module inside a value binding | Hoisted module type declarations plus rewritten local module | `spelunk_value_bindings_for_await_module_types`, `spelunk_expression_for_await_module_types`, `rewrite_expr` (`Pexp_letmodule`) | Enclosing structure, deduplication, original binding before rewriting | Checker structure/binding entry |
 | `@this` function | Method callback record/constrained callback/unsafe-to-method application | `rewrite_method_callback_expression`, `split_this_attrs` | Function arity, async body and parameter shape | Checker function entry |
@@ -510,39 +510,66 @@ caused by changed brace locations or pattern handles are not attributed by
 these probes; the end-state exact-delta gate needs those accounted for,
 not silently included in the 358.
 
-#### T7 row D: unresolved location-ownership blocker
+#### T7 row D: direct promise typing and immutable ghost views
 
-Rows A–C now type directly. Row D is **not implemented**; neither promise
-mapper helper has been deleted, and no direct-typing fallback was added.
-Small reproducer:
+The initial location-ownership blocker is resolved in `a2873133f`.
+`ParseArena::ghost_location` sets an existing index bit; `get_location`
+returns a 12-byte value with that bit applied. A source location and its
+immutable ghost view share coordinates, without a new pool row, allocation,
+lock, atomic or thread-local access. Pool limits reserve the bit. Tests pin
+the returned location to 12 bytes and prove that 10,000 ghost views leave the
+location count unchanged.
 
-```rescript
-let f = async p => await p
-```
+The two primitive longidents are allocated once per arena. The checker
+supplies their handles and a borrowed one-element argument slice to the same
+identifier and application rules used by explicit calls. The borrowed callee
+view is 16 bytes (size pinned); nothing is stored per syntax node. Async body
+typing occurs after parameter module unpacks are in scope. Dependency
+collection likewise adds the implicit primitive dependency inside that scope.
 
-`transform_await` builds an identifier and application at a ghost copy of
-`p`'s location. `Typedtree::Expression::exp_loc` is a `LocIdx`, not a location
-plus an override flag. With full locations enabled, `ParseArena::get_location`
-returns a stored `&InternedLocation`; merely setting the location-free ghost
-bit is not a valid handle in this mode. The checker holds `&ParseArena`.
-Its existing `push_typecheck_ghost_loc` creates a `Box<InternedLocation>` and
-pushes it into `elsa::sync::FrozenVec`, whose `push` takes a write lock.
-Using that API per await would violate the T7 allocation and lock constraints.
-Using the source location instead would not preserve the existing typed tree.
+`wrap_with_unsafe_async` and the dormant `type_await` stub are deleted.
+`transform_await` remains with exactly one caller,
+`create_await_module_expression`; awaited-module expansion is a separate
+rewrite. Neither ordinary await nor async functions reaches it. The mapper
+only visits their existing children; the unused-attribute sweep preserves the
+old await attribute-discard policy. A 10,000-function test proves that ordinary
+async/await functions append no expression nodes.
 
-This is an unresolved implementation constraint, not evidence that a new
-typed-tree node kind is necessary. A location representation that can expose
-an immutable ghost view without allocating or locking would remove it, but
-has not been implemented or measured here. Preallocating ghost copies per
-source node would instead violate the no-per-node-storage rule. The existing
-`type_await` stub is not a viable alternative: it types the operand against
-the result type and emits a zero-argument application of the operand.
+#### Same-base expansion census (all four rows)
 
-New fixtures cover an await outside an async function, a non-promise await
-inside an async function, and an async body type error. They preserve the
-baseline diagnostics while this row remains blocked.
+A temporary, uncommitted probe at `ParseArena::set_expansion` counted every
+entry during clean single-worker `tests/tests` builds, with the runtime
+already built. Both builds compiled 735 modules, including location retries.
+Base is `10227bc20`; head includes direct typing for all four rows. Probes
+were removed after measurement. Counts grouped by the original expression:
 
-#### T7 A–C measurements and remaining gates
+| Original expression / reason | Base | Direct typing | Removed |
+| --- | ---: | ---: | ---: |
+| `l` integer | 3 | 0 | 3 |
+| Two boolean cases | 2 | 0 | 2 |
+| Single record/dictionary let | 21 | 18 | 3 |
+| Async function | 172 | 25 | 147 |
+| Await expression | 167 | 0 | 167 |
+| Braces whose location changed | 7 | 0 | 7 |
+| Every other expression | 3,038 | 3,038 | 0 |
+| **Total** | **3,410** | **3,081** | **329** |
+
+The retained record-let entries are six packed-module bindings (outside row
+C) and twelve record-rest pattern/type rewrites. The retained async entries
+are one method-callback rewrite and twenty-four parameter/type rewrites.
+These are independent rewrites of non-expression children, not record-let or
+promise desugaring, and still produce the same shapes they produced before.
+The ordinary direct rules never record an expansion.
+
+**Correction to the initial inventory:** the 358 direct-arm hits were not
+358 independently removable expansion entries. Twelve record lets and
+twenty-four async functions also needed those independent rewrites; seven
+brace copies existed only to propagate the old await ghost location. Thus
+`358 - 12 - 24 + 7 = 329`, exactly the observed reduction. No unrelated
+expression expansion count changes. The earlier eight-entry reduction for
+A–C was the same overlap effect (`20 - 12`), not an upstream change.
+
+#### Historical T7 A–C measurements
 
 The saved release binaries at `3fa9eb29e` and `655dfcbf2` isolate A–C
 before integrating subsequent trunk changes. Linux x86-64, ordinary fat-LTO
@@ -565,14 +592,9 @@ there is no established speedup.
 signatures and 729 generated files on `tests/tests`, and all signatures,
 diagnostics and generated files on the 3,735-module application.
 
-A second temporary probe at `ParseArena::set_expansion`, removed after
-measurement, counted **3,410** calls at `3fa9eb29e` and **3,402** on the
-integrated branch at `bcd4295e5`. This is a reduction of eight, not the twenty
-A–C arm hits measured before implementation. These endpoints also include
-intervening trunk changes, unlike the release comparison above. The exact
-same-base expansion-delta gate is therefore **not established**; the eight
-must not be reported as proof that precisely the twenty expansions went
-away. Row D and its 338 direct-arm hits remain unchanged.
+The later same-base census above resolves the initial expansion-count
+attribution. The A–C figures remain measurements of those saved binaries,
+not claims about the completed four-row implementation.
 
 After merging trunk at `88ca1bd53`, both Rust crates build, rewatch tests and
 strict all-features clippy pass. The local compiler unit run reports 1,937
@@ -581,5 +603,23 @@ artifacts; it is not a passing full-suite gate. Baseline/head comparisons
 pass for all 745 single-file and 79 multi-file error fixtures. Local JS
 snapshot comparison passes 729/729, but the complete JS/stdlib/genType parity
 scripts remain blocked by missing reference/package prerequisites. CI is
-the reference-compiler gate; a draft is retained until the incomplete
-implementation and measurement gates are resolved.
+the reference-compiler gate. These are historical A–C validation results;
+the completed implementation is checked again on the final head.
+
+#### Completed four-row validation
+
+At `9d6235b9a`, against `10227bc20`, all 745 single-file and 79 multi-file
+diagnostic fixtures match. The checker comparison reports 735 matching
+signatures, one matching diagnostic and 729 matching generated files.
+The compiler unit suite locally has 1,973 passes and 48 missing-reference
+artifact failures; the reference-enabled CI compiler suite is the gate.
+
+The first completed implementation exceeded the CI instruction threshold:
+4,018,024,706 versus 4,023,019,518 (minimum of five), **+0.124%**. That result
+is not a performance improvement. The profile identified empty attribute
+slice-to-vector conversions in the extracted identifier rule and out-of-line
+location-value copies. The follow-up keeps the original compact `Attributes`
+clone and inlines the location getter so field-only readers do not copy unused
+coordinates. The final instruction check must pass without a waiver; its
+results are reported on pull request #206. Historical A–C application
+measurements above remain separately attributable to those saved binaries.
