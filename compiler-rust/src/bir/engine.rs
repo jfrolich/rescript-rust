@@ -431,6 +431,44 @@ impl<'a> Engine<'a> {
         self.set_summary(target);
     }
 
+    /// Copy a binder-free exit handler without allocating new identities.
+    /// Unlike `copy_subtree`, exit substitution must preserve the legacy
+    /// identities. Binder-containing handlers are moved, never copied.
+    /// Cost: one traversal and allocation per node; no hash iteration.
+    pub fn copy_exit_handler(&mut self, root: NodeId) -> NodeId {
+        use std::collections::HashMap;
+        let mut work = vec![(root, false)];
+        let mut nodes = HashMap::new();
+        let mut funcs = HashMap::new();
+        let empty = HashMap::new();
+        let mut lists = Lists::default();
+        while let Some((n, done)) = work.pop() {
+            if !done {
+                assert!(self.bir.binders(n).is_empty());
+                work.push((n, true));
+                work.extend(self.bir.view(n).children().into_iter().rev().map(|c| (c, false)));
+                continue;
+            }
+            if let View::Fun { header, .. } = self.bir.view(n) {
+                let h = *self.bir.function(header);
+                let attrs = self.bir.function_attributes(header).clone();
+                let fresh = self.bir.function_header(h.params, attrs, h.loc);
+                funcs.insert(header, fresh);
+            }
+            let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists)
+                .remap(&mut lists, &super::node::Renaming {
+                nodes: &nodes, vars: &empty, funcs: &funcs,
+                catches: &HashMap::new(), labels: &HashMap::new(), js: &HashMap::new(),
+            });
+            let new = self.node(packed.view(&lists), packed.aux(), 1);
+            if let Some(cold) = self.bir.cold(n) {
+                self.bir.set_cold(new, cold);
+            }
+            nodes.insert(n, new);
+        }
+        nodes[&root]
+    }
+
     /// Release a detached subtree.
     pub fn release(&mut self, node: NodeId) {
         self.bir.release(node);
