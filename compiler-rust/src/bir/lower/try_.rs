@@ -120,6 +120,51 @@ mod tests {
     }
 
     #[test]
+    fn exception_region_interactions() {
+        use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+        use crate::lambda::lam_primitive::Primitive;
+        for shape in 0..10 {
+            let mut a = LamArena::new();
+            let one = a.const_(Constant::Int { i: 1, comment: None });
+            let two = a.const_(Constant::Int { i: 2, comment: None });
+            let exn = Ident::new("exn", 10, IdentFlags::NONE);
+            let raise = a.prim_raw(Primitive::Praise, &[one], LamLoc::NONE);
+            let root = match shape {
+                0..=3 => a.try_(if shape & 1 == 0 { one } else { raise }, exn,
+                               if shape & 2 == 0 { two } else { raise }),
+                4 => a.try_finally(raise, two),
+                5 => {
+                    let caught = a.try_(one, exn, two);
+                    let f = a.var(Ident::new("f", 12, IdentFlags::NONE));
+                    let earlier = a.apply_raw(f, &[one], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+                    a.apply_raw(f, &[earlier, caught], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE })
+                }
+                6 => {
+                    let exit = a.static_raise(1, &[]);
+                    let caught = a.static_catch(exit, 1, &[], one);
+                    a.try_(caught, exn, two)
+                }
+                7 => {
+                    let exit = a.static_raise(1, &[]);
+                    let handler = a.try_(one, exn, two);
+                    a.static_catch(exit, 1, &[], handler)
+                }
+                8 => {
+                    let scrut = a.var(Ident::new("tag", 13, IdentFlags::NONE));
+                    let body = a.string_switch(scrut, &[("a", one), ("b", two)], Some(raise));
+                    a.try_(body, exn, two)
+                }
+                _ => {
+                    let inner = a.try_(one, Ident::new("inner", 14, IdentFlags::NONE), raise);
+                    let body = a.try_(inner, exn, two);
+                    a.try_finally(body, one)
+                }
+            };
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
     fn frame_sizes() {
         assert_eq!(std::mem::size_of::<Try>(), 4);
         assert_eq!(std::mem::size_of::<Plan>(), 72);

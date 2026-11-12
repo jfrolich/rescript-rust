@@ -26,6 +26,30 @@ mod tests {
     use crate::lambda::lam_constant::Constant;
 
     #[test]
+    fn assignment_captured_and_uncaptured() {
+        use crate::lambda::{FunctionAttribute, LamLoc};
+        for captured in [false, true] {
+            let mut a = LamArena::new();
+            let id = Ident::new("mutable", 10, IdentFlags::NONE);
+            let value = a.const_(Constant::Int { i: 42, comment: None });
+            let assignment = a.assign(id, value);
+            let mut tail = a.var(id);
+            if captured { tail = a.function_(0, &[], tail, FunctionAttribute::default(), LamLoc::NONE); }
+            let root = a.seq_raw(assignment, tail);
+            compare(a, root);
+        }
+    }
+
+    #[test]
+    fn assignment_raising_operand() {
+        let mut a = LamArena::new();
+        let value = a.const_(Constant::Int { i: 42, comment: None });
+        let value = a.prim_raw(crate::lambda::lam_primitive::Primitive::Praise, &[value], crate::lambda::LamLoc::NONE);
+        let root = a.assign(Ident::new("mutable", 10, IdentFlags::NONE), value);
+        compare(a, root);
+    }
+
+    #[test]
     fn assignment_all_continuations() {
         let mut a = LamArena::new();
         let value = a.const_(Constant::Int { i: 42, comment: None });
