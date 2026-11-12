@@ -104,7 +104,7 @@ fi
 
 # GenType tests
 ./gentype/01-gentype-project-root.sh &&
-./gentype/02-gentype-output-not-replayed.sh &&
+./gentype/02-gentype-notes-not-shown.sh &&
 ./gentype/03-declaration-closure.sh &&
 ./gentype/04-file-inventory.sh clean &&
 ./gentype/04-file-inventory.sh incremental &&
