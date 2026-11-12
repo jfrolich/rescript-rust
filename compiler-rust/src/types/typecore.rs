@@ -9091,7 +9091,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 #[allow(clippy::too_many_arguments)]
 fn type_identifier(
     tctx: &mut TypeCheckContext<'_>, env: &Env, expr: &ParsedExpression,
-    loc: LocIdx, lid: &Located<LidentIdx>, attributes: &[crate::parser::ast::Attribute],
+    loc: LocIdx, lid: &Located<LidentIdx>, attributes: &Attributes,
     expected_ty: &mut Expected, context: Option<ClashSite>, recarg: RecArg,
     deprecated_function_call: bool,
 ) -> TypeCoreResult<Expression> {
@@ -9181,7 +9181,7 @@ fn type_identifier(
             tctx.type_ctx.store_typed_env(env),
         );
         tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
+            .with_exp_attributes(typed_node, attributes.clone())
     })
 }
 
@@ -10084,7 +10084,7 @@ fn type_application_parts(
         }
         ApplicationCallee::Promise(lid) => {
             tctx.set_unify_env(env);
-            type_identifier(tctx, env, sexp, lid.loc, &lid, &[], &mut { inferred },
+            type_identifier(tctx, env, sexp, lid.loc, &lid, &Attributes::new(), &mut { inferred },
                 None, RecArg::Rejected, true)?
         }
     };

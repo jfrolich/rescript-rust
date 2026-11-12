@@ -1694,7 +1694,9 @@ impl ParseArena {
     /// Look up a location, applying its immutable ghost-view bit.
     /// Cost: one indexed load and one bit test for a source location; no
     /// allocation or synchronization for a ghost view of a source location.
-    #[inline]
+    // Keep field-only readers scalar: an out-of-line 12-byte return copies
+    // unused coordinates even when the caller only tests ghostness.
+    #[inline(always)]
     pub fn get_location(&self, idx: LocIdx) -> InternedLocation {
         if !self.store_locations {
             const SOURCE: InternedLocation = InternedLocation {
