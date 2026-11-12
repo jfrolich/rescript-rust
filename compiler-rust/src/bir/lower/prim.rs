@@ -115,7 +115,10 @@ impl State {
             if let [arg] = self.source.lists.get(prim.operands) {
                 let nested = self.module_paths[arg.index()];
                 if nested && name.as_str() == "make" {
-                    return Err(Unsupported("flat make"));
+                    self.module_paths[prim.source.index()] = true;
+                    let value = self.flat_make_field(prim.source);
+                    for old in values { self.arena.release(old); }
+                    return Ok(self.primitive_result(cx, statements, value));
                 }
                 self.module_paths[prim.source.index()] =
                     nested || matches!(self.source.view(*arg), View::Global { .. });

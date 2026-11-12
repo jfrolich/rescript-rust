@@ -5,6 +5,30 @@ use crate::js_ir::arena::FieldPos;
 use crate::lambda::lam_compat::FieldDbgInfo;
 
 impl State {
+    /// P: compile_flat_make_field. O(d + name bytes) for d field segments.
+    /// Called only after the indexed module-path fact succeeds; this walk
+    /// assembles the export spelling rather than rechecking subtree effects.
+    pub(super) fn flat_make_field(&mut self, mut source: NodeId) -> NodeId {
+        let mut segments = smallvec::SmallVec::<[&str; 4]>::new();
+        loop {
+            self.primitive_steps += 1;
+            match self.source.view(source) {
+                View::Prim { primitive, args: [parent] } => {
+                    let crate::lambda::lam_primitive::Primitive::Pfield(_, FieldDbgInfo::Module { name }) = self.arena.primitive(primitive).primitive else { unreachable!("module path fact") };
+                    segments.push(name.as_str());
+                    source = *parent;
+                }
+                View::Global { module } => {
+                    segments.reverse();
+                    let name = crate::lambda::flat_make_name(&segments).expect("nested make path");
+                    let member = Some(self.arena.intern_text(&name));
+                    return plain::node(&mut self.arena, View::JQualified { module, member }, 0);
+                }
+                _ => unreachable!("module path fact"),
+            }
+        }
+    }
+
     /// K: resolve_cmj_module_field_constant / compile_field_access.
     /// O(record arity + discarded nodes + field-name bytes) for literal
     /// projection; otherwise O(field-name bytes) and one summary lookup.
@@ -256,7 +280,7 @@ mod tests {
     }
 
     #[test]
-    fn module_constants_and_flat_make_reason() {
+    fn module_constants_and_flat_make_match_legacy() {
         use crate::cmi::persistent_env::CmjExportConstant as Cc;
         for constant in [
             None,
@@ -308,11 +332,37 @@ mod tests {
             &[inner],
             LamLoc::NONE,
         );
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn flat_make_path_shapes_match_legacy() {
+        for path in [vec!["make"], vec!["Inner", "make"], vec!["A", "B", "make"], vec!["A", "make", "make"], vec!["A", "other"]] {
+            let mut a = LamArena::new();
+            let mut root = a.global_module(Ident::create_persistent("Other"));
+            for field in path {
+                root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new(field) }), &[root], LamLoc::NONE);
+            }
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn ten_thousand_flat_make_segments_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = a.global_module(Ident::create_persistent("Other"));
+        for i in 0..10_000 {
+            let field = if i == 9_999 { "make" } else { "Inner" };
+            root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new(field) }), &[root], LamLoc::NONE);
+        }
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-        assert!(matches!(
-            super::super::lower(input, None, false),
-            Err(Unsupported("flat make"))
-        ));
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 10_001);
+        assert_eq!(state.primitive_steps, 30_001);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
     }
 
     #[test]
