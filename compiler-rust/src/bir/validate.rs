@@ -208,12 +208,28 @@ impl Bir {
         }
         let mut effects = vec![(false, false); self.nodes.len()];
         let mut strict = vec![false; self.nodes.len()];
-        let mut trivial_unit = vec![false; self.nodes.len()];
         let mut subexpression = vec![false; self.nodes.len()];
         // Leave events completed subtree intervals during the first traversal.
         // Only the nearest boundary matters: a binder inside it is also inside
         // every enclosing boundary, even when the binder followed the use.
+        let mut control = vec![NodeFlags::default(); self.nodes.len()];
         for &id in order.iter().rev() {
+            let node = self.node(id);
+            let facts = self.control_facts(node, |c| {
+                NodeFlags(control[c.index()].0 | if effects[c.index()].0 { NodeFlags::PURE } else { 0 })
+            });
+            control[id.index()] = facts;
+            if node.op() != Op::Var && node.op() as u8 <= Op::Continue as u8 {
+                if node.flags().contains(NodeFlags::HAS_EXIT) != facts.contains(NodeFlags::HAS_EXIT) {
+                    return fail("stale exit flag");
+                }
+                if node.flags().contains(NodeFlags::HAS_STATEMENT) != facts.contains(NodeFlags::HAS_STATEMENT) {
+                    return fail("stale statement-form flag");
+                }
+                if node.flags().contains(NodeFlags::TRIVIAL_UNIT) != facts.contains(NodeFlags::TRIVIAL_UNIT) {
+                    return fail("stale trivial unit flag");
+                }
+            }
             let actual = self.effects(id, |c| effects[c.index()]);
             effects[id.index()] = actual;
             if let Some(actual) = j::facts::purity(self, id, true, |c| strict[c.index()]) {
@@ -230,14 +246,6 @@ impl Bir {
                 }
             }
             let flags = self.node(id).flags();
-            trivial_unit[id.index()] = self.trivial_unit_fact(self.view(id), |c| {
-                (effects[c.index()].0, trivial_unit[c.index()])
-            });
-            if matches!(self.view(id), View::Const { .. } | View::Seq { .. } | View::Let { .. })
-                && flags.contains(NodeFlags::TRIVIAL_UNIT) != trivial_unit[id.index()]
-            {
-                return fail("stale trivial unit flag");
-            }
             if flags.contains(NodeFlags::PURE) != actual.0
                 || flags.contains(NodeFlags::NO_ALLOC) != actual.1
             {

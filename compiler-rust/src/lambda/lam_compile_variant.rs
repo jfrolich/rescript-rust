@@ -607,27 +607,6 @@ impl LambdaCompiler {
         }
     }
 
-    pub(crate) fn uses_named_variant_view(
-        &self,
-        switch: &crate::lambda::arena::SwitchView<'_>,
-    ) -> bool {
-        named_payload_switch(switch.payload, switch.const_keys, switch.block_keys)
-    }
-
-    /// [`untagged_switch`] of a switch view.
-    pub(crate) fn uses_untagged_variant_view(
-        &self,
-        switch: &crate::lambda::arena::SwitchView<'_>,
-    ) -> bool {
-        untagged_switch(
-            &switch.payload.dispatch,
-            switch.payload.consts_full,
-            switch.const_keys.iter(),
-            switch.payload.blocks_full,
-            switch.block_keys.iter(),
-        )
-    }
-
     fn compile_switch_inner(
         &mut self,
         a: &mut LamArena,

@@ -411,6 +411,13 @@ impl Bir {
         if let View::Assign { var, .. } = self.view(id) {
             self.vars.flags[var.index()].0 |= VarFlags::ASSIGNED;
         }
+        // The lowering's arena keeps `ASSIGNED` as level L recorded it
+        // (C:404 `assignable`, the targets of L assignments): a result
+        // temporary or handler parameter the lowering assigns stays
+        // delay-safe (A:28), as it is for the legacy lowering.
+        if self.js_scope.is_some() {
+            return changed;
+        }
         if let View::JBin { left, .. } = self.view(id) {
             if self.node(id).aux() == crate::js_ir::op::BinOp::Eq as u16 {
                 if let View::Var { var } = self.view(left) {
@@ -558,22 +565,6 @@ impl Bir {
         self.count_stack = stack;
     }
 
-    /// R5 step 0, from immediate child facts: constant work per call.
-    /// Only these L forms can denote a trivial unit spine; J uses the same
-    /// bit for strict purity and never calls this predicate during lowering.
-    pub(super) fn trivial_unit_fact(
-        &self,
-        view: View<'_>,
-        child: impl Fn(NodeId) -> (bool, bool),
-    ) -> bool {
-        match view {
-            View::Const { value } => matches!(self.constant(value), Constant::Undefined(true)),
-            View::Seq { first, second } => child(second).1 && child(first).0,
-            View::Let { value: Some(value), body, .. } => child(body).1 && child(value).0,
-            _ => false,
-        }
-    }
-
     pub(super) fn effects(
         &self,
         id: NodeId,
@@ -648,6 +639,47 @@ impl Bir {
         };
         (j_pure.unwrap_or(effects.0), effects.1)
     }
+    /// L control facts, including R5's TRIVIAL_UNIT, in one immediate-child
+    /// fold. O(arity), stopping when both control bits are set and unit is
+    /// impossible; constant for Fun, Exit, Var, Const and every J operation.
+    /// Child flags include independently known PURE for unit-spine prefixes.
+    /// Fun is a control boundary (compiler/core/lam_exit_code.ml:28).
+    pub(super) fn control_facts(
+        &self,
+        node: Node,
+        child_facts: impl Fn(NodeId) -> NodeFlags,
+    ) -> NodeFlags {
+        let own = match node.op() {
+            Op::Exit => return NodeFlags(NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT),
+            Op::Fun | Op::Var => return NodeFlags::default(),
+            Op::Switch | Op::StrSwitch | Op::Catch | Op::Try | Op::TryFinally | Op::While
+            | Op::For | Op::ForOf | Op::ForAwaitOf | Op::Assign | Op::Break | Op::Continue => true,
+            op if op as u8 <= Op::Continue as u8 => false,
+            _ => return NodeFlags::default(),
+        };
+        let view = node.view(&self.lists);
+        let tail = match view {
+            View::Const { value } => return NodeFlags(if matches!(self.constant(value), Constant::Undefined(true)) {
+                NodeFlags::TRIVIAL_UNIT
+            } else { 0 }),
+            View::Seq { second, .. } => Some(second),
+            View::Let { value: Some(_), body, .. } => Some(body),
+            _ => None,
+        };
+        let mut unit = tail.is_some();
+        let both = NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
+        let mut facts = NodeFlags(if own { NodeFlags::HAS_STATEMENT } else { 0 });
+        for child in view.children() {
+            let flags = child_facts(child);
+            facts.0 |= flags.0 & both;
+            unit &= flags.contains(if tail == Some(child) { NodeFlags::TRIVIAL_UNIT } else { NodeFlags::PURE });
+            if facts.0 == both && !unit {
+                break;
+            }
+        }
+        if unit { facts.0 |= NodeFlags::TRIVIAL_UNIT; }
+        facts
+    }
     fn repair(&mut self, mut id: NodeId) {
         loop {
             let (pure, no_alloc) = self.effects(id, |c| {
@@ -655,9 +687,21 @@ impl Bir {
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
             let old_node = self.node(id);
+            let control = self.control_facts(old_node, |c| {
+                let child = self.node(c);
+                let mut flags = child.flags();
+                // J reuses these bits for unrelated facts and metadata.
+                if child.op() == Op::Var || child.op() as u8 > Op::Continue as u8 {
+                    flags.0 &= !NodeFlags::CONTROL;
+                }
+                flags
+            });
             let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
+            if old_node.op() != Op::Var && old_node.op() as u8 <= Op::Continue as u8 {
+                flags.0 = (flags.0 & !NodeFlags::CONTROL) | control.0;
+            }
             if pure {
                 flags.0 |= NodeFlags::PURE;
             }
@@ -674,18 +718,6 @@ impl Bir {
                     if j::facts::subexpression(self, id, |c| matches!(self.view(c), View::Var { .. }) || self.node(c).flags().contains(NodeFlags::J_SUBEXPR)) {
                         flags.0 |= NodeFlags::J_SUBEXPR;
                     }
-                }
-            }
-            if matches!(old_node.op(), Op::Const | Op::Seq | Op::Let) {
-                flags.0 &= !NodeFlags::TRIVIAL_UNIT;
-                if self.trivial_unit_fact(old_node.view(&self.lists), |c| {
-                    let child = self.node(c);
-                    let flags = child.flags();
-                    (flags.contains(NodeFlags::PURE),
-                        matches!(child.op(), Op::Const | Op::Seq | Op::Let)
-                            && flags.contains(NodeFlags::TRIVIAL_UNIT))
-                }) {
-                    flags.0 |= NodeFlags::TRIVIAL_UNIT;
                 }
             }
             self.nodes[id.index()].set_flags(flags);
@@ -850,7 +882,11 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
+        // The two level-L control facts share their bits with level-J
+        // metadata: a change of either re-derives the parent, which reads
+        // them from its children.
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT
+            | NodeFlags::J_SUBEXPR | NodeFlags::HAS_EXIT | NodeFlags::HAS_STATEMENT;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
@@ -1186,6 +1222,110 @@ mod tests {
         assert_eq!(size_of::<SwitchId>(), 4);
         assert_eq!(size_of::<ColdId>(), 4);
         assert_eq!(size_of::<StrId>(), 4);
+    }
+
+    fn has_exit_flag(b: &Bir, id: NodeId) -> bool {
+        b.node(id).flags().contains(NodeFlags::HAS_EXIT)
+    }
+
+    #[test]
+    fn has_exit_is_recorded_when_a_node_is_built_and_stops_at_a_function() {
+        let mut b = Bir::default();
+        let header = b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let other = lit(&mut b);
+        let seq = b.new_node(View::Seq { first: other, second: exit }, 0);
+        let condition = lit(&mut b);
+        let else_ = lit(&mut b);
+        let branch = b.new_node(View::If { condition, then_: seq, else_ }, 0);
+        // An exit under a function does not leave it (lam_exit_code.ml:28).
+        let params = b.new_vars(&[]);
+        let function = b.function_header(params, FunctionAttribute::default(), LamLoc::NONE);
+        let closed = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let fun = b.new_node(View::Fun { body: closed, header: function }, 0);
+        let body = b.new_node(View::Seq { first: fun, second: branch }, 0);
+        let handler = lit(&mut b);
+        let root = b.new_node(View::Catch { body, handler, header }, 0);
+        for flagged in [exit, seq, branch, closed, body, root] {
+            assert!(has_exit_flag(&b, flagged));
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        for clear in [other, condition, else_, fun, handler] {
+            assert!(!has_exit_flag(&b, clear));
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+    }
+
+    #[test]
+    fn has_statement_marks_statement_forms_without_exits() {
+        let mut b = Bir::default();
+        let v = b.new_var_id(Name::new("x"), 0);
+        let value = lit(&mut b);
+        let assign = b.new_node(View::Assign { var: v, value }, 0);
+        let first = lit(&mut b);
+        let seq = b.new_node(View::Seq { first, second: assign }, 0);
+        let condition = b.new_node(View::Break, 0);
+        let body = lit(&mut b);
+        let looped = b.new_node(View::While { condition, body }, 0);
+        let root = b.new_node(View::Seq { first: seq, second: looped }, 0);
+        for flagged in [assign, seq, condition, looped, root] {
+            assert!(b.node(flagged).flags().contains(NodeFlags::HAS_STATEMENT));
+            assert!(!has_exit_flag(&b, flagged));
+        }
+        for clear in [value, first, body] {
+            assert!(!b.node(clear).flags().contains(NodeFlags::HAS_STATEMENT));
+        }
+        valid(&b, root);
+        let mut flags = b.node(first).flags();
+        flags.0 |= NodeFlags::HAS_STATEMENT;
+        b.nodes[first.index()].set_flags(flags);
+        assert_eq!(b.validate(Some(root)), Err("stale statement-form flag".to_string()));
+    }
+
+    #[test]
+    fn has_exit_follows_an_edit_up_ten_thousand_parents() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let mut root = exit;
+        for _ in 0..10_000 {
+            let first = lit(&mut b);
+            root = b.new_node(View::Seq { first, second: root }, 0);
+        }
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+        let replacement = lit(&mut b);
+        b.replace(exit, replacement);
+        assert!(!has_exit_flag(&b, root));
+        valid(&b, root);
+        let again = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        b.replace(exit, again);
+        assert!(has_exit_flag(&b, root));
+        valid(&b, root);
+    }
+
+    #[test]
+    fn validate_rejects_a_stale_exit_flag() {
+        let mut b = Bir::default();
+        b.catch_header(1, VarSpan::default());
+        let exit = b.new_node(View::Exit { label: 1, args: &[] }, 0);
+        let first = lit(&mut b);
+        let root = b.new_node(View::Seq { first, second: exit }, 0);
+        valid(&b, root);
+        for (node, set) in [(root, false), (first, true)] {
+            let old = b.node(node).flags();
+            let mut flags = old;
+            if set {
+                flags.0 |= NodeFlags::HAS_EXIT;
+            } else {
+                flags.0 &= !NodeFlags::HAS_EXIT;
+            }
+            b.nodes[node.index()].set_flags(flags);
+            assert_eq!(b.validate(Some(root)), Err("stale exit flag".to_string()));
+            b.nodes[node.index()].set_flags(old);
+        }
+        valid(&b, root);
     }
 
     #[test]

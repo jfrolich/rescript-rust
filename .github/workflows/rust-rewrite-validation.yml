@@ -465,6 +465,13 @@ jobs:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node
       - uses: ./.github/actions/prepare-parity
+      # The snapshot embedded in the executable must be what the runtime and
+      # Belt sources of this commit produce.
+      - name: Check embedded snapshot freshness
+        run: |
+          RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime" \
+            rewatch/target/release/rescript snapshot --check
+
       - name: Compare snapshot and from-source builds
         run: |
           export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"

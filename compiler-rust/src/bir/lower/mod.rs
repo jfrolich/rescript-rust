@@ -5,6 +5,7 @@ mod ffi_args;
 mod external;
 mod call;
 mod cond;
+mod exit;
 mod expr;
 mod konst;
 mod prim;
@@ -363,6 +364,17 @@ struct State {
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
     scratch: Vec<NodeId>,
+    /// 4.1: the jump table, indexed by catch header; grown where a catch is
+    /// entered and the unit has more headers than entries.
+    jumps: Vec<exit::Jump>,
+    /// The handlers of the catches being lowered, a stack of flattened tables.
+    catch_table: Vec<(NodeId, crate::bir::CatchId)>,
+    catches: Vec<Option<exit::Plan>>,
+    catch_work: Vec<NodeId>,
+    /// `HAS_EXIT` reads that decided a flattening or a form.
+    catch_flag_reads: usize,
+    /// Handler nodes read to find the label of an exit (4.1 step 1).
+    catch_walk_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -423,6 +435,12 @@ impl State {
             primitive_steps: 0,
             spine_steps: 0,
             scratch: Vec::new(),
+            jumps: Vec::new(),
+            catch_table: Vec::new(),
+            catches: Vec::new(),
+            catch_work: Vec::new(),
+            catch_flag_reads: 0,
+            catch_walk_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -480,6 +498,12 @@ impl State {
         });
         let list = self.statements.take_list(&mut self.arena, run);
         let root = self.arena.block_from_list(list);
+        // The headers keep their labels and parameters; the exits they count
+        // stay in the source, which reads the counts while a function of
+        // another module is inlined. One write per catch of the unit.
+        for header in &mut self.arena.pools.catches {
+            header.uses = 0;
+        }
         self.arena.finish_bulk(root);
         Lowered {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
@@ -597,7 +621,13 @@ impl ProbeRules for State {
                 let operands = self.source.node(node).switch_actions();
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
             }
-            View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
+            View::Catch { .. } => {
+                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node))));
+            }
+            View::Exit { label, .. } => {
+                let args = self.source.node(node).exit_arguments();
+                return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
+            }
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
             | View::For { .. }

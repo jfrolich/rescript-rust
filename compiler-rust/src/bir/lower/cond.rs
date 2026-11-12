@@ -45,6 +45,9 @@ pub(super) struct Conditional {
     unit: bool,
     /// A slot for a declaration is reserved before the head slot.
     declares: bool,
+    /// Row R5 step 1 may apply: neither branch holds a construct that is
+    /// lowered to statements in every continuation (C:5139).
+    folds: bool,
 }
 
 /// Where the output of a conditional starts and where its head slot is. The
@@ -53,9 +56,11 @@ pub(super) struct Conditional {
 struct Parts {
     start: u32,
     head: u32,
+    /// Row R5 step 1 may apply (`Conditional::folds`).
+    folds: bool,
 }
 
-const EMPTY: Span = Span { start: 0, len: 0 };
+pub(super) const EMPTY: Span = Span { start: 0, len: 0 };
 
 impl norm::IfLists for super::out::StatementStack {
     type Handle = Span;
@@ -114,6 +119,11 @@ impl State {
             // 3.7: the result of a short circuit is created after its operands.
             (Kind::And | Kind::Or, Cont::Value(_) | Cont::Effect(_)) => (Target::None, !returns),
         };
+        // C:5139 lambda_contains_statement_value_form, as two flag reads.
+        let statement = |node: NodeId| {
+            self.source.node(node).flags().contains(NodeFlags::HAS_STATEMENT)
+        };
+        let folds = !statement(then_) && !statement(else_);
         Ok(Conditional {
             condition,
             then_,
@@ -122,6 +132,7 @@ impl State {
             kind,
             unit,
             declares,
+            folds,
         })
     }
 
@@ -247,6 +258,7 @@ impl State {
         let parts = Parts {
             start,
             head: end - 1,
+            folds: conditional.folds,
         };
         let yes = children.next().expect("first branch");
         if conditional.kind == Kind::If {
@@ -353,7 +365,7 @@ impl State {
 
     /// Fill a reserved slot; an explicit empty block is recorded for the
     /// `if_` of an enclosing conditional. Constant.
-    fn place(&mut self, slot: u32, statement: NodeId) {
+    pub(super) fn place(&mut self, slot: u32, statement: NodeId) {
         self.statements.fill(slot, statement);
         if matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
         {
@@ -377,6 +389,14 @@ impl State {
         };
         self.statements.kill(upper);
         self.statements.kill(lower);
+    }
+
+    /// Release the statements of a discarded run: one step per statement.
+    pub(super) fn release_run(&mut self, run: Span) {
+        for statement in self.statements.statements(run) {
+            self.arena.release(statement);
+        }
+        self.statements.kill(run);
     }
 
     /// `[return value]`: the statement and the returned value. Constant on a
@@ -739,10 +759,9 @@ impl State {
     ) -> Probed {
         let yes = self.run(cx, yes);
         let no = self.run(cx, no);
-        // Step 1, C:5241 try_fold_effect_only_return_tail. The legacy gate
-        // lambda_contains_statement_value_form (C:5139) holds for every unit
-        // this lowering accepts: each such form is still Unsupported.
-        if self.returns_after_effects(yes) && self.returns_after_effects(no) {
+        // Step 1, C:5241 try_fold_effect_only_return_tail, behind the legacy
+        // gate lambda_contains_statement_value_form (C:5139): `folds`.
+        if parts.folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);
@@ -1723,7 +1742,7 @@ mod tests {
         };
         let (then_, else_) = (branch(&mut hand, 0, yes), branch(&mut hand, 1, no));
         let test = hand.test(0);
-        let parts = Parts { start: 0, head };
+        let parts = Parts { start: 0, head, folds: true };
         let Probed::Out(out) =
             hand.state
                 .effect_conditional(Cx::effect(), parts, test, then_, else_)
@@ -1937,9 +1956,13 @@ mod tests {
             let pure = int(&mut a, level);
             body = a.seq_raw(pure, body);
         }
-        let input = bridge::import_lambda(&a, body).unwrap();
+        let mut input = bridge::import_lambda(&a, body).unwrap();
         input.arena.validate(Some(input.root)).unwrap();
         let root = input.root;
+        let flags = input.arena.node(root).flags();
+        input.arena.nodes[root.index()].set_flags(NodeFlags(flags.0 ^ NodeFlags::TRIVIAL_UNIT));
+        assert_eq!(input.arena.validate(Some(root)), Err("stale trivial unit flag".into()));
+        input.arena.nodes[root.index()].set_flags(flags);
         let mut state = State::new(input);
         assert!(state.trivial_unit(root));
         assert_eq!(state.spine_steps, 1);
@@ -1951,7 +1974,7 @@ mod tests {
         assert_eq!(size_of::<Kind>(), 1);
         assert_eq!(size_of::<Target>(), 8);
         assert_eq!(size_of::<Conditional>(), 24);
-        assert_eq!(size_of::<Parts>(), 8);
+        assert_eq!(size_of::<Parts>(), 12);
         assert_eq!(size_of::<Cx>(), 32);
     }
 }

@@ -77,11 +77,13 @@ Three structural differences between the legacy code and OCaml matter here.
 1. **Exits.** OCaml has one jump table, `jmp_table: label -> {exit_id,
    bindings, order_id}`, and one test for the cheap form (`lam_compile.ml:1173`).
    The legacy code has three stacks (`static_handlers`,
-   `static_jump_handlers`, `fallthrough_return_handlers`, C:413-415) and
-   chooses between them with about twenty predicates that walk the body and
-   the handler (`uses_fallthrough_staticcatch_return` (C:3646),
-   `return_staticcatch_requires_explicit_jump` (C:6135) and the functions of row
-   K14). The predicates approximate what OCaml's `in_staticcatch` bit says.
+   `static_jump_handlers`, `fallthrough_return_handlers`, C:413-415). Until
+   S3.5 it chose between them with about twenty predicates that walked the
+   body and the handler and approximated what OCaml's `in_staticcatch` bit
+   says. S3.5 found two shapes on which they chose the other form than OCaml
+   (4.6) and replaced them with OCaml's test, `staticcatch_takes_pseudo_jump`:
+   no enclosing `try` body, the three stacks empty, and no exit in the
+   handler.
 2. **Speculation.** OCaml compiles a branch of a conditional in `NeedValue`
    first and compiles it again in the real continuation when the first result
    needs statements (`lam_compile.ml:1577-1712`). The legacy code does the
@@ -328,7 +330,7 @@ against it.
 | K11 | Switch depth, loops, labels | `with_switch_depth` (C:1988), `push_loop` (C:2044), `pop_loop` (C:2050), `ensure_current_loop_label` (C:2059), `with_fresh_loop_label_counter` (C:2034), `continues_toplevel_spine` (C:1513) | `loop_N` labels and labelled `break`/`continue` | `Cx::switch_depth`, `Cx::loops`, the label schedule (4.5) |
 | K12 | Exits, explicit form | `flatten_nested_caches` (C:190), `compile_staticcatch_effect_output` (C:3378) and its three siblings, the four `compile_multi_staticcatch_effect_output` (C:3267) siblings, `emit_multi_staticcatch_prelude` (C:6441), `compile_exit_dispatch` (C:6528), `compile_static_raise_jump_output` (C:3173), `next_static_jump_exit_code` (C:6334) | `let exit = 0`, the handler parameters, the body, a dispatch on `exit` | a jump-stack entry with `order > 0`; one function for all continuations (4.1) |
 | K13 | Exits, cheap form (the handler follows the body) | `compile_fallthrough_staticcatch_return_output` (C:3463), `compile_fallthrough_static_raise_return_output` (C:3485), `with_fallthrough_return_handler` (C:3516) | the handler parameters, the body, the handler | a jump-stack entry with `order = -1` (`add_pseudo_jmp`) |
-| K14 | Exits, choice of the form | `compile_staticcatch_in_return` (C:3091), `uses_fallthrough_staticcatch_return` (C:3646), `uses_pseudo_fallthrough_staticcatch_return` (C:3805), `return_staticcatch_requires_explicit_jump` (C:6135) and the predicates in the index | a boolean | one test: the continuation is `Effect(Return(Named { in_catch: false, .. }))`, the flattened table has one handler, and the handler has no `HAS_EXIT` flag (4.1). No walk |
+| K14 | Exits, choice of the form | `compile_staticcatch_in_return` (C:3091), `staticcatch_takes_pseudo_jump` and the predicates in the index (before S3.5: `uses_fallthrough_staticcatch_return`, `uses_pseudo_fallthrough_staticcatch_return`, `return_staticcatch_requires_explicit_jump` and eighteen more, deleted there, 4.6) | a boolean | one test: the continuation is `Effect(Return(Named { in_catch: false, .. }))`, the flattened table has one handler, and the handler has no `HAS_EXIT` flag (4.1). No walk |
 | K15 | Exits, handler substituted at the raise | `with_static_handler` (C:6075), `resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932) | the handler's code at the raise site | none. Open (Q1): the form is reachable only for a catch whose body has no exit to its label |
 | H1 | Calls | `compile_apply_call_inner` (C:1144), `apply_with_arity` (C:1341), `call_info_of_apply_status` (C:320) | `JCall` | 3.3 |
 | H2 | Fields and calls of another module | `compile_external_field_apply` (C:1266), `resolve_cmj_module_field_arity` (C:1222), `resolve_cmj_module_field_lambda` (C:1211), `resolve_cmj_module_field_constant` (K:163) | `JQualified`, a constant, or an inlined body | 3.3 |
@@ -396,7 +398,7 @@ Every function name of the files below, by row.
 | H6 | `compile_recursive_bindings_output` 2215, `compile_recursive_binding` 2244, `compile_recursive_self_binding_makeblock` 2293, `recursive_dummy_object_expr` 2345, `recursive_self_binding_field_info` 2371, `letrec_bindings` 6625, `recursive_function_binding_value` 6692, `binding_is_ocaml_scc_function` 6696, `recursive_binding_group_is_function_only` 6700, `sort_recursive_binding_group` 6710 |
 | K4 | `compile_let_binding` 2400, `compile_let_binding_output` 2411, `compile_if_binding_block` 2699, `compile_switch_binding_block` 2750, `compile_string_switch_binding_block` 2775, `compile_short_circuit_binding_block` 2859, `compile_declared_if_block` 4926, `prepend_declaration_or_fold_final_assignment` 5070, `declare_compiled` 6648 |
 | K6 | `compile_return_block` 2917, `compile_return_output_inner` 2924, `compile_return_output` 3067, `compile_short_circuit_return_output` 3075, `reorder_fallthrough_return_clauses` 3835, `grouped_return_string_clauses` 3847, `lambda_contains_statement_value_form` 5016, `try_fold_effect_only_return_tail` 5118, `compile_if_return_output` 5144, `compile_test_return_block` 5216, `compile_test_return_block_with_fallback` 5231, `compile_switch_return_block` 5652, `compile_switch_return_block_inner` 5666, `compile_string_switch_return_block` 5749, `compile_string_switch_return_block_inner` 5758, `return_case_needs_break` 6643, `return_compiled` 6658 |
-| K14 | `compile_staticcatch_in_return` 3091, `handler_returns_unit_undefined` 3615, `staticcatch_handler_is_identity_binding` 3634, `uses_fallthrough_staticcatch_return` 3646, `uses_pseudo_fallthrough_staticcatch_return` 3805, `return_staticcatch_requires_explicit_jump` 6135, `handler_is_pure_outward_static_raise_forwarder` 6176, `active_static_raise_target_exists` 6199, `return_handler_requires_explicit_staticcatch_jump` 6216, `handler_is_inlineable_pure_return_static_raise_dispatch` 6248, `pure_return_static_raise_dispatch_has_terminal_value` 6259, `lambda_requires_explicit_staticcatch_jump` 6317, `any_child` 6614, `lambda_contains_static_raise` 7501, `handler_has_static_raise_like_ocaml` 7509, `no_static_raise_in_handler_like_ocaml` 7520, `lambda_has_exit` 7524, `lambda_contains_staticcatch` 7534, `lambda_contains_static_raise_to_label` 7542, `switch_cases_contain_static_raise_to_label` 7555, `string_switch_cases_contain_static_raise_to_label` 7568, `lambda_is_direct_static_raise_to_label` 7579, `switch_cases_contain_nontrivial_static_raise_to_label` 7589, `string_switch_cases_contain_nontrivial_static_raise_to_label` 7605, `lambda_has_multiple_static_raises_to_label` 7617, `lambda_static_raise_count_to_label` 7628, `lambda_contains_static_raise_to_other_label` 7645 |
+| K14 | `compile_staticcatch_in_return` 3091, `staticcatch_takes_pseudo_jump`, `any_child` 6614, `handler_has_static_raise_like_ocaml` 7509, `no_static_raise_in_handler_like_ocaml` 7520, `lambda_has_exit` 7524, `lambda_contains_static_raise_to_label` 7542. Deleted by S3.5 (4.6): `handler_returns_unit_undefined`, `staticcatch_handler_is_identity_binding`, `uses_fallthrough_staticcatch_return`, `uses_pseudo_fallthrough_staticcatch_return`, `return_staticcatch_requires_explicit_jump`, `handler_is_pure_outward_static_raise_forwarder`, `active_static_raise_target_exists`, `return_handler_requires_explicit_staticcatch_jump`, `handler_is_inlineable_pure_return_static_raise_dispatch`, `pure_return_static_raise_dispatch_has_terminal_value`, `lambda_requires_explicit_staticcatch_jump`, `lambda_contains_static_raise`, `lambda_contains_staticcatch`, `switch_cases_contain_static_raise_to_label`, `string_switch_cases_contain_static_raise_to_label`, `lambda_is_direct_static_raise_to_label`, `switch_cases_contain_nontrivial_static_raise_to_label`, `string_switch_cases_contain_nontrivial_static_raise_to_label`, `lambda_has_multiple_static_raises_to_label`, `lambda_static_raise_count_to_label`, `lambda_contains_static_raise_to_other_label` |
 | K13 | `compile_fallthrough_staticcatch_tail_loop_return_output` 3439, `compile_fallthrough_staticcatch_return_output` 3463, `compile_fallthrough_static_raise_return_output` 3485, `with_fallthrough_return_handler` 3516, `active_fallthrough_return_handler` 3831 |
 | K9 | `with_return_unit_context` 3532, `lambda_is_trivial_unit_undefined` 3550, `compile_if_unit_return_tail_block` 3579 |
 | K8 | `with_try_body_context` 3543 |
@@ -414,8 +416,8 @@ Every function name of the files below, by row.
 | Row | Functions (line) |
 | --- | --- |
 | H5 | `block_last_is_return_throw_or_continue` 41, `empty_switch_case_clause` 48, `named_payload_switch` 57, `untagged_switch` 75, `is_named` 115, `decode` 128, `stable_group_switch_cases` 180 |
-| H18 | `named_variant_keys_need_bound_scrutinee` 143, `is_int_tag` 244, `switch_literal_tags` 600, `uses_named_variant_view` 610, `uses_named_variant_switch` 860, `literal_tag_value` 868, `switch_tag_value` 882, `named_const_cases` 886, `named_block_cases` 899, `const_switch_default` 912, `const_switch_complete` 920, `block_switch_default` 924, `block_switch_complete` 932, `variant_tag_name` 936, `bind_switch_scrutinee_once` 944, `named_variant_switch_needs_bound_scrutinee` 966, `decoded_switch_needs_bound_scrutinee` 976, `dispatch_named_variant_branches` 987, `variant_tag_expr` 1010, `switch_case_expr` 1021, `switch_case_test` 1042 |
-| H17 | `class_constructor` 220, `is_instance_of` 230, `untagged_typeof_expr` 277, `untagged_test_expr` 290, `untagged_if` 319, `emit_untagged_tree` 336, `emit_untagged_clause` 400, `untagged_fallback_block` 500, `untagged_output_block` 524, `compile_untagged_plan` 547, `compile_untagged_switch` 571, `uses_untagged_variant_view` 618 |
+| H18 | `named_variant_keys_need_bound_scrutinee` 143, `is_int_tag` 244, `switch_literal_tags` 600, `uses_named_variant_switch` 860, `literal_tag_value` 868, `switch_tag_value` 882, `named_const_cases` 886, `named_block_cases` 899, `const_switch_default` 912, `const_switch_complete` 920, `block_switch_default` 924, `block_switch_complete` 932, `variant_tag_name` 936, `bind_switch_scrutinee_once` 944, `named_variant_switch_needs_bound_scrutinee` 966, `decoded_switch_needs_bound_scrutinee` 976, `dispatch_named_variant_branches` 987, `variant_tag_expr` 1010, `switch_case_expr` 1021, `switch_case_test` 1042 |
+| H17 | `class_constructor` 220, `is_instance_of` 230, `untagged_typeof_expr` 277, `untagged_test_expr` 290, `untagged_if` 319, `emit_untagged_tree` 336, `emit_untagged_clause` 400, `untagged_fallback_block` 500, `untagged_output_block` 524, `compile_untagged_plan` 547, `compile_untagged_switch` 571 |
 | K1 | `compile_switch` 468, `compile_switch_inner` 631, `compile_string_switch` 728, `compile_string_switch_inner` 739 |
 | K5 | `compile_small_string_switch_assignment` 1046, `compile_named_string_switch_assignment_general` 1204, `compile_named_string_switch_assignment` 1248, `compile_named_variant_switch_assignment_statements` 1660 |
 | K6 | `compile_small_string_switch_return` 1088, `compile_named_string_switch_return_with_strategy` 1274, `compile_named_string_switch_return` 1432, `compile_named_variant_switch_return_statements` 1738 |
@@ -1032,10 +1034,11 @@ How the rows are carried out (`bir/lower/cond.rs`):
   flags along the `Let`/`Seq` spine of each branch, and then only the test is
   lowered. Nothing is lowered and discarded;
 - row R5 step 1 reads the statements the branches produced in **R**. Its
-  legacy gate, `lambda_contains_statement_value_form` (C:5139), is true of no
-  unit the lowering accepts today, because every such form is `Unsupported`.
-  The slice that adds the first of them (S3.4) must record the fact on the L
-  node; it must not walk the branch;
+  legacy gate, `lambda_contains_statement_value_form` (C:5139), is the L flag
+  `HAS_STATEMENT` of the two branches (7.1), read when the conditional is
+  entered. S3.5 added it: the gate decides for a branch that is a string
+  switch of one complete case, or a static catch in the cheap form, whose
+  statements are effects followed by one return;
 - in **E** a branch that needs statements has the effect of its value pushed
   when the branch is complete (`compiled_to_effect_block` (C:4875)); the
   output of the row is then read by `compiled_from_effect_block` (C:7612): a
@@ -1229,10 +1232,17 @@ handling, and the gate with source maps on (8.1) is the judge.
 
 ### 4.1 Design
 
-The jump stack holds entries `{label, exit: VarId, bindings: run of VarId,
-order: i32}`. `Cx::jumps` is the height visible to a node; an `Exit` searches
-from there down for its label. A function body starts with an empty stack
-(row K10). This is OCaml's `jmp_table` (`lam_compile_context.ml:67`).
+The jump table holds one entry `{exit: VarId, order: i32}` per catch header,
+indexed by the header (`CatchId`); the bindings are the header's parameters.
+A label is bound by one catch (4.2 invariant 1), so an entry is written when
+its catch is entered and read only by the exits of that catch's body: no
+stack is pushed or popped. `Cx::jumps` is the number of entries visible to a
+node, which is all the table needs for `first` below. An `Exit` names its
+handler by label, and labels are sparse (they are `i32` in Lambda, and one
+unit of `tests/tests` has the label -1), so it finds the header through the
+arena's label index, one hash lookup per exit. A function body starts with
+no visible entry (row K10). This is OCaml's `jmp_table`
+(`lam_compile_context.ml:67`).
 
 `lower_catch(cx, node)` (`compile_staticcatch`, `lam_compile.ml:1169-1255`):
 
@@ -1241,7 +1251,8 @@ from there down for its label. A function body starts with an empty stack
    contains no `Exit` to a label already collected (issue 1698). The table is
    ordered **innermost first**. "Contains no exit" is the node flag `HAS_EXIT`
    (section 7): when it is clear the answer is immediate; when it is set the
-   handler is walked for the labels, pruned by the flag.
+   handler is walked for the labels, pruned by the flag. A collected catch is
+   marked in its table entry, so the test of a label is one read.
 2. **Cheap form.** If `cx.cont` is `Effect(Return(Named { in_catch: false,
    .. }))`, the table has one handler, and the handler has no `HAS_EXIT`:
    - push `{label, bindings, order: -1}`;
@@ -1251,8 +1262,8 @@ from there down for its label. A function body starts with an empty stack
    - pop; lower the handler **in `cx`**, after the body;
    - the output is `append(declarations, append(body, handler))`.
 3. **Explicit form**, otherwise:
-   - create `exit` (a fresh identifier named `exit`), before anything is
-     lowered;
+   - in **V** create the result `tmp` first (C:6408), then create `exit` (a
+     fresh identifier named `exit`), before anything is lowered;
    - `first = height of the visible jump stack + 1`
      (`next_static_jump_exit_code` (C:6334); `add_jmps`,
      `lam_compile_context.ml:114-123`). The i-th handler of the table gets
@@ -1268,25 +1279,44 @@ from there down for its label. A function body starts with an empty stack
      the entries still visible; pop;
    - the dispatch (`compile_exit_dispatch` (C:6528)): handlers with equal bodies
      are grouped as switch cases are (3.9 step 2,
-     `compile_grouped_staticcatch_handlers` (C:6493)), and only the last of a
-     group is lowered. One handler: `if (exit === order) { handler }`, and
-     nothing if the handler's block is empty. Several:
-     `switch (exit) { case order: ... }` with no default; a clause breaks
-     when it is the last of its group, its output is not finished and either
-     the continuation is not a return or the handler contains an exit
-     (C:6552);
-   - the output is `append(declarations, append(body, dispatch))`; in **V**
-     its value is `tmp`.
+     `compile_grouped_staticcatch_handlers` (C:6493)), with the fingerprints
+     of the switch lowering, and only the last of a group is lowered. One
+     handler: `S.if_(exit === order, handler, [])`, and nothing if the
+     handler's block is empty. Several: `switch (exit) { case order: ... }`
+     with no default; a clause breaks when it is the last of its group, its
+     output is not finished and either the continuation is not a return or
+     the handler contains an exit (C:6552). The break is clause metadata in
+     every continuation, also in **A**, where a switch on a value emits a
+     `break` statement instead (3.9 step 4);
+   - the output is `append(declarations, append(body, dispatch))`: a finished
+     body drops the dispatch, and the output is finished only then. In **V**
+     its value is `tmp` and it is never finished (C:6408); in **E** its value
+     is `undefined`.
 
 `lower_exit(cx, label, args)` (`compile_staticraise`,
-`lam_compile.ml:1122-1139`). The continuation is ignored. Find the entry. The
-arguments are lowered **last first**, each in `A(binding)`; an argument that
-is a variable is the plain assignment `b = v`; with `order = -1` an argument
-that is the binding itself is skipped (C:3506). The output is the argument
-outputs in source order followed by `exit = order` when `order >= 0`, joined
-with `append`, so a finished argument (one that throws) drops what follows
-it. The output is **not** finished: control falls through to the end of the
+`lam_compile.ml:1122-1139`). Find the entry. The arguments are lowered
+**last first**, each in `A(binding)`; an argument that is a variable is the
+plain assignment `b = v`; with `order = -1` an argument that is the binding
+itself is skipped (C:3506). The output is the argument outputs in source
+order followed by `exit = order` when `order >= 0`, joined with `append`, so
+a finished argument (one that throws) drops what follows it. With more than
+one argument each argument's run is moved to a slot reserved for it, so that
+lowering last first still writes source order. The output is **not**
+finished unless an argument is: control falls through to the end of the
 enclosing statements and reaches the dispatch or the handler.
+
+The continuation is ignored by OCaml. The legacy families read a value where
+they need one, and the lowering gives the same: `undefined` in **V** and
+**E**, and `let id = undefined` in **D** (the default arms of `compile_expr`
+and `compile_let_binding_output`); nothing in **A** and **R**. In an effect
+or return continuation an output that is one block (one argument, a
+conditional that needs statements) is unnested, as `compile_return_output`
+and `compile_effect_block_output` do for every construct.
+
+A catch whose body holds no exit to its label is lowered by the same rule;
+the legacy code substitutes its handler at the (absent) raise instead (row
+K15). The two differ when the body's output is not finished, and the shape
+does not reach the lowering (Q1).
 
 That is the whole mechanism. The legacy code reaches the same outputs with
 four copies of the explicit form (one per continuation family:
@@ -1296,9 +1326,9 @@ four copies of the explicit form (one per continuation family:
 `compile_staticcatch_tail_loop_return_output` (C:3317)), four of the flattened
 form, two of the cheap form, and the choice in
 `compile_staticcatch_in_return` (C:3091) (also inline in
-`compile_tail_loop_return_output_inner` (C:4174), C:4240-4312). The choice there
-is made by walking the body and the handler with the predicates of row K14;
-step 2 above replaces them with the `in_catch` bit and one flag.
+`compile_tail_loop_return_output_inner` (C:4174), C:4240-4312). Since S3.5
+the choice there is OCaml's test as well (`staticcatch_takes_pseudo_jump`,
+4.6); step 2 above is the same test on the `in_catch` bit and one flag.
 
 ### 4.2 Invariants
 
@@ -1683,6 +1713,36 @@ loops, switches and breaks in every continuation.
 Until that is built, a group in which a label is requested and a conditional
 has a branch that needs statements returns
 `Unsupported("loop label under a re-lowered conditional")`.
+
+### 4.6 What S3.5 found in the legacy choice
+
+The rule tests of S3.5 lower one catch in return position in 952 shapes
+(body, handler, parameters, what encloses the catch, `return_unit`) with the
+legacy code and with 4.1. They disagreed on 51, in two families, and the
+OCaml compiler was run on source for each:
+
+1. **The handler holds a catch under a function, and no exit of its own.**
+   `lambda_contains_staticcatch` looked into function bodies, so the legacy
+   code took the explicit form. OCaml's `no_static_raise_in_handler` stops at
+   a function (`lam_exit_code.ml:28`) and takes the cheap form.
+2. **A catch without parameters whose body is a catch that exits to it,
+   lowered under an enclosing catch.** An arm of
+   `compile_staticcatch_in_return` took the cheap form without asking
+   whether a catch enclosed it. OCaml has `in_staticcatch = true` there and
+   takes the explicit form. With an exit to the enclosing catch in the body
+   the legacy output also ran the wrong handler.
+
+Both are fixed in the legacy code by the same change: the choice is
+`staticcatch_takes_pseudo_jump`, and the 23 functions that made it before
+are deleted. `tests/tests/src/lowering_static_catch.res` holds one function
+per family with the JavaScript the OCaml compiler prints. After the change
+the 952 shapes agree.
+
+Three more places where the code needed what this document did not say:
+
+- row R5 step 1 needs the fact `HAS_STATEMENT` (3.6, 7.1);
+- a variable the lowering assigns is not `ASSIGNED` for sequencing (7.1);
+- the jump table is indexed by catch header, not by label (4.1).
 
 ## 5. Tail calls as loops, `let rec`, `try`
 
@@ -2320,23 +2380,25 @@ read, one J node built, one statement pushed or copied, or one flag read.
 
 Each row is a question the legacy code answers by walking a subtree, and the
 maintained fact that answers it in `Bir`. The flags are computed when a node
-is built, from the children's flags, as `PURE` is (B.4). `NodeFlags` has two
-free bits (`bir/node.rs` defines six); J expression nodes do not use `TAIL`,
-`VALUE_UNUSED`, `DEAD` or `NO_ALLOC`, so the J flags below reuse those
-positions.
+is built, from the children's flags, as `PURE` is (B.4). `NodeFlags` has no
+free bit: J expression nodes do not use `VALUE_UNUSED`, `DEAD` or `NO_ALLOC`,
+so the J flags below reuse those positions, and L nodes do not use
+`JS_CHAR_PRESENT` or `JS_LOC_PRESENT`, which `HAS_EXIT` and `HAS_STATEMENT`
+reuse. `Var` is an operation of both levels and carries neither L flag.
 
 | Legacy walk | Asked by | Fact |
 | --- | --- | --- |
 | `lam_analysis::no_side_effects` | `lambda_is_trivial_unit_undefined` (C:3550), the predicates of K14 | `PURE` (B.4) |
 | `has_exit_code(handler, in table)`, `has_exit_code(handler, any)`, `lambda_has_exit` (C:7524) | flattening (4.1 step 1), the cheap form's test, `break` in a return continuation (3.9 step 4, 4.1) | L flag `HAS_EXIT`: the subtree contains an `Exit` that is not under a `Fun`. Clear answers at once. Set: for "any" it is the answer; for "in table" the handler is walked, pruned by the flag |
 | `function_has_self_tailcall` (C:6772) | 5.1 | none needed: `triggered` |
-| `lambda_contains_statement_value_form` (C:5016) and every `lambda_contains_*`, `*_requires_explicit_*`, `uses_*fallthrough*` of row K14 | 3.6, 4.1 | none needed: `probe` and `in_catch` |
+| `lambda_contains_statement_value_form` (C:5016) | 3.6 row R5 step 1 | L flag `HAS_STATEMENT`: the subtree contains, not under a `Fun`, a switch, catch, exit, try, loop, assignment, `Break` or `Continue`. `probe` does not answer it: a branch that is not free can still lower to effects followed by one return |
+| every `lambda_contains_*`, `*_requires_explicit_*`, `uses_*fallthrough*` of row K14 (deleted by S3.5) | 4.1 | none needed: `in_catch` and `HAS_EXIT` |
 | `free_variables(body)` | `compile_for_of` (C:2154) | `uses[v] == 0` |
 | `arena_assigned_variables` (whole unit, and per inlined body in `extend_assignable` (A:280)) | `delay_safe` (A:28) | `ASSIGNED` |
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
 | `is_pure_subexpression` (E:146) | J-M0 | J flag `J_SUBEXPR`, reusing L `DEAD`; distinct from both purity predicates |
-| `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
+| `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts: an assignment the lowering builds (a result temporary, a handler parameter) does not set it in the lowering's arena, as the legacy `assignable` set holds the targets of L assignments only |
 | `runs_no_code` (A:90) | sequencing | Iterative inspection of the owned record-field spine; unknown property reads stop it. Variables read the final `JS_GLOBAL` fact. This predicate differs from `J_SUBEXPR` and does not share its bit |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |
 | the second and third lowering of a branch | 3.6 | `probe` |
@@ -2365,13 +2427,13 @@ positions.
 | grouping switch cases and exit handlers (3.9 step 2) | each case is compared with the heads of the groups before it by `eq_approx`, which stops at the first difference | `cases x groups` comparisons. Quadratic for a switch with many distinct bodies. The step count of the compared node pairs is reported per corpus (as `Stats::compared` is for N11, C.5). Open (Q7): whether a cached structural hash is needed |
 | J-E7, J-S3 rules that compare branches (`ocaml_eq_expression`, `ocaml_eq_block`) | stops at the first difference | counted the same way |
 | J-E9 | O(4^11) bounded logical attempts, plus equality/negation inspections and duplicated output | counted (section 6) |
-| flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT` | each handler is walked at most once per catch chain it is flattened in |
+| flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT`, over its nodes that have the flag, with one label lookup per exit met | a handler is tested once, by the chain that reaches its catch; a node is read once per handler it lies in whose catch is tested that way, so the bound is the nesting depth of handlers that hold exits. Measured at 10,000 nested catches: 9,999 flag reads and no node read when the handlers hold no exit; 9,999 flag reads and 9,999 node reads when each handler is one exit to the catch around it; one flag read for a handler of 60,001 nodes without an exit |
 | sequencing arguments | one right-to-left scan; a held argument's literal is entered once | linear in the arguments |
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
 | a conditional (3.6) | constant, plus the statements of a branch that becomes a list (copied once) or is discarded; a branch kept as the statements after a guard is not read | each statement is written once and copied to a list once. Measured at 10,000 nested conditionals whose innermost branch needs a statement: 20,001 copies in **V** and **A**, 10,000 in **R** |
-| row R5 step 0 | one `TRIVIAL_UNIT` flag read per branch | maintained by `Bir::repair` from immediate child facts on construction/import and edits; independently checked by `Bir::validate` |
+| row R5 step 0 | one `TRIVIAL_UNIT` flag read per branch | maintained with `HAS_EXIT` and `HAS_STATEMENT` by `Bir::control_facts` during construction/import and repair; independently checked by `Bir::validate` |
 | row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
 | `S.if_` | `norm::js3_simplify_if` takes two list-pool handles; shared rules 0 to 6 also accept statement-stack run handles so retained tails stay in place | consumed statements and shells, plus structural comparisons and J expression rules; no per-branch vectors |
 
@@ -2430,6 +2492,26 @@ repeating the search takes none. Mapped oracle tests cover all four dispatch
 families and all five continuations. Normalized J expressions also cache delay
 safety from immediate children: corpus checking exposed an unnecessary held
 arithmetic argument when a later argument was an untagged switch.
+
+S3.5 exit costs (`exit.rs`):
+
+- The jump-table entry is 8 bytes, the traversal frame of a catch a 4-byte
+  handle, of an exit 16 bytes; the cold plan of a catch is 168 bytes. The
+  handlers of the catches being lowered are one stack of 8-byte entries, and
+  the walk of a handler that has an exit reuses one work vector: nothing is
+  allocated per catch with one handler or per exit. A table of several
+  handlers allocates the group vectors of the switch lowering once.
+- The form of a catch costs at most two flag reads: one per flattened
+  handler, one for the cheap form.
+- An exit costs one label lookup and one step per argument. Arguments are
+  lowered last first; with more than one, each run is moved once to its
+  reserved slot.
+
+| 10,000-element shape (every continuation) | Source visits | Flag reads | Handler nodes read | Fingerprint visits |
+| --- | ---: | ---: | ---: | ---: |
+| nested catches, one table | 20,003 | 9,999 | 0 | 10,000 |
+| nested catches, each handler exits to the catch around it | 20,003 | 9,999 (10,000 in **R**) | 9,999 | 0 |
+| one catch, handler of 60,001 nodes without an exit, in **R** | | 1 | 0 | 0 |
 
 ### 7.4 Step-count tests each stage adds
 
@@ -2725,7 +2807,7 @@ Each with the experiment that settles it; resolved rows retain their measured re
 
 | # | Question | Experiment |
 | --- | --- | --- |
-| Q1 | Is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
+| Q1 | **Measured by S3.5: never.** A counter at the two entries of `with_static_handler` stayed at zero over the runtime library, Belt, `tests/tests` (736 modules) and a 3,735-module application. The legacy path remains until the legacy lowering is deleted; the new lowering has no counterpart (4.1). Original question: is the handler substitution of row K15 (`resolve_static_raise` (C:6113), `compile_hoisted_static_raise_chain_return_tail` (C:3932)) ever executed? By reading it needs a catch whose body has no exit to its label, which `simplify_exits` removes | count its successful returns in a `Check` build over the three in-repository corpora and the application; zero closes the row |
 | Q2 | **Resolved:** the original variant dispatch needs no loop label; a return-position conditional retaining a real JS switch prints `loop_1`, including the discarded value probe (4.5) | OCaml/Rust parity: `tests/tests/src/lowering_conditional_loop.res` and its `.mjs`; corrected switch-context entry and value-probe order. Reference: `compiler/core/lam_compile.ml:793,1636-1644,2086-2118` |
 | Q3 | Do rows R5 and R6 of 3.6 ever produce different J for one conditional, so that making a function a loop changes how its conditionals print? | a `Check` assertion in S3.6: lower each loop function's conditionals by both rows and compare |
 | Q4 | Is a `LetRec` reachable in the continuations where the legacy code lowers its body as a value (K2, K4, K5, K7; 3.4)? | count in a `Check` build; if reachable, compile one such unit with OCaml |
