@@ -311,6 +311,8 @@ fn belt_sources_digest(root: &Path) -> Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
+/// O(source bytes + module count) verification, then one package allocation.
+/// No module core is read or copied until a lookup requests it.
 /// Register the embedded runtime in `registry` if `runtime_paths` (module
 /// name, `.res` path), with the configuration at `runtime_root`, are the
 /// sources it was compiled from. Returns whether it did.
@@ -334,15 +336,13 @@ pub(crate) fn register(
         );
         return false;
     }
-    let mut registry = registry.lock().unwrap();
-    (0..embedded.len()).all(|slot| {
-        let Some((name, core)) = embedded.module(slot) else { return false; };
-        let Some(core) = rebased_runtime_core(core, Path::new(embedded.recorded_root), runtime_root) else { return false; };
-        registry.register_stored_parts(name, None, PendingCore::Bytes(core.into())).is_some()
-    })
+    registry.lock().unwrap().register_snapshot(std::sync::Arc::new(RuntimePackage {
+        index: embedded, root: runtime_root.to_path_buf(),
+    }));
+    true
 }
 
-/// O(core bytes + filename bytes), one decode and encode per registered module.
+/// Producer only: O(core bytes + filename bytes), one decode and encode per module.
 /// Runtime and Belt use the same stored-core path rebasing operation.
 fn rebased_runtime_core(bytes: &[u8], from: &Path, to: &Path) -> Option<Vec<u8>> {
     let mut core = stored_module::decode_core(bytes)?;
@@ -636,6 +636,27 @@ mod tests {
     }
 
     #[test]
+    fn runtime_provider_is_one_package_handle() {
+        assert_eq!(std::mem::size_of::<RuntimePackage>(), 32);
+    }
+
+    #[test]
+    fn runtime_index_does_not_decode_unreferenced_modules() {
+        use rescript_compiler::cmi::persistent_env::SnapshotModules;
+        let bytes = leak(encode(&[package(10_000)]).unwrap());
+        let index = &Box::leak(decode(bytes).unwrap().into_boxed_slice())[0];
+        let provider = RuntimePackage { index, root: PathBuf::from("installed") };
+        // Invalid cores are intentional: index attachment and pending queries
+        // must not inspect or decode any core, even across 10,000 lookups.
+        let mut registry = ModuleRegistry::new();
+        registry.register_snapshot(std::sync::Arc::new(provider));
+        for slot in 0..10_000 {
+            assert!(registry.is_pending_stored(&format!("M{slot:05}")));
+        }
+        assert!(RuntimePackage { index, root: PathBuf::from("installed") }.decode(7).is_none());
+    }
+
+    #[test]
     fn sources_digest_ignores_paths_but_not_contents() {
         let dir = tempfile::tempdir().unwrap();
         let write_runtime = |root: &Path, source: &str| {
@@ -666,6 +687,30 @@ mod tests {
         std::fs::write(second.join("A.res"), "let a = 1").unwrap();
         std::fs::remove_file(second.join("A.resi")).unwrap();
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+    }
+}
+
+/// One runtime package attachment, not one entry per module.
+struct RuntimePackage {
+    index: &'static PackageIndex,
+    root: PathBuf,
+}
+
+impl rescript_compiler::cmi::persistent_env::SnapshotModules for RuntimePackage {
+    /// O(1), no module index access.
+    fn is_runtime(&self) -> bool { true }
+
+    /// O(log module count), borrowed name comparisons, no allocation.
+    fn find(&self, name: &str) -> Option<u32> {
+        self.index.lookup(name).and_then(|slot| u32::try_from(slot).ok())
+    }
+
+    /// O(core bytes + filename bytes), allocating only the requested core.
+    fn decode(&self, slot: u32) -> Option<stored_module::StoredCore> {
+        let (_, bytes) = self.index.module(slot as usize)?;
+        let mut core = stored_module::decode_core(bytes)?;
+        core.rebase_paths(Path::new(self.index.recorded_root), &self.root);
+        Some(core)
     }
 }
 

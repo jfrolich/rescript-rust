@@ -3092,7 +3092,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
 
     let already_registered = {
         let registry = registry.lock().unwrap();
-        runtime_paths.iter().all(|(module_name, _)| {
+        registry.has_runtime_snapshot() || runtime_paths.iter().all(|(module_name, _)| {
             registry.is_pending_stored(module_name)
                 || (registry.module_info_is_runtime(module_name) && registry.has_cached_module(module_name))
         })
