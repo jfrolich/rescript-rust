@@ -4495,49 +4495,74 @@ deletes the old one is named.
 
 ##### W4 inventory: what a view build can read of a compilation today
 
-A view is built today as a store build on the checker context of the
-compilation that first needs it. Every read of that compilation's state is
-either a named `poison_store_build_for` reason (the build is kept private to
-the compilation), a guard (`StorePiece::guards`), or an effect recorded for
-replay (`StoreEffect`). The world builder (`build_module_view`) receives the
-world, a scratch context and a key, so each read below is either impossible
-by construction or has the replacement named.
+This is an inventory for the rewrite, not an implementation report. The
+world replacements below are requirements still to implement and verify.
+The current builders take a compilation's `TypeContext` and, for child
+components, an `Env` and a `PersistentEnv`. Moving their calls onto an empty
+scratch context alone does not establish that their results are independent
+of the compilation.
 
-Reads that poison a store build (`rg -n 'poison_store_build_for\(' src`):
+Named poison reasons (`poison_store_build_for`), grouped by state:
 
-| Reason | What is read or written | In a world view build |
-|---|---|---|
-| `local-read`, and the unnamed `poison_store_build()` calls in the node accessors (`context.rs`) | a type node, row field, abbreviation memo or mutability cell of the compilation | impossible: the scratch context holds only nodes the build made; everything else it reads is frozen |
-| `local-decl-loc` | a declaration location of the compilation's own table | impossible: a view carries the unit's shared location handles; `freeze` rejects an arrow label located on the scratch context (`Unfreezable::LocalLocation`) |
-| `unit-signature` (`env_lazy.rs`) | a signature whose nodes are not store-resident (the current unit's in-memory signature) | the key names a unit of the world's unit table (`PersStruct::ps_root_view` is set only for those); any other unit keeps `Components::Local` |
-| `local-stored-components` | a child component table kept private to one compilation | impossible: the builder never sees a compilation's tables |
-| `find_pers_struct:load`, `find_pers_struct:disk`, `find_pers_struct:prepare` | loading a unit into the compilation's persistent environment and recording its alias rewrites | the builder is handed the unit (`Arc<PersStruct>` in the key's cell); the adopting compilation has already loaded it, which is how it found the cell. Keys of this slice load no other unit |
-| `read:with_qualified_module_components`, `register_qualified_module_components` | the compilation's component cache | replaced by the world's view table for parent views; the scratch side keeps its own lazy tables |
-| `read:find_qualified_module_decl`, `read:component_paths_for_alias_source`, `read:find_module_alias_in_components` | forced child declarations and alias-source registrations of the compilation | not read: a view build forces no child declaration (that stays per worker until W5) and the scratch context has no registrations. Keys of this slice have no alias on the path, so no registration can name them as a component path |
-| `read:find_resolved_module_sig`, `register_resolved_module_sig`, `read:has_raw_module_sig`, `get_or_load_raw_module_sig`, `register_raw_module_sig`, `register_gentype_raw_module_sig`, `register_gentype_portable_raw_module_sig`, `read:renamed_module_sig`, `materialize-renamed-sig`, `rename_one_module_sig` | per-compilation signature caches (resolved, raw, renamed) | not reached: the view of a unit or of a structure-typed child is built from the unit's stored signature only |
-| `intern_cmi_longident_name`, `register_arena_longident_names`, `import_cmi_longident_names` | the compilation's name table for package constraints | `freeze` re-interns names in the pool's table and fails with `Unfreezable::UnresolvedName` otherwise |
-| `next_reified_abstract_name`, `set_arity_alias`, `store_typed_env`, `register_forced_normalized_path_full`, `register_forced_type_path_compare` | counters and memo tables of expression checking | not reached by component construction |
+| Reason | Current dependency | Required world replacement |
+| --- | --- | --- |
+| `local-read`, including unnamed `poison_store_build()` calls in node accessors | Compilation-local type nodes, row fields, abbreviation memos and mutability cells | Only scratch-owned or frozen handles may reach a builder; freeze the scratch-owned result before publishing it |
+| `local-decl-loc` | Compilation-owned declaration locations | Carry the unit's shared locations; handle or reject scratch-local locations explicitly (`freeze` currently rejects a local arrow-label location) |
+| `unit-signature` | A signature not resident in shared storage | Establish membership in the world's unit table before selecting the world path; a persistent identifier alone is insufficient |
+| `local-stored-components` | A child table kept private to a compilation | Construct structure-child views from world-owned parent data, not `StoredModuleComponents` cached in a compilation |
+| `find_pers_struct:load`, `find_pers_struct:disk`, `find_pers_struct:prepare` | Unit loading, visibility and preparation in the compilation's persistent environment | Resolve world units independently of the adopting compilation; adoption must enforce visibility and replay required unit preparation |
+| `read:with_qualified_module_components`, `register_qualified_module_components` | The compilation's component cache | World view cells during construction; the adopted-view map during checking |
+| `read:find_qualified_module_decl` | Forced child module declarations | Explicit world-owned declarations or worker-owned thunks with frozen inputs; forcing order and lifetime need validation before choosing the boundary with W5 |
+| `read:component_paths_for_alias_source`, `read:find_module_alias_in_components` | Reverse alias registrations and component tables | World facts derived from the key and parent views; retain the old mechanism only for keys outside W4 |
+| `read:find_resolved_module_sig`, `register_resolved_module_sig`, `read:has_raw_module_sig`, `get_or_load_raw_module_sig`, `register_raw_module_sig`, `register_gentype_raw_module_sig`, `register_gentype_portable_raw_module_sig`, `read:renamed_module_sig`, `materialize-renamed-sig`, `rename_one_module_sig` | Resolved, raw and renamed signature caches | Build covered structure paths from frozen signatures; do not consult a compilation's renamed or raw signature caches |
+| `intern_cmi_longident_name`, `register_arena_longident_names`, `import_cmi_longident_names` | The compilation's package-constraint name table | Pool-owned names; `freeze` re-interns resolvable names and rejects unresolved ones |
+| `next_reified_abstract_name`, `set_arity_alias`, `store_typed_env`, `register_forced_normalized_path_full`, `register_forced_type_path_compare` | Expression-checking counters and memo tables | Keep these outside view construction; verify that the new builder cannot reach them |
 
-Guards (`StorePiece::guards`): `has_component_paths_for_alias_source`, read by
-`flattened_alias_component_parent`. It is consulted for alias parents only;
-no key of this slice reaches it.
+Reads not identified by a poison reason also matter:
 
-Effects (`StoreEffect`), which replay applies to every compilation that
-reuses a piece:
+| Read | Current caller or dependency | Required world replacement |
+| --- | --- | --- |
+| `alias_sources_for_component_path` | `persistent_env::component_alias_sources`, called by `substitute_type_paths_in_value_with_maps` and alias rerooting; also child-declaration forcing in `env_lazy.rs` | Derive the sources from world-owned parent/key data. Do not assume this read disappears merely because the path has no explicit alias: the current helper still executes it |
+| `has_component_paths_for_alias_source` | `typecore::flattened_alias_component_parent`; recorded in `StorePiece::guards` rather than poisoning | Classify the path using world-owned alias/namespace facts, not the presence of earlier registrations in the adopting compilation |
+| `qualified_alias_path_for_flattened_head` | Persistent-root component construction and persistent opens | Include the resolved alias/namespace classification when selecting W4 versus W5 keys |
+| `flattened_alias_heads_for_path` | `TypeContext::flattened_backing_sources_for_alias_source`, reached while registering an alias source | Derive flattened backing relations from world-owned registry facts; adoption must preserve registrations visible to existing readers |
+| Child seed `Env` and parent signature | `scan_child_component_from_signature` and `StoredModuleComponents::build_components` | Build the required prefix environment from the parent's frozen data without capturing the adopter's environment |
+| Node descriptors and levels | Copy/substitution helpers read through `TypeContext`, including its frozen-write exceptions | Use a scratch context with no adopting compilation's exception entries; publish only the completed immutable graph |
+| Identifier allocation and handle/name caches | Substitution and declaration freshening through `TypeContext` | Scratch-owned allocation; schedule-dependent identifiers must not affect canonical output or stored interfaces |
 
-| Effect | World replacement |
-|---|---|
-| `Piece` (a nested piece) | `ModuleView::nested`: empty for keys of this slice (a child view is built from its parent's published view, read before the build starts, and adopting the child adopts nothing of the parent). A store build of a remaining kind that reads a world view records `StoreEffect::AdoptView` |
-| `RegisterComponents` | `TypeContext::adopt_view` inserts the view in the compilation's component cache |
-| `PreparePers` | the adopting compilation loads the root unit itself before it can name the key; `ModuleView::units` is empty for keys of this slice |
-| `TriggerRename` | not produced: only an alias scrape triggers the rename of a unit's signature |
-| `RegisterAliasSource` | `ModuleView::alias_sources`, registered by `adopt_view` (one push per alias child, as replay does) |
-| `RegisterQualifiedModuleDecl` | not produced by a view build. Forced child declarations stay per worker (the lazy table kept beside a view, see below) until W5's `ViewCell::decl` |
+The code has **six**, not five, `StoreEffect` variants in
+`types/context.rs`:
 
-What stays per worker for a world view until W5: the child component thunks
-(`StoredModuleComponents`, which hold an `Env`) and the forced child
-declarations. They live in one lazy table per worker and view, built over
-the view's frozen signature without copying it.
+| Effect | Required world replacement |
+| --- | --- |
+| `Piece` | Explicit nested-view dependencies and transitive adoption; retain a bridge when a remaining store build consumes a world view |
+| `RegisterComponents` | Insert a view in the compilation's adopted-view map once |
+| `PreparePers` | Prepare each required unit on adoption, preserving visibility and lookup-time diagnostics |
+| `TriggerRename` | Keep compilation-visible rename effects outside immutable construction; demonstrate whether covered keys produce none |
+| `RegisterAliasSource` | Carry alias-source facts in the view and register them on adoption |
+| `RegisterQualifiedModuleDecl` | Preserve the lifetime and observable forcing behavior of child declarations; W5 specifies `ViewCell::decl` |
+
+Do not assume `ModuleView::units` or `ModuleView::nested` is empty until the
+new builder's dependency recording and output tests establish it. The
+current registration/replay behavior is the contract to preserve.
+
+Other concrete boundaries for implementation:
+
+- `World` currently indexes units by portable-object and signature addresses
+  in two mutex-protected maps; no dense unit handle or root view field exists
+  on `PersStruct`. W4 must choose and document its unit/view indexing scheme.
+- `ViewScratch::with` holds its thread-local `RefCell` borrow throughout the
+  build. Nested builds must be arranged outside that borrow or the ownership
+  API changed; directly nesting the existing API panics.
+- `FrozenExport for LabelDescription` does not relocate `lbl_all`.
+  A published label family needs a frozen storage tier and frozen handles.
+- Persistent opens have their own component-cache/store path in
+  `PersistentEnv::open_module`, as well as
+  `open_components_into_env`. Replacing qualified lookups alone leaves a
+  second path for the same keys.
+- Per-worker opened layers must assemble tables from frozen entries without
+  copying type nodes. Reusing the old lazy component object as a companion
+  is not, by itself, the required deletion of the old covered-key path.
 
 #### W5. Alias and namespace views; adoption replaces replay
 
