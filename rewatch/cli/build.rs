@@ -18,8 +18,8 @@ fn main() {
             watch_sources(&root);
             let belt = root.parent().expect("package parent").join("belt");
             if belt.join("rescript.json").is_file() {
-                println!("cargo:rerun-if-changed={}", belt.join("rescript.json").display());
-                println!("cargo:rerun-if-changed={}", belt.join("src").display());
+                watch_sources(&belt);
+                watch_sources(&belt.join("src"));
             }
             rescript::build::snapshot::produce(&root).unwrap_or_else(|err| {
                 if rescript::build::snapshot::is_belt_proof_failure(&err) {
@@ -37,12 +37,15 @@ fn main() {
     std::fs::write(&out, bytes).expect("failed to write the embedded runtime");
 }
 
-/// Rerun when the runtime's configuration or a source changes. Not the whole
-/// directory: building the runtime writes its `lib` folder. A runtime that
-/// gained a source is still detected at run time, and compiled there.
+/// Watch directory membership as well as existing sources. Cargo watches
+/// directory descendants recursively: it has no exclusion for generated lib
+/// outputs, even though those outputs are not explicitly listed here.
 fn watch_sources(root: &Path) {
-    println!("cargo:rerun-if-changed={}", root.join("rescript.json").display());
-    let entries = std::fs::read_dir(root).expect("failed to list the runtime sources");
+    println!("cargo:rerun-if-changed={}", root.display());
+    if root.join("rescript.json").is_file() {
+        println!("cargo:rerun-if-changed={}", root.join("rescript.json").display());
+    }
+    let entries = std::fs::read_dir(root).expect("failed to list package sources");
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().is_some_and(|ext| ext == "res" || ext == "resi") {

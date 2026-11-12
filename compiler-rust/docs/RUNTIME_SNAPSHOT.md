@@ -827,3 +827,23 @@ a declaration in a dependency (which would make D2 visible to users), and
 whether watch mode's first build takes the incremental plan or compiles every
 dependency; the two descriptions in `build.rs` and `incremental.rs` read
 differently and no watch session was run for this document.
+
+### S4 directory-watch verification and Cargo limitation
+
+The build script explicitly lists `build.rs`, `packages/@rescript/runtime`,
+`packages/@rescript/belt`, `packages/@rescript/belt/src`, each existing
+`rescript.json` in those directories, and their immediate `.res`/`.resi` files.
+Adding `runtime/SnapshotDirectoryWatchProbe.res` after a successful build and
+running `cargo build -vv --manifest-path rewatch/Cargo.toml` reported
+`Dirty rescript-cli: the file .../packages/@rescript/runtime has changed`
+and reran the build script. Removing the probe and rebuilding restored the
+original embedded snapshot; all rewatch Rust tests then passed.
+
+Correction to C.1: Cargo recursively watches a listed directory; listing its
+source files as well does **not** exclude `lib`. No generated file is explicitly
+listed, but modifications under `lib` can still rerun the producer. Cargo's
+`rerun-if-changed` interface has no exclude directive. Detecting additions at
+the package root while excluding its descendants cannot be implemented by the
+specified directives alone. Source-only directory layout or a separate external
+membership stamp would be needed for that stronger requirement; neither is
+introduced here. D5 (new sources missed) is closed, not output exclusion.
