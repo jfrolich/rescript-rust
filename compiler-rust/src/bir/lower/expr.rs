@@ -143,10 +143,11 @@ impl State {
                         let value = if self.arena.node(value).flags().contains(crate::bir::NodeFlags::STRICT) {
                             self.arena.release(value);
                             second_value
-                        } else { crate::bir::j::norm::jm1_seq(&mut self.arena, value, second_value) };
+                        } else { crate::bir::j::norm::jm1_js_seq(&mut self.arena, value, second_value) };
                         second.value = Some(value);
                     } else {
-                        let held = crate::bir::j::norm::jm14_effect(&mut self.arena, value);
+                        let mut held = Vec::new();
+                        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
                         self.statements.fill_held(first.stmts.start + first.stmts.len - 1, held);
                     }
                 }
@@ -193,7 +194,9 @@ impl State {
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
     pub(super) fn drop_pure_effect(&mut self, value: NodeId) {
-        for statement in crate::bir::j::norm::jm14_effect(&mut self.arena, value) {
+        let mut effects = Vec::new();
+        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut effects);
+        for statement in effects {
             self.statements.push(statement);
         }
     }

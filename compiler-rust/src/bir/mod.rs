@@ -36,6 +36,8 @@ pub use vars::*;
 /// One compilation unit. Parent links support local ancestor repair after edits.
 #[derive(Default)]
 pub struct Bir {
+    /// Logical normalisation costs for the opt-in J backend.
+    pub j_stats: j::Stats,
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,
     cold: Vec<Option<ColdId>>,
