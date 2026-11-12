@@ -1,0 +1,1 @@
+- Port the first alias pass, including the inlining of applications, to the Bir rewrite engine, checked by the `lambda-alias` shadow stage under `RESCRIPT_BACKEND=check`.
