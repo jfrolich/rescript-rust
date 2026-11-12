@@ -8,6 +8,17 @@ cd "$fixture"
 printf '%s\n' '{"name":"gentype-file-inventory","sources":["src"],"gentypeconfig":{},"suffix":".mjs","package-specs":{"module":"esmodule","in-source":true}}' >rescript.json
 printf '%s\n' '{"name":"gentype-file-inventory","version":"0.0.0"}' >package.json
 mode=${1:-incremental}
+if [ "$mode" = clean ]; then
+    # The compiler unit wrapper counts zero file operations for Absent actions.
+    # Check that a real build selects exactly that action for all 64 modules.
+    mkdir -p counts/src
+    cp rescript.json package.json counts/
+    for i in $(seq 1 64); do printf 'type t = int\n' >"counts/src/M$i.res"; done
+    RESCRIPT_PHASE_TIMINGS=1 timeout 10 "$REWATCH_EXECUTABLE" build counts >counts.log 2>&1
+    grep -Eq 'phase=gentype_files ms=[0-9.]+ artifacts=64$' counts.log
+    grep -q 'phase=gentype_file_no_match ms=0.000 artifacts=0' counts.log
+    grep -q 'phase=gentype_file_write ms=0.000 artifacts=0' counts.log
+fi
 for module in Keep Gone Edited Missing; do printf '@genType type t = int\n' >"src/$module.res"; done
 for module in Never Stale; do printf 'type t = int\n' >"src/$module.res"; done
 # No store exists: discover and remove even a handwritten stale output.
