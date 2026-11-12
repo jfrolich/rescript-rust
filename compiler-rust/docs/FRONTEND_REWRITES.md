@@ -541,3 +541,45 @@ the result type and emits a zero-argument application of the operand.
 New fixtures cover an await outside an async function, a non-promise await
 inside an async function, and an async body type error. They preserve the
 baseline diagnostics while this row remains blocked.
+
+#### T7 A–C measurements and remaining gates
+
+The saved release binaries at `3fa9eb29e` and `655dfcbf2` isolate A–C
+before integrating subsequent trunk changes. Linux x86-64, ordinary fat-LTO
+release, one worker; runtime preparation is outside the measurements.
+
+| Corpus | Base instructions | A–C instructions | Change |
+| --- | ---: | ---: | ---: |
+| `tests/tests`, minimum of three Cachegrind runs | 4,048,215,873 | 4,049,924,082 | +0.0422% |
+| 3,735-module application, one Cachegrind run each | 67,588,537,024 | 67,625,184,174 | +0.0542% |
+
+The three `tests/tests` counts were 4,049,932,181 / 4,048,215,873 /
+4,049,320,612 at base and 4,049,924,082 / 4,050,498,052 / 4,050,144,472
+after A–C. These small increases are below the 0.1% instruction gate but
+are **not instruction savings**. No individual-row saving was measured.
+Hyperfine (two warmups, ten clean builds each) measured base 566.8 ± 40.4 ms
+(range 504.3–615.5) and A–C 558.9 ± 19.6 ms (535.3–591.0). The ranges overlap;
+there is no established speedup.
+
+`compare_checker_builds.py` found no differences on either corpus: 735
+signatures and 729 generated files on `tests/tests`, and all signatures,
+diagnostics and generated files on the 3,735-module application.
+
+A second temporary probe at `ParseArena::set_expansion`, removed after
+measurement, counted **3,410** calls at `3fa9eb29e` and **3,402** on the
+integrated branch at `bcd4295e5`. This is a reduction of eight, not the twenty
+A–C arm hits measured before implementation. These endpoints also include
+intervening trunk changes, unlike the release comparison above. The exact
+same-base expansion-delta gate is therefore **not established**; the eight
+must not be reported as proof that precisely the twenty expansions went
+away. Row D and its 338 direct-arm hits remain unchanged.
+
+After merging trunk at `88ca1bd53`, both Rust crates build, rewatch tests and
+strict all-features clippy pass. The local compiler unit run reports 1,937
+passed, 50 failed and 25 ignored in the checkout without OCaml reference
+artifacts; it is not a passing full-suite gate. Baseline/head comparisons
+pass for all 745 single-file and 79 multi-file error fixtures. Local JS
+snapshot comparison passes 729/729, but the complete JS/stdlib/genType parity
+scripts remain blocked by missing reference/package prerequisites. CI is
+the reference-compiler gate; a draft is retained until the incomplete
+implementation and measurement gates are resolved.
