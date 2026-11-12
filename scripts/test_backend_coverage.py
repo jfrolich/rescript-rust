@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RATCHET = ROOT / "compiler-rust/tests/backend_coverage.txt"
 
 
-STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "js-bridge")
+STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits", "js-bridge")
 
 
 def summarize(directory, stage, prefix=None):
@@ -71,10 +71,10 @@ def rule_counts(directory, prefix=None):
             "renormalised": dict(sorted(totals["renormalised"].items()))}
 
 
-def flatten_counts(directory, prefix=None):
+def flatten_counts(directory, prefix=None, stage="lambda-flatten"):
     totals = collections.Counter()
     seen = set()
-    for path in sorted(directory.rglob("lambda-flatten.identical.json")):
+    for path in sorted(directory.rglob(f"{stage}.identical.json")):
         report = json.loads(path.read_text())
         if prefix and not Path(report["unit"]).resolve().is_relative_to(prefix):
             continue
@@ -120,6 +120,7 @@ def main():
     results = {stage: {} for stage in STAGES}
     rules = {}
     flatten_rules = {}
+    exits_rules = {}
     with tempfile.TemporaryDirectory(prefix="bir-shadow-") as temporary:
         for corpus, folder in [("runtime", "packages/@rescript/runtime"),
                                ("tests/tests", "tests/tests"), ("fixtures", None)]:
@@ -150,12 +151,15 @@ def main():
                         f"{stage}: {corpus}: no shadow reports (mode was not exercised)")
             rules[corpus] = rule_counts(reports, prefix)
             flatten_rules[corpus] = flatten_counts(reports, prefix)
+            exits_rules[corpus] = flatten_counts(reports, prefix, "lambda-exits")
     text = json.dumps(results, indent=2, sort_keys=True) + "\n"
     print(text, end="")
     print("lambda-norm rule firings (not ratcheted):")
     print(json.dumps(rules, indent=2, sort_keys=True))
     print("lambda-flatten rule firings (not ratcheted):")
     print(json.dumps(flatten_rules, indent=2, sort_keys=True))
+    print("lambda-exits rule firings (not ratcheted):")
+    print(json.dumps(exits_rules, indent=2, sort_keys=True))
     if args.record:
         RATCHET.write_text(text)
     else:

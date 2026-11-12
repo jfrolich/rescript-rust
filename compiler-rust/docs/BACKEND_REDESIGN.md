@@ -770,7 +770,7 @@ Queries that walk today and do not in `Bir`:
 | `collect_info` (five walks) | `fact`, set when a binder is created or its value replaced |
 | `arena_assigned_variables` (three walks) | `ASSIGNED` flag |
 | `collect_occurs` | `uses`, `CAPTURED` |
-| `count_helper` for exits | a count per catch header, maintained like `uses` |
+| `count_helper` for exits | S4.3 correction: catch headers maintain structural weighted counts, not the ordered reachable-handler count; exits takes that count before rewriting (C.3) |
 | `hit_variable(v, lam)` | `uses[v] == 0` answers "no" at once; otherwise the walk remains |
 | `free_variables_with_stats`, `size_upto` | remain bounded walks of the candidate body |
 
@@ -886,7 +886,7 @@ later).
 | 1 | `simplify_alias` reads `ident_tbl` as of the preceding `collect_info`. In particular the body it inlines for `f` is `f`'s body before the current sweep rewrote it, and the size tests of `ok_to_inline_fun_when_app` see that body. | R. A round that inlines takes a snapshot of each inlinable function's body the first time the sweep is about to rewrite inside it (copy on first write, into a per-round side map `FuncId -> NodeId`). Only functions that pass `lfunction_can_be_inlined` and a size bound are copied, so the cost is bounded by the inline size limit per function. As built (S4.1, C.6): the round names what to protect with `Round::guard`; the engine copies a guarded node before the first edit at or below it and `Engine::as_of_round_start` returns the copy. The map is keyed by node, not by function, because the same holds for every fact that names a node (a block's fields, the content of `Some`): `simplify_alias` reads them as collected before the sweep too. A snapshot is an ordinary detached copy (`copy_subtree`), so until the round ends its variable uses are counted; a round that takes snapshots must not decide on a use count (today's inlining does not: it reads `free_variables_with_stats` of the body). |
 | 2 | Three `simplify_alias` sweeps with `collect_info` between them; each sweep nests inlining at most four deep. | R. Three rounds (2, 3, 5 in C.3). Facts are current at the start of each round by construction. |
 | 3 | `collect_info` records facts only for bindings it visits; a fact from an earlier sweep stays in `ident_tbl` after its binding was rewritten or removed (OCaml's table is never cleared between sweeps). | S. `Fact` is updated when a binder's value is replaced, which can differ from a stale entry. Start by keeping the stale behaviour where the harness shows a difference (the fact table gets a per-round "frozen" bit for such binders); expected to be empty, since a stale fact describes a binding that no longer exists and can only be queried through a variable that no longer occurs. Unknown until the harness runs. As built (S4.1): a round with `Facts::Frozen` reads a copy of the fact column taken at its start (`Engine::fact`), which is what a `collect_info` before the pass gives; facts for bindings the round creates are added with `Engine::set_fact`. Facts that survive in `ident_tbl` from an earlier sweep after their binding changed kind are not reproduced; S4.4's diagnostic comparison is the judge. |
-| 4 | `simplify_exits` runs at three fixed points and counts raises at the start of each. A handler that shrank, or lost a raise, between two runs is inlined by the later run. | R. Three rounds (1, 5, 7). The maintained count equals a fresh count at the start of a round (invariant 2 with weights). |
+| 4 | `simplify_exits` runs at three fixed points and counts raises at the start of each. A handler that shrank, or lost a raise, between two runs is inlined by the later run. | R. Three rounds (1, 5, 7). S4.3 disproves the structural-count equality: raises in unused handlers count in Bir but not in the legacy query. The round takes an ordered count before editing and the shadow stage compares it directly with the legacy count. |
 | 5 | `simplify_lets` decides on a count taken once, with its own rules (B.4, invariant 2 and 3; uses inside dead bindings do not count). | R for the position (one round, 6). P for the count: the maintained count after dead bindings were released equals `collect_occurs`'s, because `release` cascades exactly along `count`'s rule "the value is counted only if the binding is used or strict". The applied-function case (`no_names_beta_reduce` inside `count`) is handled by reducing those applications at the start of round 6, before any decision reads a count. The harness checks the equality directly: in checking builds `collect_occurs` is run on an exported copy and compared with `uses`. Amended in S4.1: marking a binding dead the moment its last use disappears is wrong before round 6. An unused pure binding still has its size (`size_upto` in the inlining tests), its place in a `let` spine (`deep_flatten`) and its node in the Lambda the diagnostic comparison prints after each round. So deaths are deferred while an engine exists (`Bir::defer_deaths`) and `Engine::resume_deaths` at the start of round 6 marks every unused pure binding, cascading, in one scan of the variable table. Open for S4.7: the arena's test is "unused and `PURE`" for every `let` kind, while `simplify_lets` drops an unused `Alias` or `StrictOpt` binding whatever its value and keeps an unused `Strict` one unless `no_side_effects`; `PURE` implies `no_side_effects` but is not equal to it. |
 | 6 | `deep_flatten` runs three times, between the inlining sweeps. | R. Rounds 1, 3, 4 include its rules. |
 | 7 | `alpha_conversion` runs once, after the second inlining sweep, with arities as known then. | R. Round 4. |
@@ -905,13 +905,26 @@ Level L rounds replace `simplify_in_arena`. "Sweeps" compares with A.4.
 | Round | Rules (today's function) | Order | Skipped when |
 | ---: | --- | --- | --- |
 | 0 | alias collapse (`collapse`) | no sweep: when conversion builds `let[Alias] x = y`, later uses of `x` are built as `y`; the binding itself is built only if `x` is exported | |
-| 1 | `deep_flatten`; then exits (`subst_helper`) | flatten: `Order::Stateful`, explicit `aux`/`flatten` continuations; exits: pre-order | flatten: no `Let` or `LetRec`; exits: no `Catch` |
+| 1 | `deep_flatten`; then exits (`subst_helper`) | flatten: `Order::Stateful`, explicit `aux`/`flatten` continuations; exits: `Order::Stateful`, handler before body | flatten: no `Let` or `LetRec`; exits: no `Catch` |
 | 2 | `simplify_alias` | `simpl`'s recursion | |
 | 3 | `deep_flatten`, then `simplify_alias` | two sweeps | |
 | 4 | `deep_flatten`, then `alpha_conversion` | two sweeps | flatten: no `Let` whose value is a `Let`, `Seq`, `LetRec` or named block |
 | 5 | exits, then `simplify_alias` | two sweeps | exits: no `Catch` |
 | 6 | `simplify_lets`, `sroa` | `simplif`'s recursion | sroa: no mutable block |
-| 7 | exits, `guard_raises`, `handle_exports`, flat `make` aliases | pre-order; spine | |
+| 7 | exits, `guard_raises`, `handle_exports`, flat `make` aliases | exits: stateful; guard raises: pre-order; exports: spine | exits: no `Catch` |
+
+S4.3 correction: exits needs an ordered counting traversal before substitution.
+`CatchHeader::uses` includes every structurally present exit (with doubled
+switch-default weights). The legacy count visits a catch body before deciding
+whether to count its handler, visits let bodies before values, and visits a
+switch default first, twice when both tables are incomplete. For example,
+`catch (catch 0 with 2 -> exit 1) with 1 -> 0` has structural count 1 for
+label 1 but legacy count 0. Maintaining the latter would need conditional
+handler activation and ordered dependencies, not just local use increments.
+The count is frozen across the substitution traversal; the check stage compares
+it with `count_helper` on every supported corpus unit. Counting costs the
+legacy traversal, including its repeated default visits, plus ordered-map
+lookups. This is an explicit exception to the no-recollection goal of B.4.
 
 That is at most 11 sweeps against about 25 walks, none of them rebuilds a
 spine or refills a table, and several are skipped per module. Fusing the two
@@ -938,7 +951,7 @@ Level J rounds replace the JS passes:
 | `LamArena::let_` | none: it builds the node as given | |
 | `refine_let` | `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
 | `deep_flatten` (`flatten`, `eliminate_tuple`) | `bir/l/flatten.rs`: explicit continuations, binding groups, tuple projection elimination and `refine` | pass, rounds 1, 3, 4; first call checked in S4.2 |
-| `simplify_exits` | `inline_exit`, `drop_catch` | pass, rounds 1, 5, 7 |
+| `simplify_exits` | `bir/l/exits.rs`: `catch`, `raise`, `shallow`, explicit handler continuations and argument substitution | pass, rounds 1, 5, 7; first call checked in S4.3 |
 | `simplify_alias` field, option, boolean cases | `fold_field`, `fold_is_some`, `fold_if_var`, `fold_str_switch`, `unwrap_some` | pass, rounds 2, 3, 5 |
 | `simplify_alias` inlining, `lam_beta_reduce` | `inline_call`, `inline_external`, `beta` | pass, rounds 2, 3, 5 |
 | `alpha_conversion`, `transform_under_supply` | `uncurry_apply` | pass, round 4 |
@@ -1067,7 +1080,7 @@ guarded node that is not edited. Snapshots are released when the round ends.
 | freezing facts | one copy of the fact column (a vector copy, no tree walk) | `a_frozen_round_reads_facts_as_they_were_at_its_start` |
 | `resume_deaths` | one scan of the variable table, plus the bindings it releases | `an_unused_binding_stays_until_deaths_resume` |
 
-No rule recomputes a whole-tree fact. Purity is the `PURE` flag; a rule
+Except for S4.3's ordered exit count (C.3), no rule recomputes a whole-tree fact. Purity is the `PURE` flag; a rule
 that needs free variables or a size walks the candidate body it is about to
 copy, bounded by the limit that makes it a candidate (B.4, last table).
 
@@ -1127,10 +1140,23 @@ pass.
    `seq` on changed children too, unlike C.1's S4.1 description. Flatten's
    renorm mask includes IF and SEQ; other rounds must read their actual
    rebuild code rather than copying the illustrative mask.
+   S4.3 also needs stateful order: simplify a handler, install its substitution,
+   then visit the body; visit raise arguments before allocating fresh parameters.
+   `open_shell`/`close_shell` detach children while visiting a shallow-map frame,
+   then restore the shell once. This prevents each changed branch from repairing
+   all siblings of a wide switch. Temporary forests must be closed before a
+   parent is returned; this pass reads no binding facts while shells are open.
+   The 10,000-wide switch regression fell from 100,730,069 to 690,172 counted
+   steps; the 10,000-deep unused-catch chain takes 440,005 steps. Both are bounded
+   by 120 steps per input node; a root without Catch enters zero nodes.
 5. Fresh identifiers: `Bir::new_var_id` in the order the pass creates them
    (C.2 row 9). A rule that copies a body uses `copy_subtree` and
    `engine.replace`, not `put`, because the copy may move uses under a
-   function.
+   function. S4.3 is an exception to freshening internal binders: legacy exit
+   substitution renames only handler parameters. A binder-containing single-use
+   handler is moved; a repeated, binder-free handler uses `copy_exit_handler`,
+   which preserves identities and gives empty-parameter functions distinct
+   headers. Parameter replacement uses capture-aware `replace`, not `put`.
 6. A round that reads `ident_tbl` uses `Facts::Frozen` and `engine.fact`. If
    it reads a node through a fact (a function body, a block's fields), give
    the round a `guard` selecting those nodes and read them through
@@ -1904,7 +1930,8 @@ model with this document as its specification.
 | S3.10 | Default `New` for level J; then delete `lam_compile*.rs`, `js_pass_*.rs`, `js_shake.rs`, `js_exp_make.rs`, `js_ir/` except what emit's tests need | | fallback zero; instruction count falls by about 6.3% | −45,000 with tests | S3.9 | yes |
 | S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
 | S4.2 | Deep flatten, explicit continuations, fresh-identity export and `lambda-flatten` diagnostic comparison | `bir/l/flatten.rs`, engine, bridge, shadow and coverage ratchet | see S4.2 results below | implemented | S4.1 | yes |
-| S4.3 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
+| S4.3 | Stateful exit counting and substitution; `lambda-exits` after the first flatten | `bir/l/exits.rs`, engine, shadow, coverage and documentation | all four corpora identical; ordered counts and exact identifiers; deep/wide cost tests | implemented | S4.2 | yes |
+| S4.4 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
@@ -1943,6 +1970,38 @@ assert at most 90 steps per input node, and validate the resulting arena.
 The root-summary miss test asserts zero entered nodes. The round's syntactic
 beta-residue cache prunes subtrees without lets and clears entries for reused
 slots when it creates nodes; it is not a binding-fact recomputation.
+
+### S4.3: first exits round
+
+`RESCRIPT_BACKEND=check` runs flatten then exits from the existing shadow hook.
+Both private counters start at the same `ident_stamp_bound`; the legacy oracle
+runs the same two passes on a cloned arena. Ordered counts, Lambda dumps, and
+all identifier names, stamps and flags must agree. The normal backend stays
+legacy. A difference fails; only an explicit bridge limitation falls back.
+Nested reused catch labels still report `reused static catch label` rather
+than being reinterpreted. There is a regression for that boundary.
+
+| Corpus | Units | Identical | Unsupported |
+| --- | ---: | ---: | ---: |
+| runtime | 113 | 113 | 0 |
+| tests/tests | 711 | 711 | 0 |
+| fixtures | 480 | 480 | 0 |
+| 3,735-module application | 3,735 | 3,735 | 0 |
+
+| Rule | Runtime | tests/tests | Fixtures | Application |
+| --- | ---: | ---: | ---: | ---: |
+| drop-catch | 0 | 0 | 0 | 0 |
+| inline-direct | 104 | 691 | 568 | 5,759 |
+| inline-small | 5 | 65 | 80 | 3,433 |
+| inline-empty | 150 | 1,081 | 984 | 14,242 |
+| inline-arguments | 0 | 24 | 32 | 155 |
+| keep-catch | 1 | 107 | 160 | 1,041 |
+
+Unused catches are exercised by unit tests. Existing bridge/norm/flatten
+ratchets remain unchanged; the J bridge stage is retained too. Later exits
+cuts are **not measured**: reaching them requires the external-inline/arity
+resolvers and mutable `LamStats` used by intervening alias/alpha passes, which
+the shadow hook does not receive. No later-cut identity is claimed.
 
 ### H.2 Stage S1 in full
 

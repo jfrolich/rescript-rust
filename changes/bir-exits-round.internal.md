@@ -1,0 +1,1 @@
+- Add the diagnostic-only Bir exits round, with exact legacy comparisons, ordered exit counts, and deep/wide traversal tests.
