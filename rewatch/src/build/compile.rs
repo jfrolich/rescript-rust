@@ -3078,7 +3078,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
         std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some() || module_timings_enabled();
     let runtime_timing_start = runtime_timing_enabled.then(Instant::now);
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
-    let runtime_config = packages::read_config(runtime_root)
+    let runtime_config = super::snapshot::runtime_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
     // The runtime package ships its sources at its root; its compiled
     // modules would be in its artifact directory, the runtime's `-I`.

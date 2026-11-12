@@ -352,16 +352,33 @@ fn rebased_runtime_core(bytes: &[u8], from: &Path, to: &Path) -> Option<Vec<u8>>
     }).1)
 }
 
-/// A digest of the runtime's configuration and of every source's module name
-/// and contents (not its path: an installed runtime keeps copies of the
-/// sources elsewhere).
-fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> std::io::Result<blake3::Hash> {
+/// O(configuration bytes), once per verification. An absent configuration uses
+/// the producer's parsed options; malformed or unreadable configurations fail.
+pub(crate) fn runtime_config(root: &Path) -> Result<crate::config::Config> {
+    match std::fs::read(root.join("rescript.json")) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if root.join("bsconfig.json").exists() { return packages::read_config(root); }
+            Ok(serde_json::from_str(include_str!("../../../packages/@rescript/runtime/rescript.json"))?)
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// O(options bytes + source bytes), one read per source. Paths and configuration
+/// whitespace are excluded; parsed compiler flags and features determine options.
+fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> Result<blake3::Hash> {
+    let config = runtime_config(runtime_root)?;
+    let mut features = config.get_experimental_features_args();
+    features.sort();
     let mut hasher = blake3::Hasher::new();
     let mut add = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    add(&std::fs::read(runtime_root.join("rescript.json"))?);
+    for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&features) {
+        add(flag.as_bytes());
+    }
     for (module_name, path) in runtime_paths {
         add(module_name.as_bytes());
         add(&std::fs::read(path)?);
@@ -371,7 +388,7 @@ fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> s
                 add(&interface);
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => add(b""),
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     }
     Ok(hasher.finalize())
@@ -623,7 +640,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let write_runtime = |root: &Path, source: &str| {
             std::fs::create_dir_all(root).unwrap();
-            std::fs::write(root.join("rescript.json"), "{}").unwrap();
+            std::fs::write(root.join("rescript.json"), include_str!("../../../packages/@rescript/runtime/rescript.json")).unwrap();
             std::fs::write(root.join("A.res"), source).unwrap();
             std::fs::write(root.join("A.resi"), "let a: int").unwrap();
             vec![("A".to_string(), root.join("A.res"))]
@@ -635,6 +652,15 @@ mod tests {
         let digest = sources_digest(&first, &first_paths).unwrap();
         assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
 
+        std::fs::remove_file(second.join("rescript.json")).unwrap();
+        assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
+        let mut config: serde_json::Value = serde_json::from_str(include_str!("../../../packages/@rescript/runtime/rescript.json")).unwrap();
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
+        config["compiler-flags"] = serde_json::json!(["-nostdlib"]);
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+        std::fs::remove_file(second.join("rescript.json")).unwrap();
         std::fs::write(second.join("A.res"), "let a = 2").unwrap();
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
         std::fs::write(second.join("A.res"), "let a = 1").unwrap();

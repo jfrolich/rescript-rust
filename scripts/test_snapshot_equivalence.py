@@ -41,7 +41,7 @@ def stage(source, destination, seen=None, include_dev=True):
 
 
 def build(project, mode):
-    env = dict(os.environ, RESCRIPT_RUNTIME=str(ROOT / "packages/@rescript/runtime"),
+    env = dict(os.environ, RESCRIPT_RUNTIME=os.environ.get("RESCRIPT_RUNTIME", str(ROOT / "packages/@rescript/runtime")),
                RESCRIPT_SNAPSHOT=mode, RAYON_NUM_THREADS="1", NO_COLOR="1")
     env.pop("RESCRIPT_FULL_BUILD", None)
     env.pop("RESCRIPT_COMPILER_COUNTERS", None)
