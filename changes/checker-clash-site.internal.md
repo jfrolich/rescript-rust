@@ -1,0 +1,1 @@
+- Pass type-clash sites as Copy handles and build small application argument lists inline, preserving diagnostics.

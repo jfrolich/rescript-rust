@@ -9678,6 +9678,30 @@ pub fn apply_gentype_outcome(
     }
 }
 
+/// `apply_gentype_outcome` for a build. GenType's notes go to bsc's stdout,
+/// which rescript-ocaml drops for a compile that succeeds and shows after
+/// its stderr for one that fails (rewatch-ocaml/compiler_scheduler.ml:229-244):
+/// the notes are dropped, or follow the exception GenType raised, which
+/// follows `warnings`.
+pub fn apply_gentype_outcome_in_build(
+    outcome: Option<crate::gentype::main::Outcome>,
+    warnings: &str,
+    filename: &str,
+) -> Result<()> {
+    let Some(outcome) = outcome else {
+        return Ok(());
+    };
+    match outcome.apply() {
+        Ok((_, Ok(()))) => Ok(()),
+        Ok((printed, Err(report))) => {
+            Err(UserDiagnostic::new(format!("{warnings}{report}{printed}"), 2).into())
+        }
+        Err(error) => {
+            Err(anyhow::Error::new(error).context(format!("GenType failed for {filename}")))
+        }
+    }
+}
+
 /// Type-check an interface source in process, running the frontend as the
 /// file compile does (its warnings go to stderr).
 pub fn typecheck_interface_source_in_process(
@@ -12156,6 +12180,41 @@ mod tests {
             super::apply_gentype_outcome(Some(outcome), "", &filename.to_string_lossy()).unwrap();
         assert!(printed.contains("Annotation payload is ignored"), "{printed}");
         assert!(output.exists());
+    }
+
+    /// bsc prints GenType's notes (its stdout) before the report of the
+    /// exception GenType raised; a build shows them as rescript-ocaml shows
+    /// bsc's stdout: not at all for a compile that succeeds, and after the
+    /// warnings and the report (its stderr) for one that fails.
+    #[test]
+    fn build_shows_gentype_notes_only_after_a_gentype_failure() {
+        let note = "\n  Warning genType\n  A.res:1:1-8\n  Annotation is ignored\n";
+        let outcome = |result| crate::gentype::main::Outcome {
+            notes: vec![note.to_string()],
+            result,
+            needs_locations: false,
+        };
+        let printed = super::apply_gentype_outcome(Some(outcome(Ok(None))), "", "A.res").unwrap();
+        assert_eq!(printed, note);
+        super::apply_gentype_outcome_in_build(Some(outcome(Ok(None))), "warning\n", "A.res")
+            .unwrap();
+
+        let report = || Err("report\n".to_string());
+        let output = |error: anyhow::Error| {
+            error
+                .downcast::<super::UserDiagnostic>()
+                .unwrap()
+                .output()
+                .to_string()
+        };
+        let bsc = super::apply_gentype_outcome(Some(outcome(report())), "warning\n", "A.res");
+        assert_eq!(output(bsc.unwrap_err()), format!("warning\n{note}report\n"));
+        let build =
+            super::apply_gentype_outcome_in_build(Some(outcome(report())), "warning\n", "A.res");
+        assert_eq!(
+            output(build.unwrap_err()),
+            format!("warning\nreport\n{note}")
+        );
     }
 
     /// A GenType note quotes a location, so a compile from a location-free

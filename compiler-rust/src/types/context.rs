@@ -775,8 +775,9 @@ pub struct TypeContext {
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
     component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
-    /// Component-table name indexes of compilation-local signatures, keyed by
-    /// address; the entry keeps the signature alive so the key stays unique.
+    /// Component-table name indexes of the signatures this compilation has
+    /// indexed (a unit's comes from the world), keyed by address; the entry
+    /// keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<crate::fast_hash::AHashMap<usize, IndexedSignature>>,
     component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
@@ -1380,6 +1381,12 @@ impl TypeContext {
             .or_else(|| self.store.shared_pool().longident_name(idx))
     }
 
+    /// The world of the build this compilation belongs to.
+    #[inline]
+    pub(crate) fn world(&self) -> &Arc<super::world::World> {
+        self.store.world()
+    }
+
     /// The worker's persistent store leased by this compilation.
     pub(crate) fn thread_store(&self) -> &super::thread_store::ThreadTypeStore {
         &self.store
@@ -1590,14 +1597,16 @@ impl TypeContext {
         &self,
         sig: &Arc<super::decl::Signature>,
     ) -> Arc<super::env_lazy::SignatureIndex> {
-        if self.store.owns_signature(sig) {
-            return self.store.signature_index(sig);
-        }
         let key = Arc::as_ptr(sig) as usize;
         if let Some((_, found)) = self.signature_indexes.borrow().get(&key) {
             return found.clone();
         }
-        let built = Arc::new(super::env_lazy::SignatureIndex::build(sig));
+        // A unit's index is built once per build and read from the world once
+        // per compilation; any other signature is indexed here.
+        let built = self
+            .world()
+            .unit_signature_index(sig)
+            .unwrap_or_else(|| Arc::new(super::env_lazy::SignatureIndex::build(sig)));
         self.signature_indexes
             .borrow_mut()
             .insert(key, (sig.clone(), built.clone()));

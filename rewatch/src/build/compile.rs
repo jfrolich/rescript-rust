@@ -124,9 +124,6 @@ impl Ord for WorkUnit {
 struct CompletionMsg {
     module_name: String,
     result: Result<Option<String>>,
-    /// What GenType printed for this compile (bsc's stdout), shown with this
-    /// pass's warnings but not kept for replay.
-    gentype_output: Option<String>,
     interface_result: Option<Result<Option<String>>>,
     is_clean: bool,
     is_compiled: bool,
@@ -296,7 +293,6 @@ struct PendingRegistryUpdate {
 
 struct InProcessModuleResult {
     warning: Option<String>,
-    gentype_output: Option<String>,
     registry_updates: Vec<PendingRegistryUpdate>,
 }
 
@@ -407,9 +403,6 @@ struct CompileWarning {
     module_name: String,
     package_name: String,
     warning: String,
-    /// Whether the warning goes to the package's compiler log and is kept for
-    /// replay: false for what GenType printed, which bsc prints to stdout.
-    log: bool,
 }
 
 /// Compute the weighted critical-path priority of every module in the universe:
@@ -517,7 +510,6 @@ fn compile_one(
     if !is_dirty {
         return WorkerMsg::Completed(CompletionMsg {
             module_name: module_name.to_string(),
-            gentype_output: None,
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: true,
@@ -554,7 +546,6 @@ fn compile_one(
                 }
                 Err(err) => WorkerMsg::Completed(CompletionMsg {
                     module_name: module_name.to_string(),
-                    gentype_output: None,
                     result: Err(err),
                     interface_result: None,
                     is_clean: false,
@@ -567,7 +558,6 @@ fn compile_one(
         // entry here just marks the mlmap compiled so its members can proceed.
         SourceType::MlMap(_) => WorkerMsg::Completed(CompletionMsg {
             module_name: package.namespace.to_suffix().unwrap(),
-            gentype_output: None,
             result: Ok(None),
             interface_result: Some(Ok(None)),
             is_clean: false,
@@ -595,7 +585,6 @@ fn collect_stored_warnings_for_modules_not_recompiled(
                     module_name: module_name.clone(),
                     package_name: module.package_name.clone(),
                     warning: warning.clone(),
-                    log: true,
                 });
             }
             if let Some(ref interface) = source_file.interface
@@ -605,7 +594,6 @@ fn collect_stored_warnings_for_modules_not_recompiled(
                     module_name: module_name.clone(),
                     package_name: module.package_name.clone(),
                     warning: warning.clone(),
-                    log: true,
                 });
             }
         }
@@ -625,13 +613,11 @@ fn append_compile_warnings(
     for CompileWarning {
         package_name,
         warning,
-        log,
         ..
     } in warning_entries
     {
         if let Some(package) = build_state.get_package(&package_name)
             && write_log
-            && log
         {
             logs::append(package, &warning);
         }
@@ -1430,7 +1416,6 @@ pub fn compile(
             result,
             interface_result,
             is_compiled,
-            gentype_output,
             ..
         } = msg;
 
@@ -1536,15 +1521,6 @@ pub fn compile(
                 module_name: module_name.clone(),
                 package_name: package_name.clone(),
                 warning,
-                log: true,
-            });
-        }
-        if let Some(warning) = gentype_output {
-            warning_entries.push(CompileWarning {
-                module_name: module_name.clone(),
-                package_name: package_name.clone(),
-                warning,
-                log: false,
             });
         }
         if let Some(error) = compile_error {
@@ -1558,7 +1534,6 @@ pub fn compile(
                 module_name: module_name.clone(),
                 package_name: package_name.clone(),
                 warning,
-                log: true,
             });
         }
         if let Some(error) = interface_error {
@@ -2767,7 +2742,6 @@ fn panicked_completion(module_name: String, message: &str) -> WorkerMsg {
         result: Err(anyhow!("Compilation panicked for {module_name}: {message}")),
         module_name,
         interface_result: None,
-        gentype_output: None,
         is_clean: false,
         is_compiled: true,
         registry_updates: Vec::new(),
@@ -4344,17 +4318,12 @@ fn finish_in_process_js(
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let (result, registry_updates, gentype_output) = match result {
-        Ok(outcome) => (
-            Ok(outcome.warning),
-            outcome.registry_updates,
-            outcome.gentype_output,
-        ),
-        Err(err) => (Err(err), Vec::new(), None),
+    let (result, registry_updates) = match result {
+        Ok(outcome) => (Ok(outcome.warning), outcome.registry_updates),
+        Err(err) => (Err(err), Vec::new()),
     };
     CompletionMsg {
         module_name,
-        gentype_output,
         result,
         interface_result: None,
         is_clean,
@@ -4411,7 +4380,6 @@ fn finish_in_process_js_inner(
         );
         return Ok(InProcessModuleResult {
             warning,
-            gentype_output: None,
             registry_updates: send_js_metadata_ready(metadata_tx, module_name, registry_updates),
         });
     }
@@ -4505,7 +4473,6 @@ fn finish_in_process_js_inner(
     if registry_only {
         return Ok(InProcessModuleResult {
             warning,
-            gentype_output: None,
             registry_updates,
         });
     }
@@ -4558,10 +4525,11 @@ fn finish_in_process_js_inner(
         }
     }
 
-    // What GenType prints follows the compile's warnings in this pass's
-    // output, so a first pass the build retries with locations prints
-    // nothing; like bsc's stdout, it is not kept for replay.
-    let gentype_printed = rescript_compiler::driver::apply_gentype_outcome(
+    // GenType prints its notes (Log_.ml:99-104) to bsc's stdout, which
+    // rescript-ocaml shows only for a compile that fails, after its stderr
+    // (rewatch-ocaml/compiler_scheduler.ml:229-244): a build shows them only
+    // with the report of an exception GenType raised.
+    rescript_compiler::driver::apply_gentype_outcome_in_build(
         gentype,
         &compiler_warnings,
         &source_abs.to_string_lossy(),
@@ -4612,7 +4580,6 @@ fn finish_in_process_js_inner(
 
     Ok(InProcessModuleResult {
         warning,
-        gentype_output: (!gentype_printed.is_empty()).then_some(gentype_printed),
         registry_updates,
     })
 }
@@ -4974,13 +4941,11 @@ mod tests {
                     module_name: "Zed".to_string(),
                     package_name: "test-package".to_string(),
                     warning: "warning: fresh\n".to_string(),
-                    log: true,
                 },
                 CompileWarning {
                     module_name: "Alpha".to_string(),
                     package_name: "test-package".to_string(),
                     warning: "warning: stored\n".to_string(),
-                    log: true,
                 },
             ],
             &mut compile_warnings,
