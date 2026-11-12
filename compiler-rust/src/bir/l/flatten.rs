@@ -656,6 +656,154 @@ mod tests {
     }
 
     #[test]
+    fn named_block_eliminates_projections_and_keeps_unprojected_effects() {
+        use crate::lambda::lam_tag_info::TagInfo;
+        for escapes in [false, true] {
+            let mut a = LamArena::new();
+            let tuple = id("match", 1);
+            let projected = id("projected", 2);
+            let left = crate::bir::engine::testing::call(&mut a, "left", 10);
+            let right = crate::bir::engine::testing::call(&mut a, "right", 11);
+            let block = prim(
+                &mut a,
+                Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
+                &[left, right],
+            );
+            let v = a.var(tuple);
+            let field = prim(&mut a, Primitive::Pfield(0, FieldDbgInfo::Tuple), &[v]);
+            let result = a.var(if escapes { tuple } else { projected });
+            let body = a.let_(LetKind::Alias, projected, field, result);
+            let root = a.let_(LetKind::Strict, tuple, block, body);
+            let stats = compare(a, root);
+            assert_eq!(
+                stats.rules.get("named-block").copied().unwrap_or(0),
+                u64::from(!escapes)
+            );
+        }
+    }
+
+    #[test]
+    fn beta_residue_stays_local_and_recursive_values_are_visited() {
+        let mut a = LamArena::new();
+        let x = id("x", 1);
+        let y = id("y", 2);
+        let source = a.var(id("source", 10));
+        let call = crate::bir::engine::testing::call(&mut a, "callee", 11);
+        let residue = a.let_(LetKind::Strict, y, source, call);
+        let body = a.unit();
+        let value = a.let_(LetKind::Strict, x, residue, body);
+        let result = a.unit();
+        let root = a.letrec(&[(id("recursive", 3), value)], result);
+        compare(a, root);
+    }
+
+    #[test]
+    fn three_nested_values_and_effectful_sequence_heads() {
+        let mut a = LamArena::new();
+        let mut value = crate::bir::engine::testing::call(&mut a, "call", 20);
+        for stamp in 1..=3 {
+            let head = crate::bir::engine::testing::call(&mut a, "head", 21);
+            let seq = a.seq_raw(head, value);
+            let body = a.unit();
+            value = a.let_(LetKind::Strict, id("bound", stamp), seq, body);
+        }
+        compare(a, value);
+    }
+
+    #[test]
+    fn ordinary_let_allocates_in_body_before_value() {
+        let mut a = LamArena::new();
+        let make = |a: &mut LamArena, stamp| {
+            let call = crate::bir::engine::testing::call(a, "f", 30);
+            let value = prim(a, Primitive::PnullUndefinedToOpt, &[call]);
+            let body = a.var(id("temporary", stamp));
+            a.let_(LetKind::Strict, id("temporary", stamp), value, body)
+        };
+        let left = make(&mut a, 1);
+        let value = prim(&mut a, Primitive::PsomeNotNest, &[left]);
+        let body = make(&mut a, 2);
+        let root = a.let_(LetKind::Strict, id("outer", 3), value, body);
+        let stats = compare(a, root);
+        assert_eq!(stats.renames.len(), 2);
+    }
+
+    #[test]
+    fn nullable_variable_and_refine_primitive_and_call() {
+        for shape in 0..3 {
+            let mut a = LamArena::new();
+            let x = id("x", 1);
+            let v = a.var(id("source", 2));
+            let value = prim(&mut a, Primitive::PnullToOpt, &[v]);
+            let use_ = a.var(x);
+            let body = match shape {
+                0 => prim(&mut a, Primitive::Pnot, &[use_]),
+                1 => {
+                    let f = a.var(id("f", 3));
+                    a.apply_raw(
+                        f,
+                        &[use_],
+                        crate::lambda::ApInfo {
+                            loc: LamLoc::NONE,
+                            status: crate::lambda::ApplyStatus::Uncurry,
+                        },
+                    )
+                }
+                _ => use_,
+            };
+            let root = a.let_(LetKind::Strict, x, value, body);
+            assert!(compare(a, root).renames.is_empty());
+        }
+    }
+
+    #[test]
+    fn linear_steps_on_ten_thousand_deep_and_wide_nodes() {
+        use crate::lambda::lam_tag_info::TagInfo;
+        for wide in [false, true] {
+            let mut a = LamArena::new();
+            let mut root = a.unit();
+            let mut args = Vec::new();
+            for stamp in 1..=10_000 {
+                let body = a.unit();
+                let value = if wide { a.unit() } else { root };
+                let n = a.let_(LetKind::Strict, id("x", stamp), value, body);
+                if wide {
+                    args.push(n);
+                } else {
+                    root = n;
+                }
+            }
+            if wide {
+                root = prim(
+                    &mut a,
+                    Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
+                    &args,
+                );
+            }
+            let mut imported = crate::bir::engine::testing::import(&a, root);
+            let steps = {
+                let mut e = Engine::new(&mut imported.arena);
+                e.run(&FLATTEN, imported.root);
+                e.steps()
+            };
+            let nodes = if wide { 30_001 } else { 20_001 };
+            assert!(steps <= 90 * nodes, "wide={wide}, steps={steps}");
+            imported.arena.validate(Some(imported.root), false).unwrap();
+            eprintln!("flatten wide={wide}: {steps} steps");
+        }
+    }
+
+    #[test]
+    fn summary_miss_is_not_entered() {
+        let mut a = LamArena::new();
+        let call = crate::bir::engine::testing::call(&mut a, "f", 1);
+        let mut imported = import_lambda(&a, call).unwrap();
+        let mut e = Engine::new(&mut imported.arena);
+        assert_eq!(e.run(&FLATTEN, imported.root), Changed::No);
+        assert_eq!(e.stats.entered, 0);
+        assert_eq!(e.stats.pruned, 1);
+    }
+
+    #[test]
     fn ordinary_let_refinement() {
         for kind in [
             LetKind::Strict,
