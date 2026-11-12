@@ -871,6 +871,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 pub(super) struct TemporaryRecord {
     conn: Connection,
     temp: tempfile::NamedTempFile,
+    lifetime: PrivateRecordLock,
     package_name: String,
     pending_modules: usize,
     pending_bytes: usize,
@@ -880,6 +881,38 @@ pub(super) struct TemporaryRecord {
 }
 
 const TEMP_RECORD_PREFIX: &str = ".rescript-record-";
+
+// Never flock a SQLite file: BSD/macOS flock and SQLite's fcntl locks conflict.
+// Package readers/writers flock rescript.sqlite.guard (shared/exclusive).
+// Preparations exclusively flock <private>.sqlite.lock until publication/drop;
+// cleanup tries that same sidecar with LOCK_EX | LOCK_NB. SQLite alone uses
+// fcntl byte-range locks on database files. fs2 uses LockFileEx on Windows.
+struct PrivateRecordLock {
+    _file: std::fs::File,
+    path: PathBuf,
+}
+
+impl Drop for PrivateRecordLock {
+    fn drop(&mut self) {
+        // SQLite is closed first. On construction failure the NamedTempFile
+        // may still exist; remove it before releasing/unlinking its sidecar.
+        // After publication the private name is already gone.
+        if remove_if_present(&self.path.with_extension("")).is_ok() {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
+}
+
+fn private_lock_path(db: &Path) -> PathBuf {
+    db.with_extension("sqlite.lock")
+}
+
+fn remove_if_present(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
+}
 
 fn private_record_paths(package: &Package) -> std::io::Result<Vec<PathBuf>> {
     let entries = match std::fs::read_dir(package.get_build_path()) {
@@ -892,25 +925,33 @@ fn private_record_paths(package: &Package) -> std::io::Result<Vec<PathBuf>> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if name.starts_with(TEMP_RECORD_PREFIX) && name.ends_with(".sqlite") {
-            paths.push(entry.path());
+        if name.starts_with(TEMP_RECORD_PREFIX) {
+            if name.ends_with(".sqlite") {
+                paths.push(entry.path());
+            } else if name.ends_with(".sqlite.lock") {
+                // A kill after rename/unlink may leave only the sidecar.
+                paths.push(entry.path().with_extension(""));
+            }
         }
     }
+    paths.sort_unstable();
+    paths.dedup();
     Ok(paths)
 }
 
 // Caller holds the package guard, excluding creation and publication. A
-// lifetime lock on the private file distinguishes active preparations from
+// lifetime lock on its sidecar distinguishes active preparations from
 // files abandoned by a killed build (including a different root).
 fn discard_private_records(paths: Vec<PathBuf>) -> std::io::Result<()> {
     for path in paths {
-        let file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err),
-        };
+        let lock_path = private_lock_path(&path);
+        let file = std::fs::OpenOptions::new().read(true).write(true)
+            .create(true).truncate(false).open(&lock_path)?;
         match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => std::fs::remove_file(path)?,
+            Ok(()) => {
+                remove_if_present(&path)?;
+                remove_if_present(&lock_path)?;
+            },
             Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => (),
             Err(err) => return Err(err),
         }
@@ -933,7 +974,7 @@ pub(super) fn cleanup_private_records(package: &Package) {
     }
 }
 
-fn private_record_file(package: &Package) -> anyhow::Result<tempfile::NamedTempFile> {
+fn private_record_file(package: &Package) -> anyhow::Result<(tempfile::NamedTempFile, PrivateRecordLock)> {
     // Root build locks do not exclude another root sharing this package. Make
     // cleanup/creation/lifetime locking atomic, then release the package guard
     // before schema creation and insertion. Publication reacquires it later.
@@ -941,16 +982,21 @@ fn private_record_file(package: &Package) -> anyhow::Result<tempfile::NamedTempF
     discard_private_records(private_record_paths(package)?)?;
     let temp = tempfile::Builder::new().prefix(TEMP_RECORD_PREFIX).suffix(".sqlite")
         .tempfile_in(package.get_build_path())?;
-    fs2::FileExt::lock_exclusive(temp.as_file())?;
-    Ok(temp)
+    let lock_path = private_lock_path(temp.path());
+    let file = std::fs::OpenOptions::new().read(true).write(true).create_new(true).open(&lock_path)?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok((temp, PrivateRecordLock { _file: file, path: lock_path }))
 }
 
 impl TemporaryRecord {
     pub(super) fn new(package: &Package, seed: &PackageState, runtime: &[(String, Vec<u8>)]) -> anyhow::Result<Self> {
-        let (temp, conn) = timing::measure(Phase::RecordSqlOpen, || -> anyhow::Result<_> {
+        let (temp, lifetime, conn) = timing::measure(Phase::RecordSqlOpen, || -> anyhow::Result<_> {
             ensure_sqlite_initialized();
-            let temp = private_record_file(package)?;
+            let (temp, lifetime) = private_record_file(package)?;
             let conn = Connection::open(temp.path())?;
+            // No other SQLite connection may own this private database. Busy
+            // is a protocol failure, not contention worth retrying per package.
+            conn.busy_timeout(Duration::ZERO)?;
             conn.set_prepared_statement_cache_capacity(32);
             conn.pragma_update(None, "journal_mode", "OFF")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
@@ -959,7 +1005,7 @@ impl TemporaryRecord {
             // index pages not counted by the prepared-payload byte threshold.
             conn.pragma_update(None, "cache_size", -256)?;
             conn.execute_batch(&format!("BEGIN;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};"))?;
-            Ok((temp, conn))
+            Ok((temp, lifetime, conn))
         })?;
         apply_record_rows(&conn, &PackageState::default(), seed, "")?;
         {
@@ -972,7 +1018,7 @@ impl TemporaryRecord {
         // the publication protocol. Zero is rejected to keep bounded batches.
         let threshold = |name, default| std::env::var(name).ok()
             .and_then(|value| value.parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(default);
-        Ok(Self { conn, temp, package_name: package.name.clone(), pending_modules: 0,
+        Ok(Self { conn, temp, lifetime, package_name: package.name.clone(), pending_modules: 0,
             pending_bytes: 0, batch_modules: threshold("RESCRIPT_STORE_BATCH_MODULES", 64),
             batch_bytes: threshold("RESCRIPT_STORE_BATCH_BYTES", 128 * 1024), commits: 0 })
     }
@@ -1091,7 +1137,7 @@ impl TemporaryRecord {
         timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
         checkpoint("commit");
         publication_test_hook(&package.name, "after-commit");
-        let Self { conn, temp, commits, pending_bytes, .. } = self;
+        let Self { conn, temp, lifetime, commits, pending_bytes, .. } = self;
         let bytes = temp.as_file().metadata()?.len();
         conn.close().map_err(|(_, err)| err)?;
         checkpoint("close");
@@ -1105,6 +1151,7 @@ impl TemporaryRecord {
         publication_test_hook(&package.name, "before-rename");
         timing::measure(Phase::RecordRename, || temp.persist(&db))?;
         checkpoint("rename");
+        drop(lifetime);
         publication_test_hook(&package.name, "after-rename");
         // Compatibility with a killed writer using the incremental path's
         // external marker. This path never creates a marker of its own.
@@ -1499,16 +1546,49 @@ mod tests {
         let package = test_package(dir.path());
         let first = TemporaryRecord::new(&package, &state(17, None), &[]).unwrap();
         let first_path = first.temp.path().to_owned();
+        let first_lock = first.lifetime.path.clone();
+        let orphan_lock = package.get_build_path().join(format!("{TEMP_RECORD_PREFIX}orphan.sqlite.lock"));
+        std::fs::write(&orphan_lock, b"").unwrap();
         let abandoned = package.get_build_path().join(format!("{TEMP_RECORD_PREFIX}abandoned.sqlite"));
         std::fs::write(&abandoned, b"incomplete pages").unwrap();
         let second = TemporaryRecord::new(&package, &state(23, None), &[]).unwrap();
         assert!(first_path.exists(), "another root's live private file must survive");
         assert!(!abandoned.exists());
+        assert!(!orphan_lock.exists());
+        assert!(first_lock.exists());
         assert!(!PathBuf::from(format!("{}-journal", first_path.display())).exists());
         drop(second);
         assert!(first_path.exists());
         drop(first);
         assert!(!first_path.exists());
+        assert!(!first_lock.exists());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn application_locks_never_target_sqlite_inodes() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let record = TemporaryRecord::new(&package, &state(17, None), &[]).unwrap();
+        let db = record.temp.as_file().metadata().unwrap();
+        let guard = lock_writer(&path(&package)).unwrap();
+        for file in [&record.lifetime._file, &guard] {
+            let lock = file.metadata().unwrap();
+            assert_ne!((lock.dev(), lock.ino()), (db.dev(), db.ino()));
+        }
+        assert_eq!(record.lifetime.path, private_lock_path(record.temp.path()));
+        assert_eq!(record.conn.query_row("PRAGMA busy_timeout", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+        let sidecar = record.lifetime.path.clone();
+        drop(guard);
+        record.publish(&package).unwrap();
+        assert!(!sidecar.exists());
+        let live = std::fs::metadata(path(&package)).unwrap();
+        for exclusive in [false, true] {
+            let guard = lock_database(&path(&package), exclusive).unwrap();
+            let lock = guard.metadata().unwrap();
+            assert_ne!((lock.dev(), lock.ino()), (live.dev(), live.ino()));
+        }
     }
 
     // Subprocess entry point: the parent kills the writer while its transaction
