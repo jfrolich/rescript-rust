@@ -4340,7 +4340,7 @@ deletes the old one is named.
 | W2 | Frozen writes in one exception table; delete the overlays | 700 | W1 | yes | 0.3% (est.) | same |
 | W3 | The world object; unit table; frozen predefined environment | 1,200 | W2 | no | about 0 | below 0.1% |
 | W4 | `ModuleView` and the view table for paths without an alias | 1,500 | W3 | no | with W5 | with W5 |
-| W5 | Alias and namespace views; adoption replaces replay | 1,500 | W4 | no | 0.5-1.0% (est.) with W4 | plus 1.5-2.2% (est.; 2.4% measured as the bound) |
+| W5 | Structure-typed children, alias and namespace views; adoption replaces replay | 1,500 | W4 | no | 0.5-1.0% (est.) with W4 | plus 1.5-2.2% (est.; 2.4% measured as the bound) |
 | W6 | Delete store builds, pieces, replay, guards and poisoning | 1,500, nearly all deletions | W5 | yes | 0.7% (measured on `tests/tests`) | same |
 | W7 | Delete the worker-store tier of handles and `thread_store.rs` | 1,200, mostly deletions | W6 | yes | below 0.1% | same |
 | W8 | Publication is one export walk; delete the three save copies | 900 | #154, W3 | no | 0.9-1.4% (est.) | same |
@@ -4473,8 +4473,8 @@ deletes the old one is named.
   view build can reach today (the named `poison_store_build_for` reasons and
   the five `StoreEffect` kinds), each with its world replacement.
 - **Old path still present.** Store builds, for keys with an alias or a
-  functor application on the path. W5 moves the alias keys; W6 deletes the
-  mechanism.
+  functor application on the path, and (as built) for the children of a
+  unit. W5 moves the child and alias keys; W6 deletes the mechanism.
 - **Grep.** `rg -n 'build_shared_persistent_root_components' src` gives 0.
   `rg -n 'Rc<|RefCell<|Cell<|OnceCell<|Mutex<' src/types/module_view.rs`
   gives 0.
@@ -4625,8 +4625,87 @@ Where W4 as built differs from the text above:
 - **`RESCRIPT_WORLD_VERIFY`** describes the view again on the adopting
   worker and compares the prints without freezing the copy: freezing one
   per adoption fills the pool on the application.
+- **A view the pool has no room for** is a failure stored in its cell
+  (J.3.6, point 4): no worker builds it again, and every compilation builds
+  the unit's components for itself (`build_private_unit_components`, in a
+  store build of its worker, as before W4). A forced child the pool has no
+  room for is forced by each compilation that reads it. A full pool is the
+  only reachable reason a freeze of a view fails; the others are a debug
+  assertion (`debug_assert_unfreezable_is_pool_full` says why).
+- **Memory.** A view holds every item of its unit, used or not, and both
+  the tables a qualified lookup reads and the items `open` installs. On the
+  application (2,580 views, 30,497 signature items): 198,287 copied nodes
+  (32 bytes each, plus their lists), 22,997 values twice, 3,696
+  constructor descriptions twice (152 bytes), 15,113 label descriptions
+  three times (88 bytes: the lookup table, the opened items, the frozen
+  array), 4,687 opened type declarations (208 bytes plus their vectors) and
+  one 32-byte forced-child cell and one 72-byte value slot per signature
+  item. That is about 20 MB by these counts (an estimate from the counter
+  `world_view_items` and the struct sizes, not a heap profile), which is
+  the rise in peak memory measured on arm64 with one worker and with ten.
+  Pool pages are index space: a page costs one 16-byte slot.
 
-#### W5. Alias and namespace views; adoption replaces replay
+##### What W5 starts from
+
+W5 takes over the structure-typed children of a unit together with the
+alias and namespace paths. What W4 found that W5 has to know:
+
+1. **Which unit paths are W4 keys depends on the compilation.**
+   `PersistentEnv::qualified_alias_path_for_flattened_head` reads the alias
+   rewrites the asking compilation has collected so far, so one unit is a
+   unit key in one compilation and a namespace's backing unit in another.
+   The second kind is built for the compilation or as a store build
+   (`private=24` to `34` on the application, 4 before W4). W5 must make the
+   classification a fact of the world.
+2. **`open` does not install what a qualified lookup reads.**
+   `add_signature_to_env_with_options_inner` describes the constructors
+   again and installs the declared value types, not the substituted ones.
+   A view carries both sets (`OpenedItems` beside the lookup tables); see
+   Memory above for what that costs.
+3. **Forcing a child declaration is an effect on the compilation.**
+   `force_component_module_declaration_thunk` registers the declaration
+   (`register_qualified_module_decl`), and the tables of an alias path to
+   the same module look for it. W4 forces once per build in a cell of the
+   parent view (`ModuleView::lookup_forced_module`) and registers once per
+   compilation (`TypeContext::note_forced_view_module`, one bit per view
+   and child). Each force builds the component substitution of the parent
+   again, one pass over its signature, so forcing every child of a view is
+   quadratic; `ViewCell::decl` should build it once per view.
+4. **A seventh effect kind.** A store build that reads a view records
+   `StoreEffect::AdoptView`, so that a compilation reusing the build adopts
+   the view. W6 deletes it with the mechanism.
+5. **Verification must not freeze.** Freezing the rebuilt copy on every
+   adoption filled the pool on the application; `verify_view` compares
+   prints of a description that stays on its scratch context.
+6. **Pool pages.** A graph takes whole pages of index space: each view and
+   each forced child at least one. The application uses 3,835 pages for
+   views and forced children beside 3,061 for units, of 65,536. Child and
+   alias views multiply that; J.3.1's larger index space (2^28) is needed
+   before they are per-path graphs, or several views share a graph.
+7. **`scripts/bench_project.sh` on `tests/tests`** leaves an untracked
+   `tests/tests/.rescript-pkgs`.
+8. **Give the benchmark scripts the resolved project path.** Through a
+   symlinked directory the build reports warnings configured as errors and
+   fails. Two measurements must not run in one project directory at the
+   same time: each cleans it.
+
+Two more, found by the step-count tests:
+
+- **The substitution maps degenerate to lists on x86-64.**
+  `SUBST_MAP_STATE` in `cmi/persistent_env.rs` (trunk, not this slice) is
+  `ahash::RandomState::with_seeds` over four constants for which the
+  fallback hasher returns 0 for every key (integers, names and paths were
+  tried), so every insert and lookup in a `SubstMaps` table walks one
+  bucket. Building the maps for a signature of 10,000 types takes 0.4 s in
+  a debug build where a default-seeded map takes 1 ms. Every component
+  substitution pays it, in views and outside them. Not changed here: the
+  fix is a different seed, with its own output and instruction-count gate.
+  Whether the AES hasher of arm64 has the same result was not checked.
+- **A child's own tables** are still `StoredModuleComponents` kept per
+  worker and view (`env_lazy::ViewTables`), built in a store build with an
+  empty piece. The child scan visits each signature item once per worker.
+
+#### W5. Structure-typed children, alias and namespace views; adoption replaces replay
 
 - **Files.** `types/module_view.rs`, `types/typecore.rs`
   (`qualify_resolved_signature_for_access_path_inner`,
@@ -4634,7 +4713,9 @@ Where W4 as built differs from the text above:
   (`strengthen_view_types`, `lookup_qualified_module_shared_inner`),
   `cmi/persistent_env.rs` (`freshen_component_module_declaration_bound_idents`,
   the alias-rewrite helpers), `types/context.rs`.
-- **Added.** `build_module_view` for a path that crosses a module alias
+- **Added.** `build_module_view` for a chain of structure-typed children
+  of a unit (moved here from W4, which built unit paths only; see "What W5
+  starts from" above), and for a path that crosses a module alias
   (including the alias modules of a namespace and `Stdlib.Array`): the
   target's signature strengthened and prefixed as B.6 says. `ViewCell::decl`
   for forced child declarations. `alias_sources`, `units` and `nested` in the
