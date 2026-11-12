@@ -12,15 +12,15 @@ labelled-argument name or a JSX prop name), a **polymorphic variant tag** or a
 **lowercase JSX tag name**.
 
 ```rescript
-type input = {type: string, mutable open: bool, in?: int}
+type request = {type: string, mutable continue: bool, include?: array<string>}
 
-let make = kind => {type: kind, open: false}
-let kind = input => input.type
-let close = input => input.open = false
+let make = kind => {type: kind, continue: false}
+let kind = request => request.type
+let resume = request => request.continue = true
 
-let isText = input =>
-  switch input {
-  | {type: "text"} => true
+let isQuery = request =>
+  switch request {
+  | {type: "query"} => true
   | _ => false
   }
 
@@ -107,6 +107,15 @@ A polymorphic variant that mirrors a JavaScript string union cannot contain
 SVG element `<switch>` cannot be written at all without the escape
 (`<\"switch">`), although JSX in JavaScript accepts it.
 
+### Shorthands need a variable of the same name
+
+Labels alone leave the shorthands out: `{open}`, `(~as)` and
+`<Dialog open />` need a variable named `open` or `as`. Ten of ReScript's
+keywords are common names in JavaScript APIs (`open`, `as`, `of`, `when`,
+`private`, `external`) and are used by the grammar in so few positions that
+the parser can tell the keyword from a name. Nine of them are not reserved in
+JavaScript at all; `private` is reserved in strict mode only.
+
 ### The compiler already supports these names
 
 Only the surface syntax stands in the way. With the escape syntax, a keyword
@@ -164,7 +173,9 @@ keyword `type` as a record field name", and recovers by building a field named
 
 ## Proposal
 
-### The rule
+### Part 1: reserved words as names
+
+#### The rule
 
 > A reserved word is reserved only where a name is bound or looked up as a
 > variable, type or module. Where the grammar expects a label, a polymorphic
@@ -172,8 +183,8 @@ keyword `type` as a record field name", and recovers by building a field named
 > name.
 
 `Res_token.keyword_table` has 28 word-shaped keywords today. Ten of them
-become contextual keywords (see "Contextual keywords" below) and are plain
-identifiers in every position of this section. "Reserved word" means the
+become contextual keywords (Part 2) and are plain identifiers in every
+position of Part 1. "Reserved word" means the
 other 18, `true` and `false` included:
 
 ```
@@ -184,7 +195,7 @@ switch true try type while
 `list{` and `dict{` are not included: `list` and `dict` are ordinary
 identifiers already, and only the form glued to `{` is a token.
 
-### Positions
+#### Positions
 
 | Position | Accepted | How the parser knows |
 |---|---|---|
@@ -203,7 +214,7 @@ identifiers already, and only the form glued to `{` is a token.
 Every form in the "Accepted" column is a syntax error in ReScript 12.3.1
 (tested, with `type`), so no program that compiles today changes meaning.
 
-### What stays an error
+#### What stays an error
 
 A shorthand stands for a variable with the same name as the label, and a
 variable cannot be named by a reserved word. These get a dedicated message
@@ -224,10 +235,10 @@ a type variable `'type`, and a qualified JSX tag `<M.type />`, which looks up
 the value `M.type`.
 
 The escape `\"type"` keeps working everywhere it works today. It is still
-needed for a variable named like a keyword and for names that are not
+needed for a variable named like a reserved word and for names that are not
 identifier-shaped.
 
-### Contextual keywords
+### Part 2: contextual keywords
 
 These ten words stop being reserved:
 
@@ -243,8 +254,8 @@ ReScript already has such words: `async`, `catch`, `finally`, `nonrec` and
 
 The rule that keeps existing code safe: **in its position, the word is a
 keyword whenever today's parser would accept what follows it.** Only when the
-next token rules the keyword out is the word read as a name. That takes no
-lookahead for three of the words and one token for the rest.
+next token rules the keyword out is the word read as a name. That takes at
+most one token of lookahead.
 
 | Word | Keyword position | Keyword | Name |
 |---|---|---|---|
@@ -266,7 +277,8 @@ lookahead for three of the words and one token for the rest.
 
 This part has not been prototyped. The table comes from reading every match
 site of the ten tokens in `res_core.ml` and from running the forms in the
-"Keyword" column through ReScript 12.3.1.
+"Keyword" column through ReScript 12.3.1 (`for ... of` is new in 13 and was
+read from the parser only).
 
 Why one token is enough:
 
@@ -290,10 +302,13 @@ Why one token is enough:
 Consequences of "the keyword wins":
 
 1. `open`, `external` or `exception` as a statement of its own, followed by a
-   line that starts with a name, is read as the declaration. Such a statement
-   has no effect, so no useful program is written that way. Likewise, an alias
-   to a type named `private` (`type t = private`) is read as the keyword when
-   the next line starts with a token that can start a type.
+   line that fits the declaration (a name, or `!` after `open`), is read as
+   the declaration. Such a statement has no effect, so no useful program is
+   written that way. Likewise, an alias to a type named `private`
+   (`type t = private`) is read as the keyword when the next line starts with
+   a token that can start a type, such as `@`, `module` or a name. This case
+   exists only if the ten words are allowed as type names; see "Open
+   questions".
 2. All forms that span a line break keep parsing as they do today: `open` and
    `Belt` on separate lines, `type t = private` followed by `| A` on the next
    line (which is what the formatter prints for a long variant), and
@@ -345,17 +360,20 @@ The remaining 18 cannot follow the same rule, or are left for later:
 (`(type a, x: a) => ...`); after `module`, `with` and `and` it is always the
 keyword. It is kept out of this RFC because it is the keyword with the most
 positions (14 match sites in `res_core.ml`, against one to five for each of
-the ten), so it gets its own PR and review. Once it is contextual, `{type}`, `(~type)` and `<input type />` work without any change
-to the label rules above: their errors apply only to words that are still
-reserved.
+the ten), so it gets its own PR and review. Once it is contextual, `{type}`,
+`(~type)` and `<input type />` work without any change to the rules of Part 1:
+their errors apply only to words that are still reserved.
 
-## Why this is unambiguous
+## Why Part 1 is unambiguous
+
+Part 2 gives its reasons next to its table. This section covers the positions
+of Part 1.
 
 The parser is recursive descent and always knows which production it is in.
 Each position is entered on a token that is not a keyword (`.`, `~`, `#`, `<`,
-`{`, `,`, a JSX tag name), and inside it a keyword token currently has no meaning:
-the parser reports an error. The proposal gives that slot a meaning without
-taking one away. Per position:
+`{`, `,`, a JSX tag name), and inside it a keyword token currently has no
+meaning: the parser reports an error. The proposal gives that slot a meaning
+without taking one away. Per position:
 
 **After `.`** A field access is the `.` that follows an operand. Nothing but a
 field name or a module path can follow it. The legacy uncurried dot (`f(. x)`,
@@ -384,16 +402,15 @@ discussed below.
 **Record expressions: the one place with a real choice.** `{` in expression
 position starts either a record or a block, and a block may start with a
 keyword: `{let x = 1; x}`, `{if a {b} else {c}}`, `{switch x {...}}`,
-`{open M; e}`, `{true}`, `{await p}`. The proposal decides with one token of
-lookahead: a word followed by `:` starts a record. No block item
-starts that way. `let`, `open`, `module`, `exception`, `if`, `switch`, `while`,
-`for`, `try`, `assert` and `await` are each followed by a pattern, a path or an
-expression; `true` and `false` are followed by an operator or the end of the
-block (`{true ? a : b}` has `?` after `true`); `break` and `continue` stand
-alone. The other reserved words cannot start a block item at all. A type
-constraint needs parentheses, so `{true: bool}` is not an expression today.
-This is the same test the parser already applies to produce the current error
-message.
+`{true}`, `{await p}`. The proposal decides with one token of lookahead: a
+reserved word followed by `:` starts a record. No block item starts that way.
+`let`, `module`, `if`, `switch`, `while`, `for`, `try`, `assert` and `await`
+are each followed by a pattern, a path or an expression; `true` and `false`
+are followed by an operator or the end of the block (`{true ? a : b}` has `?`
+after `true`); `break` and `continue` stand alone. The other reserved words
+cannot start a block item at all. A type constraint needs parentheses, so
+`{true: bool}` is not an expression today. This is the same test the parser
+already applies to produce the current error message.
 
 Three details need care:
 
@@ -459,7 +476,7 @@ in place of the consumed `let?`.
 | `parse_braced_or_record_expr` | a keyword followed by `:` reports `keyword_field_in_expr` and recovers as `type_`; `break` and `continue` go to the block parser before that test | move the "reserved word followed by `:`" test first and build the row with the real name, no diagnostic |
 | `parse_record_expr_row` | same recovery for later rows | same replacement; a reserved word without `:` reports the punning error |
 | `parse_record_pattern_row` | same recovery, `keyword_field_in_pattern` | same replacement |
-| `parse_field_declaration_region`, `parse_field_declaration` | consume `mutable`, then the same recovery, `keyword_field_in_type` | treat `mutable` as a name when `:`, `?`, `,` or `}` follows; accept a reserved word followed by `:` or `?` |
+| `parse_field_declaration_region`, `parse_field_declaration` | consume `mutable`, then the same recovery, `keyword_field_in_type` | accept a reserved word followed by `:` or `?`; for `mutable` itself see the table below |
 | `parse_parameter` | `parse_lident` after `~` | `parse_label_name`; for a reserved word, require `as` and report the punning error otherwise |
 | `parse_argument2` | matches `Lident` after `~` | also match a reserved word; require `=` and report the punning error otherwise |
 | `parse_type_parameter`, `parse_es6_arrow_type` | `parse_lident` after `~` | `parse_label_name` |
@@ -483,7 +500,7 @@ the tokens between, so `(~type as kind) => ...` needs no change there.
 
 #### Contextual keywords
 
-About 30 match sites in `res_core.ml` change from a token to an identifier
+About 35 match sites in `res_core.ml` change from a token to an identifier
 with a guard, the way `Lident "async"` and `Lident "nonrec"` are matched today.
 `Parser.peek2` gives the one token of lookahead.
 
@@ -513,13 +530,13 @@ existing branch for identifiers, next to the one for `async`.
 
 The predicates that gate list parsing get the reserved words:
 `is_pattern_record_item_start`, `is_record_decl_start` and
-`is_jsx_attribute_start`. `#` and `<` already start an expression, a pattern
-and a type where they need to.
+`is_jsx_attribute_start`. `is_record_row_start` and `is_field_decl_start` have
+them already, for today's error recovery. `#` and `<` already start an
+expression, a pattern and a type where they need to.
 
 For the contextual keywords, `is_signature_item_start` and the
 `TypeConstraint` case of the list predicates name the identifier instead of
-the removed token. The other predicates accept `Lident` already. `is_record_row_start` and `is_field_decl_start` have
-them already, for today's error recovery.
+the removed token. The other predicates accept `Lident` already.
 
 ## Printer changes
 
@@ -546,13 +563,13 @@ generated interfaces, gets the same treatment for record fields and labels.
 
 The formatter therefore rewrites `{\"type": x}` to `{type: x}`, `#"type"` to
 `#type`, `<\"switch" />` to `<switch />` and `let \"open" = 1` to
-`let open = 1`. Parsing the printed form gives
-the same AST.
+`let open = 1`. Parsing the printed form gives the same AST.
 
 ## What does not change
 
-- **AST and PPX.** A field named `type` is `Lident "type"`, the same node
-  `\"type"` produces. PPXs see nothing new.
+- **AST and PPX.** A field named `type` is `Lident "type"`, and a variable
+  named `open` is `Ppat_var "open"`: the same nodes `\"type"` and `\"open"`
+  produce today. PPXs see nothing new.
 - **Type checker and generated JavaScript.** See the example under Motivation.
 - **`.cmi`, `.cmt` and build artifacts.**
 - **`@as`.** Still needed for runtime names that are not identifier-shaped
@@ -563,9 +580,15 @@ the same AST.
 
 ## Compatibility and migration
 
-The change is additive. `type_` with `@as("type")` keeps compiling, and so
-does `\"type"`. Nothing has to migrate. The one way an existing program can
-parse differently is consequence 3 under "Contextual keywords".
+Part 1 is additive: every form it accepts is a syntax error today. `type_`
+with `@as("type")` keeps compiling, and so does `\"type"`. Nothing has to
+migrate.
+
+Part 2 keeps every program that uses the ten words as keywords parsing as it
+does today. The one way an existing program can parse differently is
+consequence 3 of Part 2: an escaped name such as `\"open"` placed directly in
+a keyword position. Syntax error messages that name one of the ten words as a
+reserved keyword change.
 
 Code that uses the new syntax does not parse with older compilers, and the
 formatter of a new compiler rewrites escaped labels to the bare form. Both
@@ -597,6 +620,11 @@ of this RFC.
 - **JSX**: a tag name or attribute name may be any identifier-shaped word.
   `<switch>`, `<if />`, `<input type="a" class="b" for="c" in="d" />` and
   `<div data-type="a" />` all parse in TypeScript.
+- **Contextual keywords in JavaScript and TypeScript**: `as`, `of`, `async`,
+  `from`, `get` and `set` are keywords in one position and identifiers
+  elsewhere (`for (of of [as]) {}` is valid JavaScript). TypeScript adds
+  `type`, `module`, `namespace`, `declare` and `readonly` the same way:
+  `let type = 1` and `{type}` are valid TypeScript.
 - **Swift**: SE-0001 allowed keywords as argument labels, and SE-0071 allowed
   them after `.` in member references.
 - **ReScript**: attribute and extension names already accept keywords
@@ -633,23 +661,31 @@ of this RFC.
 - Postfix syntax of the form `expr.keyword` (such as Rust's `.await`) can no
   longer be added later.
 
-## Resolved in this draft
+## Scope
 
-- Argument labels and JSX props are in scope, not record fields alone.
-- Polymorphic variant tags are in scope.
-- `true` and `false` are included, as in JavaScript.
-- Lowercase JSX tag names are in scope, because JSX in JavaScript accepts
-  them.
-- A reserved word after `.` must be on the same line as the `.`.
-- The words that can be made contextual with at most one token of lookahead
-  are made contextual here, except `type`, which is a follow-up.
+In scope:
+
+- Reserved words as record field names, argument labels and JSX prop names.
+- Reserved words as polymorphic variant tags and lowercase JSX tag names.
+- `true` and `false` in all of these positions, as in JavaScript.
+- The ten words that can be made contextual with at most one token of
+  lookahead.
+
+Out of scope:
+
+- `type` as a contextual keyword: a follow-up.
+- The words that cannot be made contextual (see "The words that stay
+  reserved").
+- Renaming the `type_`, `as_`, `open_` and `in_` props of `JsxDOM`.
 
 ## Open questions
 
 1. **Contextual keywords as type names.** Because the scanner returns an
    identifier, `type open = int` and `type t = {mutable}` (a field `mutable`
    of type `mutable`) parse as well. Accept that, or reject the ten words as
-   type names in the parser?
+   type names in the parser? Rejecting them removes the `private` case in
+   consequence 1 of Part 2 and the name reading of `type rec = int`, but makes
+   `type \"private" = int`, which parses today, an error.
 
 ## Implementation plan
 
@@ -658,9 +694,9 @@ of this RFC.
    error" tables, round-trip tests through the formatter, and updated
    snapshots for the existing keyword-field error tests.
 2. The ten contextual keywords, as a second PR: one syntax test per row of the
-   "Contextual keywords" table for the keyword reading and one for the name
-   reading, and the full syntax test suite as the check that no existing
-   source parses differently.
+   Part 2 table for the keyword reading and one for the name reading, and the
+   full syntax test suite as the check that no existing source parses
+   differently.
 3. `type` as a contextual keyword, as a follow-up PR.
 4. Editor completion and the two highlighting grammars.
 5. Documentation.
