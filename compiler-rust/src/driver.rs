@@ -6182,9 +6182,7 @@ pub fn run_implementation_frontend(
             &ppx_warnings,
             out,
         );
-        let rewritten =
-            rewritten.map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?;
-        rewritten
+        rewritten.map_err(|e| ppx_error_to_anyhow(e, parser.arena(), source, filename))?
     };
     let mut census = parser.arena_mut().derived_census.take();
     // OCaml `Bs_ast_invariant.emit_external_warnings_on_structure` runs over
