@@ -713,6 +713,8 @@ impl State {
                     finished: Finished::True,
                 }));
             }
+            // P: compile_primitive_js, Pawait. O(1): one owned J node.
+            Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
             Primitive::Pstringlength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::String)
             }
@@ -729,7 +731,6 @@ impl State {
             | Primitive::PjsFnMethod
             | Primitive::Pjsx(_)
             | Primitive::Pimport(_)
-            | Primitive::Pawait
             | Primitive::Pduprecord
             | Primitive::PrecordRest(_) => {
                 unreachable!("unsupported primitive rejected by dispatch")
@@ -959,6 +960,27 @@ mod tests {
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
                 super::super::oracle_tests::compare(a, root);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod await_tests {
+    use super::*;
+    use crate::lambda::{LamLoc, arena::LamArena};
+
+    #[test]
+    fn await_all_continuations_and_conditional_match_legacy() {
+        for conditional in [false, true] {
+            let mut a = LamArena::new();
+            let value = a.var(Ident::new("promise", 10, crate::ident::IdentFlags::NONE));
+            let awaited = a.prim_raw(Primitive::Pawait, &[value], LamLoc::NONE);
+            let root = if conditional {
+                let test = a.var(Ident::new("test", 11, crate::ident::IdentFlags::NONE));
+                let other = a.var(Ident::new("other", 12, crate::ident::IdentFlags::NONE));
+                a.if_(test, awaited, other)
+            } else { awaited };
+            super::super::oracle_tests::compare(a, root);
         }
     }
 }

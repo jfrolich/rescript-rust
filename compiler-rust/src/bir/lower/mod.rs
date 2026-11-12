@@ -499,7 +499,6 @@ impl ProbeRules for State {
                     | Primitive::PjsFnMethod => "external",
                     Primitive::Pjsx(_) => "jsx",
                     Primitive::Pimport(_) => "import",
-                    Primitive::Pawait => "await",
                     Primitive::Pduprecord => "record copy",
                     Primitive::PrecordRest(_) => "record rest",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
