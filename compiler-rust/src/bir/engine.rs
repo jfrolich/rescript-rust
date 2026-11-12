@@ -193,6 +193,14 @@ pub struct Stats {
     pub renames: Vec<(VarId, VarId)>,
 }
 
+/// Detached children and the shell of a stateful traversal frame.
+/// Opening a frame prevents each child edit from rescanning wide siblings.
+pub struct Shell {
+    node: Node,
+    lists: Lists,
+    cold: Option<Cold>,
+}
+
 struct Guard {
     node: NodeId,
     taken: bool,
@@ -429,6 +437,82 @@ impl<'a> Engine<'a> {
         self.before_write(target);
         self.bir.replace(target, replacement);
         self.set_summary(target);
+    }
+
+    /// Detach children and vacate their old shell. Cost: direct child count.
+    /// The caller must close the frame before returning to its parent. Counts
+    /// of the children retain their incoming weights; no facts are read while
+    /// this temporary forest is open. No child edit repairs the old parent.
+    pub fn open_shell(&mut self, n: NodeId) -> Shell {
+        let mut lists = Lists::default();
+        let node = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists);
+        let cold = self.bir.cold(n);
+        for c in self.bir.view(n).children() {
+            self.detach(c);
+        }
+        let value = self.intern_const(Constant::Undefined(true));
+        self.put(n, View::Const { value }, 0);
+        Shell { node, lists, cold }
+    }
+
+    /// Restore a vacated shell around its detached, rewritten children.
+    pub fn close_shell(&mut self, n: NodeId, shell: Shell) {
+        self.put(n, shell.node.view(&shell.lists), shell.node.aux());
+        if let Some(cold) = shell.cold {
+            self.bir.set_cold(n, cold);
+        }
+    }
+
+    /// Copy a binder-free exit handler without allocating new identities.
+    /// Unlike `copy_subtree`, exit substitution must preserve the legacy
+    /// identities. Binder-containing handlers are moved, never copied.
+    /// Cost: one traversal and allocation per node; no hash iteration.
+    pub fn copy_exit_handler(&mut self, root: NodeId) -> NodeId {
+        use std::collections::HashMap;
+        let mut work = vec![(root, false)];
+        let mut nodes = HashMap::new();
+        let mut funcs = HashMap::new();
+        let empty = HashMap::new();
+        let mut lists = Lists::default();
+        while let Some((n, done)) = work.pop() {
+            if !done {
+                assert!(self.bir.binders(n).is_empty());
+                work.push((n, true));
+                work.extend(
+                    self.bir
+                        .view(n)
+                        .children()
+                        .into_iter()
+                        .rev()
+                        .map(|c| (c, false)),
+                );
+                continue;
+            }
+            if let View::Fun { header, .. } = self.bir.view(n) {
+                let h = *self.bir.function(header);
+                let attrs = self.bir.function_attributes(header).clone();
+                let fresh = self.bir.function_header(h.params, attrs, h.loc);
+                self.bir.pools.funcs[fresh.index()].flags = h.flags;
+                funcs.insert(header, fresh);
+            }
+            let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists).remap(
+                &mut lists,
+                &super::node::Renaming {
+                    nodes: &nodes,
+                    vars: &empty,
+                    funcs: &funcs,
+                    catches: &HashMap::new(),
+                    labels: &HashMap::new(),
+                    js: &HashMap::new(),
+                },
+            );
+            let new = self.node(packed.view(&lists), packed.aux(), 1);
+            if let Some(cold) = self.bir.cold(n) {
+                self.bir.set_cold(new, cold);
+            }
+            nodes.insert(n, new);
+        }
+        nodes[&root]
     }
 
     /// Release a detached subtree.
