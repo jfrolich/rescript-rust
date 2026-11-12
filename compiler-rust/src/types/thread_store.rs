@@ -589,61 +589,10 @@ pub(crate) fn current() -> StoreLease {
     )))
 }
 
-const OVERLAY_PAGE: usize = 256;
-
-/// Sparse, page-allocated map from store cell index to this compilation's
-/// value for that cell. Reads are two indexed loads; pages are allocated on
-/// first write, so a compilation that touches a handful of dependency memos
-/// pays for a handful of pages, not for the whole store.
-#[derive(Clone, Debug)]
-pub(crate) struct PagedOverlay<T> {
-    pages: Vec<Option<Box<[Option<T>]>>>,
-}
-
-impl<T: Clone> PagedOverlay<T> {
-    pub(crate) fn new() -> Self {
-        PagedOverlay { pages: Vec::new() }
-    }
-
-    #[inline]
-    pub(crate) fn get(&self, idx: usize) -> Option<&T> {
-        self.pages
-            .get(idx / OVERLAY_PAGE)?
-            .as_deref()?
-            .get(idx % OVERLAY_PAGE)?
-            .as_ref()
-    }
-
-    pub(crate) fn set(&mut self, idx: usize, value: T) {
-        let page = idx / OVERLAY_PAGE;
-        if page >= self.pages.len() {
-            self.pages.resize_with(page + 1, || None);
-        }
-        let slot =
-            self.pages[page].get_or_insert_with(|| vec![None; OVERLAY_PAGE].into_boxed_slice());
-        slot[idx % OVERLAY_PAGE] = Some(value);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::type_expr::GENERIC_LEVEL;
-
-    #[test]
-    fn overlay_pages_and_clones_are_independent() {
-        let mut overlay = PagedOverlay::new();
-        for index in [0, 255, 256, 4096] {
-            assert_eq!(overlay.get(index), None);
-            overlay.set(index, Some(index));
-        }
-        let snapshot = overlay.clone();
-        overlay.set(255, None);
-        assert_eq!(overlay.get(255), Some(&None));
-        assert_eq!(snapshot.get(255), Some(&Some(255)));
-        assert_eq!(overlay.get(257), None);
-        assert!(overlay.pages[2].is_none());
-    }
 
     #[test]
     fn store_lease_is_exclusive_and_reused() {
