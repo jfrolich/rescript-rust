@@ -1,9 +1,11 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1 implemented; S2/S3 implementation and local evidence are recorded
-below, with final CI validation pending. Section A is historical, not a
-statement of the current layout. Snapshot commands and watch integration
-remain future stages. Sections F.1–F.3 record implementation and evidence.
+Status: S1–S4 implemented; S4 CI and local freshness/equivalence checks pass.
+Cargo watches existing runtime files and Belt's source directory; new runtime
+files are caught by freshness checking and run-time fallback, not by the build
+script (see D5 and the S4 notes). Section A is historical, not
+a statement of the current layout. Watch integration remains a future stage.
+Sections F.1–F.3 and the S4 notes record implementation and evidence.
 
 ## 0. Summary
 
@@ -205,7 +207,7 @@ reads `lib/ocaml`).
 | D2 | The embedded data records the absolute source paths of the machine that built the executable (309 occurrences), in `ps_filename`, `source_path` and the file-name tables. They enter the interface digest and can reach whatever prints a dependency's file name. One source-map sample did not show them; this was not searched exhaustively | `strings` on the build script's output |
 | D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `snapshot::register` |
 | D4 | A fallback to compiling from source is logged only at debug level; no test fails when the embedded runtime stops matching | `log::debug!` in `register` |
-| D5 | The build script watches the sources that existed when it last ran. A runtime that gains a source file is compiled from source at run time until the executable is rebuilt | the comment on `watch_sources` |
+| D5 | The build script watches existing runtime sources, not the runtime directory, to avoid rebuilding the executable after writes to `lib`. A new runtime source is caught by `snapshot --check` in `make lib` and CI, and by the run-time source-digest mismatch/from-source fallback. Belt additions are watched through its `src` directory | `watch_sources`, `snapshot::check`, and `snapshot::register` |
 | D6 | On fallback, code generation runs for 113 modules and its output is discarded | `compile_runtime_module_from_source` |
 
 ## B. The artifact
@@ -253,6 +255,11 @@ per package:
     js offset, js length         u32, u32  per module format (0, 0 for none)
     slot offset, slot count      u32, u32  per module format (B.3)
 blobs        names, cores, JavaScript texts, slot lists
+source manifest (S4, cold; normal builds never read it):
+  per source, sorted within runtime then Belt:
+    package name, source filename   length-prefixed strings
+    source contents digest          32 bytes (BLAKE3)
+  manifest byte length              u32, at end of file
 ```
 
 All integers are little endian and all offsets are from the start of the
@@ -380,7 +387,7 @@ error; CI uses it (C.3).
 
 | Where | Command | What happens |
 |---|---|---|
-| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script lists the package directories, not single files, in `rerun-if-changed` (the `lib` output folders excluded by listing sources and the directory itself), which closes D5 |
+| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script watches runtime `rescript.json` and existing sources, plus Belt `rescript.json` and its `src` directory. Neither package root is watched, so package `lib` output does not trigger executable rebuilds. D5 is detected for new runtime files by `snapshot --check` and run-time fallback, not closed by the build script |
 | Inspecting or checking | `rescript snapshot --write <file>` and `rescript snapshot --check` (hidden commands, like the existing `bsc` test command) | `--write` produces the snapshot from the packages on disk to a file. `--check` produces it again and compares it with the embedded one, byte for byte |
 | `make lib` | unchanged commands, one added step | after building the two packages, `rescript snapshot --check` |
 | Release pipeline | unchanged | the executable in each platform package was built from the tagged sources; `--check` runs against the packages that are about to be published |
@@ -785,7 +792,8 @@ produced is stale.
 ### F.4 S4: producing and checking
 
 - **Changes.** C.1's two commands, the `make lib` step, the CI step of C.2,
-  the build script's directory watching (D5).
+  the build script's input watching (D5; runtime additions are detected by
+  freshness checking rather than a root-directory watch).
 - **Invariants.** Producing twice gives the same bytes.
 - **Gate.** `rescript snapshot --check` passes in CI; editing a runtime
   source without rebuilding the executable makes it fail.
@@ -827,3 +835,61 @@ a declaration in a dependency (which would make D2 visible to users), and
 whether watch mode's first build takes the incremental plan or compiles every
 dependency; the two descriptions in `build.rs` and `incremental.rs` read
 differently and no watch session was run for this document.
+
+### S4 input watching without output-triggered rebuilds
+
+The build script explicitly lists `build.rs`, runtime `rescript.json` and each
+existing runtime `.res`/`.resi` file, Belt `rescript.json`, and Belt's `src`
+directory. Neither package root nor either `lib` directory is listed. Cargo
+recursively watches a listed directory, so watching the runtime root would also
+watch its `lib` outputs and unnecessarily rerun production and relink the
+executable after building the runtime. Belt's package configuration emits its
+JavaScript under `lib`, outside the watched `src` directory.
+
+A new runtime file therefore does not trigger the build script. Instead,
+`snapshot --check` catches it after the package builds in `make lib` and CI
+(the added-module CLI test proves this). Normal builds detect the changed
+source digest and compile the runtime from source. Belt additions do trigger
+the build script because its source-only directory is watched. This deliberately
+replaces the original C.1 proposal to close D5 through runtime-root watching.
+
+Manual output-exclusion verification: build the executable, run
+`rescript build packages/@rescript/runtime`, then repeat
+`cargo build --manifest-path rewatch/Cargo.toml`; repeat those steps for Belt.
+With `RESCRIPT_RUNTIME` selecting the checkout runtime and the built executable,
+both second Cargo builds printed **no `Compiling` line**. Verbose output marked
+`rescript-cli` fresh, with no build-script execution. Running `snapshot --check`
+after both package builds exited zero. The commands used an isolated
+`CARGO_TARGET_DIR`; no source or configuration was touched between builds.
+
+### S4 production and freshness implementation
+
+The single public producer is `snapshot::produce` (previously named `compile`).
+Both hidden commands enter before public CLI parsing, like `bsc`; they are not
+listed in public help. `RESCRIPT_RUNTIME` selects the runtime root; otherwise
+normal project runtime resolution is used. Belt is its sibling `belt`, exactly
+as in the build script's producer, not independently resolved from a project.
+The commands require source package configurations, not the config-less
+published layout accepted by the normal snapshot consumer.
+
+`--check` produces once and compares the complete bytes. On mismatch it borrows
+index/blob slices; it never decodes embedded stored cores. B.2's format now has
+a cold trailer: sorted `(package name, source filename, BLAKE3(source))` records,
+with length-prefixed names and a final little-endian `u32` trailer byte length.
+Normal loading does not read the trailer. This is necessary because editing a
+source can leave all compiled cores equal: the previous package-wide digest
+could detect this but could not name the module. The trailer adds one source
+read/hash during production only. A source/options digest mismatch with identical
+source records and cores is reported at package level, rather than falsely
+naming an unchanged module. Compilation errors are reported by the producer.
+
+Tests cover two productions in one process, writes in separate processes,
+freshness in a relocated copy, edits to each package, a new runtime module,
+hidden help, absence, and a linear scan of 10,000 source records. No new
+per-node type or normal-build walk is introduced; the borrowed reader is 16
+bytes. Normal builds execute none of the freshness or manifest code. The
+expected default-path saving is zero, not an optimization claim.
+
+`make lib` checks after both package build stamps. CI should run the same check
+after building runtime and Belt; the exact workflow insertion is supplied in
+the pull request, not a workflow edit here.

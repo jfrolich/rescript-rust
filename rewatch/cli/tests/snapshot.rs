@@ -176,3 +176,68 @@ fn relocated_runtime_without_config_honors_require_and_off() {
         if mode == "off" { assert!(text.contains("Not using the prebuilt @rescript/runtime: disabled by RESCRIPT_SNAPSHOT=off"), "{text}"); }
     }
 }
+
+// All developer-command subprocesses have the same tight bound as build tests.
+fn snapshot_command(runtime: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rescript"))
+        .args(args).env("RESCRIPT_RUNTIME", runtime)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline { child.kill().unwrap(); panic!("snapshot command exceeded ten seconds"); }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn snapshot_write_is_deterministic_across_processes() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/@rescript/runtime").canonicalize().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let first = output.path().join("first.bin");
+    let second = output.path().join("second.bin");
+    for file in [&first, &second] {
+        let result = snapshot_command(&runtime, &["snapshot", "--write", file.to_str().unwrap()]);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+    assert_eq!(std::fs::read(first).unwrap(), std::fs::read(second).unwrap());
+}
+
+#[test]
+fn snapshot_check_detects_package_edits_and_added_modules() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let packages = tempfile::tempdir().unwrap();
+    let runtime = packages.path().join("runtime");
+    let belt = packages.path().join("belt");
+    copy_sources(&checkout.join("packages/@rescript/runtime"), &runtime);
+    copy_sources(&checkout.join("packages/@rescript/belt/src"), &belt.join("src"));
+    for name in ["runtime", "belt"] {
+        std::fs::copy(checkout.join(format!("packages/@rescript/{name}/rescript.json")),
+            packages.path().join(name).join("rescript.json")).unwrap();
+    }
+    let unchanged = snapshot_command(&runtime, &["snapshot", "--check"]);
+    assert!(unchanged.status.success(), "{}", String::from_utf8_lossy(&unchanged.stderr));
+    for (file, before, after, package, module) in [
+        (runtime.join("Stdlib_Int.res"), "2147483647", "2147483646", "@rescript/runtime", "Stdlib_Int"),
+        (belt.join("src/Belt_Array.res"), "i >= 0", "i >= 1", "@rescript/belt", "Belt_Array"),
+    ] {
+        let original = std::fs::read_to_string(&file).unwrap();
+        assert!(original.contains(before));
+        std::fs::write(&file, original.replacen(before, after, 1)).unwrap();
+        let changed = snapshot_command(&runtime, &["snapshot", "--check"]);
+        let error = String::from_utf8_lossy(&changed.stderr);
+        assert!(!changed.status.success() && error.contains(package) && error.contains(module), "{error}");
+        std::fs::write(file, original).unwrap();
+    }
+    std::fs::write(runtime.join("AddedSnapshotTest.res"), "let value = 1\n").unwrap();
+    let added = snapshot_command(&runtime, &["snapshot", "--check"]);
+    let error = String::from_utf8_lossy(&added.stderr);
+    assert!(!added.status.success() && error.contains("@rescript/runtime") && error.contains("AddedSnapshotTest"), "{error}");
+}
+
+#[test]
+fn snapshot_command_is_hidden() {
+    let help = snapshot_command(Path::new("."), &["--help"]);
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("snapshot"));
+}
