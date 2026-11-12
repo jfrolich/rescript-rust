@@ -1025,6 +1025,7 @@ fn copy(
 /// read, not edited. `bound` is called for each parameter that stays bound,
 /// with its fresh variable and its value, before the binding is refined
 /// (`register_bound_param_kind`). Returns the detached reduced term.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn reduce(
     e: &mut Engine<'_>,
     scratch: &mut Scratch,

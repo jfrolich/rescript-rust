@@ -6,7 +6,7 @@
 //! What the pass knows about a binder is what `Lam_pass_collect.collect_info`
 //! recorded before it ran (BACKEND_REDESIGN.md C.2 row 1). Here that is the
 //! fact the arena maintains, frozen when the round starts, and read through
-//! [`Table::entry`], which turns it into the legacy table's entry the first
+//! `Table::entry`, which turns it into the legacy table's entry the first
 //! time it is asked for, or when the sweep reaches the binding, whichever
 //! comes first. Nothing below a binding has been edited at either moment, so
 //! the entry describes the binding as it was when the round started. The
@@ -36,7 +36,7 @@ const CANDIDATES: OpMask = OpMask::APPLY
     .or(OpMask::IF)
     .or(OpMask::STR_SWITCH);
 
-/// - `mask`: see [`CANDIDATES`].
+/// - `mask`: see `CANDIDATES`.
 /// - `order`: stateful. `simpl` rewrites a conditional before it visits the
 ///   branch it keeps, visits the arguments of an application before it
 ///   decides, sweeps an inlined body again with a nesting count, and reads a
@@ -62,7 +62,7 @@ const MAX_INLINE_DEPTH: usize = crate::lambda::lam_pass_remove_alias::MAX_INLINE
 
 /// `Lam_compile_context.rec_flag` of a bound function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Rec {
+pub(crate) enum Recursion {
     /// Bound by `let`.
     NonRec,
     /// The only binding of a `let rec`.
@@ -119,7 +119,7 @@ pub(crate) enum Entry {
         /// The function node.
         node: NodeId,
         /// How it is bound.
-        rec: Rec,
+        rec: Recursion,
         /// [`may_be_inlined`] of the function as it was when the round
         /// started. A function that fails it is never inlined, so the round
         /// keeps no copy of it; it must not be inlined either when the sweep
@@ -275,12 +275,12 @@ impl Table {
                 node,
                 inlinable: may_be_inlined(b, node),
                 rec: match rec {
-                    RecFlag::No => Rec::NonRec,
+                    RecFlag::No => Recursion::NonRec,
                     RecFlag::Yes => {
                         let alone = b.vars().binder(var).is_some_and(|n| {
                             matches!(b.view(n), View::LetRec { values, .. } if values.len() == 1)
                         });
-                        if alone { Rec::SelfRec } else { Rec::Rec }
+                        if alone { Recursion::SelfRec } else { Recursion::Rec }
                     }
                 },
             },
@@ -967,13 +967,13 @@ impl Pass {
             return Ok(());
         }
         match rec {
-            Rec::Rec => {
+            Recursion::Rec => {
                 self.inline(e, n, node, Some(&stats))?;
                 fired(e, "inline-recursive");
                 e.finish_candidate(n);
             }
-            Rec::SelfRec => self.finish(e, n, before),
-            Rec::NonRec => {
+            Recursion::SelfRec => self.finish(e, n, before),
+            Recursion::NonRec => {
                 if args.iter().any(|arg| super::flatten::hit(e, *arg, var))
                     || (self.depth >= MAX_INLINE_DEPTH && !always)
                 {

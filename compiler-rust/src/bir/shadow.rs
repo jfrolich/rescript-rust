@@ -489,7 +489,7 @@ fn bir_entry(
     globals: &[crate::ident::Ident],
     var: super::VarId,
 ) -> Result<String, super::bridge::Unsupported> {
-    use super::l::alias::{Elem, Entry, Rec};
+    use super::l::alias::{Elem, Entry, Recursion};
     use super::{BoxedNullable, View};
     let b = e.bir();
     let name = |v: super::VarId| ident_text(idents[v.index()]);
@@ -541,9 +541,9 @@ fn bir_entry(
             format!(
                 "function {} ({})",
                 match rec {
-                    Rec::NonRec => "nonrec",
-                    Rec::SelfRec => "selfrec",
-                    Rec::Rec => "rec",
+                    Recursion::NonRec => "nonrec",
+                    Recursion::SelfRec => "selfrec",
+                    Recursion::Rec => "rec",
                 },
                 b.function(header)
                     .params
@@ -560,6 +560,7 @@ fn bir_entry(
 /// (the maintained fact, frozen) with the entry the legacy table holds after
 /// `collect_info`. A difference is an error naming the unit, the binder and
 /// both. Returns the number of binders per kind.
+#[allow(clippy::too_many_arguments)]
 fn compare_facts(
     e: &super::engine::Engine<'_>,
     root: super::NodeId,
@@ -603,6 +604,11 @@ fn compare_facts(
 }
 
 type Facts = std::collections::BTreeMap<&'static str, u64>;
+
+/// The round's counters and the fact counts, or a fallback reason with the
+/// fact counts when the comparison was made.
+pub(crate) type AliasOutcome =
+    Result<(super::engine::Stats, Facts), (&'static str, Option<Facts>)>;
 
 /// Mark the unit's exports in the arena (`Lam_stats.export_idents`).
 pub(crate) fn mark_exports(imported: &mut super::bridge::Imported, exports: &[crate::ident::Ident]) {
@@ -651,7 +657,7 @@ pub(crate) fn run_alias(
     legacy: &LamArena,
     table: &crate::lambda::lam_stats::IdentTable,
     unit: &str,
-) -> anyhow::Result<Result<(super::engine::Stats, Facts), (&'static str, Option<Facts>)>> {
+) -> anyhow::Result<AliasOutcome> {
     let _ = exports;
     let idents = imported.idents().to_vec();
     let mut host = InlineHost {
