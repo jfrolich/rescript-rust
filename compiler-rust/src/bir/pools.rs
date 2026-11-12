@@ -224,8 +224,8 @@ pub struct ClauseMeta {
     pub should_break: bool,
     /// Case-label comment.
     pub comment: Option<StrId>,
-    /// Case-label source location.
-    pub loc: LamLoc,
+    /// Case-label source location, retaining an explicit NONE handle too.
+    pub loc: Option<LamLoc>,
 }
 /// Switch keys in their action order. Default, if present, is the final action.
 #[derive(Debug, Clone)]
@@ -348,6 +348,9 @@ pub(super) struct Pools {
     pub js: Vec<JsPayload>,
     pub cold: Vec<Cold>,
     pub imports: Vec<Import>,
+    // J imports retain the complete module identity, including dynamic/default
+    // flags and ordered import attributes. Indexed by ImportId, like imports.
+    pub j_modules: Vec<crate::js_ir::ModuleId>,
     pub text: String,
     pub strings: Vec<(u32, u32)>,
 }

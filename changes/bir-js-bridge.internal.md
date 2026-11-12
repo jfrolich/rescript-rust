@@ -1,0 +1,1 @@
+- Add the opt-in post-pass JavaScript/Bir round-trip shadow stage, preserving printer metadata and checking exact legacy output with independent corpus coverage.

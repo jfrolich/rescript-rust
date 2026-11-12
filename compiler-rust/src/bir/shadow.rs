@@ -166,6 +166,41 @@ pub fn check_norm(arena: &LamArena, raw: Lam, unit: &str) -> anyhow::Result<()> 
     }
 }
 
+/// Stage `js-bridge`: compare the post-pass program with a J-level round trip.
+/// Both prints use the legacy printer, regardless of the selected output printer.
+#[cold]
+pub fn check_js(
+    program: &crate::js_ir::arena::JsDepsProgram,
+    resolver: &crate::js_ir::ModulePathResolver,
+    directives: &[String],
+    debug: bool,
+    jsx_preserve: bool,
+    emit_header: bool,
+    unit: &str,
+) -> anyhow::Result<()> {
+    let imported = match super::bridge_j::import_js(program) {
+        Ok(imported) => imported,
+        Err(reason) => return report(unit, "js-bridge", Some(reason.0), None),
+    };
+    imported.arena.validate(Some(imported.root), false)
+        .map_err(|message| anyhow::anyhow!("{unit}: js-bridge validation: {message}"))?;
+    let exported = match super::bridge_j::export_js(&imported) {
+        Ok(exported) => exported,
+        Err(reason) => return report(unit, "js-bridge", Some(reason.0), None),
+    };
+    let print = |p| crate::js_ir::print_deps_program_with_directives_and_options(
+        p, Some(resolver), directives, debug, jsx_preserve, emit_header,
+    );
+    let before = print(program);
+    let after = print(&exported);
+    if before != after {
+        let line = before.lines().zip(after.lines()).position(|(a,b)| a != b)
+            .unwrap_or_else(|| before.lines().count().min(after.lines().count())) + 1;
+        anyhow::bail!("{unit}: js-bridge mismatch at line {line}");
+    }
+    report(unit, "js-bridge", None, None)
+}
+
 /// The first deep_flatten cut in simplify_in_arena: its input is the lowered,
 /// alias-collapsed root passed to check_lambda. Run the same first call on a
 /// private legacy arena, with exactly its ident_stamp_bound counter seed.

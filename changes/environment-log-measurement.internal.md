@@ -1,0 +1,1 @@
+- Record the real-build environment-log measurement and drop the production switch: it predicts 2-4% more instructions, so the log remains test-only.
