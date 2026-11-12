@@ -75,7 +75,7 @@ impl State {
             }
             DeclKind::DeclVal { .. } if itself => {
                 let target = self.external_module_binding(cx, primitive, &call.prim_name);
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
+                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let value = self.call_node(target, &args, Default::default());
                 self.add_external_effect(cx, effect, value)
             }
@@ -92,12 +92,12 @@ impl State {
             }
             DeclKind::DeclVal { name } => {
                 let target = self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
+                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let value = self.call_node(target, &args, Default::default());
                 self.add_external_effect(cx, effect, value)
             }
             DeclKind::DeclNew { name } => {
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs, args);
+                let (args, effect) = self.assemble_external_args(cx, specs, args, decl.variadic);
                 let target = self.translate_scoped_module_value(cx, primitive, module, name, &decl.scopes);
                 let value = plain::node(&mut self.arena, View::JNew { callee: target, args: &args }, 1);
                 self.add_external_effect(cx, effect, value)
@@ -105,7 +105,7 @@ impl State {
             DeclKind::DeclSend { name } => {
                 let mut args = args.into_iter();
                 let receiver = args.next().expect("send receiver");
-                let (args, effect) = self.assemble_external_args_no_splice(cx, specs.get(1..).unwrap_or(&[]), args.collect());
+                let (args, effect) = self.assemble_external_args(cx, specs.get(1..).unwrap_or(&[]), args.collect(), decl.variadic);
                 let receiver = self.apply_scoped_access(cx, receiver, &decl.scopes);
                 let target = self.static_member(receiver, name);
                 let value = self.call_node(target, &args, Default::default());
@@ -139,6 +139,29 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{arena::LamArena, lam_constant::Constant, lam_primitive::{Primitive, ExternalDecl, Param}, LamLoc};
+
+    #[test]
+    fn variadic_arguments_match_legacy() {
+        use crate::lambda::lam_primitive::{Attr, LabelNoname};
+        use crate::types::external_ffi_types::Cst;
+        for literal in [false, true] {
+            for trailing_constant in [false, true] {
+                let mut a = LamArena::new();
+                let arg = if literal {
+                    let values: Vec<_> = (0..3).map(|i| a.const_(Constant::Int { i, comment: None })).collect();
+                    a.prim_raw(Primitive::Pmakearray, &values, LamLoc::NONE)
+                } else { a.var(Ident::new("args", 10, crate::ident::IdentFlags::NONE)) };
+                let mut specs = vec![Param::dummy()];
+                if trailing_constant { specs.push(Param { arg_label: LabelNoname::ArgEmpty, arg_type: Attr::ArgCst(Cst::ArgIntLit(7)) }); }
+                let root = a.prim_raw(Primitive::PjsCall(Box::new(JsCall {
+                    prim_name: "invoke".into(), arg_types: specs,
+                    ffi: ExternalDecl { kind: DeclKind::DeclVal { name: "invoke".into() }, module_: None,
+                        scopes: vec![], variadic: true, effective_arity: 1 },
+                })), &[arg], LamLoc::NONE);
+                oracle_tests::compare(a, root);
+            }
+        }
+    }
 
     #[test]
     fn calls_and_access_match_legacy_in_all_continuations() {

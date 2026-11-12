@@ -573,7 +573,6 @@ impl ProbeRules for State {
                     Primitive::Psequand | Primitive::Psequor => {
                         unreachable!("short circuits are lowered above")
                     }
-                    Primitive::PjsCall(call) if call.ffi.variadic => "external",
                     Primitive::PjsObjectCreate(_)
                     | Primitive::PjsObjectGet(_)
                     | Primitive::PjsObjectSet(_)

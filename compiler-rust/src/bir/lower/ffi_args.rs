@@ -353,6 +353,52 @@ impl State {
         (values, self.fuse_external_effects(cx, effects))
     }
 
+    /// X:894 assemble_external_args_with_splice. O(specs + array elements +
+    /// conversion work); the last runtime argument, not last spec, is spliced.
+    pub(super) fn assemble_external_args_with_splice(&mut self, cx: Cx, specs: &[Param], args: SmallVec<[NodeId; 4]>) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {
+        let mut args = args.into_iter().peekable();
+        let mut values = SmallVec::with_capacity(specs.len());
+        let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();
+        let mut spread = false;
+        for spec in specs {
+            self.primitive_steps += 1;
+            if let Attr::ArgCst(cst) = &spec.arg_type {
+                values.push(self.compile_external_arg_const(cx, cst));
+                continue;
+            }
+            let arg = args.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+            if args.peek().is_none() {
+                if let View::JArray { values: elements } = self.arena.view(arg) {
+                    let start = values.len();
+                    values.extend_from_slice(elements);
+                    for &value in &values[start..] {
+                        self.primitive_steps += 1;
+                        self.arena.detach(value);
+                    }
+                    self.arena.release(arg);
+                    continue;
+                }
+                spread = true;
+            }
+            let (converted, effect) = self.lower_external_arg_values_and_effect(cx, arg, spec.arg_label, &spec.arg_type);
+            values.extend(converted);
+            effects.extend(effect);
+        }
+        debug_assert!(args.next().is_none());
+        if spread {
+            if let Some(value) = values.pop() {
+                values.push(plain::node(&mut self.arena, View::JSpread { value }, 0));
+            }
+        }
+        (values, self.fuse_external_effects(cx, effects))
+    }
+
+    /// X:959 assemble_external_args. O(specs + selected assembly work).
+    pub(super) fn assemble_external_args(&mut self, cx: Cx, specs: &[Param], args: SmallVec<[NodeId; 4]>, splice: bool) -> (SmallVec<[NodeId; 4]>, Option<NodeId>) {
+        if splice { self.assemble_external_args_with_splice(cx, specs, args) }
+        else { self.assemble_external_args_no_splice(cx, specs, args) }
+    }
+
     /// X:741 external_arg_effect. O(1) cached ordinary purity lookup.
     pub(super) fn external_arg_effect(&mut self, _cx: Cx, arg: NodeId) -> Option<NodeId> {
         if self.arena.node(arg).flags().contains(NodeFlags::PURE) {
