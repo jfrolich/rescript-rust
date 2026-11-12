@@ -4,6 +4,7 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    If(super::cond::Conditional),
     Call(super::call::Call),
     Prim(super::prim::Prim),
     Let {
@@ -15,7 +16,6 @@ pub(super) enum Resume {
     Seq {
         first: NodeId,
         second: NodeId,
-        continuation: Cont,
     },
     Fun {
         body: NodeId,
@@ -42,7 +42,12 @@ impl State {
             into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
             return;
         }
+        if let Resume::If(conditional) = resume {
+            self.conditional_children(cx, conditional, into);
+            return;
+        }
         match *resume {
+            Resume::If(_) => unreachable!("conditional handled above"),
             Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
@@ -88,6 +93,9 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
+        if let Resume::If(conditional) = resume {
+            return self.conditional_child(cx, conditional, index, child);
+        }
         if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
@@ -100,20 +108,18 @@ impl State {
             out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
             return Probed::Out(out);
         }
-        if let Resume::Seq { continuation, .. } = resume {
+        if let Resume::Seq { .. } = resume {
             if index == 0 {
+                // The head's value is held in every continuation: whether it
+                // becomes a statement depends on the tail (1.5).
                 let mut out = self.realize(cx, child);
-                match continuation {
-                    Cont::Value(_) | Cont::Effect(Tail::No) => { self.statements.reserve(); }
-                    Cont::Declare(_, _) | Cont::Assign(_) | Cont::Effect(Tail::Return(_)) => {
-                        if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    }
-                }
+                self.statements.reserve();
                 out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
                 return Probed::Out(out);
             }
         }
         let force = match resume {
+            Resume::If(_) => unreachable!("conditional handled above"),
             Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
@@ -133,6 +139,7 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Prim(_) => unreachable!("primitive finished by dispatch"),
             Resume::Let { value, .. } => {
@@ -160,12 +167,35 @@ impl State {
                 let Probed::Out(mut first) = children.next().expect("sequence head") else {
                     unreachable!("head realized before tail")
                 };
-                let mut second = self.realize(cx, children.next().expect("sequence tail"));
+                let tail = children.next().expect("sequence tail");
+                let keeps_value = matches!(cx.cont, Cont::Value(_) | Cont::Effect(Tail::No));
+                let slot = first.stmts.start + first.stmts.len - 1;
                 if first.finished == Finished::True {
+                    let second = self.realize(cx, tail);
+                    if !keeps_value && let Some(value) = first.value.take() {
+                        self.hold_effect(slot, value);
+                    }
                     return Probed::Out(self.append_outputs(first, second, None));
                 }
-                if let Some(value) = first.value.take() {
-                    if !self.statements.has_statements(second.stmts) {
+                let head = first.value.take();
+                let tail = match (head, tail) {
+                    // 1.5: a free tail after a head without statements is free
+                    // in the continuations that convert a value (1.4) too.
+                    (Some(head), Probed::Free(tail))
+                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    {
+                        self.statements.remove_empty(first.stmts);
+                        if self.arena.node(head).flags().contains(crate::bir::NodeFlags::STRICT) {
+                            self.arena.release(head);
+                            return Probed::Free(tail);
+                        }
+                        return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
+                    }
+                    (_, tail) => tail,
+                };
+                let mut second = self.realize(cx, tail);
+                if let Some(value) = head {
+                    if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
                         let value = if self.arena.node(value).flags().contains(crate::bir::NodeFlags::STRICT) {
                             self.arena.release(value);
@@ -173,9 +203,7 @@ impl State {
                         } else { crate::bir::j::norm::jm1_js_seq(&mut self.arena, value, second_value) };
                         second.value = Some(value);
                     } else {
-                        let mut held = Vec::new();
-                        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
-                        self.statements.fill_held(first.stmts.start + first.stmts.len - 1, held);
+                        self.hold_effect(slot, value);
                     }
                 }
                 let value = second.value;
@@ -217,6 +245,15 @@ impl State {
                 self.probe_leaf(cx, value)
             }
         }
+    }
+    /// K2: O:339 push_effect_expression into the slot reserved after the head
+    /// of a sequence. One step per comma operand of the value.
+    fn hold_effect(&mut self, slot: u32, value: NodeId) {
+        let mut held = std::mem::take(&mut self.scratch);
+        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
+        self.statements.fill_held(slot, &held);
+        held.clear();
+        self.scratch = held;
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.
