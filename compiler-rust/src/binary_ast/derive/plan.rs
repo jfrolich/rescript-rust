@@ -109,6 +109,9 @@ pub enum Obligation {
         skeleton: SkeletonIdx,
         /// Location of the identifier expression.
         expr_loc: ExprLoc,
+        /// Whether the body calls the value: a deprecated value is recorded
+        /// as called or as referenced.
+        called: bool,
     },
     /// A type constructor: looked up as a type annotation is. Skeletons name
     /// it through `SkeletonNode::Named`.
@@ -117,6 +120,8 @@ pub enum Obligation {
         name: LidentIdx,
         /// Location of the name.
         name_loc: LocIdx,
+        /// The number of type arguments skeletons apply it to.
+        arity: u16,
     },
 }
 
@@ -367,6 +372,7 @@ mod tests {
                 name_loc: LocIdx(0),
                 skeleton,
                 expr_loc: ExprLoc::Dummy,
+                called: false,
             });
             args.push(plans.push_body(BodyNode::Free(obligation)));
         }

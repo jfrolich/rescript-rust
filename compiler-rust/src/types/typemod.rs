@@ -16747,10 +16747,44 @@ fn type_structure_item<'a>(
             ))
         }
 
-        // A derived item is checked as the value group it stands for.
+        // A derived item: discharge the obligations of its plan, or, when one
+        // fails, type the value group it stands for.
         ParsedStructureItemDesc::Pstr_derived(idx) => {
-            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
-            type_structure_item(tctx, env, arena, &general)
+            match crate::types::derived::discharge(tctx, env, *idx) {
+                Ok(discharged) => {
+                    // typemod.ml type_structure: the signature holds the
+                    // value descriptions the bindings have in the environment.
+                    let sig_items = tctx
+                        .typed
+                        .derived
+                        .bound(*idx)
+                        .map(|bound| {
+                            let value_desc = discharged
+                                .env
+                                .lookup_value(&Path::pident(bound.ident))
+                                .expect("derived binding missing from structure environment")
+                                .clone();
+                            crate::types::decl::SignatureItem::SigValue(bound.ident, value_desc)
+                        })
+                        .collect();
+                    Ok((
+                        StructureItem {
+                            str_desc: StructureItemDesc::Tstr_derived(*idx),
+                            str_loc: loc,
+                            str_env: EnvRef(0),
+                        },
+                        sig_items,
+                        discharged.env,
+                    ))
+                }
+                Err(crate::types::derived::Fallback) => {
+                    if let Some(census) = &mut tctx.derived_census {
+                        census.paths.fallback += arena.plans().item(*idx).bindings.len as u64;
+                    }
+                    let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
+                    type_structure_item(tctx, env, arena, &general)
+                }
+            }
         }
 
         ParsedStructureItemDesc::Pstr_value(inner) => {

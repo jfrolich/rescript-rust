@@ -432,6 +432,9 @@ impl Builder<'_> {
             name_loc: parts.name_loc,
             skeleton,
             expr_loc: parts.expr_loc,
+            // A plain argument is passed as a value; every other codec is
+            // applied, to its arguments or to the binding's parameter.
+            called: !matches!(slot, Slot::Plain(_)),
         });
         let mut funct = plans.push_body(BodyNode::Free(obligation));
         for i in 0..arity {
