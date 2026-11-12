@@ -538,7 +538,7 @@ module A = {
         (parser, expanded)
     }
 
-    fn type_context() -> TypeContext {
+    pub(crate) fn type_context() -> TypeContext {
         crate::ident::Ident::set_current_time(999);
         let id_gen = IdGenerator::with_start_stamp(999);
         let _ = id_gen.next_stamp();

@@ -4,6 +4,8 @@
 //! incrementally ports expression lowering from `translcore.ml`.
 
 use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
+use smallvec::SmallVec;
+mod derived;
 mod jsx;
 
 use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
@@ -193,6 +195,41 @@ fn let_bound_idents(ta: &TypedArena, bindings: &[ValueBinding]) -> Vec<Ident> {
         iter_bound_pattern_idents(ta, ta.pattern(binding.vb_pat), &mut |id| ids.push(*id));
     }
     ids
+}
+
+/// The terms a partial application binds outside the function it makes.
+type Protected = SmallVec<[(Ident, RawLambda); 4]>;
+
+/// How the arguments of an application are lowered
+/// ([`RawLambdaConverter::transl_apply_of`]).
+trait ArgLowering<B: RawLambdaBuilder, A> {
+    /// Whether the argument is supplied, not left for a later application.
+    fn supplied(&self, arg: &A) -> bool;
+    /// Whether the argument's label is optional.
+    fn optional(&self, arg: &A) -> bool;
+    /// The term of a supplied argument.
+    fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, arg: &A) -> RawLambda;
+}
+
+/// The arguments of a typed application.
+struct TypedArgs;
+
+impl<B: RawLambdaBuilder> ArgLowering<B, ApplyArg> for TypedArgs {
+    #[inline(always)]
+    fn supplied(&self, arg: &ApplyArg) -> bool {
+        arg.expression.is_some()
+    }
+
+    #[inline(always)]
+    fn optional(&self, arg: &ApplyArg) -> bool {
+        arg.label.is_optional()
+    }
+
+    #[inline(always)]
+    fn lower(&mut self, conv: &mut RawLambdaConverter<'_, B>, arg: &ApplyArg) -> RawLambda {
+        let expr = arg.expression.expect("a supplied argument has an expression");
+        conv.convert_expr_raw(conv.ta.expr(expr))
+    }
 }
 
 fn simple_let_binding_id(ta: &TypedArena, binding: &ValueBinding) -> Option<Ident> {
@@ -4744,8 +4781,21 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 }
                 self.convert_let_with_census(*rec_flag, self.ta.value_bindings(*bindings), body, bindings.start())
             }
-            StructureItemDesc::Tstr_derived(_) => {
-                unreachable!("the checker makes no derived item until it discharges plans")
+            StructureItemDesc::Tstr_derived(idx) => {
+                let old_len = fields.len();
+                fields.extend(self.ta.derived.bound(*idx).map(|bound| bound.ident));
+                let body =
+                    self.convert_structure_items_raw(fields, rem, is_top_level, rootpath, cc, loc);
+                fields.truncate(old_len);
+                // O(1) disabled probe, as for a value group.
+                let census_start = crate::derived_census::start(self.derived_census.is_some());
+                let result = derived::lower(self, *idx, body, &mut ());
+                if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
+                    census
+                        .conversion
+                        .add(true, crate::derived_census::nanos(start.elapsed()));
+                }
+                result
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -6586,16 +6636,33 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         loc: LocIdx,
         uncurried_partial_application: Option<i32>,
     ) -> RawLambda {
+        let loc = self.lam_loc(loc);
+        self.transl_apply_of(lam, sargs, loc, uncurried_partial_application, &mut TypedArgs)
+    }
+
+    /// `Translcore.transl_apply` over arguments `how` lowers: those of a
+    /// typed application, or those of a derived item's body.
+    /// Cost: O(arguments) builder calls and identifiers; the arguments, the
+    /// protected terms and the parameters of a partial application are
+    /// gathered inline, up to four each without a heap allocation.
+    fn transl_apply_of<A>(
+        &mut self,
+        lam: RawLambda,
+        sargs: &[A],
+        loc: LamLoc,
+        uncurried_partial_application: Option<i32>,
+        how: &mut impl ArgLowering<B, A>,
+    ) -> RawLambda {
         let rb = self.b;
         fn lapply<B: RawLambdaBuilder>(
             rb: &B,
             loc: LamLoc,
             func: RawLambda,
-            args: Vec<RawLambda>,
+            args: &[RawLambda],
         ) -> RawLambda {
             rb.apply(
                 func,
-                &args,
+                args,
                 ApInfo {
                     loc,
                     status: ApplyStatus::Na,
@@ -6633,7 +6700,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             conv: &mut RawLambdaConverter<'_, B>,
             name: &str,
             lam: RawLambda,
-            defs: &mut Vec<(Ident, RawLambda)>,
+            defs: &mut Protected,
         ) -> RawLambda {
             if is_simple(conv.b, lam) {
                 lam
@@ -6648,7 +6715,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         // the first protected term (the callee) is the outermost binding.
         fn bind_protected<B: RawLambdaBuilder>(
             rb: &B,
-            defs: Vec<(Ident, RawLambda)>,
+            defs: Protected,
             body: RawLambda,
         ) -> RawLambda {
             defs.into_iter().rev().fold(body, |body, (id, lam)| {
@@ -6666,7 +6733,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             let rb = conv.b;
             match pending.pop_front() {
                 Some((None, optional)) => {
-                    let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
+                    let mut defs = Protected::new();
 
                     let all_optional = args_rev.iter().all(|(_, is_optional)| *is_optional);
                     let remaining_args = if all_optional {
@@ -6681,7 +6748,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                             rb,
                             loc,
                             lam,
-                            args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
+                            &args_rev.into_iter().rev().map(|(arg, _)| arg).collect::<Vec<_>>(),
                         )
                     };
                     let handle = protect(conv, "func", applied, &mut defs);
@@ -6717,7 +6784,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                     rb,
                     loc,
                     lam,
-                    args_rev.into_iter().rev().map(|(arg, _)| arg).collect(),
+                    &args_rev.into_iter().rev().map(|(arg, _)| arg).collect::<Vec<_>>(),
                 ),
             }
         }
@@ -6725,54 +6792,60 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         match uncurried_partial_application {
             Some(arity) => {
                 let extra_arity = arity - sargs.len() as i32;
-                let mut none_ids = Vec::new();
-                let mut defs: Vec<(Ident, RawLambda)> = Vec::new();
+                // The parameters of the function: one per omitted argument,
+                // then the remaining ones.
+                let mut params: SmallVec<[Ident; 4]> = SmallVec::new();
+                let mut defs = Protected::new();
                 let lam = protect(self, "func", lam, &mut defs);
-                let args = sargs
-                    .iter()
-                    .map(|arg| match &arg.expression {
-                        Some(expr) => {
-                            let arg = self.convert_expr_raw(self.ta.expr(*expr));
-                            protect(self, "arg", arg, &mut defs)
-                        }
-                        None => {
-                            let id = self.fresh_ident("none");
-                            none_ids.push(id);
-                            rb.var(id)
-                        }
-                    })
-                    .collect::<Vec<_>>();
-                let extra_ids = (0..extra_arity)
-                    .map(|_| self.fresh_ident("extra"))
-                    .collect::<Vec<_>>();
-                let mut ap_args = args;
-                ap_args.extend(extra_ids.iter().cloned().map(|id| rb.var(id)));
-                let body = lapply(rb, self.lam_loc(loc), lam, ap_args);
+                let mut ap_args: SmallVec<[RawLambda; 4]> = SmallVec::new();
+                for arg in sargs {
+                    ap_args.push(if how.supplied(arg) {
+                        let arg = how.lower(self, arg);
+                        protect(self, "arg", arg, &mut defs)
+                    } else {
+                        let id = self.fresh_ident("none");
+                        params.push(id);
+                        rb.var(id)
+                    });
+                }
+                let omitted = params.len();
+                for _ in 0..extra_arity {
+                    params.push(self.fresh_ident("extra"));
+                }
+                ap_args.extend(params[omitted..].iter().map(|id| rb.var(*id)));
+                let body = lapply(rb, loc, lam, &ap_args);
                 bind_protected(
                     rb,
                     defs,
                     rb.function_(
-                        (none_ids.len() + extra_ids.len()) as i32,
-                        &none_ids.into_iter().chain(extra_ids).collect::<Vec<_>>(),
+                        params.len() as i32,
+                        &params,
                         body,
                         FunctionAttribute::default(),
-                        self.lam_loc(loc),
+                        loc,
                     ),
                 )
+            }
+            None if sargs.iter().all(|arg| how.supplied(arg)) => {
+                // Every argument is supplied: `build_apply` would apply the
+                // callee to them in order.
+                let mut args: SmallVec<[RawLambda; 4]> = SmallVec::new();
+                for arg in sargs {
+                    args.push(how.lower(self, arg));
+                }
+                lapply(rb, loc, lam, &args)
             }
             None => {
                 let pending = sargs
                     .iter()
                     .map(|arg| {
                         (
-                            arg.expression
-                                .as_ref()
-                                .map(|expr| self.convert_expr_raw(self.ta.expr(*expr))),
-                            arg.label.is_optional(),
+                            how.supplied(arg).then(|| how.lower(self, arg)),
+                            how.optional(arg),
                         )
                     })
                     .collect::<Vec<_>>();
-                build_apply(self, lam, Vec::new(), pending.into(), self.lam_loc(loc))
+                build_apply(self, lam, Vec::new(), pending.into(), loc)
             }
         }
     }
