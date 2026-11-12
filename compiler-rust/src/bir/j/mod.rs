@@ -122,7 +122,6 @@ mod sequencing_tests {
 #[cfg(test)]
 mod sequencing_depth_tests {
     use super::*;
-    use crate::bir::VarFlags;
     #[test]
     fn ten_thousand_record_fields_have_linear_sequencing_inspection() {
         let mut b = Bir::default();

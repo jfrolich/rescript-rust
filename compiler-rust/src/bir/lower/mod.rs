@@ -10,6 +10,7 @@ mod prim_cmp;
 mod prim_block;
 mod switch;
 mod variant;
+mod untagged;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -304,6 +305,7 @@ enum ModuleConstants {
 struct State {
     switches: Vec<Option<switch::Plan>>,
     variants: Vec<Option<variant::Plan>>,
+    untagged: Vec<Option<untagged::Plan>>,
     switch_facts: Vec<switch::Facts>,
     switch_work: Vec<(NodeId, bool)>,
     switch_pairs: Vec<(NodeId, NodeId)>,
@@ -362,7 +364,7 @@ impl State {
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
             switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
-            switches: Vec::new(), variants: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
+            switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
             switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
             switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             module_paths: vec![false; input.arena.nodes.len()],
@@ -544,7 +546,9 @@ impl ProbeRules for State {
             View::Switch { scrutinee, header, .. } => {
                 let operands = self.source.node(node).switch_actions();
                 if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
-                    if variant::is_untagged(self.arena.switch(header)) { return Err(Unsupported("switch")); }
+                    if variant::is_untagged(self.arena.switch(header)) {
+                        return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
+                    }
                     return Ok(ProbePlan::Children(expr::Resume::Variant(self.named_variant(cx, scrutinee, operands, header)?)));
                 }
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.integer_switch(cx, scrutinee, operands, header)?)));

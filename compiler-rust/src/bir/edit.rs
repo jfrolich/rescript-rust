@@ -1163,11 +1163,11 @@ impl Bir {
             for child in self.view(new).children() {
                 self.parents[child.index()] = Some(new);
                 let multiplier = self.edge_weight(new, child);
-                if multiplier != 1 {
+                if !self.bulk && multiplier != 1 {
                     self.adjust_counts(child, i64::from(multiplier) - 1);
                 }
             }
-            self.adjust_direct(new, 1);
+            if !self.bulk { self.adjust_direct(new, 1); }
             self.repair(new);
             if let Some(cold) = self.cold(id) {
                 self.set_cold(new, cold);

@@ -6,6 +6,7 @@ use crate::bir::{FuncId, VarSpan};
 pub(super) enum Resume {
     Switch(super::switch::Switch),
     Variant(super::variant::Variant),
+    Untagged(super::untagged::Untagged),
     If(super::cond::Conditional),
     Call(super::call::Call),
     Prim(super::prim::Prim),
@@ -33,6 +34,7 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Untagged(frame) = resume { self.untagged_children(cx, *frame, into); return; }
         if let Resume::Variant(frame) = resume { self.variant_children(cx, *frame, into); return; }
         if let Resume::Switch(frame) = resume {
             self.switch_children(cx, *frame, into);
@@ -54,7 +56,7 @@ impl State {
             return;
         }
         match *resume {
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) => unreachable!("control handled above"),
+            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
@@ -103,6 +105,7 @@ impl State {
         if let Resume::If(conditional) = resume {
             return self.conditional_child(cx, conditional, index, child);
         }
+        if let Resume::Untagged(frame) = resume { return self.untagged_child(cx, *frame, index, child); }
         if let Resume::Variant(frame) = resume { return self.variant_child(cx, *frame, index, child); }
         if let Resume::Switch(frame) = resume { return self.switch_child(cx, *frame, index, child); }
         if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
@@ -128,7 +131,7 @@ impl State {
             }
         }
         let force = match resume {
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) => unreachable!("control handled above"),
+            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
@@ -150,6 +153,7 @@ impl State {
         match resume {
             Resume::Switch(frame) => self.finish_switch(cx, frame),
             Resume::Variant(frame) => self.finish_variant(cx, frame),
+            Resume::Untagged(frame) => self.finish_untagged(cx, frame),
             Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Prim(_) => unreachable!("primitive finished by dispatch"),

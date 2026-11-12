@@ -57,15 +57,38 @@ impl State {
         header: SwitchId,
     ) -> Result<Switch, Unsupported> {
         let h = self.arena.switch(header);
-        if h.constants as usize != h.keys.len()
-            || !matches!(h.dispatch, crate::lambda::SwitchDispatch::Direct)
-            || !h
-                .keys
+        let n = h.constants as usize;
+        assert!(matches!(h.dispatch, crate::lambda::SwitchDispatch::Direct));
+        assert!(
+            h.keys[..n]
                 .iter()
                 .all(|k| matches!(k, CaseKey::Lambda(crate::lambda::SwitchKey::Int(_))))
-        {
-            return Err(Unsupported("switch"));
-        }
+        );
+        // C: direct dispatch consumes constant arms only, even when a raw
+        // synthetic switch carries an unused block partition.
+        let (operands, header) = if n != h.keys.len() {
+            let keys = h.keys[..n].to_vec();
+            let has_default = h.has_default;
+            let consts_full = h.consts_full;
+            let all = self.source.lists.get(operands);
+            let mut actions = all[..n].to_vec();
+            if has_default {
+                actions.push(all[h.keys.len()]);
+            }
+            let operands = self.source.lists.push(&actions);
+            let header = self.arena.switch_header(crate::bir::SwitchHeader {
+                keys,
+                clauses: Vec::new(),
+                constants: n as u32,
+                consts_full,
+                blocks_full: false,
+                has_default,
+                dispatch: crate::lambda::SwitchDispatch::Direct,
+            });
+            (operands, header)
+        } else {
+            (operands, header)
+        };
         self.plan_switch(cx, scrutinee, operands, header, Kind::Integer)
     }
 
@@ -236,7 +259,7 @@ impl State {
     /// One iterative bottom-up visit per source node, memoized across switches.
     /// O(new reachable nodes + edges + immediate payload bytes). No recursion
     /// or allocation per node: traversal and operand scratch are reused.
-    fn switch_facts(&mut self, root: NodeId) {
+    pub(super) fn switch_facts(&mut self, root: NodeId) {
         use std::hash::{Hash, Hasher};
         let mut work = std::mem::take(&mut self.switch_work);
         work.push((root, false));
@@ -353,6 +376,21 @@ impl State {
             }
             _ => {}
         }
+    }
+
+    /// Fingerprint prefilter followed by eq_approx. O(1) on rejection,
+    /// otherwise O(confirmed source pairs), counted separately.
+    pub(super) fn same_switch_body(&mut self, a: NodeId, b: NodeId) -> bool {
+        let (a_facts, b_facts) = (self.switch_facts[a.index()], self.switch_facts[b.index()]);
+        a_facts.comparable
+            && b_facts.comparable
+            && a_facts.hash == b_facts.hash
+            && self.switch_equal(a, b)
+    }
+
+    /// Exit fact recorded with the body's fingerprint. O(1).
+    pub(super) fn switch_has_exit(&self, body: NodeId) -> bool {
+        self.switch_facts[body.index()].exit
     }
 
     /// LamArena::eq_approx, confirmed on L nodes after the hash prefilter.
@@ -769,7 +807,7 @@ impl State {
     /// Prepare dense payload-indexed hashes once, at the first switch.
     /// O(payload bytes + constant edges); a single serialization buffer is
     /// reused, not allocated per payload or per source occurrence.
-    fn prepare_switch_hashes(&mut self) {
+    pub(super) fn prepare_switch_hashes(&mut self) {
         use crate::bir::Constant as C;
         use crate::lambda::lam_primitive::Primitive;
         use std::hash::{Hash, Hasher};
