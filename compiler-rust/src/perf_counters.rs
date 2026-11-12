@@ -428,8 +428,7 @@ pub(crate) mod store_views {
     static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
     static BINDERS: AtomicU64 = AtomicU64::new(0);
     static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    static STAMPS_REPLAYED: AtomicU64 = AtomicU64::new(0);
-    /// Replayed effects other than stamps: components, prepare, rename,
+    /// Replayed effects: components, prepare, rename,
     /// alias source, module declaration.
     static EFFECTS_REPLAYED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
 
@@ -479,12 +478,7 @@ pub(crate) mod store_views {
         PIECES_REPLAYED.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// A replay advanced the compilation's stamp counter by `stamps`.
-    pub(crate) fn record_stamps_replayed(stamps: usize) {
-        STAMPS_REPLAYED.fetch_add(stamps as u64, Ordering::Relaxed);
-    }
-
-    /// A replayed effect other than stamps (index as in `EFFECTS_REPLAYED`).
+    /// A replayed effect (index as in `EFFECTS_REPLAYED`).
     pub(crate) fn record_effect_replayed(kind: usize) {
         EFFECTS_REPLAYED[kind].fetch_add(1, Ordering::Relaxed);
     }
@@ -500,7 +494,6 @@ pub(crate) mod store_views {
             &PIECES_POISONED,
             &BINDERS,
             &PIECES_REPLAYED,
-            &STAMPS_REPLAYED,
         ]
         .into_iter()
         .chain(&EFFECTS_REPLAYED)
@@ -533,9 +526,8 @@ pub(crate) mod store_views {
             load(&BINDERS),
         );
         eprintln!(
-            "[compiler-counter] store_replay pieces={} stamps={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
+            "[compiler-counter] store_replay pieces={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
             load(&PIECES_REPLAYED),
-            load(&STAMPS_REPLAYED),
             load(&EFFECTS_REPLAYED[0]),
             load(&EFFECTS_REPLAYED[1]),
             load(&EFFECTS_REPLAYED[2]),
