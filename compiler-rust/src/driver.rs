@@ -9818,7 +9818,6 @@ struct JsFileSettings<'a> {
 #[inline(never)]
 fn render_oxc_source_map(
     program: &DepsProgram,
-    bir: Option<&crate::bir::bridge_j::Imported>,
     resolver: &ModulePathResolver,
     settings: JsFileSettings<'_>,
     options: &CompilerOptions,
@@ -9835,18 +9834,14 @@ fn render_oxc_source_map(
     let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) else {
         return Err(crate::emit::Unsupported("source map: missing output or source path"));
     };
-    let map_options = crate::emit::sourcemap::Options {
-        target, source, mode: options.source_map,
-        sources_content: options.source_map_sources_content,
-        source_root: &options.source_map_root, locations: lam_locs,
-    };
-    if let Some(bir) = bir {
-        crate::emit::emit_bir(bir, resolver, settings.file_directives, settings.debug,
-            settings.jsx_preserve, !options.no_version_header, Some(&map_options), None)
-    } else {
-        crate::emit::emit_with_source_map(program, resolver, settings.file_directives,
-            settings.debug, settings.jsx_preserve, !options.no_version_header, &map_options)
-    }
+    crate::emit::emit_with_source_map(
+        program, resolver, settings.file_directives, settings.debug, settings.jsx_preserve,
+        !options.no_version_header, &crate::emit::sourcemap::Options {
+            target, source, mode: options.source_map,
+            sources_content: options.source_map_sources_content,
+            source_root: &options.source_map_root, locations: lam_locs,
+        },
+    )
 }
 
 fn render_js_program(
@@ -9862,18 +9857,7 @@ fn render_js_program(
         debug,
         jsx_preserve,
     } = settings;
-    if let crate::emit::PrinterMode::Oxc(stats) | crate::emit::PrinterMode::OxcBir(stats) = &options.js_printer {
-        let (bridged, bridge_reason) = if matches!(options.js_printer, crate::emit::PrinterMode::OxcBir(_)) {
-            match crate::bir::bridge_j::import_js(program) {
-                Ok(imported) => (Some(imported), None),
-                Err(reason) => {
-                    stats.record_bridge_unsupported(reason.0);
-                    (None, Some(reason.0))
-                }
-            }
-        } else {
-            (None, None)
-        };
+    if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
         let mut raw_audit = stats.raw_audit_buffer();
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None
             && std::env::var("RESCRIPT_JS_PRINTER_SOURCE_MAPS").as_deref() == Ok("legacy")
@@ -9884,7 +9868,6 @@ fn render_js_program(
         } else if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
             render_oxc_source_map(
                 program,
-                bridged.as_ref(),
                 resolver,
                 JsFileSettings {
                     file_directives,
@@ -9895,9 +9878,6 @@ fn render_js_program(
                 output_path,
                 lam_locs.clone(),
             )
-        } else if let Some(bir) = &bridged {
-            crate::emit::emit_bir(bir, resolver, file_directives, debug, jsx_preserve,
-                !options.no_version_header, None, raw_audit.as_mut())
         } else {
             crate::emit::emit_audited(
                 program,
@@ -9912,7 +9892,6 @@ fn render_js_program(
         stats.record(&result);
         if let Err(error) = stats.report_output(
             &result,
-            bridge_reason,
             options.source_filename.as_deref().map(FsPath::new),
             output_path,
         ) {

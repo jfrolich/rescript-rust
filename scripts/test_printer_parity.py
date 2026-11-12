@@ -65,8 +65,6 @@ def check(actual, baseline):
         if name not in baseline:
             raise RuntimeError(f"{name}: no baseline; use --record after reviewing coverage")
         old = baseline[name]
-        if new["emitted_from_bir"] < old["emitted_from_bir"]:
-            raise RuntimeError(f"{name}: Bir emitted count fell")
         if new["outputs"] < old["outputs"]:
             raise RuntimeError(f"{name}: outputs missing")
         if new["emitted"] < old["emitted"]:
@@ -145,33 +143,22 @@ def compare(reference, candidate, tool, work, env):
     return seconds
 
 
-def compare_exact(reference, candidate, reference_files, candidate_files):
-    """Same printer/options: no normalization, including source-map JSON."""
-    if reference_files != candidate_files:
-        raise RuntimeError("Bir and JS-IR generated file sets differ")
-    for relative in sorted(reference_files):
-        if (reference / relative).read_bytes() != (candidate / relative).read_bytes():
-            raise RuntimeError(f"Bir and JS-IR output bytes differ: {relative}")
-
-
 def corpus(name, project, binary, bsc, runtime, tool, work, external=False):
     project = project.resolve()
     reports = work / "reports"
     reports.mkdir()
-    bir_reports = work / "bir-reports"
-    bir_reports.mkdir()
     outputs = {}
     build_seconds = {}
-    for label in ("reference", "candidate", "bir"):
+    for label in ("reference", "candidate"):
         env = dict(os.environ, RESCRIPT_RUNTIME=str(runtime), RESCRIPT_FULL_BUILD="1",
-                   RESCRIPT_JS_PRINTER={"reference": "legacy", "candidate": "oxc", "bir": "oxc-bir"}[label],
+                   RESCRIPT_JS_PRINTER="legacy" if label == "reference" else "oxc",
                    RESCRIPT_JS_PRINTER_SOURCE_MAPS="legacy")
         env.pop("RESCRIPT_JS_PRINTER_STATS", None)
-        if label in ("candidate", "bir"):
-            env["RESCRIPT_JS_PRINTER_STATS"] = str(reports if label == "candidate" else bir_reports)
+        if label == "candidate":
+            env["RESCRIPT_JS_PRINTER_STATS"] = str(reports)
         run([binary, "clean", project], env, work / f"{label}-clean.log")
         def build(folder, suffix):
-            command = [binary, "build", folder] if label != "reference" or external else [binary, "build-reference", "--bsc", bsc, folder]
+            command = [binary, "build", folder] if label == "candidate" or external else [binary, "build-reference", "--bsc", bsc, folder]
             return run(command, env, work / f"{label}-{suffix}.log")
         if project != runtime.resolve():
             run([binary, "clean", runtime], env, work / f"{label}-runtime-clean.log")
@@ -181,17 +168,7 @@ def corpus(name, project, binary, bsc, runtime, tool, work, external=False):
         before = inventory(project)
         build_seconds[label] = build(project, "build")
         outputs[label] = capture(project, before, work / label, external or name.startswith("gentype-"))
-    compare_exact(work / "candidate", work / "bir", outputs["candidate"], outputs["bir"])
-    print(f"Bir vs JS IR: {len(outputs['bir'])} byte-identical generated files (including maps)")
     result = summarize(reports, [project / n for n in outputs["candidate"]], project)
-    bir_coverage = summarize(bir_reports, [project / n for n in outputs["bir"]], project)
-    for report in bir_reports.glob("*.json"):
-        reason = json.loads(report.read_text()).get("bridge_unsupported")
-        if reason is not None:
-            raise RuntimeError(f"Bir import fallback: {reason}")
-    if result != bir_coverage:
-        raise RuntimeError("Bir and JS-IR printer coverage differs")
-    result["emitted_from_bir"] = bir_coverage["emitted"]
     js_count = sum(Path(n).suffix in JS for n in outputs["candidate"])
     result_display = {**result, "generated_files": len(outputs["candidate"]), "javascript_files": js_count,
                       "build_seconds": build_seconds}

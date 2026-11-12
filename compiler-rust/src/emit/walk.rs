@@ -1,6 +1,6 @@
 //! Shared token-shape decisions. Unsupported decisions reject the entire module.
-use super::{Unsupported, view::View};
-use crate::js_ir::arena::{Expr, ExprKind, FunId, Stmt, StmtKind, VarDecl};
+use super::Unsupported;
+use crate::js_ir::arena::{Expr, ExprKind, FunId, JsArena, Stmt, StmtKind, VarDecl};
 use crate::js_ir::op::{BinOp, Number, UsedStats};
 use crate::js_ir::{CallArity, CallKind};
 
@@ -17,12 +17,12 @@ pub(super) fn prints_declaration(decl: &VarDecl) -> Declaration {
     }
 }
 
-pub(super) fn eta_target(a: &impl View, f: FunId) -> Option<Expr> {
+pub(super) fn eta_target(a: &JsArena, f: FunId) -> Option<Expr> {
     let f = a.fun(f);
     if f.is_method || f.async_ || f.directive.is_some() {
         return None;
     }
-    let [stmt] = &*a.stmts(f.body) else { return None };
+    let [stmt] = a.stmts(f.body) else { return None };
     let StmtKind::Return(e) = a.sk(*stmt) else {
         return None;
     };
@@ -32,8 +32,8 @@ pub(super) fn eta_target(a: &impl View, f: FunId) -> Option<Expr> {
     if !matches!(a.ek(callee), ExprKind::Var(_) | ExprKind::Qualified(_)) {
         return None;
     }
-    let params = &*a.ident_slice(f.params);
-    let args = &*a.exprs(args);
+    let params = a.ident_slice(f.params);
+    let args = a.exprs(args);
     if args.len() != params.len()
         || !args
             .iter()
@@ -65,7 +65,7 @@ pub(super) enum FunctionForm {
     Method,
     ArrowEmpty,
 }
-pub(super) fn function_form(a: &impl View, f: FunId, top: bool) -> Result<FunctionForm, Unsupported> {
+pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<FunctionForm, Unsupported> {
     if let Some(target) = eta_target(a, f) {
         return Ok(FunctionForm::Eta(target));
     }
@@ -82,7 +82,7 @@ pub(super) fn function_form(a: &impl View, f: FunId, top: bool) -> Result<Functi
     if f.directive.is_some() {
         return Ok(FunctionForm::ArrowBlock);
     }
-    if let [stmt] = &*a.stmts(f.body) {
+    if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
             StmtKind::Return(e) | StmtKind::Exp(e) => {
@@ -93,20 +93,20 @@ pub(super) fn function_form(a: &impl View, f: FunId, top: bool) -> Result<Functi
     }
     Ok(FunctionForm::ArrowBlock)
 }
-pub(super) fn undefined(a: &impl View, e: Expr) -> bool {
+pub(super) fn undefined(a: &JsArena, e: Expr) -> bool {
     matches!(a.ek(e), ExprKind::Undefined { .. })
 }
-pub(super) fn return_undefined(a: &impl View, s: Stmt) -> bool {
+pub(super) fn return_undefined(a: &JsArena, s: Stmt) -> bool {
     matches!(a.sk(s), StmtKind::Return(e) if undefined(a, e))
 }
-pub(super) fn function_body<'a>(a: &impl View, body: &'a [Stmt]) -> &'a [Stmt] {
+pub(super) fn function_body<'a>(a: &JsArena, body: &'a [Stmt]) -> &'a [Stmt] {
     if body.len() >= 2 && return_undefined(a, body[body.len() - 1]) {
         &body[..body.len() - 1]
     } else {
         body
     }
 }
-pub(super) fn omitted_expression(a: &impl View, e: Expr) -> bool {
+pub(super) fn omitted_expression(a: &JsArena, e: Expr) -> bool {
     matches!(
         a.ek(e),
         ExprKind::Var(_)
@@ -116,7 +116,7 @@ pub(super) fn omitted_expression(a: &impl View, e: Expr) -> bool {
             | ExprKind::JsonLiteral(_)
     )
 }
-pub(super) fn else_omitted(a: &impl View, body: &[Stmt]) -> bool {
+pub(super) fn else_omitted(a: &JsArena, body: &[Stmt]) -> bool {
     match body {
         [] => true,
         [s] => match a.sk(*s) {
@@ -127,11 +127,11 @@ pub(super) fn else_omitted(a: &impl View, body: &[Stmt]) -> bool {
         _ => false,
     }
 }
-pub(super) fn else_if(a: &impl View, body: &[Stmt]) -> Option<Stmt> {
+pub(super) fn else_if(a: &JsArena, body: &[Stmt]) -> Option<Stmt> {
     match body {
         [s] => match a.sk(*s) {
             StmtKind::If(..) => Some(*s),
-            StmtKind::Block(b) => match &*a.stmts(b) {
+            StmtKind::Block(b) => match a.stmts(b) {
                 [s] if matches!(a.sk(*s), StmtKind::If(..)) => Some(*s),
                 _ => None,
             },
@@ -140,15 +140,15 @@ pub(super) fn else_if(a: &impl View, body: &[Stmt]) -> Option<Stmt> {
         _ => None,
     }
 }
-pub(super) fn arguments<'a>(a: &impl View, args: &'a [Expr]) -> &'a [Expr] {
+pub(super) fn arguments<'a>(a: &JsArena, args: &'a [Expr]) -> &'a [Expr] {
     match args {
         [e] if matches!(a.ek(*e), ExprKind::Undefined { is_unit: true }) => &[],
         _ => args,
     }
 }
-pub(super) fn negation_form(a: &impl View, op: BinOp, left: Expr) -> bool {
+pub(super) fn negation_form(a: &JsArena, op: BinOp, left: Expr) -> bool {
     op == BinOp::Minus
-        && matches!(a.ek(left), ExprKind::Number(n) if match &*a.number(n) {
+        && matches!(a.ek(left), ExprKind::Number(n) if match a.number(n) {
             Number::Int { i: 0, .. } => true,
             Number::Float(f) => f.f == "0.",
             _ => false,
@@ -160,7 +160,7 @@ pub(super) fn negation_form(a: &impl View, op: BinOp, left: Expr) -> bool {
 /// be proven without rendering or allocating; other target comparisons remain
 /// a specific fallback. Only the retained left target is met by naming.
 pub(super) fn nullish_target(
-    a: &impl View,
+    a: &JsArena,
     op: BinOp,
     l: Expr,
     r: Expr,
@@ -241,7 +241,7 @@ pub(super) fn block_float_tag(s: &str) -> Result<f64, Unsupported> {
 /// The analysis pass separately retains the legacy scan of extra polyvar
 /// elements, which can affect function-environment reservations in malformed IR.
 pub(super) fn block_elements<'a>(
-    a: &'a impl View,
+    a: &'a JsArena,
     elements: &'a [Expr],
     tag: &'a crate::lambda::TagInfo,
 ) -> impl Iterator<Item = (usize, Expr)> + 'a {
@@ -260,7 +260,7 @@ pub(super) fn block_elements<'a>(
 /// Expression decorations precede the expression and introduce no identifiers.
 /// S0 drops block comments directly before numeric literals (also through
 /// parentheses); other comments must survive and remain a whole-file fallback.
-pub(super) fn expression_comment(a: &impl View, e: Expr) -> Result<(), Unsupported> {
+pub(super) fn expression_comment(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
     if a.expr_comment(e).is_some() && !numeric_decoration(a, e) && !pure_call(a, e) {
         return Err(Unsupported("non-decoration expression comment"));
     }
@@ -280,14 +280,14 @@ pub(super) fn template_supported(segments: usize, values: usize) -> Result<(), U
 /// The exception-creation annotation is semantic, not a numeric decoration.
 /// It prints immediately before the call; callee and arguments retain their
 /// ordinary left-to-right naming order. Codegen owns its spelling and spacing.
-pub(super) fn pure_call(a: &impl View, e: Expr) -> bool {
+pub(super) fn pure_call(a: &JsArena, e: Expr) -> bool {
     a.expr_comment(e) == Some("@__PURE__") && matches!(a.ek(e), ExprKind::Call(..))
 }
 
-fn numeric_decoration(a: &impl View, e: Expr) -> bool {
+fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
     // A minus, Infinity, NaN, or bigint suffix is not the numeric-literal
     // adjacency S0 removes. Be conservative rather than discarding a comment.
-    matches!(a.ek(e), ExprKind::Number(n) if matches!( &*a.number(n), Number::Int { i, .. } if *i >= 0))
+    matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
 }
 
 /// Raw text meets no IR identifiers. Statements keep surrounding newlines and
@@ -350,7 +350,7 @@ pub(super) fn raw_wrapping(
 /// `print_exp_statement_of`: only unit tails discard numbers/undefined and
 /// simplify sequences with a trivial side. Naming visits only the surviving
 /// expression; the builder supplies statement parentheses and semicolons.
-pub(super) fn tail_effect(a: &impl View, e: Expr) -> Option<Expr> {
+pub(super) fn tail_effect(a: &JsArena, e: Expr) -> Option<Expr> {
     let trivial = |e| matches!(a.ek(e), ExprKind::Number(_) | ExprKind::Undefined { .. });
     match a.ek(e) {
         ExprKind::Seq(l, r) if trivial(l) => tail_effect(a, r),
@@ -362,7 +362,7 @@ pub(super) fn tail_effect(a: &impl View, e: Expr) -> Option<Expr> {
 
 /// Range loops name their binder, then a synthetic finish binder, then visit
 /// start, finish and body. Only numbers and variable references avoid caching.
-pub(super) fn finish_binding(a: &impl View, e: Expr) -> bool {
+pub(super) fn finish_binding(a: &JsArena, e: Expr) -> bool {
     !matches!(
         a.ek(e),
         ExprKind::Number(_) | ExprKind::Var(_) | ExprKind::Qualified(_)
@@ -371,7 +371,7 @@ pub(super) fn finish_binding(a: &impl View, e: Expr) -> bool {
 
 /// Assignment meets the target before the value. Only identifiers and member
 /// accesses are valid targets; codegen owns precedence and the final semicolon.
-pub(super) fn assignment_target(a: &impl View, e: Expr) -> Result<(), Unsupported> {
+pub(super) fn assignment_target(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
     match a.ek(e) {
         ExprKind::Var(_)
         | ExprKind::Qualified(_)
@@ -398,7 +398,7 @@ pub(super) enum StatementChild {
 /// order and appends `Error: new Error()` only for literal extension blocks.
 /// Braces, labels, parentheses and semicolons are represented by AST nodes.
 pub(super) fn statement_children(
-    a: &impl View,
+    a: &JsArena,
     s: Stmt,
     mut visit: impl FnMut(StatementChild) -> Result<(), Unsupported>,
 ) -> Result<(), Unsupported> {
@@ -440,7 +440,7 @@ pub(super) fn statement_children(
         }
         StmtKind::IntSwitch(e, id) => {
             visit(Expression(e))?;
-            let t = &*a.int_switch(id);
+            let t = a.int_switch(id);
             for (_, c) in &t.clauses {
                 visit(Block(c.body))?;
             }
@@ -450,7 +450,7 @@ pub(super) fn statement_children(
         }
         StmtKind::StringSwitch(e, id) => {
             visit(Expression(e))?;
-            let t = &*a.string_switch(id);
+            let t = a.string_switch(id);
             for c in &t.clauses {
                 switch_tag_supported(&c.tag_type)?;
                 visit(Block(c.clause.body))?;
@@ -482,7 +482,7 @@ pub(super) fn switch_tag_supported(tag: &crate::lambda::SwitchCaseTag) -> Result
 /// sequence there parses as additional declarators, not a sequence initializer.
 /// Keep that exceptional shape on the legacy path rather than changing tokens.
 pub(super) fn range_supported(
-    a: &impl View,
+    a: &JsArena,
     f: crate::js_ir::arena::ForRangeInfo,
 ) -> Result<(), Unsupported> {
     if !finish_binding(a, f.end) && f.init.is_some_and(|e| matches!(a.ek(e), ExprKind::Seq(..))) {
@@ -496,13 +496,13 @@ pub(super) fn range_supported(
 /// Legacy OptionalBlock(false) spells Primitive_option.some, a fixed global
 /// (not a named IR identifier), followed by the operand except synthetic unit.
 /// Calls supply the parentheses; no synthetic identifier enters naming.
-pub(super) fn optional_argument(a: &impl View, e: Expr) -> Option<Expr> {
+pub(super) fn optional_argument(a: &JsArena, e: Expr) -> Option<Expr> {
     (!matches!(a.ek(e), ExprKind::Undefined { is_unit: true })).then_some(e)
 }
 
 /// Unlike logical operators, string + preserves right association: the legacy
 /// printer uses Plus's right precedence 12, above its own precedence 11.
-pub(super) fn string_children(a: &impl View, e: Expr) -> Option<(Expr, Expr)> {
+pub(super) fn string_children(a: &JsArena, e: Expr) -> Option<(Expr, Expr)> {
     match a.ek(e) {
         ExprKind::StringAppend(l, r) => Some((l, r)),
         _ => None,
@@ -511,7 +511,7 @@ pub(super) fn string_children(a: &impl View, e: Expr) -> Option<(Expr, Expr)> {
 
 /// Traverse string leaves in printed order, without stack growth with depth.
 pub(super) fn string_leaves(
-    a: &impl View,
+    a: &JsArena,
     root: Expr,
     pending: &mut Vec<Expr>,
     mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
@@ -540,7 +540,7 @@ pub(super) enum JsxForm {
 /// callee). Sequence containers remain unsupported: codegen drops their
 /// required parentheses, including explicit ParenthesizedExpression nodes.
 pub(super) fn jsx_form(
-    a: &impl View,
+    a: &JsArena,
     id: crate::js_ir::arena::JsxId,
     preserve: bool,
 ) -> Result<(crate::js_ir::arena::JsxInfo, JsxForm), Unsupported> {
@@ -562,7 +562,7 @@ pub(super) fn jsx_form(
         .chain(
             jsx.children
                 .into_iter()
-                .flat_map(|c| a.exprs(c).into_owned()),
+                .flat_map(|c| a.exprs(c).iter().copied()),
         )
     {
         let mut value = value;
@@ -586,7 +586,7 @@ pub(super) fn jsx_form(
 /// Destructuring declarations meet excluded-field binders before the rest
 /// binder and source. Expression-position rest uses only synthetic binders.
 pub(super) fn rest_declaration(
-    a: &impl View,
+    a: &JsArena,
     d: &VarDecl,
 ) -> Option<(crate::js_ir::arena::RestId, Expr)> {
     match a.ek(d.value?) {
@@ -606,7 +606,7 @@ pub(super) fn numeric_member(name: &str) -> Option<i64> {
 /// A legacy call of the external `delete` parses as a unary operator, not a
 /// call. Raw support exposes this previously hidden shape; keep it on fallback
 /// until its separate AST rule is implemented rather than relaxing fixed points.
-pub(super) fn call_supported(a: &impl View, callee: Expr) -> Result<(), Unsupported> {
+pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupported> {
     if let ExprKind::Var(id) = a.ek(callee) {
         let id = a.ident(id);
         if id.name() == "delete" && (id.stamp() == 0 || id.is_js()) {
@@ -618,7 +618,7 @@ pub(super) fn call_supported(a: &impl View, callee: Expr) -> Result<(), Unsuppor
 
 /// Identity options print their payload unchanged. Legacy arrow bodies group a
 /// function under any number of these wrappers (printer::arrow_expr_needs_paren).
-pub(super) fn arrow_function_body(a: &impl View, mut e: Expr) -> bool {
+pub(super) fn arrow_function_body(a: &JsArena, mut e: Expr) -> bool {
     while let ExprKind::OptionalBlock(inner, true) = a.ek(e) {
         e = inner;
     }
@@ -628,7 +628,7 @@ pub(super) fn arrow_function_body(a: &impl View, mut e: Expr) -> bool {
 /// Logical chains flatten only nodes the legacy printer actually prints as
 /// logical operators. A nullish rewrite is an atomic `x == null` operand.
 pub(super) fn chain_children(
-    a: &impl View,
+    a: &JsArena,
     op: BinOp,
     e: Expr,
 ) -> Result<Option<(Expr, Expr)>, Unsupported> {
@@ -641,144 +641,4 @@ pub(super) fn chain_children(
         }
     }
     Ok(None)
-}
-
-pub(super) fn expression_children(
-    a: &impl View,
-    e: Expr,
-    jsx_preserve: bool,
-    mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
-) -> Result<(), Unsupported> {
-    match a.ek(e) {
-        ExprKind::Var(_) | ExprKind::Qualified(_) | ExprKind::Fun(_) => {
-            unreachable!("handled by caller")
-        }
-        ExprKind::Number(_)
-        | ExprKind::Str(_)
-        | ExprKind::Bool(_)
-        | ExprKind::Null
-        | ExprKind::Undefined { .. } => {}
-        ExprKind::Length(e, _)
-        | ExprKind::IsNullOrUndefined(e)
-        | ExprKind::Typeof(e)
-        | ExprKind::JsNot(e)
-        | ExprKind::JsBnot(e)
-        | ExprKind::OptionalBlock(e, true)
-        | ExprKind::CamlBlockTag(e, _)
-        | ExprKind::Await(e)
-        | ExprKind::Spread(e) => visit(e)?,
-        ExprKind::StaticIndex(e, _, _) => visit(e)?,
-        ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
-            assignment_target(a, l)?;
-            visit(l)?;
-            visit(r)?;
-        }
-        ExprKind::Bin(op, l, r) => {
-            if let Some(target) = nullish_target(a, op, l, r)? {
-                visit(target)?;
-            } else {
-                visit(l)?;
-                visit(r)?;
-            }
-        }
-        ExprKind::In(l, r) | ExprKind::Seq(l, r) | ExprKind::ArrayIndex(l, r) => {
-            visit(l)?;
-            visit(r)?;
-        }
-        ExprKind::Cond(c, t, f) => {
-            visit(c)?;
-            visit(t)?;
-            visit(f)?;
-        }
-        ExprKind::Call(f, args, _) => {
-            call_supported(a, f)?;
-            visit(f)?;
-            for e in &*a.exprs(args) {
-                visit(*e)?;
-            }
-        }
-        ExprKind::New(f, args) => {
-            visit(f)?;
-            if let Some(args) = args {
-                for e in &*a.exprs(args) {
-                    visit(*e)?;
-                }
-            }
-        }
-        ExprKind::Array(items, _) => {
-            for e in &*a.exprs(items) {
-                visit(*e)?;
-            }
-        }
-        ExprKind::Object(props) => {
-            for (_, e) in &*a.props(props) {
-                visit(*e)?;
-            }
-        }
-        ExprKind::CamlBlock(items, _, tag) => {
-            let (items, tag) = (&*a.exprs(items), a.tag(tag));
-            block_supported(items, tag)?;
-            for (_, e) in block_elements(a, items, tag) {
-                visit(e)?;
-            }
-        }
-        ExprKind::RawJsCode(_) => {}
-        ExprKind::Jsx(id) => {
-            let (jsx, form) = jsx_form(a, id, jsx_preserve)?;
-            if matches!(form, JsxForm::Runtime) {
-                visit(jsx.callee)?;
-            }
-            if !matches!(form, JsxForm::Fragment) {
-                visit(jsx.tag)?;
-            }
-            if !matches!(form, JsxForm::Runtime)
-                && let Some(key) = jsx.key
-            {
-                visit(key)?;
-            }
-            if let Some(spread) = jsx.spread {
-                visit(spread)?;
-            }
-            for (_, value) in &*a.props(jsx.props) {
-                visit(*value)?;
-            }
-            if let Some(children) = jsx.children {
-                for child in &*a.exprs(children) {
-                    visit(*child)?;
-                }
-            }
-            if matches!(form, JsxForm::Runtime)
-                && let Some(key) = jsx.key
-            {
-                visit(key)?;
-            }
-        }
-        ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
-        ExprKind::InterpolatedTemplate(segments, values) => {
-            template_supported(a.segments(segments).len(), a.exprs(values).len())?;
-            for e in &*a.exprs(values) {
-                visit(*e)?;
-            }
-        }
-        ExprKind::TaggedTemplate(tag, strings, values) => {
-            template_supported(a.tagged(strings).len(), a.exprs(values).len())?;
-            visit(tag)?;
-            for e in &*a.exprs(values) {
-                visit(*e)?;
-            }
-        }
-        // Legacy .apply meets the callee before the argument array.
-        ExprKind::FlatCall(func, args) => {
-            visit(func)?;
-            visit(args)?;
-        }
-        ExprKind::OptionalBlock(inner, false) => {
-            if let Some(inner) = optional_argument(a, inner) {
-                visit(inner)?;
-            }
-        }
-        ExprKind::RecordRest(_, source) => visit(source)?,
-        ExprKind::StringAppend(..) => unreachable!("iterative string traversal in caller"),
-    }
-    Ok(())
 }

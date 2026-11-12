@@ -1,1 +1,1 @@
-- Add an opt-in `oxc-bir` printer mode for validating emission through the J-level backend representation; keep the default printer unchanged.
+- Record a three-way printer instruction measurement and add its instruction-summary script.

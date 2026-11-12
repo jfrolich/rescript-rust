@@ -1,10 +1,6 @@
 //! The only expression/statement layer that knows oxc AST types.
-#[cfg(test)]
-use crate::js_ir::arena::JsArena;
-#[cfg(test)]
-use super::naming::Names;
-use super::{Unsupported, literal, view::{View, NameSource, PrintedNames}, walk};
-use crate::js_ir::arena::{Expr, ExprKind, FunId, PropName, Stmt, StmtKind};
+use super::{Unsupported, literal, naming::Names, walk};
+use crate::js_ir::arena::{Expr, ExprKind, FunId, JsArena, PropName, Stmt, StmtKind};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
@@ -15,10 +11,10 @@ use oxc_syntax::{
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
 };
 
-pub(super) struct Build<'a, 'r, V: View, N: PrintedNames> {
+pub(super) struct Build<'a, 'r> {
     pub b: AstBuilder<'a>,
-    pub arena: &'r V,
-    pub names: &'r N,
+    pub arena: &'r JsArena,
+    pub names: &'r Names,
     pub debug: bool,
     pub jsx_preserve: bool,
     rest_name: std::cell::RefCell<String>,
@@ -32,8 +28,8 @@ pub(super) struct Build<'a, 'r, V: View, N: PrintedNames> {
     // S1.2: absent on the default, location-free path.
     pub source_map: Option<&'r super::sourcemap::Spans>,
 }
-impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
-    pub fn new(alloc: &'a Allocator, arena: &'r V, names: &'r N) -> Self {
+impl<'a, 'r> Build<'a, 'r> {
+    pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
         let mut prefix = oxc_allocator::StringBuilder::from_str_in(super::raw::PREFIX, alloc);
         let prefix_len = names.raw_prefix_len();
         while prefix.len() < prefix_len {
@@ -55,9 +51,6 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
             string_values: Default::default(),
             source_map: None,
         }
-    }
-    fn name(&self, source: NameSource) -> &str {
-        self.names.name(self.arena.name_key(source))
     }
     pub fn text(&self, s: &str) -> &'a str {
         self.b.allocator().alloc_str(s)
@@ -225,7 +218,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 field
                     .ident
                     .as_ref()
-                    .map(|_| self.name(NameSource::Rest(fields, i)))
+                    .map(|id| self.names.get(id))
                     .unwrap_or(&field.label)
             } else {
                 synthetic.clear();
@@ -324,7 +317,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         }
         let callee = self.expr_at(jsx.callee, 15)?;
         let mut args = self.b.vec1(Argument::from(self.argument(jsx.tag, level)?));
-        let props = &*self.arena.props(jsx.props);
+        let props = self.arena.props(jsx.props);
         let extra = usize::from(
             level == 15 && self.jsx_indent.get() == 0 && !self.suppress_call_indent.get(),
         );
@@ -354,7 +347,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 ));
             }
             if let Some(children) = jsx.children {
-                let children = &*self.arena.exprs(children);
+                let children = self.arena.exprs(children);
                 let value = if let [child] = children
                     && !jsx.multi
                 {
@@ -454,7 +447,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 ),
             )));
         }
-        for (key, value) in &*self.arena.props(jsx.props) {
+        for (key, value) in self.arena.props(jsx.props) {
             let PropName::Lit(key) = key else {
                 unreachable!("validated JSX property")
             };
@@ -493,7 +486,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         let Some(list) = jsx.children else {
             return Ok(children);
         };
-        let expressions = &*self.arena.exprs(list);
+        let expressions = self.arena.exprs(list);
         let whitespace = |indent: usize| {
             let text = self.text(&format!("\n{}", "  ".repeat(indent)));
             JSXChild::Text(
@@ -923,10 +916,10 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         let a = self.arena;
         walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
-            ExprKind::Var(id) => self.id(self.name(NameSource::Variable(id))),
+            ExprKind::Var(id) => self.id(self.names.get(&a.ident(id))),
             ExprKind::Qualified(q) => {
                 let (m, field) = a.qual(q);
-                let base = self.id(self.name(NameSource::Qualified(q)));
+                let base = self.id(self.names.get(&m.id));
                 match field {
                     None => base,
                     Some(_) if matches!(m.kind, Kind::External { default: true, .. }) => base,
@@ -940,7 +933,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     ),
                 }
             }
-            ExprKind::Number(n) => self.number(&a.number(n))?,
+            ExprKind::Number(n) => self.number(a.number(n))?,
             ExprKind::Str(s) => self.string_expr(a.text(s)),
             ExprKind::Bool(b) => Expression::new_boolean_literal(SPAN, b, &self.b),
             ExprKind::Null => Expression::new_null_literal(SPAN, &self.b),
@@ -974,7 +967,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     SPAN,
                     self.expr_at(f, 15)?,
                     None,
-                    self.args(walk::arguments(a, &a.exprs(args)), level)?,
+                    self.args(walk::arguments(a, a.exprs(args)), level)?,
                     false,
                     &self.b,
                 );
@@ -985,7 +978,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 SPAN,
                 self.expr_at(f, 16)?,
                 None,
-                self.args(&args.map(|args| a.exprs(args)).unwrap_or_default(), level)?,
+                self.args(args.map_or(&[], |args| a.exprs(args)), level)?,
                 &self.b,
             ),
             ExprKind::StaticIndex(e, s, _) => self.member(self.dot_target(e)?, a.text(s)),
@@ -1002,7 +995,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
             ),
             ExprKind::Array(items, _) => {
                 let mut elements = self.b.vec();
-                for e in &*a.exprs(items) {
+                for e in a.exprs(items) {
                     elements.push(if let ExprKind::Spread(e) = a.ek(*e) {
                         ArrayExpressionElement::SpreadElement(self.b.alloc(SpreadElement::new(
                             SPAN,
@@ -1017,7 +1010,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
             }
             ExprKind::Object(props) => {
                 let mut properties = self.b.vec();
-                for (key, value) in &*a.props(props) {
+                for (key, value) in a.props(props) {
                     if key.is_spread() {
                         properties.push(ObjectPropertyKind::SpreadProperty(
                             self.b
@@ -1066,7 +1059,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 }
                 self.call(self.member(self.id("Primitive_option"), "some"), args)
             }
-            ExprKind::CamlBlock(items, _, tag) => self.caml_block(&a.exprs(items), a.tag(tag))?,
+            ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(id) => self.raw(id, walk::RawContext::Expression)?,
             ExprKind::Jsx(id) => self.jsx_call(id, level)?,
             ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
@@ -1076,14 +1069,14 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
             ExprKind::InterpolatedTemplate(segments, values) => {
                 Expression::TemplateLiteral(self.b.alloc(self.template(
                     a.segments(segments).iter().map(|s| s.source()),
-                    &a.exprs(values),
+                    a.exprs(values),
                 )?))
             }
             ExprKind::TaggedTemplate(tag, strings, values) => {
                 let tag = self.expr(tag)?;
                 let quasi = self.template(
                     a.tagged(strings).iter().map(|s| s.as_str()),
-                    &a.exprs(values),
+                    a.exprs(values),
                 )?;
                 Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
             }
@@ -1112,7 +1105,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         if self.source_map.is_some() {
             return Err(Unsupported("source map: verbatim raw JavaScript"));
         }
-        let info = &*self.arena.raw(id);
+        let info = self.arena.raw(id);
         let (before, after, remove_semicolon) = walk::raw_wrapping(info, context)?;
         let mut pieces = self.raw_pieces.borrow_mut();
         let mut token =
@@ -1170,14 +1163,14 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
         let info = self.arena.fun(f);
-        for (index, _) in self
+        for id in self
             .arena
             .ident_slice(info.params)
-            .iter().enumerate()
+            .iter()
             .skip(usize::from(info.is_method))
         {
             let pattern =
-                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(self.name(NameSource::Parameter(info.params, index)))));
+                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(self.names.get(id))));
             items.push(FormalParameter::new(
                 SPAN,
                 self.b.vec(),
@@ -1210,14 +1203,14 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         f: FunId,
     ) -> Result<oxc_allocator::Box<'a, FunctionBody<'a>>, Unsupported> {
         let info = self.arena.fun(f);
-        let body_storage = self.arena.stmts(info.body);
-        let body = walk::function_body(self.arena, &body_storage);
+        let body = walk::function_body(self.arena, self.arena.stmts(info.body));
         let mut statements = self.b.vec();
         // Methods omit their first IR parameter and materialize it as `this`
         // only when used. Naming meets that binding before the real parameters.
         if info.is_method && self.names.method_this_used(f) {
+            let this = &self.arena.ident_slice(info.params)[0];
             statements.push(self.variable(
-                self.name(NameSource::Parameter(info.params, 0)),
+                self.names.get(this),
                 Some(Expression::new_this_expression(SPAN, &self.b)),
             ));
         }
@@ -1233,7 +1226,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         if let Some(directive) = info.directive {
             // Legacy prints the supplied text followed by a semicolon, even
             // when it already ends in one. Retain resulting empty statements.
-            let source = literal::arena_string(directive, self.b.allocator());
+            let source = literal::arena_string(self.arena.text(directive), self.b.allocator());
             let source = self.text(&format!("{source};"));
             let parsed =
                 oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
@@ -1347,7 +1340,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
     ) -> Result<oxc_allocator::Box<'a, BlockStatement<'a>>, Unsupported> {
         Ok(self.b.alloc(BlockStatement::new(
             SPAN,
-            self.with_indent(1, || self.block(&self.arena.stmts(b), false))?,
+            self.with_indent(1, || self.block(self.arena.stmts(b), false))?,
             &self.b,
         )))
     }
@@ -1387,7 +1380,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         let a = self.arena;
         let f = a.for_range(id);
         walk::range_supported(a, f)?;
-        let name = self.name(NameSource::Variable(f.ident));
+        let name = self.names.get(&a.ident(f.ident));
         let finish = walk::finish_binding(a, f.end).then(|| self.names.finish(s));
         let mut declarations = self.b.vec();
         if let Some(e) = f.init {
@@ -1454,7 +1447,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
         test: Expression<'a>,
         c: &crate::js_ir::arena::Clause,
     ) -> Result<SwitchCase<'a>, Unsupported> {
-        let mut body = self.with_indent(2, || self.block(&self.arena.stmts(c.body), false))?;
+        let mut body = self.with_indent(2, || self.block(self.arena.stmts(c.body), false))?;
         if c.should_break {
             body.push(Statement::new_break_statement(SPAN, None, &self.b));
         }
@@ -1593,15 +1586,15 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
             return Err(Unsupported("statement comment"));
         }
         match a.sk(s) {
-            StmtKind::Block(b) => out.extend(self.block(&a.stmts(b), false)?),
+            StmtKind::Block(b) => out.extend(self.block(a.stmts(b), false)?),
             StmtKind::Variable(v) => {
-                let decl = &*a.var(v);
+                let decl = a.var(v);
                 match walk::prints_declaration(decl) {
                     walk::Declaration::Omit => return Ok(()),
                     walk::Declaration::Effect(e) => return self.effect(e, out),
                     walk::Declaration::Binding => {}
                 }
-                let name = self.name(NameSource::Declaration(v));
+                let name = self.names.get(&decl.ident);
                 if let Some((fields, source)) = walk::rest_declaration(a, decl) {
                     let item = VariableDeclarator::new(
                         SPAN,
@@ -1677,7 +1670,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 &self.b,
             )),
             StmtKind::If(c, t, f) => {
-                let f = &*a.stmts(f);
+                let f = a.stmts(f);
                 let omit = walk::else_omitted(a, f)
                     || (tail.is_some() && matches!(f, [s] if walk::return_undefined(a, *s)));
                 let alternate = if omit {
@@ -1698,7 +1691,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     self.indented_expr(c, 1)?,
                     Statement::new_block_statement(
                         SPAN,
-                        self.with_indent(1, || self.block(&a.stmts(t), false))?,
+                        self.with_indent(1, || self.block(a.stmts(t), false))?,
                         &self.b,
                     ),
                     alternate,
@@ -1725,7 +1718,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     SPAN,
                     VariableDeclarationKind::Let,
                     self.b
-                        .vec1(self.declarator(self.name(NameSource::Variable(f.ident)), None)),
+                        .vec1(self.declarator(self.names.get(&a.ident(f.ident)), None)),
                     false,
                     &self.b,
                 );
@@ -1742,7 +1735,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 ));
             }
             StmtKind::IntSwitch(e, id) => {
-                let info = &*a.int_switch(id);
+                let info = a.int_switch(id);
                 let mut cases = self.b.vec();
                 for (value, c) in &info.clauses {
                     cases.push(self.case(self.number(&Number::int(*value))?, c)?);
@@ -1751,7 +1744,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.with_indent(2, || self.block(&a.stmts(b), false))?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }
@@ -1763,7 +1756,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 ));
             }
             StmtKind::StringSwitch(e, id) => {
-                let info = &*a.string_switch(id);
+                let info = a.string_switch(id);
                 let mut cases = self.b.vec();
                 for c in &info.clauses {
                     cases.push(self.case(self.switch_tag(&c.tag_type)?, &c.clause)?);
@@ -1772,7 +1765,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.with_indent(2, || self.block(&a.stmts(b), false))?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }
@@ -1787,7 +1780,7 @@ impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
                 let t = a.try_info(id);
                 let handler = if let Some((id, body)) = t.catch {
                     let pattern = BindingPattern::BindingIdentifier(
-                        self.b.alloc(self.binding(self.name(NameSource::Variable(id)))),
+                        self.b.alloc(self.binding(self.names.get(&a.ident(id)))),
                     );
                     Some(self.b.alloc(CatchClause::new(
                         SPAN,

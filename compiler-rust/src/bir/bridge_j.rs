@@ -16,18 +16,12 @@ pub struct Imported {
     pub arena: Bir,
     /// Synthetic top-level statement list.
     pub root: NodeId,
-    pub(super) idents: Vec<Ident>,
-    pub(super) modules: Vec<js::ModuleId>,
-    pub(super) exports: Vec<Ident>,
+    idents: Vec<Ident>,
+    modules: Vec<js::ModuleId>,
+    exports: Vec<Ident>,
     export_set: ahash::AHashSet<Ident>,
-    pub(super) reservations: Vec<Ident>,
-    pub(super) side_effect: Option<String>,
-    // Legacy identity associations use the existing VarTable namespace too.
-    pub(super) module_variables: Vec<VarId>,
-    pub(super) import_variables: Vec<VarId>,
-    pub(super) export_variables: Vec<VarId>,
-    pub(super) reservation_variables: Vec<VarId>,
-    pub(super) syntax_variable_count: usize,
+    reservations: Vec<Ident>,
+    side_effect: Option<String>,
     /// Number of source occurrences decoded, including statement lists.
     pub steps: usize,
 }
@@ -35,13 +29,8 @@ pub struct Imported {
 impl Imported {
     /// Plain J tree built by lowering, before export coercion and dependency discovery.
     pub(super) fn from_lowering(arena: Bir, root: NodeId, idents: Vec<Ident>) -> Self {
-        let syntax_variable_count = idents.len();
-        Self {
-            arena, root, idents, modules: vec![], exports: vec![],
-            export_set: Default::default(), reservations: vec![], side_effect: None, steps: 0,
-            module_variables: vec![], import_variables: vec![], export_variables: vec![],
-            reservation_variables: vec![], syntax_variable_count,
-        }
+        Self { arena, root, idents, modules: vec![], exports: vec![],
+            export_set: Default::default(), reservations: vec![], side_effect: None, steps: 0 }
     }
 }
 
@@ -216,6 +205,9 @@ impl Importer {
             self.ids.push(id);
             v
         });
+        if id.is_js() || (id.is_global() && id.stamp() == 0) {
+            self.b.vars.flags[v.index()].0 |= VarFlags::JS_IDENT;
+        }
         // Ident equality deliberately ignores names on stamped locals and all
         // flags. The bridge cannot silently unify different printed identities.
         if self.ids[v.index()].cmp(&id) != std::cmp::Ordering::Equal {
@@ -747,7 +739,7 @@ impl Importer {
                 }
             }
         }
-        let node = self.b.new_node(view, aux);
+        let node = super::j::plain::node(&mut self.b, view, aux);
         let cold = match s {
             Source::Expr(e) => a.expr_cold(e),
             Source::Stmt(s) => a.stmt_cold(s),
@@ -837,16 +829,10 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
         }
     }
     let root = values[0];
-    let export_variables = p.program.exports.iter().map(|&id| {
+    for &id in &p.program.exports {
         let v = i.var(id);
         i.b.export(v, id.name_atom());
-        v
-    }).collect();
-    let syntax_variable_count = i.ids.len();
-    let module_identities: Vec<_> = i.b.pools.j_modules.iter().map(|m| m.id).collect();
-    let module_variables = module_identities.into_iter().map(|id| i.var(id)).collect();
-    let import_variables = p.modules.iter().map(|m| i.var(m.id)).collect();
-    let reservation_variables = p.program.name_reservations.iter().map(|&id| i.var(id)).collect();
+    }
     for v in 0..i.ids.len() {
         let v = VarId(index(v));
         if i.b.vars.binder(v).is_none() {
@@ -867,8 +853,6 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
         reservations: p.program.name_reservations.clone(),
         side_effect: p.side_effect.clone(),
         steps,
-        module_variables, import_variables, export_variables, reservation_variables,
-        syntax_variable_count,
     })
 }
 
@@ -905,7 +889,7 @@ impl Output {
 // Explicit discriminant inventories: no transmute and no unsafe. The bridge
 // doesn't cast an untrusted aux back into an enum.
 macro_rules! decode {
-    ($name:ident,$ty:ty,[$($variant:path),+])=>{pub(super) fn $name(n:u16)->Result<$ty,Unsupported>{$(if n==$variant as u16{return Ok($variant);})+Err(Unsupported(concat!("invalid J encoding: ",stringify!($name))))}};
+    ($name:ident,$ty:ty,[$($variant:path),+])=>{fn $name(n:u16)->Result<$ty,Unsupported>{$(if n==$variant as u16{return Ok($variant);})+Err(Unsupported(concat!("invalid J encoding: ",stringify!($name))))}};
 }
 decode!(
     bin,
@@ -984,7 +968,7 @@ decode!(
         UsedStats::NA
     ]
 );
-pub(super) fn mutability(n: u16) -> Result<MutableFlag, Unsupported> {
+fn mutability(n: u16) -> Result<MutableFlag, Unsupported> {
     match n {
         0 => Ok(MutableFlag::Immutable),
         1 => Ok(MutableFlag::Mutable),
@@ -1003,6 +987,7 @@ struct Exporter<'a> {
 }
 impl Exporter<'_> {
     fn ident(&self, v: VarId) -> Result<Ident, Unsupported> {
+        let v = self.p.arena.vars.j_origin.get(&v).copied().unwrap_or(v);
         self.p
             .idents
             .get(v.index())
@@ -1511,18 +1496,8 @@ impl Exporter<'_> {
     }
 }
 
-#[cfg(test)]
-thread_local! {
-    static EXPORT_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-#[cfg(test)]
-pub(crate) fn export_calls() -> usize { EXPORT_CALLS.get() }
-
 /// Export to a fresh JS arena without running any smart constructors.
 pub fn export_js(p: &Imported) -> Result<j::JsDepsProgram, Unsupported> {
-    #[cfg(test)]
-    EXPORT_CALLS.set(EXPORT_CALLS.get() + 1);
     enum Work {
         Enter(NodeId),
         Finish(NodeId, usize),
@@ -1631,21 +1606,37 @@ mod tests {
         );
         assert_eq!(imported.arena.pools.j_modules, again.arena.pools.j_modules);
     }
-    fn expression(build: impl FnOnce(&mut j::JsArena, j::Expr, j::Expr) -> E) {
-        let mut a = j::JsArena::new();
-        let x = a.expr(E::Bool(true));
-        let y = a.expr(E::Bool(false));
-        let kind = build(&mut a, x, y);
-        let comment = a.str("retained comment");
-        let e = a.expr_with(
-            kind,
-            j::Cold {
-                comment: Some(comment),
-                source_loc: Some(LamLoc::for_test(17)),
-            },
-        );
-        let s = a.stmt(S::Exp(e));
-        roundtrip(&program(a, vec![s]));
+    fn expression(mut build: impl FnMut(&mut j::JsArena, j::Expr, j::Expr) -> E) {
+        for effects in 0..4 {
+            let mut a = j::JsArena::new();
+            let mut operand = |impure| {
+                if impure {
+                    let raw = a.raw_id(js::JsRawInfo { code: "effect()".into(), is_stmt: false });
+                    a.expr(E::RawJsCode(raw))
+                } else { a.expr(E::Bool(true)) }
+            };
+            let x = operand(effects & 1 != 0);
+            let y = operand(effects & 2 != 0);
+            let kind = build(&mut a, x, y);
+            let comment = a.str("retained comment");
+            let e = a.expr_with(kind, j::Cold {
+                comment: Some(comment), source_loc: Some(LamLoc::for_test(17)),
+            });
+            let expected_pure = js::build::expression_has_no_side_effects(&a, e);
+            let expected_strict = crate::lambda::js_exp_make::js_expr_no_side_effects(&a, e);
+            let expected_equal = js::build::ocaml_eq_expression(&a, e, e);
+            let expected_subexpression = crate::lambda::js_exp_make::is_pure_subexpression(&a, e);
+            let s = a.stmt(S::Exp(e));
+            let p = program(a, vec![s]);
+            let imported = import_js(&p).unwrap();
+            let View::SBlock { statements } = imported.arena.view(imported.root) else { panic!() };
+            let View::SExp { value } = imported.arena.view(statements[0]) else { panic!() };
+            assert_eq!(imported.arena.node(value).flags().contains(NodeFlags::PURE), expected_pure);
+            assert_eq!(crate::bir::j::facts::strictly_pure(&imported.arena, value), expected_strict);
+            assert_eq!(crate::bir::j::equal::equal(&imported.arena, value, value, &mut 0), expected_equal);
+            assert_eq!(imported.arena.node(value).flags().contains(NodeFlags::J_SUBEXPR), expected_subexpression);
+            roundtrip(&p);
+        }
     }
     macro_rules! expr_case {
         ($name:ident,|$a:ident,$x:ident,$y:ident|$body:expr) => {
@@ -1831,7 +1822,11 @@ mod tests {
                 source_loc: Some(LamLoc::for_test(19)),
             },
         );
-        roundtrip(&program(a, vec![s]));
+        let p = program(a, vec![s]);
+        let imported = import_js(&p).unwrap();
+        let expected = js::build::ocaml_eq_block(&p.program.arena, &p.program.block, &p.program.block);
+        assert_eq!(crate::bir::j::equal::equal(&imported.arena, imported.root, imported.root, &mut 0), expected);
+        roundtrip(&p);
     }
     macro_rules! stmt_case {
         ($name:ident,|$a:ident,$x:ident,$b:ident|$body:expr) => {

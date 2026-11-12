@@ -4,20 +4,20 @@ import json
 from pathlib import Path
 import tempfile
 import unittest
-from test_printer_parity import check, compare_exact, summarize
+from test_printer_parity import check, summarize
 
 
 class PrinterCoverageTests(unittest.TestCase):
     def setUp(self):
-        self.baseline = {"runtime": {"outputs": 10, "emitted": 8, "emitted_from_bir": 8, "unsupported": {"reason": 2}}}
+        self.baseline = {"runtime": {"outputs": 10, "emitted": 8, "unsupported": {"reason": 2}}}
 
     def test_unchanged_and_improved(self):
         check(self.baseline, self.baseline)
-        check({"runtime": {"outputs": 10, "emitted": 9, "emitted_from_bir": 9, "unsupported": {"reason": 1}}}, self.baseline)
+        check({"runtime": {"outputs": 10, "emitted": 9, "unsupported": {"reason": 1}}}, self.baseline)
 
     def test_regressions(self):
         for field, value, message in [("outputs", 9, "outputs missing"), ("emitted", 7, "emitted count fell"),
-                                      ("emitted", 0, "zero oxc"), ("emitted_from_bir", 7, "Bir emitted count fell"), ("unsupported", {"new": 1}, "new fallback"),
+                                      ("emitted", 0, "zero oxc"), ("unsupported", {"new": 1}, "new fallback"),
                                       ("unsupported", {"reason": 3}, "fallback count grew")]:
             actual = copy.deepcopy(self.baseline)
             actual["runtime"][field] = value
@@ -61,27 +61,6 @@ class PrinterCoverageTests(unittest.TestCase):
                 "output": str(root / "a.mjs"), "emitted": True, "unsupported": "reason"}))
             with self.assertRaisesRegex(RuntimeError, "contradictory"):
                 summarize(root, [root / "a.mjs"], root)
-
-class BirByteGateTests(unittest.TestCase):
-    def test_every_output_is_exact_including_maps(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            left, right = root / "left", root / "right"
-            left.mkdir()
-            right.mkdir()
-            files = {"a.mjs", "a.mjs.map"}
-            for name in files:
-                (left / name).write_bytes(b"same")
-                (right / name).write_bytes(b"same")
-            compare_exact(left, right, files, files)
-            for name in files:
-                (right / name).write_bytes(b"same ")
-                with self.assertRaisesRegex(RuntimeError, "output bytes differ"):
-                    compare_exact(left, right, files, files)
-                (right / name).write_bytes(b"same")
-            with self.assertRaisesRegex(RuntimeError, "file sets differ"):
-                compare_exact(left, right, files, {"a.mjs"})
-
 
 class PrinterOptionTests(unittest.TestCase):
     def parse(self, args, printer=None):

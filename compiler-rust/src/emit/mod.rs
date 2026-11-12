@@ -2,13 +2,11 @@
 mod build;
 mod literal;
 mod naming;
-mod bir_naming;
 mod program;
 mod raw;
 pub use raw::RawSegment;
 pub mod sourcemap;
 mod walk;
-pub(crate) mod view;
 
 use crate::js_ir::{ModulePathResolver, arena::JsDepsProgram};
 use std::collections::BTreeMap;
@@ -26,8 +24,6 @@ pub enum PrinterMode {
     Legacy,
     /// Experimental AST output, with whole-file fallback.
     Oxc(Arc<PrinterStats>),
-    /// Experimental J-level bridge output, with JS-IR fallback on import limits.
-    OxcBir(Arc<PrinterStats>),
 }
 
 impl PrinterMode {
@@ -39,7 +35,6 @@ impl PrinterMode {
     fn from_value(value: Option<&str>) -> Self {
         match value {
             Some("oxc") => Self::Oxc(Arc::default()),
-            Some("oxc-bir") => Self::OxcBir(Arc::default()),
             _ => Self::Legacy,
         }
     }
@@ -59,8 +54,6 @@ pub struct Coverage {
     pub supported: usize,
     /// Number of legacy fallbacks by first unsupported construct.
     pub unsupported: BTreeMap<&'static str, usize>,
-    /// Bridge import limits, counted independently of printer fallback.
-    pub bridge_unsupported: BTreeMap<&'static str, usize>,
 }
 
 impl PrinterStats {
@@ -91,11 +84,6 @@ impl PrinterStats {
             .unwrap_or_default()
     }
 
-    pub(crate) fn record_bridge_unsupported(&self, reason: &'static str) {
-        *self.coverage.lock().expect("printer coverage lock poisoned")
-            .bridge_unsupported.entry(reason).or_default() += 1;
-    }
-
     /// Count one attempted output.
     pub fn record(&self, result: &Result<(String, Option<String>), Unsupported>) {
         let mut counts = self
@@ -113,7 +101,6 @@ impl PrinterStats {
     pub(crate) fn report_output(
         &self,
         result: &Result<(String, Option<String>), Unsupported>,
-        bridge_reason: Option<&'static str>,
         source: Option<&std::path::Path>,
         output: Option<&std::path::Path>,
     ) -> anyhow::Result<()> {
@@ -137,7 +124,6 @@ impl PrinterStats {
         let mut hash = std::collections::hash_map::DefaultHasher::new();
         output.hash(&mut hash);
         reason.hash(&mut hash);
-        bridge_reason.hash(&mut hash);
         let directory = std::path::Path::new(&directory);
         std::fs::create_dir_all(directory)?;
         let path = directory.join(format!("{:016x}.json", hash.finish()));
@@ -154,7 +140,6 @@ impl PrinterStats {
             &mut file,
             &serde_json::json!({
                 "source": source, "output": output, "emitted": result.is_ok(), "unsupported": reason,
-                "bridge_unsupported": bridge_reason,
             }),
         )?;
         Ok(())
@@ -207,25 +192,6 @@ pub(crate) fn emit_audited(
     )
 }
 
-/// Emit directly through a borrowed J-level view; no migration exporter runs.
-#[allow(clippy::too_many_arguments)]
-pub(crate) fn emit_bir(
-    imported: &crate::bir::bridge_j::Imported,
-    resolver: &ModulePathResolver, directives: &[String],
-    debug: bool, jsx_preserve: bool, header: bool,
-    source_map: Option<&sourcemap::Options<'_>>,
-    audit: Option<&mut Vec<RawSegment>>,
-) -> Result<(String, Option<String>), Unsupported> {
-    let view = crate::bir::emit_view::EmitterView::new(imported)?;
-    let block = view.root();
-    let names = bir_naming::Names::collect(&view, &block, resolver, jsx_preserve)?;
-    program::emit_named(
-        program::Unit { arena: &view, block: &block, modules: view.modules(),
-            exports: view.exports(), reservations: view.reservations(), side_effect: view.side_effect() },
-        &names, resolver, directives, program::FileOptions { debug, jsx_preserve, header }, source_map, audit,
-    )
-}
-
 /// Emit with source maps, retaining whole-file fallback on unsupported mappings.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
@@ -258,30 +224,6 @@ mod tests {
             PrinterMode::from_value(Some("oxc")),
             PrinterMode::Oxc(_)
         ));
-    }
-
-    #[test]
-    fn bir_selection_is_explicit() {
-        assert!(matches!(PrinterMode::from_value(Some("oxc-bir")), PrinterMode::OxcBir(_)));
-    }
-
-    #[test]
-    fn bir_wiring_emits_with_oxc() {
-        use crate::driver::{CompilerOptions, compile_source_to_js_with_options};
-        let source = "let identity = x => x; let value = identity(42)";
-        let mut options = CompilerOptions {
-            js_printer: PrinterMode::Oxc(Arc::default()),
-            ..CompilerOptions::default()
-        };
-        let expected = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
-        let stats = Arc::new(PrinterStats::default());
-        options.js_printer = PrinterMode::OxcBir(stats.clone());
-        let exports = crate::bir::bridge_j::export_calls();
-        let actual = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
-        assert_eq!(crate::bir::bridge_j::export_calls(), exports, "direct emission must not export a JS arena");
-        assert_eq!(actual, expected);
-        assert_eq!(stats.snapshot().supported, 1);
-        assert!(stats.snapshot().bridge_unsupported.is_empty());
     }
 
     #[test]
@@ -320,11 +262,6 @@ mod oracle_tests {
         options.js_printer = PrinterMode::Oxc(stats.clone());
         let actual = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
         assert_eq!(stats.snapshot().supported, 1, "{source}: {:?}", stats.snapshot());
-        let bir_stats = Arc::new(PrinterStats::default());
-        options.js_printer = PrinterMode::OxcBir(bir_stats.clone());
-        let from_bir = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
-        assert_eq!(actual, from_bir, "Bir emission bytes: {source}");
-        assert!(bir_stats.snapshot().bridge_unsupported.is_empty(), "{source}");
         let mode = ReformatOptions {
             split_file: true,
             drop_decoration_comments: true,

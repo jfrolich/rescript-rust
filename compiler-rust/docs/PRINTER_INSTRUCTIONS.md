@@ -1,10 +1,20 @@
 # Three-way printer instruction measurement
 
+## Historical experiment
+
+The `oxc-bir` mode measured here was an experiment and is **not on trunk**.
+Its code is preserved at commit
+`8242898f092fd015ca958fc0558847d8dfb4e61d` on branch
+`s3-1b-oxc-bir-emitter`. [THREE_TREES.md section 9](THREE_TREES.md#9-the-saving)
+uses these figures as evidence for dropping JS-level Bir emission as a product
+path. This document and its summary script retain the evidence, not that mode.
+
 ## Status
 
-The direct Bir emitter and dense naming implementation are built and parity
-checked. Both `tests/tests` and the 3,735-module application are measured below. The default remains legacy: even excluding import,
-the current direct path does **not** meet the default-switch cost gate.
+The experimental direct Bir emitter and dense naming implementation were built
+and parity checked. Measurements below cover `tests/tests` and the 3,735-module
+application. Even excluding import, the experiment did **not** meet the
+default-switch cost gate.
 
 ## Measurement setup
 
@@ -175,6 +185,14 @@ application comparison. The negative result is retained, not optimized away in
 this change.
 
 ## Reproduce
+
+The `oxc-bir` sample requires the experimental code at commit
+`8242898f092fd015ca958fc0558847d8dfb4e61d` of branch
+`s3-1b-oxc-bir-emitter`; current trunk does not implement that mode. Use that
+revision in a separate checkout. The original samples remain pinned to the
+compiler commit and binary hash recorded above, before subsequent trunk
+integration; rebuilding the later preserved experiment is not a claim to
+reproduce the exact original counts.
 
 Build one release binary for all modes, with line tables for attribution:
 

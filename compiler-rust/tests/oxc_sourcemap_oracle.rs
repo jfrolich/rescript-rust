@@ -127,15 +127,6 @@ fn run() {
             let actual = compile_file_to_js_with_options(path, &options)
                 .unwrap_or_else(|e| panic!("oxc {}: {e:#}", path.display()));
             let actual_map = std::fs::read_to_string(&map_path).unwrap();
-            let bir_stats = Arc::new(PrinterStats::default());
-            options.js_printer = PrinterMode::OxcBir(bir_stats.clone());
-            let from_bir = compile_file_to_js_with_options(path, &options)
-                .unwrap_or_else(|e| panic!("oxc-bir {}: {e:#}", path.display()));
-            let bir_map = std::fs::read_to_string(&map_path).unwrap();
-            assert_eq!(actual, from_bir, "Bir emission bytes: {} {format:?}", path.display());
-            assert_eq!(actual_map, bir_map, "Bir map bytes: {} {format:?}", path.display());
-            assert!(bir_stats.snapshot().bridge_unsupported.is_empty(),
-                "Bir import fallback: {}: {:?}", path.display(), bir_stats.snapshot());
             assert_eq!(mapping_sequence::sequence(&legacy_map), mapping_sequence::sequence(&actual_map), "mapping sequence: {}", path.display());
             let coverage = stats.snapshot();
             assert_eq!(

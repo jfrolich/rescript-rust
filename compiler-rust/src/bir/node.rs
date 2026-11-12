@@ -28,10 +28,10 @@ impl NodeFlags {
     pub const JS_CHAR_PRESENT: u8 = 128;
     /// J-only: strict purity, reusing the L tail-position bit after lowering.
     pub const STRICT: u8 = Self::TAIL;
+    /// J-only: removable by E:146 is_pure_subexpression (not general purity).
+    pub const J_SUBEXPR: u8 = Self::DEAD;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
     pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
-    /// J-only: evaluating the expression runs no code (A:90).
-    pub const RUNS_NO_CODE: u8 = Self::DEAD;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0

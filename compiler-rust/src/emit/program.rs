@@ -30,16 +30,6 @@ pub(super) struct FileOptions {
     pub header: bool,
 }
 
-/// File metadata is borrowed independently of the node representation.
-pub(super) struct Unit<'a, V: super::view::View> {
-    pub arena: &'a V,
-    pub block: &'a [crate::js_ir::arena::Stmt],
-    pub exports: &'a [crate::ident::Ident],
-    pub reservations: &'a [crate::ident::Ident],
-    pub modules: &'a [crate::js_ir::ModuleId],
-    pub side_effect: Option<&'a str>,
-}
-
 pub(super) fn emit(
     program: &JsDepsProgram,
     resolver: &ModulePathResolver,
@@ -48,26 +38,8 @@ pub(super) fn emit(
     source_map: Option<&super::sourcemap::Options<'_>>,
     audit: Option<&mut Vec<super::RawSegment>>,
 ) -> Result<(String, Option<String>), Unsupported> {
-    let p = &program.program;
-    let names = Names::collect(program, resolver, options.jsx_preserve)?;
-    emit_named(
-        Unit { arena: &p.arena, block: &p.block, exports: &p.exports,
-            reservations: &p.name_reservations, modules: &program.modules,
-            side_effect: program.side_effect.as_deref() },
-        &names, resolver, directives, options, source_map, audit,
-    )
-}
-
-pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
-    unit: Unit<'_, V>,
-    names: &N,
-    resolver: &ModulePathResolver,
-    directives: &[String],
-    options: FileOptions,
-    source_map: Option<&super::sourcemap::Options<'_>>,
-    audit: Option<&mut Vec<super::RawSegment>>,
-) -> Result<(String, Option<String>), Unsupported> {
     let FileOptions { debug, jsx_preserve, header } = options;
+    let p = &program.program;
     let mut text = String::new();
     for directive in directives {
         text.push_str(directive);
@@ -76,11 +48,11 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
     if header {
         text.push_str(HEADER);
     }
-    if unit.modules.is_empty()
-        && unit.side_effect.is_none()
-        && unit.block.is_empty()
-        && unit.exports.is_empty()
-        && unit.reservations.is_empty()
+    if program.modules.is_empty()
+        && program.side_effect.is_none()
+        && p.block.is_empty()
+        && p.exports.is_empty()
+        && p.name_reservations.is_empty()
     {
         text.push_str(EMPTY);
         return Ok(match source_map {
@@ -88,8 +60,9 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
             None => (text, None),
         });
     }
+    let names = Names::collect(program, resolver, jsx_preserve)?;
     let allocator = Allocator::default();
-    let mut build = Build::new(&allocator, unit.arena, names);
+    let mut build = Build::new(&allocator, &p.arena, &names);
     build.debug = debug;
     build.jsx_preserve = jsx_preserve;
     let spans = source_map.map(|m| super::sourcemap::Spans::new(m.locations.clone(), m.source));
@@ -106,14 +79,14 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
             b,
         ));
     }
-    for (index, module) in unit.modules.iter().enumerate() {
+    for module in &program.modules {
         if module.dynamic_import {
             continue;
         }
         let Some(path) = resolver.resolve_module_path(module) else {
             continue;
         };
-        let name = names.name(unit.arena.name_key(super::view::NameSource::Import(index, module.id)));
+        let name = names.get(&module.id);
         let default = matches!(module.kind, Kind::External { default: true, .. });
         if commonjs {
             let call = Expression::new_call_expression(
@@ -170,18 +143,18 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
             ));
         }
     }
-    let statements = build.block(unit.block, true)?;
+    let statements = build.block(&p.block, true)?;
     let no_statements = statements.is_empty();
     body.extend(statements);
     if commonjs {
-        for (index, id) in unit.exports.iter().enumerate() {
+        for id in &p.exports {
             let export = js_export_name(id.name());
             let target = build.member(build.id("exports"), &export);
             let assignment = Expression::new_assignment_expression(
                 SPAN,
                 AssignmentOperator::Assign,
                 build.target(target)?,
-                build.id(names.name(unit.arena.name_key(super::view::NameSource::Export(index, *id)))),
+                build.id(names.get(id)),
                 b,
             );
             body.push(build.expression_statement(assignment));
@@ -197,12 +170,12 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
                 body.push(build.expression_statement(assignment));
             }
         }
-    } else if !unit.exports.is_empty() {
+    } else if !p.exports.is_empty() {
         let mut specifiers = b.vec();
-        for (index, id) in unit.exports.iter().enumerate() {
+        for id in &p.exports {
             let local = ModuleExportName::IdentifierName(IdentifierName::new(
                 SPAN,
-                build.text(names.name(unit.arena.name_key(super::view::NameSource::Export(index, *id)))),
+                build.text(names.get(id)),
                 b,
             ));
             let exported = ModuleExportName::IdentifierName(IdentifierName::new(
@@ -264,12 +237,12 @@ pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
     )?;
     // S0's split-file comparison preserves this gap, not just the comment.
     // With no exports the legacy printer ensures two newlines before the trailer.
-    text.push_str(if unit.exports.is_empty() {
+    text.push_str(if p.exports.is_empty() {
         if no_statements { "\n\n\n" } else { "\n\n" }
     } else {
         "\n"
     });
-    match &unit.side_effect {
+    match &program.side_effect {
         None => text.push_str("/* No side effect */\n"),
         Some(reason) => {
             text.push_str("/* ");

@@ -1445,8 +1445,9 @@ warnings from the decision tree.
 
 Pinned version: `oxc_allocator`, `oxc_ast`, `oxc_codegen`, `oxc_parser`,
 `oxc_span`, `oxc_syntax` at `=0.158.0`, the version the reformat tool
-`scripts/js-reformat` pins. The compiler also uses this version for
-classifying raw JS in `binary_ast/ppx.rs`; the old 0.49 dependency is gone. The facts about oxc below were checked
+`scripts/js-reformat` pins. `compiler-rust/Cargo.toml` depends on oxc 0.49 today (`oxc_parser` for
+classifying raw JS in `binary_ast/ppx.rs`); S1 moves that use to the pinned
+version so that one oxc is linked. The facts about oxc below were checked
 against 0.158.0 by reading `oxc_codegen` and by small experiments (building a
 program by hand, reformatting the 676 committed outputs under
 `tests/tests/src`).
@@ -1469,28 +1470,6 @@ J-level Bir (or, in S1, the JsArena program)
 Module layout: `compiler-rust/src/emit/` with `naming.rs`, `build.rs` (the
 only file that names oxc types), `program.rs` (imports, exports, file
 assembly), `literal.rs` (numbers, strings), `raw.rs` (raw JS), `sourcemap.rs`.
-
-S3.1b is opt-in as `RESCRIPT_JS_PRINTER=oxc-bir`. After the existing JS
-passes, `bridge_j::import_js` creates J-level Bir. The emitter reads it through
-`emit::view::View`, implemented by `JsArena` and `bir::emit_view::EmitterView`.
-`walk`, `Build` and file assembly are generic over this view; neither emission
-logic nor shape decisions are duplicated per representation. Bir accessors
-decode nodes directly and use temporary owned typed-list/payload guards where
-the two pool layouts differ. They do not construct a JsArena or retain another
-graph. JS-IR accessors borrow their existing lists and metadata.
-
-An unsupported import is counted separately and uses the existing JS-IR oxc
-emitter. A successful import never calls `export_js`; a test-only per-thread
-export counter checks this. The legacy printer remains the default, including
-its exact output and maps. The default-switch gate is direct emission at or
-below the legacy printer's instruction cost, not a presumed percentage saving.
-
-The new gate compares oxc-bir and oxc output **byte for byte**, including map
-JSON where supported. No reformat step is involved in this comparison. The
-original legacy-normalization, raw-byte, fixed-point and coverage gates remain;
-`printer_coverage.json` adds `emitted_from_bir` without changing old counts.
-The measurement procedure and attribution limits are in
-[PRINTER_INSTRUCTIONS.md](PRINTER_INSTRUCTIONS.md).
 
 ### E.2 Mapping to oxc AST nodes
 
@@ -1540,7 +1519,7 @@ Expressions:
 | `JBlockLit` | object, array or exception literal | the choice `print_caml_block` makes today is made when the J node is built |
 | `JOptional` | the value, or a helper call, as today | |
 | `JJsx` | `JSXElement` or `JSXFragment` in preserve mode when `jsx_printable`; otherwise the runtime call | E.7 |
-| `JRaw` | placeholder identifier, replaced with verbatim text after codegen | E.4.3 |
+| `JRaw` | the parsed raw JS, spliced | E.4.3 |
 | `JAwait`, `JSpread` | `AwaitExpression`, `SpreadElement` | |
 
 Program:
@@ -1555,60 +1534,65 @@ Program:
 
 ### E.3 Identifier naming and numbering
 
-The JS-IR path retains `emit::naming::Names`: reservation prepass,
-free-environment analysis and assignment traversal, with Ident-indexed lookup.
-The Bir path uses `emit::bir_naming::Names` instead:
+Names are decided today while printing (A.7). The naming step reproduces
+`Ext_pp_scope` as a walk over the J-level program in print order, before the
+oxc AST is built. In S1 it runs over `JsArena`; from S3 over `Bir`.
 
-1. One explicit-stack traversal records first name requests in print order,
-   while collecting each function's definitions and uses. On function exit,
-   remove its bound variables, handle the method's implicit `this` parameter,
-   order its free list by the retained legacy identities, and merge that list
-   into its parent's used set. Unprinted children still contribute to the exact
-   free environment as in the legacy algorithm. Eta bodies, omitted declarations,
-   unit tails and omitted branches record only the names actually printed.
-2. Consume the resulting name/scope schedule, not the IR again. Imports precede
-   reservations, statements and exports. A non-eta function reserves its free
-   environment plus its binder in sorted identity order before naming the binder;
-   an eta function names its binder first. Enter a scope with the captured bases'
-   complete suffix tables; siblings do not inherit each other's local assignments.
-3. Write each chosen name to `Vec<Option<Name>>` indexed by VarId. The visible
-   identity table is also dense. Only base-name collision/suffix groups, spelling
-   conversion and raw-name reservation use name-keyed maps/sets. Name requests
-   repeated in one scope are deduplicated. Uses, parameters, declarations, rest
-   binders and qualified modules read their slot directly, without hashing an
-   identifier. Loop-finish names and method-use flags have dense node-indexed
-   side tables.
+Algorithm (each line names the function it replaces):
 
-Module/import/export/reservation identities use the existing VarTable namespace
-as well. The importer resolves them using its existing legacy identity table and
-retains VarId associations in bridge metadata; the emitter creates no extra
-identifier-indexed map. No new stamps are allocated. External-shadow renaming
-remains an earlier JS pass, before import; it has not moved into naming.
+1. Reserve raw JS names (`reserve_js_names`): the set of stamp-0 or JS-flagged
+   names of the form `base$N` that the program mentions. Usually empty; the
+   arena already knows (`may_use_js_name_of_renamed_local`).
+2. Rename locals that shadow a JS global the program refers to
+   (`apply_external_shadow_pass`). This is a naming decision and moves here.
+3. Top scope: name imports in import order, then name reservations, then
+   walk statements, then exports.
+4. `name(var)`: if the variable already has a printed name visible from this
+   scope, use it. Otherwise take the mangled base
+   (`convert_ident_atom`), and pick the first of `base`, `base$1`, ... not
+   used in the scope and, for suffixed candidates, not reserved
+   (`add_ident`).
+5. Entering a function: compute its free variables (once per function;
+   `FreeVarScratch`), add the function's own binding, sort by `(order, name)`,
+   name each in the enclosing scope if unnamed, then open a scope seeded with
+   those names' suffix tables (`with_reserved_ident_scope`).
+6. Walk in the order the printer prints: declaration name before value except
+   where today reserves first (`print_variable_declaration` reserves the
+   function's environment before naming the binding), parameters before body,
+   `for` variable before bounds, `catch` variable before handler.
+7. Fresh names the printer invents (`fresh_scoped_name`: `i_finish`, the
+   `this` binding of methods) are created here in the same positions.
 
-The traversal and constructor share `emit::walk` decisions, including expression
-child order. They may call a shape predicate independently; there is no cache of
-old JS-IR decisions. The Bir pass has no separate reservation prepass or recursive
-assignment walk. It still visits the unit once to compute the following missing
-relations; a conservative `CAPTURED` bit and aggregate use count are not an exact
-free environment. `capture_flags_do_not_encode_function_environments` constructs
-two units with identical variable-table facts and different capture owners.
+Data: `printed: Vec<Name>` indexed by variable; a scope is a small map from
+base name to (next suffix, list of (variable, printed)). Scopes are pooled as
+`spare_name_scopes` are today.
 
-| Relation not maintained today | Computed during naming | Cost of maintaining it during lowering/edits |
-| --- | --- | --- |
-| Exact capture owners/free variables per function | Local definition/use sets, bottom-up free lists, sorted by legacy identity order | A variable ID plus multiplicity per function-variable relation, and a list handle per function. Adding/removing a use updates affected ancestor environments until the binder; moving a subtree may change all intervening functions. A sorted-vector insertion/removal costs the affected list length; multiplicities distinguish removal of the last use. |
-| First print-order requests and scope boundaries | A flat per-function schedule, with first requests deduplicated | Store ordered request spans per function. A local append can append requests; insertion, removal or a change between eta/arrow/block forms can invalidate the containing function's order and first occurrences. Rebuilding that function's schedule is linear in its naming-relevant subtree; an order-maintenance index could trade extra metadata for logarithmic local insertion, but is not implemented. |
+The walk order must equal print order including the cases where the printer
+prints something other than the tree (eta-reduced functions, omitted dead
+declarations, omitted `else`). Therefore naming and AST building share one
+traversal skeleton (`emit::walk`), with naming as its first pass and building
+as its second; a decision such as "this declaration is not printed" is
+computed once and read by both.
 
-Neither relation is added to the maintained Bir schema in S3.1b. Work is bounded
-by visited nodes, requested names and propagated captures, plus sorting the exact
-free lists. Step counters include sorting comparisons and name-collision probes.
-The 10,000-variable single-function and 10,000-nested-function tests (each function
-capturing the outermost variable) check linear growth against their 5,000-element
-versions. The traversal and schedule consumption both use explicit stacks.
+Stamps. Step 5 is the only place where the order of two identifiers, rather
+than their identity, reaches the output: when two not-yet-named identifiers
+with the same base name are free in the same function, the one with the
+smaller stamp gets the unsuffixed name. `Bir` keeps a per-variable `order`
+(creation sequence number) for this. Variables from the typed tree take the
+order of their type-checker identifier; variables the backend creates take
+the next number. Because rounds sweep in today's traversal order (C.2, row
+9), relative order is preserved for the cases that matter.
 
-Legacy identity order remains observable when same-base names are reserved
-together. This change does not redefine that order or claim that such collisions
-never occur. The byte-equality gate, not a stamp-parity assumption, checks the
-chosen names. All table and schedule storage is per emission, never global.
+Since type-checker stamp parity is not a requirement, this dependence should
+not survive. S1 adds a counter to the naming step (how often step 5 names two
+same-base identifiers in one reservation) and reports it over all corpora. If
+it is zero everywhere, the sort key is redefined as "position of the binder
+in print order", which needs no stamps, and row 9 of C.2 is closed. If not,
+the cases are listed and the canonical key is chosen to match them. Unknown
+until measured.
+
+Cost (estimated): one walk with a hash lookup per binder and none per use
+(a use reads `printed[var]`), about 300 instructions per source line.
 
 ### E.4 Text outside the AST: directives, header, comments, raw JS
 
@@ -1665,14 +1649,29 @@ raw pieces can share their scan; raw-free files currently only copy the
 codegen buffer, so adding decorations introduces a scan plus per-hole work.
 Measure those costs separately before retaining comments by default.
 
-**E.4.3 Raw JS.** `%raw` expressions and statements remain verbatim. The
-current emitter registers placeholder identifiers and substitutes each hole
-exactly once after codegen, without scanning inserted text again. The existing
-raw classifiers still decide statement elision and expression grouping; parsed
-snippets are not spliced into the oxc tree. The raw audit checks exact payload
-bytes and a masked fixed point. A placeholder collision, unsupported raw-literal
-statement elision or unsupported raw source mapping retains its named whole-file
-fallback. Direct Bir emission uses the same raw path and classifiers.
+**E.4.3 Raw JS.** `%raw` expressions and statements are printed verbatim
+today. oxc has no verbatim node, so raw JS is parsed with `oxc_parser` into
+the module's allocator and spliced:
+
+- an expression: `Parser::parse_expression`; a statement: parsed as a
+  program and its statements spliced;
+- comments inside the snippet are carried: the snippet text is appended to
+  the synthetic source text, and the snippet's spans and comment spans are
+  shifted by its offset with a `VisitMut` over the spliced subtree. Without
+  the shift, checked by experiment, the snippet's own spans leak into the
+  source map and its comments are lost;
+- the result of the parse is cached per snippet text within a module (the
+  purity test `raw_js_is_pure` and `classify_js_stmt` already parse it once
+  with oxc; they can share the parse);
+- a snippet oxc cannot parse (today it is emitted as is, whatever it is) is
+  emitted as a placeholder identifier that file assembly replaces with the
+  verbatim text after printing. Such a module cannot be checked by the
+  reformat gate, in the reference or the candidate; the gate lists it as
+  "verbatim" and compares the text around the placeholders.
+
+Parentheses around raw functions and objects (`raw_js_expression_needs_paren`)
+are no longer decided by us: oxc parenthesises a spliced expression by
+precedence.
 
 ### E.5 Parentheses and association
 
@@ -1746,10 +1745,10 @@ container values, `JSXSpreadAttribute`, and children as elements or
 
 Known oxc defect (0.158.0, checked): a sequence expression inside a JSX
 expression container prints without parentheses, `{a, b}`, which does not
-parse. The committed `jsx_preserve_cases.mjs` hits it. The emitter currently
-returns the named `JSX sequence container` fallback: explicit grouping is not
-reliably retained by this codegen path. The reformat tool and its existing gate
-are unchanged by S3.1b.
+parse. The committed `jsx_preserve_cases.mjs` hits it. The emit step wraps
+such a child in an explicit `ParenthesizedExpression`; the reformat tool
+applies the same wrap to the reference after parsing (S0), and the defect is
+reported upstream.
 
 The inlining rule that protects JSX tags in preserve mode
 (`simplify_alias`, the `Pjsx` case) is unaffected.
@@ -1818,19 +1817,19 @@ printer currently emits no names (`names: []`); the adapter preserves that.
 outputs, with exact JS/map checks for fallback outputs. The default printer
 and its byte-exact source-map fixture remain unchanged.
 
-Allocator ownership. Both opt-in paths create one `oxc_allocator::Allocator`
-per emitted module, build the tree and print before dropping it. The AST and
-synthetic source text never outlive it or enter Bir. Worker-local allocator reuse
-was proposed in the original design but is not implemented by S3.1b. The output
-owns its JavaScript and optional source-map strings.
+Allocator ownership. One `oxc_allocator::Allocator` per worker thread, held
+in the worker's compilation context beside its other scratch state. For each
+module: build the AST, print, then `Allocator::reset()` (which keeps the
+largest chunk). The AST, the synthetic source text and parsed raw JS live in
+it and never outlive the module; nothing from it is stored in `Bir`, in
+summaries or across modules. `Program<'a>` borrows the allocator, so the emit
+function has the shape
+`fn emit(bir: &Bir, alloc: &Allocator, opts: &EmitOptions) -> Emitted` with
+`Emitted { code: String, map: Option<String> }` owning its data.
 
-The earlier 1,600-instructions/source-line estimate is not evidence of a win.
-See [PRINTER_INSTRUCTIONS.md](PRINTER_INSTRUCTIONS.md) for the same-binary
-three-way measurements: both corpora cost more overall with oxc-bir, and the
-public-corpus rendering cost remains above legacy even without import. Named
-self instructions cannot assign shared allocation or inlined work exclusively
-to import or emission; subtracting only the import bucket is not a proof of the
-future lowering-to-Bir path's total cost.
+Cost (estimated): building the AST is about one allocation and a few writes
+per J node, about 350 instructions per source line; oxc printing is 950
+(measured); naming 300. Total 1,600 against 5,800 today.
 
 ### E.9 What the reformat gate absorbs and what it does not
 
@@ -2038,11 +2037,11 @@ model with this document as its specification.
 | S1.1 | `emit/`: naming, oxc AST from `JsArena`, program assembly, literals, raw JS; `RESCRIPT_JS_PRINTER=oxc`; default legacy | `compiler-rust/src/emit/*`, `Cargo.toml`, `driver.rs` (`render_js_program`) | H.2 | 3,500 | S0.1 | yes, H.2 is the spec; E.5 needs a careful reviewer |
 | S1.2 | Source maps through oxc tokens; mapping-sequence gate | `emit/sourcemap.rs`, `js_ir/source_map.rs`, `tests/build_tests/source_map` | E.8 gate on the fixture and on `tests/tests` built with maps | 500 | S1.1 | yes |
 | S1.3 | Switch parity suites and CI to reformat-and-compare | scripts, `.github/workflows` | suites pass with the oxc printer and with the legacy printer | 150 | S0.2, S1.1 | yes |
-| S1.4 | Default printer is oxc. Second commit: regenerate committed outputs (about 900 files with the generated header under `tests/`, `packages/@rescript/runtime/lib`, `rewatch/testrepo`). Changelog entry | option default, generated files | all suites; direct Bir emission at or below legacy instruction cost | 20 plus generated | S1.2, S1.3, S3.1 | yes |
+| S1.4 | Default printer is oxc. Second commit: regenerate committed outputs (about 900 files with the generated header under `tests/`, `packages/@rescript/runtime/lib`, `rewatch/testrepo`). Changelog entry | option default, generated files | all suites; instruction count falls by about 2.8% | 20 plus generated | S1.2, S1.3 | yes |
 | S1.5 | Remove the legacy printer's layout code from release builds; it stays under `cfg(test)` while `lam_compile` tests print with it | `js_ir/printer.rs`, `js_ir/program_printer.rs` | suites | −3,000 | S1.4, two clean weeks | yes |
 | S2.1 | `Bir`: nodes, pools, views, constructors without rules, `validate`, text dump | `compiler-rust/src/bir/{mod,node,pools,vars,edit,validate,dump}.rs` | unit tests; size assertions; invariants of B.4 under random edits | 2,500 | none | yes, section B is the spec |
 | S2.2 | Bridges: import from `LamArena` and from `JsArena`, export to `LamArena`; `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `bir/bridge.rs`, `driver.rs`, `rewatch/src/build/compile.rs`, workflow | import then export is the identity on all corpora (compared with `sexp_lambda`) | 1,500 | S2.1 | yes |
-| S3.1 | Implemented opt-in `oxc-bir`: direct J view, shared construction, one naming traversal and dense VarId names; no export-back; measured on both corpora; default-switch gate closed (PRINTER_INSTRUCTIONS.md) | `emit/*`, `bir/emit_view.rs`, bridge identity metadata | Exact oxc/Bir JavaScript and map bytes; no-export counter; 10,000-element naming step tests; existing coverage unchanged | implemented | S1.1, S3.1a J bridge | yes |
+| S3.1 | Emit reads J-level `Bir` (the emit walk is written against a view trait implemented by `JsArena` and `Bir`); naming on `VarId` | `emit/*` | `JsArena` to `Bir` to text equals `JsArena` to text on all corpora | 800 | S1.4, S2.2 | yes |
 | S3.2 | J normalising rules and rounds J1 to J4, fed by importing the JS IR before the JS passes | `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `Check` against the legacy JS passes | 3,000 | S3.1 | yes, each rule cites its function (C.4) |
 | S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs`, `bir/bridge.rs` | `Check`; coverage reported | 4,500 | S2.2 | yes, with [BACKEND_LOWERING.md](BACKEND_LOWERING.md) as the specification: it is the table this row asked for. Exports and their coercion move to S3.9b there, and the gate does not need S3.2 |
 | S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,000 to 3,000 each | S3.3 | yes, per slice of BACKEND_LOWERING.md 8.3, which regroups them (`let rec` of functions with tail loops, `Assign` with loops, export coercion as S3.9b); static catch (S3.5) goes to the strongest reviewer, tail loops (S3.6) and loop labels (in S3.7) to a strong one |
@@ -2233,8 +2232,8 @@ block, exports, export_set, name_reservations }`, `modules`,
    comments per E.4.2.
 4. `emit::program` builds imports and exports, calls `Codegen`, and
    assembles the file (E.4.1).
-5. The allocator is created per call in S1.1 and remains per call in S3.1.
-   Worker-context reuse is not part of the direct-view implementation.
+5. The allocator is created per call in S1.1 and moved to the worker context
+   in S3.1, when the emit step gets its permanent signature.
 
 **Invariants.**
 
