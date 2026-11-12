@@ -8140,7 +8140,26 @@ fn moregen_link_structure(
             crate::types::typedtree::StructureItemDesc::Tstr_module(mb) => {
                 moregen_link_mod_expr(type_ctx, ta, ta.module_expr(mb.mb_expr), iface_val_types);
             }
-            _ => {}
+            // A derived binding is a `let` of a variable bound to a function.
+            crate::types::typedtree::StructureItemDesc::Tstr_derived(idx) => {
+                for bound in ta.derived.bound(*idx) {
+                    let Some(&iface_ty) = iface_val_types.get(bound.ident.name()) else {
+                        continue;
+                    };
+                    let iface_inst = crate::types::ctype::instance(type_ctx, iface_ty);
+                    moregen_link(type_ctx, bound.ty, iface_inst, &mut ahash::AHashSet::new());
+                }
+            }
+            crate::types::typedtree::StructureItemDesc::Tstr_eval(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_primitive(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_type(..)
+            | crate::types::typedtree::StructureItemDesc::Tstr_typext(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_exception(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_recmodule(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_modtype(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_include(_)
+            | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {}
         }
     }
 }

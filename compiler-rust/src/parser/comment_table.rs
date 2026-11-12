@@ -980,6 +980,10 @@ fn walk_structure_item(
     }
 
     match &si.pstr_desc {
+        StructureItemDesc::Pstr_derived(idx) => {
+            let general = crate::binary_ast::derive::general_item(arena, si.pstr_loc, *idx);
+            walk_structure_item(&general, t, comments, arena)
+        }
         StructureItemDesc::Pstr_primitive(vd) => walk_value_description(vd, t, comments, arena),
         StructureItemDesc::Pstr_open(od) => walk_open_description(od, t, comments, arena),
         StructureItemDesc::Pstr_value(inner) => {

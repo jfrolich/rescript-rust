@@ -5634,6 +5634,7 @@ fn private_extension_item_allowed(item: &StructureItem, arena: &ParseArena) -> b
     match &item.pstr_desc {
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_derived(_)
         | StructureItemDesc::Pstr_primitive(_)
         | StructureItemDesc::Pstr_typext(_)
         | StructureItemDesc::Pstr_exception(_) => true,
@@ -10656,6 +10657,16 @@ fn rewrite_structure_item_body(
                     pstr_loc: item.pstr_loc,
                 }]
             }
+        }
+        // A derived item keeps its plan; its general form is rewritten as the
+        // value group it is, which rewrites to one value group.
+        StructureItemDesc::Pstr_derived(idx) => {
+            let general = derive::general_item(arena, item.pstr_loc, *idx);
+            let [rewritten] = rewrite_structure_item_body(&general, arena).try_into().unwrap_or_else(
+                |_| unreachable!("a `let` group of generated bindings rewrites to one item"),
+            );
+            derive::set_general_form(arena, *idx, &rewritten.pstr_desc);
+            vec![item.clone()]
         }
         // Handle value bindings - need to rewrite expressions and patterns
         // Also handle @inline transformation

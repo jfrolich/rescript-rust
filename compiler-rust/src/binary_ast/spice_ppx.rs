@@ -4535,6 +4535,7 @@ fn structure_item_contains_spice_type_decl(item: &StructureItem, arena: &ParseAr
         }
         StructureItemDesc::Pstr_eval(_)
         | StructureItemDesc::Pstr_value(_)
+        | StructureItemDesc::Pstr_derived(_)
         | StructureItemDesc::Pstr_primitive(_)
         | StructureItemDesc::Pstr_typext(_)
         | StructureItemDesc::Pstr_exception(_)
@@ -5548,6 +5549,12 @@ impl<'a> LocCloner<'a> {
                     self.value_binding(binding);
                 }
                 *bindings = self.arena.push_vb_list(&new_bindings);
+            }
+            // The item keeps its plan; its general form is cloned as a value group.
+            StructureItemDesc::Pstr_derived(idx) => {
+                let mut general = super::derive::general_form(self.arena, *idx);
+                self.structure_item_desc(&mut general);
+                super::derive::set_general_form(self.arena, *idx, &general);
             }
             StructureItemDesc::Pstr_primitive(vd) => self.value_description(vd),
             StructureItemDesc::Pstr_type(inner) => {

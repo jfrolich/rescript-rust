@@ -8,8 +8,35 @@ pub mod plan;
 mod shape;
 pub(super) use shape::record as record_shapes;
 
-use crate::parse_arena::ParseArena;
-use crate::parser::ast::{SignatureItem, StructureItem};
+use crate::parse_arena::{LocIdx, ParseArena};
+use crate::parser::ast::{RecFlag, SignatureItem, StructureItem, StructureItemDesc};
+use plan::DerivedIdx;
+
+/// The general form of a derived item: the value group the derive generates
+/// for it, which the item stands for wherever a plan is not understood (the
+/// stored `.ast`, the parse tree dumps) or cannot be used (an obligation of
+/// the plan failed).
+/// Cost: O(1), one read of the item's slot; no allocation.
+pub fn general_form(arena: &ParseArena, idx: DerivedIdx) -> StructureItemDesc {
+    StructureItemDesc::Pstr_value((RecFlag::Nonrecursive, arena.plans().item(idx).general))
+}
+
+/// [`general_form`] as a structure item at `loc`. Cost: O(1).
+pub fn general_item(arena: &ParseArena, loc: LocIdx, idx: DerivedIdx) -> StructureItem {
+    StructureItem {
+        pstr_desc: general_form(arena, idx),
+        pstr_loc: loc,
+    }
+}
+
+/// Replace the general form of a derived item by `desc`, the value group a
+/// mapper made of [`general_form`]. Cost: O(1).
+pub fn set_general_form(arena: &mut ParseArena, idx: DerivedIdx, desc: &StructureItemDesc) {
+    let StructureItemDesc::Pstr_value((RecFlag::Nonrecursive, general)) = desc else {
+        unreachable!("a mapper keeps the general form of a derived item a `let` group")
+    };
+    arena.plans_mut().set_general(idx, *general);
+}
 
 /// Detect derives in a structure. O(items and visited attributes), delegating to
 /// the existing mapper scan; no additional traversal.
@@ -77,9 +104,21 @@ pub(super) fn mark_generated_item(item: &StructureItem, arena: &mut ParseArena) 
 /// hashing, synchronization or traversal.
 pub fn is_derived_item(item: &StructureItem, arena: &ParseArena) -> bool {
     match item.pstr_desc {
-        crate::parser::ast::StructureItemDesc::Pstr_value((_, bindings)) =>
-            arena.is_derived_value_group(bindings),
-        _ => false,
+        StructureItemDesc::Pstr_value((_, bindings)) => arena.is_derived_value_group(bindings),
+        StructureItemDesc::Pstr_derived(_) => true,
+        StructureItemDesc::Pstr_eval(_)
+        | StructureItemDesc::Pstr_primitive(_)
+        | StructureItemDesc::Pstr_type(_)
+        | StructureItemDesc::Pstr_typext(_)
+        | StructureItemDesc::Pstr_exception(_)
+        | StructureItemDesc::Pstr_module(_)
+        | StructureItemDesc::Pstr_recmodule(_)
+        | StructureItemDesc::Pstr_modtype(_)
+        | StructureItemDesc::Pstr_open(_)
+        | StructureItemDesc::Pstr_include(_)
+        | StructureItemDesc::Pstr_attribute(_)
+        | StructureItemDesc::Pstr_extension(_)
+        | StructureItemDesc::Pstr_raw(_) => false,
     }
 }
 

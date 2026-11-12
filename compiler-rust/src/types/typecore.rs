@@ -11066,6 +11066,9 @@ fn collect_module_expr_ident_heads(
                     | StructureItemDesc::Tstr_modtype(_)
                     | StructureItemDesc::Tstr_open(_)
                     | StructureItemDesc::Tstr_attribute(_) => {}
+                    StructureItemDesc::Tstr_derived(_) => {
+                        unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+                    }
                 }
             }
         }
@@ -12154,6 +12157,15 @@ fn collect_lident_idents_in_module_expr(
                     }
                     SID::Pstr_value(inner) => {
                         for binding in arena.vb_list(inner.1).iter() {
+                            collect_lident_idents_in_expression(
+                                arena,
+                                arena.get_expanded_expr(binding.pvb_expr),
+                                out,
+                            );
+                        }
+                    }
+                    SID::Pstr_derived(idx) => {
+                        for binding in arena.vb_list(arena.plans().item(*idx).general).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
                                 arena.get_expanded_expr(binding.pvb_expr),
@@ -19317,6 +19329,8 @@ fn is_nonexpansive_module_expr(
                 crate::types::typedtree::StructureItemDesc::Tstr_modtype(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_open(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => true,
+                // Every binding of a derived item is a function.
+                crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => true,
                 crate::types::typedtree::StructureItemDesc::Tstr_value(_, bindings) => ta
                     .value_bindings(*bindings)
                     .iter()
@@ -19921,6 +19935,9 @@ fn typed_structure_item_uses_ident(ta: &TypedArena, item: &StructureItem, target
         | StructureItemDesc::Tstr_exception(_)
         | StructureItemDesc::Tstr_open(_)
         | StructureItemDesc::Tstr_attribute(_) => false,
+        StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
+        }
     }
 }
 
@@ -20331,6 +20348,9 @@ fn rec_structure_item(
         | crate::types::typedtree::StructureItemDesc::Tstr_open(_)
         | crate::types::typedtree::StructureItemDesc::Tstr_attribute(_) => {
             (RecEnv::default(), RecUse::default())
+        }
+        crate::types::typedtree::StructureItemDesc::Tstr_derived(_) => {
+            unreachable!("{}", crate::types::derived::TOP_LEVEL_ONLY)
         }
     }
 }

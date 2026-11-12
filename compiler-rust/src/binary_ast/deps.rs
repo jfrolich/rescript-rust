@@ -302,6 +302,10 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_structure_item(&mut self, item: &StructureItem) {
         match &item.pstr_desc {
+            StructureItemDesc::Pstr_derived(idx) => {
+                let general = crate::binary_ast::derive::general_item(self.arena, item.pstr_loc, *idx);
+                self.add_structure_item(&general)
+            }
             StructureItemDesc::Pstr_eval(inner) => {
                 let (ref expr, ref _attrs) = **inner;
                 self.add_expr_idx(*expr);

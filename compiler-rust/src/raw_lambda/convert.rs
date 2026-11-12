@@ -4744,6 +4744,9 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                 }
                 self.convert_let_with_census(*rec_flag, self.ta.value_bindings(*bindings), body, bindings.start())
             }
+            StructureItemDesc::Tstr_derived(_) => {
+                unreachable!("the checker makes no derived item until it discharges plans")
+            }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
                 // OCaml always skips @internal.local modules from the field list,
