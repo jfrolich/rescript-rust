@@ -27,8 +27,8 @@ pub struct Imported {
     pub arena: Bir,
     /// The unit's root.
     pub root: NodeId,
-    idents: Vec<Ident>,
-    globals: Vec<Ident>,
+    pub(super) idents: Vec<Ident>,
+    pub(super) globals: Vec<Ident>,
     #[cfg(test)]
     identifier_lookups: usize,
 }

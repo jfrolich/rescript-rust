@@ -1,8 +1,13 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
+mod konst;
+#[cfg(test)]
+mod oracle_tests;
 pub mod out;
 
-use super::{NodeId, VarId};
+use super::bridge::Unsupported;
+use super::{Bir, NodeId, VarId, View};
+use crate::ident::Ident;
 use crate::lambda::lam_compat::LetKind;
 pub use out::{Finished, Free, FreeId, FreePool, Out, Probed, Span, StatementStack};
 
@@ -226,12 +231,290 @@ pub(crate) struct Lowered {
     pub finished: Finished,
 }
 
-/// N1: C:663 compile_deps_program_in_arena. Initial harness cut: no source
-/// construct is supported until the subsequent construct commits.
-pub(crate) fn lower(
-    _input: super::bridge::Imported,
-) -> Result<Lowered, super::bridge::Unsupported> {
-    Err(super::bridge::Unsupported("lowering not implemented"))
+/// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
+pub(crate) fn lower(input: super::bridge::Imported) -> Result<Lowered, Unsupported> {
+    let root = input.root;
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), root)?;
+    Ok(state.complete(Cx::value(), probed))
+}
+
+struct State {
+    source: Bir,
+    arena: Bir,
+    idents: Vec<Ident>,
+    statements: StatementStack,
+    free: FreePool,
+    source_steps: usize,
+}
+impl State {
+    /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
+    /// remain readable. Variables retain source identities, never global stamps.
+    fn new(mut input: super::bridge::Imported) -> Self {
+        let mut arena = Bir::default();
+        arena.begin_bulk();
+        arena.pools = std::mem::take(&mut input.arena.pools);
+        arena.func_owners.resize(arena.pools.funcs.len(), None);
+        for i in 0..input.arena.vars.len() {
+            let var = VarId(i as u32);
+            let made = arena.new_var_id(input.arena.vars.name(var), input.arena.vars.order(var));
+            assert_eq!(made, var);
+            arena.vars.flags[i] = input.arena.vars.flags[i];
+        }
+        arena.pools.j_modules = input
+            .globals
+            .iter()
+            .map(|&id| crate::js_ir::ModuleId {
+                id,
+                kind: crate::js_ir::op::Kind::Ml,
+                dynamic_import: false,
+            })
+            .collect();
+        Self {
+            source: input.arena,
+            arena,
+            idents: input.idents,
+            statements: StatementStack::default(),
+            free: FreePool::default(),
+            source_steps: 0,
+        }
+    }
+    /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
+    /// variable, module and function expressions are strictly pure by construction.
+    /// Delay safety reads child flags or the variable's final ASSIGNED/JS_GLOBAL facts.
+    fn pure_expression(&mut self, view: View<'_>, aux: u16) -> NodeId {
+        let delay_safe = if let View::Var { var } = view {
+            let flags = self.arena.vars.flags(var);
+            !flags.contains(super::VarFlags::ASSIGNED)
+                && !flags.contains(super::VarFlags::JS_GLOBAL)
+        } else if let View::JFun { .. } = view {
+            true
+        } else {
+            view.children().iter().all(|&child| {
+                self.arena
+                    .node(child)
+                    .flags()
+                    .contains(super::NodeFlags::DELAY_SAFE)
+            })
+        };
+        let node = self.arena.new_node(view, aux);
+        let mut flags = self.arena.node(node).flags();
+        flags.0 |= super::NodeFlags::STRICT;
+        if delay_safe {
+            flags.0 |= super::NodeFlags::DELAY_SAFE;
+        }
+        self.arena.nodes[node.index()].set_flags(flags);
+        node
+    }
+    /// K1: C:1529 compile_expr. SourceProbe owns the depth-independent traversal.
+    fn probe(&mut self, cx: Cx, node: NodeId) -> Result<Probed, Unsupported> {
+        let mut traversal = SourceProbe::default();
+        let output = traversal.probe(self, cx, node);
+        self.source_steps += traversal.steps;
+        output
+    }
+    /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
+    fn realize(&mut self, cx: Cx, probed: Probed) -> Out {
+        let mut free = std::mem::take(&mut self.free);
+        let out = free.realize(cx, probed, self);
+        self.free = free;
+        out
+    }
+    /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
+    /// in a plain sentinel SExp removed before export extraction and coercion.
+    fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
+        let out = self.realize(cx, probed);
+        let value = out
+            .value
+            .unwrap_or_else(|| self.pure_expression(View::JUndefined, 0));
+        let value = self.arena.new_node(View::SExp { value }, 0);
+        self.statements.push(value);
+        let run = self.statements.since(Span {
+            start: out.stmts.start,
+            len: 0,
+        });
+        let list = self.statements.take_list(&mut self.arena, run);
+        let root = self.arena.block_from_list(list);
+        self.arena.finish_bulk(root);
+        Lowered {
+            program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
+            finished: out.finished,
+        }
+    }
+}
+
+impl ProbeRules for State {
+    type Resume = std::convert::Infallible;
+    /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
+    fn enter(&mut self, _cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
+        let value = match self.source.view(node) {
+            View::Var { var } => self.pure_expression(View::Var { var }, 0),
+            View::Global { module } => self.pure_expression(
+                View::JQualified {
+                    module,
+                    member: None,
+                },
+                0,
+            ),
+            View::Const { value } => self.constant(value),
+            View::Apply { .. } => return Err(Unsupported("apply")),
+            View::Fun { .. } | View::Let { .. } | View::Seq { .. } => {
+                return Err(Unsupported("lowering not implemented"));
+            }
+            View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::Prim { primitive, .. } => {
+                use crate::lambda::lam_primitive::Primitive;
+                let reason = match &self.arena.primitive(primitive).primitive {
+                    Primitive::Psequand | Primitive::Psequor => "short circuit",
+                    Primitive::PjsCall(_)
+                    | Primitive::PjsApply
+                    | Primitive::PjsObjectCreate(_)
+                    | Primitive::PjsObjectGet(_)
+                    | Primitive::PjsObjectSet(_)
+                    | Primitive::PjsFnMethod => "external",
+                    Primitive::Pjsx(_) => "jsx",
+                    Primitive::Pimport(_) => "import",
+                    Primitive::Pawait => "await",
+                    Primitive::Pduprecord => "record copy",
+                    Primitive::PrecordRest(_) => "record rest",
+                    _ => "prim",
+                };
+                return Err(Unsupported(reason));
+            }
+            View::If { .. } => return Err(Unsupported("if")),
+            View::Switch { .. } => return Err(Unsupported("switch")),
+            View::StrSwitch { .. } => return Err(Unsupported("string switch")),
+            View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
+            View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
+            View::While { .. }
+            | View::For { .. }
+            | View::ForOf { .. }
+            | View::ForAwaitOf { .. }
+            | View::Break
+            | View::Continue => return Err(Unsupported("loop")),
+            View::Assign { .. } => return Err(Unsupported("assign")),
+            View::JBin { .. }
+            | View::JNot { .. }
+            | View::JBnot { .. }
+            | View::JTypeof { .. }
+            | View::JIn { .. }
+            | View::JCond { .. }
+            | View::JSeq { .. }
+            | View::JCall { .. }
+            | View::JFlatCall { .. }
+            | View::JNew { .. }
+            | View::JIndex { .. }
+            | View::JDot { .. }
+            | View::JLength { .. }
+            | View::JIsNullish { .. }
+            | View::JStrAppend { .. }
+            | View::JFun { .. }
+            | View::JObject { .. }
+            | View::JArray { .. }
+            | View::JBlockLit { .. }
+            | View::JOptional { .. }
+            | View::JJsx { .. }
+            | View::JTemplate { .. }
+            | View::JTagged { .. }
+            | View::JRaw { .. }
+            | View::JAwait { .. }
+            | View::JSpread { .. }
+            | View::JQualified { .. }
+            | View::JNumber { .. }
+            | View::JStr { .. }
+            | View::JBool
+            | View::JNull
+            | View::JUndefined
+            | View::JJson { .. }
+            | View::JRecordRest { .. }
+            | View::SBlock { .. }
+            | View::SDecl { .. }
+            | View::SExp { .. }
+            | View::SIf { .. }
+            | View::SWhile { .. }
+            | View::SForRangeExisting { .. }
+            | View::SForRange { .. }
+            | View::SForOf { .. }
+            | View::SForAwaitOf { .. }
+            | View::SSwitch { .. }
+            | View::SReturn { .. }
+            | View::SThrow { .. }
+            | View::STry { .. }
+            | View::SBreak { .. }
+            | View::SContinue { .. }
+            | View::SDebugger
+            | View::SRest { .. } => unreachable!("expected level-L source"),
+        };
+        Ok(ProbePlan::Ready(Probed::Free(
+            self.free.push(Free::Leaf(value)),
+        )))
+    }
+    /// K1: C:1529 compile_expr; leaves have no source child frames in this slice.
+    fn children(&self, _: Cx, resume: &Self::Resume, _: &mut Vec<(Cx, NodeId)>) {
+        match *resume {}
+    }
+    /// K0: C:119 append; no resume is created until structural constructs arrive.
+    fn finish(
+        &mut self,
+        _: Cx,
+        resume: Self::Resume,
+        _: impl Iterator<Item = Probed>,
+    ) -> Result<Probed, Unsupported> {
+        match resume {}
+    }
+}
+
+impl Realizer for State {
+    /// K4/K5/K6: C:6648 declare_compiled, C:6667 assign_compiled, C:6658 return_compiled.
+    fn leaf(&mut self, cx: Cx, value: NodeId) -> Out {
+        let start = self.statements.mark();
+        let mut finished = Finished::False;
+        let value = match cx.cont {
+            Cont::Value(Tail::No) | Cont::Value(Tail::Return(_)) | Cont::Effect(Tail::No) => {
+                Some(value)
+            }
+            Cont::Declare(kind, var) => {
+                let stmt = self.arena.new_node(
+                    View::SDecl {
+                        var,
+                        value: Some(value),
+                    },
+                    kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
+                );
+                self.statements.push(stmt);
+                None
+            }
+            Cont::Assign(var) => {
+                let left = self.pure_expression(View::Var { var }, 0);
+                let value = self.arena.new_node(
+                    View::JBin { left, right: value },
+                    crate::js_ir::BinOp::Eq as u16,
+                );
+                let stmt = self.arena.new_node(View::SExp { value }, 0);
+                self.statements.push(stmt);
+                None
+            }
+            Cont::Effect(Tail::Return(_)) => {
+                let stmt = self.arena.new_node(View::SReturn { value }, 0);
+                self.statements.push(stmt);
+                finished = Finished::True;
+                None
+            }
+        };
+        Out {
+            stmts: self.statements.since(start),
+            value,
+            finished,
+        }
+    }
+    /// K2: C:4715 append_effect_output; no deferred sequence is produced yet.
+    fn seq(&mut self, _: Cx, _: NodeId, _: Out) -> Out {
+        unreachable!("sequence is unsupported")
+    }
+    /// K6: C:5144 compile_if_return_output; If remains explicitly unsupported.
+    fn cond(&mut self, _: Cx, _: NodeId, _: Out, _: Out) -> Out {
+        unreachable!("conditional is unsupported")
+    }
 }
 
 #[cfg(test)]

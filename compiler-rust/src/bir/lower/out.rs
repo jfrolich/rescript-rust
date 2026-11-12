@@ -170,7 +170,7 @@ pub struct FreePool {
 impl FreePool {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output; preserve
     /// the first pass's operands rather than recompiling the source subtree.
-    fn push(&mut self, free: Free) -> FreeId {
+    pub(super) fn push(&mut self, free: Free) -> FreeId {
         let id = FreeId(u32::try_from(self.nodes.len()).expect("free pool capacity"));
         self.nodes.push(Some(free));
         id

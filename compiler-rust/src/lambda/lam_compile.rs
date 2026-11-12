@@ -607,6 +607,22 @@ impl LambdaCompiler {
         self.compile_deps_program_owned(lam).program
     }
 
+    #[cfg(test)]
+    pub(crate) fn bir_lower_oracle(
+        &mut self, arena: &mut LamArena, root: Lam,
+        cont: crate::bir::lower::Cont, target: Ident,
+    ) -> Compiled {
+        use crate::bir::lower::{Cont, Tail};
+        let output = match cont {
+            Cont::Value(Tail::No) | Cont::Value(Tail::Return(_)) => return self.compile_expr(arena, root),
+            Cont::Effect(Tail::No) => return self.compile_effect_output(arena, root),
+            Cont::Declare(kind, _) => self.compile_let_binding_output(arena, kind, &target, root),
+            Cont::Assign(_) => self.compile_assign_to_target_output(arena, &target, root),
+            Cont::Effect(Tail::Return(_)) => self.compile_return_output(arena, root),
+        };
+        Compiled { prelude: output.block, expr: JE::undefined(false, &mut self.j), finished: output.finished }
+    }
+
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
         self.compile_deps_program_with_possible_required_modules(lam, &AHashSet::new())
