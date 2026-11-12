@@ -10241,6 +10241,7 @@ fn in_process_type_check_context<'a>(
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
 ) -> (TypeCheckContext<'a>, Env) {
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    tctx.read_log = options.collect_unit_reads.then(Default::default);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);

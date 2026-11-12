@@ -1328,6 +1328,8 @@ pub struct TypeCheckContext<'a> {
     /// Node storage of the typed tree being built. Consumers receive it
     /// through [`TypeCheckContext::take_typed_arena`] once typing is done.
     pub typed: TypedArena,
+    /// Optional per-unit read log; disabled for callers that do not need reads.
+    pub read_log: Option<super::unit_reads::ReadLog>,
     /// Unification state.
     pub unify_state: UnifyState,
     /// Newtype level (for local type definitions).
@@ -1540,6 +1542,7 @@ impl<'a> TypeCheckContext<'a> {
             type_ctx,
             arena,
             typed: TypedArena::new(),
+            read_log: None,
             unify_state: UnifyState::new(),
             newtype_level: None,
             diagnostics: Vec::new(),

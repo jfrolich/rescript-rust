@@ -45,6 +45,30 @@ impl SeenTypes {
     }
 }
 
+/// Reads recorded as typed nodes are constructed. Type roots are retained until
+/// checking finishes: unification can change their descendants after creation.
+/// Owned paths keep the interned nodes alive for address-based deduplication.
+#[derive(Default)]
+pub struct ReadLog {
+    paths: ahash::AHashMap<(usize, Kind), Path>,
+    seen: SeenTypes,
+    types: Vec<TypeExprRef>,
+}
+
+impl ReadLog {
+    /// Record a resolved path in its namespace.
+    pub fn path(&mut self, path: &Path, kind: Kind) {
+        self.paths.entry((path.node_addr(), kind)).or_insert_with(|| path.clone());
+    }
+
+    /// Record a type root without observing its still-mutable descendants.
+    pub fn ty(&mut self, ty: TypeExprRef) {
+        if self.seen.insert(ty) {
+            self.types.push(ty);
+        }
+    }
+}
+
 struct Collector<'a> {
     ctx: &'a TypeContext,
     ta: &'a TypedArena,
@@ -284,4 +308,20 @@ pub fn signature_reads(
     };
     collector.signature(signature);
     collector.out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn read_log_deduplicates_each_type_reference_space() {
+        let mut log = ReadLog::default();
+        for ty in [TypeExprRef(7), TypeExprRef(STORE_REF_TAG | 7),
+                   TypeExprRef(STORE_REF_TAG | SHARED_REF_TAG | 7)] {
+            log.ty(ty);
+            log.ty(ty);
+        }
+        assert_eq!(log.types.len(), 3);
+    }
 }
