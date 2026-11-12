@@ -1,0 +1,1 @@
+- Cover genType builds with dependent modules in debug-profile tests, and preserve the signature publication guards.
