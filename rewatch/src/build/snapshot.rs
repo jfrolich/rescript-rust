@@ -1,4 +1,4 @@
-//! The runtime compiled into the executable.
+//! Verified runtime and Belt packages compiled into the executable.
 //!
 //! Every process that compiles anything needs `@rescript/runtime` compiled
 //! into its module registry, and the runtime that ships with a compiler is
@@ -43,8 +43,9 @@ pub fn install(bytes: &'static [u8]) {
     let _ = EMBEDDED.set(decode(bytes));
 }
 
-/// Compile the runtime package at `runtime_root` from its sources there, as
-/// [`install`] takes it.
+/// Compile the runtime and, when present, its sibling Belt package into the
+/// container accepted by [`install`]. Producer only: one runtime compile and
+/// four Belt proof compiles; allocation is proportional to their outputs.
 pub fn compile(runtime_root: &Path) -> Result<Vec<u8>> {
     let runtime_root = runtime_root.to_path_buf();
     // Like a build's runtime pre-compilation, on a thread with a large stack.
@@ -86,11 +87,26 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
     };
     let belt_root = runtime_root.parent().expect("runtime package parent").join("belt");
     if belt_root.join("rescript.json").is_file() {
-        let belt = produce_belt(&belt_root, runtime_root, &runtime)?;
+        let belt = produce_belt(&belt_root, runtime_root, &runtime).context(BeltProofFailure)?;
         encode(&[runtime, belt])
     } else {
         encode(&[runtime])
     }
+}
+
+#[derive(Debug)]
+struct BeltProofFailure;
+impl std::fmt::Display for BeltProofFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Belt snapshot proof failed")
+    }
+}
+impl std::error::Error for BeltProofFailure {}
+
+/// O(error context depth), producer only. Belt proof failures are fatal while
+/// runtime compile failures retain the pre-existing build-script fallback.
+pub fn is_belt_proof_failure(error: &anyhow::Error) -> bool {
+    error.is::<BeltProofFailure>()
 }
 
 /// Compile Belt through the ordinary package pipeline for both formats, two
@@ -528,6 +544,8 @@ mod tests {
         }
         assert_eq!(std::mem::size_of::<Reader>(), 16);
         assert_eq!(std::mem::size_of::<PackageIndex>(), 96);
+        assert_eq!(std::mem::size_of::<ProducedModule>(), 144);
+        assert_eq!(std::mem::size_of::<ProducedPackage>(), 104);
     }
 
     #[test]
@@ -623,6 +641,7 @@ impl rescript_compiler::cmi::persistent_env::SnapshotModules for BeltPackage {
 /// Select Belt once per build: O(source bytes) verification, one package clone
 /// and one registry attachment. No core is read or copied by this operation.
 pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) -> Result<()> {
+    if let Some(package) = state.build_state.packages.get_mut("@rescript/belt") { package.prebuilt = false; }
     let Some(package) = state.packages.get("@rescript/belt") else { return Ok(()); };
     if package.is_root { return Ok(()); }
     let mode = std::env::var("RESCRIPT_SNAPSHOT").unwrap_or_default();
@@ -636,6 +655,7 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     };
     if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
     if state.check_only { return mismatch("check-only is not supported"); }
+    if state.diagnostic_locations { return mismatch("the diagnostic retry requires source declaration locations"); }
     if state.dump.is_some() { return mismatch("dump flags are not supported"); }
     if let Some(option) = alternate_backend_option() { return mismatch(option); }
     if state.source_map_command == crate::config::SourceMapCommand::Watch {

@@ -21,7 +21,13 @@ fn main() {
                 println!("cargo:rerun-if-changed={}", belt.join("rescript.json").display());
                 println!("cargo:rerun-if-changed={}", belt.join("src").display());
             }
-            rescript::build::snapshot::compile(&root).expect("snapshot production and proof builds")
+            rescript::build::snapshot::compile(&root).unwrap_or_else(|err| {
+                if rescript::build::snapshot::is_belt_proof_failure(&err) {
+                    panic!("snapshot production and proof builds: {err:#}");
+                }
+                println!("cargo:warning=not embedding the runtime, which failed to compile: {err:#}");
+                Vec::new()
+            })
         }
         None => {
             println!("cargo:warning=not embedding the runtime: packages/@rescript/runtime not found");

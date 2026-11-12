@@ -1,7 +1,9 @@
 Cleaned 1 stale module
 Parsed 1 source file
-Parsed 423 source files
-Compiled 422 modules
+INFO:
+Not using the prebuilt @rescript/belt: the diagnostic retry requires source declaration locations. Compiling it from source.
+Parsed 466 source files
+Compiled 465 modules
 
   Warning number 32
   /packages/watch-warnings/src/ModuleA.res:1:5-15
