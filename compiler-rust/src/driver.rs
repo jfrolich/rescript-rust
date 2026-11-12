@@ -8237,6 +8237,14 @@ pub struct FileConfigOverrides {
     pub jsx_preserve: bool,
     /// `-bs-noassertfalse` (`Clflags.no_assert_false`, translcore.ml:1555).
     pub no_assert_false: bool,
+    /// `-noassert` (`Clflags.noassert`, translcore.ml:1558).
+    pub noassert: bool,
+    /// `-bs-no-check-div-by-zero` (`Js_config.check_div_by_zero`,
+    /// lam_compile_primitive.ml:246-261).
+    pub no_check_div_by_zero: bool,
+    /// `-bs-no-version-header` (`Js_config.no_version_header`,
+    /// js_dump_program.ml:133).
+    pub no_version_header: bool,
 }
 
 impl FileConfigOverrides {
@@ -8246,6 +8254,9 @@ impl FileConfigOverrides {
             || self.debug
             || self.jsx_preserve
             || self.no_assert_false
+            || self.noassert
+            || self.no_check_div_by_zero
+            || self.no_version_header
     }
 
     /// The options of this file's compile: the command line's with the
@@ -8265,6 +8276,10 @@ impl FileConfigOverrides {
         options.debug |= self.debug;
         options.jsx_preserve |= self.jsx_preserve;
         options.no_assert_false |= self.no_assert_false;
+        options.noassert |= self.noassert;
+        options.no_version_header |= self.no_version_header;
+        // A `clear` flag: it can only turn the check off.
+        options.check_div_by_zero &= !self.no_check_div_by_zero;
         std::borrow::Cow::Owned(options)
     }
 }
@@ -8391,6 +8406,9 @@ fn run_file_level_flags(
                 "-bs-g" => overrides.debug = true,
                 "-bs-jsx-preserve" => overrides.jsx_preserve = true,
                 "-bs-noassertfalse" => overrides.no_assert_false = true,
+                "-noassert" => overrides.noassert = true,
+                "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
+                "-bs-no-version-header" => overrides.no_version_header = true,
                 _ => {}
             }
             continue;

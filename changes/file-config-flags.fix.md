@@ -1,1 +1,2 @@
 - Read a file's `@@config` flags only from its first leading `@@config`, like `bsc`: `-bs-g`, `-bs-jsx`, `-bs-jsx-preserve` and `-bs-noassertfalse` in a later or nested `@@config`, or as a string in another attribute, no longer take effect.
+- Honour `-noassert`, `-bs-no-check-div-by-zero` and `-bs-no-version-header` in a file's `@@config`.
