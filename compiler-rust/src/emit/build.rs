@@ -471,9 +471,7 @@ impl<'a, 'r> Build<'a, 'r> {
     }
     fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
         let a = self.arena;
-        if a.expr_comment(e).is_some() {
-            return Err(Unsupported("expression comment"));
-        }
+        walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
             ExprKind::Var(id) => self.id(self.names.get(&a.ident(id))),
             ExprKind::Qualified(q) => {
@@ -522,14 +520,18 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.sequence(e, &mut expressions)?;
                 Expression::new_sequence_expression(SPAN, expressions, &self.b)
             }
-            ExprKind::Call(f, args, _) => Expression::new_call_expression(
-                SPAN,
-                self.expr(f)?,
-                None,
-                self.args(walk::arguments(a, a.exprs(args)))?,
-                false,
-                &self.b,
-            ),
+            ExprKind::Call(f, args, _) => {
+                let mut call = CallExpression::new(
+                    SPAN,
+                    self.expr(f)?,
+                    None,
+                    self.args(walk::arguments(a, a.exprs(args)))?,
+                    false,
+                    &self.b,
+                );
+                call.pure = walk::pure_call(a, e);
+                Expression::CallExpression(self.b.alloc(call))
+            }
             ExprKind::New(f, args) => Expression::new_new_expression(
                 SPAN,
                 self.expr(f)?,
@@ -607,17 +609,70 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
             ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
-            ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
+            ExprKind::RawJsCode(_) => return walk::raw_supported(),
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
-            ExprKind::TemplateLiteral(_)
-            | ExprKind::InterpolatedTemplate(..)
-            | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
-            ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
+            ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
+                self.b
+                    .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
+            ),
+            ExprKind::InterpolatedTemplate(segments, values) => {
+                Expression::TemplateLiteral(self.b.alloc(self.template(
+                    a.segments(segments).iter().map(|s| s.source()),
+                    a.exprs(values),
+                )?))
+            }
+            ExprKind::TaggedTemplate(tag, strings, values) => {
+                let tag = self.expr(tag)?;
+                let quasi = self.template(
+                    a.tagged(strings).iter().map(|s| s.as_str()),
+                    a.exprs(values),
+                )?;
+                Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
+            }
+            ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
             ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         })
     }
+    /// JSON is already validated source, not a string value. It meets no
+    /// identifiers; parsing reproduces property-key forms and precedence, while
+    /// the surrounding oxc node supplies parentheses and statement semicolons.
+    fn json(&self, source: &str) -> Result<Expression<'a>, Unsupported> {
+        let source = literal::arena_string(source, self.b.allocator());
+        oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
+            .parse_expression()
+            .map_err(|_| Unsupported("invalid JSON or directive"))
+    }
+
+    /// See `walk::template_supported`: source spelling, not the cooked value,
+    /// determines printed quasis. Codegen never reads cooked values here; tagged
+    /// templates may have invalid escapes and therefore no cooked value at all.
+    fn template(
+        &self,
+        segments: impl ExactSizeIterator<Item = &'r str>,
+        values: &[Expr],
+    ) -> Result<TemplateLiteral<'a>, Unsupported> {
+        walk::template_supported(segments.len(), values.len())?;
+        let mut quasis = self.b.vec();
+        for (i, source) in segments.enumerate() {
+            quasis.push(TemplateElement::new(
+                SPAN,
+                TemplateElementValue {
+                    raw: literal::arena_string(source, self.b.allocator()).into(),
+                    cooked: None,
+                },
+                i == values.len(),
+                &self.b,
+            ));
+        }
+        let mut expressions = self.b.vec();
+        for e in values {
+            expressions.push(self.expr(*e)?);
+        }
+        Ok(TemplateLiteral::new(SPAN, quasis, expressions, &self.b))
+    }
+
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
         for id in self.arena.ident_slice(self.arena.fun(f).params) {
@@ -659,9 +714,23 @@ impl<'a, 'r> Build<'a, 'r> {
                 &mut statements,
             )?;
         }
+        let mut directives = self.b.vec();
+        if let Some(directive) = info.directive {
+            // The legacy directive includes its quotes. It precedes every body
+            // statement and meets no identifiers; codegen supplies the semicolon.
+            let Expression::StringLiteral(value) = self.json(self.arena.text(directive))? else {
+                return Err(Unsupported("non-string function directive"));
+            };
+            directives.push(Directive::new(
+                SPAN,
+                value.unbox(),
+                self.text(self.arena.text(directive).trim_matches(['\'', '"'])),
+                &self.b,
+            ));
+        }
         Ok(self
             .b
-            .alloc(FunctionBody::new(SPAN, self.b.vec(), statements, &self.b)))
+            .alloc(FunctionBody::new(SPAN, directives, statements, &self.b)))
     }
     fn function_expr(&self, f: FunId) -> Result<Expression<'a>, Unsupported> {
         if self.source_map.is_some() {
