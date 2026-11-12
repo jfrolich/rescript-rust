@@ -2902,6 +2902,29 @@ mod identity_tests {
     }
 
     #[test]
+    fn absent_raw_signature_stays_absent_without_eager_encoding() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let source = PersStruct {
+            ps_name: "NoRaw".into(),
+            ps_filename: "NoRaw.res".into(),
+            ps_sig: Arc::new(vec![]),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+        };
+        let published = publish_signature(
+            &source, &ctx, None, SignaturePublicationMode::Eager, false,
+        ).0;
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.encoded.get().is_none());
+        published.encoded();
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.has_decoded_signatures());
+    }
+
+    #[test]
     fn gentype_alias_declarations_ignore_storage_schedule() {
         use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
         use crate::driver::{CompilerOptions, compile_source_in_process};
@@ -2941,8 +2964,9 @@ mod identity_tests {
                         result.cmj_export_constants, false));
             }
             RAW_READ_STORAGE.with(|hook| assert!(hook.borrow().is_none(), "schedule point was not reached"));
-            crate::gentype::main::type_declarations_of_module("Aliases-Schedule")
-                .into_iter().map(|(_, data)| crate::binser::to_vec(&data).unwrap()).collect::<Vec<_>>()
+            let declarations = crate::gentype::main::type_declarations_of_module("Aliases-Schedule");
+            assert_eq!(declarations.len(), 1);
+            declarations.into_iter().map(|(_, data)| crate::binser::to_vec(&data).unwrap()).collect::<Vec<_>>()
         };
         let expected = run(None);
         assert!(expected == run(Some(("Dependency-Schedule", true))), "presence read raced with storage");
