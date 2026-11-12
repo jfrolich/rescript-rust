@@ -2717,11 +2717,11 @@ fn remap_sig_item_refs(item: &mut SignatureItem, map: &impl SignatureRefMap) {
     }
 }
 
-fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
+pub(crate) fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
     vd.val_type = map.ty(vd.val_type);
 }
 
-fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
+pub(crate) fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
     if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
         *layout_ref = map.layout(*layout_ref);
     }
@@ -2798,7 +2798,7 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, map: &impl SignatureRefMap
     }
 }
 
-fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
+pub(crate) fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
     remap_module_type_refs(&mut md.md_type, map);
 }
 

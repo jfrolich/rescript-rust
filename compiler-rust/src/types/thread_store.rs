@@ -91,14 +91,6 @@ pub(crate) struct ThreadTypeStore {
     >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
-    /// The predefined environment built as a store build, with its replay
-    /// record (see `env::initial_env`).
-    initial_env: RefCell<
-        Option<(
-            crate::types::env::Env,
-            Rc<crate::types::context::StorePiece>,
-        )>,
-    >,
     generation: u64,
     /// The build's world; holding it keeps every frozen node this store's
     /// data refers to alive.
@@ -125,7 +117,6 @@ impl ThreadTypeStore {
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
-            initial_env: RefCell::new(None),
             generation,
             world: super::world::World::current(),
             decl_locs: Default::default(),
@@ -266,23 +257,6 @@ impl ThreadTypeStore {
 
     pub(crate) fn label_family_count(&self) -> usize {
         self.label_families.borrow().len()
-    }
-
-    pub(crate) fn cached_initial_env(
-        &self,
-    ) -> Option<(
-        crate::types::env::Env,
-        Rc<crate::types::context::StorePiece>,
-    )> {
-        self.initial_env.borrow().clone()
-    }
-
-    pub(crate) fn publish_initial_env(
-        &self,
-        env: crate::types::env::Env,
-        piece: Rc<crate::types::context::StorePiece>,
-    ) {
-        self.initial_env.borrow_mut().get_or_insert((env, piece));
     }
 
     /// Intern a longident component name for a store node. Names live in
