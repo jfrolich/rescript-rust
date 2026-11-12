@@ -3027,8 +3027,7 @@ impl PersistentEnv {
         // The view of a unit the world owns is the same for every
         // compilation (OCaml builds `ps_comps` once per process): it is
         // built once per build and adopted here.
-        if alias_source.is_none()
-            && self.in_process_mode
+        if self.in_process_mode
             && let Some(view) =
                 crate::types::typecore::adopt_unit_view(&ps, components_key.clone(), ctx)
         {

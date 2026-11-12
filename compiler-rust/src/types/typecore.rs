@@ -26952,9 +26952,18 @@ pub(crate) fn adopt_unit_view(
     Some(view)
 }
 
-/// The world's view of `module_path` when it is the path of a unit that is
-/// not the flattened backing unit of a namespace alias. Loads the unit as
-/// any lookup of it does.
+/// The world's view of `module_path` when it is the path of a unit.
+///
+/// Which kind of key a path is, is a fact of the path and the world: a
+/// persistent identifier names a unit, and a unit's components are its own
+/// (`ps_comps`, compiler/ml/env.ml:669-678, 1000-1007), whether or not the
+/// asking compilation has met a module alias of the unit. Loads the unit as
+/// any lookup of it does; a lookup that carries no persistent environment
+/// (type expansion) reads the unit through the compilation's own, as its
+/// raw signature was read before.
+///
+/// Cost: the unit lookup (one probe of the compilation's unit cache when it
+/// is loaded) and one load of the unit's view cell.
 fn adopt_persistent_root_view(
     module_path: &Path,
     key: &crate::types::context::QualifiedModuleComponentsCacheKey,
@@ -26964,21 +26973,22 @@ fn adopt_persistent_root_view(
     if !ctx.persistent_env_is_in_process() {
         return None;
     }
-    let PathView::Pident(id) = module_path.view() else {
-        return None;
+    let name = crate::types::module_view::unit_key_name(module_path)?;
+    let ps = match pers_env.as_mut() {
+        Some(pers) => {
+            if !pers.unit_visible(name) {
+                return None;
+            }
+            pers.find_pers_struct(name, ctx)?
+        }
+        None => {
+            let mut pers = ctx.persistent_env_clone()?;
+            if !pers.unit_visible(name) {
+                return None;
+            }
+            pers.find_pers_struct(name, ctx)?
+        }
     };
-    if !id.is_persistent() {
-        return None;
-    }
-    let pers = pers_env.as_mut()?;
-    if pers
-        .qualified_alias_path_for_flattened_head(id.name())
-        .is_some()
-        || !pers.unit_visible(id.name())
-    {
-        return None;
-    }
-    let ps = pers.find_pers_struct(id.name(), ctx)?;
     adopt_unit_view(&ps, key.clone(), ctx)
 }
 
@@ -27001,13 +27011,6 @@ fn build_private_unit_components(
     }
 
     let pers = pers_env.as_mut()?;
-    if pers
-        .qualified_alias_path_for_flattened_head(id.name())
-        .is_some()
-    {
-        return None;
-    }
-
     let ps = pers.find_pers_struct(id.name(), ctx)?;
     let access_path = Path::pident(Ident::create_persistent(id.name()));
     Some(

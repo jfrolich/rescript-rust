@@ -92,6 +92,20 @@ impl ViewKey<'_> {
     }
 }
 
+/// The unit a module path names when the path is a unit key: a persistent
+/// identifier. This is all that decides it: a unit that some namespace or
+/// library module aliases (`module JSON = Stdlib_JSON`) is still reached by
+/// its own path through its own components (compiler/ml/env.ml:1000-1007),
+/// so the answer does not depend on which aliases a compilation has met.
+/// One tag test and one flag test.
+#[inline]
+pub(crate) fn unit_key_name(path: &Path) -> Option<&str> {
+    match path.view() {
+        super::path::PathView::Pident(id) if id.is_persistent() => Some(id.name()),
+        _ => None,
+    }
+}
+
 /// The views of one world.
 pub(crate) struct ViewTable {
     next_id: AtomicU32,
@@ -1478,6 +1492,79 @@ mod tests {
         assert_eq!(lookup(&failed), (false, format!("{}.t", failed.ps_name)));
         assert_eq!(lookup(&fits), (true, format!("{}.t", fits.ps_name)));
         assert_eq!(ctx.view_adoptions.get(), 1);
+    }
+
+    #[test]
+    fn a_unit_path_is_a_unit_key_whatever_aliases_the_compilation_met() {
+        let backing = unit("Backing", 3);
+        let name = backing.ps_name.as_str();
+        // `Namespace` holds `module Alias = <backing>`.
+        let namespace = Arc::new(PersStruct {
+            ps_name: "Namespace".into(),
+            ps_sig: Arc::new(vec![SignatureItem::SigModule(
+                Ident::create_local("Alias"),
+                ModuleDeclaration {
+                    md_type: ModuleType::MtyAlias(
+                        AliasPresence::MtaAbsent,
+                        Arc::new(Path::pident(Ident::create_persistent(name))),
+                    ),
+                    md_attributes: vec![],
+                    md_loc: crate::types::DeclLoc::none(),
+                    md_path: None,
+                },
+                RecStatus::TrecNot,
+            )]),
+            ps_filename: "Namespace.res".into(),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
+        });
+        let path = Path::pident(Ident::create_persistent(name));
+        assert_eq!(unit_key_name(&path), Some(name));
+        assert_eq!(unit_key_name(&Path::pdot(path, "Inner")), None);
+        assert_eq!(
+            unit_key_name(&Path::pident(Ident::create_local(name.to_string()))),
+            None
+        );
+        let env = crate::types::env::Env::empty();
+        let is_world_view = |ctx: &TypeContext,
+                             pers: &mut Option<crate::cmi::persistent_env::PersistentEnv>| {
+            crate::types::typecore::with_resolved_module_components_for_path(
+                &path,
+                &env,
+                pers,
+                ctx,
+                |components| matches!(components, Components::World(_)),
+            )
+            .expect("the unit has components")
+        };
+        // One compilation has loaded the namespace and so knows the unit as
+        // the backing unit of `Namespace.Alias`; the other has not; a third
+        // looks the unit up without a persistent environment at hand.
+        for (met_alias, with_env) in [(true, true), (false, true), (true, false)] {
+            let ctx = compilation();
+            let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+            pers.set_in_process_mode(true);
+            pers.insert_loaded_unit(backing.clone());
+            pers.insert_loaded_unit(namespace.clone());
+            if met_alias {
+                pers.find_pers_struct("Namespace", &ctx)
+                    .expect("the namespace is loaded");
+            }
+            assert_eq!(
+                pers.qualified_alias_path_for_flattened_head(name).is_some(),
+                met_alias
+            );
+            ctx.set_persistent_env(pers.clone());
+            let mut pers = with_env.then_some(pers);
+            assert!(is_world_view(&ctx, &mut pers), "{met_alias} {with_env}");
+            assert_eq!(ctx.view_adoptions.get(), 1);
+        }
+        assert_eq!(
+            backing.ps_view.get().unwrap().builds.load(Ordering::Relaxed),
+            1
+        );
     }
 
     #[test]
