@@ -195,10 +195,19 @@ pub struct PortablePersStruct {
     summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
     /// Publication hashes from the shared graph; absent on stored/fallback units.
     shared_item_hashes: Option<Vec<(super::item_deps::Kind, crate::name::Name, u64)>>,
-    decoded: std::sync::Mutex<Option<(PublishedSignature, Option<PortableRawSignature>)>>,
+    decoded: std::sync::Mutex<Option<(PublishedSignature, RawSignature)>>,
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
     publication_counter_id: usize,
+}
+
+/// Absence of a raw signature is different from storage having moved it to
+/// `encoded`. Readers can observe the latter after waiting for `decoded`, even
+/// if their earlier `encoded.get()` saw an empty slot.
+#[derive(Debug)]
+enum RawSignature {
+    Decoded(Option<Box<PortableRawSignature>>),
+    Encoded,
 }
 
 #[derive(Debug)]
@@ -340,7 +349,34 @@ pub struct PortableRawSignature {
     pub raw_locations: DeclLocTable,
 }
 
+// A deterministic schedule point: storage runs after a reader observes that
+// bytes are absent, but before it acquires the decoded-signature lock.
+#[cfg(test)]
+thread_local! {
+    static RAW_READ_STORAGE: std::cell::RefCell<Option<(&'static str, bool)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 impl PortablePersStruct {
+    #[cfg(test)]
+    fn run_raw_read_storage(&self, presence: bool) {
+        let run = RAW_READ_STORAGE.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            if hook.as_ref().is_some_and(|(name, kind)| *name == self.ps_name && *kind == presence) {
+                hook.take();
+                true
+            } else {
+                false
+            }
+        });
+        if run {
+            std::thread::scope(|scope| {
+                scope.spawn(|| self.encoded()).join().unwrap();
+            });
+        }
+    }
+
     fn record_access(&self, imported: bool) {
         if let Some(generation) = self.published_generation {
             crate::perf_counters::record_signature_access(
@@ -378,7 +414,10 @@ impl PortablePersStruct {
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
-            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(Box::new(sig)), raw))),
+            decoded: std::sync::Mutex::new(Some((
+                PublishedSignature::Portable(Box::new(sig)),
+                RawSignature::Decoded(raw.map(Box::new)),
+            ))),
         }
     }
 
@@ -407,14 +446,19 @@ impl PortablePersStruct {
                     PublishedSignature::Portable(sig) => crate::binser::Encoded::encode(sig.as_ref()),
                     PublishedSignature::Shared(graph) => graph.encode(),
                 },
-                raw: raw.as_ref().map(crate::binser::Encoded::encode),
+                raw: match raw {
+                    RawSignature::Decoded(raw) => raw.as_deref().map(crate::binser::Encoded::encode),
+                    RawSignature::Encoded => {
+                        unreachable!("raw signature encoded before its publication")
+                    }
+                },
             };
             if matches!(sig, PublishedSignature::Portable(_)) {
                 *decoded = None;
             } else if let Some((_, raw)) = decoded.as_mut() {
                 // Keep the frozen graph for a later importer, not a duplicate
                 // raw signature after its bytes have been produced.
-                *raw = None;
+                *raw = RawSignature::Encoded;
             }
             encoded
         })
@@ -459,12 +503,14 @@ impl PortablePersStruct {
     /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
         if self.encoded.get().is_none() {
+            #[cfg(test)]
+            self.run_raw_read_storage(false);
             let decoded = self.decoded.lock().unwrap();
-            if let Some((_, raw)) = decoded.as_ref() {
+            if let Some((_, RawSignature::Decoded(raw))) = decoded.as_ref() {
                 // GenType may read a dependency's raw signature while publishing
                 // the current unit. Do not encode either signature just to read
                 // this graph; byte production belongs to the storage reader.
-                return raw.clone();
+                return raw.as_deref().cloned();
             }
         }
         self.encoded()
@@ -477,10 +523,12 @@ impl PortablePersStruct {
         if let Some(encoded) = self.encoded.get() {
             return encoded.raw.is_some();
         }
+        #[cfg(test)]
+        self.run_raw_read_storage(true);
         let decoded = self.decoded.lock().unwrap();
         match decoded.as_ref() {
-            Some((_, raw)) => raw.is_some(),
-            None => {
+            Some((_, RawSignature::Decoded(raw))) => raw.is_some(),
+            Some((_, RawSignature::Encoded)) | None => {
                 drop(decoded);
                 self.encoded().raw.is_some()
             }
@@ -1859,7 +1907,9 @@ pub(crate) fn publish_signature(
         ps_name: ps.ps_name.clone(), ps_filename: ps.ps_filename.clone(),
         ps_deprecated: ps.ps_deprecated.clone(), ps_crcs: ps.ps_crcs.clone(),
         shareable: true, fingerprint, summary: Default::default(), shared_item_hashes: Some(hashes),
-        decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), raw))),
+        decoded: std::sync::Mutex::new(Some((
+            PublishedSignature::Shared(graph), RawSignature::Decoded(raw.map(Box::new)),
+        ))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
         publication_counter_id: crate::perf_counters::signature_publication_id(),
     });
@@ -2859,6 +2909,78 @@ mod identity_tests {
     }
 
     #[test]
+    fn absent_raw_signature_stays_absent_without_eager_encoding() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let source = PersStruct {
+            ps_name: "NoRaw".into(),
+            ps_filename: "NoRaw.res".into(),
+            ps_sig: Arc::new(vec![]),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+        };
+        let published = publish_signature(
+            &source, &ctx, None, SignaturePublicationMode::Eager, false,
+        ).0;
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.encoded.get().is_none());
+        published.encoded();
+        assert!(!published.has_raw_signature());
+        assert!(published.raw_signature().is_none());
+        assert!(published.has_decoded_signatures());
+    }
+
+    #[test]
+    fn gentype_alias_declarations_ignore_storage_schedule() {
+        use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+        use crate::driver::{CompilerOptions, compile_source_in_process};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        let options = CompilerOptions {
+            open_modules: vec!["Schedule".into()],
+            gentype_config: Some(Arc::new(crate::gentype::config::build_config_from_cli_args(
+                None, &["-bs-project-root".into(), root.path().to_string_lossy().into_owned(),
+                    "-bs-gentype".into()],
+            ))),
+            ..Default::default()
+        };
+        let run = |schedule| {
+            let mut registry = ModuleRegistry::new();
+            registry.register_namespace("Schedule", &[
+                ("Dependency".into(), "Dependency-Schedule".into()),
+                ("Aliases".into(), "Aliases-Schedule".into()),
+                ("Use".into(), "Use-Schedule".into()),
+            ]);
+            for (name, source) in [
+                ("Dependency", include_str!("../../tests/fixtures/gentype-storage/Dependency.res")),
+                ("Aliases", include_str!("../../tests/fixtures/gentype-storage/Aliases.res")),
+                ("Use", include_str!("../../tests/fixtures/gentype-storage/Use.res")),
+                ("Output", include_str!("../../tests/fixtures/gentype-storage/Output.res")),
+            ] {
+                let module = format!("{name}-Schedule");
+                let filename = root.path().join("src").join(format!("{name}.res"));
+                std::fs::write(&filename, source).unwrap();
+                if name == "Aliases" {
+                    RAW_READ_STORAGE.with(|hook| *hook.borrow_mut() = schedule);
+                }
+                let result = compile_source_in_process(source, filename.to_str().unwrap(),
+                    &module, &options, &registry, false, None).unwrap();
+                registry.register_module_arc(&module, result.pers_struct.unwrap(),
+                    InMemoryModuleInfo::new(filename, result.is_pure,
+                        result.cmj_export_constants, false));
+            }
+            RAW_READ_STORAGE.with(|hook| assert!(hook.borrow().is_none(), "schedule point was not reached"));
+            let declarations = crate::gentype::main::type_declarations_of_module("Aliases-Schedule");
+            assert_eq!(declarations.len(), 1);
+            declarations.into_iter().map(|(_, data)| crate::binser::to_vec(&data).unwrap()).collect::<Vec<_>>()
+        };
+        let expected = run(None);
+        assert!(expected == run(Some(("Dependency-Schedule", true))), "presence read raced with storage");
+        assert!(expected == run(Some(("Dependency-Schedule", false))), "raw read raced with storage");
+    }
+
+    #[test]
     fn dependency_raw_read_does_not_encode_during_publication() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let portable = serialize_pers_struct(
@@ -2877,12 +2999,12 @@ mod identity_tests {
             let mut decoded = portable.decoded.lock().unwrap();
             let (source, raw) = decoded.as_mut().unwrap();
             let sig = source.portable();
-            *raw = Some(PortableRawSignature {
+            *raw = RawSignature::Decoded(Some(Box::new(PortableRawSignature {
                 raw_ps_sig: sig.ps_sig.clone(),
                 cmi_longident_names: sig.cmi_longident_names.clone(),
                 raw_type_graph: sig.type_graph.clone(),
                 raw_locations: sig.locations.clone(),
-            });
+            })));
         }
         assert!(portable.has_raw_signature());
         assert!(portable.encoded.get().is_none());

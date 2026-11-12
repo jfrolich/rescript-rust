@@ -6492,9 +6492,17 @@ fn type_pattern_record(
         }
 
         // `Label.disambiguate` calls the chosen label's `use ()`, which marks
-        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
+        // its type and, for a label in scope through an `open`, that open
+        // (`Env.lookup_all_labels`, env.ml:1230-1238; typecore.ml:912-922).
         if let Some(label) = label.as_ref() {
             mark_type_path_of(ctx, env, label.lbl_res);
+            let generated = tctx
+                .generated_pattern_labels
+                .iter()
+                .any(|(name, _)| name == &field_name);
+            if matches!(resolved_lid, Longident::Lident(_)) && !generated {
+                use_in_scope_label_of_type(ctx, env, field_name.as_str(), label);
+            }
         }
         pending_fields.push(PendingRecordPatternField {
             lid: field.lid,

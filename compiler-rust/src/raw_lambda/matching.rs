@@ -7757,12 +7757,19 @@ fn value_test_defaults_on_undefined<B: RawLambdaBuilder>(
         View::Prim(Primitive::PvalFromOptionNotNest, [payload], _) => a.eq_approx(arg, *payload),
         _ => a.eq_approx(arg, e),
     };
-    let is_defined_constant = |e| {
-        matches!(
-            a.view(e),
+    let is_defined_constant = |e| match a.view(e) {
+        // A tagless polymorphic variant is still `Const_polyvar` at this point
+        // in OCaml, which this test does not accept; only a numeric-looking
+        // name is already a `Const_int` (lambda.ml `const_polyvar`, as in
+        // `lower_constant`).
+        View::Const(crate::lambda::Constant::Int { comment, .. }) => match comment.as_deref() {
+            Some(PointerInfo::PolyVariant(name)) => name.parse::<i32>().is_ok(),
+            _ => true,
+        },
+        view => matches!(
+            view,
             View::Const(
-                crate::lambda::Constant::Int { .. }
-                    | crate::lambda::Constant::Char(_)
+                crate::lambda::Constant::Char(_)
                     | crate::lambda::Constant::String { .. }
                     | crate::lambda::Constant::Float(_)
                     | crate::lambda::Constant::BigInt { .. }
