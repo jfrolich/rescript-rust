@@ -3,17 +3,85 @@
 ## Status
 
 The direct Bir emitter and dense naming implementation are built and parity
-checked. The three-way measurements must be run on the merged candidate; final
-numbers are **not yet recorded here**. Earlier interrupted profiles are not
-measurements. The default printer remains legacy, and the default-switch gate
-remains closed.
+checked. The merged candidate is measured below on `tests/tests`; application
+profiles are still running. The default remains legacy: even excluding import,
+the current direct path does **not** meet the default-switch cost gate.
 
-The final report must include the measured commit, binary hash, Rust/Valgrind
-versions and architecture; `tests/tests` and a 3,735-module application; totals
-for legacy, JS-IR oxc and direct Bir oxc; and naming, AST construction, codegen,
-import, shared allocation and unattributed work. Native timing must give mean,
-standard deviation and min/max from repeated hyperfine runs, not profiler wall
-time.
+## Measurement setup
+
+Measured compiler commit: `aabaaf46e580d134b9df4fed04f0e12d51aaad42`.
+Binary SHA-256: `82ee4d462cfe8b7ebf0ca956dde621eff30e5d8c690329322ca9ed3667966f31`.
+Linux x86-64, Rust `1.102.0-nightly (ac8310ba6 2026-11-09)`, Valgrind 3.22.0.
+One release binary, fat LTO, line tables, one Rayon worker, full clean builds;
+runtime preparation outside each sample. No backend or printer stats enabled.
+Each profiler/mode has one successful sample. Native timing uses one warmup and
+five measured runs per mode. Profiler wall time is not native build time.
+
+## tests/tests
+
+### Cachegrind: whole-build instructions
+
+| Mode | Instructions | Change from legacy |
+| --- | ---: | ---: |
+| legacy | 4,357,226,252 | +0.00% |
+| oxc | 4,422,808,687 | +1.51% |
+| oxc-bir | 4,803,130,120 | +10.23% |
+
+### Named self attribution (millions of instructions)
+
+These buckets partition the whole build, not just rendering. Shared costs are
+not assigned exclusively to a phase. The Bir-support bucket includes helpers
+and destruction, not only import. Inlined construction may appear under the
+emitter caller rather than the construction bucket.
+
+| Bucket | Legacy | JS-IR oxc | Bir oxc |
+| --- | ---: | ---: | ---: |
+| AST construction / oxc arena | 0.141 | 2.335 | 2.201 |
+| Bir support / import (named self) | 0.410 | 0.401 | 315.625 |
+| Legacy printer | 80.892 | 11.261 | 10.604 |
+| Naming | 0.000 | 67.694 | 56.305 |
+| Other compiler/runtime | 3144.335 | 3149.517 | 3145.813 |
+| Other emitter | 0.028 | 11.395 | 64.987 |
+| Oxc codegen | 0.000 | 22.644 | 22.610 |
+| Oxc parser | 4.853 | 4.604 | 4.604 |
+| Shared allocation / containers | 1106.641 | 1132.586 | 1159.962 |
+| Stats and environment | 1.192 | 1.623 | 1.623 |
+| Unresolved | 18.735 | 18.748 | 18.795 |
+
+### Callgrind: inclusive phase costs (instructions)
+
+| Boundary | Legacy | JS-IR oxc | Bir oxc |
+| --- | ---: | ---: | ---: |
+| Whole build | 4,351,289,943 | 4,418,094,310 | 4,798,013,247 |
+| Rendering, including import | 112,139,184 | 176,819,283 | 557,550,534 |
+| Import (child of rendering) | 0 | 0 | 297,786,544 |
+| Rendering minus import | 112,139,184 | 176,819,283 | 259,763,990 |
+
+Incoming call-edge costs avoid double-counting same-function inline file splits.
+The import row is already included in rendering; do not add these rows together.
+Rendering minus import still includes destruction of the imported tree and any
+fallback rendering. It is 131.64% above legacy and 46.91% above JS-IR oxc here.
+Dense naming removes the identifier lookup path but does not make this emitter
+cheaper overall. This measurement is not evidence for switching the default.
+
+Callgrind and Cachegrind totals are reported separately: they are distinct runs
+and differ slightly. No inclusive cost is subtracted from another run's total.
+
+### Native clean-build timing (seconds)
+
+| Mode | Mean | Standard deviation | Minimum | Maximum |
+| --- | ---: | ---: | ---: | ---: |
+| legacy | 0.6392 | 0.0535 | 0.5993 | 0.7288 |
+| oxc | 0.6215 | 0.0558 | 0.5729 | 0.7095 |
+| oxc-bir | 0.6385 | 0.0369 | 0.6029 | 0.6995 |
+
+The timing distributions overlap; they do not establish a wall-time improvement.
+
+## Application
+
+The 3,735-module application measurements are in progress. Its byte-equality
+gate already passes for all 3,980 generated files, with zero import fallback.
+Interrupted or failed profiles are not included in the results.
 
 ## Reproduce
 
