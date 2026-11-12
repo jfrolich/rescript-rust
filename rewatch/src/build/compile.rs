@@ -4417,7 +4417,7 @@ fn finish_in_process_js_inner(
     }
 
     // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
-    let gentype = pre_js.gentype.take();
+    let mut gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -4547,6 +4547,15 @@ fn finish_in_process_js_inner(
     // What GenType prints follows the compile's warnings in this pass's
     // output, so a first pass the build retries with locations prints
     // nothing; like bsc's stdout, it is not kept for replay.
+    if let Some(outcome) = gentype.as_mut()
+        && let Ok(Some(output)) = &mut outcome.result
+        && let rescript_compiler::gentype::main::Output::NoMatch { output_file } = output
+        && package.gentype_output_absent(Path::new(output_file))
+    {
+        *output = rescript_compiler::gentype::main::Output::Absent {
+            output_file: std::mem::take(output_file),
+        };
+    }
     let gentype_printed = rescript_compiler::driver::apply_gentype_outcome(
         gentype,
         &compiler_warnings,
@@ -4802,6 +4811,7 @@ mod tests {
             path,
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }
