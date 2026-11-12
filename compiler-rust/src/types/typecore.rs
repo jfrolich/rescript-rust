@@ -19611,7 +19611,14 @@ fn type_approx_for_rec_let(
                     typ,
                 )
             }));
-            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?;
+            // The return annotation constrains the operand of unsafe_async,
+            // not the function's promise result. Approximate that application
+            // with a fresh variable, as for every other application below.
+            let ret = if inner.is_async {
+                ctx.new_var(None)
+            } else {
+                type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?
+            };
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
