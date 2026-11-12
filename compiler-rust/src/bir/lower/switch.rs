@@ -981,7 +981,7 @@ impl State {
             {
                 self.arena.release(statement);
             } else {
-                self.statements.fill(plan.head, statement);
+                self.place(plan.head, statement);
             }
         }
         self.switch_result(cx, &plan)

@@ -346,7 +346,7 @@ impl State {
 
     /// Fill a reserved slot; an explicit empty block is recorded for the
     /// `if_` of an enclosing conditional. Constant.
-    fn place(&mut self, slot: u32, statement: NodeId) {
+    pub(super) fn place(&mut self, slot: u32, statement: NodeId) {
         self.statements.fill(slot, statement);
         if matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
         {

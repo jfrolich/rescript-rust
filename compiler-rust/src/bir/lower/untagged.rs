@@ -415,7 +415,7 @@ impl State {
                     self.statements.copied += body.len();
                     self.statements.kill(out.run);
                     let block = norm::js2_block(&mut self.arena, body);
-                    self.statements.fill(start.start, block);
+                    self.place(start.start, block);
                     p.outputs.push(Output {
                         run: self.statements.since(start),
                         action: NONE,
@@ -431,7 +431,7 @@ impl State {
     fn untagged_if(&mut self, p: &mut Plan, test: NodeId, yes: Span, no: Span) {
         let start = p.marks.pop().unwrap();
         let statement = self.if_statement(test, yes, no);
-        self.statements.fill(start.start, statement);
+        self.place(start.start, statement);
         if matches!(p.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(start.start);
         }

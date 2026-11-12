@@ -432,7 +432,7 @@ impl State {
             {
                 self.arena.release(statement);
             } else {
-                self.statements.fill(plan.head, statement);
+                self.place(plan.head, statement);
             }
         }
         if let Some(value) = plan.value {

@@ -1078,6 +1078,49 @@ mod tests {
         a.switch_raw(scrutinee, actions, info)
     }
 
+    #[test]
+    fn a_dispatch_joins_the_test_of_a_handler_that_is_one_conditional() {
+        // `if (exit === 1) { if (y) { .. } }` is `if (exit === 1 && y) { .. }`
+        // (J-S3): the handler's other branch is an exit that writes nothing.
+        for (shape, body_finishes, statements) in
+            (0..5).flat_map(|shape| [(shape, false, 1), (shape, true, 1), (shape, true, 2), (shape, true, 3)])
+        {
+            let mut a = LamArena::new();
+            let other = if body_finishes { raise(&mut a, 2) } else { effect(&mut a, 2) };
+            let test = a.var(id("y", 11));
+            let out = a.static_raise(2, &[]);
+            let mut stay = effect(&mut a, 3);
+            if statements == 2 {
+                let first = effect(&mut a, 5);
+                stay = a.seq_raw(first, stay);
+            }
+            if statements == 3 {
+                // `let c = y._0; return f(c)`.
+                let c = id("c", 12);
+                let y = a.var(id("y", 11));
+                let value = field(&mut a, 0, y);
+                let c_ = a.var(c);
+                let result = call(&mut a, "f", 30, &[c_, c_]);
+                stay = a.let_(LetKind::Strict, c, value, result);
+            }
+            let handler = match shape {
+                0 => a.if_(test, stay, out),
+                1 => a.if_(test, out, stay),
+                2 => named(&mut a, test, &[], &[("B", stay)], Some(out)),
+                3 => named(&mut a, test, &[("A", out)], &[("B", stay)], None),
+                _ => {
+                    let out2 = a.static_raise(2, &[]);
+                    let stay2 = effect(&mut a, 7);
+                    named(&mut a, test, &[("A", out), ("D", out2)], &[("B", stay), ("C", stay2)], None)
+                }
+            };
+            let inner = one_handler(&mut a, other, handler);
+            let outer = effect(&mut a, 4);
+            let root = a.static_catch(inner, 2, &[], outer);
+            compare(a, root, ALL);
+        }
+    }
+
     /// Section 4.3: the Lambda after the passes, with `big` and `log` as
     /// local functions (an external is lowered by another slice).
     #[test]
