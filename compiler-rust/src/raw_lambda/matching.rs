@@ -1978,7 +1978,39 @@ pub struct PmOrCompiled<'p> {
     /// Handlers for or-patterns: (matrix, exit_number, idents, pattern_matching).
     pub handlers: Vec<OrHandler<'p>>,
     /// The or-pattern matrix.
-    pub or_matrix: Matrix<'p>,
+    or_matrix: OrMatrix<'p>,
+}
+
+/// The matrix of a [`PmOrCompiled`]: `as_matrix` of the rows it was split
+/// from. Nothing reads it unless the matching is consed onto a default
+/// environment or flattened, so it is kept as its rows until then.
+#[derive(Clone)]
+enum OrMatrix<'p> {
+    /// Not computed: the matrix of the first `plain` cases of the body
+    /// followed by `ors`, the or-pattern rows the handlers were made from.
+    Rows {
+        plain: usize,
+        ors: Vec<Clause<'p>>,
+    },
+    /// Computed and flattened (`flatten_precompiled`).
+    Flat(Matrix<'p>),
+}
+
+impl<'p> PmOrCompiled<'p> {
+    /// The or-pattern matrix. Cost: one [`as_matrix`] of the rows when it
+    /// was not flattened, a copy of the matrix when it was.
+    fn or_matrix(&self, pa: &PatArena<'p>) -> Matrix<'p> {
+        match &self.or_matrix {
+            OrMatrix::Rows { plain, ors } => as_matrix_rows(
+                pa,
+                self.body.cases[..*plain]
+                    .iter()
+                    .chain(ors)
+                    .map(|(row, _)| row.as_slice()),
+            ),
+            OrMatrix::Flat(matrix) => matrix.clone(),
+        }
+    }
 }
 
 /// Half-compiled pattern matching.
@@ -2002,11 +2034,15 @@ pub struct PmVarCompiled<'p> {
 }
 
 /// Half-compiled pattern matching with associated info.
+///
+/// OCaml's record also carries `matrix`, the matrix of `me`. It is a
+/// function of `me` ([`rebuild_matrix`]) and is read only when `me` becomes
+/// an entry of a default environment, that is when `me` is not the first
+/// group of its split. It is computed there and nowhere else: a split into
+/// one group, the common case, never compares its rows.
 pub struct PmHalfCompiledInfo<'p> {
     /// The half-compiled pattern matching.
     pub me: PmHalfCompiled<'p>,
-    /// The associated matrix.
-    pub matrix: Matrix<'p>,
     /// The top-level default environment.
     pub top_default: DefaultEnv<'p>,
 }
@@ -3252,14 +3288,41 @@ fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
+///
+/// Cost: at most n(n-1) row comparisons for n rows (two passes of
+/// [`get_mins_indices`]), none for one row, and one row copy per kept row.
 fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
+    as_matrix_rows(pa, cases.iter().map(|(row, _)| row.as_slice()))
+}
+
+/// [`as_matrix`] over rows.
+fn as_matrix_rows<'a, 'p: 'a>(
+    pa: &PatArena<'p>,
+    rows: impl Iterator<Item = &'a [&'p Pattern]>,
+) -> Matrix<'p> {
+    let rows: smallvec::SmallVec<[&[&'p Pattern]; 8]> = rows.collect();
     get_mins_indices(
-        |a: &Clause<'p>, b: &Clause<'p>| le_pats(pa, &a.0, &b.0),
-        cases,
+        |a: &&[&'p Pattern], b: &&[&'p Pattern]| {
+            count_row_comparison();
+            le_pats(pa, a, b)
+        },
+        &rows,
     )
     .iter()
-    .map(|&i| cases[i].0.clone())
+    .map(|&i| rows[i].to_vec())
     .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Row comparisons made by [`as_matrix`], for the step-count tests.
+    static ROW_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_row_comparison() {
+    #[cfg(test)]
+    ROW_COMPARISONS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -3872,11 +3935,19 @@ fn insert_or_append<'p>(
 // ============================================================================
 
 /// Reconstruct a matrix from a half-compiled pattern matching.
-/// Equivalent to OCaml's `rebuild_matrix`.
+/// Equivalent to OCaml's `rebuild_matrix`, and the `matrix` field of OCaml's
+/// `pm_half_compiled_info`: every split function builds that field as
+/// `as_matrix` of the cases of a `Pm`, as the or-pattern matrix of a `PmOr`,
+/// or by adding a wildcard column to the matrix of what a `PmVar` wraps,
+/// which is what this computes from the finished matching. `as_matrix` only
+/// reads patterns, so computing it here, later, gives the same matrix.
+///
+/// Cost: one [`as_matrix`] of the innermost matching's rows, plus one row
+/// copy per kept row and `PmVar` level.
 fn rebuild_matrix<'p>(pa: &PatArena<'p>, pmh: &PmHalfCompiled<'p>) -> Matrix<'p> {
     match pmh {
         PmHalfCompiled::Pm(pm) => as_matrix(pa, &pm.cases),
-        PmHalfCompiled::PmOr(por) => por.or_matrix.clone(),
+        PmHalfCompiled::PmOr(por) => por.or_matrix(pa),
         PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(pa, &x.inside)),
     }
 }
@@ -4029,10 +4100,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             let idef = bump_raise_count(self.next_raise);
             let PmHalfCompiledInfo {
                 me: next,
-                matrix,
                 top_default,
             } = info;
-            let new_def = cons_default(matrix, idef, top_default);
+            let new_def = cons_default(rebuild_matrix(self.pa, &next), idef, top_default);
             let mut new_nexts = vec![(idef, next)];
             new_nexts.extend(nexts);
             self.precompile_or(yes, yesor, new_def, new_nexts)
@@ -4082,7 +4152,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         args: args.clone(),
                         default: def.clone(),
                     }),
-                    matrix: as_matrix(pa, &yes),
                     top_default: def,
                 },
                 k,
@@ -4100,10 +4169,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
@@ -4113,7 +4181,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4125,10 +4192,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
-                    let new_def = cons_default(matrix, idef, top_default);
+                    let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                     let mut new_nexts = vec![(idef, next)];
                     new_nexts.extend(nexts);
                     (
@@ -4138,7 +4204,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                                 args: args.clone(),
                                 default: new_def.clone(),
                             }),
-                            matrix: as_matrix(pa, &yes),
                             top_default: new_def,
                         },
                         new_nexts,
@@ -4166,9 +4231,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(self.pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4243,7 +4308,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             args: args.clone(),
                             default: def.clone(),
                         }),
-                        matrix: as_matrix(pa, &yes),
                         top_default: def,
                     },
                     k,
@@ -4264,10 +4328,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
@@ -4277,7 +4340,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4329,9 +4391,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4401,7 +4463,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     Some(v) => {
                         if cls.len() == 1 {
                             // as split as it can
-                            dont_precompile_var(pa, args, cls, def, k)
+                            dont_precompile_var(args, cls, def, k)
                         } else {
                             // Precompile: strip first pattern from each case
                             let var_cls: Vec<Clause<'p>> = cls
@@ -4432,14 +4494,13 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             // Compute top information
                             if nexts.is_empty() {
                                 // If you need
-                                dont_precompile_var(pa, args, cls, def, k)
+                                dont_precompile_var(args, cls, def, k)
                             } else {
                                 let rfirst = PmHalfCompiledInfo {
                                     me: PmHalfCompiled::PmVar(PmVarCompiled {
                                         inside: Box::new(first_info.me),
                                         var_arg: av,
                                     }),
-                                    matrix: add_omega_column(&first_info.matrix),
                                     top_default: rebuild_default(pa, &nexts, def),
                                 };
                                 let rnexts = rebuild_nexts(&av, nexts, k);
@@ -4447,10 +4508,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             }
                         }
                     }
-                    _ => dont_precompile_var(pa, args, cls, def, k),
+                    _ => dont_precompile_var(args, cls, def, k),
                 }
             }
-            _ => dont_precompile_var(pa, args, cls, def, k),
+            _ => dont_precompile_var(args, cls, def, k),
         }
     }
 
@@ -4463,7 +4524,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         def: DefaultEnv<'p>,
         k: Vec<(i32, PmHalfCompiled<'p>)>,
     ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-        let Split { pa, args, .. } = *self;
+        let Split { args, .. } = *self;
         if ors.is_empty() {
             return self.split_constr(&cls, def, k);
         }
@@ -4471,7 +4532,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // do_cases processes the or-pattern list
         let (end_body, handlers) = self.do_cases_or(&ors, &def);
 
-        let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
+        let plain = cls.len();
         let body = PatternMatching {
             cases: [cls, end_body].concat(),
             args: args.clone(),
@@ -4482,9 +4543,8 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 me: PmHalfCompiled::PmOr(PmOrCompiled {
                     body,
                     handlers,
-                    or_matrix: matrix.clone(),
+                    or_matrix: OrMatrix::Rows { plain, ors },
                 }),
-                matrix,
                 top_default: def,
             },
             k,
@@ -4590,7 +4650,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
 /// Don't precompile: just wrap the cases in a PatternMatching.
 /// Equivalent to OCaml's `dont_precompile_var`.
 fn dont_precompile_var<'p>(
-    pa: &PatArena<'p>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
     def: DefaultEnv<'p>,
@@ -4603,7 +4662,6 @@ fn dont_precompile_var<'p>(
                 args: args.clone(),
                 default: def.clone(),
             }),
-            matrix: as_matrix(pa, &cls),
             top_default: def,
         },
         k,
@@ -9241,12 +9299,11 @@ fn flatten_precompiled<'p>(
 ) -> Result<PmHalfCompiled<'p>, CannotFlattenExn> {
     match pmh {
         PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(pa, size, args.clone(), &pm)?)),
-        PmHalfCompiled::PmOr(PmOrCompiled {
-            body,
-            handlers,
-            or_matrix,
-        }) => {
-            let flat_body = flatten_pm(pa, size, args.clone(), &body)?;
+        PmHalfCompiled::PmOr(por) => {
+            let flat_body = flatten_pm(pa, size, args.clone(), &por.body)?;
+            // Flattening the matrix can fail, so it is computed here.
+            let or_matrix = por.or_matrix(pa);
+            let handlers = por.handlers;
             let flat_handlers: Vec<_> = handlers
                 .into_iter()
                 .map(|(mat, i, vars, pm)| {
@@ -9258,7 +9315,7 @@ fn flatten_precompiled<'p>(
             Ok(PmHalfCompiled::PmOr(PmOrCompiled {
                 body: flat_body,
                 handlers: flat_handlers,
-                or_matrix: flat_or_matrix,
+                or_matrix: OrMatrix::Flat(flat_or_matrix),
             }))
         }
         PmHalfCompiled::PmVar(_) => panic!("flatten_precompiled: PmVar"),
@@ -9633,6 +9690,115 @@ mod tests {
         let before = KEY_STEPS.with(|steps| steps.get());
         run();
         KEY_STEPS.with(|steps| steps.get()) - before
+    }
+
+    fn row_comparisons(run: impl FnOnce()) -> u64 {
+        let before = super::ROW_COMPARISONS.with(|steps| steps.get());
+        run();
+        super::ROW_COMPARISONS.with(|steps| steps.get()) - before
+    }
+
+    /// The rows of a one-column matching: `groups` runs of distinct string
+    /// constants, of the given lengths, each followed by a wildcard row.
+    fn constant_runs<'p>(
+        pa: &'p PatArena<'p>,
+        b: &RawArena,
+        runs: &[usize],
+    ) -> PatternMatching<'p> {
+        use crate::lambda::lam_constant::Constant as LamConstant;
+        let mut cases = Vec::new();
+        for (run, &len) in runs.iter().enumerate() {
+            for i in 0..len {
+                let constant = Constant::String(format!("{run}-{i}"));
+                let pat = pa.alloc(make_pat(
+                    PatternDesc::Tpat_constant(constant),
+                    omega().pat_type,
+                    omega().pat_env,
+                ));
+                let action = b.const_(LamConstant::int(cases.len() as i32));
+                cases.push((vec![pat], MatchAction::new(action)));
+            }
+            let action = b.const_(LamConstant::int(cases.len() as i32));
+            cases.push((vec![omega()], MatchAction::new(action)));
+        }
+        PatternMatching {
+            cases,
+            args: MatchArgs::new([(b.var(Ident::create_local("x")), LetKind::Alias)]),
+            default: Vec::new(),
+        }
+    }
+
+    fn split_runs(runs: &[usize]) -> (u64, Vec<usize>) {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        let pm = constant_runs(&pa, &b, runs);
+        let mut next_raise = 0;
+        let mut default_rows = Vec::new();
+        let steps = row_comparisons(|| {
+            let (first, nexts) = split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("the first group is a plain matching");
+            };
+            default_rows = first.default.iter().map(|(rows, _)| rows.len()).collect();
+            assert_eq!(nexts.len(), first.default.len());
+        });
+        (steps, default_rows)
+    }
+
+    /// A matching that splits into one group never compares its rows: the
+    /// matrix of a group is computed only for a default environment, and
+    /// the first group of a split is in none.
+    #[test]
+    fn splitting_into_one_group_compares_no_rows() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        for n in [1, 4, 64, 512] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            // Drop the wildcard row: constants only, one group.
+            pm.cases.pop();
+            let mut next_raise = 0;
+            let steps = row_comparisons(|| {
+                let (first, nexts) =
+                    split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+                assert!(nexts.is_empty());
+                let PmHalfCompiled::Pm(first) = first else {
+                    panic!("one plain matching");
+                };
+                assert_eq!(first.cases.len(), n);
+            });
+            assert_eq!(steps, 0, "n = {n}");
+            // Asking for the matrix is what costs: n rows, none below another.
+            let steps = row_comparisons(|| assert_eq!(as_matrix(&pa, &pm.cases).len(), n));
+            assert_eq!(steps as usize, n * (n - 1), "n = {n}");
+        }
+    }
+
+    /// Splitting costs the row comparisons of the groups that become default
+    /// environment entries, whatever the size of the first group: here the
+    /// entries are a wildcard row, `m` constants and a wildcard row, so at
+    /// most m(m-1) comparisons for any `n`.
+    #[test]
+    fn splitting_compares_only_rows_of_default_entries() {
+        for m in [2, 8] {
+            let mut steps_for_n = Vec::new();
+            for n in [1, 64, 512] {
+                let (steps, default_rows) = split_runs(&[n, m]);
+                assert_eq!(default_rows, vec![1, m, 1], "n = {n}, m = {m}");
+                assert!(steps as usize <= m * (m - 1), "n = {n}, m = {m}: {steps}");
+                steps_for_n.push(steps);
+            }
+            assert!(steps_for_n.iter().all(|steps| *steps == steps_for_n[0]));
+        }
     }
 
     /// An action whose key is a little over `size` bytes; actions of
