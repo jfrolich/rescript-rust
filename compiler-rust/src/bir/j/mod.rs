@@ -5,28 +5,15 @@ mod logic;
 pub mod facts;
 pub mod equal;
 
-use super::{Bir, NodeFlags, NodeId, VarFlags, VarId, View};
+use super::{Bir, NodeFlags, NodeId, VarId, View};
 use crate::lambda::lam_compat::LetKind;
 
 /// H13: A:28 delay_safe; strict-pure expression construction for Var, Global,
 /// Const and Fun. Read child facts rather than walking expression subtrees.
 pub(crate) fn pure_expression(bir: &mut Bir, view: View<'_>, aux: u16) -> NodeId {
-    let delay_safe = if let View::Var { var } = view {
-        let flags = bir.vars.flags(var);
-        !flags.contains(VarFlags::ASSIGNED) && !flags.contains(VarFlags::JS_GLOBAL)
-    } else if let View::JFun { .. } = view {
-        true
-    } else {
-        view.children()
-            .iter()
-            .all(|&child| bir.node(child).flags().contains(NodeFlags::DELAY_SAFE))
-    };
     let node = plain::node(bir, view, aux);
     let mut flags = bir.node(node).flags();
     flags.0 |= NodeFlags::STRICT;
-    if delay_safe {
-        flags.0 |= NodeFlags::DELAY_SAFE;
-    }
     bir.nodes[node.index()].set_flags(flags);
     node
 }
@@ -100,6 +87,7 @@ pub(crate) fn member(bir: &mut Bir, object: NodeId, property: super::StrId, posi
 #[cfg(test)]
 mod sequencing_tests {
     use super::*;
+    use crate::bir::VarFlags;
     use crate::js_ir::arena::FieldPos;
 
     #[test]
@@ -134,6 +122,7 @@ mod sequencing_tests {
 #[cfg(test)]
 mod sequencing_depth_tests {
     use super::*;
+    use crate::bir::VarFlags;
     #[test]
     fn ten_thousand_record_fields_have_linear_sequencing_inspection() {
         let mut b = Bir::default();
