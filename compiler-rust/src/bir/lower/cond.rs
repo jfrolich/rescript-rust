@@ -56,6 +56,8 @@ pub(super) struct Conditional {
 struct Parts {
     start: u32,
     head: u32,
+    /// Row R5 step 1 may apply (`Conditional::folds`).
+    folds: bool,
 }
 
 pub(super) const EMPTY: Span = Span { start: 0, len: 0 };
@@ -237,11 +239,12 @@ impl State {
         let parts = Parts {
             start,
             head: end - 1,
+            folds: conditional.folds,
         };
         let yes = children.next().expect("first branch");
         if conditional.kind == Kind::If {
             let no = children.next().expect("second branch");
-            return self.finish_if(cx, conditional.target, conditional.folds, parts, test, yes, no);
+            return self.finish_if(cx, conditional.target, parts, test, yes, no);
         }
         let and = conditional.kind == Kind::And;
         if !matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
@@ -252,9 +255,9 @@ impl State {
         let constant = self.pure_expression(View::JBool, u16::from(!and));
         let constant = Probed::Free(self.free.push(Free::Leaf(constant)));
         if and {
-            self.finish_if(cx, Target::None, conditional.folds, parts, test, yes, constant)
+            self.finish_if(cx, Target::None, parts, test, yes, constant)
         } else {
-            self.finish_if(cx, Target::None, conditional.folds, parts, test, constant, yes)
+            self.finish_if(cx, Target::None, parts, test, constant, yes)
         }
     }
 
@@ -264,7 +267,6 @@ impl State {
         &mut self,
         cx: Cx,
         target: Target,
-        folds: bool,
         parts: Parts,
         test: NodeId,
         yes: Probed,
@@ -292,9 +294,7 @@ impl State {
         };
         match (cx.cont, target) {
             (Cont::Effect(Tail::No), _) => self.effect_conditional(cx, parts, test, yes, no),
-            (Cont::Effect(Tail::Return(_)), _) => {
-                self.return_conditional(cx, folds, parts, test, yes, no)
-            }
+            (Cont::Effect(Tail::Return(_)), _) => self.return_conditional(cx, parts, test, yes, no),
             (_, Target::Result(target) | Target::Given(target)) => {
                 let assign = Cx {
                     cont: Cont::Assign(target),
@@ -842,7 +842,6 @@ impl State {
     fn return_conditional(
         &mut self,
         cx: Cx,
-        folds: bool,
         parts: Parts,
         test: NodeId,
         yes: Probed,
@@ -852,7 +851,7 @@ impl State {
         let no = self.run(cx, no);
         // Step 1, C:5241 try_fold_effect_only_return_tail, behind the legacy
         // gate lambda_contains_statement_value_form (C:5139): `folds`.
-        if folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
+        if parts.folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);
@@ -1845,7 +1844,7 @@ mod tests {
         };
         let (then_, else_) = (branch(&mut hand, 0, yes), branch(&mut hand, 1, no));
         let test = hand.test(0);
-        let parts = Parts { start: 0, head };
+        let parts = Parts { start: 0, head, folds: true };
         let Probed::Out(out) =
             hand.state
                 .effect_conditional(Cx::effect(), parts, test, then_, else_)
@@ -2057,7 +2056,7 @@ mod tests {
         assert_eq!(size_of::<Kind>(), 1);
         assert_eq!(size_of::<Target>(), 8);
         assert_eq!(size_of::<Conditional>(), 24);
-        assert_eq!(size_of::<Parts>(), 8);
+        assert_eq!(size_of::<Parts>(), 12);
         assert_eq!(size_of::<Cx>(), 32);
     }
 }
