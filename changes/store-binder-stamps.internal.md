@@ -1,1 +1,3 @@
 - Binders of shared store data no longer advance the consuming compilation's stamp counter; the stamp replay, the reserved rename stamps and the stamp-mapping serializer are removed.
+- `SamePathKey` hashes with the hash every interned path already stores, which makes replaying alias-source registrations cheaper.
+- Debug builds assert that no diagnostic is recorded while shared store data is built.
