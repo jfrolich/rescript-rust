@@ -7,6 +7,7 @@
  * in the Node smoke test (scripts/smoke.mjs).
  */
 
+import { CompilerCrash, createCompleter } from "./complete.js";
 import { formatException, formatValue, hideModules } from "./repl-format.js";
 
 export function moduleNameOf(filename) {
@@ -95,6 +96,8 @@ export function createEngine(wasm, stdlib) {
   // Compiled JavaScript of the project, by module name.
   let projectJs = Object.create(null);
   let projectFiles = [];
+  // Counts the builds: what a completion found is of one build.
+  let projectVersion = 0;
   const javascriptOf = (name) => projectJs[name] ?? stdlib.javascript[name];
 
   // The macro engine is this JavaScript engine: host.js gets the compiled
@@ -159,6 +162,7 @@ export function createEngine(wasm, stdlib) {
       }
     }
     projectFiles = files;
+    projectVersion += 1;
     projectJs = Object.create(null);
     macroCall({ kind: "reset" });
     // Other files are what `Macro.readFile` reads.
@@ -224,6 +228,8 @@ export function createEngine(wasm, stdlib) {
     const { order, results } = build(libraries, { execute: false });
     session = {
       count: 0,
+      // What the inputs defined, by name: the names an input can use.
+      scope: new Map(),
       // What every input opens: earlier inputs, and the modules they opened.
       opens: [],
       // The modules an input defined: `open` of one is not `open` of a file.
@@ -371,6 +377,7 @@ export function createEngine(wasm, stdlib) {
     for (const item of items) {
       const declaration = hideInputModules(item.text).replace(/^type exn \+=\s+/, "exception ");
       if (item.kind === "module") current.defined.add(item.name);
+      current.scope.set(item.name, item);
       if (item.kind !== "value" || declaration.startsWith("external ") || !(item.name in module.exports)) {
         output.push({ kind: "value", text: declaration });
         continue;
@@ -411,5 +418,68 @@ export function createEngine(wasm, stdlib) {
     build([]);
   }
 
-  return { build, warm, replStart, replEval };
+  // ── Completion ────────────────────────────────────────────────────────────
+
+  const completer = createCompleter(wasm);
+
+  /**
+   * What can be written at `offset`. In a session of the read-eval-print
+   * loop (`{mode: "repl", source, offset}`) the input sees the inputs before
+   * it; in a project (`{mode: "project", files, name, offset}`) the file
+   * `name` sees the files it depends on, which are compiled if they are not.
+   * Returns `{from, options, validFor}`, null, or `{crashed}`.
+   */
+  function complete(request) {
+    try {
+      if (request.mode === "repl") {
+        if (!session) replStart([]);
+        const inputs = /^Repl\d+$/;
+        return completer.complete(
+          {
+            key: `repl/${projectVersion}/${session.opens.length}`,
+            opens: session.opens,
+            // What an `open` of an input opened.
+            opened: session.opens.filter((name) => !inputs.test(name)),
+            modules: projectFiles.filter((file) => isSourceFile(file.name)).map((file) => moduleNameOf(file.name)),
+            scope: [...session.scope.values()],
+          },
+          request.source,
+          request.offset,
+          request.explicit,
+        );
+      }
+      const { files, name } = request;
+      const built =
+        !session &&
+        files.length === projectFiles.length &&
+        files.every(
+          (file, index) =>
+            file.name === projectFiles[index].name && (file.name === name || file.source === projectFiles[index].source),
+        );
+      if (!built) {
+        session = null;
+        const outcome = build(files, { execute: false });
+        if (outcome.crashed) return { crashed: outcome.crashed };
+      }
+      const file = files.find((candidate) => candidate.name === name);
+      if (!file || !isSourceFile(name)) return null;
+      return completer.complete(
+        {
+          key: `project/${projectVersion}`,
+          opens: [],
+          opened: [],
+          modules: files.filter((other) => isSourceFile(other.name) && other.name !== name).map((other) => moduleNameOf(other.name)),
+          scope: [],
+        },
+        file.source,
+        request.offset,
+        request.explicit,
+      );
+    } catch (error) {
+      if (error instanceof CompilerCrash) return { crashed: error.message };
+      throw error;
+    }
+  }
+
+  return { build, warm, replStart, replEval, complete };
 }

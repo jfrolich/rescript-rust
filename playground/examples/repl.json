@@ -38,5 +38,43 @@
       "label": "a query checked against schema.sql",
       "source": "module Vips = %Sql.query(\"select name, city from customers where vip = :vip\")"
     }
+  ],
+  "completions": [
+    [
+      "price->",
+      "Float.toFixed"
+    ],
+    [
+      "Json.",
+      "encode"
+    ],
+    [
+      "%Debug.",
+      "log"
+    ],
+    [
+      "@Enum.",
+      "derive"
+    ],
+    [
+      "[1, 2]->Array.map(n => n + 1)->",
+      "Array.length"
+    ],
+    [
+      "sizeValues->Array.map(size => size->",
+      "sizeToString"
+    ],
+    [
+      "let ada: user = {name: \"Ada\", age: 36}\n[ada]->Array.map(u => u.",
+      "email"
+    ],
+    [
+      "Vips.",
+      "run"
+    ],
+    [
+      "pri",
+      "price"
+    ]
   ]
 }
