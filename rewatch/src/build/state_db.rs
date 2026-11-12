@@ -112,7 +112,7 @@ impl Imports {
         }
     }
 
-    fn from_text(text: String) -> Self {
+    pub(super) fn from_text(text: String) -> Self {
         Self {
             text: Some(text.into()),
             list: std::sync::OnceLock::new(),
@@ -129,15 +129,15 @@ impl Imports {
         })
     }
 
-    fn encode(&self) -> String {
+    pub(super) fn encode(&self) -> std::borrow::Cow<'_, str> {
         match (&self.text, self.list.get()) {
-            (Some(text), None) => text.to_string(),
-            _ => self
+            (Some(text), None) => std::borrow::Cow::Borrowed(text),
+            _ => std::borrow::Cow::Owned(self
                 .list()
                 .iter()
                 .map(|(module, digest)| format!("{module}={digest:x}"))
                 .collect::<Vec<_>>()
-                .join("\n"),
+                .join("\n")),
         }
     }
 }
@@ -192,6 +192,10 @@ pub struct PackageState {
     /// every recorded row missing from them is kept (see
     /// `incremental::current_record`).
     pub partial: bool,
+    /// Fresh-build rows encoded by the preparation worker.
+    pub encoded_reads: BTreeMap<String, String>,
+    pub encoded_items: BTreeMap<String, String>,
+    pub encoded_deps: BTreeMap<String, String>,
 }
 
 /// A stored interface to write: its content hash, encoded extras (`None` for
@@ -225,7 +229,7 @@ pub type UnitReads = BTreeMap<String, (u64, Vec<String>)>;
 /// A module's item digests, by item key.
 pub type ItemDigests = BTreeMap<String, u64>;
 
-fn encode_reads(reads: &UnitReads) -> String {
+pub(super) fn encode_reads(reads: &UnitReads) -> String {
     reads
         .iter()
         .map(|(unit, (digest, keys))| format!("{unit}\t{digest:x}\t{}", keys.join(",")))
@@ -251,7 +255,7 @@ fn decode_reads(text: &str) -> Option<UnitReads> {
         .collect()
 }
 
-fn encode_items(items: &ItemDigests) -> String {
+pub(super) fn encode_items(items: &ItemDigests) -> String {
     items
         .iter()
         .map(|(key, digest)| format!("{key}\t{digest:x}"))
@@ -707,6 +711,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         && new.reads_updates.is_empty()
         && new.items_updates.is_empty()
         && new.interface_updates.is_empty()
+        && new.encoded_reads.is_empty()
+        && new.encoded_items.is_empty()
         && new.meta.iter().all(|(key, value)| {
             previous.meta.get(key) == Some(value) || (partial && key == META_BUILD_STARTED_AT)
         })
@@ -728,7 +734,15 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     let module_rows = timing::measure(Phase::RecordImportsEncode, || changed_rows(&previous.modules, &new.modules, |row| {
         row.imports.as_ref().map(Imports::encode)
     }));
-    let deps_rows = timing::measure(Phase::RecordDepsEncode, || changed_rows(&previous.deps, &new.deps, |row| row.deps.join("\n")));
+    let deps_rows = timing::measure(Phase::RecordDepsEncode, || new.deps.par_iter()
+        .filter(|(key, row)| previous.deps.get(*key) != Some(*row))
+        .map(|(key, row)| {
+            let encoded = match new.encoded_deps.get(key) {
+                Some(text) => std::borrow::Cow::Borrowed(text.as_str()),
+                None => std::borrow::Cow::Owned(row.deps.join("\n")),
+            };
+            (key, row, encoded)
+        }).collect::<Vec<_>>());
     let write = || -> rusqlite::Result<()> {
         let mut conn = timing::measure(Phase::RecordSqlOpen, || open_for_write(package))?;
         timing::measure(Phase::RecordSqlMeta, || conn.execute(
@@ -768,10 +782,16 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             for (module, reads) in &reads {
                 set_reads.execute(params![module, reads])?;
             }
+            for (module, reads) in &new.encoded_reads {
+                set_reads.execute(params![module, reads])?;
+            }
             drop(table_timer);
             let table_timer = RecordTimer::start(Phase::RecordSqlItems);
             let mut set_items = tx.prepare("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
             for (module, items) in &items {
+                set_items.execute(params![module, items])?;
+            }
+            for (module, items) in &new.encoded_items {
                 set_items.execute(params![module, items])?;
             }
             drop(table_timer);
@@ -850,7 +870,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 &deps_rows,
                 partial,
                 |source| delete_deps.execute(params![source]).map(drop),
-                |source, row, deps| set_deps.execute(params![source, row.mtime, deps]).map(drop),
+                |source, row, deps| set_deps.execute(params![source, row.mtime, deps.as_ref()]).map(drop),
             )?;
             drop(table_timer);
         }
@@ -878,7 +898,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 fn changed_rows<'a, K, V, E>(
     previous: &BTreeMap<K, V>,
     new: &'a BTreeMap<K, V>,
-    encode: impl Fn(&V) -> E + Sync,
+    encode: impl Fn(&'a V) -> E + Sync,
 ) -> Vec<(&'a K, &'a V, E)>
 where
     K: Ord + Sync,

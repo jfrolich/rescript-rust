@@ -359,6 +359,7 @@ pub struct BuildCommandState {
     // module's registration drops its entry.
     pub prepared_interfaces: Mutex<AHashMap<String, crate::build::state_db::StoredInterface>>,
     /// Joined before persistence or any subsequent registry mutation.
+    pub(crate) prepared_packages: Mutex<AHashMap<String, crate::build::state_db::PackageState>>,
     pub(crate) pending_record_prep: Mutex<Option<super::compile::DigestPrep>>,
     // Monotonically increasing generation counter for in-memory interface invalidation.
     // Each compilation that produces a new interface bumps this counter.
@@ -527,6 +528,7 @@ impl BuildCommandState {
             published_item_digests: Mutex::new(AHashMap::new()),
             prepared_interfaces: Mutex::new(AHashMap::new()),
             pending_record_prep: Mutex::new(None),
+            prepared_packages: Mutex::new(AHashMap::new()),
             interface_generation: AtomicU64::new(0),
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),

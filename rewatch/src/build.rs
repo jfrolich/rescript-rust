@@ -12,6 +12,7 @@ pub mod parse;
 pub mod plan;
 pub mod pools;
 pub mod qos;
+mod record_prep;
 pub mod state_db;
 pub mod tooling;
 

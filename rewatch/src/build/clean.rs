@@ -88,7 +88,13 @@ pub fn write_in_process_record(
     if build_state.build_run.stopped_at_parse() {
         return;
     }
-    let digests = build::incremental::UnitDigests::of_compiled(build_state);
+    let mut prepared = std::mem::take(&mut *build_state.prepared_packages.lock().unwrap());
+    if !build_state.build_run.succeeded() || prepared.values().any(|record|
+        record.modules.keys().any(|name| !build_state.written_modules.contains(name)
+            || build_state.modules.get(name).is_none_or(|m| m.compile_dirty))) {
+        prepared.clear();
+    }
+    let digests = std::sync::OnceLock::new();
     crate::build::phase_mark("record-digests");
     let compiles = build::incremental::CompileRecords::lock(build_state);
     // A successful one-shot build records the compiler identity with it
@@ -96,12 +102,17 @@ pub fn write_in_process_record(
     let source_map_args = build::compiler_info::source_map_args(build_state);
     let with_compiler_info =
         compiler_info_write == build::CompilerInfoWrite::WithRecord && build_state.build_run.succeeded();
-    build_state
-        .packages
-        .par_iter()
-        .for_each(|(package_name, package)| {
-            let mut record =
-                build::incremental::current_record(build_state, &compiles, package_name, &digests);
+    let packages: Vec<_> = build_state.packages.iter()
+        .map(|(name, package)| (name, package, prepared.remove(name))).collect();
+    packages.into_par_iter().for_each(|(package_name, package, prepared)| {
+            let mut record = match prepared {
+                Some(mut record) => {
+                    build::incremental::fill_record_metadata(build_state, package_name, &mut record);
+                    record
+                }
+                None => build::incremental::current_record(build_state, &compiles, package_name,
+                    digests.get_or_init(|| build::incremental::UnitDigests::of_compiled(build_state))),
+            };
             if with_compiler_info
                 && let Some(entries) =
                     build::compiler_info::recorded_entries(build_state, package, &source_map_args)

@@ -700,6 +700,7 @@ pub fn compile(
     // digests computed by this build's scheduler are reused.
     build_state.published_item_digests.lock().unwrap().clear();
     build_state.prepared_interfaces.lock().unwrap().clear();
+    build_state.prepared_packages.lock().unwrap().clear();
     build_state.clear_gentype_contexts();
     // Worker type stores hold dependency graphs published by this build
     // only; a new build starts every worker from an empty store.
@@ -781,7 +782,7 @@ pub fn compile(
     let cutoff = incremental_plan == Some(IncrementalPlan::Cutoff);
 
     let js_writer = JsWriter::spawn();
-    let digest_prep = DigestPrep::spawn(build_state.snapshot_module_registry());
+    let digest_prep = DigestPrep::spawn(build_state);
     // Bound the jobs handed to rayon so the priority heap still orders work —
     // dumping everything into rayon's queue would defeat #2. Allow one queued
     // job per thread beyond the running ones: a worker that finishes then
@@ -1175,7 +1176,7 @@ pub fn compile(
                             );
 
                             // Its registration is final: compile is done with it.
-                            digest_prep.prepare(msg.module_name.clone());
+                            digest_prep.prepare(&msg, build_command_state_ref);
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
@@ -2556,8 +2557,9 @@ fn write_js_output(
 /// otherwise recording a large build decodes and hashes every signature at
 /// the end, when nothing else runs.
 pub(crate) struct DigestPrep {
-    tx: mpsc::Sender<String>,
-    handle: std::thread::JoinHandle<Vec<PreparedRecord>>,
+    tx: mpsc::Sender<super::record_prep::ReadInput>,
+    handle: std::thread::JoinHandle<PreparedBuild>,
+    fresh: bool,
 }
 
 /// Finish persistence preparation before recording or reusing the registry.
@@ -2565,10 +2567,24 @@ pub fn finish_record_preparation(build_state: &BuildCommandState) {
     let pending = build_state.pending_record_prep.lock().unwrap().take();
     let Some(pending) = pending else { return };
     super::phase_mark("record-preparation-join-start");
+    let prepared = pending.finish();
+    if let Some(fresh) = prepared.fresh {
+        *build_state.prepared_packages.lock().unwrap() = fresh.packages;
+        {
+            let mut deps = build_state.in_memory_deps.lock().unwrap();
+            if deps.is_empty() { *deps = fresh.deps; } else { deps.extend(fresh.deps); }
+        }
+        let mut loaded = build_state.loaded_units.lock().unwrap();
+        let mut reads = build_state.unit_reads.lock().unwrap();
+        for input in fresh.inputs {
+            if let Some(units) = input.loaded { loaded.insert(input.name.clone(), units); }
+            if let Some(pending) = input.pending { reads.insert(input.name, pending); }
+        }
+    }
     {
         let mut item_digests = build_state.published_item_digests.lock().unwrap();
         let mut interfaces = build_state.prepared_interfaces.lock().unwrap();
-        for prepared in pending.finish() {
+        for prepared in prepared.modules {
             match prepared.item_digests {
                 Some(items) => item_digests.insert(prepared.module_name.clone(), items),
                 None => item_digests.remove(&prepared.module_name),
@@ -2583,6 +2599,11 @@ pub fn finish_record_preparation(build_state: &BuildCommandState) {
     super::phase_mark("record-preparation-join-end");
 }
 
+struct PreparedBuild {
+    modules: Vec<PreparedRecord>,
+    fresh: Option<super::record_prep::FinishedRows>,
+}
+
 /// What [`DigestPrep`] computed of a completed module.
 struct PreparedRecord {
     module_name: String,
@@ -2593,40 +2614,53 @@ struct PreparedRecord {
 impl DigestPrep {
     /// `registry` shares the build registry's maps, so it sees each module
     /// as registered when [`DigestPrep::prepare`] is called.
-    fn spawn(registry: ModuleRegistry) -> Self {
-        let (tx, rx) = mpsc::channel::<String>();
+    fn spawn(state: &BuildCommandState) -> Self {
+        let registry = state.snapshot_module_registry();
+        let mut fresh_rows = super::record_prep::FreshRows::new(state);
+        let fresh = fresh_rows.is_some();
+        let (tx, rx) = mpsc::channel::<super::record_prep::ReadInput>();
         let handle = std::thread::Builder::new()
             .name("digest-prep".to_string())
             .spawn(move || {
-                rx.into_iter()
-                    .map(|module_name| PreparedRecord {
-                        item_digests: rescript_compiler::timing::measure(
-                            rescript_compiler::timing::Phase::RecordDigests,
-                            || registry.item_digests(&module_name)
+                let modules = rx.into_iter().map(|input| {
+                    let module_name = input.name.clone();
+                    let item_digests = rescript_compiler::timing::measure(
+                        rescript_compiler::timing::Phase::RecordDigests, || match &fresh_rows {
+                            Some(fresh) => fresh.items(&module_name),
+                            None => registry.item_digests(&module_name)
                                 .filter(|items| items.contains_key(rescript_compiler::cmi::item_deps::WHOLE))
                                 .map(Arc::new),
-                        ),
-                        interface: rescript_compiler::timing::measure(
-                            rescript_compiler::timing::Phase::RecordInterfaces,
-                            || registry.encode_stored_module_parts(&module_name)
-                                .map(|(extras, core)| super::state_db::StoredInterface::new(extras, core)),
-                        ),
-                        module_name,
-                    })
-                    .collect()
+                        });
+                    let mut interface = rescript_compiler::timing::measure(
+                        rescript_compiler::timing::Phase::RecordInterfaces,
+                        || registry.encode_stored_module_parts(&module_name)
+                            .map(|(extras, core)| super::state_db::StoredInterface::new(extras, core)));
+                    if let Some(fresh) = &mut fresh_rows {
+                        fresh.complete(input, interface.take());
+                    }
+                    PreparedRecord { module_name, item_digests, interface }
+                }).collect();
+                PreparedBuild { modules, fresh: fresh_rows.map(super::record_prep::FreshRows::finish) }
             })
             .expect("failed to spawn the digest thread");
-        DigestPrep { tx, handle }
+        DigestPrep { tx, handle, fresh }
     }
 
-    /// Digest `module_name` as registered now.
-    fn prepare(&self, module_name: String) {
-        // The thread only stops when `finish` drops the sender.
-        self.tx.send(module_name).expect("digest thread stopped");
+    fn prepare(&self, msg: &CompletionMsg, state: &BuildCommandState) {
+        let (loaded, pending) = if self.fresh {
+            (state.loaded_units.lock().unwrap().remove(&msg.module_name),
+             state.unit_reads.lock().unwrap().remove(&msg.module_name))
+        } else { (None, None) };
+        self.tx.send(super::record_prep::ReadInput {
+            name: msg.module_name.clone(), loaded, pending,
+            implementation_warnings: msg.result.as_ref().ok().and_then(|w| w.clone()),
+            interface_warnings: msg.interface_result.as_ref().and_then(|r| r.as_ref().ok())
+                .and_then(|w| w.clone()),
+        }).expect("digest thread stopped");
     }
 
     /// What was prepared, later completions of a module after earlier ones.
-    fn finish(self) -> Vec<PreparedRecord> {
+    fn finish(self) -> PreparedBuild {
         drop(self.tx);
         self.handle
             .join()

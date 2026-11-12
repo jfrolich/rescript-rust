@@ -168,6 +168,12 @@ impl UnitDigests {
         }
     }
 
+    pub(super) fn for_preparation(registry: rescript_compiler::cmi::persistent_env::ModuleRegistry,
+        modules: &AHashSet<String>) -> Self {
+        Self { registry, recorded: AHashMap::new(), other: std::sync::Mutex::new(AHashMap::new()),
+            cache: modules.iter().map(|name| (name.clone(), std::sync::OnceLock::new())).collect() }
+    }
+
     /// [`UnitDigests::new`], with the digests of the modules this build
     /// compiled computed up front, in parallel.
     pub fn of_compiled(build_state: &BuildCommandState) -> Self {
@@ -260,21 +266,13 @@ pub fn expected_outputs(build_state: &BuildCommandState, package_name: &str) -> 
 }
 
 /// The build record to save for `package` after this build.
-pub fn current_record(
-    build_state: &BuildCommandState,
-    compiles: &CompileRecords,
-    package_name: &str,
-    digests: &UnitDigests,
-) -> PackageState {
+/// Whole-build fields: final success, source/output set and build identity.
+pub(super) fn fill_record_metadata(
+    build_state: &BuildCommandState, package_name: &str, record: &mut PackageState,
+) {
     let meta_timer = RecordTimer::start(Phase::RecordMetaRows);
-    let mut record = PackageState::default();
-    let previous = build_state
-        .previous_in_process
-        .as_ref()
+    let previous = build_state.previous_in_process.as_ref()
         .and_then(|previous| previous.packages.get(package_name));
-    let changed =
-        previous.and_then(|previous| changed_modules(build_state, compiles, package_name, previous));
-    record.partial = changed.is_some();
     let outputs = match previous
         .filter(|previous| record.partial && outputs_as_recorded(build_state, package_name, previous))
     {
@@ -311,6 +309,23 @@ pub fn current_record(
         );
     }
     drop(meta_timer);
+}
+
+pub fn current_record(
+    build_state: &BuildCommandState,
+    compiles: &CompileRecords,
+    package_name: &str,
+    digests: &UnitDigests,
+) -> PackageState {
+    let mut record = PackageState::default();
+    let previous = build_state
+        .previous_in_process
+        .as_ref()
+        .and_then(|previous| previous.packages.get(package_name));
+    let changed =
+        previous.and_then(|previous| changed_modules(build_state, compiles, package_name, previous));
+    record.partial = changed.is_some();
+    fill_record_metadata(build_state, package_name, &mut record);
     let interface_timer = RecordTimer::start(Phase::RecordInterfaceRows);
     // The interfaces of the modules this build compiled, where they differ
     // from the stored ones (by content: the interface digest leaves out
@@ -1628,11 +1643,11 @@ impl<'a> CompileRecords<'a> {
 }
 
 /// What a module written by this build read and published, for its record.
-struct WrittenRecord {
-    digest: u64,
-    imports: Vec<(String, u64)>,
-    reads: UnitReads,
-    items: ItemDigests,
+pub(super) struct WrittenRecord {
+    pub digest: u64,
+    pub imports: Vec<(String, u64)>,
+    pub reads: UnitReads,
+    pub items: ItemDigests,
 }
 
 fn written_interface(
@@ -1644,11 +1659,18 @@ fn written_interface(
     if !build_state.written_modules.contains(module_name) {
         return None;
     }
-    let read_timer = RecordTimer::start(Phase::RecordReadRows);
-    let own = digests.get(module_name)?;
+    let keys = read_keys(compiles.unit_reads.get(module_name),
+        compiles.loaded_units.get(module_name)?, digests);
+    written_from_keys(module_name, keys, digests)
+}
+
+pub(super) fn read_keys(pending: Option<&PendingReads>, loaded: &AHashSet<Name>, digests: &UnitDigests)
+    -> item_deps::ResolvedReads
+{
+    let _timer = RecordTimer::start(Phase::RecordReadRows);
     // What inlinable bodies refer to is added now, with dependencies' JS
     // metadata final (they may publish it after this module compiled).
-    let mut read_keys: item_deps::ResolvedReads = match compiles.unit_reads.get(module_name) {
+    let mut read_keys: item_deps::ResolvedReads = match pending {
         Some(pending) => {
             let mut keys = pending.resolved.clone();
             for (unit, unit_keys) in digests.lambda_reads(&pending.resolved) {
@@ -1662,16 +1684,24 @@ fn written_interface(
         None => item_deps::ResolvedReads::default(),
     };
     // A unit the compile loaded without a recorded read is read whole.
-    for unit in compiles.loaded_units.get(module_name)? {
+    for unit in loaded {
         read_keys
             .entry(*unit)
             .or_insert_with(|| [ItemKey::Whole, ItemKey::ModuleLevel].into_iter().collect());
     }
+    read_keys
+}
+
+pub(super) fn written_from_keys(module_name: &str, read_keys: item_deps::ResolvedReads,
+    digests: &UnitDigests) -> Option<WrittenRecord>
+{
+    let _timer = RecordTimer::start(Phase::RecordReadRows);
+    let own = digests.get(module_name)?;
     let mut imports = Vec::new();
     let mut reads = UnitReads::new();
     for (unit, keys) in read_keys {
         let unit = unit.as_str();
-        if unit == module_name || !build_state.modules.contains_key(unit) {
+        if unit == module_name || !digests.cache.contains_key(unit) {
             continue;
         }
         // The digest of every item covers the others.
@@ -1688,7 +1718,7 @@ fn written_interface(
         imports.push((unit.to_string(), unit_digests.0));
         reads.insert(unit.to_string(), (read_digest, keys));
     }
-    drop(read_timer);
+
     let import_timer = RecordTimer::start(Phase::RecordImportRows);
     imports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
     drop(import_timer);
