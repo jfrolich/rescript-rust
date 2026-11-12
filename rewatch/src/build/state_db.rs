@@ -419,12 +419,51 @@ fn open_existing(path: &Path) -> Option<Connection> {
     (version == SCHEMA_VERSION).then_some(conn)
 }
 
-fn open_for_write(package: &Package) -> rusqlite::Result<Connection> {
+fn lock_writer(path: &Path) -> std::io::Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .read(true).write(true).create(true).truncate(false)
+        .open(path.with_extension("sqlite.guard"))?;
+    fs2::FileExt::lock_exclusive(&file)?;
+    Ok(file)
+}
+
+// Called only while holding the writer lock. A pending marker then belongs
+// to an interrupted writer, rather than another root sharing this dependency.
+fn discard_incomplete(path: &Path) -> std::io::Result<bool> {
+    if !pending_path(path).try_exists()? {
+        return Ok(false);
+    }
+    let mut journal = path.as_os_str().to_owned();
+    journal.push("-journal");
+    for file in [path.to_path_buf(), PathBuf::from(journal)] {
+        match std::fs::remove_file(file) {
+            Ok(()) => (),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(true)
+}
+
+// Keep the guard alive until after the connection closes.
+fn open_for_write(package: &Package) -> anyhow::Result<(std::fs::File, Connection)> {
     open_path_for_write(&path(package))
 }
 
-fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
-    open_path_for_write_with_journal(path, None)
+fn open_path_for_write(path: &Path) -> anyhow::Result<(std::fs::File, Connection)> {
+    let guard = lock_writer(path)?;
+    let discarded = discard_incomplete(path)?;
+    let conn = open_path_for_write_with_journal(path, None)?;
+    if discarded {
+        // The replacement schema contains no completed build record. Runtime
+        // or metadata writes can now commit normally with a disk journal;
+        // the later build-record write must preserve these new runtime rows.
+        std::fs::remove_file(pending_path(path))?;
+    }
+    Ok((guard, conn))
 }
 
 fn open_path_for_write_with_journal(path: &Path, journal: Option<&str>) -> rusqlite::Result<Connection> {
@@ -646,8 +685,8 @@ pub fn read_runtime_interfaces(db: &Path, key: &str) -> Option<Vec<(String, Vec<
 /// `interfaces`, under `key` (see [`read_runtime_interfaces`]). A failure
 /// only costs compiling the runtime again, so it is not reported.
 pub fn write_runtime_interfaces(db: &Path, key: &str, interfaces: &[(String, Vec<u8>)]) {
-    let write = || -> rusqlite::Result<()> {
-        let mut conn = open_path_for_write(db)?;
+    let write = || -> anyhow::Result<()> {
+        let (_guard, mut conn) = open_path_for_write(db)?;
         conn.busy_timeout(Duration::from_secs(1))?;
         let tx = conn.transaction()?;
         tx.execute("DELETE FROM runtime_interfaces", [])?;
@@ -661,7 +700,8 @@ pub fn write_runtime_interfaces(db: &Path, key: &str, interfaces: &[(String, Vec
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
             params![META_RUNTIME_KEY, key],
         )?;
-        tx.commit()
+        tx.commit()?;
+        Ok(())
     };
     if let Err(err) = write() {
         log::debug!(
@@ -697,8 +737,8 @@ pub fn write_meta_over(
     {
         return;
     }
-    let write = || -> rusqlite::Result<()> {
-        let mut conn = open_for_write(package)?;
+    let write = || -> anyhow::Result<()> {
+        let (_guard, mut conn) = open_for_write(package)?;
         let tx = conn.transaction()?;
         {
             let mut stmt = tx.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
@@ -706,7 +746,8 @@ pub fn write_meta_over(
                 stmt.execute(params![key, value])?;
             }
         }
-        tx.commit()
+        tx.commit()?;
+        Ok(())
     };
     if let Err(err) = write() {
         log::warn!("Could not record the build state of {}: {err}", package.name);
@@ -769,14 +810,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     let pending = pending_path(&db);
     // Two roots can share a dependency database. A pending marker is stale
     // only after its writer has released this per-database lock (also on kill).
-    let guard = (|| -> std::io::Result<std::fs::File> {
-        std::fs::create_dir_all(package.get_build_path())?;
-        let file = std::fs::OpenOptions::new().read(true).write(true).create(true)
-            .truncate(false).open(db.with_extension("sqlite.guard"))?;
-        fs2::FileExt::lock_exclusive(&file)?;
-        Ok(file)
-    })();
-    let _guard = match guard {
+    let _guard = match lock_writer(&db) {
         Ok(guard) => guard,
         Err(err) => {
             log::warn!("Could not lock the build state of {}: {err}", package.name);
@@ -784,19 +818,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         }
     };
     let write = || -> anyhow::Result<()> {
-        if pending.try_exists()? {
-            // A killed memory-journal writer may have spilled incomplete pages.
-            // Its database is a cache miss, never a base for difference writes.
-            let mut journal = db.as_os_str().to_owned();
-            journal.push("-journal");
-            for file in [db.clone(), PathBuf::from(journal)] {
-                match std::fs::remove_file(file) {
-                    Ok(()) => (),
-                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
-                    Err(err) => return Err(err.into()),
-                }
-            }
-        }
+        discard_incomplete(&db)?;
         std::fs::write(&pending, b"incomplete")?;
         let mut conn = timing::measure(Phase::RecordSqlOpen, ||
             open_path_for_write_with_journal(&db, Some("MEMORY")))?;
@@ -1106,7 +1128,7 @@ mod tests {
         drop(conn);
         assert!(read(&package).is_none());
         assert!(read_meta(&package).is_none());
-        let conn = open_for_write(&package).unwrap();
+        let (_guard, conn) = open_for_write(&package).unwrap();
         let version: i64 = conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .unwrap();
@@ -1123,6 +1145,25 @@ mod tests {
         let package = test_package(dir.path());
         assert!(read(&package).is_none());
         assert!(read_meta(&package).is_none());
+    }
+
+    #[test]
+    fn recovered_runtime_rows_survive_the_following_build_record() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let db = path(&package);
+        write_record(&package, None, &state(1, None));
+        std::fs::write(pending_path(&db), b"incomplete").unwrap();
+        std::fs::write(&db, b"incomplete SQLite pages").unwrap();
+        let runtime = vec![("Runtime".to_string(), vec![1, 2, 3])];
+        write_runtime_interfaces(&db, "runtime-key", &runtime);
+        assert_eq!(read_runtime_interfaces(&db, "runtime-key"), Some(runtime.clone()));
+        assert!(read(&package).is_none());
+        write_record(&package, None, &state(2, None));
+        assert_eq!(read_runtime_interfaces(&db, "runtime-key"), Some(runtime));
+        let mut expected = state(2, None);
+        expected.meta.insert(META_RUNTIME_KEY.to_string(), "runtime-key".to_string());
+        assert_eq!(read(&package).as_ref(), Some(&expected));
     }
 
     #[test]
