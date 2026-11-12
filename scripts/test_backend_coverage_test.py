@@ -12,14 +12,42 @@ from test_backend_coverage import check, summarize
 
 class CoverageGateTests(unittest.TestCase):
     def setUp(self):
-        self.baseline = {"runtime": {"units": 10, "identical": 8,
-                                     "unsupported": {"reason": 2}}}
+        corpora = {"runtime": {"units": 10, "identical": 8,
+                               "unsupported": {"reason": 2}}}
+        self.baseline = {stage: copy.deepcopy(corpora) for stage in coverage.STAGES}
 
     def test_unchanged_and_improved_pass(self):
         check(self.baseline, self.baseline)
-        improved = {"runtime": {"units": 10, "identical": 9,
-                                 "unsupported": {"reason": 1}}}
+        improved = copy.deepcopy(self.baseline)
+        for stage in coverage.STAGES:
+            improved[stage] = {"runtime": {"units": 10, "identical": 9,
+                                           "unsupported": {"reason": 1}}}
         check(improved, self.baseline)
+
+    def test_each_stage_is_ratcheted_on_its_own(self):
+        for stage in coverage.STAGES:
+            actual = copy.deepcopy(self.baseline)
+            actual[stage]["runtime"]["unsupported"]["reason"] = 3
+            with self.assertRaisesRegex(RuntimeError, f"{stage}: runtime: fallback count grew"):
+                check(actual, self.baseline)
+
+    def test_reports_are_counted_per_stage(self):
+        with tempfile.TemporaryDirectory() as temp:
+            directory = Path(temp)
+            for i, (stage, reason) in enumerate([("lambda-bridge", None),
+                                                 ("lambda-norm", "reason")]):
+                (directory / f"{i}.json").write_text(json.dumps({
+                    "unit": "Unit.res", "stage": stage,
+                    "identical": reason is None, "unsupported": reason,
+                }))
+            self.assertEqual(summarize(directory, "lambda-bridge"), {
+                "units": 1, "identical": 1, "unsupported": {}})
+            self.assertEqual(summarize(directory, "lambda-norm"), {
+                "units": 1, "identical": 0, "unsupported": {"reason": 1}})
+            (directory / "2.json").write_text(json.dumps({
+                "unit": "Unit.res", "stage": "other", "identical": True, "unsupported": None}))
+            with self.assertRaisesRegex(RuntimeError, "unexpected report stage"):
+                summarize(directory, "lambda-norm")
 
     def test_any_mode_fallback_wins(self):
         with tempfile.TemporaryDirectory() as temp:
@@ -29,7 +57,7 @@ class CoverageGateTests(unittest.TestCase):
                     "unit": "Unit.res", "stage": "lambda-bridge",
                     "identical": reason is None, "unsupported": reason,
                 }))
-            self.assertEqual(summarize(directory), {
+            self.assertEqual(summarize(directory, "lambda-bridge"), {
                 "units": 1, "identical": 0, "unsupported": {"reason": 1}})
 
     def test_package_is_cleaned_and_zero_reports_still_fail(self):
@@ -52,19 +80,19 @@ class CoverageGateTests(unittest.TestCase):
 
     def test_missing_units_fail(self):
         actual = copy.deepcopy(self.baseline)
-        actual["runtime"]["units"] = 9
+        actual["lambda-bridge"]["runtime"]["units"] = 9
         with self.assertRaisesRegex(RuntimeError, "missing units"):
             check(actual, self.baseline)
 
     def test_growing_fallback_fails(self):
         actual = copy.deepcopy(self.baseline)
-        actual["runtime"]["unsupported"]["reason"] = 3
+        actual["lambda-bridge"]["runtime"]["unsupported"]["reason"] = 3
         with self.assertRaisesRegex(RuntimeError, "fallback count grew"):
             check(actual, self.baseline)
 
     def test_new_reason_fails(self):
         actual = copy.deepcopy(self.baseline)
-        actual["runtime"]["unsupported"] = {"different": 2}
+        actual["lambda-bridge"]["runtime"]["unsupported"] = {"different": 2}
         with self.assertRaisesRegex(RuntimeError, "fallback reason grew"):
             check(actual, self.baseline)
 
