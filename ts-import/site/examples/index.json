@@ -63,6 +63,15 @@
     ]
   },
   {
+    "id": "tags",
+    "title": "Shared tags",
+    "summary": "Members that share a tag are cases of one tagged variant, told apart by their other fields.",
+    "files": [
+      "nodes.ts",
+      "Demo.res"
+    ]
+  },
+  {
     "id": "module",
     "title": "A whole module",
     "summary": "module Api = %ts(...) imports every export; type t = %ts(\"...#Name\") imports one type.",
