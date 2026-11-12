@@ -631,6 +631,8 @@ fn place_location_free_warnings(
 pub struct CompilerOptions {
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
+    /// Dormant publication equality oracle; configured once, not per unit.
+    pub signature_check: Option<crate::cmi::signature_check::SignatureCheck>,
     /// Experimental JavaScript printer, selected once when options are created.
     pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
@@ -876,6 +878,7 @@ impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
             backend: crate::bir::shadow::BackendMode::from_env(),
+            signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
             dump_lambda: false,
@@ -10666,6 +10669,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         } else {
             None
         };
+        if let Some(check) = &options.signature_check {
+            if pers_struct.is_some() {
+                check.after_publication(filename)?;
+            }
+        }
         // Keep the just-saved current unit visible through raw-lambda
         // conversion. OCaml saves the inferred signature in the no-interface
         // branch before translation (compiler/ml/typemod.ml:1779-1788), and
@@ -11592,6 +11600,12 @@ pub fn typecheck_preprocessed_signature_in_process(
         Some(arena),
         SignaturePublicationMode::Eager,
     );
+
+    if let Some(check) = &options.signature_check {
+        if pers_struct.is_some() {
+            check.after_publication(filename)?;
+        }
+    }
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,
