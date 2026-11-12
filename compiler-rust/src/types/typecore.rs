@@ -1440,6 +1440,8 @@ struct DelayedOpenCheck {
 
 /// Context for type checking.
 pub struct TypeCheckContext<'a> {
+    /// Optional item accounting; absent in ordinary compilation.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1656,6 +1658,7 @@ impl<'a> TypeCheckContext<'a> {
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
+            derived_census: None,
             type_ctx,
             arena,
             typed: TypedArena::new(),

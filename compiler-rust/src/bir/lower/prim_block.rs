@@ -5,6 +5,42 @@ use crate::js_ir::arena::FieldPos;
 use crate::lambda::lam_compat::FieldDbgInfo;
 
 impl State {
+    /// P: compile_flat_make_field, tried before lowering operands. O(d + name
+    /// bytes) for d module-field segments. Failed paths are marked in a dense
+    /// source-node table, so nested make misses never rescan an earlier spine.
+    /// A successful path replaces the entire spine without visiting it again.
+    pub(super) fn flat_make_field(&mut self, mut source: NodeId) -> Option<NodeId> {
+        let mut segments = smallvec::SmallVec::<[&str; 4]>::new();
+        let mut visited = smallvec::SmallVec::<[NodeId; 4]>::new();
+        loop {
+            self.primitive_steps += 1;
+            if self.invalid_module_paths[source.index()] { break; }
+            match self.source.view(source) {
+                View::Prim { primitive, args: [parent] } => {
+                    let crate::lambda::lam_primitive::Primitive::Pfield(_, FieldDbgInfo::Module { name }) = self.arena.primitive(primitive).primitive else { break };
+                    segments.push(name.as_str());
+                    visited.push(source);
+                    source = *parent;
+                }
+                View::Global { module } => {
+                    segments.reverse();
+                    let name = crate::lambda::flat_make_name(&segments)?;
+                    let member = Some(self.arena.intern_text(&name));
+                    return Some(plain::node(&mut self.arena, View::JQualified { module, member }, 0));
+                }
+                View::Var { var } if self.awaited_units[var.index()] => {
+                    segments.reverse();
+                    let name = crate::lambda::flat_make_name(&segments)?;
+                    let object = self.pure_expression(View::Var { var }, 0);
+                    return Some(self.static_member(object, &name));
+                }
+                _ => break,
+            }
+        }
+        for node in visited { self.invalid_module_paths[node.index()] = true; }
+        None
+    }
+
     /// K: resolve_cmj_module_field_constant / compile_field_access.
     /// O(record arity + discarded nodes + field-name bytes) for literal
     /// projection; otherwise O(field-name bytes) and one summary lookup.
@@ -256,7 +292,7 @@ mod tests {
     }
 
     #[test]
-    fn module_constants_and_flat_make_reason() {
+    fn module_constants_and_flat_make_match_legacy() {
         use crate::cmi::persistent_env::CmjExportConstant as Cc;
         for constant in [
             None,
@@ -308,11 +344,54 @@ mod tests {
             &[inner],
             LamLoc::NONE,
         );
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn flat_make_path_shapes_match_legacy() {
+        for path in [vec!["make"], vec!["Inner", "make"], vec!["A", "B", "make"], vec!["A", "make", "make"], vec!["A", "other"]] {
+            let mut a = LamArena::new();
+            let mut root = a.global_module(Ident::create_persistent("Other"));
+            for field in path {
+                root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new(field) }), &[root], LamLoc::NONE);
+            }
+            super::super::oracle_tests::compare(a, root);
+        }
+    }
+
+    #[test]
+    fn ten_thousand_failed_make_segments_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = a.var(Ident::new("local", 10, crate::ident::IdentFlags::NONE));
+        for _ in 0..10_000 {
+            root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new("make") }), &[root], LamLoc::NONE);
+        }
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
-        assert!(matches!(
-            super::super::lower(input, None, false),
-            Err(Unsupported("flat make"))
-        ));
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 10_001);
+        assert_eq!(state.primitive_steps, 40_000);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
+    }
+
+    #[test]
+    fn ten_thousand_flat_make_segments_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = a.global_module(Ident::create_persistent("Other"));
+        for i in 0..10_000 {
+            let field = if i == 9_999 { "make" } else { "Inner" };
+            root = a.prim_raw(P::Pfield(0, FieldDbgInfo::Module { name: Name::new(field) }), &[root], LamLoc::NONE);
+        }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 1);
+        assert_eq!(state.primitive_steps, 10_001);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 
     #[test]

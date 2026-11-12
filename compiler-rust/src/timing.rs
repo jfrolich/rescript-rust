@@ -121,7 +121,7 @@ impl PhaseTimingSnapshot {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static ENABLED: OnceLock<bool> = OnceLock::new();
+static ENABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 /// Aggregate nanoseconds per phase, indexed by `Phase as usize`.
 static PHASE_NS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
 static PHASE_COUNT: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
@@ -147,18 +147,17 @@ impl ThreadPhaseCounters {
 /// Thread-local timing scope for one worker-owned compilation unit.
 pub struct ThreadTimingGuard {
     active: bool,
+    previous: Option<ThreadPhaseCounters>,
 }
 
 impl ThreadTimingGuard {
     /// Start collecting thread-local phase timings for the current thread.
     pub fn start() -> Self {
         let active = enabled();
-        if active {
-            THREAD_TIMINGS.with(|timings| {
-                *timings.borrow_mut() = Some(ThreadPhaseCounters::default());
-            });
-        }
-        Self { active }
+        let previous = if active {
+            THREAD_TIMINGS.with(|timings| timings.replace(Some(ThreadPhaseCounters::default())))
+        } else { None };
+        Self { active, previous }
     }
 
     /// Return the phase timings recorded on this thread since the guard started.
@@ -182,7 +181,13 @@ impl Drop for ThreadTimingGuard {
     fn drop(&mut self) {
         if self.active {
             THREAD_TIMINGS.with(|timings| {
-                *timings.borrow_mut() = None;
+                let mut current = timings.borrow_mut();
+                if let (Some(previous), Some(child)) = (&mut self.previous, current.as_ref()) {
+                    for (parent, child) in previous.0.iter_mut().zip(child.0) {
+                        *parent += child;
+                    }
+                }
+                *current = self.previous.take();
             });
         }
     }
@@ -212,6 +217,13 @@ mod clock {
     }
 }
 
+/// Enable existing phase timers when the compiler options request a census.
+/// O(1), once at option creation; no added test in the disabled hot path.
+pub fn enable_for_census() {
+    #[cfg(not(target_arch = "wasm32"))]
+    { ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(true)).store(true, Ordering::Relaxed); }
+}
+
 /// Returns whether aggregate phase timing is enabled.
 #[inline]
 pub fn enabled() -> bool {
@@ -221,11 +233,11 @@ pub fn enabled() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        *ENABLED.get_or_init(|| {
+        ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(
             std::env::var_os("RESCRIPT_PHASE_TIMINGS").is_some()
                 || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some()
                 || std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
-        })
+        )).load(Ordering::Relaxed)
     }
 }
 

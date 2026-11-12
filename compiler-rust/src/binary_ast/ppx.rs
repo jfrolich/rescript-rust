@@ -1254,152 +1254,277 @@ impl UnusedAttributeSweep<'_> {
     }
 }
 
-impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
-    fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
-        if self.stopped {
-            return;
-        }
-        let name = arena.get_string(td.ptype_name.txt);
-        if is_builtin_rank0_type_name(name) {
-            self.raise(
-                td.ptype_loc,
-                format!("built-in type `{name}` can not be redefined "),
-            );
-            return;
-        }
-        super::ast_iter::walk_type_declaration(self, arena, td);
-    }
-
-    fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
-        if self.stopped {
-            return;
-        }
-        // bs_ast_invariant.ml:119-142.
-        if let Some(PrimitiveRepr::PrimName(byte_name)) = &vd.pval_prim {
-            let byte_name = arena.get_string(*byte_name);
-            if matches!(byte_name, "%identity" | "%component_identity")
-                && !core_type_is_arity_one(vd.pval_type, arena)
-            {
+// Expand to direct field access for the ordinary visitor. Its layout and
+// callbacks remain trunk's; only the census visitor carries borrowed state.
+macro_rules! sweep_state {
+    ($visitor:ident, inline) => {
+        $visitor
+    };
+    ($visitor:ident, indirect) => {
+        $visitor.state
+    };
+}
+macro_rules! sweep_count {
+    ($visitor:ident, false) => {};
+    ($visitor:ident, true) => {
+        $visitor.counts.node();
+    };
+}
+macro_rules! validation_methods {
+    ($state:ident, $count:tt, $validate:expr) => {
+        /// O(subtree occurrences): validate and visit each child once.
+        fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
+            if !$validate {
+                super::ast_iter::walk_type_declaration(self, arena, td);
+                return;
+            }
+            if sweep_state!(self, $state).stopped {
+                return;
+            }
+            let name = arena.get_string(td.ptype_name.txt);
+            if is_builtin_rank0_type_name(name) {
                 self.raise(
-                    vd.pval_loc,
-                    format!("{byte_name} expects a function type of the form 'a => 'b (arity 1)"),
+                    td.ptype_loc,
+                    format!("built-in type `{name}` can not be redefined "),
                 );
                 return;
             }
-            let safe = byte_name
-                .as_bytes()
-                .first()
-                .is_some_and(|c| matches!(c, b'%' | b'#' | b'?'));
-            if !safe {
-                self.warnings.push(PpxWarning {
-                    loc: vd.pval_loc,
-                    warning: Warning::BsFfiWarning {
-                        message: format!("{byte_name} such externals are unsafe"),
-                    },
-                });
+            super::ast_iter::walk_type_declaration(self, arena, td);
+        }
+
+        /// O(subtree occurrences): validate and visit each child once.
+        fn value_description(&mut self, arena: &ParseArena, vd: &ValueDescription) {
+            if !$validate {
+                super::ast_iter::walk_value_description(self, arena, vd);
                 return;
             }
-        }
-        super::ast_iter::walk_value_description(self, arena, vd);
-    }
-
-    fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
-        // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
-        // not traversed.
-        if self.stopped {
-            return;
-        }
-        if let Some(error) = check_removed_ocaml_attribute(attr, arena) {
-            self.stopped = true;
-            self.error = Some(error);
-            return;
-        }
-        warn_unused_attribute(attr, arena, self.warnings);
-    }
-
-    fn extension(&mut self, arena: &ParseArena, ext: &Extension) {
-        if self.stopped {
-            return;
-        }
-        if let Some(error) = check_removed_ocaml_extension(ext, arena) {
-            self.stopped = true;
-            self.error = Some(error);
-            return;
-        }
-        super::ast_iter::walk_extension(self, arena, ext);
-    }
-
-    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
-        let idx = arena.expanded(idx);
-        if arena.expr_needs_no_attribute_sweep(idx) {
-            return;
-        }
-        // `Pexp_constant` runs the literal check and then sweeps only its
-        // attributes, without `super.expr` (bs_ast_invariant.ml).
-        let expr = arena.get_expr(idx);
-        match &expr.pexp_desc {
-            ExpressionDesc::Pexp_constant(constant) => {
-                if !self.stopped {
-                    check_constant(expr.pexp_loc, constant, self.warnings, arena);
-                    self.attributes(arena, expr.pexp_attributes.as_slice());
+            if sweep_state!(self, $state).stopped {
+                return;
+            }
+            // bs_ast_invariant.ml:119-142.
+            if let Some(PrimitiveRepr::PrimName(byte_name)) = &vd.pval_prim {
+                let byte_name = arena.get_string(*byte_name);
+                if matches!(byte_name, "%identity" | "%component_identity")
+                    && !core_type_is_arity_one(vd.pval_type, arena)
+                {
+                    self.raise(
+                        vd.pval_loc,
+                        format!(
+                            "{byte_name} expects a function type of the form 'a => 'b (arity 1)"
+                        ),
+                    );
+                    return;
                 }
-            }
-            _ => super::ast_iter::walk_expr(self, arena, idx),
-        }
-    }
-
-    fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
-        // `Ppat_constant` runs `check_constant` and then sweeps only its
-        // attributes (bs_ast_invariant.ml).
-        let pat = arena.get_pat(idx);
-        if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
-            if !self.stopped {
-                check_constant(pat.ppat_loc, constant, self.warnings, arena);
-                self.attributes(arena, pat.ppat_attributes.as_slice());
-            }
-        } else {
-            super::ast_iter::walk_pat(self, arena, idx);
-        }
-    }
-
-    fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
-        // bs_ast_invariant.ml: a field's `@as` is taken out of its attributes
-        // when it names the field, so one still here is either a second one,
-        // which the type checker rejects, or a payload that is not a name and
-        // warns as the unused attribute it is.
-        for attr in ld.pld_attributes.iter() {
-            if arena.get_string(attr.0.txt) != "as" {
-                continue;
-            }
-            match crate::ast_payload::string_literal_of_payload(arena, &attr.1) {
-                Ok(Some(_)) => arena.mark_used_attribute(attr),
-                Ok(None) => {}
-                Err(error) => {
-                    self.raise(error.loc, error.message);
+                let safe = byte_name
+                    .as_bytes()
+                    .first()
+                    .is_some_and(|c| matches!(c, b'%' | b'#' | b'?'));
+                if !safe {
+                    sweep_state!(self, $state).warnings.push(PpxWarning {
+                        loc: vd.pval_loc,
+                        warning: Warning::BsFfiWarning {
+                            message: format!("{byte_name} such externals are unsafe"),
+                        },
+                    });
                     return;
                 }
             }
+            super::ast_iter::walk_value_description(self, arena, vd);
         }
-        super::ast_iter::walk_label_declaration(self, arena, ld);
-    }
 
-    fn constructor_declaration(&mut self, arena: &ParseArena, cd: &ConstructorDeclaration) {
-        if self.stopped {
-            return;
+        /// O(attribute-name bytes): attributes are metadata, not executable nodes.
+        // Keep warning construction out of the recursive expression/type frames.
+        // Additional census instantiations otherwise change LLVM's inlining
+        // decision here and spill the ordinary visitor's hot state.
+        #[inline(never)]
+        fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
+            if !$validate {
+                return;
+            }
+            // `attribute = fun _ attr -> warn_unused_attribute attr`: payloads are
+            // not traversed.
+            if sweep_state!(self, $state).stopped {
+                return;
+            }
+            if let Some(error) = check_removed_ocaml_attribute(attr, arena) {
+                sweep_state!(self, $state).stopped = true;
+                sweep_state!(self, $state).error = Some(error);
+                return;
+            }
+            warn_unused_attribute(attr, arena, sweep_state!(self, $state).warnings);
         }
-        // `Ast_untagged_variants.process_constructor_tag`: an `@as` left in
-        // the attributes is invalid or a duplicate, and the tag must decode.
-        if let Err((loc, error)) = crate::types::typemod::process_constructor_tag(arena, cd) {
-            self.raise(loc, error.message_text());
-            return;
+
+        /// O(payload occurrences): visit each payload child once.
+        fn extension(&mut self, arena: &ParseArena, ext: &Extension) {
+            if !$validate {
+                super::ast_iter::walk_extension(self, arena, ext);
+                return;
+            }
+            if sweep_state!(self, $state).stopped {
+                return;
+            }
+            if let Some(error) = check_removed_ocaml_extension(ext, arena) {
+                sweep_state!(self, $state).stopped = true;
+                sweep_state!(self, $state).error = Some(error);
+                return;
+            }
+            super::ast_iter::walk_extension(self, arena, ext);
         }
-        let name = arena.get_string(cd.pcd_name.txt);
-        if matches!(name, "false" | "true" | "()") {
-            self.raise(cd.pcd_name.loc, format!("{name} can not be redefined "));
-            return;
+
+        /// O(expression subtree occurrences): one count and one validation per visit.
+        fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+            let idx = arena.expanded(idx);
+            sweep_count!(self, $count);
+            if !$validate {
+                super::ast_iter::walk_expr(self, arena, idx);
+                return;
+            }
+            if !$count && arena.expr_needs_no_attribute_sweep(idx) {
+                return;
+            }
+            // `Pexp_constant` runs the literal check and then sweeps only its
+            // attributes, without `super.expr` (bs_ast_invariant.ml).
+            let expr = arena.get_expr(idx);
+            match &expr.pexp_desc {
+                ExpressionDesc::Pexp_constant(constant) => {
+                    if !sweep_state!(self, $state).stopped {
+                        check_constant(
+                            expr.pexp_loc,
+                            constant,
+                            sweep_state!(self, $state).warnings,
+                            arena,
+                        );
+                        self.attributes(arena, expr.pexp_attributes.as_slice());
+                    }
+                }
+                _ => super::ast_iter::walk_expr(self, arena, idx),
+            }
         }
-        super::ast_iter::walk_constructor_declaration(self, arena, cd);
+
+        /// O(pattern subtree occurrences): one count and one validation per visit.
+        fn pat(&mut self, arena: &ParseArena, idx: PatIdx) {
+            sweep_count!(self, $count);
+            if !$validate {
+                super::ast_iter::walk_pat(self, arena, idx);
+                return;
+            }
+            // `Ppat_constant` runs `check_constant` and then sweeps only its
+            // attributes (bs_ast_invariant.ml).
+            let pat = arena.get_pat(idx);
+            if let PatternDesc::Ppat_constant(constant) = &pat.ppat_desc {
+                if !sweep_state!(self, $state).stopped {
+                    check_constant(
+                        pat.ppat_loc,
+                        constant,
+                        sweep_state!(self, $state).warnings,
+                        arena,
+                    );
+                    self.attributes(arena, pat.ppat_attributes.as_slice());
+                }
+            } else {
+                super::ast_iter::walk_pat(self, arena, idx);
+            }
+        }
+
+        /// O(subtree occurrences): validate and visit each child once.
+        fn label_declaration(&mut self, arena: &ParseArena, ld: &LabelDeclaration) {
+            if !$validate {
+                super::ast_iter::walk_label_declaration(self, arena, ld);
+                return;
+            }
+            // bs_ast_invariant.ml: a field's `@as` is taken out of its attributes
+            // when it names the field, so one still here is either a second one,
+            // which the type checker rejects, or a payload that is not a name and
+            // warns as the unused attribute it is.
+            for attr in ld.pld_attributes.iter() {
+                if arena.get_string(attr.0.txt) != "as" {
+                    continue;
+                }
+                match crate::ast_payload::string_literal_of_payload(arena, &attr.1) {
+                    Ok(Some(_)) => arena.mark_used_attribute(attr),
+                    Ok(None) => {}
+                    Err(error) => {
+                        self.raise(error.loc, error.message);
+                        return;
+                    }
+                }
+            }
+            super::ast_iter::walk_label_declaration(self, arena, ld);
+        }
+
+        /// O(subtree occurrences): validate and visit each child once.
+        fn constructor_declaration(&mut self, arena: &ParseArena, cd: &ConstructorDeclaration) {
+            if !$validate {
+                super::ast_iter::walk_constructor_declaration(self, arena, cd);
+                return;
+            }
+            if sweep_state!(self, $state).stopped {
+                return;
+            }
+            // `Ast_untagged_variants.process_constructor_tag`: an `@as` left in
+            // the attributes is invalid or a duplicate, and the tag must decode.
+            if let Err((loc, error)) = crate::types::typemod::process_constructor_tag(arena, cd) {
+                self.raise(loc, error.message_text());
+                return;
+            }
+            let name = arena.get_string(cd.pcd_name.txt);
+            if matches!(name, "false" | "true" | "()") {
+                self.raise(cd.pcd_name.loc, format!("{name} can not be redefined "));
+                return;
+            }
+            super::ast_iter::walk_constructor_declaration(self, arena, cd);
+        }
+    };
+}
+impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
+    validation_methods!(inline, false, true);
+}
+
+// Only the enabled census instantiates this 16-byte wrapper.
+struct CountingAttributeSweep<'a, 'w, const VALIDATE: bool> {
+    state: &'a mut UnusedAttributeSweep<'w>,
+    counts: &'a mut super::derive::census::SyntaxCounts,
+}
+impl<const VALIDATE: bool> CountingAttributeSweep<'_, '_, VALIDATE> {
+    /// O(message bytes) only on an error, delegated to the ordinary validator.
+    fn raise(&mut self, loc: LocIdx, message: impl Into<String>) {
+        self.state.raise(loc, message);
     }
+}
+impl<const VALIDATE: bool> super::ast_iter::AstIter for CountingAttributeSweep<'_, '_, VALIDATE> {
+    /// O(item subtree occurrences): restore the parent's attribution after children.
+    fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
+        let previous = self.counts.side;
+        {
+            self.counts.item(arena, item);
+        }
+        super::ast_iter::walk_structure_item(self, arena, item);
+        {
+            self.counts.side = previous;
+        }
+    }
+    /// O(subtree occurrences): one count per visit, no allocation.
+    fn typ(&mut self, arena: &ParseArena, idx: CoreTypeIdx) {
+        {
+            self.counts.node();
+        }
+        super::ast_iter::walk_typ(self, arena, idx);
+    }
+    /// O(subtree occurrences): one count per visit, no allocation.
+    fn module_expr(&mut self, arena: &ParseArena, idx: ModExprIdx) {
+        {
+            self.counts.node();
+        }
+        super::ast_iter::walk_module_expr(self, arena, idx);
+    }
+    /// O(subtree occurrences): one count per visit, no allocation.
+    fn module_type(&mut self, arena: &ParseArena, idx: ModTypeIdx) {
+        {
+            self.counts.node();
+        }
+        super::ast_iter::walk_module_type(self, arena, idx);
+    }
+    validation_methods!(indirect, true, VALIDATE);
 }
 
 /// Mark the first leading `@@config` used (OCaml `Ast_config.iter_on_config_str`
@@ -1425,19 +1550,63 @@ fn mark_first_config_attribute<'a>(
 
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_structure`: the warnings
 /// in traversal order, and the error the sweep raised (if any).
+/// O(visited syntax occurrences); counting shares this validation traversal.
 pub fn collect_unused_attribute_warnings_structure(
     items: &[StructureItem],
     arena: &ParseArena,
+    census: Option<&mut super::derive::census::Census>,
+    validate: bool,
 ) -> (Vec<PpxWarning>, Option<PpxError>) {
-    let mut warnings = Vec::new();
-    let mut sweep = UnusedAttributeSweep {
-        warnings: &mut warnings,
-        stopped: false,
-        error: None,
-    };
-    super::ast_iter::walk_structure(&mut sweep, arena, items);
-    let error = sweep.error.take();
-    (warnings, error)
+    if census.is_none() {
+        if !validate {
+            return (Vec::new(), None);
+        }
+        let mut warnings = Vec::new();
+        let mut sweep = UnusedAttributeSweep {
+            warnings: &mut warnings,
+            stopped: false,
+            error: None,
+        };
+        super::ast_iter::walk_structure(&mut sweep, arena, items);
+        let error = sweep.error.take();
+        return (warnings, error);
+    }
+    // O(visited syntax occurrences), one existing validation walk. With validation
+    // disabled this is the first syntax walk, and only runs for an enabled census.
+    #[cold]
+    #[inline(never)]
+    fn walk<const VALIDATE: bool>(
+        items: &[StructureItem],
+        arena: &ParseArena,
+        census: Option<&mut super::derive::census::Census>,
+    ) -> (Vec<PpxWarning>, Option<PpxError>) {
+        let mut warnings = Vec::new();
+        let mut state = UnusedAttributeSweep {
+            warnings: &mut warnings,
+            stopped: false,
+            error: None,
+        };
+        let mut counts = super::derive::census::SyntaxCounts::default();
+        super::ast_iter::walk_structure(
+            &mut CountingAttributeSweep::<VALIDATE> {
+                state: &mut state,
+                counts: &mut counts,
+            },
+            arena,
+            items,
+        );
+        let error = state.error.take();
+        if let Some(census) = census {
+            census.syntax_nodes = counts.nodes;
+            census.bindings = counts.bindings;
+        }
+        (warnings, error)
+    }
+    match (census, validate) {
+        (Some(census), true) => walk::<true>(items, arena, Some(census)),
+        (Some(census), false) => walk::<false>(items, arena, Some(census)),
+        (None, _) => unreachable!("handled ordinary validation before census dispatch"),
+    }
 }
 
 /// OCaml `Bs_ast_invariant.removed_ocaml_spellings`: the PPX bridge renames
@@ -1490,19 +1659,63 @@ pub fn check_removed_ocaml_spellings_signature(
 }
 
 /// OCaml `Bs_ast_invariant.emit_external_warnings_on_signature`.
+/// O(visited syntax occurrences); counting shares this validation traversal.
 pub fn collect_unused_attribute_warnings_signature(
     items: &[SignatureItem],
     arena: &ParseArena,
+    census: Option<&mut super::derive::census::Census>,
+    validate: bool,
 ) -> (Vec<PpxWarning>, Option<PpxError>) {
-    let mut warnings = Vec::new();
-    let mut sweep = UnusedAttributeSweep {
-        warnings: &mut warnings,
-        stopped: false,
-        error: None,
-    };
-    super::ast_iter::walk_signature(&mut sweep, arena, items);
-    let error = sweep.error.take();
-    (warnings, error)
+    if census.is_none() {
+        if !validate {
+            return (Vec::new(), None);
+        }
+        let mut warnings = Vec::new();
+        let mut sweep = UnusedAttributeSweep {
+            warnings: &mut warnings,
+            stopped: false,
+            error: None,
+        };
+        super::ast_iter::walk_signature(&mut sweep, arena, items);
+        let error = sweep.error.take();
+        return (warnings, error);
+    }
+    // O(visited syntax occurrences), one existing validation walk. With validation
+    // disabled this is the first syntax walk, and only runs for an enabled census.
+    #[cold]
+    #[inline(never)]
+    fn walk<const VALIDATE: bool>(
+        items: &[SignatureItem],
+        arena: &ParseArena,
+        census: Option<&mut super::derive::census::Census>,
+    ) -> (Vec<PpxWarning>, Option<PpxError>) {
+        let mut warnings = Vec::new();
+        let mut state = UnusedAttributeSweep {
+            warnings: &mut warnings,
+            stopped: false,
+            error: None,
+        };
+        let mut counts = super::derive::census::SyntaxCounts::default();
+        super::ast_iter::walk_signature(
+            &mut CountingAttributeSweep::<VALIDATE> {
+                state: &mut state,
+                counts: &mut counts,
+            },
+            arena,
+            items,
+        );
+        let error = state.error.take();
+        if let Some(census) = census {
+            census.syntax_nodes = counts.nodes;
+            census.bindings = counts.bindings;
+        }
+        (warnings, error)
+    }
+    match (census, validate) {
+        (Some(census), true) => walk::<true>(items, arena, Some(census)),
+        (Some(census), false) => walk::<false>(items, arena, Some(census)),
+        (None, _) => unreachable!("handled ordinary validation before census dispatch"),
+    }
 }
 
 /// The `@string is redundant here` warning `spec_of_ptyp` emits through
@@ -10312,7 +10525,27 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
     })
 }
 
+/// Rewrite one item and preserve its provenance.
+/// Cost: the existing recursive rewrite plus O(1) provenance lookup and O(k)
+/// bitmap writes for a derived item's k output groups; no extra AST traversal.
 fn rewrite_structure_item_no_spice(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    let derived = derive::is_derived_item(item, arena);
+    let rewritten = rewrite_structure_item_body(item, arena);
+    if derived {
+        for item in &rewritten {
+            derive::mark_generated_item(item, arena);
+        }
+    }
+    rewritten
+}
+
+/// The existing structure rewrite, without the provenance transfer wrapper.
+/// Cost is proportional to the visited subtree and generated output; retained
+/// certified expression subtrees take O(1). Allocations are the existing mapper's.
+fn rewrite_structure_item_body(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
@@ -11454,10 +11687,44 @@ let e = () =>
         assert_eq!((line, start, end), (1, 10, 18));
     }
 
+    #[test]
+    fn derived_value_groups_survive_frontend_rewriting() {
+        let (mut arena, source) = parse_structure(
+            "let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2\n",
+        );
+        assert!(source.iter().all(|item| !derive::is_derived_item(item, &arena)));
+        let expanded: Vec<_> = source.iter().flat_map(|item|
+            derive::expand_structure_item_with_mapper(item, &mut arena, true).unwrap()
+        ).collect();
+        assert_eq!(expanded.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
+        // Use the original tree: expanding twice would generate codecs twice.
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        assert_eq!(rewritten.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
+    }
+
+    #[test]
+    fn nested_derived_value_groups_survive_frontend_rewriting() {
+        let (mut arena, source) = parse_structure(
+            "module M = { let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2 }\n",
+        );
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let StructureItemDesc::Pstr_module(module) = &rewritten[0].pstr_desc else {
+            panic!("expected module");
+        };
+        let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else {
+            panic!("expected structure");
+        };
+        assert_eq!(items.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
+    }
+
     /// The elements of the tuple bound by the single binding of `source`,
     /// and the tuple itself.
     fn bound_tuple(source: &str) -> (ParseArena, ExprIdx, Vec<ExprIdx>) {
         let (arena, structure) = parse_structure(source);
+
         let StructureItemDesc::Pstr_value((_, bindings)) = &structure[0].pstr_desc else {
             panic!("expected binding");
         };
@@ -11886,7 +12153,7 @@ type envelope = Story(Story.event)
                             arena.get_expr_mut(ExprIdx(0));
                         }
                         let (sweep, error) =
-                            collect_unused_attribute_warnings_structure(&items, &arena);
+                            collect_unused_attribute_warnings_structure(&items, &arena, None, true);
                         format!("{warnings:?}; {sweep:?}; {error:?}")
                     }
                     Err(error) => format!("{warnings:?}; {error:?}"),
@@ -11896,4 +12163,41 @@ type envelope = Story(Story.event)
         }
     }
 
+}
+
+#[cfg(test)]
+#[test]
+fn validation_census_counts_ten_thousand_elements_in_one_walk() {
+    assert_eq!(std::mem::size_of::<CountingAttributeSweep<'_, '_, true>>(), 16);
+    assert_eq!(std::mem::size_of::<CountingAttributeSweep<'_, '_, false>>(), 16);
+    let source = format!("let xs = [{}]", vec!["0"; 10_000].join(","));
+    let mut parser = crate::parser::Parser::new("count.res", &source);
+    let items = crate::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors());
+    for validate in [true, false] {
+        let mut census = super::derive::census::Census::new(std::path::Path::new("unused"), "count.res");
+        let (warnings, error) = collect_unused_attribute_warnings_structure(&items, parser.arena(), Some(&mut census), validate);
+        assert!(warnings.is_empty() && error.is_none());
+        assert_eq!(census.syntax_nodes, [0, 10_003]);
+        assert_eq!(census.bindings, [0, 1]);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn census_counts_expansions_not_replaced_source_nodes() {
+    let source = "let x = b->f(c)";
+    let mut parser = crate::parser::Parser::new("expansion.res", source);
+    let items = crate::parser::module::parse_structure(&mut parser);
+    assert!(!parser.has_errors());
+    let mut arena = parser.into_arena();
+    let rewritten = rewrite_structure_with_warnings(&items, &mut arena, false).0.unwrap();
+    for validate in [true, false] {
+        let mut census = super::derive::census::Census::new(std::path::Path::new("unused"), "expansion.res");
+        let (warnings, error) = collect_unused_attribute_warnings_structure(&rewritten, &arena, Some(&mut census), validate);
+        assert!(warnings.is_empty() && error.is_none());
+        // f(b, c): application + three identifiers + binding pattern + item.
+        assert_eq!(census.syntax_nodes, [0, 6]);
+        assert_eq!(census.bindings, [0, 1]);
+    }
 }
