@@ -63,3 +63,22 @@ pub fn is_derived_item(item: &StructureItem, arena: &ParseArena) -> bool {
         _ => false,
     }
 }
+
+#[cfg(test)]
+#[test]
+fn derive_error_fixture_messages() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/ppx_spice/errors");
+    let manifest = std::fs::read_to_string(root.join("cases.tsv")).unwrap();
+    for line in manifest.lines() {
+        let (name, expected) = line.split_once('\t').unwrap();
+        let source = std::fs::read_to_string(root.join(name)).unwrap();
+        let mut parser = crate::parser::Parser::new(name, &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors(), "{name}: fixture must reach the derive");
+        let mut arena = parser.into_arena();
+        let result: Result<Vec<_>, _> = items.iter().map(|item|
+            expand_structure_item_with_mapper(item, &mut arena, true)).collect();
+        let error = result.expect_err(name);
+        assert!(error.contains(expected), "{name}: expected {expected:?}, got {error:?}");
+    }
+}
