@@ -878,6 +878,38 @@ bytes; scoped access costs its segments and spelling bytes. Unknown optional
 fields use one pending list per object, not one allocation per field. This
 specification is not a claim that these costs have already been measured.
 
+**S3.8 implementation evidence.** The event duplicability predicate is a dense
+boolean node table maintained by arena construction/repair; the holder reads
+it in O(1). Object suffix facts are two booleans per argument. Module binding
+identity uses a dense table indexed by the interned bundle and default bit;
+repeated call primitives reuse a `PrimId`-indexed reference. Import attributes
+remain on the reference, not the binding. Persistent global names also reuse
+one variable identity: distinct identities for repeated `console.log` calls
+prevented the conditional normalizer from recognizing equal branches.
+
+The cross-module attempt uses the existing BIR `closed_with_stats` and `reduce`
+implementations of the closure-statistics/beta rules rather than exporting back
+to the legacy Lambda compiler. Imported binders and their assignment facts are
+fresh; they cannot modify enclosing assignment facts. Its reduced body is
+scheduled in V, followed by conversion to the original continuation.
+
+The corpus gate exposed `PisPolyVarBlock("a")` bypassing J-M9/J-E4, producing
+`typeof "a" === "object"` instead of `false`. P:642 calls E:832/E:653, which
+normalizes `typeof` first; the BIR primitive now calls those existing J rules.
+No new J rule was needed. These global-identity and primitive corrections do
+not change the X tables above.
+
+Measured 10,000-element lowering tests (constant operands):
+
+| Shape | Source visits | Primitive steps | Sequencing steps | Holds |
+| --- | ---: | ---: | ---: | ---: |
+| External call | 10,001 | 30,001 | 10,000 | 0 |
+| Labelled object | 10,001 | 40,001 | 10,000 | 0 |
+
+Separate 10,000-element holder tests exercise 10,000 event holds in 10,000
+argument steps and 5,000 optional-object holds in 20,000 argument steps.
+These counts describe the opt-in backend, not a default-path speedup.
+
 ### 3.6 `If`
 
 `If(c, t, e)`. Always first: `V(c)`. Its statements come first in the output

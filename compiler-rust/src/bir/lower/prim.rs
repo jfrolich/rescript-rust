@@ -320,9 +320,10 @@ impl State {
                 norm::jm3_to_int32(&mut self.arena, length)
             }
             Primitive::PisPolyVarBlock => {
-                let typeof_ = plain::node(&mut self.arena, View::JTypeof { value: values[0] }, 0);
+                // P:642 / E:653 folds typeof before comparing the type name.
+                let typeof_ = norm::jm9_typeof(&mut self.arena, values[0]);
                 let object = plain::string(&mut self.arena, "object");
-                plain::bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
+                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
             }
             // P: compile_primitive_js, indexing. Both string forms are checked.
             Primitive::Pstringrefs | Primitive::Pstringrefu => {
