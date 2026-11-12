@@ -1,1 +1,1 @@
-- Add seeded shared-pool page allocation perturbation for determinism testing.
+- Add seeded shared-pool page allocation perturbation, frozen-node access counters, and a four-build worker-count determinism gate comparing generated files, diagnostics, canonical signatures, and stored interfaces.
