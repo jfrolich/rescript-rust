@@ -5259,6 +5259,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .expect("pool has room");
@@ -5553,6 +5554,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .unwrap();

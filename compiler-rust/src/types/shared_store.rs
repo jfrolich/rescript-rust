@@ -70,9 +70,94 @@ pub(crate) struct SharedGraph {
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
     locations: super::decl_loc::DeclLocTable,
+    /// Cold serialization metadata; never consulted by type-node readers.
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 impl SharedGraph {
+    /// A graph retained for hashing/storage, before any importer needs pool addresses.
+    pub(crate) fn detached(parts: SharedGraphParts) -> Self {
+        let mut graph = Self::from_parts(0, parts);
+        graph.base = u32::MAX;
+        graph
+    }
+
+    pub(crate) fn is_detached(&self) -> bool {
+        self.base == u32::MAX
+    }
+
+    /// The first importer gives an immutable detached graph pool addresses.
+    /// Storage may still be reading the original arrays concurrently.
+    pub(crate) fn copy_parts(&self) -> SharedGraphParts {
+        SharedGraphParts {
+            nodes: self.nodes.iter().map(|n| (n.desc, n.level)).collect(),
+            payloads: SharedGraphPayloads {
+                lists: self.lists.to_vec(),
+                args: self.args.to_vec(),
+                rows: self.rows.to_vec(),
+                lids: self.lids.to_vec(),
+            },
+            layouts: self.layouts.to_vec(),
+            locations: self.locations.clone(),
+            carried: self.carried.clone(),
+        }
+    }
+
+    pub(crate) fn sizes(&self) -> SharedGraphSizes {
+        SharedGraphSizes {
+            nodes: self.nodes.len(),
+            layouts: self.layouts.len(),
+            list_items: self.lists.len(),
+            arg_items: self.args.len(),
+            rows: self.rows.len(),
+            lids: self.lids.len(),
+        }
+    }
+
+    /// Move an exclusively owned detached graph into its reserved pool slot.
+    pub(crate) fn take_parts(&mut self) -> SharedGraphParts {
+        assert!(self.is_detached());
+        SharedGraphParts {
+            nodes: std::mem::take(&mut self.nodes)
+                .into_vec()
+                .into_iter()
+                .map(|n| (n.desc, n.level))
+                .collect(),
+            payloads: SharedGraphPayloads {
+                lists: std::mem::take(&mut self.lists).into_vec(),
+                args: std::mem::take(&mut self.args).into_vec(),
+                rows: std::mem::take(&mut self.rows).into_vec(),
+                lids: std::mem::take(&mut self.lids).into_vec(),
+            },
+            layouts: std::mem::take(&mut self.layouts).into_vec(),
+            locations: std::mem::take(&mut self.locations),
+            carried: std::mem::take(&mut self.carried),
+        }
+    }
+
+    fn from_parts(base: u32, parts: SharedGraphParts) -> Self {
+        Self {
+            base,
+            nodes: parts
+                .nodes
+                .into_iter()
+                .enumerate()
+                .map(|(offset, (desc, level))| SharedTypeNode {
+                    desc,
+                    level,
+                    id: SHARED_TYPE_ID_BASE + base as i32 + offset as i32,
+                })
+                .collect(),
+            lists: parts.payloads.lists.into_boxed_slice(),
+            args: parts.payloads.args.into_boxed_slice(),
+            rows: parts.payloads.rows.into_boxed_slice(),
+            lids: parts.payloads.lids.into_boxed_slice(),
+            layouts: parts.layouts.into_boxed_slice(),
+            locations: parts.locations.without_interning_indexes(),
+            carried: parts.carried,
+        }
+    }
+
     /// The graph's first shared index.
     pub(crate) fn base(&self) -> u32 {
         self.base
@@ -96,6 +181,9 @@ impl SharedGraph {
     /// The offset of the node `r` names, `None` when it is no node of this
     /// graph.
     pub(crate) fn node_offset(&self, r: TypeExprRef) -> Option<usize> {
+        if self.is_detached() {
+            return (!r.is_store() && r.index() < self.nodes.len()).then_some(r.index());
+        }
         if !r.is_shared() {
             return None;
         }
@@ -113,7 +201,11 @@ impl SharedGraph {
         if list.is_empty() {
             return &[];
         }
-        let start = self.payload_offset(list.raw_start()) - self.nodes.len();
+        let start = if self.is_detached() {
+            list.raw_start() as usize
+        } else {
+            self.payload_offset(list.raw_start()) - self.nodes.len()
+        };
         &self.lists[start..start + list.len()]
     }
 
@@ -122,23 +214,36 @@ impl SharedGraph {
         if list.is_empty() {
             return &[];
         }
-        let start = self.payload_offset(list.raw_start()) - self.nodes.len() - self.lists.len();
+        let start = if self.is_detached() {
+            list.raw_start() as usize
+        } else {
+            self.payload_offset(list.raw_start()) - self.nodes.len() - self.lists.len()
+        };
         &self.args[start..start + list.len()]
     }
 
     /// The row of a variant node of this graph.
     pub(crate) fn row(&self, row: RowDescRef) -> &RowDesc {
-        &self.rows
-            [self.payload_offset(row.raw()) - self.nodes.len() - self.lists.len() - self.args.len()]
+        let index = if self.is_detached() {
+            row.raw() as usize
+        } else {
+            self.payload_offset(row.raw()) - self.nodes.len() - self.lists.len() - self.args.len()
+        };
+        &self.rows[index]
     }
 
     /// The constraint names of a package node of this graph.
     pub(crate) fn lids(&self, lids: PackageLidsRef) -> &[Longident] {
-        &self.lids[self.payload_offset(lids.raw())
-            - self.nodes.len()
-            - self.lists.len()
-            - self.args.len()
-            - self.rows.len()]
+        let index = if self.is_detached() {
+            lids.raw() as usize
+        } else {
+            self.payload_offset(lids.raw())
+                - self.nodes.len()
+                - self.lists.len()
+                - self.args.len()
+                - self.rows.len()
+        };
+        &self.lids[index]
     }
 }
 
@@ -297,6 +402,7 @@ pub(crate) struct SharedGraphParts {
     pub(crate) payloads: SharedGraphPayloads,
     pub(crate) layouts: Vec<Layout>,
     pub(crate) locations: super::decl_loc::DeclLocTable,
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 pub(crate) struct SharedTypePool {
@@ -306,7 +412,7 @@ pub(crate) struct SharedTypePool {
     shuffle: Option<u64>,
     reservations: AtomicU32,
     pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
-    longident_names: RwLock<HashMap<u32, String>>,
+    longident_names: Arc<RwLock<HashMap<u32, String>>>,
     next_longident_idx: AtomicU32,
 }
 
@@ -341,7 +447,7 @@ impl SharedTypePool {
             shuffle,
             reservations: AtomicU32::new(0),
             pers: Mutex::new(HashMap::new()),
-            longident_names: RwLock::new(HashMap::new()),
+            longident_names: Arc::new(RwLock::new(HashMap::new())),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
         }
     }
@@ -404,6 +510,7 @@ impl SharedTypePool {
             payloads,
             layouts: built_layouts,
             locations,
+            carried,
         } = build(base);
         assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
         assert_eq!(
@@ -431,24 +538,10 @@ impl SharedTypePool {
             sizes.layouts,
             "shared graph layout count changed"
         );
-        let graph = Arc::new(SharedGraph {
-            base,
-            nodes: descs
-                .into_iter()
-                .enumerate()
-                .map(|(offset, (desc, level))| SharedTypeNode {
-                    desc,
-                    level,
-                    id: SHARED_TYPE_ID_BASE + (base as i32) + offset as i32,
-                })
-                .collect(),
-            lists: payloads.lists.into_boxed_slice(),
-            args: payloads.args.into_boxed_slice(),
-            rows: payloads.rows.into_boxed_slice(),
-            lids: payloads.lids.into_boxed_slice(),
-            layouts: built_layouts.into_boxed_slice(),
-            locations,
-        });
+        crate::perf_counters::record_signature_nodes_frozen(sizes.nodes);
+        let graph = Arc::new(SharedGraph::from_parts(base, SharedGraphParts {
+            nodes: descs, payloads, layouts: built_layouts, locations, carried,
+        }));
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
             assert!(published.is_ok(), "shared type page published twice");
@@ -489,6 +582,14 @@ impl SharedTypePool {
             .unwrap()
             .insert(raw, name.to_string());
         StrIdx::from_raw(raw)
+    }
+
+    pub(crate) fn names(&self) -> Arc<RwLock<HashMap<u32, String>>> {
+        self.longident_names.clone()
+    }
+
+    pub(crate) fn names_ref(&self) -> &RwLock<HashMap<u32, String>> {
+        &self.longident_names
     }
 
     pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {
@@ -548,6 +649,7 @@ mod tests {
                             payloads: Default::default(),
                             layouts: Vec::new(),
                             locations: Default::default(),
+                            carried: Default::default(),
                         },
                     )
                     .unwrap();
@@ -591,6 +693,7 @@ mod tests {
                     ],
                     payloads: Default::default(),
                     layouts: Vec::new(),
+                    carried: Default::default(),
                     locations: [crate::location::Location::in_file(StrIdx::from_raw(4))]
                         .into_iter()
                         .collect(),
@@ -608,6 +711,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .unwrap();

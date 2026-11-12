@@ -239,7 +239,7 @@ mod tests {
         let output = Codegen::new()
             .with_options(CodegenOptions {
                 source_map_path: Some(source.clone()),
-                ..CodegenOptions::default()
+                ..crate::emit::program::codegen_options()
             })
             .build(&ast);
         assert_eq!(output.code.lines().count(), N);

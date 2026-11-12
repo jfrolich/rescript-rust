@@ -529,16 +529,21 @@ pub(super) fn string_leaves(
     Ok(())
 }
 
-/// Preserve-mode JSX needs a separate AST shape; runtime-mode JSX prints a
-/// normal call and never drops its tag, props or key, even when they are unit.
-pub(super) fn jsx_runtime(
+#[derive(Clone, Copy)]
+pub(super) enum JsxForm {
+    Runtime,
+    Element,
+    Fragment,
+}
+
+/// Legacy JSX meets tag, key, spread, props, children (never the runtime
+/// callee). Sequence containers remain unsupported: codegen drops their
+/// required parentheses, including explicit ParenthesizedExpression nodes.
+pub(super) fn jsx_form(
     a: &JsArena,
     id: crate::js_ir::arena::JsxId,
     preserve: bool,
-) -> Result<crate::js_ir::arena::JsxInfo, Unsupported> {
-    if preserve {
-        return Err(Unsupported("JSX preserve mode"));
-    }
+) -> Result<(crate::js_ir::arena::JsxInfo, JsxForm), Unsupported> {
     let jsx = a.jsx(id);
     if a.props(jsx.props)
         .iter()
@@ -546,7 +551,36 @@ pub(super) fn jsx_runtime(
     {
         return Err(Unsupported("symbol JSX key"));
     }
-    Ok(jsx)
+    if !crate::js_ir::printer::jsx_printable(a, &jsx, preserve) {
+        return Ok((jsx, JsxForm::Runtime));
+    }
+    let fragment = crate::js_ir::printer::is_empty_fragment(a, &jsx);
+    for value in jsx
+        .key
+        .into_iter()
+        .chain(a.props(jsx.props).iter().map(|(_, v)| *v))
+        .chain(
+            jsx.children
+                .into_iter()
+                .flat_map(|c| a.exprs(c).iter().copied()),
+        )
+    {
+        let mut value = value;
+        while let ExprKind::OptionalBlock(inner, true) = a.ek(value) {
+            value = inner;
+        }
+        if matches!(a.ek(value), ExprKind::Seq(..)) {
+            return Err(Unsupported("JSX sequence container"));
+        }
+    }
+    Ok((
+        jsx,
+        if fragment {
+            JsxForm::Fragment
+        } else {
+            JsxForm::Element
+        },
+    ))
 }
 
 /// Destructuring declarations meet excluded-field binders before the rest
@@ -561,17 +595,12 @@ pub(super) fn rest_declaration(
     }
 }
 
-/// Canonical integer property text is emitted as a numeric index by legacy.
-/// Keep the newly exposed member shape separate from record-rest support.
-pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
-    let (name, _) = member_form(name);
+/// Canonical i64 text is a numeric index; leading zeros, +, -0 and overflow
+/// remain strings (js_ir/printer.rs::print_property_access).
+pub(super) fn numeric_member(name: &str) -> Option<i64> {
     let digits = name.strip_prefix('-').unwrap_or(name);
     let canonical = name == "0" || matches!(digits.as_bytes(), [b'1'..=b'9', ..]);
-    if canonical && name.parse::<i64>().is_ok() {
-        Err(Unsupported("numeric static member"))
-    } else {
-        Ok(())
-    }
+    canonical.then(|| name.parse::<i64>().ok()).flatten()
 }
 
 /// A legacy call of the external `delete` parses as a unary operator, not a
@@ -585,4 +614,31 @@ pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupporte
         }
     }
     Ok(())
+}
+
+/// Identity options print their payload unchanged. Legacy arrow bodies group a
+/// function under any number of these wrappers (printer::arrow_expr_needs_paren).
+pub(super) fn arrow_function_body(a: &JsArena, mut e: Expr) -> bool {
+    while let ExprKind::OptionalBlock(inner, true) = a.ek(e) {
+        e = inner;
+    }
+    matches!(a.ek(e), ExprKind::Fun(_))
+}
+
+/// Logical chains flatten only nodes the legacy printer actually prints as
+/// logical operators. A nullish rewrite is an atomic `x == null` operand.
+pub(super) fn chain_children(
+    a: &JsArena,
+    op: BinOp,
+    e: Expr,
+) -> Result<Option<(Expr, Expr)>, Unsupported> {
+    if let ExprKind::Bin(child, l, r) = a.ek(e)
+        && child == op
+    {
+        expression_comment(a, e)?;
+        if nullish_target(a, op, l, r)?.is_none() {
+            return Ok(Some((l, r)));
+        }
+    }
+    Ok(None)
 }

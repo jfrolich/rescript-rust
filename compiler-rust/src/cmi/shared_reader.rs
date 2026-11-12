@@ -13,8 +13,10 @@
 //!   hold everything that signature holds; [`Carried`] is the rest, and
 //!   says so field by field.
 //!
-//! Today only the signature equality check calls them (`signature_check`).
+//! Serialization metadata lives with the frozen graph, including outside check mode.
 //! Every function here is linear in the graph it reads.
+
+mod encode;
 
 use std::borrow::Cow;
 
@@ -36,22 +38,47 @@ use crate::types::type_expr::{
 use crate::types::variant_runtime::{ShapeAllocation, ShapeImport};
 use crate::types::{VariantLayout, VariantLayoutRef};
 
+/// Frozen ownership for storage. Retains its graph and name table, not the
+/// pool's registry (which itself retains the publication Arc).
+#[derive(Debug)]
+pub(crate) struct PublishedGraph {
+    pub(crate) graph: std::sync::Arc<SharedGraph>,
+    pub(crate) signature: std::sync::Arc<Signature>,
+    pub(crate) names: std::sync::Arc<std::sync::RwLock<AHashMap<u32, String>>>,
+}
+
+impl PublishedGraph {
+    pub(crate) fn reader(&self) -> FrozenGraph<'_> {
+        FrozenGraph { graph: &self.graph, names: &self.names }
+    }
+    pub(crate) fn portable(&self) -> PortableSignature {
+        portable_signature(&self.reader(), &self.signature)
+    }
+    pub(crate) fn storage_bytes_for_check(&self) -> Vec<u8> {
+        crate::binser::to_vec(&encode::view(&self.reader(), &self.signature)).unwrap()
+    }
+
+    pub(crate) fn encode(&self) -> crate::binser::Encoded<PortableSignature> {
+        crate::binser::Encoded::encode_from(&encode::view(&self.reader(), &self.signature))
+    }
+
+}
+
 /// One published graph of the shared pool, read in place.
 pub(crate) struct FrozenGraph<'a> {
     graph: &'a SharedGraph,
-    pool: &'a SharedTypePool,
+    names: &'a std::sync::RwLock<AHashMap<u32, String>>,
 }
 
 impl<'a> FrozenGraph<'a> {
     /// The graph `pool` published at `base`.
     pub(crate) fn new(pool: &'a SharedTypePool, graph: &'a SharedGraph) -> Self {
-        FrozenGraph { graph, pool }
+        FrozenGraph { graph, names: pool.names_ref() }
     }
 
     fn portable_longident(&self, lid: &Longident) -> PortableLongident {
         let name = |idx: StrIdx| {
-            self.pool
-                .longident_name(idx)
+            self.names.read().unwrap().get(&idx.raw()).cloned()
                 .expect("a shared package constraint names its components in the pool")
         };
         match lid {
@@ -87,6 +114,9 @@ impl TypeGraph for FrozenGraph<'_> {
         r
     }
 
+    // Fuse the TypeDesc -> Node adapter with its caller's match rather than
+    // materializing the borrowed Node enum on every hashed/reference-read node.
+    #[inline(always)]
     fn node(&self, slot: usize) -> Node<'_, Self> {
         let graph = self.graph;
         match &graph.nodes()[slot].desc {
@@ -185,7 +215,41 @@ impl TypeGraph for FrozenGraph<'_> {
         )
     }
 
+    fn hash_package_lids(&self, lids: &[Longident], hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        // Match PortableLongident's derived Hash, borrowing the interned names
+        // under one read lock instead of allocating a portable tree per node.
+        fn lid(l: &Longident, names: &AHashMap<u32, String>, h: &mut impl std::hash::Hasher) {
+            match l {
+                Longident::Lident(name) => {
+                    0isize.hash(h);
+                    names.get(&name.raw()).expect("shared constraint name").hash(h);
+                }
+                Longident::Ldot(prefix, name) => {
+                    1isize.hash(h);
+                    lid(prefix, names, h);
+                    names.get(&name.raw()).expect("shared constraint name").hash(h);
+                }
+                Longident::Lapply(functor, arg) => {
+                    2isize.hash(h);
+                    lid(functor, names, h);
+                    lid(arg, names, h);
+                }
+            }
+        }
+        {
+            let names = self.names.read().unwrap();
+            lids.len().hash(hasher);
+            for l in lids {
+                lid(l, &names, hasher);
+            }
+        }
+    }
+
     fn layout(&self, layout: VariantLayoutRef) -> Option<&VariantLayout> {
+        if self.graph.is_detached() {
+            return self.graph.layouts().get(layout.0 as usize);
+        }
         if !layout.is_shared() {
             return None;
         }
@@ -195,10 +259,10 @@ impl TypeGraph for FrozenGraph<'_> {
 }
 
 /// What a frozen graph does not hold of the portable signature it was built
-/// from. `internalize_signature_into_shared` drops or rewrites each of
-/// these one way, so a writer of the portable form that reads the frozen
-/// graph (P3b, step 12 of H.1.5) has to be given them.
-#[derive(Default)]
+/// from. Stored once beside the node arrays in the frozen graph: readers
+/// need none of it for type checking, but serialization needs all of it.
+/// No field enlarges an individual node.
+#[derive(Clone, Debug, Default)]
 pub(crate) struct Carried {
     /// `PortableSignature::cmi_longident_names`: the file names of the
     /// signature's and of the raw signature's locations, with their
@@ -229,6 +293,19 @@ impl Carried {
         scopes: &AHashMap<u64, u64>,
         shapes: ShapeImport<'_>,
     ) {
+        self.record_maps(scopes, shapes);
+        self.link_levels = graph
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                matches!(entry.desc, PortableTypeDesc::Tlink(_)) && entry.level != GENERIC_LEVEL
+            })
+            .map(|(index, entry)| (index as u32, entry.level))
+            .collect();
+    }
+
+    pub(crate) fn record_maps(&mut self, scopes: &AHashMap<u64, u64>, shapes: ShapeImport<'_>) {
         let (other_scopes, allocations) = shapes.into_maps();
         for (producer, imported) in scopes.iter().chain(other_scopes.iter()) {
             let previous = self.scopes.insert(*imported, *producer);
@@ -244,15 +321,6 @@ impl Carried {
                 "two shape allocations were imported as one"
             );
         }
-        self.link_levels = graph
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                matches!(entry.desc, PortableTypeDesc::Tlink(_)) && entry.level != GENERIC_LEVEL
-            })
-            .map(|(index, entry)| (index as u32, entry.level))
-            .collect();
     }
 
     /// Which parts the inverse needs for this unit, by name: an empty part
@@ -290,20 +358,39 @@ impl SignatureRefMap for PortableRefs<'_> {
     }
 
     fn layout(&self, r: VariantLayoutRef) -> VariantLayoutRef {
-        VariantLayoutRef(r.shared_index() - self.graph.base())
+        if self.graph.is_detached() { r } else {
+            VariantLayoutRef(r.shared_index() - self.graph.base())
+        }
     }
 }
 
 /// The portable signature that `sig`, a signature whose types are nodes of
 /// `frozen`, was internalized from: the inverse of
-/// `portable_types::internalize_signature_into_shared`, given what that
-/// import does not keep (`carried`). Linear in the signature and the graph.
-pub(crate) fn portable_signature(
-    frozen: &FrozenGraph<'_>,
-    sig: &Signature,
-    carried: &Carried,
-) -> PortableSignature {
+/// `portable_types::internalize_signature_into_shared`. All serialization
+/// metadata is read from the frozen graph. Linear in the signature and graph.
+pub(crate) fn portable_signature(frozen: &FrozenGraph<'_>, sig: &Signature) -> PortableSignature {
+    let view = portable_export(frozen, sig, true);
+    PortableSignature {
+        ps_sig: view.ps_sig.into_owned(),
+        cmi_longident_names: view.cmi_longident_names.to_vec(),
+        type_graph: view.type_graph,
+        locations: view.locations.into_owned(),
+    }
+}
+
+/// Same field order and encoding as PortableSignature. Detached signatures
+/// already have portable locations and references: storage can borrow them.
+#[derive(serde::Serialize)]
+struct PortableExport<'a> {
+    ps_sig: Cow<'a, Signature>,
+    cmi_longident_names: &'a [(u32, String)],
+    type_graph: PortableTypeGraph,
+    locations: Cow<'a, crate::types::decl_loc::DeclLocTable>,
+}
+
+fn portable_export<'a>(frozen: &'a FrozenGraph<'_>, sig: &'a Signature, nodes: bool) -> PortableExport<'a> {
     let graph = frozen.graph;
+    let carried = &graph.carried;
     let base = graph.base();
 
     // File names: pool index -> name -> portable key. A file the import did
@@ -314,9 +401,15 @@ pub(crate) fn portable_signature(
         .map(|(key, name)| (name.as_str(), *key))
         .collect();
     let file = |file: StrIdx| -> StrIdx {
+        if graph.is_detached() {
+            return file;
+        }
         frozen
-            .pool
-            .longident_name(file)
+            .names
+            .read()
+            .unwrap()
+            .get(&file.raw())
+            .cloned()
             .and_then(|name| keys.get(name.as_str()).copied())
             .map_or(file, StrIdx::from_raw)
     };
@@ -327,6 +420,7 @@ pub(crate) fn portable_signature(
                 assert_eq!(loc.owner(), base, "a location of another shared graph");
                 DeclLoc::table(DeclLocKind::Portable, 0, loc.index())
             }
+            DeclLocKind::Portable if graph.is_detached() => loc,
             kind => panic!("{kind:?} declaration location in a shared signature"),
         }
     };
@@ -351,8 +445,8 @@ pub(crate) fn portable_signature(
     let mut cells: AHashMap<MutabilityRef, usize> = AHashMap::default();
 
     let mut link_levels = carried.link_levels.iter().copied().peekable();
-    let mut entries = Vec::with_capacity(graph.nodes().len());
-    for (i, node) in graph.nodes().iter().enumerate() {
+    let mut entries = Vec::with_capacity(if nodes { graph.nodes().len() } else { 0 });
+    for (i, node) in graph.nodes().iter().enumerate().take(if nodes { graph.nodes().len() } else { 0 }) {
         let desc = match &node.desc {
             TypeDesc::Tvar(name) => PortableTypeDesc::Tvar(*name),
             TypeDesc::Tarrow { args, ret } => PortableTypeDesc::Tarrow {
@@ -455,29 +549,32 @@ pub(crate) fn portable_signature(
         .iter()
         .cloned()
         .map(|mut layout| {
-            shapes.layout(&mut layout);
+            if !graph.is_detached() {
+                shapes.layout(&mut layout);
+            }
             layout
         })
         .collect();
 
     // Locations: the graph's table, with the producer's file keys and
     // scopes.
-    let mut locations = graph.locations().clone();
-    locations.remap_for_import_with(&file, |scope| {
-        *carried
-            .scopes
-            .get(&scope)
-            .expect("an allocation scope of the import has a producer scope")
-    });
+    let mut locations = Cow::Borrowed(graph.locations());
+    let mut ps_sig = Cow::Borrowed(sig);
+    if !graph.is_detached() {
+        locations.to_mut().remap_for_import_with(&file, |scope| {
+            *carried
+                .scopes
+                .get(&scope)
+                .expect("an allocation scope of the import has a producer scope")
+        });
+        remap_signature_refs(ps_sig.to_mut(), &PortableRefs { graph });
+        crate::types::decl::for_each_signature_location(ps_sig.to_mut(), &mut |l| *l = loc(*l));
+        shapes.signature(ps_sig.to_mut());
+    }
 
-    let mut ps_sig = sig.clone();
-    remap_signature_refs(&mut ps_sig, &PortableRefs { graph });
-    crate::types::decl::for_each_signature_location(&mut ps_sig, &mut |l| *l = loc(*l));
-    shapes.signature(&mut ps_sig);
-
-    PortableSignature {
+    PortableExport {
         ps_sig,
-        cmi_longident_names: carried.file_names.clone(),
+        cmi_longident_names: &carried.file_names,
         type_graph: PortableTypeGraph {
             entries,
             variant_layouts,

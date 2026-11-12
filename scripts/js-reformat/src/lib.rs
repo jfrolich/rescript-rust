@@ -2,7 +2,7 @@
 use oxc_allocator::Allocator;
 use oxc_ast::ast::*;
 use oxc_ast_visit::{VisitMut, walk_mut};
-use oxc_codegen::{Codegen, CodegenOptions, CommentOptions};
+use oxc_codegen::{Codegen, CodegenOptions, CommentOptions, IndentChar};
 use oxc_parser::{ParseOptions, Parser};
 use oxc_span::{GetSpan, SourceType};
 
@@ -148,7 +148,11 @@ pub fn reformat(source: &str, options: ReformatOptions) -> Result<String, String
         }
         true
     });
-    let mut codegen = CodegenOptions::default();
+    let mut codegen = CodegenOptions {
+        indent_char: IndentChar::Space,
+        indent_width: 2,
+        ..CodegenOptions::default()
+    };
     if options.strip_comments {
         codegen.comments = CommentOptions::disabled();
     }

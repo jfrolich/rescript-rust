@@ -22,6 +22,84 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
 
+static SIGNATURE_NONSHAREABLE: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_POOL_FULL: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn record_signature_fallback(pool_full: bool) {
+    if enabled() {
+        let counter = if pool_full { &SIGNATURE_POOL_FULL } else { &SIGNATURE_NONSHAREABLE };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[derive(Default)]
+struct SignatureCounts {
+    published: std::collections::HashSet<(u64, usize)>,
+    imported: std::collections::HashSet<(u64, usize)>,
+}
+
+impl SignatureCounts {
+    fn record(&mut self, key: (u64, usize), imported: bool) {
+        if imported {
+            if self.published.contains(&key) {
+                self.imported.insert(key);
+            }
+        } else {
+            self.published.insert(key);
+        }
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn signature_counts_distinguish_imported_publications_and_generations() {
+    let mut counts = SignatureCounts::default();
+    counts.record((1, 7), true); // A stored interface is not this build's publication.
+    assert!(counts.imported.is_empty());
+    counts.record((1, 7), false);
+    counts.record((1, 8), false); // A leaf.
+    counts.record((1, 7), true);
+    counts.record((1, 7), true); // Repeated worker acquisitions count once.
+    counts.record((2, 7), false); // Address reuse in another build is a new unit.
+    assert_eq!(counts.published.len(), 3);
+    assert_eq!(counts.imported.len(), 1);
+}
+
+static SIGNATURE_NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+/// Diagnostic identity independent of allocation-address reuse by unread leaves.
+pub(crate) fn signature_publication_id() -> usize {
+    if enabled() { SIGNATURE_NEXT_ID.fetch_add(1, Ordering::Relaxed) } else { 0 }
+}
+
+static SIGNATURE_COUNTS: OnceLock<Mutex<SignatureCounts>> = OnceLock::new();
+static SIGNATURE_NODES_FROZEN: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_NODES_HASHED: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_HASH_WALKS: AtomicU64 = AtomicU64::new(0);
+
+/// A publication ID distinguishes objects even after an unread leaf is freed.
+/// Import counts exclude stored/embedded interfaces and count a signature
+/// acquisition, not each individual node read or repeated worker lookup.
+pub(crate) fn record_signature_access(id: usize, generation: u64, imported: bool) {
+    if enabled() {
+        let mut counts = SIGNATURE_COUNTS.get_or_init(Default::default).lock().unwrap();
+        counts.record((generation, id), imported);
+    }
+}
+
+pub(crate) fn record_signature_nodes_frozen(nodes: usize) {
+    if enabled() {
+        SIGNATURE_NODES_FROZEN.fetch_add(nodes as u64, Ordering::Relaxed);
+    }
+}
+
+pub(crate) fn record_signature_nodes_hashed(nodes: u64) {
+    if enabled() {
+        SIGNATURE_HASH_WALKS.fetch_add(1, Ordering::Relaxed);
+        SIGNATURE_NODES_HASHED.fetch_add(nodes, Ordering::Relaxed);
+    }
+}
+
 struct GentypeCounts {
     modules: AtomicU64,
     declarations: AtomicU64,
@@ -927,6 +1005,20 @@ pub fn print_report() {
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
     );
+    eprintln!("signature_nonshareable={} signature_pool_full={}",
+        SIGNATURE_NONSHAREABLE.load(Ordering::Relaxed), SIGNATURE_POOL_FULL.load(Ordering::Relaxed));
+
+    if let Some(counts) = SIGNATURE_COUNTS.get() {
+        let counts = counts.lock().unwrap();
+        eprintln!(
+            "[compiler-counter] signature_units_published={} signature_units_imported={} signature_nodes_frozen={} signature_nodes_hashed={} signature_hash_walks={}",
+            counts.published.len(), counts.imported.len(),
+            SIGNATURE_NODES_FROZEN.load(Ordering::Relaxed),
+            SIGNATURE_NODES_HASHED.load(Ordering::Relaxed),
+            SIGNATURE_HASH_WALKS.load(Ordering::Relaxed),
+        );
+    }
+
     for (index, annotated) in [false, true].into_iter().enumerate() {
         let (modules, declarations) = GENTYPE_COUNTS[index].snapshot();
         eprintln!(
