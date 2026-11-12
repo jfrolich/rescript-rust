@@ -8,6 +8,7 @@ mod konst;
 mod prim;
 mod prim_cmp;
 mod prim_block;
+mod switch;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -287,6 +288,15 @@ enum ModuleConstants {
 }
 
 struct State {
+    switches: Vec<switch::Plan>,
+    switch_facts: Vec<switch::Facts>,
+    switch_work: Vec<(NodeId, bool)>,
+    switch_pairs: Vec<(NodeId, NodeId)>,
+    switch_primitive_hashes: Vec<u64>,
+    switch_constant_hashes: Vec<u64>,
+    switch_comparisons: usize,
+    switch_compared: usize,
+    switch_visits: usize,
     source: Bir,
     arena: Bir,
     idents: Vec<Ident>,
@@ -336,6 +346,10 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
+            switches: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
+            switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
+            switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             module_paths: vec![false; input.arena.nodes.len()],
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
@@ -512,7 +526,10 @@ impl ProbeRules for State {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
                 return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
             }
-            View::Switch { .. } => return Err(Unsupported("switch")),
+            View::Switch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.integer_switch(cx, scrutinee, operands, header)?)));
+            }
             View::StrSwitch { .. } => return Err(Unsupported("string switch")),
             View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),

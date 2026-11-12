@@ -350,6 +350,11 @@ impl Node {
     pub fn aux(self) -> u16 {
         self.aux
     }
+    /// Borrow the existing switch action-list handle. O(1).
+    pub(crate) fn switch_actions(self) -> ListId {
+        assert!(matches!(self.op, Op::Switch | Op::StrSwitch));
+        ListId(self.words[1])
+    }
     /// O(1): retain the existing primitive operand-list handle without copying
     /// its elements into a traversal resume record.
     pub(crate) fn primitive_arguments(self) -> ListId {

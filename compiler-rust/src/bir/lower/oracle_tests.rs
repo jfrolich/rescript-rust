@@ -18,10 +18,14 @@ pub(super) fn compare_with_checks(arena: LamArena, root: Lam, checks: bool) {
     compare_with_options(arena, root, None, checks);
 }
 
-fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
+fn compare_with_options(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
+    compare_in_contexts(arena, root, resolver, checks, &[0, 1, 2, 3, 4]);
+}
+
+pub(super) fn compare_in_contexts(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8]) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
-        for context in 0..5 {
+        for &context in contexts {
             let mut input = bridge::import_lambda(&arena, root).unwrap();
             let var = input
                 .arena
