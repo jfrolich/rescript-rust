@@ -1,0 +1,11 @@
+let x = %Macro.eval()
+----
+
+  We've found a bug for you!
+  EvalWithoutExpression.res:1:9-21
+
+  1 │ let x = %Macro.eval()
+  2 │
+
+  %Macro.eval takes one expression: `%Macro.eval(expr)`.
+

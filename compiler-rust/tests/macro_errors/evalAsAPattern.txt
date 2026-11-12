@@ -1,0 +1,18 @@
+let f = x =>
+  switch x {
+  | %Macro.eval(1) => true
+  | _ => false
+  }
+----
+
+  We've found a bug for you!
+  EvalAsAPattern.res:3:5-18
+
+  1 │ let f = x =>
+  2 │   switch x {
+  3 │   | %Macro.eval(1) => true
+  4 │   | _ => false
+  5 │   }
+
+  `%Macro.eval(expr)` is the value of an expression: it is written where an expression is.
+
