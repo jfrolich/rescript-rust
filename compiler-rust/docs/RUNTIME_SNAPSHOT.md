@@ -18,7 +18,7 @@ version, so the work can be done once, when the packages are built.
 ### What the code already does
 
 Half of this exists. Since the runtime was compiled into the executable
-(`rewatch/src/build/embedded_runtime.rs`), a build whose runtime sources equal
+(`rewatch/src/build/snapshot.rs`), a build whose runtime sources equal
 the ones the executable was built from registers the runtime's interfaces from
 the executable's memory and compiles none of it. What remains:
 
@@ -102,9 +102,9 @@ tries, in order:
 
 1. **Already registered** in this process (later builds of a watch session):
    nothing to do.
-2. **Embedded** (`embedded_runtime::register`). The executable's build script
+2. **Embedded** (`snapshot::register`). The executable's build script
    (`rewatch/cli/build.rs`) compiles `packages/@rescript/runtime` with
-   `embedded_runtime::compile` and the result is included with
+   `snapshot::compile` and the result is included with
    `include_bytes!` and installed at start-up (`rewatch/cli/src/main.rs`).
    The data is: a magic number, a BLAKE3 digest, then each module's name and
    stored-module bytes. The digest covers the runtime's `rescript.json` and
@@ -202,7 +202,7 @@ reads `lib/ocaml`).
 |---|---|---|
 | D1 | A runtime directory without `rescript.json` fails the build with "failed to read runtime config", before the embedded check. The published package ships only `lib`; `npm pack --dry-run` in the package lists no `rescript.json` | reproduced by removing the file from a copy |
 | D2 | The embedded data records the absolute source paths of the machine that built the executable (309 occurrences), in `ps_filename`, `source_path` and the file-name tables. They enter the interface digest and can reach whatever prints a dependency's file name. One source-map sample did not show them; this was not searched exhaustively | `strings` on the build script's output |
-| D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `embedded_runtime::register` |
+| D3 | Every build reads and hashes all runtime sources, and decodes the extras of and inserts a registry entry for all 113 modules | `snapshot::register` |
 | D4 | A fallback to compiling from source is logged only at debug level; no test fails when the embedded runtime stops matching | `log::debug!` in `register` |
 | D5 | The build script watches the sources that existed when it last ran. A runtime that gains a source file is compiled from source at run time until the executable is rebuilt | the comment on `watch_sources` |
 | D6 | On fallback, code generation runs for 113 modules and its output is discarded | `compile_runtime_module_from_source` |
@@ -258,7 +258,7 @@ All integers are little endian and all offsets are from the start of the
 file. Looking a module up is a binary search over fixed-width records that
 compares names in place; nothing is decoded or allocated for the modules that
 are not looked up. The container is written and read by one module,
-`rewatch/src/build/snapshot.rs`, which replaces `embedded_runtime.rs`.
+`rewatch/src/build/snapshot.rs`, replacing the former runtime-only container.
 
 ### B.3 Belt's JavaScript as a template
 
@@ -502,7 +502,7 @@ Code/document discrepancy: build databases are under `lib/rescript`, not
 `lib/bs` as section A.5 says. Hardware instruction counting was unavailable
 in the measurement environment; the figures above are Cachegrind counts.
 
-- **Changes.** Rename `embedded_runtime.rs` to `snapshot.rs` and give it the
+- **Changes.** Replace the runtime-only container with `snapshot.rs` and the
   container of B.2 with two packages. The build script produces Belt's part:
   it compiles Belt against the runtime it just compiled, under the proof
   configurations of B.3 and B.5, and stores cores and JavaScript templates.
@@ -514,8 +514,7 @@ in the measurement environment; the figures above are Cachegrind counts.
   written from the templates for each root package spec when the file is
   missing or different. `RESCRIPT_SNAPSHOT=off|require` and the info-level
   message of B.7. The equivalence script of C.3.
-- **Files.** `rewatch/src/build/snapshot.rs` (new, from
-  `embedded_runtime.rs`), `rewatch/cli/build.rs`, `rewatch/cli/src/main.rs`,
+- **Files.** `rewatch/src/build/snapshot.rs`, `rewatch/cli/build.rs`, `rewatch/cli/src/main.rs`,
   `rewatch/src/build.rs`, `rewatch/src/build/compile.rs`,
   `rewatch/src/build/incremental.rs` (reuse `load_stored`'s registration),
   `rewatch/src/build/clean.rs` (cleaning still removes the written files),
