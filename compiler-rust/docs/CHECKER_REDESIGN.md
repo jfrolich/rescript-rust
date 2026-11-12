@@ -4307,7 +4307,7 @@ The tests that prove it:
 | Per-item `OnceLock`s inside a world view (B.6: one item on first use) | one small graph and one page per forced item (56,497 forcings on the application), and forcing that nests across threads. It saves at most the surplus of building whole views, which J.6 bounds. Revisit only if W4's counter `world_view_nodes` shows the surplus above 0.2% of the build |
 | Absolute paths written into each unit's graph (F.7) | it changes what `ps_sig`, the inclusion check of an interface, genType's raw signature and the stored format see, to save one substitution of each unit's signature per build (at most 368,428 nodes). With whole views built once that substitution is already paid once. Revisit with W5's counters |
 | Rewriting `matches` to probe on copies | not needed: the exception table is empty again after its restore. It would also not cover the lasting writes of J.3.5, kind 2 |
-| Views as positions in P6's binding log | the log is dropped: 5.05 G instructions for what the tables do in 2.65 G |
+| Views as positions in P6's binding log | the log is dropped (H.2.11): 5.05 G instructions for what the tables do in 2.65 G |
 
 ### J.4 The slices
 
