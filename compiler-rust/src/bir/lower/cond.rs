@@ -51,6 +51,28 @@ impl State {
         }
     }
 
+    /// R3, C:4873 compile_if_assignment_block and C:4895
+    /// compile_test_assignment_block: assignments are lowered once.
+    pub(super) fn conditional_assignment(
+        &mut self, cx: Cx, condition: NodeId, then_: NodeId, else_: NodeId,
+    ) -> Result<Probed, Unsupported> {
+        let start = self.statements.mark();
+        let value_cx = Cx { cont: Cont::Value(Tail::No), ..cx };
+        let condition = self.probe(value_cx, condition)?;
+        let condition = self.realize(value_cx, condition).value.expect("condition value");
+        let yes = self.probe(cx, then_)?;
+        let yes = self.realize(cx, yes);
+        let yes = self.conditional_statements(yes.stmts);
+        let no = self.probe(cx, else_)?;
+        let no = self.realize(cx, no);
+        let no = self.conditional_statements(no.stmts);
+        // C:6595 normalize_if_assignment_merge_order: J-S3 swaps a negated
+        // test before combining two assignments to the same target.
+        let statement = norm::js3_simplify_if(&mut self.arena, condition, yes, no);
+        self.statements.push(statement);
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: None, finished: Finished::False }))
+    }
+
     /// K0, C:119: transfer a completed branch off the shared statement stack.
     fn conditional_statements(&mut self, span: Span) -> Vec<NodeId> {
         let list = self.statements.take_list(&mut self.arena, span);
@@ -66,7 +88,7 @@ mod tests {
     use crate::js_ir::arena::{JsDepsProgram, JsProgram, StmtKind};
     use crate::lambda::{arena::LamArena, lam_compile::LambdaCompiler, lam_constant::Constant};
 
-    fn compare_value(statement_branch: bool) {
+    fn compare_context(statement_branch: bool, assignment: bool) {
         let mut source = LamArena::new();
         let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
         let mut yes = source.const_(Constant::JsTrue);
@@ -79,13 +101,15 @@ mod tests {
         let input = bridge::import_lambda(&source, root).unwrap();
         let node = input.root;
         let mut state = State::new(input);
-        let output = state.probe(Cx::value(), node).unwrap();
-        let lowered = state.complete(Cx::value(), output);
+        let target = state.fresh_variable("result");
+        let target_id = state.idents[target.index()];
+        let cx = if assignment { Cx::assign(target) } else { Cx::value() };
+        let output = state.probe(cx, node).unwrap();
+        let lowered = state.complete(cx, output);
         lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
         let actual = bridge_j::export_js(&lowered.program).unwrap();
         let mut legacy = LambdaCompiler::new();
-        let output = legacy.bir_lower_oracle(&mut source, root, Cx::value().cont,
-            Ident::new("unused", 3, IdentFlags::NONE));
+        let output = legacy.bir_lower_oracle(&mut source, root, cx.cont, target_id);
         let mut block = output.prelude;
         block.push(legacy.j.stmt(StmtKind::Exp(output.expr)));
         let expected = JsDepsProgram { program: JsProgram::new_in(block, vec![], legacy.j), modules: vec![], side_effect: None };
@@ -95,8 +119,14 @@ mod tests {
     }
 
     #[test]
-    fn r1_free_branches_match_legacy() { compare_value(false); }
+    fn r3_assignments_match_legacy() {
+        compare_context(false, true);
+        compare_context(true, true);
+    }
 
     #[test]
-    fn r1_statement_branch_matches_legacy() { compare_value(true); }
+    fn r1_free_branches_match_legacy() { compare_context(false, false); }
+
+    #[test]
+    fn r1_statement_branch_matches_legacy() { compare_context(true, false); }
 }
