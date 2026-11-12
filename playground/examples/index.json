@@ -55,6 +55,16 @@
     ]
   },
   {
+    "id": "sql",
+    "title": "Types from a database schema",
+    "summary": "%Sql.tables() and %Sql.query(\"select ...\") read schema.sql while compiling: rows are typed records, and a column that does not exist is a compile error.",
+    "files": [
+      "Sql.res",
+      "schema.sql",
+      "Main.res"
+    ]
+  },
+  {
     "id": "eval",
     "title": "%Macro.eval: compute now",
     "summary": "%Macro.eval(expr) runs an expression while compiling and leaves its value in the output.",
