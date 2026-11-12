@@ -523,7 +523,9 @@ impl Names {
     }
     fn expr(&mut self, a: &JsArena, e: Expr) -> Result<(), Unsupported> {
         self.charge(1)?;
-        walk::expression_comment(a, e)?;
+        // collect analyzes the entire immutable arena before assigning names;
+        // analyze_expr already validated these comments, including unprinted
+        // children. The standalone AST builder retains its own validation.
         match a.ek(e) {
             ExprKind::Var(id) => self.add(a.ident(id), false),
             ExprKind::Qualified(q) => self.add(a.qual(q).0.id, true),
@@ -799,6 +801,25 @@ mod tests {
             budget: 1_000_000,
             ..Names::default()
         }
+    }
+
+    #[test]
+    fn collect_rejects_comments_before_assigning_names() {
+        use crate::js_ir::arena::JsProgram;
+        let mut a = JsArena::new();
+        let e = a.expr_commented(ExprKind::Null, "keep this comment");
+        let s = a.stmt(StmtKind::Exp(e));
+        let p = JsDepsProgram {
+            program: JsProgram::new_in(vec![s], vec![], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver =
+            ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        assert_eq!(
+            Names::collect(&p, &resolver, false).err(),
+            Some(Unsupported("non-decoration expression comment"))
+        );
     }
 
     #[test]
