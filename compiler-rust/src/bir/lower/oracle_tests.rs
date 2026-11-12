@@ -175,3 +175,116 @@ fn strict_and_delay_safe_flags_use_variable_facts() {
     assert!(flags.contains(crate::bir::NodeFlags::STRICT));
     assert!(!flags.contains(crate::bir::NodeFlags::DELAY_SAFE));
 }
+
+#[test]
+fn lets_and_sequences_in_all_contexts() {
+    for kind in [
+        LetKind::Strict,
+        LetKind::Alias,
+        LetKind::StrictOpt,
+        LetKind::Variable,
+    ] {
+        let mut a = LamArena::new();
+        let x = Ident::new("x", 10, IdentFlags::NONE);
+        let y = Ident::new("y", 11, IdentFlags::NONE);
+        let z = Ident::new("z", 12, IdentFlags::NONE);
+        let one = a.const_(C::Int {
+            i: 1,
+            comment: None,
+        });
+        let y_use = a.var(y);
+        let nested = a.let_(LetKind::Strict, y, one, y_use);
+        let two = a.const_(C::Int {
+            i: 2,
+            comment: None,
+        });
+        let x_use = a.var(x);
+        let tail = a.let_(LetKind::Alias, z, two, x_use);
+        let root = a.let_(kind, x, nested, tail);
+        compare(a, root);
+    }
+    for first_position in [false, true] {
+        let mut a = LamArena::new();
+        let x = Ident::new("x", 10, IdentFlags::NONE);
+        let value = a.const_(C::JsTrue);
+        let body = a.var(x);
+        let binding = a.let_(LetKind::Strict, x, value, body);
+        let constant = a.const_(C::String("discarded".into()));
+        let inner = if first_position {
+            a.seq_raw(binding, constant)
+        } else {
+            a.seq_raw(constant, binding)
+        };
+        let tail = a.const_(C::Int {
+            i: 9,
+            comment: None,
+        });
+        let root = a.seq_raw(inner, tail);
+        compare(a, root);
+    }
+}
+
+#[test]
+fn functions_and_function_attributes_in_all_contexts() {
+    use crate::lambda::{FunctionAttribute, LamLoc};
+    for return_unit in [false, true] {
+        for async_ in [false, true] {
+            for one_unit_arg in [false, true] {
+                let mut a = LamArena::new();
+                let param = Ident::new("arg", 10, IdentFlags::NONE);
+                let body = if return_unit || one_unit_arg {
+                    a.const_(C::JsUndefined {
+                        is_unit: return_unit,
+                    })
+                } else {
+                    a.var(param)
+                };
+                let attr = FunctionAttribute {
+                    return_unit,
+                    async_,
+                    one_unit_arg,
+                    directive: Some("use test".into()),
+                    ..Default::default()
+                };
+                let root = a.function_(1, &[param], body, attr, LamLoc::NONE);
+                compare(a, root);
+            }
+        }
+    }
+    let mut a = LamArena::new();
+    let outer = Ident::new("x", 10, IdentFlags::NONE);
+    let inner = Ident::new("x", 11, IdentFlags::NONE);
+    let value = a.const_(C::Int {
+        i: 1,
+        comment: None,
+    });
+    let read = a.var(outer);
+    let fun = a.function_(
+        1,
+        &[inner],
+        read,
+        FunctionAttribute::default(),
+        LamLoc::NONE,
+    );
+    let root = a.let_(LetKind::Strict, outer, value, fun);
+    compare(a, root);
+}
+
+#[test]
+fn supported_constructs_preserve_identities_without_touching_the_legacy_counter() {
+    let mut a = LamArena::new();
+    let id = Ident::new("preserved", 50_000, IdentFlags::NONE);
+    let value = a.const_(C::JsNull);
+    let body = a.var(id);
+    let root = a.let_(LetKind::Strict, id, value, body);
+    let input = bridge::import_lambda(&a, root).unwrap();
+    let source_root = input.root;
+    let identities = input.idents.clone();
+    let stamp = Ident::current_local_stamp();
+    let mut state = State::new(input);
+    let probed = state.probe(Cx::value(), source_root).unwrap();
+    assert_eq!(state.idents, identities);
+    assert_eq!(state.arena.vars.order(VarId(0)), 50_000);
+    state.complete(Cx::value(), probed);
+    assert_eq!(Ident::current_local_stamp(), stamp);
+}

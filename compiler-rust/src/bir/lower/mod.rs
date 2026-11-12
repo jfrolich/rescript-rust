@@ -1,5 +1,6 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
+mod expr;
 mod konst;
 #[cfg(test)]
 mod oracle_tests;
@@ -159,6 +160,11 @@ pub trait ProbeRules {
     ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
     /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
+    /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
+    /// Consume a child's result before entering its next sibling when required.
+    fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed) -> Probed {
+        output
+    }
     /// K0/K2: C:119 append / C:4715 append_effect_output; combine child outputs.
     fn finish(
         &mut self,
@@ -187,6 +193,7 @@ impl SourceProbe {
         enum Work<R> {
             Enter(Cx, NodeId),
             Finish(Cx, R, usize),
+            Child(Cx, usize, usize),
         }
         let mut work = vec![Work::Enter(cx, node)];
         let mut values = Vec::new();
@@ -199,15 +206,21 @@ impl SourceProbe {
                         ProbePlan::Ready(value) => values.push(value),
                         ProbePlan::Children(resume) => {
                             rules.children(cx, &resume, &mut children);
+                            let parent = work.len();
                             work.push(Work::Finish(cx, resume, children.len()));
-                            work.extend(
-                                children
-                                    .drain(..)
-                                    .rev()
-                                    .map(|(cx, node)| Work::Enter(cx, node)),
-                            );
+                            for (index, (cx, node)) in children.drain(..).enumerate().rev() {
+                                work.push(Work::Child(cx, parent, index));
+                                work.push(Work::Enter(cx, node));
+                            }
                         }
                     }
+                }
+                Work::Child(cx, parent, index) => {
+                    let Work::Finish(_, resume, _) = &work[parent] else {
+                        unreachable!("parent resume frame")
+                    };
+                    let child = values.pop().expect("completed source child");
+                    values.push(rules.child(cx, resume, index, child));
                 }
                 Work::Finish(cx, resume, count) => {
                     let start = values
@@ -344,7 +357,7 @@ impl State {
 }
 
 impl ProbeRules for State {
-    type Resume = std::convert::Infallible;
+    type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
     fn enter(&mut self, _cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
         let value = match self.source.view(node) {
@@ -358,8 +371,26 @@ impl ProbeRules for State {
             ),
             View::Const { value } => self.constant(value),
             View::Apply { .. } => return Err(Unsupported("apply")),
-            View::Fun { .. } | View::Let { .. } | View::Seq { .. } => {
-                return Err(Unsupported("lowering not implemented"));
+            View::Fun { body, header } => {
+                return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
+            }
+            View::Let { var, value, body } => {
+                let kind = match self.source.node(node).aux() & 3 {
+                    0 => LetKind::Strict,
+                    1 => LetKind::Alias,
+                    2 => LetKind::StrictOpt,
+                    3 => LetKind::Variable,
+                    _ => unreachable!("masked let kind"),
+                };
+                return Ok(ProbePlan::Children(expr::Resume::Let {
+                    var,
+                    kind,
+                    value,
+                    body,
+                }));
+            }
+            View::Seq { first, second } => {
+                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, .. } => {
@@ -449,18 +480,22 @@ impl ProbeRules for State {
             self.free.push(Free::Leaf(value)),
         )))
     }
-    /// K1: C:1529 compile_expr; leaves have no source child frames in this slice.
-    fn children(&self, _: Cx, resume: &Self::Resume, _: &mut Vec<(Cx, NodeId)>) {
-        match *resume {}
+    /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
+    fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
+        self.expression_children(cx, resume, into);
     }
-    /// K0: C:119 append; no resume is created until structural constructs arrive.
+    /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
+    fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed) -> Probed {
+        self.expression_child(cx, resume, index, output)
+    }
+    /// K0/K2/K10: C:119 append / C:4715 append_effect_output / C:562 function_expr.
     fn finish(
         &mut self,
-        _: Cx,
+        cx: Cx,
         resume: Self::Resume,
-        _: impl Iterator<Item = Probed>,
+        children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
-        match resume {}
+        Ok(self.finish_expression(cx, resume, children))
     }
 }
 
@@ -507,9 +542,11 @@ impl Realizer for State {
             finished,
         }
     }
-    /// K2: C:4715 append_effect_output; no deferred sequence is produced yet.
-    fn seq(&mut self, _: Cx, _: NodeId, _: Out) -> Out {
-        unreachable!("sequence is unsupported")
+    /// K2: C:4715 append_effect_output. The retained head has no effects in
+    /// this slice; its already-lowered J subtree is released, never recompiled.
+    fn seq(&mut self, _: Cx, first: NodeId, second: Out) -> Out {
+        self.drop_pure_effect(first);
+        second
     }
     /// K6: C:5144 compile_if_return_output; If remains explicitly unsupported.
     fn cond(&mut self, _: Cx, _: NodeId, _: Out, _: Out) -> Out {
