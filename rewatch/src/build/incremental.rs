@@ -495,17 +495,14 @@ pub fn current_record(
                 (Some(deps), Some(mtime)) => Some(SourceDeps {
                     mtime: *mtime,
                     deps: deps.iter().cloned().collect(),
-                    gentype_annotations: build_state
-                        .gentype_annotations
-                        .lock()
-                        .unwrap()
-                        .get(&key)
-                        .copied()
+                    gentype_annotations: source_file.gentype_annotations[usize::from(*kind == "intf")]
                         .unwrap_or(true),
-                    gentype_declarations: if build_state.compiled_modules.contains(module_name) {
-                        rescript_compiler::gentype::main::has_type_declarations_for_module(
-                            module_name,
-                        )
+                    gentype_declarations: if build_state.packages[package_name].config.gentype_config.is_none() {
+                        false
+                    } else if build_state.compiled_modules.contains(module_name) {
+                        build_state.gentype_needed.as_ref()
+                            .is_none_or(|needed| needed.contains(module_name))
+                            && rescript_compiler::gentype::main::has_type_declarations_for_module(module_name)
                     } else {
                         previous
                             .and_then(|p| p.state.deps.get(&key))
@@ -718,9 +715,13 @@ pub fn seed_recorded_deps(build_state: &mut BuildCommandState) {
     }
     {
         let mut in_memory_deps = build_state.in_memory_deps.lock().unwrap();
-        let mut annotations = build_state.gentype_annotations.lock().unwrap();
         for (key, row) in seeded {
-            annotations.insert(key.clone(), row.gentype_annotations);
+            if let Some((name, kind)) = key.rsplit_once(':')
+                && let Some(module) = build_state.build_state.modules.get_mut(name)
+                && let SourceType::SourceFile(source) = &mut module.source_type
+            {
+                source.gentype_annotations[usize::from(kind == "intf")] = Some(row.gentype_annotations);
+            }
             in_memory_deps.insert(key, row.deps.iter().cloned().collect());
         }
     }

@@ -3,7 +3,6 @@ use super::packages;
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
 use rescript_compiler::binary_ast::Dependencies;
-use std::path::PathBuf;
 
 /// What resolving a module's raw dependency names needs from its package.
 struct DepContext<'a> {
@@ -227,7 +226,6 @@ mod tests {
 /// O(V + E) reachability, including dependency packages and namespace modules.
 /// Missing parse flags are conservatively treated as annotated (old/unparsed inputs).
 pub fn plan_gentype(build_state: &mut BuildCommandState) {
-    let annotations = build_state.gentype_annotations.lock().unwrap();
     let roots = build_state.modules.iter().filter_map(|(name, module)| {
         let SourceType::SourceFile(source) = &module.source_type else {
             return None;
@@ -239,19 +237,11 @@ pub fn plan_gentype(build_state: &mut BuildCommandState) {
         if !enabled {
             return None;
         }
-        let annotated = annotations
-            .get(&format!("{name}:impl"))
-            .copied()
-            .unwrap_or(true)
-            || (source.interface.is_some()
-                && annotations
-                    .get(&format!("{name}:intf"))
-                    .copied()
-                    .unwrap_or(true));
-        annotated.then(|| name.clone())
+        let annotated = source.gentype_annotations[0].unwrap_or(true)
+            || (source.interface.is_some() && source.gentype_annotations[1].unwrap_or(true));
+        annotated.then_some(name.as_str())
     });
     let needed = gentype_closure(&build_state.modules, roots);
-    drop(annotations);
     if rescript_compiler::perf_counters::enabled() {
         eprintln!(
             "[compiler-counter] gentype_closure needed={} total={}",
@@ -259,59 +249,39 @@ pub fn plan_gentype(build_state: &mut BuildCommandState) {
             build_state.modules.len()
         );
     }
-    // Also mark unparsed, stored modules, so a closure bug cannot turn a
-    // missing cache entry into a silently ignored CMT lookup.
-    for (name, module) in &build_state.modules {
-        if needed.contains(name) {
-            continue;
-        }
-        let SourceType::SourceFile(source) = &module.source_type else {
-            continue;
-        };
-        let package = &build_state.packages[&module.package_name];
-        if package.config.gentype_config.is_none() {
-            continue;
-        }
-        let suffix = package
-            .namespace
-            .to_suffix()
-            .map(|ns| format!("-{ns}"))
-            .unwrap_or_default();
-        let paths = std::iter::once((&source.implementation.path, "cmt"))
-            .chain(
-                source
-                    .interface
-                    .as_ref()
-                    .map(|interface| (&interface.path, "cmti")),
-            )
-            .map(|(path, extension)| {
-                PathBuf::from(&package.path)
-                    .join("lib/rescript")
-                    .join(format!(
-                        "{}{suffix}.{extension}",
-                        path.file_stem().unwrap().to_string_lossy()
-                    ))
-                    .to_string_lossy()
-                    .into_owned()
-            })
-            .collect::<Vec<_>>();
-        rescript_compiler::gentype::main::skip_type_declarations(name, &paths);
-    }
+    // Only names are retained once per plan. Artifact paths are inspected
+    // lazily on a cache miss, never normalized for each skipped module.
+    rescript_compiler::gentype::main::set_skipped_modules(
+        build_state.modules.iter().filter_map(|(name, module)| {
+            (!needed.contains(name)
+                && !module.is_mlmap()
+                && build_state.packages[&module.package_name].config.gentype_config.is_some())
+                .then(|| name.clone())
+        }),
+    );
     build_state.gentype_needed = Some(needed);
 }
 
-fn gentype_closure(
-    modules: &AHashMap<String, Module>,
-    roots: impl Iterator<Item = String>,
+fn gentype_closure<'a>(
+    modules: &'a AHashMap<String, Module>,
+    roots: impl Iterator<Item = &'a str>,
 ) -> AHashSet<String> {
     let mut needed = AHashSet::new();
-    let mut pending: Vec<_> = roots.collect();
-    while let Some(name) = pending.pop() {
-        if !needed.insert(name.clone()) {
-            continue;
+    let mut pending = Vec::new();
+    for root in roots {
+        if !needed.contains(root) {
+            needed.insert(root.to_string());
+            pending.push(root);
         }
-        if let Some(module) = modules.get(&name) {
-            pending.extend(module.deps.iter().cloned());
+    }
+    while let Some(name) = pending.pop() {
+        if let Some(module) = modules.get(name) {
+            for dependency in &module.deps {
+                if !needed.contains(dependency) {
+                    needed.insert(dependency.clone());
+                    pending.push(dependency.as_str());
+                }
+            }
         }
     }
     needed
@@ -343,7 +313,7 @@ mod gentype_tests {
                 },
             );
         }
-        let needed = gentype_closure(&modules, ["Output".to_string()].into_iter());
+        let needed = gentype_closure(&modules, ["Output"].into_iter());
         assert_eq!(
             needed,
             ["Output", "Alias", "Types"]

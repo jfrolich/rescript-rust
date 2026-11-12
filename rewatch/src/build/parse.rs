@@ -182,10 +182,14 @@ pub fn generate_asts(
                 let sinks = ParseSinks {
                     stored_asts: &build_state.stored_asts,
                     in_memory_deps: &build_state.in_memory_deps,
-                    gentype_annotations: &build_state.gentype_annotations,
                     parse_warnings: &build_state.parse_warnings,
                     warning_log,
                 };
+                if let Ok(generated) = &ast_result
+                    && let Some(flag) = generated.gentype_annotations
+                {
+                    source_file.gentype_annotations[0] = Some(flag);
+                }
                 let (parse_state, parse_dirty) = sinks.apply(
                     package,
                     format!("{module_name}:impl"),
@@ -198,6 +202,11 @@ pub fn generate_asts(
 
                 // `None` when the file has no interface file associated.
                 if let Some(iast_result) = iast_result.transpose() {
+                    if let Ok(generated) = &iast_result
+                        && let Some(flag) = generated.gentype_annotations
+                    {
+                        source_file.gentype_annotations[1] = Some(flag);
+                    }
                     let (parse_state, parse_dirty) = sinks.apply(
                         package,
                         format!("{module_name}:intf"),
@@ -432,11 +441,7 @@ fn generate_ast(
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
     }
-    let gentype_annotations = package
-        .config
-        .gentype_config
-        .as_ref()
-        .map(|_| parsed_gentype_annotations(&stored_ast));
+    let gentype_annotations = Some(parsed_gentype_annotations(&stored_ast));
     Ok(GeneratedAst {
         gentype_annotations,
         stderr,
@@ -445,35 +450,11 @@ fn generate_ast(
     })
 }
 
-/// Scan the post-frontend parse tree, including nested and file-level attributes.
-/// Only genType-enabled packages pay for this walk. It deliberately accepts
-/// more than the typed annotation walk (for example attributes on record fields).
+/// The frontend's derived genType accessors inherit an existing annotation
+/// (binary_ast/ppx.rs::gentype_attrs_for_derived_accessors). It does not invent
+/// annotations in previously unannotated source, so the parser flag suffices.
 fn parsed_gentype_annotations(ast: &StoredAst) -> bool {
-    use rescript_compiler::binary_ast::ast_iter::{self, AstIter};
-    use rescript_compiler::gentype::annotation;
-    struct Flags(bool);
-    impl AstIter for Flags {
-        fn attribute(
-            &mut self,
-            arena: &rescript_compiler::parse_arena::ParseArena,
-            attr: &rescript_compiler::parser::ast::Attribute,
-        ) {
-            let name = arena.get_string(attr.0.txt);
-            self.0 |= annotation::tag_is_one_of_the_gentype_annotations(name)
-                || annotation::tag_is_gentype_ignore_interface(name);
-            ast_iter::walk_attribute(self, arena, attr);
-        }
-    }
-    let mut flags = Flags(false);
-    match ast {
-        StoredAst::Structure(ast) => {
-            ast_iter::walk_structure(&mut flags, &ast.arena, &ast.structure)
-        }
-        StoredAst::Signature(ast) => {
-            ast_iter::walk_signature(&mut flags, &ast.arena, &ast.signature)
-        }
-    }
-    flags.0
+    ast.arena().has_gentype_annotations()
 }
 
 fn parse_saved_source(
@@ -681,7 +662,6 @@ fn filter_ppx_flags(
 struct ParseSinks<'a> {
     stored_asts: &'a std::sync::Mutex<ahash::AHashMap<String, super::build_types::StoredAst>>,
     in_memory_deps: &'a std::sync::Mutex<ahash::AHashMap<String, Dependencies>>,
-    gentype_annotations: &'a std::sync::Mutex<ahash::AHashMap<String, bool>>,
     parse_warnings: &'a ParseWarnings,
     warning_log: ParseWarningLog,
 }
@@ -737,12 +717,6 @@ impl ParseSinks<'_> {
             }
             None => (ParseState::Success, false),
         };
-        if let Some(annotated) = generated.gentype_annotations {
-            self.gentype_annotations
-                .lock()
-                .unwrap()
-                .insert(key.clone(), annotated);
-        }
         if let Some(ast) = generated.stored_ast {
             self.stored_asts.lock().unwrap().insert(key.clone(), ast);
         }
@@ -774,7 +748,7 @@ mod tests {
     #[test]
     fn parsed_gentype_flags_cover_all_names_and_nested_attributes() {
         for prefix in ["genType", "gentype"] {
-            for suffix in ["", ".as", ".import", ".opaque", ".ignoreInterface"] {
+            for suffix in ["", ".as", ".import", ".opaque", ".ignoreInterface", ".future"] {
                 for source in [
                     format!("@{prefix}{suffix} type t = int"),
                     format!("@@{prefix}{suffix}\ntype t = int"),
@@ -805,7 +779,7 @@ mod tests {
                 ))));
             }
         }
-        let mut parser = Parser::new("Plain.res", "type t = int\nlet x = 1");
+        let mut parser = Parser::new("Plain.res", "type t = int\nlet x = `genType` // @gentype");
         let structure = module::parse_structure(&mut parser);
         assert!(!parsed_gentype_annotations(&StoredAst::Structure(
             Arc::new(StoredStructureAst {

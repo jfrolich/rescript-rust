@@ -4810,6 +4810,7 @@ mod tests {
     fn test_module(package_name: &str, implementation_warning: Option<&str>) -> Module {
         Module {
             source_type: SourceType::SourceFile(SourceFile {
+                gentype_annotations: [None; 2],
                 implementation: Implementation {
                     path: PathBuf::from("src/ModuleA.res"),
                     parse_state: ParseState::Success,
