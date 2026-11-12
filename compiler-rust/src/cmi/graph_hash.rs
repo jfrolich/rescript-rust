@@ -69,6 +69,10 @@ pub trait TypeGraph {
     fn mutability(&self, cell: Self::Mutability) -> Option<MutableFlag>;
     /// The constraint names of a package type, with their names resolved.
     fn package_lids<'a>(&'a self, lids: &'a [Self::Lid]) -> Cow<'a, [PortableLongident]>;
+    /// Hash constraint names without requiring a temporary owned tree.
+    fn hash_package_lids(&self, lids: &[Self::Lid], hasher: &mut impl Hasher) {
+        self.package_lids(lids).hash(hasher);
+    }
     /// The layout a variant declaration of the signature refers to.
     fn layout(&self, layout: VariantLayoutRef) -> Option<&VariantLayout>;
 }
@@ -223,6 +227,12 @@ pub struct GraphWalk<'g, G: TypeGraph + ?Sized> {
     written: usize,
     /// Node records hashed since the walk was created.
     records: u64,
+}
+
+impl<G: TypeGraph + ?Sized> Drop for GraphWalk<'_, G> {
+    fn drop(&mut self) {
+        crate::perf_counters::record_signature_nodes_hashed(self.records);
+    }
 }
 
 impl<'g, G: TypeGraph + ?Sized> GraphWalk<'g, G> {
@@ -401,7 +411,7 @@ impl<'g, G: TypeGraph + ?Sized> GraphWalk<'g, G> {
             Node::Tpackage { path, lids, args } => {
                 hasher.write_u8(12);
                 hash_path_by_name(hasher, &path);
-                graph.package_lids(lids).hash(hasher);
+                graph.hash_package_lids(lids, hasher);
                 self.references(hasher, args);
             }
         }
