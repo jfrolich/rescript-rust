@@ -1,0 +1,1 @@
+- Infer constant expression types without allocating a fresh expected-type variable.

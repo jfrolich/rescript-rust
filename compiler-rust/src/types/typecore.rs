@@ -7539,12 +7539,40 @@ fn type_pattern_exception(
 // Expression Type Checking
 // ============================================================================
 
+/// An inferred expression replaces an otherwise unobservable fresh expected
+/// variable. Unconverted constructs still materialise that variable.
+#[derive(Clone, Copy)]
+enum Expected {
+    Known(TypeExprRef),
+    Infer { level: i32 },
+}
+
+impl From<TypeExprRef> for Expected {
+    fn from(ty: TypeExprRef) -> Self {
+        Self::Known(ty)
+    }
+}
+
 pub(crate) fn type_exp<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    if matches!(
+        expr.pexp_desc,
+        crate::parser::ast::ExpressionDesc::Pexp_constant(_)
+    ) {
+        return type_expect_full(
+            tctx,
+            env,
+            expr,
+            Expected::Infer { level: tctx.type_ctx.current_level() },
+            context,
+            RecArg::Rejected,
+            None,
+        );
+    }
     if tctx.type_ctx.compiler_counters_enabled() {
         crate::perf_counters::record_expected_var(expected_var_use(expr));
     }
@@ -7897,11 +7925,12 @@ fn type_expect_full<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
+    expected_ty: impl Into<Expected>,
     context: Option<TypeClashContext>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
+    let expected_ty = expected_ty.into();
     let arena = tctx.arena;
     let mut typed = crate::types::typemod::with_warning_scope(
         tctx,
@@ -7935,7 +7964,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
+    expected_ty: Expected,
     context: Option<TypeClashContext>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
@@ -7963,6 +7992,36 @@ fn type_expect_with_recarg_unscoped<'a>(
     // OCaml passes `env` through all Ctype operations; in Rust we update the
     // unify-state snapshot on each type_expect entry.
     tctx.set_unify_env(env);
+
+    if let ED::Pexp_constant(cst) = &expr.pexp_desc {
+        let constant = convert_constant(cst, loc, tctx.arena)?;
+        let ty = type_constant(ctx, env, &constant);
+        match expected_ty {
+            Expected::Known(expected) => rue_unify(tctx, loc, ty, expected, context)?,
+            Expected::Infer { level } => {
+                // type_constant instances a nullary predefined constructor at
+                // current_level. No scope or universal variable can escape, and
+                // unifying with a fresh variable at this level only links that
+                // variable to this exact node (ctype.ml:2280-2286).
+                debug_assert_eq!(ctx.get_level(ctx.repr(ty)), level);
+            }
+        }
+        let node = Expression::new(
+            ExpressionDesc::Texp_constant(constant),
+            loc,
+            ty,
+            exp_env_ref,
+        );
+        return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
+    }
+    let expected_ty = match expected_ty {
+        Expected::Known(ty) => ty,
+        Expected::Infer { level } => {
+            let ty = ctx.new_var(None);
+            ctx.set_level(ty, level);
+            ty
+        }
+    };
 
     match &expr.pexp_desc {
         ED::Pexp_braces(braces) => {
@@ -8066,25 +8125,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             })
         }
 
-        ED::Pexp_constant(cst) => {
-            // Constant expression
-            let constant = convert_constant(cst, loc, tctx.arena)?;
-            let ty = type_constant(ctx, env, &constant);
-
-            // OCaml: rue { ... exp_type = type_constant cst; ... }
-            rue_unify(tctx, loc, ty, expected_ty, context)?;
-
-            Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_constant(constant),
-                    loc,
-                    ty,
-                    exp_env_ref,
-                );
-                tctx.typed
-                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-            })
-        }
+        ED::Pexp_constant(_) => unreachable!("constants were typed above"),
 
         ED::Pexp_break => {
             if tctx.loop_depth == 0 {
@@ -29886,6 +29927,40 @@ mod tests {
             crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
         let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
+    }
+
+    #[test]
+    fn inferred_constant_keeps_the_instantiated_node_and_level() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+        let literal = arena.intern_string("42");
+        let expr = ParsedExpression {
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(
+                crate::parser::ast::Constant::Integer(literal, None),
+            ),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Default::default(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        for level in [1, 10, 1000] {
+            ctx.set_current_level(level);
+            let inferred = type_exp(&mut tctx, &env, &expr, None).unwrap();
+            assert_eq!(ctx.repr(inferred.exp_type), inferred.exp_type);
+            assert_eq!(ctx.get_level(inferred.exp_type), level);
+            let expected = ctx.new_var(None);
+            let checked = type_expect(&mut tctx, &env, &expr, expected, None).unwrap();
+            assert_eq!(ctx.repr(expected), checked.exp_type);
+            assert_eq!(ctx.get_level(checked.exp_type), level);
+            assert_ne!(inferred.exp_type, checked.exp_type);
+            let (TypeDesc::Tconstr { path: inferred_path, .. },
+                 TypeDesc::Tconstr { path: checked_path, .. }) =
+                (ctx.get_desc(inferred.exp_type).into_desc(),
+                 ctx.get_desc(checked.exp_type).into_desc()) else {
+                panic!("integer constants have constructor types");
+            };
+            assert!(inferred_path.same(&checked_path));
+        }
     }
 
     #[test]
