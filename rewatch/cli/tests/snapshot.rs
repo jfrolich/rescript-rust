@@ -176,3 +176,29 @@ fn relocated_runtime_without_config_honors_require_and_off() {
         if mode == "off" { assert!(text.contains("Not using the prebuilt @rescript/runtime: disabled by RESCRIPT_SNAPSHOT=off"), "{text}"); }
     }
 }
+
+// All developer-command subprocesses have the same tight bound as build tests.
+fn snapshot_command(runtime: &Path, args: &[&str]) -> std::process::Output {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_rescript"))
+        .args(args).env("RESCRIPT_RUNTIME", runtime)
+        .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while child.try_wait().unwrap().is_none() {
+        if Instant::now() >= deadline { child.kill().unwrap(); panic!("snapshot command exceeded ten seconds"); }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child.wait_with_output().unwrap()
+}
+
+#[test]
+fn snapshot_write_is_deterministic_across_processes() {
+    let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/@rescript/runtime").canonicalize().unwrap();
+    let output = tempfile::tempdir().unwrap();
+    let first = output.path().join("first.bin");
+    let second = output.path().join("second.bin");
+    for file in [&first, &second] {
+        let result = snapshot_command(&runtime, &["snapshot", "--write", file.to_str().unwrap()]);
+        assert!(result.status.success(), "{}", String::from_utf8_lossy(&result.stderr));
+    }
+    assert_eq!(std::fs::read(first).unwrap(), std::fs::read(second).unwrap());
+}
