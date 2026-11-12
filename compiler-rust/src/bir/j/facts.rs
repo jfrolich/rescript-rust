@@ -172,3 +172,18 @@ pub(crate) fn delay_safe(b: &Bir, id: NodeId) -> bool {
         _ => false,
     }
 }
+
+/// X:60 duplicable. O(1): at most three immediate cached operand reads.
+/// Template literals are duplicable regardless of their interpolations, as in X.
+pub(crate) fn external_duplicable(b: &Bir, id: NodeId) -> bool {
+    let child = |node: NodeId| b.j_duplicable.get(node.index()).copied().unwrap_or(false);
+    match b.view(id) {
+        View::JUndefined | View::JBool | View::JNumber { .. } | View::JStr { .. }
+        | View::JTemplate { .. } | View::JQualified { .. } => true,
+        View::Var { var } => !b.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL),
+        View::JDot { object, position, .. } => position.get().is_some() && child(object),
+        View::JIndex { object, index } => child(object) && child(index),
+        View::JCond { condition, then_, else_ } => child(condition) && child(then_) && child(else_),
+        _ => false,
+    }
+}
