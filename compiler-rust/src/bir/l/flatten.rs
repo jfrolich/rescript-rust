@@ -576,10 +576,9 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                     }
                 } else if before != revision
                     && FLATTEN.renorm.intersects(OpMask::of(e.bir().node(n).op()))
+                    && e.normalise(n) == Changed::Yes
                 {
-                    if e.normalise(n) == Changed::Yes {
-                        revision += 1;
-                    }
+                    revision += 1;
                 }
                 e.finish_candidate(n);
             }
