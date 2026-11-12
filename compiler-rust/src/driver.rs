@@ -6285,8 +6285,8 @@ fn compile_source_to_js_with_options_inner(
         &mut pers_env,
         &mut env,
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         current_unit_name.as_deref(),
     );
 
@@ -7478,6 +7478,8 @@ pub fn typecheck_interface_source(
         file_config,
         experimental_let_unwrap,
     } = frontend?;
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     let ppx_warnings_have_errors = if options.frontend_already_reported {
         report_stored_ast_config_warnings(
             first_config_attribute_of_signature(&signature, parser.arena()),
@@ -7523,8 +7525,8 @@ pub fn typecheck_interface_source(
         &mut pers_env,
         &mut env,
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         current_unit_name.as_deref(),
     );
 
@@ -8254,6 +8256,18 @@ pub struct FileConfigOverrides {
     /// (compiler/frontend/ppx_entry.ml:39, 58). Only the frontend reads it,
     /// so [`Self::apply`] leaves it out; see [`Self::no_builtin_ppx`].
     pub no_builtin_ppx: bool,
+    /// `-open` modules in the order given (`Clflags.open_modules`), opened
+    /// after the command line's by `Res_compmisc.initial_env`
+    /// (compiler/core/res_compmisc.ml:47-66), which runs after the
+    /// `@@config` is processed. See [`Self::open_modules`].
+    pub open_modules: Vec<String>,
+    /// `-nopervasives` (`Clflags.nopervasives`, res_compmisc.ml:57).
+    pub nopervasives: bool,
+    /// `-no-alias-deps` (`Clflags.transparent_modules`), read when typing.
+    pub transparent_modules: bool,
+    /// `-keep-locs` (`Some(true)`) or `-no-keep-locs` (`Some(false)`), the
+    /// last one given (`Clflags.keep_locs`, read when saving the signature).
+    pub keep_locs: Option<bool>,
 }
 
 impl FileConfigOverrides {
@@ -8261,6 +8275,28 @@ impl FileConfigOverrides {
     /// its `@@config`.
     pub fn no_builtin_ppx(&self, options: &CompilerOptions) -> bool {
         options.no_builtin_ppx || self.no_builtin_ppx
+    }
+
+    /// The modules this file's initial environment opens: the command
+    /// line's, then the `@@config`'s. OCaml processes the `@@config` twice
+    /// (ppx_entry.ml:48, js_implementation.ml:129), adding each module twice;
+    /// opening a module again changes nothing, so it is opened once.
+    /// [`Self::apply`] leaves `options.open_modules` alone: the persistent
+    /// environment compiles other units from source with the command line's.
+    pub fn open_modules<'a>(&self, options: &'a CompilerOptions) -> std::borrow::Cow<'a, [String]> {
+        if self.open_modules.is_empty() {
+            return std::borrow::Cow::Borrowed(&options.open_modules);
+        }
+        let mut open_modules = options.open_modules.clone();
+        open_modules.extend(self.open_modules.iter().cloned());
+        std::borrow::Cow::Owned(open_modules)
+    }
+
+    /// Whether this file's initial environment leaves out Pervasives and
+    /// Stdlib. Like [`Self::open_modules`], only this file's initial
+    /// environment reads it.
+    pub fn nopervasives(&self, options: &CompilerOptions) -> bool {
+        options.nopervasives || self.nopervasives
     }
 
     /// Whether any flag changes a [`CompilerOptions`] field in [`Self::apply`].
@@ -8272,6 +8308,8 @@ impl FileConfigOverrides {
             || self.noassert
             || self.no_check_div_by_zero
             || self.no_version_header
+            || self.transparent_modules
+            || self.keep_locs.is_some()
     }
 
     /// The options of this file's compile: the command line's with the
@@ -8295,6 +8333,10 @@ impl FileConfigOverrides {
         options.no_version_header |= self.no_version_header;
         // A `clear` flag: it can only turn the check off.
         options.check_div_by_zero &= !self.no_check_div_by_zero;
+        options.transparent_modules |= self.transparent_modules;
+        if let Some(keep_locs) = self.keep_locs {
+            options.keep_locs = keep_locs;
+        }
         std::borrow::Cow::Owned(options)
     }
 }
@@ -8425,6 +8467,10 @@ fn run_file_level_flags(
                 "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
                 "-bs-no-version-header" => overrides.no_version_header = true,
                 "-bs-no-builtin-ppx" => overrides.no_builtin_ppx = true,
+                "-nopervasives" => overrides.nopervasives = true,
+                "-no-alias-deps" => overrides.transparent_modules = true,
+                "-keep-locs" => overrides.keep_locs = Some(true),
+                "-no-keep-locs" => overrides.keep_locs = Some(false),
                 _ => {}
             }
             continue;
@@ -8459,6 +8505,7 @@ fn run_file_level_flags(
             "-bs-jsx-module" => {
                 apply_jsx_module_flag(arg, &mut overrides.jsx_module, &mut overrides.jsx_version);
             }
+            "-open" => overrides.open_modules.push(arg.clone()),
             "-enable-experimental" => {
                 if arg == "LetUnwrap" {
                     overrides.let_unwrap = true;
@@ -9960,6 +10007,8 @@ fn in_process_type_check_context<'a>(
     file_config: &FileConfigOverrides,
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
 ) -> (TypeCheckContext<'a>, Env) {
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -9987,8 +10036,8 @@ fn in_process_type_check_context<'a>(
         &mut pers_env,
         &mut env,
         type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         Some(module_name),
     );
     tctx.set_persistent_env(pers_env);
@@ -11204,6 +11253,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     )
     .entered();
     let file_config = extract_file_config_from_signature(signature, arena);
+    // The saved signature keeps its locations per the file's `-keep-locs`.
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
