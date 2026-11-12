@@ -1,1 +1,1 @@
-- Fix the hash seeds of the type checker's substitution maps: on targets without AES instructions every key hashed to the same value, which made building a signature's substitution quadratic.
+- Fix the hash seeds of the type checker's substitution maps: the first key came out zero, so integer keys on every target and all keys of the fallback hasher hashed to the same value, which made building a signature's substitution quadratic.
