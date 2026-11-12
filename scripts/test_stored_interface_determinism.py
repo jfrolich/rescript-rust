@@ -25,12 +25,12 @@ def database_path(path):
                             ", ".join(str(candidate) for candidate in candidates))
 
 
-def read_interfaces(path):
+def read_interfaces(path, *, allow_empty=False):
     path = database_path(path)
     with sqlite3.connect(path.resolve().as_uri() + "?mode=ro", uri=True) as db:
         result = {(table, module): bytes(data) for table in TABLES
                   for module, data in db.execute(f"SELECT module, data FROM {table}")}
-    if not any(table == "interfaces" for table, _ in result):
+    if not allow_empty and not any(table == "interfaces" for table, _ in result):
         raise ValueError(f"No stored module interfaces in {path}")
     return result
 

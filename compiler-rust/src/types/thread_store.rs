@@ -448,6 +448,10 @@ impl ThreadTypeStore {
         self.types.set_level(r.store_index(), level);
     }
 
+    pub(crate) fn abbrev_count(&self) -> usize {
+        self.abbrevs.borrow().len()
+    }
+
     pub(crate) fn row_field_count(&self) -> usize {
         self.row_fields.borrow().len()
     }
