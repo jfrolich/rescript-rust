@@ -222,3 +222,62 @@ mod tests {
         assert_eq!(modules["C"].dependents, AHashSet::from(["B".to_string()]));
     }
 }
+
+/// O(V + E) reachability, including dependency packages and namespace modules.
+/// Missing parse flags are conservatively treated as annotated (old/unparsed inputs).
+pub fn plan_gentype(build_state: &mut BuildCommandState) {
+    let annotations = build_state.gentype_annotations.lock().unwrap();
+    let roots = build_state.modules.iter().filter_map(|(name, module)| {
+        let SourceType::SourceFile(source) = &module.source_type else { return None; };
+        let enabled = build_state.packages.get(&module.package_name)
+            .is_some_and(|package| package.config.gentype_config.is_some());
+        let annotated = annotations.get(&format!("{name}:impl")).copied().unwrap_or(true)
+            || (source.interface.is_some()
+                && annotations.get(&format!("{name}:intf")).copied().unwrap_or(true));
+        (enabled && annotated).then(|| name.clone())
+    });
+    let needed = gentype_closure(&build_state.modules, roots);
+    drop(annotations);
+    if rescript_compiler::perf_counters::enabled() {
+        eprintln!("[compiler-counter] gentype_closure needed={} total={}",
+            needed.len(), build_state.modules.len());
+    }
+    build_state.gentype_needed = Some(needed);
+}
+
+fn gentype_closure(
+    modules: &AHashMap<String, Module>,
+    roots: impl Iterator<Item = String>,
+) -> AHashSet<String> {
+    let mut needed = AHashSet::new();
+    let mut pending: Vec<_> = roots.collect();
+    while let Some(name) = pending.pop() {
+        if !needed.insert(name.clone()) { continue; }
+        if let Some(module) = modules.get(&name) {
+            pending.extend(module.deps.iter().cloned());
+        }
+    }
+    needed
+}
+
+#[cfg(test)]
+mod gentype_tests {
+    use super::*;
+
+    #[test]
+    fn closure_includes_transitive_dependencies_and_terminates_on_cycles() {
+        let mut modules = AHashMap::new();
+        for (name, deps) in [("Output", vec!["Alias"]), ("Alias", vec!["Types"]),
+            ("Types", vec!["Alias"]), ("Unused", vec![])] {
+            modules.insert(name.to_string(), Module {
+                source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
+                deps: deps.into_iter().map(str::to_string).collect(),
+                dependents: AHashSet::new(), package_name: name.to_string(),
+                compile_dirty: false, deps_dirty: false, is_type_dev: false,
+            });
+        }
+        let needed = gentype_closure(&modules, ["Output".to_string()].into_iter());
+        assert_eq!(needed, ["Output", "Alias", "Types"].into_iter().map(str::to_string).collect());
+        assert!(gentype_closure(&modules, std::iter::empty()).is_empty());
+    }
+}

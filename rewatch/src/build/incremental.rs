@@ -883,6 +883,7 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
     let mut warnings = super::parse::generate_asts(build_state, &inc, super::parse::ParseWarningLog::Append)?;
     let deleted_modules = build_state.deleted_modules.clone();
     super::deps::get_deps(build_state, &deleted_modules);
+    super::deps::plan_gentype(build_state);
     plan(build_state);
     super::compile::mark_modules_with_deleted_deps_dirty(&mut build_state.build_state);
     let stale: AHashSet<String> = build_state

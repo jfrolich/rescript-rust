@@ -410,6 +410,11 @@ pub fn reset() {
         return;
     }
 
+    for counts in &GENTYPE_COUNTS {
+        counts.modules.store(0, Ordering::Relaxed);
+        counts.declarations.store(0, Ordering::Relaxed);
+    }
+
     for counter in [
         &VALUE_HITS,
         &VALUE_MISSES,

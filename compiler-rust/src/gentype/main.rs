@@ -150,6 +150,8 @@ pub struct TypedArtifact<'a> {
     /// import its types; generate no output (a module compiled only for its
     /// interface).
     pub declarations_only: bool,
+    /// False only when whole-build reachability proves no output can read this artifact.
+    pub declarations_needed: bool,
     /// Renders an invalid string escape read in the artifact's file.
     pub render_escape: &'a RenderEscape<'a>,
 }
@@ -885,6 +887,29 @@ pub fn read_input_check_annotation(
     .is_some())
 }
 
+/// Discard stale declarations when an unneeded module is recompiled, while
+/// retaining the normal removal of an obsolete generated file. No resolver,
+/// annotation walk, translation or declaration encoding is needed here.
+fn unneeded_artifact(config: &crate::gentype::config::T, artifact: &TypedArtifact<'_>) -> Outcome {
+    let mut cache = in_process_type_declarations_cache().lock().unwrap();
+    if let Some(keys) = cache.by_module.remove(&artifact.compiler_module_name) {
+        for key in keys { cache.by_cmt.remove(&key); }
+    }
+    drop(cache);
+    if artifact.declarations_only {
+        return Outcome::default();
+    }
+    let source = artifact.source_file.map(str::to_owned).unwrap_or_else(|| {
+        format!("{}{}", artifact.file_name, if artifact.is_interface { ".resi" } else { ".res" })
+    });
+    Outcome {
+        result: Ok(Some(Output::NoMatch {
+            output_file: crate::gentype::paths::get_output_file(config, &source),
+        })),
+        ..Outcome::default()
+    }
+}
+
 /// GenType for a module without an interface (GenTypeMain.ml:136-175, with
 /// `read_input_cmt`'s implementation case).
 pub fn process_typed_artifact(
@@ -892,6 +917,9 @@ pub fn process_typed_artifact(
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
     artifact: TypedArtifact<'_>,
 ) -> Outcome {
+    if !artifact.declarations_needed {
+        return unneeded_artifact(config, &artifact);
+    }
     // Mirrors compiler/gentype/GenTypeMain.ml:136-175, but starts from the
     // typedtree already produced in-process instead of re-reading a .cmt.
     // The OCaml call site is compiler/core/js_implementation.ml:170 after
@@ -942,6 +970,13 @@ pub fn read_interface_artifact(
     shared_resolver: Option<&crate::gentype::module_resolver::Resolver>,
     artifact: TypedArtifact<'_>,
 ) -> InterfaceRead {
+    if !artifact.declarations_needed {
+        return InterfaceRead::Read {
+            ignore_interface: false,
+            needs_locations: false,
+            output: Some(unneeded_artifact(config, &artifact)),
+        };
+    }
     let prepared = prepare(config, shared_resolver, &artifact);
     let resolver = shared_resolver
         .or(prepared.local_resolver.as_ref())
@@ -1010,6 +1045,9 @@ pub fn process_implementation_with_interface(
     interface: InterfaceRead,
     artifact: TypedArtifact<'_>,
 ) -> Outcome {
+    if !artifact.declarations_needed {
+        return unneeded_artifact(config, &artifact);
+    }
     let (ignore_interface, interface_output) = match interface {
         InterfaceRead::DeclarationsOnly { .. } => {
             return process_typed_artifact(config, shared_resolver, artifact);
@@ -1185,6 +1223,7 @@ mod tests {
                 file_name: crate::gentype::paths::get_module_name_from_source_path(&source_file),
                 is_interface: false,
                 declarations_only: false,
+                declarations_needed: true,
                 render_escape: &render_escape,
             },
         )

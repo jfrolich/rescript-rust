@@ -2058,6 +2058,8 @@ pub(crate) fn build_compiler_options(
         }
     };
     let mut options = (*template).clone();
+    options.gentype_declarations_needed = build_command_state.gentype_needed.as_ref()
+        .is_none_or(|needed| needed.contains(module_name));
     if let Some(dump) = &build_command_state.dump {
         options.dumps = dump.kinds.clone();
     }

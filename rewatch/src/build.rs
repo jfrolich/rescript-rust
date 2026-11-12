@@ -758,6 +758,7 @@ pub fn incremental_build_without_lock(
     phase_mark("parse-end");
     let deleted_modules = build_state.deleted_modules.clone();
     deps::get_deps(build_state, &deleted_modules);
+    deps::plan_gentype(build_state);
     phase_mark("deps-end");
     let timing_parse_total = timing_parse_start.elapsed();
     // An incremental build parses in two rounds; report what it parsed.

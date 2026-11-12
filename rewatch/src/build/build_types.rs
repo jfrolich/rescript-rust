@@ -370,6 +370,9 @@ pub struct BuildCommandState {
     pub in_memory_deps: Mutex<AHashMap<String, Dependencies>>,
     /// Conservative genType annotation flags, keyed like the parse results.
     pub gentype_annotations: Mutex<AHashMap<String, bool>>,
+    /// Annotated modules and their transitive syntactic dependencies.
+    /// None means no plan is available: standalone callers retain all declarations.
+    pub gentype_needed: Option<AHashSet<String>>,
     // The units each module's last compile in this process read the
     // interface of (type checking its interface and implementation, plus
     // the modules its generated code may require). Interned: every module
@@ -530,6 +533,7 @@ impl BuildCommandState {
             module_registry: Mutex::new(ModuleRegistry::new()),
             in_memory_deps: Mutex::new(AHashMap::new()),
             gentype_annotations: Mutex::new(AHashMap::new()),
+            gentype_needed: None,
             loaded_units: Mutex::new(AHashMap::new()),
             unit_reads: Mutex::new(AHashMap::new()),
             verified_imports: Mutex::new(AHashMap::new()),
