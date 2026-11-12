@@ -321,6 +321,7 @@ impl Names {
         used: &mut HashSet<Ident>,
     ) -> Result<(), Unsupported> {
         self.charge(1)?;
+        walk::expression_comment(a, e)?;
         match a.ek(e) {
             ExprKind::Var(id) => {
                 let id = a.ident(id);
@@ -448,6 +449,7 @@ impl Names {
     }
     fn expr(&mut self, a: &JsArena, e: Expr) -> Result<(), Unsupported> {
         self.charge(1)?;
+        walk::expression_comment(a, e)?;
         match a.ek(e) {
             ExprKind::Var(id) => self.add(a.ident(id), false),
             ExprKind::Qualified(q) => self.add(a.qual(q).0.id, true),
@@ -632,12 +634,22 @@ fn children(
                 visit(e)?;
             }
         }
-        ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
+        ExprKind::RawJsCode(_) => return walk::raw_supported(),
         ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
-        ExprKind::TemplateLiteral(_)
-        | ExprKind::InterpolatedTemplate(..)
-        | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
-        ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
+        ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
+        ExprKind::InterpolatedTemplate(segments, values) => {
+            walk::template_supported(a.segments(segments).len(), a.exprs(values).len())?;
+            for e in a.exprs(values) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::TaggedTemplate(tag, strings, values) => {
+            walk::template_supported(a.tagged(strings).len(), a.exprs(values).len())?;
+            visit(tag)?;
+            for e in a.exprs(values) {
+                visit(*e)?;
+            }
+        }
         ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
         ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         ExprKind::StringAppend(..) => return Err(Unsupported("string concatenation association")),

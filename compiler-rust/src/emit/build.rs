@@ -5,7 +5,7 @@ use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
-use oxc_span::SPAN;
+use oxc_span::{SPAN, GetSpanMut};
 use oxc_syntax::{
     number::{BigintBase, NumberBase},
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
@@ -16,6 +16,8 @@ pub(super) struct Build<'a, 'r> {
     pub arena: &'r JsArena,
     pub names: &'r Names,
     pub debug: bool,
+    // S1.2: absent on the default, location-free path.
+    pub source_map: Option<&'r super::sourcemap::Spans>,
 }
 impl<'a, 'r> Build<'a, 'r> {
     pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
@@ -24,6 +26,7 @@ impl<'a, 'r> Build<'a, 'r> {
             arena,
             names,
             debug: false,
+            source_map: None,
         }
     }
     pub fn text(&self, s: &str) -> &'a str {
@@ -451,10 +454,24 @@ impl<'a, 'r> Build<'a, 'r> {
         })
     }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
-        let a = self.arena;
-        if a.expr_comment(e).is_some() {
-            return Err(Unsupported("expression comment"));
+        let mut expression = self.expr_unmapped(e)?;
+        // S1.2: only kinds with a codegen start-token mapping are supported.
+        if let Some(maps) = self.source_map {
+            if maps.is_located(self.arena.expr_loc(e)) {
+                match &expression {
+                    Expression::Identifier(_) | Expression::NumericLiteral(_)
+                    | Expression::StringLiteral(_) | Expression::BooleanLiteral(_)
+                    | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) => {}
+                    _ => return Err(Unsupported("source map: located compound expression")),
+                }
+                *expression.span_mut() = maps.span(self.arena.expr_loc(e))?;
+            }
         }
+        Ok(expression)
+    }
+    fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let a = self.arena;
+        walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
             ExprKind::Var(id) => self.id(self.names.get(&a.ident(id))),
             ExprKind::Qualified(q) => {
@@ -503,14 +520,18 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.sequence(e, &mut expressions)?;
                 Expression::new_sequence_expression(SPAN, expressions, &self.b)
             }
-            ExprKind::Call(f, args, _) => Expression::new_call_expression(
-                SPAN,
-                self.expr(f)?,
-                None,
-                self.args(walk::arguments(a, a.exprs(args)))?,
-                false,
-                &self.b,
-            ),
+            ExprKind::Call(f, args, _) => {
+                let mut call = CallExpression::new(
+                    SPAN,
+                    self.expr(f)?,
+                    None,
+                    self.args(walk::arguments(a, a.exprs(args)))?,
+                    false,
+                    &self.b,
+                );
+                call.pure = walk::pure_call(a, e);
+                Expression::CallExpression(self.b.alloc(call))
+            }
             ExprKind::New(f, args) => Expression::new_new_expression(
                 SPAN,
                 self.expr(f)?,
@@ -588,17 +609,70 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
             ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
-            ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
+            ExprKind::RawJsCode(_) => return walk::raw_supported(),
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
-            ExprKind::TemplateLiteral(_)
-            | ExprKind::InterpolatedTemplate(..)
-            | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
-            ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
+            ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
+                self.b
+                    .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
+            ),
+            ExprKind::InterpolatedTemplate(segments, values) => {
+                Expression::TemplateLiteral(self.b.alloc(self.template(
+                    a.segments(segments).iter().map(|s| s.source()),
+                    a.exprs(values),
+                )?))
+            }
+            ExprKind::TaggedTemplate(tag, strings, values) => {
+                let tag = self.expr(tag)?;
+                let quasi = self.template(
+                    a.tagged(strings).iter().map(|s| s.as_str()),
+                    a.exprs(values),
+                )?;
+                Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
+            }
+            ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
             ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         })
     }
+    /// JSON is already validated source, not a string value. It meets no
+    /// identifiers; parsing reproduces property-key forms and precedence, while
+    /// the surrounding oxc node supplies parentheses and statement semicolons.
+    fn json(&self, source: &str) -> Result<Expression<'a>, Unsupported> {
+        let source = literal::arena_string(source, self.b.allocator());
+        oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
+            .parse_expression()
+            .map_err(|_| Unsupported("invalid JSON or directive"))
+    }
+
+    /// See `walk::template_supported`: source spelling, not the cooked value,
+    /// determines printed quasis. Codegen never reads cooked values here; tagged
+    /// templates may have invalid escapes and therefore no cooked value at all.
+    fn template(
+        &self,
+        segments: impl ExactSizeIterator<Item = &'r str>,
+        values: &[Expr],
+    ) -> Result<TemplateLiteral<'a>, Unsupported> {
+        walk::template_supported(segments.len(), values.len())?;
+        let mut quasis = self.b.vec();
+        for (i, source) in segments.enumerate() {
+            quasis.push(TemplateElement::new(
+                SPAN,
+                TemplateElementValue {
+                    raw: literal::arena_string(source, self.b.allocator()).into(),
+                    cooked: None,
+                },
+                i == values.len(),
+                &self.b,
+            ));
+        }
+        let mut expressions = self.b.vec();
+        for e in values {
+            expressions.push(self.expr(*e)?);
+        }
+        Ok(TemplateLiteral::new(SPAN, quasis, expressions, &self.b))
+    }
+
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
         for id in self.arena.ident_slice(self.arena.fun(f).params) {
@@ -640,11 +714,28 @@ impl<'a, 'r> Build<'a, 'r> {
                 &mut statements,
             )?;
         }
+        let mut directives = self.b.vec();
+        if let Some(directive) = info.directive {
+            // The legacy directive includes its quotes. It precedes every body
+            // statement and meets no identifiers; codegen supplies the semicolon.
+            let Expression::StringLiteral(value) = self.json(self.arena.text(directive))? else {
+                return Err(Unsupported("non-string function directive"));
+            };
+            directives.push(Directive::new(
+                SPAN,
+                value.unbox(),
+                self.text(self.arena.text(directive).trim_matches(['\'', '"'])),
+                &self.b,
+            ));
+        }
         Ok(self
             .b
-            .alloc(FunctionBody::new(SPAN, self.b.vec(), statements, &self.b)))
+            .alloc(FunctionBody::new(SPAN, directives, statements, &self.b)))
     }
     fn function_expr(&self, f: FunId) -> Result<Expression<'a>, Unsupported> {
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: transformed function body"));
+        }
         let body = match walk::function_form(self.arena, f, false)? {
             walk::FunctionForm::Eta(e) => return self.expr(e),
             walk::FunctionForm::ArrowExpression(e) => ArrowFunctionBody::from(self.expr(e)?),
@@ -892,6 +983,45 @@ impl<'a, 'r> Build<'a, 'r> {
         tail: Option<bool>,
         out: &mut ArenaVec<'a, Statement<'a>>,
     ) -> Result<(), Unsupported> {
+        // S1.2: switch clauses have independent mapping points, not just the
+        // statement/expression locations covered by the hooks below.
+        if self.source_map.is_some()
+            && matches!(self.arena.sk(s), StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..))
+        {
+            return Err(Unsupported("source map: switch clause markers"));
+        }
+        let start = out.len();
+        self.stmt_unmapped(s, top, tail, out)?;
+        // S1.2: block/expression wrappers do not reliably emit a start token.
+        if let Some(maps) = self.source_map {
+            let loc = self.arena.stmt_loc(s);
+            if maps.is_located(loc) {
+                if out.len() != start + 1 {
+                    return Err(Unsupported("source map: expanded or omitted statement"));
+                }
+                match &mut out[start] {
+                    Statement::VariableDeclaration(_) | Statement::ReturnStatement(_)
+                    | Statement::IfStatement(_) | Statement::DebuggerStatement(_) => {
+                        *out[start].span_mut() = maps.span(loc)?;
+                    }
+                    Statement::FunctionDeclaration(f) => {
+                        // The statement's mark precedes the function expression's
+                        // mark at the same token; the legacy builder keeps the first.
+                        f.span = maps.span(loc)?;
+                    }
+                    _ => return Err(Unsupported("source map: statement without start token")),
+                }
+            }
+        }
+        Ok(())
+    }
+    fn stmt_unmapped(
+        &self,
+        s: Stmt,
+        top: bool,
+        tail: Option<bool>,
+        out: &mut ArenaVec<'a, Statement<'a>>,
+    ) -> Result<(), Unsupported> {
         let a = self.arena;
         if a.stmt_comment(s).is_some() {
             return Err(Unsupported("statement comment"));
@@ -912,7 +1042,8 @@ impl<'a, 'r> Build<'a, 'r> {
                     match walk::function_form(a, f, top)? {
                         walk::FunctionForm::Declaration => {
                             out.push(Statement::new_function_declaration(
-                                SPAN,
+                                // S1.2: initializer maps to the `function` token.
+                                self.source_map.map_or(Ok(SPAN), |m| m.span(a.expr_loc(e)))?,
                                 FunctionType::FunctionDeclaration,
                                 Some(self.binding(name)),
                                 false,
@@ -928,6 +1059,9 @@ impl<'a, 'r> Build<'a, 'r> {
                             return Ok(());
                         }
                         walk::FunctionForm::Eta(e) => {
+                            if self.source_map.is_some() {
+                                return Err(Unsupported("source map: eta-reduced declaration"));
+                            }
                             out.push(self.variable(name, Some(self.expr(e)?)));
                             return Ok(());
                         }

@@ -1,0 +1,1 @@
+- CI compares, for every unit of the runtime and the test project, the interface fingerprint, item digests and encoded bytes computed from the shared type graph with those of the portable form.

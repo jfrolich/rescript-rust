@@ -150,6 +150,22 @@ impl SourceMapBuilder {
         self.last_generated = Some((generated_line, generated_column));
     }
 
+    /// Add an already-resolved original position. The AST emitter indexes UTF-16
+    /// columns once per source instead of rescanning a line for each token.
+    pub(crate) fn add_resolved_mapping(
+        &mut self, generated_line: usize, generated_column: usize,
+        file: StrIdx, original_line: usize, original_column: usize,
+    ) {
+        if self.last_generated == Some((generated_line, generated_column)) {
+            return;
+        }
+        let (source_index, _) = self.add_source(file);
+        self.mappings.push(Mapping {
+            generated_line, generated_column, source_index, original_line, original_column,
+        });
+        self.last_generated = Some((generated_line, generated_column));
+    }
+
     /// The Source Map v3 JSON for the mappings added so far.
     pub fn json(&self) -> String {
         fn push_json_str(result: &mut String, value: &str) {
@@ -213,7 +229,7 @@ fn has_windows_drive(path: &Path) -> bool {
             .is_some_and(u8::is_ascii_alphabetic)
 }
 
-fn absolute_path(path: &Path) -> PathBuf {
+pub(crate) fn absolute_path(path: &Path) -> PathBuf {
     if path.is_absolute() || has_windows_drive(path) {
         path.to_path_buf()
     } else {

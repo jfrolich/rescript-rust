@@ -1804,7 +1804,10 @@ build (I.5), with no long-lived branch.
   The warning fixtures for unused opens and shadowing.
 - **Saving, 3-4%.** Environment lookups are 9% of checking (3.6% of the
   build), dropping environment snapshots 0.98%, persistent maps 1.5%
-  build-wide.
+  build-wide. *Amended (H.2.10): measured on the log built in step 4,
+  binding and cloning are five times cheaper but a lookup is not cheaper
+  than today's. Count on the snapshots and the persistent maps, at most
+  2.5%, not on the lookups.*
 - **Hand-off.** The inventory is H.2. It found that the scope tree of C.10
   cannot be built behind the existing API: environments are extended
   without any scope entry or exit, old environments are extended (1.3% of
@@ -2380,6 +2383,12 @@ copy a new `id`; `clone_preserve_id` keeps it. Every `add_*` gives a new
 `id`; those that change what module-path resolution reads also give a new
 `scope_id` (`bump_scope`).
 
+*Amended (H.2.10): steps 1 to 3 of H.2.8 are merged. `Clone` keeps the
+`id`, `clone_preserve_id` and `pending_open_slot` no longer exist, and the
+methods H.2.2 lists as having no callers are deleted, except the five
+`fold_*_names` beside `fold_modtype_names`, which are still there and still
+unused.*
+
 #### H.2.2 Operations
 
 "Sites" counts textual call sites outside `types/env.rs`, tests included.
@@ -2404,7 +2413,7 @@ build is not measured, except for the totals in H.2.5.
 | `set_pending_open_slot(slot)` | - | no | 7 | `typecore.rs`: `type_open`; `typemod.rs`: `transl_signature`, `type_structure_item` | not an entry: make it an argument of the open (H.2.8 step 1) |
 | `add_local_constraint(path, decl)` | - | yes | 3 | `ctype.rs`: `add_gadt_equation`; `typecore.rs`: `add_missing_local_constraints` | one entry keyed by path; called on the unify state's own `Env` |
 | `add_gadt_instance_level()` | - | yes | 2 | `typecore.rs` | an entry with no payload |
-| `mark_implicit_open_root(name)` | - | yes, `id` kept | 2 | `driver.rs`: `load_pervasives` | one entry |
+| `mark_implicit_open_root(name)` | - | yes | 2 | `driver.rs`: `load_pervasives` | one entry |
 | `implicit_coercion()`, `in_signature(b)` | new `Env` | no | 1 / 0 | `typemod.rs` | a flags entry |
 | `update_value_type_by_name(name, ty)` | bool | no | 1 | `typecore.rs`: `duplicate_ident_types_for_gadt_cases` | **replaces** the innermost binding of `name`, also when it comes from an open (H.2.4) |
 
@@ -2518,7 +2527,8 @@ Three consequences:
    binds; `update_type_variance` does not.
 9. **`scope_id` is stable across value, constructor and label bindings**, so
    that caches of resolved paths survive ordinary `let` bindings.
-10. **`id` changes on every clone.** `check_abbrev_env` therefore clears the
+10. **`id` changes on every clone** (*until step 3 of H.2.8; a clone now
+    keeps it*)**.** `check_abbrev_env` therefore clears the
     abbreviation memos when it is called with a clone of the previous
     environment. Whether any output depends on those extra clears is not
     known.
@@ -2552,8 +2562,9 @@ The off-path extensions come from `type_let_bindings`,
 `type_function_nary`, `typemod::closed_modtype` and `load_pervasives`, among
 others: it is not one construct that can be special-cased.
 
-Not measured: the same on the 3,735-module application, whose modules are
-larger; instructions per lookup before and after.
+Not measured: ~~the same on the 3,735-module application, whose modules are
+larger;~~ instructions per lookup before and after. *The application is
+measured in H.2.10.*
 
 #### H.2.6 Where the code contradicts C.10 and F.8
 
@@ -2587,6 +2598,14 @@ larger; instructions per lookup before and after.
    but the count is then touched on every clone, as today.
 
 #### H.2.7 Correction: a version tree with a current path
+
+> **Amended (H.2.10).** Step 4 built this and changed it in six places:
+> payloads live in address-stable pools, so results stay borrowed; a module
+> thunk's seed does not own its log; a local module and its components are
+> one entry; an open is one entry with a mask of its non-empty tables, and
+> opens are chained among themselves; `Override` records what it stands in
+> for; `base` always names a frozen log that binds no modules. H.2.10 holds
+> where the two disagree.
 
 The log is kept; the scope tree is replaced by the tree of versions, and
 the position test by a table that always describes one path of that tree.
@@ -2727,7 +2746,8 @@ Each step compiles, passes the gates of F.1 and is its own pull request.
    benchmark comparison of E.3. If a difference appears, it names a place
    that depended on the clear (H.2.4 item 10) and is fixed there, not by
    restoring the id.
-4. **The log beside the tables.** New `types/env_log.rs` with H.2.7,
+4. **The log beside the tables.** *Done; H.2.10 records what it decided
+   and what steps 5 and 6 do with it.* New `types/env_log.rs` with H.2.7,
    exposing the same methods as `Env`, unused by the compiler. The property
    test of F.8, extended with what H.2.3 and H.2.4 found: sequences of
    bind, open, clone, **extend an old clone**, replace, re-bind a type,
@@ -2782,6 +2802,252 @@ Each step compiles, passes the gates of F.1 and is its own pull request.
     down at step 6 and does not go up at steps 1 to 5 and 7 to 8. A counter
     in `perf_counters.rs` reports path moves and entries moved; on the
     benchmark, entries moved per lookup should stay below one.
+
+#### H.2.10 Step 4: decisions, corrections and measurements
+
+Step 4 of H.2.8 built the log beside the tables (`types/env_log.rs`,
+compiled for tests only) and compared it with them. H.2.7 left three
+things open. This section decides them, lists where H.2.7 did not hold,
+and gives the numbers. Where it disagrees with H.2.7 or H.2.8, it holds.
+
+**Decision 1: results stay borrowed, from address-stable pools.**
+
+Today every lookup returns a reference that borrows the `Env`
+(`&ValueDescription`, `&Arc<TypeDeclaration>`, `&Ident`). Outside `env.rs`
+there are 203 call sites of the lookup methods (`typecore.rs` 72,
+`typemod.rs` 50, `ctype.rs` 34, `env_lazy.rs` 6, 41 elsewhere). Of the 162
+in those four files, 21 copy or test the result within the same expression;
+141 bind the reference and use it in later statements, across calls that
+extend other environments.
+
+H.2.7's `Rc<EnvLog>` with `Vec` payloads cannot give that: pushing to a
+shared vector while a reference into it is alive is exactly what Rust
+forbids, and a `RefCell` cannot return a reference past its guard. Three
+ways out were weighed:
+
+| Option | What the 203 lookup sites become | Cost of a lookup |
+|---|---|---|
+| The log owned exclusively (`add_value(&mut log, &mut tip, ..)`, lookups borrow the log) | every site takes the log; every site that holds a result while any environment is extended has to copy the result first. Not a receiver for steps 5 and 6 | none added |
+| Handles (`ValueRef(u32)`) with accessors on the owner | every site changes to fetch through the owner, and the owner has to be in reach of `includemod`, `printtyp`, lowering and genType, which have no context argument for it | none added, but the accessor needs the same stable storage as below, or the owner behind a `RefCell` and results copied out |
+| Payloads returned by value (`Arc` clone) | the 141 borrowing sites compile unchanged only where deref coercion applies; signatures change | one atomic reference-count update per lookup, 15 million per build of the application |
+| **Address-stable pools** (chosen) | **nothing: same methods, same signatures** | one `RefCell` flag test around the index probe; no allocation, no reference count |
+
+A pool (`Pool<T>`) is append-only and never moves an element: chunk `c`
+holds `64 << c` slots, each a `OnceCell` written once, so `push` takes
+`&self` and is safe Rust. Entries and payloads live in pools; only the
+movable path index (`visible`, the path bits, the tip) is in a `RefCell`,
+and no reference into it is returned. A reference returned by a lookup
+borrows the `LogEnv` it was asked through and stays valid while any other
+handle of the same log is extended.
+
+The API has two layers. `EnvLog` works on `Tip`s (a `u32`, `Copy`) with
+`&self` methods. `LogEnv { log: Rc<EnvLog>, tip }` (16 bytes) wraps it with
+`Env`'s method names and signatures: it is the receiver for steps 5 and 6.
+Cloning a `LogEnv` copies the version and updates one reference count, as
+cloning an `Env` does today; step 9 removes that count by taking the log
+from the checker context, without touching `EnvLog`.
+
+Two signatures differ, by necessity: `with_local_module_components` and
+`local_module_components_shared` hand out the log's thunk type
+(`LogComponents`) until `StoredModuleComponents` carries a seed (decision
+2); and `id()` and `scope_id()` return the log's own identity types.
+
+**Decision 2: a module thunk's seed is a version that does not own its
+log.**
+
+`StoredModuleComponents` captures the environment before the binding
+(`seed_env`), and forcing reads and extends it. In a log, the log owns the
+thunk (payload pool) and the forced table is cached in the thunk, so a seed
+that owns its log is a reference cycle: the log would never be freed. This
+holds for every variant with a strong reference, including a base log
+owned by the forced table, because the base is the seed's log. So:
+
+- The seed is `EnvSeed { log: Weak<EnvLog>, tip }` (16 bytes, where
+  `Box<Env>` is 8 plus a 24-byte allocation). `add_module` makes it from
+  the version being extended: no allocation, no traversal.
+  `seed.env()` upgrades it at force time, once per forced thunk. "A tip
+  plus the owner supplied at force time" was rejected because a thunk is
+  shared out of its log into `OpenedLayers` and child tables, where no
+  owner is at hand, and forced there.
+- What keeps a log alive: the `LogEnv` handles of its compilation (the
+  typed tree's snapshots, the checker's own environments), and for a log
+  started while a component table is built, that table.
+  `LogEnv::component_working_env(seed)` returns the environment the table
+  extends and, exactly when extending the seed starts a new log (the seed's
+  log is frozen), that log for the table to own. When the seed's log is not
+  frozen the table forks inside it and owns nothing.
+- A frozen log binds no modules (`freeze` asserts it). The initial
+  environment binds none, and the empty environment binds nothing. Without
+  this rule a table forced from a frozen seed would own a log whose base
+  owns the table's thunk.
+- Step 6 changes three places in `env_lazy.rs`: `seed_env: Box<Env>`
+  becomes `seed: EnvSeed`; `build_local_module_components` starts with
+  `stored.seed.env()` and `component_working_env`, and stores the owned
+  log in the table it returns; `ChildComponentScanState::Complete` keeps
+  the cursor's `working_env` instead of dropping it (its children's seeds
+  point into that log). In shadow mode (step 5) the seed carries both: the
+  table `Env` and the `EnvSeed`.
+- Open question for step 5: a thunk built in a store build and forced by a
+  later compilation must have its seed in a log that outlives the first
+  compilation. Its seeds start from `Env::empty()` (`persistent_env.rs`,
+  `ChildScanCursor`), so they live in table-owned logs; shadow mode has to
+  confirm that no such thunk is seeded from a compilation's own
+  environment (`seed.env()` returning `None` is the signal).
+
+**Decision 3: corrections to H.2.7.**
+
+- *Entry.* `{ parent, shadows, prev_open, scope_ver, item: u32, kind: u8,
+  bits: u8, id: Ident }`, 40 bytes. `key` is not stored: it is the kind's
+  name space and the identifier's name, or the path in the constraint
+  payload. Flags and "has constraints" are bits inherited from the parent.
+- *Opens.* One entry per open, whatever the number of names; opened names
+  never enter `visible`, so binding an open is O(1) and moving the path
+  across one is one step. The entry's record holds the shared
+  `OpenedLayers`, the root, the slot, a mask of its non-empty tables and
+  the next older open. The mask matters: today an open is a layer of a
+  table only when its table is not empty, and `fold_modtype_names` and the
+  candidate walk depend on where the layers are. A lookup probes the opens
+  that are newer than the local binding it found and have the table:
+  O(1) for a name bound after the last open, one probe per such open
+  otherwise, which is today's layer walk.
+- *Modules.* A local module and its component thunk are one entry with two
+  parallel payloads, not two entries; the component table of an open is a
+  separate table, so the two name spaces differ only through opens.
+- *Replacement.* An `Override` entry records what it stands in for: the
+  log and the local entry, or the open. Looked up by name it gives the
+  replaced description with the identifier, path, slot and "hides an
+  earlier binding" of the original; by identifier it matches when the
+  original was local and is skipped when the original came through an
+  open; iteration yields it once. A replacement of a replacement stands in
+  for the original. "A log without Override skips the check" is not
+  needed: the check is one kind test on the entry that was found.
+- *Re-binding and removal.* `add_type` looks up the label family of the
+  identifier (one probe) and appends a removal entry when there is one;
+  `update_type_variance` appends a type entry and leaves the family.
+- *`scope_id`* is `(log, scope_ver)`, and for a version with no
+  scope-changing entry in its log, the base's. The scope-changing kinds
+  are type, module, module type, open, local constraint, GADT level and
+  implicit root; values, constructors, labels, label families, flags and
+  replacements are not. An open with every table empty adds no entry and
+  changes nothing, as today. `mark_implicit_open_root` gives a new `id`
+  (H.2.2 said it kept it).
+- *Marking.* `open_slot_use` is the lookup by name, then, for a name found
+  through an open with a slot, a second lookup at the version before the
+  open. "All candidates with marking" merges the `shadows` chain and the
+  open chain by index; the hidden candidate of an open's block is the
+  item after it, also when that item comes from the base log.
+- *Base logs.* `base` is strong and always names a frozen log. Lookups,
+  candidates, iteration, folds and identity fall through to it. The memo
+  tables of `ScopeCaches` are a map keyed by `scope_ver` in the log.
+- *Not in H.2.2 but in the API:* `with_current_local_module_aliases` and
+  `module_path_requires_env_scoped_cache`; both are provided.
+
+**Measured: the traffic on the application.** A temporary counter (not
+committed) simulated the version tree on today's `Env` during a clean build
+of the 3,735-module application: each extension makes a version whose
+parent is the version extended, a log is frozen where `publish_initial_env`
+publishes it, and an extension of a frozen log starts a new log.
+
+| Quantity | Value |
+|---|---|
+| Extensions | 526,953 |
+| ... at the newest version | 396,974 (75.3%) |
+| ... at an older version on the current path (leaving a nested scope) | 121,403 (23.0%) |
+| ... at a version off the path | 2,004 (0.38%) |
+| ... starting a new log | 6,572 (1.2%) |
+| Lookups (nested calls counted) | 15,149,564 |
+| ... at the newest version | 10,819,444 (71.4%) |
+| ... at an older version on the path | 4,200,561 (27.7%) |
+| ... at a version off the path | 129,559 (0.86%) |
+| Path moves | 252,966: 123,407 by extensions, 129,559 by lookups |
+| Entries undone or redone | 1,229,794: 0.078 per operation, 4.9 per move |
+| Longest move | 1,247 entries; deepest path 1,286 |
+
+Distance of a move through the common ancestor, in entries:
+
+| Distance | 1 | 2-3 | 4-7 | 8-15 | 16-31 | 32-63 | 64-127 | 128-255 | 256-511 | 512 and more |
+|---|---|---|---|---|---|---|---|---|---|---|
+| Moves by an extension | 67,925 | 22,657 | 20,906 | 8,089 | 2,383 | 928 | 397 | 80 | 19 | 23 |
+| Moves by a lookup | 17,357 | 66,657 | 22,070 | 13,878 | 6,752 | 2,070 | 619 | 125 | 22 | 9 |
+
+So old versions are extended often (23.4% of extensions), but almost
+always by going back up the current path a few entries, which is what
+leaving a scope is; 99.9% of moves are shorter than 128 entries, and the
+whole build moves 1.2 million entries against 15.7 million operations. The
+version tree keeps its advantage. A lookup at a version off the path has to
+move the path: a variant that walked up from the version instead of moving
+left the path in the wrong place, and 4.4 million lookups then walked 72.6
+million entries.
+
+**Measured: the log against the tables** (`env_log_tests.rs`, one workload
+in the shape of a module: 10,000 value bindings in 1,000 nested bodies, 100
+types, three opens of 1,200-name modules, 50 retained versions, 100,000
+lookups with the shares above):
+
+| Part (optimised build, best of 25, one x86-64 machine) | Tables | Log | Tables / log |
+|---|---|---|---|
+| The whole workload | 7.98 ms | 4.83 ms | 1.65 |
+| Its 10,000 bindings and 1,000 clones alone | 3.35 ms | 0.63 ms | 5.3 |
+| 100,000 lookups at the newest version, the four kinds below in turn | 2.78 ms | 2.66 ms | 1.05 |
+| A local value bound after the opens, per lookup | 18 ns | 24 ns | 0.76 |
+| A name bound nowhere, past three opens | 24 ns | 22 ns | 1.08 |
+| A value of an opened module | 22 ns | 23 ns | 0.93 |
+| A local type | 5.7 ns | 10.3 ns | 0.55 |
+
+Both representations return the same 100,000 answers. Counted on the log:
+10,103 entries, 110,200 index probes, 2,920 path moves of 35,540 entries in
+all (0.32 per operation).
+
+What this says about F.8's estimate: binding and cloning is where the log
+wins, five times over. A lookup is not cheaper than today's: a hit at the
+newest version reads the index, the entry and the payload, where a table
+hit is one persistent-map probe, and it executes about a third more
+instructions (counted with callgrind on this workload). The log has no
+worse case with a long list of recent bindings, but no better common case
+either. Of F.8's 3-4%, the
+part that came from "environment lookups are 9% of checking" should not be
+counted on; what remains is the persistent maps (1.5% build-wide) and the
+snapshots (0.98%). Step 6 is worth doing for those, at most 2.5%, and for
+removing `IdTbl`, `TycompTbl` and the per-version allocations; not for
+3-4%. These are estimates from a workload in a test, not a build: step 5
+can count the instructions of both representations on the application
+before step 6 is committed to.
+
+**Costs.** Stated on each operation in `env_log.rs` and pinned by a
+step-count test:
+
+| Operation | Cost |
+|---|---|
+| Bind (value, type, module, module type, constructor, label, family, constraint, flag, GADT level, implicit root) | one index probe and one push at the newest version; a type also looks up its label family (one probe) |
+| Open of a module with `k` names | one push, independent of `k` |
+| Clone | no step; one reference-count update |
+| Lookup by name at the newest version | one probe, plus one probe per open that is newer than the binding found and has the table |
+| Lookup by name at an older version on the path | the same, plus one link per newer binding of the same name |
+| Lookup at a version off the path | a path move, then as above |
+| Path move | the distance through the common ancestor; one step per entry, an open included |
+| Lookup by identifier | one probe, then one link per local binding of the name examined |
+| All candidates | one probe, one step per candidate and per open with the table |
+| `open_slot_use` | one lookup; a second one when the name comes through an open with a slot |
+| `scope_id`, `id`, flags, `has_local_constraints` | a field read |
+| `find_local_constraint` | the bit test; one probe when the environment has constraints |
+| `iter_values`, `fold_modtype_names`, local module aliases | the length of the path, plus the opened names visited |
+| Replace (`update_value_type_by_name`) | one lookup and one push |
+
+**What steps 5 and 6 do with this.** Step 5: `Env` gets a `LogEnv` field
+behind the debug switch; every `add_*` calls both; every lookup compares
+(the comparison functions of the property test are the model); the seed
+carries both forms. Step 6: `Env` becomes `LogEnv`, renamed; the three
+changes of decision 2 in `env_lazy.rs`; `EnvId` and `ScopeId` become the
+log's identity types; `publish_initial_env` freezes the log; the step
+counters and the fault switch of the tests go behind `cfg(test)`.
+
+**Invariants added to H.2.9.**
+
+11. A reference returned by a lookup stays valid and unchanged while any
+    environment of the same log is extended (pools never move an element).
+12. Nothing stored in a log owns that log: dropping every `LogEnv` of a log
+    frees it, with modules bound (`a_component_seed_..._owns_nothing`).
+13. A frozen log binds no modules, and a base is always frozen.
 
 ## I. P1 findings and their consequences
 
