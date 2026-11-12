@@ -1124,7 +1124,7 @@ impl<'a, 'r> Build<'a, 'r> {
         let source = literal::arena_string(source, self.b.allocator());
         oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
             .parse_expression()
-            .map_err(|_| Unsupported("invalid JSON or directive"))
+            .map_err(|_| Unsupported("invalid JSON expression"))
     }
 
     /// See `walk::template_supported`: source spelling, not the cooked value,
@@ -1219,17 +1219,28 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         let mut directives = self.b.vec();
         if let Some(directive) = info.directive {
-            // The legacy directive includes its quotes. It precedes every body
-            // statement and meets no identifiers; codegen supplies the semicolon.
-            let Expression::StringLiteral(value) = self.json(self.arena.text(directive))? else {
+            // Legacy prints the supplied text followed by a semicolon, even
+            // when it already ends in one. Retain resulting empty statements.
+            let source = literal::arena_string(self.arena.text(directive), self.b.allocator());
+            let source = self.text(&format!("{source};"));
+            let parsed =
+                oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
+                    .parse();
+            if !parsed.diagnostics.is_empty()
+                || parsed.program.directives.len() != 1
+                || !parsed.program.comments.is_empty()
+                || !parsed
+                    .program
+                    .body
+                    .iter()
+                    .all(|s| matches!(s, Statement::EmptyStatement(_)))
+            {
                 return Err(Unsupported("non-string function directive"));
-            };
-            directives.push(Directive::new(
-                SPAN,
-                value.unbox(),
-                self.text(self.arena.text(directive).trim_matches(['\'', '"'])),
-                &self.b,
-            ));
+            }
+            directives = parsed.program.directives;
+            let mut prefix = parsed.program.body;
+            prefix.extend(statements);
+            statements = prefix;
         }
         Ok(self
             .b
