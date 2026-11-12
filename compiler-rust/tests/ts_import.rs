@@ -297,3 +297,46 @@ fn compilations_on_one_thread_are_independent() {
     compile("let x = Array.length([1])", &[]).unwrap();
     compile("let y = Array.length([1])", &[]).unwrap();
 }
+
+/// Runs `js` (CommonJS, with no imports left) and `check` under Node, and
+/// returns what it prints; `None` without Node.
+fn run_node(js: &str, check: &str) -> Option<String> {
+    let dir = std::env::temp_dir().join(format!("ts-import-node-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).ok()?;
+    let file = dir.join(format!("run-{}.js", js.len()));
+    std::fs::write(&file, format!("{js}\n{check}\n")).ok()?;
+    let output = std::process::Command::new("node").arg(&file).output().ok()?;
+    let _ = std::fs::remove_file(&file);
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+#[test]
+fn a_member_with_only_the_tag_is_an_object() {
+    let ts = r#"
+export type Shape = { kind: "circle"; radius: number } | { kind: "point" };
+"#;
+    let js = compile(
+        r#"
+module Shapes = %ts("./shapes.ts")
+
+let describe = (shape: Shapes.shape) =>
+  switch shape {
+  | Circle({radius}) => `circle ${Float.toString(radius)}`
+  | Point(_) => "point"
+  }
+let point: Shapes.shape = Point({})
+"#,
+        &[("/app/src/shapes.ts", ts)],
+    )
+    .unwrap();
+    // `{kind: "point"}`, not the string "point".
+    assert!(js.contains(r#"kind: "point""#), "{js}");
+    let check = r#"
+console.log(JSON.stringify(exports.point));
+console.log(exports.describe({kind: "point"}), exports.describe({kind: "circle", radius: 2}));
+"#;
+    if let Some(output) = run_node(&js, check) {
+        assert_eq!(output, "{\"kind\":\"point\"}\npoint circle 2\n", "{js}");
+    }
+}

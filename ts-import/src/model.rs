@@ -482,6 +482,7 @@ fn write_decl_body(decl: &Decl, indent: &str, out: &mut String) {
                         write_ty(ty, out);
                         out.push(')');
                     }
+                    Payload::Record(fields) if fields.is_empty() => out.push_str("({})"),
                     Payload::Record(fields) => {
                         out.push('(');
                         write_fields(fields, &format!("{indent}  "), out);

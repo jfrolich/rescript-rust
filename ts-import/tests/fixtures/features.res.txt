@@ -44,7 +44,7 @@ module Features = {
     | @as("square") Square({
       size: float,
     })
-    | @as("empty") Empty
+    | @as("empty") Empty({})
   @tag("ok") type outcome<'t> =
     | @as(true) Ok({
       value: 't,

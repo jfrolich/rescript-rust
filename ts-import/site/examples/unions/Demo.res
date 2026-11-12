@@ -10,10 +10,12 @@ let describe = shape =>
   switch scale(shape, 2.) {
   | Circle({radius}) => `a circle of radius ${Float.toString(radius)}`
   | Rect({width, height}) => `${Float.toString(width)} by ${Float.toString(height)}`
-  | Point => "a point"
+  | Point(_) => "a point"
   }
 
 // String literals are polymorphic variants; `number | "auto"` is an
 // unboxed variant, a plain number or the string "auto" at run time.
+// A member with only the tag is a case with an empty record:
+// `Point({})` is `{kind: "point"}`.
 let placed = place(circle, #center, Auto)
-let sized = place(Point, #left, Number(120.))
+let sized = place(Point({}), #left, Number(120.))

@@ -2001,7 +2001,9 @@ impl<'a> Converter<'a> {
                 ctors.push(Ctor {
                     name: ctor_name,
                     tag: Some(tag),
-                    payload: if fields.is_empty() { Payload::None } else { Payload::Record(fields) },
+                    // A member with only the tag is the object `{kind: "point"}`, so an
+                    // empty record: a case without a payload would be the bare string.
+                    payload: Payload::Record(fields),
                 });
             }
             return Some(DeclKind::Variant { tag: Some(name.to_string()), ctors });
