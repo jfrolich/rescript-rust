@@ -21,6 +21,7 @@ pub(super) struct Plan {
     clauses: Vec<ClauseMeta>,
     start: Span,
     value: Option<NodeId>,
+    target: Option<VarId>,
 }
 
 impl State {
@@ -33,9 +34,6 @@ impl State {
         operands: crate::bir::ListId,
         header: SwitchId,
     ) -> Result<Switch, Unsupported> {
-        if !matches!(cx.cont, Cont::Assign(_) | Cont::Effect(_)) {
-            return Err(Unsupported("switch"));
-        }
         let h = self.arena.switch(header);
         if h.constants as usize != h.keys.len()
             || !matches!(h.dispatch, crate::lambda::SwitchDispatch::Direct)
@@ -52,6 +50,20 @@ impl State {
             .then(|| self.source.lists.get(operands)[count]);
         self.prepare_switch_hashes();
         let (groups, next, bodies) = self.group_switch_cases(operands, count, default);
+        let start = self.statements.mark();
+        let binding = match cx.cont {
+            Cont::Value(_) => Some((LetKind::Strict, self.fresh_variable("tmp"))),
+            Cont::Declare(kind, var) => Some((kind, var)),
+            _ => None,
+        };
+        if let Some((kind, var)) = binding {
+            let declaration = plain::node(
+                &mut self.arena,
+                View::SDecl { var, value: None },
+                kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
+            );
+            self.statements.push(declaration);
+        }
         let frame = Switch(self.switches.len() as u32);
         self.switches.push(Plan {
             scrutinee,
@@ -62,8 +74,9 @@ impl State {
             default,
             output: Vec::new(),
             clauses: Vec::new(),
-            start: self.statements.mark(),
+            start,
             value: None,
+            target: binding.map(|(_, var)| var),
         });
         Ok(frame)
     }
@@ -411,6 +424,7 @@ impl State {
             plan.scrutinee,
         ));
         let body_cx = Cx {
+            cont: plan.target.map_or(cx.cont, Cont::Assign),
             switch_depth: cx.switch_depth + 1,
             ..cx
         };
@@ -489,6 +503,7 @@ impl State {
             .expect("switch frames close in stack order");
         assert_eq!(frame.0 as usize, self.switches.len());
         let scrutinee = plan.value.expect("lowered scrutinee");
+        let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
         let empty = plan.output.iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
         if empty && matches!(cx.cont, Cont::Effect(Tail::No)) {
             for body in plan.output {
@@ -522,7 +537,7 @@ impl State {
             let mut has_default = plan.default.is_some();
             if has_default {
                 let body = *plan.output.last().unwrap();
-                if !matches!(cx.cont, Cont::Assign(_))
+                if !matches!(body_cont, Cont::Assign(_))
                     && matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty())
                 {
                     self.arena.release(body);
@@ -552,8 +567,16 @@ impl State {
             );
             self.statements.push(statement);
         }
-        let value = matches!(cx.cont, Cont::Effect(Tail::No))
-            .then(|| plain::node(&mut self.arena, View::JUndefined, 0));
+        let value = match cx.cont {
+            Cont::Value(_) => Some(self.pure_expression(
+                View::Var {
+                    var: plan.target.unwrap(),
+                },
+                0,
+            )),
+            Cont::Effect(Tail::No) => Some(plain::node(&mut self.arena, View::JUndefined, 0)),
+            _ => None,
+        };
         Probed::Out(Out {
             stmts: self.statements.since(plan.start),
             value,
@@ -744,7 +767,7 @@ mod tests {
     fn frames_and_facts_are_small() {
         assert_eq!(std::mem::size_of::<Switch>(), 4);
         assert_eq!(std::mem::size_of::<Facts>(), 16);
-        assert_eq!(std::mem::size_of::<Plan>(), 152);
+        assert_eq!(std::mem::size_of::<Plan>(), 160);
     }
     #[test]
     fn ten_thousand_cases_have_linear_comparison_counts() {
@@ -786,6 +809,101 @@ mod tests {
         }
     }
 
+    #[test]
+    fn ten_thousand_nested_switches_use_the_explicit_traversal() {
+        for context in 0..5 {
+            let mut a = LamArena::new();
+            let mut body = a.const_(C::Int {
+                i: 42,
+                comment: None,
+            });
+            let info = a.add_switch(
+                true,
+                [SwitchKey::Int(0)],
+                false,
+                std::iter::empty(),
+                false,
+                SwitchDispatch::Direct,
+            );
+            for _ in 0..10_000 {
+                let scrutinee = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+                let actions = a.add_list(&[body]);
+                body = a.switch_raw(scrutinee, actions, info);
+            }
+            let mut input = crate::bir::bridge::import_lambda(&a, body).unwrap();
+            let var = input.arena.new_var_id(crate::name::Name::new("result"), 11);
+            input
+                .idents
+                .push(Ident::new("result", 11, crate::ident::IdentFlags::NONE));
+            let cx = match context {
+                0 => Cx::value(),
+                1 => Cx::declare(LetKind::Strict, var),
+                2 => Cx::assign(var),
+                3 => Cx::effect(),
+                _ => Cx::returning(),
+            };
+            let root = input.root;
+            let mut state = State::new(input);
+            let out = state.probe(cx, root).unwrap();
+            assert_eq!(state.source_steps, 20_001);
+            assert_eq!(state.switch_visits, 10_000);
+            assert_eq!(state.switch_comparisons, 0);
+            let result = state.complete(cx, out);
+            result
+                .program
+                .arena
+                .validate(Some(result.program.root), false)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn scrutinee_statements_follow_the_declaration() {
+        let mut a = LamArena::new();
+        let arg = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+        let effect = a.prim_raw(P::PinitMod, &[arg], LamLoc::NONE);
+        let scrutinee = a.seq_raw(effect, arg);
+        let body = a.const_(C::Int {
+            i: 42,
+            comment: None,
+        });
+        let actions = a.add_list(&[body]);
+        let info = a.add_switch(
+            true,
+            [SwitchKey::Int(0)],
+            false,
+            std::iter::empty(),
+            false,
+            SwitchDispatch::Direct,
+        );
+        let root = a.switch_raw(scrutinee, actions, info);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn value_matches_legacy() {
+        check(
+            &[0, 1, 2],
+            &[10, 20, 30],
+            Some(40),
+            false,
+            false,
+            false,
+            &[0],
+        );
+    }
+    #[test]
+    fn declaration_matches_legacy() {
+        check(
+            &[0, 1, 2],
+            &[10, 20, 30],
+            Some(40),
+            false,
+            false,
+            false,
+            &[2],
+        );
+    }
     #[test]
     fn assignment_matches_legacy() {
         check(
@@ -831,7 +949,7 @@ mod tests {
             false,
             true,
             false,
-            &[1, 3, 4],
+            &[0, 1, 2, 3, 4],
         );
     }
     #[test]
@@ -843,7 +961,7 @@ mod tests {
             false,
             true,
             false,
-            &[1, 3, 4],
+            &[0, 1, 2, 3, 4],
         );
     }
     #[test]
@@ -851,8 +969,16 @@ mod tests {
         for count in 0..=2 {
             let keys: Vec<_> = (0..count).collect();
             let values: Vec<_> = (10..10 + count).collect();
-            check(&keys, &values, Some(40), false, false, false, &[1, 3, 4]);
-            check(&keys, &values, None, true, false, false, &[1, 3, 4]);
+            check(
+                &keys,
+                &values,
+                Some(40),
+                false,
+                false,
+                false,
+                &[0, 1, 2, 3, 4],
+            );
+            check(&keys, &values, None, true, false, false, &[0, 1, 2, 3, 4]);
         }
     }
     #[test]
@@ -864,7 +990,7 @@ mod tests {
             false,
             false,
             true,
-            &[1, 3, 4],
+            &[0, 1, 2, 3, 4],
         );
     }
     #[test]
