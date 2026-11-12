@@ -63,6 +63,7 @@ pub mod unit_reads;
 pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
+pub(crate) mod world;
 pub(crate) mod variant_layout;
 
 // Re-exports for convenience
