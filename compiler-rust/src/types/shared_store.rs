@@ -429,7 +429,7 @@ impl SharedTypePool {
             rows: payloads.rows.into_boxed_slice(),
             lids: payloads.lids.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
-            locations,
+            locations: locations.without_interning_indexes(),
             carried,
         });
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {

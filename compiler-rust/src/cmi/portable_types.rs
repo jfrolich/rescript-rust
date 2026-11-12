@@ -202,7 +202,7 @@ pub struct PortablePersStruct {
 
 #[derive(Debug)]
 enum PublishedSignature {
-    Portable(PortableSignature),
+    Portable(Box<PortableSignature>),
     Shared(super::shared_reader::PublishedGraph),
 }
 
@@ -364,7 +364,7 @@ impl PortablePersStruct {
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
-            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(sig), raw))),
+            decoded: std::sync::Mutex::new(Some((PublishedSignature::Portable(Box::new(sig)), raw))),
         }
     }
 
@@ -2731,6 +2731,11 @@ fn remap_module_type_refs(mt: &mut ModuleType, map: &impl SignatureRefMap) {
 mod identity_tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn publication_state_keeps_portable_fallback_out_of_line() {
+        assert_eq!(std::mem::size_of::<PublishedSignature>(), 24);
+    }
 
     #[test]
     fn decoded_stamp_mapping_matches_the_saving_serializer() {

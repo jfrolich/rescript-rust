@@ -179,3 +179,15 @@ A traversal reads each source node once, with one cache per graph; cost is
 O(nodes + edges + signature items). Step-count tests cover a 10,000-node
 chain and 10,000 parents sharing one child. The legacy recursive traversal
 uses the compiler test suite's large-stack convention for the deep chain.
+
+### Comparing separately built executables
+
+The embedded runtime retains the allocation namespaces of its build-time
+source paths. Two binaries built in different directories can therefore
+produce different stored allocation identities even when their source and
+output behavior are identical. This does not affect the same-build oracle
+comparison above. For a cross-binary byte comparison, give both binaries
+the same runtime compiled from the same paths: copy the runtime package and
+change only whitespace in its configuration to select source compilation
+instead of either embedded image. Compare the runtime entries as well as
+the application's entries; do not normalize or ignore differing bytes.
