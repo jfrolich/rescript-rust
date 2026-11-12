@@ -182,8 +182,11 @@ def corpus(name, project, binary, bsc, runtime, tool, work, external=False):
     try:
         compare(work / "reference", work / "candidate", tool, work, env)
         result_display["equal"] = True
-    except RuntimeError:
+    except RuntimeError as error:
         result_display["equal"] = False
+        if (work / "reformat.log").exists():
+            log = work.parent / f"{name.replace('/', '-')}-reformat.log"
+            raise RuntimeError(f"{name}: reformat comparison failed; log: {log}") from error
         raise
     finally:
         result_display["reformat_seconds"] = time.monotonic() - comparison_start
