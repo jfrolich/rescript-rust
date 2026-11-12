@@ -1,0 +1,4 @@
+We've found a bug for you!
+  /.../fixtures/Shadowed_module/Main.res
+
+  The value getOr can't be found in Option
