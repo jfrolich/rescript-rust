@@ -312,6 +312,13 @@ fn skipped_declaration_error(cmt_file: &str, importer: &str) -> Option<String> {
     Some(format!("Internal genType dependency-closure error: module {importer} requested skipped declarations of module {module}"))
 }
 
+/// Whether this process has translated declarations for a module (including
+/// an empty translation). Does not decode the cached result.
+pub fn has_type_declarations_for_module(module_name: &str) -> bool {
+    in_process_type_declarations_cache().lock().unwrap().by_module
+        .get(module_name).is_some_and(|keys| !keys.is_empty())
+}
+
 /// The type declarations `module_name`'s typed artifacts registered, by
 /// normalized `.cmt`/`.cmti` path, for an incremental build to store with the
 /// module's interface: a later build that does not compile the module

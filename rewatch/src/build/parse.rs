@@ -432,10 +432,10 @@ fn generate_ast(
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
     }
-    let gentype_annotations = package.config.gentype_config.is_some()
-        && parsed_gentype_annotations(&stored_ast);
+    let gentype_annotations = package.config.gentype_config.as_ref()
+        .map(|_| parsed_gentype_annotations(&stored_ast));
     Ok(GeneratedAst {
-        gentype_annotations: Some(gentype_annotations),
+        gentype_annotations,
         stderr,
         stored_ast: Some(stored_ast),
         deps: Some(deps),

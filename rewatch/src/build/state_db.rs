@@ -31,7 +31,8 @@ pub const DB_FILE: &str = "rescript.sqlite";
 // 19: the database moved from lib/bs to lib/rescript, whose build records
 // name no lib/bs or lib/ocaml artifacts.
 // 20: PortableRawSignature carries its own file names.
-const SCHEMA_VERSION: i64 = 20;
+// 21: parsed genType flags and declaration-cache availability survive restart.
+const SCHEMA_VERSION: i64 = 21;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -45,7 +46,7 @@ CREATE TABLE modules (
     imports TEXT
 ) WITHOUT ROWID;
 CREATE TABLE parse_warnings (source TEXT PRIMARY KEY, text TEXT NOT NULL) WITHOUT ROWID;
-CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL) WITHOUT ROWID;
+CREATE TABLE deps (source TEXT PRIMARY KEY, mtime INTEGER NOT NULL, deps TEXT NOT NULL, gentype_annotations INTEGER NOT NULL, gentype_declarations INTEGER NOT NULL) WITHOUT ROWID;
 CREATE TABLE reads (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE items (module TEXT PRIMARY KEY, data TEXT NOT NULL);
 CREATE TABLE interfaces (module TEXT PRIMARY KEY, hash INTEGER NOT NULL, data BLOB NOT NULL);
@@ -349,6 +350,8 @@ pub fn read_items(package: &Package, modules: &[&str]) -> BTreeMap<String, ItemD
 pub struct SourceDeps {
     pub mtime: i64,
     pub deps: Vec<String>,
+    pub gentype_annotations: bool,
+    pub gentype_declarations: bool,
 }
 
 pub const META_BUILD_STARTED_AT: &str = "build_started_at";
@@ -521,15 +524,17 @@ fn read_parse_warnings(conn: &Connection) -> rusqlite::Result<BTreeMap<String, S
 
 fn read_deps(conn: &Connection) -> rusqlite::Result<BTreeMap<String, SourceDeps>> {
     let mut deps = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT source, mtime, deps FROM deps")?;
+    let mut stmt = conn.prepare("SELECT source, mtime, deps, gentype_annotations, gentype_declarations FROM deps")?;
     for row in stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
             row.get::<_, i64>(1)?,
             row.get::<_, String>(2)?,
+            row.get::<_, bool>(3)?,
+            row.get::<_, bool>(4)?,
         ))
     })? {
-        let (source, mtime, text) = row?;
+        let (source, mtime, text, gentype_annotations, gentype_declarations) = row?;
         let deps_list = text
             .split('\n')
             .filter(|dep| !dep.is_empty())
@@ -540,6 +545,8 @@ fn read_deps(conn: &Connection) -> rusqlite::Result<BTreeMap<String, SourceDeps>
             SourceDeps {
                 mtime,
                 deps: deps_list,
+                gentype_annotations,
+                gentype_declarations,
             },
         );
     }
@@ -793,14 +800,14 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
 
             let mut delete_deps = tx.prepare("DELETE FROM deps WHERE source = ?1")?;
             let mut set_deps =
-                tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps) VALUES (?1, ?2, ?3)")?;
+                tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps, gentype_annotations, gentype_declarations) VALUES (?1, ?2, ?3, ?4, ?5)")?;
             sync_encoded_rows(
                 &previous.deps,
                 &new.deps,
                 &deps_rows,
                 partial,
                 |source| delete_deps.execute(params![source]).map(drop),
-                |source, row, deps| set_deps.execute(params![source, row.mtime, deps]).map(drop),
+                |source, row, deps| set_deps.execute(params![source, row.mtime, deps, row.gentype_annotations, row.gentype_declarations]).map(drop),
             )?;
         }
         tx.commit()
@@ -993,6 +1000,8 @@ mod tests {
             SourceDeps {
                 mtime: 42,
                 deps: vec!["B".to_string(), "C.D".to_string()],
+                gentype_annotations: true,
+                gentype_declarations: false,
             },
         );
         write_record(&package, Some(&first), &second);

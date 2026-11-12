@@ -232,10 +232,11 @@ pub fn plan_gentype(build_state: &mut BuildCommandState) {
         let SourceType::SourceFile(source) = &module.source_type else { return None; };
         let enabled = build_state.packages.get(&module.package_name)
             .is_some_and(|package| package.config.gentype_config.is_some());
+        if !enabled { return None; }
         let annotated = annotations.get(&format!("{name}:impl")).copied().unwrap_or(true)
             || (source.interface.is_some()
                 && annotations.get(&format!("{name}:intf")).copied().unwrap_or(true));
-        (enabled && annotated).then(|| name.clone())
+        annotated.then(|| name.clone())
     });
     let needed = gentype_closure(&build_state.modules, roots);
     drop(annotations);
