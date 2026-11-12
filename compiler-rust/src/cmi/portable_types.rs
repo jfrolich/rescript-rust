@@ -386,6 +386,10 @@ impl PortablePersStruct {
     /// its decoded graph, so keep only the bytes storage will need anyway.
     pub fn prepare_for_storage(&self) {
         self.encoded();
+        // The scheduler calls this only for a unit with no waiting importer.
+        // Unlike an ordinary storage reader, it can release detached arrays
+        // as well as raw signatures. A later build can load the stored bytes.
+        *self.decoded.lock().unwrap() = None;
     }
 
     fn encoded(&self) -> &EncodedSignatures {
@@ -2966,9 +2970,15 @@ mod identity_tests {
             publish_signature(&ps, &ctx, None, SignaturePublicationMode::Eager, true).0
         };
         assert!(ctx.thread_store().pers_struct(&published).is_none());
+        let leaf = publish_signature(&ps, &ctx, None, SignaturePublicationMode::OnDemand, false).0;
         drop(ps);
         drop(ctx);
-        published.prepare_for_storage();
+        // Ordinary storage may precede an importer. The scheduler's explicit
+        // leaf path instead releases the graph because no importer is waiting.
+        published.encoded();
+        leaf.prepare_for_storage();
+        assert!(!leaf.has_decoded_signatures());
+        assert_eq!(crate::binser::to_vec(&leaf.signature()).unwrap(), crate::binser::to_vec(&oracle).unwrap());
         assert_eq!(
             crate::binser::to_vec(&published.signature()).unwrap(),
             crate::binser::to_vec(&oracle).unwrap()

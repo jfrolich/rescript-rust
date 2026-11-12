@@ -202,6 +202,9 @@ pub(super) fn build(
     let mut sink = ser.sink;
     let locations = ser.locations;
     let layouts = ser.variant_layouts;
+    // The main walk is finished. Return its memo-table lease before the raw
+    // walk requests one, rather than retaining two high-water tables per worker.
+    drop(ser.cache);
     let raw = ctx
         .find_raw_module_sig(&ps.ps_name)
         .map(|sig| serialize_signature(&sig, ctx, arena, &mut files));
