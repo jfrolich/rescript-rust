@@ -92,6 +92,13 @@ function __holeItem(value) {
   };
 }
 
+function __holeTypeBody(value) {
+  return {
+    ...value,
+    raw: true
+  };
+}
+
 let quote = (function (pieces, holes, file) {
   var parts = [];
   function add(piece) {
@@ -640,6 +647,7 @@ exports.expected = expected;
 exports.readFile = readFile;
 exports.env = env;
 exports.__holeItem = __holeItem;
+exports.__holeTypeBody = __holeTypeBody;
 exports.quote = quote;
 exports.__quoteCode = __quoteCode;
 exports.__quoteDecls = __quoteDecls;

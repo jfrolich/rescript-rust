@@ -112,6 +112,9 @@ external __holeCode: code<'a> => hole = "%identity"
 external __holeType: typ => hole = "%identity"
 external __holePat: pat => hole = "%identity"
 let __holeItem = (value: code<'a>): hole => ofNode({...toNode(value), raw: true})
+/* The body of a type declaration, `type t = ${body}`: a record or a variant
+   type cannot be written in parentheses. */
+let __holeTypeBody = (value: typ): hole => ofNode({...toNode(value), raw: true})
 
 /* A piece is the text between two holes: parts of the macro's file, each
    with its line and column there (line 0: text that is not from the file). */

@@ -926,3 +926,39 @@ fn attribute_on_generated_code() {
     assert!(expanded.contains(r#"@warning("-27") (unused => 2)"#), "{expanded}");
     assert_eq!(project.warnings, "", "{}", project.warnings);
 }
+
+const SHAPES: &str = r#"
+open Macro
+
+// A record type, a variant type and another type as the body of a type
+// declaration.
+@macro
+let shapes = (): decls =>
+  %code(
+    type point = ${Type.record([Type.field("x", %type(int)), Type.field("y", %type(int))])}
+    type side = ${Type.variant([Type.constructor("Left"), Type.constructor("Right")])}
+    type points = ${%type(array<point>)}
+    let origin: point = {x: 0, y: 0}
+  )
+"#;
+
+#[test]
+fn a_hole_is_the_body_of_a_type_declaration() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Shapes.res", SHAPES);
+    let js = compile_ok(
+        &mut project,
+        "Main.res",
+        r#"
+%%Shapes.shapes()
+
+let path: points = [origin, {x: 1, y: 2}]
+let side = Left
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    assert!(expanded.contains("type point = {x: int, y: int}"), "{expanded}");
+    assert!(expanded.contains("type side = | Left | Right"), "{expanded}");
+    assert!(expanded.contains("type points = array<point>"), "{expanded}");
+    assert!(js.contains("origin"), "{js}");
+}

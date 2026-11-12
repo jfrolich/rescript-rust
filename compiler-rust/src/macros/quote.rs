@@ -35,7 +35,7 @@ use crate::binary_ast::ast_iter::{self, AstIter};
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::{
     ArgLabel, CoreTypeDesc, ExpressionDesc, Extension, PatternDesc, Payload, StructureItem,
-    StructureItemDesc,
+    StructureItemDesc, TypeDeclaration,
 };
 use crate::parser::longident::Longident;
 use crate::parser::module::{HOLE_EXTENSION, SPLICE_HOLE_EXTENSION};
@@ -157,6 +157,9 @@ enum SplicePlace {
 enum HoleKind {
     Code,
     Type,
+    /// The body of a type declaration, `type t = ${body}`. It is not put in
+    /// parentheses: a record or a variant type cannot be.
+    TypeBody,
     Pat,
     Item,
     Splice(SplicePlace),
@@ -188,6 +191,8 @@ struct QuoteScan<'a> {
     item_exprs: &'a HashSet<ExprIdx>,
     /// The splice holes that are an item of a list, with the list.
     splice_places: HashMap<ExprIdx, SplicePlace>,
+    /// The types that are the body of a type declaration of the quote.
+    type_bodies: HashSet<CoreTypeIdx>,
 }
 
 fn is_splice(arena: &ParseArena, extension: &Extension) -> bool {
@@ -367,6 +372,8 @@ impl AstIter for QuoteScan<'_> {
                 inner,
                 kind: if is_splice(arena, extension) {
                     HoleKind::SpliceOutOfPlace
+                } else if self.type_bodies.contains(&idx) {
+                    HoleKind::TypeBody
                 } else {
                     HoleKind::Type
                 },
@@ -374,6 +381,13 @@ impl AstIter for QuoteScan<'_> {
             return;
         }
         ast_iter::walk_typ(self, arena, idx);
+    }
+
+    fn type_declaration(&mut self, arena: &ParseArena, td: &TypeDeclaration) {
+        if let Some(body) = td.ptype_manifest {
+            self.type_bodies.insert(body);
+        }
+        ast_iter::walk_type_declaration(self, arena, td);
     }
 }
 
@@ -425,6 +439,7 @@ impl QuoteFinder<'_> {
                 &item_exprs
             },
             splice_places: HashMap::new(),
+            type_bodies: HashSet::new(),
         };
         scan.payload(arena, &extension.1);
 
@@ -532,6 +547,7 @@ impl QuoteFinder<'_> {
             let wrapper = match hole.kind {
                 HoleKind::Code | HoleKind::SpliceOutOfPlace => "__holeCode",
                 HoleKind::Type => "__holeType",
+                HoleKind::TypeBody => "__holeTypeBody",
                 HoleKind::Pat => "__holePat",
                 HoleKind::Item => "__holeItem",
                 HoleKind::Splice(SplicePlace::Items) => "__spliceItems",
