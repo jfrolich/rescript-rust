@@ -1125,6 +1125,79 @@ mod tests {
     }
 
     #[test]
+    fn conditional_branch_temporaries_preserve_legacy_names() {
+        let mut source = LamArena::new();
+        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let callee = source.var(Ident::new("callee", 2, IdentFlags::NONE));
+        let effect = source.var(Ident::new("effect", 3, IdentFlags::NONE));
+        let call_info = crate::lambda::ApInfo {
+            loc: crate::lambda::LamLoc::NONE,
+            status: crate::lambda::ApplyStatus::InferFull,
+        };
+        let effect = source.apply_raw(effect, &[], call_info.clone());
+        let binding = Ident::new("tmp", 4, IdentFlags::NONE);
+        let value = source.const_(Constant::JsNull);
+        let use_binding = source.var(binding);
+        let binding = source.let_(LetKind::Strict, binding, value, use_binding);
+        let yes = source.apply_raw(callee, &[effect, binding], call_info);
+        let no = source.const_(Constant::JsFalse);
+        let root = source.if_raw(condition, yes, no);
+        super::super::oracle_tests::compare(source, root);
+    }
+
+    #[test]
+    fn q2_conditional_loop_keeps_the_loop_boundary() {
+        let mut source = LamArena::new();
+        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let loop_test = source.const_(Constant::JsTrue);
+        let loop_body = source.const_(Constant::JsUndefined { is_unit: true });
+        let loop_ = source.while_(loop_test, loop_body);
+        let one = source.const_(Constant::Int {
+            i: 1,
+            comment: None,
+        });
+        let yes = source.seq_raw(loop_, one);
+        let no = source.const_(Constant::Int {
+            i: 2,
+            comment: None,
+        });
+        let root = source.if_raw(condition, yes, no);
+        let input = bridge::import_lambda(&source, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        assert!(matches!(
+            state.probe(Cx::returning(), root),
+            Err(Unsupported("loop"))
+        ));
+    }
+
+    #[test]
+    fn q5_nested_rec_keeps_the_let_rec_boundary() {
+        let mut source = LamArena::new();
+        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let id = Ident::new("nested", 2, IdentFlags::NONE);
+        let body = source.const_(Constant::JsTrue);
+        let function = source.function_(
+            0,
+            &[],
+            body,
+            Default::default(),
+            crate::lambda::LamLoc::NONE,
+        );
+        let yes = source.var(id);
+        let yes = source.letrec(&[(id, function)], yes);
+        let no = source.const_(Constant::JsFalse);
+        let root = source.if_raw(condition, yes, no);
+        let input = bridge::import_lambda(&source, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        assert!(matches!(
+            state.probe(Cx::returning(), root),
+            Err(Unsupported("let rec"))
+        ));
+    }
+
+    #[test]
     fn short_circuit_value() {
         short_circuit_case(0);
     }
