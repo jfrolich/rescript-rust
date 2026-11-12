@@ -111,7 +111,6 @@ fn labels_of_keys(ctx: &TypeContext, keys: Vec<String>) -> Vec<LabelDescription>
                 lbl_repres: RecordRepresentation::RecordRegular,
                 lbl_private: PrivateFlag::Public,
                 lbl_loc: crate::types::DeclLoc::none(),
-                lbl_attributes: Vec::new(),
             })
             .collect()
     })

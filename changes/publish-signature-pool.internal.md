@@ -1,0 +1,1 @@
+- Publish checked signatures needed by dependents into the shared type pool before releasing them, defer signature encoding and summaries, and keep leaf signatures on demand without retaining decoded graphs.

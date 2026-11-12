@@ -30,7 +30,8 @@ pub const DB_FILE: &str = "rescript.sqlite";
 /// Bump when the schema changes; an older database is then discarded.
 // 19: the database moved from lib/bs to lib/rescript, whose build records
 // name no lib/bs or lib/ocaml artifacts.
-const SCHEMA_VERSION: i64 = 19;
+// 20: PortableRawSignature carries its own file names.
+const SCHEMA_VERSION: i64 = 20;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;

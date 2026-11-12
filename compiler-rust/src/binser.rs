@@ -625,6 +625,14 @@ impl<T> Encoded<T> {
 impl<T: Serialize> Encoded<T> {
     /// Encode a value once for shared storage and deferred decoding.
     pub fn encode(value: &T) -> Self {
+        #[cfg(debug_assertions)]
+        if std::any::type_name::<T>()
+            == std::any::type_name::<crate::cmi::portable_types::PortableSignature>()
+            || std::any::type_name::<T>()
+                == std::any::type_name::<crate::cmi::portable_types::PortableRawSignature>()
+        {
+            crate::perf_counters::assert_signature_released();
+        }
         Encoded {
             bytes: to_vec(value)
                 .expect("encoding to memory cannot fail")
