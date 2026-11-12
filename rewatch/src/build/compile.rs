@@ -4510,6 +4510,20 @@ fn finish_in_process_js_inner(
         });
     }
 
+    // A configured JS suffix can share the genType path. That write can
+    // invalidate the discovery snapshot, so preserve the ordinary probe.
+    if let Some(outcome) = gentype.as_mut()
+        && let Ok(Some(output)) = &mut outcome.result
+        && let rescript_compiler::gentype::main::Output::NoMatch { output_file } = output
+        && !compile_result.js_outputs.is_empty()
+        && !compile_result.js_outputs.iter().any(|js| js.path == Path::new(output_file))
+        && package.gentype_output_absent(Path::new(output_file))
+    {
+        *output = rescript_compiler::gentype::main::Output::Absent {
+            output_file: std::mem::take(output_file),
+        };
+    }
+
     let mut write_duration = Duration::default();
     {
         let _write_span = info_span!(
@@ -4547,15 +4561,6 @@ fn finish_in_process_js_inner(
     // What GenType prints follows the compile's warnings in this pass's
     // output, so a first pass the build retries with locations prints
     // nothing; like bsc's stdout, it is not kept for replay.
-    if let Some(outcome) = gentype.as_mut()
-        && let Ok(Some(output)) = &mut outcome.result
-        && let rescript_compiler::gentype::main::Output::NoMatch { output_file } = output
-        && package.gentype_output_absent(Path::new(output_file))
-    {
-        *output = rescript_compiler::gentype::main::Output::Absent {
-            output_file: std::mem::take(output_file),
-        };
-    }
     let gentype_printed = rescript_compiler::driver::apply_gentype_outcome(
         gentype,
         &compiler_warnings,

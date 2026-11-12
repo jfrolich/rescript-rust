@@ -1625,8 +1625,11 @@ mod file_inventory_tests {
     fn absent_outputs_perform_zero_file_operations() {
         take_file_operations();
         for module in 0..512 {
-            Output::Absent { output_file: format!("not-created/M{module}.gen.tsx") }
-                .apply().unwrap();
+            Output::Absent {
+                output_file: format!("not-created/M{module}.gen.tsx"),
+            }
+            .apply()
+            .unwrap();
         }
         assert_eq!(take_file_operations(), 0);
     }
@@ -1636,15 +1639,33 @@ mod file_inventory_tests {
         let dir = tempfile::tempdir().unwrap();
         let file = dir.path().join("M.gen.tsx").to_string_lossy().into_owned();
         take_file_operations();
-        Output::NoMatch { output_file: file.clone() }.apply().unwrap();
+        Output::NoMatch {
+            output_file: file.clone(),
+        }
+        .apply()
+        .unwrap();
         assert_eq!(take_file_operations(), 1);
         std::fs::write(&file, "handwritten").unwrap();
-        Output::NoMatch { output_file: file.clone() }.apply().unwrap();
+        Output::NoMatch {
+            output_file: file.clone(),
+        }
+        .apply()
+        .unwrap();
         assert_eq!(take_file_operations(), 2);
         assert!(!std::path::Path::new(&file).exists());
-        Output::Write { output_file: file.clone(), contents: "new".to_string() }.apply().unwrap();
+        Output::Write {
+            output_file: file.clone(),
+            contents: "new".to_string(),
+        }
+        .apply()
+        .unwrap();
         assert_eq!(take_file_operations(), 2);
-        Output::Write { output_file: file, contents: "new".to_string() }.apply().unwrap();
+        Output::Write {
+            output_file: file,
+            contents: "new".to_string(),
+        }
+        .apply()
+        .unwrap();
         assert_eq!(take_file_operations(), 2); // exists + read, no rewrite
     }
 }

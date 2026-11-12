@@ -55,7 +55,9 @@ printf 'type t = int\n' >src/Gone.res
 for module in Keep Edited Missing Stale; do printf '\n// recompile\n' >>"src/$module.res"; done
 if [ "$mode" = watch ]; then
     wait_for_pattern_count watch.log 'Finished .*compilation' 3 30
-    wait_for_file src/Missing.gen.tsx 30
+    timeout 30 bash -c 'until cmp -s expected-edited src/Edited.gen.tsx &&
+        cmp -s expected-missing src/Missing.gen.tsx &&
+        [ ! -f src/Gone.gen.tsx ] && [ ! -f src/Stale.gen.tsx ]; do sleep 0.1; done'
 else
     build
 fi

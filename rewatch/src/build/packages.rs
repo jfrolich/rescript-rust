@@ -53,7 +53,11 @@ struct Dependency {
 }
 
 type DirectoryEntries = AHashMap<PathBuf, AHashSet<std::ffi::OsString>>;
-type SourceWalk = (AHashMap<PathBuf, SourceFileMeta>, Vec<PathBuf>, DirectoryEntries);
+type SourceWalk = (
+    AHashMap<PathBuf, SourceFileMeta>,
+    Vec<PathBuf>,
+    DirectoryEntries,
+);
 
 #[derive(Debug, Clone)]
 pub struct Package {
@@ -108,7 +112,9 @@ impl Package {
     /// Whether a completed source-directory listing proves this path absent.
     /// Unknown directories preserve the compiler's ordinary filesystem check.
     pub fn gentype_output_absent(&self, path: &Path) -> bool {
-        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else { return false };
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
         self.gentype_outputs.as_ref()
             .and_then(|dirs| dirs.get(parent))
             .is_some_and(|entries| !entries.contains(name))
@@ -1405,6 +1411,32 @@ fn unallowed_dependents_hint() -> String {
     )
 }
 
+/// Watch content edits do not repeat package discovery. Refresh the shared
+/// directory inventory once before such a build, including manual file changes.
+/// An unreadable directory leaves presence unknown; the old per-file behavior
+/// remains the fallback, rather than treating a failed listing as empty.
+pub fn refresh_gentype_outputs(packages: &mut AHashMap<String, Package>) {
+    for package in packages.values_mut() {
+        if package.config.gentype_config.is_none() {
+            continue;
+        }
+        package.gentype_outputs = (|| -> std::io::Result<DirectoryEntries> {
+            let mut outputs = AHashMap::new();
+            if let Some(dirs) = &package.dirs {
+                for dir in dirs {
+                    let dir = package.path.join(dir);
+                    let entries = fs::read_dir(&dir)?
+                        .map(|entry| entry.map(|entry| entry.file_name()))
+                        .collect::<std::io::Result<AHashSet<_>>>()?;
+                    outputs.insert(dir, entries);
+                }
+            }
+            Ok(outputs)
+        })()
+        .ok();
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::config;
@@ -2026,6 +2058,7 @@ mod test {
             );
         }
     }
+
     #[test]
     fn gentype_inventory_knows_only_listed_directories() {
         let temp = tempfile::tempdir().unwrap();
@@ -2034,11 +2067,19 @@ mod test {
         std::fs::write(src.join("Plain.res"), "type t = int").unwrap();
         std::fs::write(src.join("Plain.custom.ts"), "manual").unwrap();
         let (_, _, entries) = super::read_folders_and_dirs(
-            &None, temp.path(), std::path::Path::new("src"), false, false, true,
-        ).unwrap();
+            &None,
+            temp.path(),
+            std::path::Path::new("src"),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
         let mut package = create_package(CreatePackageArgs {
-            name: "inventory".to_string(), bs_deps: vec![],
-            build_dev_deps: vec![], allowed_dependents: None,
+            name: "inventory".to_string(),
+            bs_deps: vec![],
+            build_dev_deps: vec![],
+            allowed_dependents: None,
         });
         package.gentype_outputs = Some(entries);
         assert!(package.gentype_output_absent(&src.join("Plain.gen.tsx")));
@@ -2046,31 +2087,5 @@ mod test {
         assert!(!package.gentype_output_absent(&src.join("other/Plain.gen.tsx")));
         package.gentype_outputs = None;
         assert!(!package.gentype_output_absent(&src.join("Plain.gen.tsx")));
-    }
-
-}
-
-/// Watch content edits do not repeat package discovery. Refresh the shared
-/// directory inventory once before such a build, including manual file changes.
-/// An unreadable directory leaves presence unknown; the old per-file behavior
-/// remains the fallback, rather than treating a failed listing as empty.
-pub fn refresh_gentype_outputs(packages: &mut AHashMap<String, Package>) {
-    for package in packages.values_mut() {
-        if package.config.gentype_config.is_none() {
-            continue;
-        }
-        package.gentype_outputs = (|| -> std::io::Result<DirectoryEntries> {
-            let mut outputs = AHashMap::new();
-            if let Some(dirs) = &package.dirs {
-                for dir in dirs {
-                    let dir = package.path.join(dir);
-                    let entries = fs::read_dir(&dir)?
-                        .map(|entry| entry.map(|entry| entry.file_name()))
-                        .collect::<std::io::Result<AHashSet<_>>>()?;
-                    outputs.insert(dir, entries);
-                }
-            }
-            Ok(outputs)
-        })().ok();
     }
 }
