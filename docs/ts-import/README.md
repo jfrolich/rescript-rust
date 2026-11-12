@@ -233,12 +233,13 @@ Two things the survey does not measure come before any of these rows, because th
 
 ## Language changes
 
-Four of the solutions need a change to ReScript. Everything else in the table is converter or standard-library work.
+Five of the solutions need a change to ReScript. Everything else in the table is converter or standard-library work.
 
 | Change | Status | What it closes |
 |---|---|---|
 | [Classes on records](#classes-on-records) | implemented, Rust compiler only | Unions of classes, with the fields of the class readable. Together with `symbol` cases, 39 fewer unions with a note in the survey. |
 | [Object cases told apart by their fields](#object-cases-told-apart-by-their-fields) | implemented, Rust compiler only | Unions of plain objects and of members that share a tag. Measured: the declarations with a union note went from 535 to 305, and vite's syntax tree is a variant of 165 cases. Library interfaces follow once they are records. |
+| [Shared tags on tagged variants](#shared-tags-on-tagged-variants) | specified, being implemented | The same unions as object cases, without the tag written as a field of every case. It changes no count; it changes what the imported type looks like. |
 | [Bounded type variables](#bounded-type-variables) | specified | Constraints where the parameter also decides the result, such as `pipe<T extends Writable>(destination: T): T`. Part of the 3.2%. |
 | [A record with a `dict` remainder](#a-record-with-a-dict-remainder) | not designed | Named properties next to an index signature, 0.7%. |
 
@@ -393,6 +394,58 @@ let message = job =>
 <!-- /example -->
 
 **Measured.** On the twelve surveyed modules, without and with object cases in the import: the declarations with a union note go from 535 to 305, and the declarations with any note from 1,003 to 808. The number of types goes from 2,419 to 3,075, because the members of a union that was `unknown` are now declared. Converting vite takes as long as before within the noise of the runs: 0.27 to 0.43 s with, 0.26 to 0.43 s without, in runs taken one after another.
+
+### Shared tags on tagged variants
+
+Status: specified, being implemented in the Rust compiler only.
+
+With object cases, a union whose members share a tag is an `@unboxed` variant, and the tag is an ordinary field of every case: `StringLiteral({@as("type") type_: [#Literal], value: string})`. The field has to be written again wherever a value is built: `Super({type_: #Super, start: 3})`. A `@tag` variant writes the tag for you, but rejects two cases with the same tag ("Duplicate literal Literal."). This change allows them.
+
+```rescript
+@tag("type")
+type node =
+  | @as("Literal") StringLiteral({value: string})
+  | @as("Literal") NumericLiteral({value: float})
+  | @as("ThisExpression") This({start: int})
+  | @as("Super") Super({start: int})
+
+let name = node =>
+  switch node {
+  | StringLiteral({value}) => value
+  | NumericLiteral({value}) => Float.toString(value)
+  | This(_) => "this"
+  | Super(_) => "super"
+  }
+
+let made = Super({start: 3}) // {type: "Super", start: 3}
+```
+
+```js
+function name(node) {
+  switch (node.type) {
+    case "Literal":
+      if (typeof node.value === "string") {
+        return node.value;
+      } else {
+        return node.value.toString();
+      }
+    case "ThisExpression":
+      return "this";
+    case "Super":
+      return "super";
+  }
+}
+```
+
+- **Which cases.** Cases whose payload is an inline record may share a tag. A case without a payload is the tag itself at run time (`"Super"`, not an object), and a case with a tuple payload keeps its values under `_0`, `_1`; neither can share a tag.
+- **Telling them apart.** The cases that share a tag are object cases among themselves: the compiler finds an order and tests by the [rules above](#object-cases-told-apart-by-their-fields), on the fields other than the tag. The last one is not tested.
+- **No order.** Two cases with the same tag and the same fields at the same kinds are rejected, with the message for a duplicate tag that both compilers give today.
+- **Dispatch.** The tag is tested first, as for any tagged variant; the tests on fields run inside the arm of a shared tag. A `switch` that names some of the cases of a tag tests only those.
+- **Everything else is unchanged**: building a value, exhaustiveness, a variant where no tag is shared.
+
+**In the import.** A union of objects that all have one property holding a literal is a `@tag` variant, as before; members with the same literal become cases with the same `@as`, named after their interfaces. A member with no other property is a case with an empty record, `Point({})`, which is the object `{kind: "point"}`; a case without a payload would be the bare string.
+
+One thing is lost against the `@unboxed` form. There a case holds the member's own record (`Identifier(identifier)`), which can be passed to a function that takes that member. The fields of a tagged case are an inline record, which cannot leave the `switch` as a value.
 
 ### Bounded type variables
 
