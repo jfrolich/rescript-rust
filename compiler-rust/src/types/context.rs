@@ -623,6 +623,8 @@ pub struct TypeContext {
     /// place.
     store_build_type_start: Cell<usize>,
     store_build_row_start: Cell<usize>,
+    /// Memo ownership boundary used only by the frozen-write counters.
+    store_build_abbrev_start: Cell<usize>,
     /// The current store build read compilation-local state, so its result
     /// must stay private to this compilation.
     store_build_poisoned: Cell<bool>,
@@ -1126,6 +1128,7 @@ impl TypeContext {
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
             store_build_row_start: Cell::new(0),
+            store_build_abbrev_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
             store_build_guards: RefCell::new(Vec::new()),
@@ -2543,6 +2546,13 @@ impl TypeContext {
     /// published descriptor.
     #[inline(never)]
     fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
+        if self.compiler_counters_enabled && !self.store_build_owns(r) {
+            crate::perf_counters::frozen::record(if r.is_shared() {
+                crate::perf_counters::frozen::Kind::DescReadShared
+            } else {
+                crate::perf_counters::frozen::Kind::DescReadWorker
+            });
+        }
         if r.is_shared() {
             let idx = r.shared_index();
             if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
@@ -2600,6 +2610,13 @@ impl TypeContext {
 
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
+        if self.compiler_counters_enabled && !self.store_build_owns(r) {
+            crate::perf_counters::frozen::record(if r.is_shared() {
+                crate::perf_counters::frozen::Kind::LevelReadShared
+            } else {
+                crate::perf_counters::frozen::Kind::LevelReadWorker
+            });
+        }
         if r.is_shared() {
             let idx = r.shared_index();
             return self
@@ -2716,6 +2733,11 @@ impl TypeContext {
     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
             if r.is_shared() {
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::frozen::record(
+                        crate::perf_counters::frozen::Kind::LevelWriteShared,
+                    );
+                }
                 self.shared_level_overlay
                     .borrow_mut()
                     .set(r.shared_index() as usize, level);
@@ -2724,6 +2746,11 @@ impl TypeContext {
             if self.store_build_owns(r) {
                 self.store.set_level_backing(r, level);
                 return;
+            }
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::LevelWriteWorker,
+                );
             }
             self.store_level_overlay
                 .borrow_mut()
@@ -2750,6 +2777,13 @@ impl TypeContext {
     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
             if r.is_shared() {
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::frozen::record(if matches!(desc, TypeDesc::Tlink(_)) {
+                        crate::perf_counters::frozen::Kind::LinkShared
+                    } else {
+                        crate::perf_counters::frozen::Kind::DescWriteShared
+                    });
+                }
                 self.set_shared_desc(r, desc);
                 return;
             }
@@ -2758,6 +2792,9 @@ impl TypeContext {
                 self.check_store_desc(&desc);
                 self.store.set_desc_backing(r, desc);
                 return;
+            }
+            if self.compiler_counters_enabled && matches!(desc, TypeDesc::Tlink(_)) {
+                crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::LinkWorker);
             }
             let index = self
                 .store_desc_overlay
@@ -3309,6 +3346,14 @@ impl TypeContext {
     /// Write a memo cell; store cells are written to this compilation's
     /// overlay only. Missing local cells are ignored.
     fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        if self.compiler_counters_enabled
+            && memo.is_store()
+            && (memo.is_shared()
+                || !self.in_store_build()
+                || memo.store_index() < self.store_build_abbrev_start.get())
+        {
+            crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::MemoWrite);
+        }
         if memo.is_shared() {
             self.shared_abbrev_overlay
                 .borrow_mut()
@@ -3581,6 +3626,11 @@ impl TypeContext {
                 self.store.set_row_field_backing(rf, value);
                 return;
             }
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::RowFieldWrite,
+                );
+            }
             self.store_row_field_overlay
                 .borrow_mut()
                 .set(rf.store_index(), value);
@@ -3663,6 +3713,11 @@ impl TypeContext {
     /// Unlogged cell write (copy-session links and their restoration, undo).
     fn write_mutability_raw(&self, r: MutabilityRef, value: FieldMutability) {
         if r.is_persistent() {
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::MutabilityWrite,
+                );
+            }
             self.mutability_overlay.borrow_mut().insert(r, value);
             return;
         }
@@ -4643,6 +4698,9 @@ impl TypeContext {
         if depth == 0 {
             self.store_build_type_start.set(self.store.type_count());
             self.store_build_row_start.set(self.store.row_field_count());
+            if self.compiler_counters_enabled {
+                self.store_build_abbrev_start.set(self.store.abbrev_count());
+            }
         }
         self.store_build_depth.set(depth + 1);
         super::thread_store::set_store_build_depth(depth + 1);
@@ -5436,6 +5494,82 @@ mod tests {
         ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
         ctx.clear_abbrev_memos();
         assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+    }
+
+    #[test]
+    fn frozen_counters_exclude_local_owned_and_disabled_accesses() {
+        use crate::perf_counters::frozen::{Kind, count};
+        let mut ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
+        let read_before = count(Kind::DescReadWorker);
+        let level_before = count(Kind::LevelReadWorker);
+        let write_before = count(Kind::LinkWorker);
+        let memo_before = count(Kind::MemoWrite);
+        ctx.compiler_counters_enabled = false;
+        ctx.get_desc(stored);
+        ctx.get_level(stored);
+        ctx.write_desc_raw(stored, TypeDesc::Tlink(stored));
+        ctx.write_abbrev(memo, AbbrevMemo::Mnil);
+        assert_eq!(count(Kind::DescReadWorker), read_before);
+        assert_eq!(count(Kind::LevelReadWorker), level_before);
+        assert_eq!(count(Kind::LinkWorker), write_before);
+        assert_eq!(count(Kind::MemoWrite), memo_before);
+        ctx.compiler_counters_enabled = true;
+        let local = ctx.new_var(None);
+        ctx.get_desc(local);
+        ctx.get_level(local);
+        ctx.write_desc_raw(local, TypeDesc::Tlink(stored));
+        ctx.build_in_store(|| {
+            let owned = ctx.new_generic_type(TypeDesc::Tnil);
+            ctx.get_desc(owned);
+            ctx.get_level(owned);
+            ctx.write_desc_raw(owned, TypeDesc::Tlink(stored));
+            let owned_memo = ctx.alloc_abbrev_nil();
+            ctx.write_abbrev(owned_memo, AbbrevMemo::Mnil);
+        });
+        assert_eq!(count(Kind::DescReadWorker), read_before);
+        assert_eq!(count(Kind::LevelReadWorker), level_before);
+        assert_eq!(count(Kind::LinkWorker), write_before);
+        assert_eq!(count(Kind::MemoWrite), memo_before);
+        ctx.get_desc(stored);
+        ctx.get_level(stored);
+        ctx.write_desc_raw(stored, TypeDesc::Tlink(local));
+        ctx.write_abbrev(memo, AbbrevMemo::Mnil);
+        assert_eq!(count(Kind::DescReadWorker), read_before + 1);
+        assert_eq!(count(Kind::LevelReadWorker), level_before + 1);
+        assert_eq!(count(Kind::LinkWorker), write_before + 1);
+        assert_eq!(count(Kind::MemoWrite), memo_before + 1);
+
+        let base = ctx
+            .store
+            .shared_pool()
+            .publish(
+                super::super::shared_store::SharedGraphSizes {
+                    nodes: 1,
+                    ..Default::default()
+                },
+                |_| super::super::shared_store::SharedGraphParts {
+                    nodes: vec![(TypeDesc::Tnil, GENERIC_LEVEL)],
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: Default::default(),
+                    carried: Default::default(),
+                },
+            )
+            .unwrap();
+        let shared = super::super::shared_store::shared_ref(base, 0);
+        let links = count(Kind::LinkShared);
+        let descriptors = count(Kind::DescWriteShared);
+        let levels = count(Kind::LevelWriteShared);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_desc(shared, TypeDesc::Tlink(local));
+        ctx.set_level(shared, 1);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(count(Kind::LinkShared), links + 1);
+        // Restoration goes through the raw writer too: count both directions.
+        assert_eq!(count(Kind::DescWriteShared), descriptors + 1);
+        assert_eq!(count(Kind::LevelWriteShared), levels + 2);
     }
 
     #[test]
