@@ -454,6 +454,25 @@ jobs:
           python3 -m unittest discover -s scripts -p test_signature_equality_test.py
           python3 scripts/test_signature_equality.py
 
+  # A dependency served from the prebuilt snapshot must give the JavaScript,
+  # diagnostics and stored records that compiling it from source gives.
+  snapshot-equivalence:
+    name: Snapshot equivalence
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Compare snapshot and from-source builds
+        run: |
+          export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+          # The two projects whose dependencies this job has; the script's
+          # default list adds a workspace that needs its own package install.
+          RESCRIPT_EXECUTABLE="$PWD/rewatch/target/release/rescript" \
+            ./scripts/test_snapshot_equivalence.sh tests/belt_tests tests/tests
+
   # The output suites again with the Rust side printed by the opt-in oxc
   # printer: JavaScript is compared with the OCaml reference after
   # reformatting both, and a per-corpus ratchet
