@@ -43,6 +43,9 @@ use std::sync::Arc;
 /// allocation does not copy earlier nodes and reads take no borrow flag; a
 /// node's position is its `TypeExprRef` index.
 pub(crate) struct TypeNodes {
+    /// Leased for this store's lifetime; only initialized slots below `len`
+    /// may be read. Reusing an array does not clear its previous contents.
+    first: Rc<[TypeNode; Self::FIRST_LEN]>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
     len: Cell<usize>,
 }
@@ -55,14 +58,41 @@ struct TypeNode {
     id: Cell<i32>,
 }
 
+thread_local! {
+    // The list retains one owner. A second owner leases the array exclusively.
+    static FIRST_NODE_ARRAYS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+}
+
 impl TypeNodes {
+    const FIRST_LEN: usize = 1 << 14;
     const FIRST_CHUNK_BITS: u32 = 8;
     /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
     /// chunks cover every index a `TypeExprRef` can hold.
     const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
 
     pub(crate) fn new() -> Self {
+        let first = FIRST_NODE_ARRAYS.with(|arrays| {
+            let mut arrays = arrays.borrow_mut();
+            if let Some(free) = arrays.iter().find(|array| Rc::strong_count(array) == 1) {
+                return Rc::clone(free);
+            }
+            // Collect on the heap rather than constructing a large stack array.
+            let array: Rc<[TypeNode]> = (0..Self::FIRST_LEN)
+                .map(|_| TypeNode {
+                    desc: Cell::new(TypeDesc::Tnil),
+                    level: Cell::new(0),
+                    id: Cell::new(0),
+                })
+                .collect();
+            let array: Rc<[TypeNode; Self::FIRST_LEN]> = match array.try_into() {
+                Ok(array) => array,
+                Err(_) => unreachable!("first node array has FIRST_LEN elements"),
+            };
+            arrays.push(Rc::clone(&array));
+            array
+        });
         TypeNodes {
+            first,
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
         }
@@ -79,7 +109,16 @@ impl TypeNodes {
     /// Node `idx` (a local index or a store index with the tag stripped).
     #[inline(always)]
     fn node(&self, idx: usize) -> &TypeNode {
-        let (chunk, offset) = Self::locate(idx);
+        if idx < Self::FIRST_LEN {
+            return &self.first[idx];
+        }
+        self.node_far(idx)
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn node_far(&self, idx: usize) -> &TypeNode {
+        let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
         &self.chunks[chunk]
             .get()
             .expect("type node index refers to an unallocated chunk")[offset]
@@ -113,16 +152,20 @@ impl TypeNodes {
     /// Append a node and return its index.
     pub(crate) fn push(&self, desc: TypeDesc, level: i32, id: i32) -> usize {
         let idx = self.len.get();
-        let (chunk, offset) = Self::locate(idx);
-        let node = &self.chunks[chunk].get_or_init(|| {
-            (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
-                .map(|_| TypeNode {
-                    desc: Cell::new(TypeDesc::Tnil),
-                    level: Cell::new(0),
-                    id: Cell::new(0),
-                })
-                .collect()
-        })[offset];
+        let node = if idx < Self::FIRST_LEN {
+            &self.first[idx]
+        } else {
+            let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
+            &self.chunks[chunk].get_or_init(|| {
+                (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
+                    .map(|_| TypeNode {
+                        desc: Cell::new(TypeDesc::Tnil),
+                        level: Cell::new(0),
+                        id: Cell::new(0),
+                    })
+                    .collect()
+            })[offset]
+        };
         node.desc.set(desc);
         node.level.set(level);
         node.id.set(id);
@@ -5376,9 +5419,31 @@ mod tests {
     }
 
     #[test]
+    fn type_nodes_lease_exclusively_and_reuse_without_clearing() {
+        // A fresh thread gives this test a fresh lease list.
+        std::thread::spawn(|| {
+            let first = TypeContext::new(Arc::new(IdGenerator::new()));
+            let second = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert!(!Rc::ptr_eq(&first.types.first, &second.types.first));
+            let address = Rc::as_ptr(&first.types.first);
+            let idx = first.types.push(TypeDesc::Tvar(None), 37, 91);
+            drop(first);
+            let reused = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert_eq!(Rc::as_ptr(&reused.types.first), address);
+            assert_eq!(reused.types.len(), 0);
+            // Inspect the backing slot, not a live handle: leasing must not clear it.
+            assert_eq!(reused.types.first[idx].level.get(), 37);
+            assert_eq!(reused.types.push(TypeDesc::Tnil, 4, 5), idx);
+            assert!(matches!(reused.types.desc(idx), TypeDesc::Tnil));
+            assert_eq!(reused.types.level(idx), 4);
+            assert_eq!(reused.types.id(idx), 5);
+        }).join().unwrap();
+    }
+
+    #[test]
     fn type_nodes_address_every_node_across_chunks() {
         let nodes = TypeNodes::new();
-        let count = (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
+        let count = TypeNodes::FIRST_LEN + (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
         for i in 0..count {
             assert_eq!(nodes.push(TypeDesc::Tnil, i as i32, -(i as i32)), i);
         }
