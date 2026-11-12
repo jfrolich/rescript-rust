@@ -1,1 +1,1 @@
-- Read machine-integer literals directly without allocating frontend expansion nodes.
+- Type machine integers, two-case boolean matches and single record bindings directly without frontend expansion nodes.

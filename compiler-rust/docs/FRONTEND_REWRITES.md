@@ -33,14 +33,14 @@ claims that these moves have been implemented.
 | Relative-path module external | Constrained include containing external, preventing cross-module inlining | `rewrite_structure_item_no_spice`, `check_decl`, `is_package_relative_path` | Declaration's module source | Checker declaration entry |
 | `@inline` single nonrecursive constant binding | Inline external primitive | `transform_inline_binding`, `inline_string_semantic` | Binding pattern, recursiveness; semantic literal text | Parser completed binding or checker binding entry |
 | `@inline(value)` signature value | Inline external primitive | `transform_inline_sig_value` | Declared type and payload | Checker signature value entry |
-| Integer expression with `l` suffix | Integer without suffix; original attributes retained | `rewrite_expr` | None | Parser literal completion |
-| Integer pattern with `l` suffix | Pattern constant without suffix | `rewrite_pattern` | None | Parser pattern completion |
+| Integer expression with `l` suffix | Original node retained; digits read by `Constant::integer_digits` | `typecore::convert_constant`, `check_constant`, inline constant consumers | None | Direct (implemented) |
+| Integer pattern with `l` suffix | Original pattern handle retained; same digit accessor | `typecore::convert_constant`, `check_constant` | None | Direct (implemented) |
 | Binary `a -> f` | Application, constructor/variant application or tuple pipe, with temporary binding when needed | `desugar_pipe`, `rewrite_pipe_rhs`, `pipe_tuple_map`, `pipe_bound`, `fresh_bound_name` | Names in RHS, evaluation count/order | Parser completed pipe or checker expression entry |
-| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | One-case match with merged expression/binding attributes | `rewrite_single_binding_let` | Binding group and RHS shape | Parser completed local binding |
-| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_single_binding_let` | Experimental-feature setting, top-level vs local context | Checker binding entry |
+| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | Typed match from one borrowed case; merged expression/binding attributes | `parsetree_viewer::single_record_binding`, `typecore::type_match` | Binding group and RHS shape | Direct (implemented) |
+| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_unwrap_binding_let` | Experimental-feature setting, top-level vs local context | Checker binding entry |
 | Simple tuple binding with matching tuple RHS (possibly under opens) | Separate bindings, preserving opens | `rewrite_value_binding`, `destruct_open_tuple`, `restore_exp` | Complete pattern/RHS; recursive bindings excluded; value-constraint side data | Parser completed binding group or checker binding entry |
 | Record pattern binding to packed module identifier | Separate bindings referring to module fields | `rewrite_value_binding` | Complete RHS and unqualified field patterns | Checker binding entry |
-| Two unguarded true/false match cases | If/then/else with arms in boolean order | `boolean_match_arms`, `rewrite_expr` (`Pexp_match`) | Both cases | Parser completed match |
+| Two unguarded true/false match cases | Typed conditional with arms in boolean order | `parsetree_viewer::boolean_match_arms`, `typecore::type_conditional` | Both cases | Direct (implemented) |
 | `async` function | Function body wrapped with promise/unsafe-async operations | `rewrite_fun`, `wrap_with_unsafe_async` | N-ary parameter/default/newtype side tables, parameter location | Checker function entry |
 | `await e` | `Primitive_promise.unsafe_await` application | `transform_await` | Validation needs enclosing async function; generated ghost location comes from operand | Checker expression entry |
 | Awaited module alias, with optional module-type constraint | Dynamic import expression, module unpack and module type declaration | `transform_module_await`, `create_await_module_expression`, `local_module_type_decl` | Per-structure module-type-name deduplication | Checker module entry; not node-local parser work |
@@ -160,7 +160,7 @@ types visit tagged field types in reverse, excluding inherited types and the
 object's own attributes. Attribute payloads recurse through structures,
 signatures, types, and pattern guards (guard before pattern). Expression
 extensions validate their own payload without traversing it; raw/todo nodes
-also have dedicated handling. Integer `l` expressions/patterns ignore attributes.
+also have dedicated handling. Integer `l` expressions/patterns now retain their source nodes; the ordinary attribute traversal applies.
 `@@config` is not mapped; consumed deriving attributes are omitted.
 
 The diagnostic-producing sites (other nodes only lead to these sites) are:
