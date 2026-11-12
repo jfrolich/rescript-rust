@@ -129,7 +129,7 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
-            Resume::If(conditional) => self.finish_conditional(cx, conditional),
+            Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {

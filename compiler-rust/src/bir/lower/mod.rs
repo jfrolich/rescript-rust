@@ -72,6 +72,9 @@ pub struct Cx {
     pub loops: LoopTop,
     /// Enclosing function returns unit.
     pub return_unit: bool,
+    /// A conditional reads whether this output is free (1.5): a leaf stays
+    /// deferred, also in the direct mode of invariant P1.
+    pub probing: bool,
 }
 impl Cx {
     /// K10: C:1997 with_function_scope; no control state crosses a function.
@@ -82,6 +85,7 @@ impl Cx {
             switch_depth: 0,
             loops: LoopTop(0),
             return_unit: false,
+            probing: false,
         }
     }
     /// K1: C:1529 compile_expr (V).
@@ -283,6 +287,10 @@ struct State {
     cross_module_inline: bool,
     locations: Option<crate::lambda::LamLocTable>,
     sequence_steps: usize,
+    /// Let/Seq nodes read by row R5 step 0 of section 3.6.
+    spine_steps: usize,
+    /// Reused by the J rules that push onto a vector.
+    scratch: Vec<NodeId>,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -324,12 +332,14 @@ impl State {
             cross_module_inline: false,
             locations: None,
             sequence_steps: 0,
+            spine_steps: 0,
+            scratch: Vec::new(),
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
     /// leaves immediately instead of allocating deferred expression records.
     fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
-        if self.direct {
+        if self.direct && !cx.probing {
             Probed::Out(self.leaf(cx, value))
         } else {
             Probed::Free(self.free.push(Free::Leaf(value)))
@@ -425,12 +435,30 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
-            View::Prim { primitive, args } if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::Psequand) && args.len() == 2 => return self.short_circuit(cx, true, args[0], args[1]).map(ProbePlan::Ready),
-            View::Prim { primitive, args } if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::Psequor) && args.len() == 2 => return self.short_circuit(cx, false, args[0], args[1]).map(ProbePlan::Ready),
+            View::Prim { primitive, args }
+                if matches!(
+                    self.arena.primitive(primitive).primitive,
+                    crate::lambda::lam_primitive::Primitive::Psequand
+                        | crate::lambda::lam_primitive::Primitive::Psequor
+                ) =>
+            {
+                use crate::lambda::lam_primitive::Primitive;
+                let kind = match self.arena.primitive(primitive).primitive {
+                    Primitive::Psequand => cond::Kind::And,
+                    _ => cond::Kind::Or,
+                };
+                let &[left, right] = args else {
+                    unreachable!("a short circuit has two operands")
+                };
+                let conditional = self.conditional(cx, kind, left, right, right)?;
+                return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
+            }
             View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => "short circuit",
+                    Primitive::Psequand | Primitive::Psequor => {
+                        unreachable!("short circuits are lowered above")
+                    }
                     Primitive::PjsCall(_)
                     | Primitive::PjsApply
                     | Primitive::PjsObjectCreate(_)
@@ -447,7 +475,7 @@ impl ProbeRules for State {
                 return Err(Unsupported(reason));
             }
             View::If { condition, then_, else_ } => {
-                let conditional = self.conditional(cx, condition, then_, else_)?;
+                let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
                 return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
             }
             View::Switch { .. } => return Err(Unsupported("switch")),
@@ -609,6 +637,7 @@ mod tests {
             assert_eq!(cx.loops, LoopTop(0));
             assert_eq!(cx.switch_depth, 0);
             assert!(!cx.return_unit);
+            assert!(!cx.probing);
         }
     }
     #[test]

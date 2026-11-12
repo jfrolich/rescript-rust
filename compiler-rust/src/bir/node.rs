@@ -363,6 +363,9 @@ impl Node {
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }
+    pub(super) fn explicit_block_list(list: ListId) -> Self {
+        Self { aux: 1, ..Self::block_list(list) }
+    }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;
     }
