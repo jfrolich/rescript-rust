@@ -5,6 +5,9 @@ mod call;
 mod cond;
 mod expr;
 mod konst;
+mod prim;
+mod prim_cmp;
+mod prim_block;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -261,7 +264,7 @@ pub(crate) fn lower(
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, None, false)
+    unit::lower(input, locations, direct, None, false, true)
 }
 
 /// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
@@ -271,8 +274,16 @@ pub(crate) fn lower_with_resolver(
     direct: bool,
     resolver: Option<&crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct, resolver, cross_module_inline)
+    unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero)
+}
+
+/// One immutable summary acquisition per imported module; indexed by ImportId.
+enum ModuleConstants {
+    Unread,
+    Missing,
+    Present(std::sync::Arc<ahash::AHashMap<String, crate::cmi::persistent_env::CmjExportConstant>>),
 }
 
 struct State {
@@ -282,13 +293,17 @@ struct State {
     statements: StatementStack,
     free: FreePool,
     source_steps: usize,
+    module_paths: Vec<bool>,
+    module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
     next_order: u32,
     resolver: Option<crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
     sequence_steps: usize,
+    primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
@@ -321,6 +336,8 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            module_paths: vec![false; input.arena.nodes.len()],
+            module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
             idents: input.idents,
@@ -332,8 +349,10 @@ impl State {
             next_order,
             resolver: None,
             cross_module_inline: false,
+            check_div_by_zero: true,
             locations: None,
             sequence_steps: 0,
+            primitive_steps: 0,
             spine_steps: 0,
             scratch: Vec::new(),
         }
@@ -367,6 +386,17 @@ impl State {
         self.free = free;
         out
     }
+    /// K0: append_output drops the tail of finished output. Release its J
+    /// ownership as well as truncating its statement run. O(s + released nodes)
+    /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
+    fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+        if first.finished == Finished::True {
+            for statement in self.statements.statements(second.stmts) { self.arena.release(statement); }
+            if let Some(value) = second.value { self.arena.release(value); }
+        }
+        self.statements.append(first, second, value)
+    }
+
     /// N1: C:663 compile_deps_program_in_arena. Export transports the last value
     /// in a plain sentinel SExp removed before export extraction and coercion.
     fn complete(mut self, cx: Cx, probed: Probed) -> Lowered {
@@ -472,7 +502,9 @@ impl ProbeRules for State {
                     Primitive::Pawait => "await",
                     Primitive::Pduprecord => "record copy",
                     Primitive::PrecordRest(_) => "record rest",
-                    _ => "prim",
+                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                        source: node, primitive, operands: self.source.node(node).primitive_arguments(),
+                    }))),
                 };
                 return Err(Unsupported(reason));
             }
@@ -560,7 +592,10 @@ impl ProbeRules for State {
         resume: Self::Resume,
         children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
-        Ok(self.finish_expression(cx, resume, children))
+        match resume {
+            expr::Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
+            resume => Ok(self.finish_expression(cx, resume, children)),
+        }
     }
 }
 

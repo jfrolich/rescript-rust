@@ -1286,6 +1286,73 @@ mod tests {
         });
     }
 
+    /// `throw exception`: a branch that ends in a terminal statement.
+    fn raise(a: &mut LamArena, stamp: i32) -> Lam {
+        let exception = var(a, "exception", stamp);
+        a.prim_raw(Primitive::Praise, &[exception], LamLoc::NONE)
+    }
+    fn not(a: &mut LamArena, value: Lam) -> Lam {
+        a.prim_raw(Primitive::Pnot, &[value], LamLoc::NONE)
+    }
+
+    #[test]
+    fn negated_test_swaps_the_branches_in_every_row() {
+        for statement in [false, true] {
+            check(|a| {
+                let test = var(a, "condition", 1);
+                let test = not(a, test);
+                let (mut yes, no) = (int(a, 1), int(a, 2));
+                if statement {
+                    yes = bound(a, 2, yes);
+                }
+                a.if_raw(test, yes, no)
+            });
+            check(|a| {
+                let test = var(a, "condition", 1);
+                let test = not(a, test);
+                let (mut yes, mut no) = (effect(a, 2), effect(a, 3));
+                if statement {
+                    yes = bound(a, 4, yes);
+                    no = bound(a, 5, no);
+                }
+                a.if_raw(test, yes, no)
+            });
+        }
+    }
+    #[test]
+    fn r4_step4_then_ends_in_throw() {
+        check(|a| {
+            let (head, yes) = (effect(a, 2), raise(a, 3));
+            let yes = a.seq_raw(head, yes);
+            let no = effect(a, 4);
+            let no = bound(a, 5, no);
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn branches_that_throw_in_every_row() {
+        for statement in [false, true] {
+            for then_position in [false, true] {
+                check(|a| {
+                    let thrown = raise(a, 2);
+                    let mut other = int(a, 1);
+                    if statement {
+                        other = bound(a, 3, other);
+                    }
+                    if then_position {
+                        if_(a, 1, thrown, other)
+                    } else {
+                        if_(a, 1, other, thrown)
+                    }
+                });
+            }
+        }
+        check(|a| {
+            let (yes, no) = (raise(a, 2), raise(a, 3));
+            if_(a, 1, yes, no)
+        });
+    }
+
     #[test]
     fn r5_step0_trivial_unit_branches_of_a_unit_function() {
         for spine in [false, true] {
@@ -1532,9 +1599,10 @@ mod tests {
         ));
     }
 
-    // Level-J rule tests. The lowering cannot yet produce a negated or
-    // constant test, `throw`, `break` or `continue`, so the rules that read
-    // them are tested on statements built by hand, against J-S3 on vectors.
+    // Level-J rule tests. The lowering cannot yet produce a constant test,
+    // `break` or `continue`; the rules that read them, and every rule of
+    // J-S3 on runs, are tested on statements built by hand, against J-S3 on
+    // vectors.
     struct Hand {
         state: State,
         vars: [VarId; 4],

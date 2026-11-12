@@ -350,6 +350,12 @@ impl Node {
     pub fn aux(self) -> u16 {
         self.aux
     }
+    /// O(1): retain the existing primitive operand-list handle without copying
+    /// its elements into a traversal resume record.
+    pub(crate) fn primitive_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Prim);
+        ListId(self.words[0])
+    }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
         (self.op == Op::JNumber && self.flags.contains(NodeFlags::JS_CHAR_PRESENT))

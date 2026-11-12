@@ -155,11 +155,13 @@ impl State {
 
     /// A:191 sequence_arguments: allocate holds right to left after all operands
     /// have been lowered. Reserved slots keep their execution left to right.
+    /// O(arguments + statement slots + held literal nodes), proven by the
+    /// 10,000-wide call/block tests. Up to four outputs/values stay inline.
     pub(super) fn sequence_arguments(
         &mut self,
         method_callee: bool,
-        args: Vec<Out>,
-    ) -> (Span, Vec<NodeId>) {
+        args: smallvec::SmallVec<[Out; 4]>,
+    ) -> (Span, smallvec::SmallVec<[NodeId; 4]>) {
         let start = args.first().map_or_else(
             || self.statements.mark(),
             |arg| Span {
@@ -173,7 +175,7 @@ impl State {
             .any(|arg| self.statements.has_statements(arg.stmts));
         let mut has_code = false;
         let mut later_defines_pure = true;
-        let mut values = Vec::with_capacity(args.len());
+        let mut values = smallvec::SmallVec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate().rev() {
             self.sequence_steps += 1;
             let value = arg.value.expect("argument value");
@@ -371,7 +373,7 @@ mod tests {
             let statement = legacy.j.stmt(StmtKind::Exp(effect));
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
-            let (span, values) = state.sequence_arguments(method, args);
+            let (span, values) = state.sequence_arguments(method, args.into());
             if method || shape != 0 {
                 assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
             }
