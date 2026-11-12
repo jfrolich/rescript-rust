@@ -8440,6 +8440,32 @@ fn bsc_flag_arity(flag: &str) -> Option<BscFlagArity> {
 /// `file_level_flags_handler` on a string array: `Bsc_args.parse_exn`
 /// (compiler/ext/bsc_args.ml) applying each option in order. Returns `false`
 /// when parsing raises, after the options before the failure were applied.
+///
+/// Every `command_line_flags` entry is accepted. The ones recorded in
+/// [`FileConfigOverrides`] are those whose state a later phase of the same
+/// compile reads. The rest are accepted without effect:
+///
+/// - Read before the `@@config` is processed, so OCaml ignores them too:
+///   `-I`, `-nostdlib` and `-runtime-path` (`Res_compmisc.init_path` fixes
+///   the load path before parsing, compiler/core/js_implementation.ml:170),
+///   `-ppx` and `-bs-test-ast-conversion` (`Cmd_ppx_apply` already ran),
+///   `-ignore-parse-errors` (parsing is done), and the no-ops `-bs-jsx-mode`,
+///   `-unsafe` and `-verbose`.
+/// - Without an observable effect: `-bs-cmi` and `-bs-cmj` only skip
+///   rewriting an unchanged `.cmi`/`.cmj` (js_implementation.ml:141,
+///   compiler/core/lam_compile_main.ml:454).
+/// - Not applied per file by Rust: the IR dumps and checks (`-d*`,
+///   `-bs-loc`, `-debug-ir`, `-check-lam`), which are debugging aids; what
+///   the build decides before it compiles the file: its outputs and paths
+///   (`-o`, `-bs-package-output`, `-bs-package-name`, `-bs-ns`,
+///   `-bs-project-root`, `-bs-source-map*`, `-make-runtime`), whether it
+///   has an interface (`-bs-read-cmi`, typemod.ml:1783), the modes that stop
+///   the compile early (`-bs-ast`, `-as-pp`, `-bs-syntax-only`,
+///   `-only-parse`, `-bs-cmi-only`, `-editor-mode`), `-bs-no-bin-annot` and
+///   genType (`-bs-gentype*`); how diagnostics are shown (`-color`,
+///   `-absname`, and `-short-paths`, which Rust does not implement); and
+///   the flags that act at once on another input (`-e`, `-format`,
+///   `-reprint-source`).
 fn run_file_level_flags(
     flags: &[String],
     overrides: &mut FileConfigOverrides,
