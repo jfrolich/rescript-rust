@@ -7119,6 +7119,13 @@ fn compile_source_to_js_with_options_inner(
         .expect("lambda compiler retained module path resolver");
     check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
 
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_js(
+            &program, &module_path_resolver, &file_directives, debug, jsx_preserve,
+            !options.no_version_header, filename,
+        )?;
+    }
+
     // JS IR -> JS source. File-based compilation writes the companion map
     // here because its public return value remains the generated JS string;
     // in-process compilation carries the map on `JsOutput` instead.
@@ -11348,6 +11355,15 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         debug: pre_js.debug,
         jsx_preserve: pre_js.jsx_preserve,
     };
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        for (_, program, resolver, _) in &rendered_programs {
+            crate::bir::shadow::check_js(
+                program, resolver, js_settings.file_directives, js_settings.debug,
+                js_settings.jsx_preserve, !options.no_version_header,
+                options.source_filename.as_deref().unwrap_or("_none_"),
+            )?;
+        }
+    }
     let (js, js_outputs) = crate::timing::measure(crate::timing::Phase::Codegen, || {
         let _phase = info_span!(
             "compiler.js_print",

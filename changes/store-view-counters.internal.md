@@ -1,0 +1,1 @@
+- Count component-view builds, store pieces and replayed effects under `RESCRIPT_COMPILER_COUNTERS` (baseline for process-wide component views).

@@ -630,6 +630,22 @@ Level J opcodes (the content of `js_ir::arena::ExprKind` and `StmtKind`):
 | Expressions | `JBin` (operator in `aux`), `JNot`, `JBnot`, `JTypeof`, `JIn`, `JCond`, `JSeq`, `JCall`, `JNew`, `JIndex`, `JDot` (property `StrId`), `JLength`, `JIsNullish`, `JStrAppend`, `JFun`, `JObject`, `JArray`, `JBlockLit` (the runtime shape is fixed here, see E.2), `JOptional`, `JJsx`, `JTemplate`, `JTagged`, `JRaw`, `JAwait`, `JSpread`, `JQualified` (module member), `JNumber`, `JStr`, `JBool`, `JNull`, `JUndefined`; `Var` and `Const` are shared with level L |
 | Statements | `SBlock`, `SDecl` (`VarId`, optional value), `SExp`, `SIf`, `SWhile` (label), `SForRange`, `SForOf`, `SForAwaitOf`, `SSwitch`, `SReturn`, `SThrow`, `STry`, `SBreak` (label), `SContinue` (label), `SDebugger`, `SRest` (record rest destructuring) |
 
+The post-pass JS bridge (`bir/bridge_j.rs`, S3.1a) uses the existing packed
+schema, including `JFlatCall`, `JJson` and `JRecordRest` already present in code,
+and adds `SForRangeExisting` for ranges with no initializer (B.5).
+It distinguishes list wrappers from explicit `SBlock` statements, static index
+from block-tag access, absent from empty `new` arguments and JSX children,
+non-interpolated from interpolated templates, and integer from string switches
+in `aux`. `SDecl` packs the four binding properties below the eight `UsedStats`
+values. Array/block mutability is 0 immutable, 1 mutable, 2 not-applicable.
+Functions retain method/return-unit/async/directive metadata in existing headers
+and attributes. Template parts retain both source and semantic spelling, with
+absent semantic text representing `InvalidSource`. Raw statement/expression
+classification is retained. Module identities (including default/dynamic flags
+and ordered import attributes) are a J-only cold `Vec<ModuleId>` addressed by
+`ImportId`, parallel to the ordinary import rows. No legacy child handles or
+copy of the source arena is retained.
+
 What lowering needs is carried as follows:
 
 - **Statement or expression position.** At level L every node is an
@@ -760,10 +776,23 @@ Queries that walk today and do not in `Bir`:
 
 ### B.5 Size
 
+S3.1a adds only the cold J module identity pool: a `ModuleId` is 80 bytes on
+64-bit targets, one per distinct qualified module, addressed by a 4-byte
+`ImportId`. Its strings and attribute entries are owned metadata, not nodes.
+The packed node remains 16 bytes, function header 20, template part 12, and
+clause metadata 16; bridge tests assert these sizes. The additional opcode
+`SForRangeExisting` uses a Var child, a [bound, body] list and optional label
+instead of introducing another binder when `init` is absent. No node grows.
+`JS_LOC_PRESENT` and `JS_CHAR_PRESENT` use the two remaining flag bits; character
+decoration occupies a spare JNumber word, while the node's constant retains
+the actual numeric value. ClauseMeta.loc becomes Option<LamLoc>, still four
+bytes. Imported `SRest` uses aux bit 15 to retain its full RecordRest descriptor
+as the value child while exposing its destructured binders.
+
 Measured today: `lambda::arena::Node` is 16 bytes, `js_ir::arena::ExprNode`
 and `StmtNode` are 20. `Bir::Node` is 16 with flags included; locations and
-comments move to a parallel array allocated only when a source map is
-requested. Peak memory is expected to fall (estimated), because there is one
+comments move to a parallel array allocated on demand for either locations
+or comments, including comments without source maps. Peak memory is expected to fall (estimated), because there is one
 arena instead of three and rewrites do not append.
 
 ## C. The rewrite engine
@@ -1238,8 +1267,22 @@ a slice and removes the vector per row, about half of that; the other half
 is the lists themselves, most of them for the 75% of splits that have one
 row, which a pool does not remove. Its ceiling is therefore 0.15% to 0.2%,
 at the bar set for these stages, and the same cost is better taken by
-splitting a one-row matching without the three work lists of `split_or`
-(ceiling about 0.2%, not built either).
+splitting a one-row matching without the three work lists of `split_or`.
+
+That is done: `split_or` sorts rows into work lists (rows that may move up,
+or-pattern rows, the rest); for one row that does not start with an
+or-pattern the lists decide nothing and end in `split_constr` on that row
+with the same default environment and no next matching, so `split_or` calls
+it directly and the environment moves instead of being copied. Measured:
+-0.15% of the application build, -0.09% of `tests/tests`; under the bar, and
+kept because it is fifteen lines.
+
+After the three changes match compilation is about 2.9% of the application
+build (3.97% before them). What is left, largest first: action keys 0.47%,
+the constructor listing of `mk_failaction_pos` 0.45% (in
+`types/env_lazy.rs`), case lists of splits of several rows about 0.25%,
+stored overlay patterns 0.12%, `lower_bind` 0.13%; the rest is spread over
+the dispatch itself.
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1876,7 +1919,7 @@ model with this document as its specification.
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); row pool and the one-row split (not built, D.1: ceilings of 0.15% to 0.2% each) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); a one-row matching split without work lists (done, D.1: -0.15%); row pool (not built, D.1: ceiling 0.15% to 0.2%) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |

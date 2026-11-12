@@ -3508,6 +3508,19 @@ fn as_matrix_rows<'a, 'p: 'a>(
 
 #[cfg(test)]
 thread_local! {
+    /// Steps of `do_split_or`'s loop over its work lists, for the step-count
+    /// tests: one per row and one to finish.
+    static WORK_LIST_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_work_list_row() {
+    #[cfg(test)]
+    WORK_LIST_STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
     /// Row comparisons made by [`as_matrix`], for the step-count tests.
     static ROW_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -4219,6 +4232,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         } = *self;
         let cls = simplify_cases(ctx_ref, pa, arena, args, cls);
 
+        // One row that does not start with an or-pattern: `do_split_or`
+        // would find nothing to compare it with (`up_ok` over no rows makes
+        // no comparison and takes no identifier), put it in `before` and,
+        // with no or-pattern row and no row left, call `split_constr` on it
+        // with this default environment and no next matching. Call it
+        // directly: O(1), no work list, and the environment is not copied.
+        if let [(row, _)] = cls.as_slice()
+            && let Some((p, ps)) = row.split_first()
+            && !is_or(p, ps)
+        {
+            return self.split_constr(&cls, def, Vec::new());
+        }
         self.do_split_or(cls.into(), &def)
     }
 
@@ -4240,6 +4265,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // deep `do_split_or` stacks. Keep the exact branch order but run it as an
         // explicit loop.
         loop {
+            count_work_list_row();
             let Some(cl) = rest.pop_front() else {
                 let before = rev_deque_to_vec(before);
                 let ors = rev_deque_to_vec(ors);
@@ -10058,6 +10084,52 @@ mod tests {
             let steps = row_comparisons(|| assert_eq!(as_matrix(&pa, &pm.cases).len(), n));
             assert_eq!(steps as usize, n * (n - 1), "n = {n}");
         }
+    }
+
+    /// A matching of one row that does not start with an or-pattern is
+    /// split without `split_or`'s work lists; a matching of n rows takes
+    /// n + 1 steps of them. Both give the matching the lists would give.
+    #[test]
+    fn one_row_split_uses_no_work_list() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        fn steps_of<'p>(
+            pa: &'p PatArena<'p>,
+            arena: &LocArena<'_, RawArena>,
+            pm: &PatternMatching<'p>,
+        ) -> u64 {
+            let before = WORK_LIST_STEPS.with(|steps| steps.get());
+            let mut next_raise = 0;
+            let (first, nexts) = split_precompile(None, pa, arena, &None, pm, &mut next_raise);
+            assert!(nexts.is_empty());
+            assert_eq!(next_raise, 0);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("one plain matching");
+            };
+            assert_eq!(first.cases.len(), pm.cases.len());
+            for ((row, _), (given, _)) in first.cases.iter().zip(&pm.cases) {
+                assert!(std::ptr::eq(row[0], given[0]));
+            }
+            assert_eq!(first.default.len(), pm.default.len());
+            WORK_LIST_STEPS.with(|steps| steps.get()) - before
+        }
+        for n in [1usize, 2, 64] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            pm.cases.pop();
+            pm.default = vec![(vec![vec![omega()]], 7)];
+            let expected = if n == 1 { 0 } else { n as u64 + 1 };
+            assert_eq!(steps_of(&pa, &arena, &pm), expected, "n = {n}");
+        }
+        // One wildcard row: the variable case of `split_constr`.
+        let mut pm = constant_runs(&pa, &b, &[0]);
+        pm.default = Vec::new();
+        assert_eq!(pm.cases.len(), 1);
+        assert_eq!(steps_of(&pa, &arena, &pm), 0);
     }
 
     /// Splitting costs the row comparisons of the groups that become default

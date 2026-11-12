@@ -2990,6 +2990,9 @@ impl PersistentEnv {
                     && let Some((components, piece)) =
                         ctx.thread_store().shared_components(&components_key)
                 {
+                    if ctx.compiler_counters_enabled() {
+                        crate::perf_counters::store_views::record_view_hit();
+                    }
                     ctx.touch_store_piece(&piece);
                     ctx.register_qualified_module_components_shared(
                         components_key.clone(),
@@ -3018,6 +3021,12 @@ impl PersistentEnv {
                     (build(), None)
                 };
                 let components = Rc::new(components);
+                if shareable && ctx.compiler_counters_enabled() {
+                    crate::perf_counters::store_views::record_view_build(
+                        module_path.name(),
+                        piece.is_some(),
+                    );
+                }
                 if shareable {
                     match piece {
                         Some(piece) => ctx.thread_store().publish_shared_components(
@@ -4896,40 +4905,6 @@ fn freshened_signature_ident_plan(
     }
 
     (new_idents, local_maps, has_nested_module_types)
-}
-
-/// Number of binder stamps `freshened_signature_bound_idents_from_kind`
-/// allocates for `sig_items`: one per top-level binder
-/// (`freshened_signature_ident_plan`), then the nested module-type binders
-/// renamed by `freshen_nested_signature_module_types`.
-pub(crate) fn signature_freshen_stamp_count(sig_items: &[SignatureItem]) -> i32 {
-    fn module_type_count(module_type: &ModuleType) -> i32 {
-        match module_type {
-            ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => 0,
-            ModuleType::MtySignature(sig) => signature_freshen_stamp_count(sig),
-            ModuleType::MtyFunctor {
-                param_type, result, ..
-            } => {
-                1 + module_type_count(result)
-                    + param_type
-                        .as_ref()
-                        .map_or(0, |param| module_type_count(param))
-            }
-        }
-    }
-    sig_items
-        .iter()
-        .map(|item| match item {
-            SignatureItem::SigValue(..)
-            | SignatureItem::SigTypext(..)
-            | SignatureItem::SigType(..) => 1,
-            SignatureItem::SigModtype(_, mtd) => {
-                1 + mtd.mtd_type.as_ref().map_or(0, module_type_count)
-            }
-            SignatureItem::SigModule(_, md, _) => 1 + module_type_count(&md.md_type),
-            SignatureItem::SigClass | SignatureItem::SigClassType => 0,
-        })
-        .sum()
 }
 
 fn freshen_nested_signature_module_types(sig_items: &mut [SignatureItem], ctx: &TypeContext) {
