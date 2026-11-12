@@ -496,6 +496,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
     let compiler_opts = CompilerOptions {
         backend: crate::bir::shadow::BackendMode::from_env(),
         signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
+        env_shadow: std::env::var("RESCRIPT_ENV_SHADOW").as_deref() == Ok("1"),
         js_printer: crate::emit::PrinterMode::from_env(),
         check_only: false,
         dump_lambda: opts.dump_lambda,

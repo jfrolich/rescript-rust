@@ -2253,7 +2253,6 @@ pub(crate) struct StoredModuleComponents {
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
 }
 
-#[cfg(test)]
 impl StoredModuleComponents {
     /// The seed environment, access path and declaration, for the test that
     /// compares the tables with the environment log.

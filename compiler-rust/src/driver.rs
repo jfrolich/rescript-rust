@@ -657,6 +657,8 @@ pub struct CompilerOptions {
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
     pub signature_check: Option<crate::cmi::signature_check::SignatureCheck>,
+    /// Compare the environment tables with the version log (default off).
+    pub env_shadow: bool,
     /// Experimental JavaScript printer, selected once when options are created.
     pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
@@ -903,6 +905,7 @@ impl Default for CompilerOptions {
         Self {
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
+            env_shadow: std::env::var("RESCRIPT_ENV_SHADOW").as_deref() == Ok("1"),
             js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
             dump_lambda: false,
@@ -6582,6 +6585,8 @@ fn compile_source_to_js_with_options_inner(
     options: &CompilerOptions,
     #[cfg(test)] mut discriminator_trace: Option<&mut PreJsDiscriminatorTrace>,
 ) -> Result<String> {
+    crate::types::env::shadow::begin(options.env_shadow, filename);
+    let result = (|| {
     // Parse
     let mut parser = Parser::new(filename, source);
     let structure = module::parse_structure(&mut parser);
@@ -7157,6 +7162,9 @@ fn compile_source_to_js_with_options_inner(
     }
 
     Ok(js)
+
+    })();
+    crate::types::env::shadow::finish(result)
 }
 
 /// Build a structural module coercion by matching interface items to implementation
@@ -7809,6 +7817,8 @@ pub fn typecheck_interface_source(
     filename: &str,
     options: &CompilerOptions,
 ) -> Result<()> {
+    crate::types::env::shadow::begin(options.env_shadow, filename);
+    let result = (|| {
     // Parse as signature
     let mut parser = Parser::new(filename, source);
     let signature = module::parse_signature(&mut parser);
@@ -7986,6 +7996,9 @@ pub fn typecheck_interface_source(
     }
 
     Ok(())
+
+    })();
+    crate::types::env::shadow::finish(result)
 }
 
 /// Type-check an interface file and dump typed sexp if requested.
@@ -10342,6 +10355,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
     publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
+    crate::types::env::shadow::begin(options.env_shadow, filename);
+    let result = (|| {
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
@@ -11135,6 +11150,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             .map(PersistentEnv::loaded_units)
             .unwrap_or_default(),
     })
+
+    })();
+    crate::types::env::shadow::finish(result)
 }
 
 /// Run the JS backend on the result of
@@ -11390,6 +11408,8 @@ pub fn typecheck_preprocessed_signature_in_process(
     options: &CompilerOptions,
     registry: &ModuleRegistry,
 ) -> Result<InProcessInterfaceResult> {
+    crate::types::env::shadow::begin(options.env_shadow, filename);
+    let result = (|| {
     let _span = info_span!(
         "compiler.in_process_signature",
         module = %module_name,
@@ -11673,6 +11693,9 @@ pub fn typecheck_preprocessed_signature_in_process(
         loaded_units: internal_env.loaded_units(),
         unit_reads,
     })
+
+    })();
+    crate::types::env::shadow::finish(result)
 }
 
 #[cfg(test)]

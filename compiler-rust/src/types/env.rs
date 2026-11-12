@@ -1436,6 +1436,7 @@ pub struct Env {
 
 #[derive(Debug, Clone)]
 struct EnvData {
+    shadow: Option<env_log::LogEnv>,
     /// Value bindings.
     values: IdTbl<Arc<ValueDescription>>,
 
@@ -1489,6 +1490,11 @@ struct EnvData {
 
 impl Clone for Env {
     fn clone(&self) -> Self {
+        if let Some(log) = &self.data.shadow {
+            shadow::identity(self.id, log.id());
+            shadow::scope(self.scope_id, log.scope_id());
+            shadow::count("clone");
+        }
         Env {
             // A clone is the same version until either copy is extended.
             id: self.id,
@@ -1519,17 +1525,31 @@ impl Env {
         let mut env = self.clone();
         env.bump_id();
         env.data_mut().flags.implicit_coercion = true;
+        if let Some(log) = &self.data.shadow {
+            env.data_mut().shadow = Some(log.implicit_coercion());
+            shadow::count("implicit_coercion");
+        }
         env
     }
 
     /// `Env.is_in_signature` (env.ml:505).
     pub fn is_in_signature(&self) -> bool {
-        self.data.flags.in_signature
+        let result = (|| self.data.flags.in_signature)();
+        if let Some(log) = &self.data.shadow {
+            let other = log.is_in_signature();
+            shadow::compare("is_in_signature", "", &result, &other);
+        }
+        result
     }
 
     /// `Env.is_implicit_coercion` (env.ml:506).
     pub fn is_implicit_coercion(&self) -> bool {
-        self.data.flags.implicit_coercion
+        let result = (|| self.data.flags.implicit_coercion)();
+        if let Some(log) = &self.data.shadow {
+            let other = log.is_implicit_coercion();
+            shadow::compare("is_implicit_coercion", "", &result, &other);
+        }
+        result
     }
 
     /// Create an empty environment.
@@ -1538,7 +1558,11 @@ impl Env {
         thread_local! {
             static EMPTY_ENV: Env = Env::build_empty();
         }
-        EMPTY_ENV.with(Env::clone)
+        let mut env = EMPTY_ENV.with(Env::clone);
+        if shadow::enabled() {
+            env.data_mut().shadow = Some(env_log::LogEnv::empty());
+        }
+        env
     }
 
     fn build_empty() -> Self {
@@ -1547,6 +1571,7 @@ impl Env {
             id,
             scope_id: id,
             data: std::rc::Rc::new(EnvData {
+                shadow: None,
                 values: IdTbl::new(),
                 types: IdTbl::new(),
                 constrs: TycompTbl::new(),
@@ -1571,14 +1596,21 @@ impl Env {
         kind: OpenLookupKind,
         name: impl crate::name::NameKey,
     ) -> Option<OpenSlotUse> {
-        let name = name.name_key()?;
-        match kind {
-            OpenLookupKind::Value => self.data.values.open_slot_use(name),
-            OpenLookupKind::Type => self.data.types.open_slot_use(name),
-            OpenLookupKind::Module => self.data.modules.open_slot_use(name),
-            OpenLookupKind::Component => self.data.module_components.open_slot_use(name),
-            OpenLookupKind::Modtype => self.data.modtypes.open_slot_use(name),
+        let result = (|| {
+            let name = name.name_key()?;
+            match kind {
+                OpenLookupKind::Value => self.data.values.open_slot_use(name),
+                OpenLookupKind::Type => self.data.types.open_slot_use(name),
+                OpenLookupKind::Module => self.data.modules.open_slot_use(name),
+                OpenLookupKind::Component => self.data.module_components.open_slot_use(name),
+                OpenLookupKind::Modtype => self.data.modtypes.open_slot_use(name),
+            }
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.open_slot_use(kind, name);
+            shadow::compare("open_slot_use", name.text(), &result, &other);
         }
+        result
     }
 
     /// OCaml `TycompTbl.find_all` for constructors, with each candidate's
@@ -1590,17 +1622,24 @@ impl Env {
         &ConstructorDescription,
         OpenSlotMark<'_, ConstructorDescription>,
     )> {
-        self.data
-            .constrs
-            .find_all_marking(name)
-            .into_iter()
-            .map(|(desc, mark)| {
-                (
-                    desc.as_ref(),
-                    mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
-                )
-            })
-            .collect()
+        let result = (|| {
+            self.data
+                .constrs
+                .find_all_marking(name)
+                .into_iter()
+                .map(|(desc, mark)| {
+                    (
+                        desc.as_ref(),
+                        mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
+                    )
+                })
+                .collect()
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_all_constructors_marking(name);
+            shadow::compare("find_all_constructors_marking", name, &result, &other);
+        }
+        result
     }
 
     /// OCaml `TycompTbl.find_all` for labels, with `mk_callback` data.
@@ -1608,21 +1647,31 @@ impl Env {
         &self,
         name: &str,
     ) -> Vec<(&LabelDescription, OpenSlotMark<'_, LabelDescription>)> {
-        self.data
-            .labels
-            .find_all_marking(name)
-            .into_iter()
-            .map(|(desc, mark)| {
-                (
-                    desc.as_ref(),
-                    mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
-                )
-            })
-            .collect()
+        let result = (|| {
+            self.data
+                .labels
+                .find_all_marking(name)
+                .into_iter()
+                .map(|(desc, mark)| {
+                    (
+                        desc.as_ref(),
+                        mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
+                    )
+                })
+                .collect()
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_all_labels_marking(name);
+            shadow::compare("find_all_labels_marking", name, &result, &other);
+        }
+        result
     }
 
     /// Identity of this environment version.
     pub fn id(&self) -> EnvId {
+        if let Some(log) = &self.data.shadow {
+            shadow::identity(self.id, log.id());
+        }
         EnvId(self.id)
     }
 
@@ -1640,6 +1689,9 @@ impl Env {
 
     /// Identity of the module-level bindings (see the `scope_id` field).
     pub fn scope_id(&self) -> ScopeId {
+        if let Some(log) = &self.data.shadow {
+            shadow::scope(self.scope_id, log.scope_id());
+        }
         ScopeId(self.scope_id)
     }
 
@@ -1709,42 +1761,64 @@ impl Env {
         }
 
         let cache = self.data.scope_caches.local_module_aliases.borrow();
+        if let Some(log) = &self.data.shadow {
+            log.with_current_local_module_aliases(|other| {
+                shadow::compare(
+                    "with_current_local_module_aliases",
+                    "",
+                    &cache.as_deref().unwrap_or(&[]),
+                    &other,
+                );
+            });
+        }
         f(cache.as_deref().unwrap_or(&[]))
     }
 
     pub(crate) fn module_path_requires_env_scoped_cache(&self, module_path: &Path) -> bool {
-        if module_path.head().is_persistent() {
-            return false;
+        let result = (|| {
+            if module_path.head().is_persistent() {
+                return false;
+            }
+
+            let Some(cache_key) = Self::module_path_scope_cache_key(module_path) else {
+                return false;
+            };
+
+            if let Some(cached) = self
+                .data
+                .scope_caches
+                .module_path_requires_env_scoped
+                .borrow()
+                .get(&cache_key)
+                .copied()
+            {
+                return cached;
+            }
+
+            let requires = self.with_current_local_module_aliases(|aliases| {
+                aliases.iter().any(|(_, target_path)| {
+                    let target_head = target_path.head();
+                    self.has_module_ident(target_head)
+                        && Self::path_has_prefix(module_path, target_path)
+                })
+            });
+            self.data
+                .scope_caches
+                .module_path_requires_env_scoped
+                .borrow_mut()
+                .insert(cache_key, requires);
+            requires
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.module_path_requires_env_scoped_cache(module_path);
+            shadow::compare(
+                "module_path_requires_env_scoped_cache",
+                &format!("{:?}", module_path),
+                &result,
+                &other,
+            );
         }
-
-        let Some(cache_key) = Self::module_path_scope_cache_key(module_path) else {
-            return false;
-        };
-
-        if let Some(cached) = self
-            .data
-            .scope_caches
-            .module_path_requires_env_scoped
-            .borrow()
-            .get(&cache_key)
-            .copied()
-        {
-            return cached;
-        }
-
-        let requires = self.with_current_local_module_aliases(|aliases| {
-            aliases.iter().any(|(_, target_path)| {
-                let target_head = target_path.head();
-                self.has_module_ident(target_head)
-                    && Self::path_has_prefix(module_path, target_path)
-            })
-        });
-        self.data
-            .scope_caches
-            .module_path_requires_env_scoped
-            .borrow_mut()
-            .insert(cache_key, requires);
-        requires
+        result
     }
 
     // ========================================================================
@@ -1753,6 +1827,11 @@ impl Env {
 
     /// Add a value binding.
     pub fn add_value(&mut self, id: Ident, desc: ValueDescription) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_value(id, desc.clone());
+            shadow::count("add_value");
+        }
         self.bump_id();
         let desc = Arc::new(desc);
         self.data_mut().values.add(id, desc);
@@ -1760,20 +1839,47 @@ impl Env {
 
     /// Find a value by name.
     pub fn find_value(&self, name: impl crate::name::NameKey) -> EnvResult<&ValueDescription> {
-        self.data
-            .values
-            .find_by_name(name)
-            .map(|v| v.as_ref())
-            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .values
+                .find_by_name(name)
+                .map(|v| v.as_ref())
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_value(name);
+            shadow::compare(
+                "find_value",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a value by name, returning both the identifier and description.
-    pub fn find_value_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ValueDescription)> {
-        self.data
-            .values
-            .find_by_name_with_id(name)
-            .map(|(id, v)| (id, v.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+    pub fn find_value_with_id(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(&Ident, &ValueDescription)> {
+        let result = (|| {
+            self.data
+                .values
+                .find_by_name_with_id(name)
+                .map(|(id, v)| (id, v.as_ref()))
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_value_with_id(name);
+            shadow::compare(
+                "find_value_with_id",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a value and its local or opened path, sharing the stored description.
@@ -1781,41 +1887,69 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<ValueDescription>)> {
-        self.data
-            .values
-            .find_by_name_with_path(name)
-            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .values
+                .find_by_name_with_path(name)
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_value_arc_with_path(name);
+            shadow::compare(
+                "find_value_arc_with_path",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
+        if let Some(log) = &self.data.shadow {
+            let mut tables: Vec<_> =
+                (|| self.data.values.iter().map(|(id, v)| (id, v.as_ref())))().collect();
+            let mut other: Vec<_> = log.iter_values().collect();
+            tables.sort_by_key(|(id, _)| (id.stamp(), id.name()));
+            other.sort_by_key(|(id, _)| (id.stamp(), id.name()));
+            shadow::compare("iter_values", "", &tables, &other);
+        }
         self.data.values.iter().map(|(id, v)| (id, v.as_ref()))
     }
 
     /// Update the visible value binding for `name` with a replacement type.
     /// This replaces the current binding in-place rather than adding a shadowing entry.
     pub fn update_value_type_by_name(&mut self, name: &str, new_type: TypeExprRef) -> bool {
-        let mut update = |desc: &Arc<ValueDescription>| {
-            let mut updated = (**desc).clone();
-            updated.val_type = new_type;
-            Arc::new(updated)
-        };
-        if self
-            .data_mut()
-            .values
-            .update_by_name(name, &mut update)
-            .is_none()
-        {
-            return false;
-        }
+        let result = (|| {
+            let mut update = |desc: &Arc<ValueDescription>| {
+                let mut updated = (**desc).clone();
+                updated.val_type = new_type;
+                Arc::new(updated)
+            };
+            if self
+                .data_mut()
+                .values
+                .update_by_name(name, &mut update)
+                .is_none()
+            {
+                return false;
+            }
 
-        self.bump_id();
-        true
+            self.bump_id();
+            true
+        })();
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            let other = log.update_value_type_by_name(name, new_type);
+            shadow::compare("update_value_type_by_name", name, &result, &other);
+        }
+        result
     }
 
     /// Find a value by path.
     pub fn lookup_value(&self, path: &Path) -> EnvResult<&ValueDescription> {
-        match path.view() {
+        let result = (|| match path.view() {
             PathView::Pident(id) => self
                 .data
                 .values
@@ -1824,7 +1958,17 @@ impl Env {
                 .ok_or_else(|| EnvError::ValueNotFound(id.name().into())),
             PathView::Pdot(_, name, _) => self.find_value(name),
             PathView::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_value(path);
+            shadow::compare(
+                "lookup_value",
+                &format!("{:?}", path),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
         }
+        result
     }
 
     // ========================================================================
@@ -1837,8 +1981,13 @@ impl Env {
     /// uses (env.ml:1488), or an abstract placeholder. A previous binding of
     /// `id` loses its labels' array. Use [`Env::store_type`] for `Env.add_type`.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
-        self.bump_scope();
         let decl = decl.into();
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_type(id, decl.clone());
+            shadow::count("add_type");
+        }
+        self.bump_scope();
         let data = self.data_mut();
         data.types.add(id, decl);
         data.type_label_families.remove(&id);
@@ -1883,33 +2032,69 @@ impl Env {
         id: Ident,
         variance: Vec<super::variance::Variance>,
     ) -> Option<Arc<TypeDeclaration>> {
-        let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
-        decl.type_variance = variance;
-        let decl = Arc::new(decl);
-        self.bump_scope();
-        self.data_mut().types.add(id, decl.clone());
-        Some(decl)
+        let log_variance = self.data.shadow.as_ref().map(|_| variance.clone());
+        let result = (|| {
+            let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
+            decl.type_variance = variance;
+            let decl = Arc::new(decl);
+            self.bump_scope();
+            self.data_mut().types.add(id, decl.clone());
+            Some(decl)
+        })();
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            let other = log.update_type_variance(id, log_variance.unwrap());
+            shadow::compare("update_type_variance", id.name(), &result, &other);
+        }
+        result
     }
 
     /// Find a type by name.
     pub fn find_type(&self, name: impl crate::name::NameKey) -> EnvResult<&TypeDeclaration> {
-        self.data
-            .types
-            .find_by_name(name)
-            .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .types
+                .find_by_name(name)
+                .map(|t| t.as_ref())
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_type(name);
+            shadow::compare(
+                "find_type",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_type_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &TypeDeclaration)> {
-        self.data
-            .types
-            .find_by_name_with_path(name)
-            .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+    pub fn find_type_with_path(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(Path, &TypeDeclaration)> {
+        let result = (|| {
+            self.data
+                .types
+                .find_by_name_with_path(name)
+                .map(|(path, decl)| (path, decl.as_ref()))
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_type_with_path(name);
+            shadow::compare(
+                "find_type_with_path",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Like `find_type_with_path`, sharing the stored declaration.
@@ -1917,10 +2102,22 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<TypeDeclaration>)> {
-        self.data
-            .types
-            .find_by_name_with_path(name)
-            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .types
+                .find_by_name_with_path(name)
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_type_arc_with_path(name);
+            shadow::compare(
+                "find_type_arc_with_path",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// The name list OCaml builds with `Env.fold_types (fun x _ _ xs -> x :: xs)
@@ -1941,7 +2138,12 @@ impl Env {
 
     /// `Env.fold_modtypes` with no module prefix (compiler/ml/env.ml:2003).
     pub fn fold_modtype_names(&self) -> Vec<String> {
-        fold_names_list(self.data.modtypes.fold_name_order())
+        let result = (|| fold_names_list(self.data.modtypes.fold_name_order()))();
+        if let Some(log) = &self.data.shadow {
+            let other = log.fold_modtype_names();
+            shadow::compare("fold_modtype_names", "", &result, &other);
+        }
+        result
     }
 
     /// `Env.fold_constructors` with no module prefix (compiler/ml/env.ml:1995).
@@ -1955,108 +2157,159 @@ impl Env {
     }
 
     pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
-        // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
-        // `IdTbl.find_same`, so same-name bindings must not be treated as an
-        // exact hit when expanding a constructor path by identifier.
-        self.data
-            .types
-            .find_by_ident(id)
-            .map(|t| t.as_ref())
-            .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
+        let result = (|| {
+            // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
+            // `IdTbl.find_same`, so same-name bindings must not be treated as an
+            // exact hit when expanding a constructor path by identifier.
+            self.data
+                .types
+                .find_by_ident(id)
+                .map(|t| t.as_ref())
+                .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_type_by_ident(id);
+            shadow::compare(
+                "find_type_by_ident",
+                &format!("{:?}", id),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Shared-declaration form of [`Env::find_type_by_ident`].
     pub(crate) fn find_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
-        self.data.types.find_by_ident(id)
+        let result = (|| self.data.types.find_by_ident(id))();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_type_arc_by_ident(id);
+            shadow::compare(
+                "find_type_arc_by_ident",
+                &format!("{:?}", id),
+                &result,
+                &other,
+            );
+        }
+        result
     }
 
     /// Shared-declaration form of [`Env::lookup_type`] for `Pident` paths.
     pub(crate) fn lookup_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
-        self.data
-            .types
-            .find_by_ident(id)
-            .or_else(|| self.data.types.find_by_name(id.name_atom()))
+        let result = (|| {
+            self.data
+                .types
+                .find_by_ident(id)
+                .or_else(|| self.data.types.find_by_name(id.name_atom()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_type_arc_by_ident(id);
+            shadow::compare(
+                "lookup_type_arc_by_ident",
+                &format!("{:?}", id),
+                &result,
+                &other,
+            );
+        }
+        result
     }
 
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
-        match path.view() {
-            PathView::Pident(id) => self
-                .data
-                .types
-                .find_by_ident(id)
-                .or_else(|| {
-                    // Some in-process callers still pass copied signature ids
-                    // whose stamp does not match the current table entry. Keep
-                    // the existing recovery here; expansion paths that must
-                    // mirror OCaml `IdTbl.find_same` use
-                    // `lookup_type_ident_exact` instead
-                    // (compiler/ml/env.ml:800-813,862).
-                    self.data.types.find_by_name(id.name_atom())
-                })
-                .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(id.name().into())),
-            PathView::Pdot(parent, name, _) => {
-                // Try to find the type through the parent module's signature first.
-                // Follow MtyIdent/MtyAlias to resolve the module type to a signature.
-                if let Ok(parent_md) = self.lookup_module(parent) {
-                    // Search parent module's signature for the type
-                    fn find_type_in_module_type<'a>(
-                        env: &'a Env,
-                        mty: &'a super::decl::ModuleType,
-                        name: &str,
-                        depth: usize,
-                    ) -> Option<&'a super::decl::TypeDeclaration> {
-                        if depth > 10 {
-                            return None;
-                        }
-                        match mty {
-                            super::decl::ModuleType::MtySignature(sig) => {
-                                for item in sig.iter() {
-                                    if let super::decl::SignatureItem::SigType(id, decl, _) = item {
-                                        if id.name() == name {
-                                            return Some(decl);
+        let result = (|| {
+            match path.view() {
+                PathView::Pident(id) => self
+                    .data
+                    .types
+                    .find_by_ident(id)
+                    .or_else(|| {
+                        // Some in-process callers still pass copied signature ids
+                        // whose stamp does not match the current table entry. Keep
+                        // the existing recovery here; expansion paths that must
+                        // mirror OCaml `IdTbl.find_same` use
+                        // `lookup_type_ident_exact` instead
+                        // (compiler/ml/env.ml:800-813,862).
+                        self.data.types.find_by_name(id.name_atom())
+                    })
+                    .map(|t| t.as_ref())
+                    .ok_or_else(|| EnvError::TypeNotFound(id.name().into())),
+                PathView::Pdot(parent, name, _) => {
+                    // Try to find the type through the parent module's signature first.
+                    // Follow MtyIdent/MtyAlias to resolve the module type to a signature.
+                    if let Ok(parent_md) = self.lookup_module(parent) {
+                        // Search parent module's signature for the type
+                        fn find_type_in_module_type<'a>(
+                            env: &'a Env,
+                            mty: &'a super::decl::ModuleType,
+                            name: &str,
+                            depth: usize,
+                        ) -> Option<&'a super::decl::TypeDeclaration> {
+                            if depth > 10 {
+                                return None;
+                            }
+                            match mty {
+                                super::decl::ModuleType::MtySignature(sig) => {
+                                    for item in sig.iter() {
+                                        if let super::decl::SignatureItem::SigType(id, decl, _) =
+                                            item
+                                        {
+                                            if id.name() == name {
+                                                return Some(decl);
+                                            }
                                         }
                                     }
+                                    None
                                 }
-                                None
-                            }
-                            super::decl::ModuleType::MtyIdent(_)
-                            | super::decl::ModuleType::MtyAlias(..) => {
-                                let type_path = mty.ident_or_alias_path().unwrap();
-                                if let Ok(mtd) = env.lookup_modtype(type_path) {
-                                    if let Some(resolved) = &mtd.mtd_type {
+                                super::decl::ModuleType::MtyIdent(_)
+                                | super::decl::ModuleType::MtyAlias(..) => {
+                                    let type_path = mty.ident_or_alias_path().unwrap();
+                                    if let Ok(mtd) = env.lookup_modtype(type_path) {
+                                        if let Some(resolved) = &mtd.mtd_type {
+                                            return find_type_in_module_type(
+                                                env,
+                                                resolved,
+                                                name,
+                                                depth + 1,
+                                            );
+                                        }
+                                    }
+                                    if let Ok(md) = env.lookup_module(type_path) {
                                         return find_type_in_module_type(
                                             env,
-                                            resolved,
+                                            &md.md_type,
                                             name,
                                             depth + 1,
                                         );
                                     }
+                                    None
                                 }
-                                if let Ok(md) = env.lookup_module(type_path) {
-                                    return find_type_in_module_type(
-                                        env,
-                                        &md.md_type,
-                                        name,
-                                        depth + 1,
-                                    );
-                                }
-                                None
+                                _ => None,
                             }
-                            _ => None,
+                        }
+                        if let Some(decl) =
+                            find_type_in_module_type(self, &parent_md.md_type, name, 0)
+                        {
+                            return Ok(decl);
                         }
                     }
-                    if let Some(decl) = find_type_in_module_type(self, &parent_md.md_type, name, 0)
-                    {
-                        return Ok(decl);
-                    }
+                    // Fallback to name-based lookup
+                    self.find_type(name)
                 }
-                // Fallback to name-based lookup
-                self.find_type(name)
+                PathView::Papply(_, _) => {
+                    Err(EnvError::TypeNotFound("(functor application)".into()))
+                }
             }
-            PathView::Papply(_, _) => Err(EnvError::TypeNotFound("(functor application)".into())),
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_type(path);
+            shadow::compare(
+                "lookup_type",
+                &format!("{:?}", path),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
         }
+        result
     }
 
     // ========================================================================
@@ -2065,28 +2318,58 @@ impl Env {
 
     /// Add a constructor binding.
     pub fn add_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_constructor(id, desc.clone());
+            shadow::count("add_constructor");
+        }
         self.bump_id();
         let desc = Arc::new(desc);
         self.data_mut().constrs.add(id, desc);
     }
 
     /// Find a constructor by name.
-    pub fn find_constructor(&self, name: impl crate::name::NameKey) -> EnvResult<&ConstructorDescription> {
-        self.data
-            .constrs
-            .find_by_name(name)
-            .map(|c| c.as_ref())
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
+    pub fn find_constructor(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<&ConstructorDescription> {
+        let result = (|| {
+            self.data
+                .constrs
+                .find_by_name(name)
+                .map(|c| c.as_ref())
+                .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_constructor(name);
+            shadow::compare(
+                "find_constructor",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find all constructors with a given name.
-    pub fn find_all_constructors(&self, name: impl crate::name::NameKey) -> Vec<&ConstructorDescription> {
-        self.data
-            .constrs
-            .find_all(name)
-            .into_iter()
-            .map(|c| c.as_ref())
-            .collect()
+    pub fn find_all_constructors(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> Vec<&ConstructorDescription> {
+        let result = (|| {
+            self.data
+                .constrs
+                .find_all(name)
+                .into_iter()
+                .map(|c| c.as_ref())
+                .collect()
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_all_constructors(name);
+            shadow::compare("find_all_constructors", name.text(), &result, &other);
+        }
+        result
     }
 
     // ========================================================================
@@ -2095,6 +2378,11 @@ impl Env {
 
     /// Add a label binding.
     pub fn add_label(&mut self, id: Ident, desc: LabelDescription) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_label(id, desc.clone());
+            shadow::count("add_label");
+        }
         self.bump_id();
         let desc = Arc::new(desc);
         self.data_mut().labels.add(id, desc);
@@ -2103,6 +2391,11 @@ impl Env {
     /// Record that the labels installed for the record type `id` share the
     /// array `lbl_all` (the labels half of `store_type`, env.ml:1561-1569).
     pub fn add_type_label_family(&mut self, id: Ident, lbl_all: super::decl::LabelArrayRef) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_type_label_family(id, lbl_all);
+            shadow::count("add_type_label_family");
+        }
         self.bump_id();
         self.data_mut().type_label_families.insert(id, lbl_all);
     }
@@ -2110,26 +2403,50 @@ impl Env {
     /// `snd (find_type_descrs (Pident id))` of a record type: the array its
     /// labels were installed with.
     pub fn type_label_family(&self, id: &Ident) -> Option<super::decl::LabelArrayRef> {
-        self.data.type_label_families.get(id).copied()
+        let result = (|| self.data.type_label_families.get(id).copied())();
+        if let Some(log) = &self.data.shadow {
+            let other = log.type_label_family(id);
+            shadow::compare("type_label_family", &format!("{:?}", id), &result, &other);
+        }
+        result
     }
 
     /// Find a label by name.
     pub fn find_label(&self, name: impl crate::name::NameKey) -> EnvResult<&LabelDescription> {
-        self.data
-            .labels
-            .find_by_name(name)
-            .map(|l| l.as_ref())
-            .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .labels
+                .find_by_name(name)
+                .map(|l| l.as_ref())
+                .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_label(name);
+            shadow::compare(
+                "find_label",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find all labels with a given name.
     pub fn find_all_labels(&self, name: impl crate::name::NameKey) -> Vec<&LabelDescription> {
-        self.data
-            .labels
-            .find_all(name)
-            .into_iter()
-            .map(|l| l.as_ref())
-            .collect()
+        let result = (|| {
+            self.data
+                .labels
+                .find_all(name)
+                .into_iter()
+                .map(|l| l.as_ref())
+                .collect()
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_all_labels(name);
+            shadow::compare("find_all_labels", name.text(), &result, &other);
+        }
+        result
     }
 
     // ========================================================================
@@ -2154,6 +2471,17 @@ impl Env {
         parent_context: Option<(Path, Arc<Signature>)>,
     ) {
         let seed_env = self.clone();
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_module_with_component_context(
+                id,
+                decl.clone(),
+                component_decl.clone(),
+                component_path,
+                parent_context.clone(),
+            );
+            shadow::count("add_module_with_component_context");
+        }
         let stored_components = Rc::new(
             super::env_lazy::StoredModuleComponents::new_with_parent_context(
                 seed_env,
@@ -2179,15 +2507,30 @@ impl Env {
         self.add_module(id, decl);
         // `add_module` above already started a new scope.
         self.data_mut().functor_args.insert(id);
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.mark_functor_arg(id);
+            shadow::count("mark_functor_arg");
+        }
     }
 
     /// Check whether a module path is rooted in a functor parameter.
     pub fn is_functor_arg_path(&self, path: &Path) -> bool {
-        match path.view() {
+        let result = (|| match path.view() {
             PathView::Pident(id) => self.data.functor_args.contains(id),
             PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             PathView::Papply(_, _) => true,
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.is_functor_arg_path(path);
+            shadow::compare(
+                "is_functor_arg_path",
+                &format!("{:?}", path),
+                &result,
+                &other,
+            );
         }
+        result
     }
 
     /// Open `layers` (the component tables of one signature) under `root`.
@@ -2197,6 +2540,11 @@ impl Env {
         layers: &OpenedLayers,
         slot: Option<u32>,
     ) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_prebuilt_open_layers(root, layers, slot);
+            shadow::count("add_prebuilt_open_layers");
+        }
         if layers.is_empty() {
             return;
         }
@@ -2225,32 +2573,74 @@ impl Env {
 
     /// Find a module by name.
     pub fn find_module(&self, name: impl crate::name::NameKey) -> EnvResult<&ModuleDeclaration> {
-        self.data
-            .modules
-            .find_by_name(name)
-            .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .modules
+                .find_by_name(name)
+                .map(|m| m.as_ref())
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_module(name);
+            shadow::compare(
+                "find_module",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a module by name, returning both the identifier and declaration.
-    pub fn find_module_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModuleDeclaration)> {
-        self.data
-            .modules
-            .find_by_name_with_id(name)
-            .map(|(id, m)| (id, m.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+    pub fn find_module_with_id(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+        let result = (|| {
+            self.data
+                .modules
+                .find_by_name_with_id(name)
+                .map(|(id, m)| (id, m.as_ref()))
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_module_with_id(name);
+            shadow::compare(
+                "find_module_with_id",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a module by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_module_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModuleDeclaration)> {
-        self.data
-            .modules
-            .find_by_name_with_path(name)
-            .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+    pub fn find_module_with_path(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(Path, &ModuleDeclaration)> {
+        let result = (|| {
+            self.data
+                .modules
+                .find_by_name_with_path(name)
+                .map(|(path, decl)| (path, decl.as_ref()))
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_module_with_path(name);
+            shadow::compare(
+                "find_module_with_path",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     fn first_dotted_component_path(path: &Path) -> Option<Path> {
@@ -2264,61 +2654,119 @@ impl Env {
     }
 
     pub(crate) fn path_starts_with_opened_component(&self, path: &Path) -> bool {
-        // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
-        // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
-        // opened components without a root module binding. Detect those
-        // component-origin paths from the Env binding itself, not by spelling
-        // roots such as `Stdlib` or `Pervasives`.
-        let Some(component_path) = Self::first_dotted_component_path(path) else {
-            return false;
-        };
-        self.find_module_with_path(component_path.last())
-            .ok()
-            .is_some_and(|(selected_path, _)| selected_path.same(&component_path))
+        let result = (|| {
+            // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
+            // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
+            // opened components without a root module binding. Detect those
+            // component-origin paths from the Env binding itself, not by spelling
+            // roots such as `Stdlib` or `Pervasives`.
+            let Some(component_path) = Self::first_dotted_component_path(path) else {
+                return false;
+            };
+            self.find_module_with_path(component_path.last())
+                .ok()
+                .is_some_and(|(selected_path, _)| selected_path.same(&component_path))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.path_starts_with_opened_component(path);
+            shadow::compare(
+                "path_starts_with_opened_component",
+                &format!("{:?}", path),
+                &result,
+                &other,
+            );
+        }
+        result
     }
 
     pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.mark_implicit_open_root(name);
+            shadow::count("mark_implicit_open_root");
+        }
         self.data_mut().implicit_open_roots.insert(name.to_string());
         self.bump_scope();
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
-        let Some(component_path) = Self::first_dotted_component_path(path) else {
-            return false;
-        };
-        self.data
-            .implicit_open_roots
-            .contains(component_path.head().name())
-            && self.path_starts_with_opened_component(path)
+        let result = (|| {
+            let Some(component_path) = Self::first_dotted_component_path(path) else {
+                return false;
+            };
+            self.data
+                .implicit_open_roots
+                .contains(component_path.head().name())
+                && self.path_starts_with_opened_component(path)
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.path_starts_with_implicit_opened_component(path);
+            shadow::compare(
+                "path_starts_with_implicit_opened_component",
+                &format!("{:?}", path),
+                &result,
+                &other,
+            );
+        }
+        result
     }
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
-        self.data.modules.find_by_ident(id).is_some()
+        let result = (|| self.data.modules.find_by_ident(id).is_some())();
+        if let Some(log) = &self.data.shadow {
+            let other = log.has_module_ident(id);
+            shadow::compare("has_module_ident", &format!("{:?}", id), &result, &other);
+        }
+        result
     }
 
     pub(crate) fn lookup_module_ident_exact(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
-        // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
-        // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
-        // own name fallback in env.ml:1000-1007; exact paths must not resolve to
-        // a local/opened same-name module.
-        self.data
-            .modules
-            .find_by_ident(id)
-            .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        let result = (|| {
+            // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
+            // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
+            // own name fallback in env.ml:1000-1007; exact paths must not resolve to
+            // a local/opened same-name module.
+            self.data
+                .modules
+                .find_by_ident(id)
+                .map(|m| m.as_ref())
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_module_ident_exact(id);
+            shadow::compare(
+                "lookup_module_ident_exact",
+                &format!("{:?}", id),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     pub(crate) fn find_module_same(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
-        // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
-        // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
-        // skips opened components. This keeps alias scraping from resolving a
-        // persistent alias target through an unrelated opened component with
-        // the same name.
-        self.data
-            .modules
-            .find_local_by_ident(id)
-            .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        let result = (|| {
+            // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
+            // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
+            // skips opened components. This keeps alias scraping from resolving a
+            // persistent alias target through an unrelated opened component with
+            // the same name.
+            self.data
+                .modules
+                .find_local_by_ident(id)
+                .map(|m| m.as_ref())
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_module_same(id);
+            shadow::compare(
+                "find_module_same",
+                &format!("{:?}", id),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     pub(crate) fn with_local_module_components<R>(
@@ -2326,6 +2774,39 @@ impl Env {
         path: &Path,
         f: impl FnOnce(&super::env_lazy::StoredModuleComponents) -> R,
     ) -> Option<R> {
+        if let Some(log) = &self.data.shadow {
+            let tables = path
+                .as_pident()
+                .and_then(|id| self.data.module_components.find_by_ident(id));
+            log.with_local_module_components(path, |other| {
+                if let Some(tables) = tables {
+                    let (seed, access, decl, parent) = tables.test_parts();
+                    shadow::compare(
+                        "component_seed",
+                        &path.name(),
+                        &(access, decl, parent),
+                        &(
+                            &other.access_path,
+                            &other.module_decl,
+                            other.parent_context.is_some(),
+                        ),
+                    );
+                    if let Some(other_seed) = other.seed.env() {
+                        shadow::identity(seed.id, other_seed.id());
+                        shadow::scope(seed.scope_id, other_seed.scope_id());
+                    } else {
+                        shadow::compare("component_seed_alive", &path.name(), &true, &false);
+                    }
+                }
+            });
+            shadow::compare(
+                "with_local_module_components",
+                &path.name(),
+                &tables.is_some(),
+                &log.local_module_components_shared(path).is_some(),
+            );
+        }
+
         let PathView::Pident(id) = path.view() else {
             return None;
         };
@@ -2337,6 +2818,39 @@ impl Env {
         &self,
         path: &Path,
     ) -> Option<Rc<super::env_lazy::StoredModuleComponents>> {
+        if let Some(log) = &self.data.shadow {
+            let tables = path
+                .as_pident()
+                .and_then(|id| self.data.module_components.find_by_ident(id));
+            log.with_local_module_components(path, |other| {
+                if let Some(tables) = tables {
+                    let (seed, access, decl, parent) = tables.test_parts();
+                    shadow::compare(
+                        "component_seed",
+                        &path.name(),
+                        &(access, decl, parent),
+                        &(
+                            &other.access_path,
+                            &other.module_decl,
+                            other.parent_context.is_some(),
+                        ),
+                    );
+                    if let Some(other_seed) = other.seed.env() {
+                        shadow::identity(seed.id, other_seed.id());
+                        shadow::scope(seed.scope_id, other_seed.scope_id());
+                    } else {
+                        shadow::compare("component_seed_alive", &path.name(), &true, &false);
+                    }
+                }
+            });
+            shadow::compare(
+                "local_module_components_shared",
+                &path.name(),
+                &tables.is_some(),
+                &log.local_module_components_shared(path).is_some(),
+            );
+        }
+
         let PathView::Pident(id) = path.view() else {
             return None;
         };
@@ -2349,61 +2863,73 @@ impl Env {
 
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
-        fn lookup_submodule_in_module_type<'a>(
-            env: &'a Env,
-            mty: &'a ModuleType,
-            name: &str,
-            visiting: &mut smallvec::SmallVec<[Path; 4]>,
-        ) -> Option<&'a ModuleDeclaration> {
-            match mty {
-                ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
-                    SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
-                    _ => None,
-                }),
-                ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
-                    let alias_path = mty.ident_or_alias_path().unwrap();
-                    let md = lookup_module_inner(env, alias_path, visiting).ok()?;
-                    lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
+        let result = (|| {
+            fn lookup_submodule_in_module_type<'a>(
+                env: &'a Env,
+                mty: &'a ModuleType,
+                name: &str,
+                visiting: &mut smallvec::SmallVec<[Path; 4]>,
+            ) -> Option<&'a ModuleDeclaration> {
+                match mty {
+                    ModuleType::MtySignature(sig) => sig.iter().find_map(|item| match item {
+                        SignatureItem::SigModule(id, md, _) if id.name() == name => Some(md),
+                        _ => None,
+                    }),
+                    ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                        let alias_path = mty.ident_or_alias_path().unwrap();
+                        let md = lookup_module_inner(env, alias_path, visiting).ok()?;
+                        lookup_submodule_in_module_type(env, &md.md_type, name, visiting)
+                    }
+                    ModuleType::MtyFunctor { .. } => None,
                 }
-                ModuleType::MtyFunctor { .. } => None,
             }
+
+            fn lookup_module_inner<'a>(
+                env: &'a Env,
+                path: &Path,
+                visiting: &mut smallvec::SmallVec<[Path; 4]>,
+            ) -> EnvResult<&'a ModuleDeclaration> {
+                if visiting.contains(path) {
+                    return Err(EnvError::ModuleNotFound(path.name().into()));
+                }
+                visiting.push(*path);
+
+                match path.view() {
+                    PathView::Pident(id) => {
+                        env.data
+                            .modules
+                            .find_by_ident(id)
+                            .or_else(|| {
+                                // Fallback: try name-based lookup for stamp mismatches
+                                env.data.modules.find_by_name(id.name_atom())
+                            })
+                            .map(|m| m.as_ref())
+                            .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+                    }
+                    PathView::Pdot(parent, name, _) => {
+                        let parent_md = lookup_module_inner(env, parent, visiting)?;
+                        lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
+                            .ok_or_else(|| EnvError::ModuleNotFound((*name).into()))
+                    }
+                    PathView::Papply(_, _) => {
+                        Err(EnvError::ModuleNotFound("(functor application)".into()))
+                    }
+                }
+            }
+
+            let mut visiting = smallvec::SmallVec::new();
+            lookup_module_inner(self, path, &mut visiting)
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_module(path);
+            shadow::compare(
+                "lookup_module",
+                &format!("{:?}", path),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
         }
-
-        fn lookup_module_inner<'a>(
-            env: &'a Env,
-            path: &Path,
-            visiting: &mut smallvec::SmallVec<[Path; 4]>,
-        ) -> EnvResult<&'a ModuleDeclaration> {
-            if visiting.contains(path) {
-                return Err(EnvError::ModuleNotFound(path.name().into()));
-            }
-            visiting.push(*path);
-
-            match path.view() {
-                PathView::Pident(id) => {
-                    env.data
-                        .modules
-                        .find_by_ident(id)
-                        .or_else(|| {
-                            // Fallback: try name-based lookup for stamp mismatches
-                            env.data.modules.find_by_name(id.name_atom())
-                        })
-                        .map(|m| m.as_ref())
-                        .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
-                }
-                PathView::Pdot(parent, name, _) => {
-                    let parent_md = lookup_module_inner(env, parent, visiting)?;
-                    lookup_submodule_in_module_type(env, &parent_md.md_type, name, visiting)
-                        .ok_or_else(|| EnvError::ModuleNotFound((*name).into()))
-                }
-                PathView::Papply(_, _) => {
-                    Err(EnvError::ModuleNotFound("(functor application)".into()))
-                }
-            }
-        }
-
-        let mut visiting = smallvec::SmallVec::new();
-        lookup_module_inner(self, path, &mut visiting)
+        result
     }
 
     /// Normalize a path by following module aliases.
@@ -2411,20 +2937,35 @@ impl Env {
     /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
     /// keeps its suffix string; an unchanged `Pident` is returned itself.
     pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
-        *self.normalize_shared_path(ctx, &Arc::new(*path), 0)
+        let result = (|| *self.normalize_shared_path(ctx, &Arc::new(*path), 0))();
+        if let Some(log) = &self.data.shadow {
+            let other = log.normalize_path(ctx, path);
+            shadow::compare("normalize_path", &format!("{:?}", path), &result, &other);
+        }
+        result
     }
 
     /// Normalize the prefix of a value/extension path by following module aliases.
     /// Equivalent to OCaml's `Env.normalize_path_prefix` (env.ml:898-902),
     /// which always builds a fresh `Pdot`.
     pub fn normalize_path_prefix(&self, ctx: &TypeContext, path: &Path) -> Path {
-        match path.view() {
+        let result = (|| match path.view() {
             PathView::Pdot(..) => {
                 ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
             }
             PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.normalize_path_prefix(ctx, path);
+            shadow::compare(
+                "normalize_path_prefix",
+                &format!("{:?}", path),
+                &result,
+                &other,
+            );
         }
+        result
     }
 
     /// `normalize_path` of a path block: a fresh `Pdot` around the normalized
@@ -2459,6 +3000,11 @@ impl Env {
 
     /// Add a module type binding.
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_modtype(id, decl.clone());
+            shadow::count("add_modtype");
+        }
         self.bump_scope();
         let decl = Arc::new(decl);
         self.data_mut().modtypes.add(id, decl);
@@ -2466,58 +3012,97 @@ impl Env {
 
     /// Find a module type by name.
     pub fn find_modtype(&self, name: impl crate::name::NameKey) -> EnvResult<&ModtypeDeclaration> {
-        self.data
-            .modtypes
-            .find_by_name(name)
-            .map(|m| m.as_ref())
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+        let result = (|| {
+            self.data
+                .modtypes
+                .find_by_name(name)
+                .map(|m| m.as_ref())
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_modtype(name);
+            shadow::compare(
+                "find_modtype",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
     /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_modtype_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ModtypeDeclaration)> {
-        self.data
-            .modtypes
-            .find_by_name_with_path(name)
-            .map(|(path, decl)| (path, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+    pub fn find_modtype_with_path(
+        &self,
+        name: impl crate::name::NameKey,
+    ) -> EnvResult<(Path, &ModtypeDeclaration)> {
+        let result = (|| {
+            self.data
+                .modtypes
+                .find_by_name_with_path(name)
+                .map(|(path, decl)| (path, decl.as_ref()))
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_modtype_with_path(name);
+            shadow::compare(
+                "find_modtype_with_path",
+                name.text(),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
+        }
+        result
     }
 
     /// Find a module type by path.
     pub fn lookup_modtype(&self, path: &Path) -> EnvResult<&ModtypeDeclaration> {
-        match path.view() {
-            PathView::Pident(id) => self
-                .data
-                .modtypes
-                .find_by_ident(id)
-                .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModtypeNotFound(id.name().into())),
-            PathView::Pdot(parent, name, _) => {
-                // Try to find the modtype through the parent module's signature.
-                // First try ident-based lookup, then name-based for stamp mismatches.
-                let parent_md = self.lookup_module(parent).or_else(|_| {
-                    // Fallback: try by name if stamp doesn't match
-                    self.find_module(parent.last())
-                });
-                if let Ok(parent_md) = parent_md {
-                    if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
-                        for item in sig.iter() {
-                            if let super::decl::SignatureItem::SigModtype(id, decl) = item {
-                                if id.name() == name {
-                                    return Ok(decl);
+        let result = (|| {
+            match path.view() {
+                PathView::Pident(id) => self
+                    .data
+                    .modtypes
+                    .find_by_ident(id)
+                    .map(|m| m.as_ref())
+                    .ok_or_else(|| EnvError::ModtypeNotFound(id.name().into())),
+                PathView::Pdot(parent, name, _) => {
+                    // Try to find the modtype through the parent module's signature.
+                    // First try ident-based lookup, then name-based for stamp mismatches.
+                    let parent_md = self.lookup_module(parent).or_else(|_| {
+                        // Fallback: try by name if stamp doesn't match
+                        self.find_module(parent.last())
+                    });
+                    if let Ok(parent_md) = parent_md {
+                        if let super::decl::ModuleType::MtySignature(ref sig) = parent_md.md_type {
+                            for item in sig.iter() {
+                                if let super::decl::SignatureItem::SigModtype(id, decl) = item {
+                                    if id.name() == name {
+                                        return Ok(decl);
+                                    }
                                 }
                             }
                         }
                     }
+                    Err(EnvError::ModtypeNotFound((*name).into()))
                 }
-                Err(EnvError::ModtypeNotFound((*name).into()))
+                PathView::Papply(_, _) => {
+                    Err(EnvError::ModtypeNotFound("(functor application)".into()))
+                }
             }
-            PathView::Papply(_, _) => {
-                Err(EnvError::ModtypeNotFound("(functor application)".into()))
-            }
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.lookup_modtype(path);
+            shadow::compare(
+                "lookup_modtype",
+                &format!("{:?}", path),
+                &result.as_ref().map_err(|e| format!("{e:?}")),
+                &other.as_ref().map_err(|e| format!("{e:?}")),
+            );
         }
+        result
     }
 
     // ========================================================================
@@ -2526,11 +3111,21 @@ impl Env {
 
     /// Check if the environment has local constraints.
     pub fn has_local_constraints(&self) -> bool {
-        !self.data.local_constraints.is_empty()
+        let result = (|| !self.data.local_constraints.is_empty())();
+        if let Some(log) = &self.data.shadow {
+            let other = log.has_local_constraints();
+            shadow::compare("has_local_constraints", "", &result, &other);
+        }
+        result
     }
 
     /// Add a local constraint.
     pub fn add_local_constraint(&mut self, path: Path, decl: TypeDeclaration) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_local_constraint(path, decl.clone());
+            shadow::count("add_local_constraint");
+        }
         self.bump_scope();
         self.data_mut()
             .local_constraints
@@ -2539,16 +3134,41 @@ impl Env {
 
     /// Find a local constraint.
     pub fn find_local_constraint(&self, path: &Path) -> Option<&TypeDeclaration> {
-        // Local constraints only exist under GADT pattern refinement; skip
-        // hashing the path in the common empty case.
-        if self.data.local_constraints.is_empty() {
-            return None;
+        let result = (|| {
+            // Local constraints only exist under GADT pattern refinement; skip
+            // hashing the path in the common empty case.
+            if self.data.local_constraints.is_empty() {
+                return None;
+            }
+            self.data.local_constraints.get(path).map(|d| d.as_ref())
+        })();
+        if let Some(log) = &self.data.shadow {
+            let other = log.find_local_constraint(path);
+            shadow::compare(
+                "find_local_constraint",
+                &format!("{:?}", path),
+                &result,
+                &other,
+            );
         }
-        self.data.local_constraints.get(path).map(|d| d.as_ref())
+        result
     }
 
     /// Iterate over all local constraints.
     pub fn iter_local_constraints(&self) -> impl Iterator<Item = (&Path, &TypeDeclaration)> {
+        if let Some(log) = &self.data.shadow {
+            let mut tables: Vec<_> = (|| {
+                self.data
+                    .local_constraints
+                    .iter()
+                    .map(|(p, d)| (p, d.as_ref()))
+            })()
+            .collect();
+            let mut other: Vec<_> = log.iter_local_constraints().collect();
+            tables.sort_by_key(|(path, _)| (path.name(), path.head().stamp()));
+            other.sort_by_key(|(path, _)| (path.name(), path.head().stamp()));
+            shadow::compare("iter_local_constraints", "", &tables, &other);
+        }
         self.data
             .local_constraints
             .iter()
@@ -2559,6 +3179,11 @@ impl Env {
     /// Rust does not track GADT instances, so only the fresh scope identity
     /// that the scope-keyed caches observe is kept.
     pub fn add_gadt_instance_level(&mut self) {
+        if self.data.shadow.is_some() {
+            let log = self.data_mut().shadow.as_mut().unwrap();
+            log.add_gadt_instance_level();
+            shadow::count("add_gadt_instance_level");
+        }
         self.bump_scope();
     }
 
@@ -2598,6 +3223,7 @@ pub fn initial_env(ctx: &TypeContext) -> Env {
         return env;
     }
     let (env, piece) = ctx.build_in_store(|| build_initial_env(ctx));
+    if let Some(log) = &env.data.shadow { log.freeze(); }
     if let Some(piece) = piece {
         ctx.thread_store().publish_initial_env(env.clone(), piece);
     }
@@ -3101,7 +3727,6 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 
 /// The environment as a version log, built beside the tables and compared
 /// with them (docs/CHECKER_REDESIGN.md, H.2.8 step 4).
-#[cfg(test)]
 #[path = "env_log.rs"]
 mod env_log;
 
@@ -3621,5 +4246,159 @@ mod tests {
         );
 
         assert!(!env.module_path_requires_env_scoped_cache(&target_child_path));
+    }
+}
+
+/// Debug-only, per-worker comparison state. Compiler options select the mode;
+/// environment operations never read process environment variables.
+pub(crate) mod shadow {
+    use super::*;
+    use std::collections::BTreeMap;
+
+    #[derive(Default)]
+    struct State {
+        enabled: bool,
+        unit: String,
+        counts: BTreeMap<&'static str, u64>,
+        difference: Option<String>,
+        ids: HashMap<u64, env_log::LogEnvId>,
+        reverse_ids: HashMap<env_log::LogEnvId, u64>,
+        scopes: HashMap<u64, env_log::LogScopeId>,
+        reverse_scopes: HashMap<env_log::LogScopeId, u64>,
+    }
+
+    thread_local! {
+        static STATE: RefCell<State> = RefCell::new(State::default());
+    }
+
+    pub(crate) fn enabled() -> bool {
+        STATE.with(|state| state.borrow().enabled)
+    }
+
+    pub(crate) fn begin(enabled: bool, unit: &str) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            state.enabled = enabled;
+            if enabled {
+                state.unit = unit.to_owned();
+                state.counts.clear();
+                state.difference = None;
+            }
+        });
+    }
+
+    pub(crate) fn finish<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            if !state.enabled {
+                return result;
+            }
+            let report = serde_json::json!({
+                "stage": "env-shadow", "unit": state.unit,
+                "counts": state.counts, "difference": state.difference,
+            });
+            eprintln!("RESCRIPT_ENV_SHADOW {report}");
+            state.enabled = false;
+            match state.difference.take() {
+                Some(message) => Err(anyhow::anyhow!(message)),
+                None => result,
+            }
+        })
+    }
+
+    pub(super) fn count(operation: &'static str) {
+        STATE.with(|state| *state.borrow_mut().counts.entry(operation).or_default() += 1);
+    }
+
+    pub(super) fn compare<T: PartialEq + std::fmt::Debug>(
+        operation: &'static str,
+        key: &str,
+        tables: &T,
+        log: &T,
+    ) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            *state.counts.entry(operation).or_default() += 1;
+            if tables != log && state.difference.is_none() {
+                state.difference = Some(format!(
+                    "environment shadow mismatch in {}: {operation}({key}): tables={tables:?}; log={log:?}",
+                    state.unit,
+                ));
+            }
+        });
+    }
+
+    pub(super) fn identity(tables: u64, log: env_log::LogEnvId) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            *state.counts.entry("id").or_default() += 1;
+            let forward = state.ids.insert(tables, log).is_none_or(|old| old == log);
+            let reverse = state
+                .reverse_ids
+                .insert(log, tables)
+                .is_none_or(|old| old == tables);
+            if !(forward && reverse) && state.difference.is_none() {
+                state.difference = Some(format!(
+                    "environment shadow mismatch in {}: id({tables}): log={log:?}",
+                    state.unit
+                ));
+            }
+        });
+    }
+
+    pub(super) fn scope(tables: u64, log: env_log::LogScopeId) {
+        STATE.with(|state| {
+            let mut state = state.borrow_mut();
+            *state.counts.entry("scope_id").or_default() += 1;
+            let forward = state
+                .scopes
+                .insert(tables, log)
+                .is_none_or(|old| old == log);
+            let reverse = state
+                .reverse_scopes
+                .insert(log, tables)
+                .is_none_or(|old| old == tables);
+            if !(forward && reverse) && state.difference.is_none() {
+                state.difference = Some(format!(
+                    "environment shadow mismatch in {}: scope_id({tables}): log={log:?}",
+                    state.unit
+                ));
+            }
+        });
+    }
+}
+
+#[cfg(test)]
+mod shadow_tests {
+    use super::*;
+
+    #[test]
+    fn a_difference_poisoning_a_lookup_is_a_compilation_error() {
+        shadow::begin(true, "ShadowMismatch.res");
+        let mut env = Env::empty();
+        let id = Ident::create_persistent("missing");
+        env.data_mut().shadow.as_mut().unwrap().add_modtype(
+            id,
+            ModtypeDeclaration {
+                mtd_type: None,
+                mtd_attributes: vec![],
+                mtd_loc: super::super::DeclLoc::none(),
+            },
+        );
+        // The tables remain authoritative even when the shadow differs.
+        assert!(env.find_modtype("missing").is_err());
+        let error = shadow::finish(Ok(())).unwrap_err().to_string();
+        assert!(error.contains("ShadowMismatch.res"), "{error}");
+        assert!(error.contains("find_modtype(missing)"), "{error}");
+    }
+
+    #[test]
+    fn unchanged_clones_keep_both_identities() {
+        shadow::begin(true, "ShadowClone.res");
+        let env = Env::empty();
+        let clone = env.clone();
+        assert_eq!(env.id(), clone.id());
+        assert_eq!(env.scope_id(), clone.scope_id());
+        shadow::finish(Ok(())).unwrap();
     }
 }

@@ -1,0 +1,1 @@
+- Add opt-in environment table/log comparisons for checker migration validation.

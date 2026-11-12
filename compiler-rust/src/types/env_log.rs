@@ -1,6 +1,6 @@
 //! The environment as a version log (docs/CHECKER_REDESIGN.md H.2.7, as
-//! amended by H.2.10). Built beside the persistent tables of `Env` and not
-//! used by the compiler: this module is compiled for tests only.
+//! amended by H.2.10). Built beside the persistent tables of `Env` and
+//! used as the oracle shadow when `RESCRIPT_ENV_SHADOW=1`.
 //!
 //! # Shape
 //!
@@ -1229,10 +1229,12 @@ impl LogEnv {
         self.log.frozen.set(true);
     }
 
+    #[cfg(test)]
     pub(super) fn log(&self) -> &EnvLog {
         &self.log
     }
 
+    #[cfg(test)]
     pub(super) fn same_log(&self, other: &LogEnv) -> bool {
         Rc::ptr_eq(&self.log, &other.log)
     }
@@ -1248,6 +1250,7 @@ impl LogEnv {
     /// The environment a component table extends while it is built from
     /// `seed`, and the log the table must own to keep its children's seeds
     /// alive: `Some` exactly when extending the seed starts a new log.
+    #[cfg(test)]
     pub(super) fn component_working_env(seed: &LogEnv) -> (LogEnv, Option<Rc<EnvLog>>) {
         let mut working = seed.clone();
         if seed.log.frozen.get() {
@@ -1474,6 +1477,7 @@ impl LogEnv {
 
     /// `Env.add_type` (env.ml:1561-1569): `add_type`, then for a record its
     /// label family and one label entry per field, last field first.
+    #[cfg(test)]
     pub(super) fn store_type(
         &mut self,
         ctx: &TypeContext,
@@ -1736,6 +1740,7 @@ impl LogEnv {
     // Modules
     // ------------------------------------------------------------------
 
+    #[cfg(test)]
     pub(super) fn add_module_with_component_path(
         &mut self,
         id: Ident,
@@ -1772,13 +1777,19 @@ impl LogEnv {
     }
 
     /// `add_module_with_component_context` with the module's own path.
+    #[cfg(test)]
     pub(super) fn add_module(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module_with_component_path(id, decl, Path::pident(id));
     }
 
     /// `add_module` and one marker entry.
+    #[cfg(test)]
     pub(super) fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module(id, decl);
+        self.mark_functor_arg(id);
+    }
+
+    pub(super) fn mark_functor_arg(&mut self, id: Ident) {
         self.add(Kind::FunctorArg, id, |_| 0);
     }
 
