@@ -165,10 +165,13 @@ The bridge uses the existing Bir bulk constructors; those constructors still
 use SmallVec scratch for child/binder lists and debug-only duplicate checks.
 
 Bulk finalization establishes Var-node use counts, binder links, parameter
-facts/flags, export flags, captured flags and assignment flags. SDecl gets the
-existing constant, alias, function, block/mutable-block and optional facts;
-unknown values stay Unknown. No J normalization or stronger constant/purity
-analysis is claimed. For-of/await-of and catch bindings keep Unknown facts,
+facts/flags, export flags, captured flags and assignment flags. SDecl gets
+Const for JNumber, Alias for Var, Function with RecFlag::No for JFun,
+Block/MutableBlock for JArray/JBlockLit (NA is conservatively mutable), and
+Optional for JOptional. Other values, including JBool/JStr/JNull/JUndefined,
+JObject and JQualified, stay Unknown. JS recursion classification and stronger
+J literal/purity facts are deferred to the later J rounds. No J normalization
+is performed. For-of/await-of and catch bindings keep Unknown facts,
 matching the current editing API. Unbound legacy identities are marked JS_GLOBAL
 so they remain representable, including undeclared exports after a throw.
 

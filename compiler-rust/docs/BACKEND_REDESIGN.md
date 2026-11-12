@@ -791,8 +791,8 @@ as the value child while exposing its destructured binders.
 
 Measured today: `lambda::arena::Node` is 16 bytes, `js_ir::arena::ExprNode`
 and `StmtNode` are 20. `Bir::Node` is 16 with flags included; locations and
-comments move to a parallel array allocated only when a source map is
-requested. Peak memory is expected to fall (estimated), because there is one
+comments move to a parallel array allocated on demand for either locations
+or comments, including comments without source maps. Peak memory is expected to fall (estimated), because there is one
 arena instead of three and rewrites do not append.
 
 ## C. The rewrite engine
