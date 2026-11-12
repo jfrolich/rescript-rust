@@ -94,7 +94,9 @@ jobs:
     steps:
       - uses: actions/checkout@v6
       - name: Install the pinned Rust toolchain with the wasm target
-        run: rustup toolchain install --target wasm32-unknown-unknown
+        run: |
+          rustup toolchain install
+          rustup target add wasm32-unknown-unknown
 
       - uses: actions/cache/restore@v5
         id: cache
