@@ -39,6 +39,7 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     death_candidates: Vec<NodeId>,
+    deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
     capture_boundaries: usize,
     weighted_switches: usize,
