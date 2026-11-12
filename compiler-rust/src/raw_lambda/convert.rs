@@ -4737,7 +4737,12 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         }
                     }
                 }
-                let census_start = crate::derived_census::start(self.derived_census.is_some());
+                // O(1) disabled probe; the same converter runs without preserving
+                // census state across its mutable recursive calls.
+                if self.derived_census.is_none() {
+                    return self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
+                }
+                let census_start = crate::derived_census::start(true);
                 let census_before = self.derived_census.as_ref().map_or(0, |c| c.conversion.total());
                 let result = self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
                 if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {

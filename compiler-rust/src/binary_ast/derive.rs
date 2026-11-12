@@ -28,7 +28,12 @@ pub fn expand_structure_item_with_mapper(
     arena: &mut ParseArena,
     active: bool,
 ) -> Result<Vec<StructureItem>, String> {
-    let start = census::start(arena.derived_census.is_some());
+    // O(1) disabled probe: retain the direct call without saving profiling state
+    // across a mapper that mutably borrows the arena.
+    if arena.derived_census.is_none() {
+        return super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+    }
+    let start = census::start(true);
     let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
     let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
     if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
