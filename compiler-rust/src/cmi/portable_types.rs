@@ -2135,6 +2135,12 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                     ps_alias_rewrites: Default::default(),
                 }));
             }
+            if let Some((PublishedSignature::Portable(portable), _)) = decoded.as_ref() {
+                // Snapshot path rebasing already decoded this graph. Publish it
+                // directly: encoding it just to decode it again adds a complete
+                // traversal and an eager summary hash to the first import.
+                return shared_pers_struct(&pps, portable, pool);
+            }
             drop(decoded);
             let portable = pps.signature();
             shared_pers_struct(&pps, &portable, pool)
