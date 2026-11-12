@@ -8,11 +8,9 @@
 //! registers these interfaces, borrowed from the executable's memory and
 //! decoded on first lookup, instead of compiling the runtime.
 //!
-//! A runtime with other sources (one being edited, or another version) is
-//! compiled as before. The embedded interfaces record the source paths of the
-//! repository they were compiled in, as the `.cmi` files of a published
-//! runtime record those of the machine that built it; JavaScript imports of
-//! runtime modules do not depend on them.
+//! A runtime with other sources is compiled as before. Embedded paths use
+//! package-relative roots and the shared stored-core rebasing operation restores
+//! the installed source paths before the registry exposes a unit.
 
 use super::compile;
 use super::packages;
@@ -77,11 +75,25 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
             .ok_or_else(|| anyhow!("invalid stored extras for {name}"))?;
         anyhow::ensure!(extras.gentype_declarations.is_empty(),
             "snapshot module {name} has genType declarations");
-        Ok(ProducedModule { name, core: core.to_vec(), javascript: Default::default(), slots: Default::default() })
+        let mut normalized = stored_module::decode_core(core)
+            .ok_or_else(|| anyhow!("invalid runtime core {name}"))?;
+        normalized.rebase_paths(runtime_root, Path::new("@rescript/runtime"));
+        let (_, normalized) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+            pers_struct: normalized.pers_struct.as_ref(), info: &normalized.info, gentype_declarations: &[],
+        });
+        anyhow::ensure!(!contains_bytes(&normalized, runtime_root.to_string_lossy().as_bytes()),
+            "runtime module {name} retains a producer path");
+        let mut restored = stored_module::decode_core(&normalized).expect("normalized runtime core");
+        restored.rebase_paths(Path::new("@rescript/runtime"), runtime_root);
+        let (_, restored) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+            pers_struct: restored.pers_struct.as_ref(), info: &restored.info, gentype_declarations: &[],
+        });
+        anyhow::ensure!(restored == core, "runtime stored-core equivalence failed for {name}");
+        Ok(ProducedModule { name, core: normalized, javascript: Default::default(), slots: Default::default() })
     }).collect::<Result<Vec<_>>>()?;
     let runtime = ProducedPackage {
         name: "@rescript/runtime".into(),
-        recorded_root: runtime_root.to_string_lossy().into_owned(),
+        recorded_root: "@rescript/runtime".into(),
         sources_digest: digest,
         modules,
     };
@@ -154,7 +166,9 @@ fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> 
             {
                 let mut registry = state.module_registry.lock().unwrap();
                 for module in &runtime.modules {
-                    registry.register_stored_parts(&module.name, None, PendingCore::Bytes(module.core.clone().into()))
+                    registry.register_stored_parts(&module.name, None, PendingCore::Bytes(rebased_runtime_core(
+                        &module.core, Path::new(&runtime.recorded_root), runtime_root,
+                    ).ok_or_else(|| anyhow!("invalid runtime module {}", module.name))?.into()))
                         .ok_or_else(|| anyhow!("failed to register runtime module {}", module.name))?;
                 }
             }
@@ -284,6 +298,7 @@ fn belt_sources_digest(root: &Path) -> Result<blake3::Hash> {
     flags.sort();
     let mut hasher = blake3::Hasher::new();
     let mut add = |bytes: &[u8]| { hasher.update(&(bytes.len() as u64).to_le_bytes()); hasher.update(bytes); };
+    add(config.name.as_bytes());
     for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&flags) { add(flag.as_bytes()); }
     let mut paths = std::fs::read_dir(root.join("src"))?.map(|entry| entry.map(|entry| entry.path()))
         .collect::<std::io::Result<Vec<_>>>()?;
@@ -297,6 +312,8 @@ fn belt_sources_digest(root: &Path) -> Result<blake3::Hash> {
     Ok(hasher.finalize())
 }
 
+/// O(source bytes + module count) verification, then one package allocation.
+/// No module core is read or copied until a lookup requests it.
 /// Register the embedded runtime in `registry` if `runtime_paths` (module
 /// name, `.res` path), with the configuration at `runtime_root`, are the
 /// sources it was compiled from. Returns whether it did.
@@ -304,39 +321,158 @@ pub(crate) fn register(
     registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_paths: &[(String, PathBuf)],
-) -> bool {
+    store: Option<&compile::RuntimeStore>,
+    dump: bool,
+) -> Result<bool> {
+    let mode = std::env::var("RESCRIPT_SNAPSHOT").unwrap_or_default();
+    anyhow::ensure!(matches!(mode.as_str(), "" | "off" | "require"),
+        "RESCRIPT_SNAPSHOT must be off or require (or unset)");
+    let mismatch = |reason| fallback("@rescript/runtime", &mode, reason);
+    if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
+    if dump { return mismatch("dump flags are not supported"); }
+    if std::env::var_os("RESCRIPT_FULL_BUILD").is_some() { return mismatch("RESCRIPT_FULL_BUILD is enabled"); }
+    if let Some(option) = alternate_backend_option() { return mismatch(option); }
     let Some(Some(embedded)) = EMBEDDED.get() else {
-        return false;
+        return mismatch("the snapshot is absent");
     };
     let Some(embedded) = embedded.iter().find(|package| package.name == "@rescript/runtime") else {
-        return false;
+        return mismatch("the snapshot is absent");
     };
     if embedded.len() != runtime_paths.len()
-        || sources_digest(runtime_root, runtime_paths).ok() != Some(embedded.sources_digest)
+        || !verify_runtime(embedded.sources_digest, runtime_root, runtime_paths, store).unwrap_or(false)
     {
-        log::debug!(
-            "The runtime at {} is not the embedded one",
-            runtime_root.display()
-        );
-        return false;
+        return mismatch("its sources differ from the ones this compiler was built with");
     }
-    let mut registry = registry.lock().unwrap();
-    (0..embedded.len()).all(|slot| {
-        let Some((name, core)) = embedded.module(slot) else { return false; };
-        registry.register_stored_parts(name, None, PendingCore::Bytes(core.into())).is_some()
-    })
+    registry.lock().unwrap().register_snapshot(std::sync::Arc::new(RuntimePackage {
+        index: embedded, root: runtime_root.to_path_buf(),
+    }));
+    Ok(true)
 }
 
-/// A digest of the runtime's configuration and of every source's module name
-/// and contents (not its path: an installed runtime keeps copies of the
-/// sources elsewhere).
-fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> std::io::Result<blake3::Hash> {
+/// O(message bytes), one allocation on a package fallback, never per module.
+fn fallback(package: &str, mode: &str, reason: &str) -> Result<bool> {
+    let message = format!("Not using the prebuilt {package}: {reason}. Compiling it from source.");
+    anyhow::ensure!(mode != "require", "{message}");
+    log::info!("{message}");
+    Ok(false)
+}
+
+/// O(file count + path bytes), one stat per path and no source reads. Missing
+/// optional interfaces/configuration have a distinct marker. This follows the
+/// incremental planner's assumption: edits change size or modification time,
+/// and sources do not change during a build. It is not a tamper-proof cache.
+fn verification_key<'a>(
+    expected: blake3::Hash,
+    compiler: &str,
+    paths: impl Iterator<Item = &'a Path>,
+    mut metadata: impl FnMut(&Path) -> std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<blake3::Hash> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(expected.as_bytes());
+    hash.update(compiler.as_bytes());
+    for path in paths {
+        let name = path.as_os_str().as_encoded_bytes();
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name);
+        match metadata(path) {
+            Ok(meta) => {
+                hash.update(&[1]);
+                hash.update(&meta.len().to_le_bytes());
+                hash.update(&super::state_db::nanos_from_time(meta.modified()?).to_le_bytes());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => { hash.update(&[0]); }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(hash.finalize())
+}
+
+/// O(file count + path bytes) on a hit, no source reads; otherwise `digest`'s
+/// source-byte cost. The small memo lives beside the build DB and is removed by
+/// clean. Atomic replacement prevents a concurrent reader accepting a partial key.
+fn verified(
+    expected: blake3::Hash,
+    paths: &[PathBuf],
+    store: Option<&compile::RuntimeStore>,
+    package: &str,
+    digest: impl FnOnce() -> Result<blake3::Hash>,
+) -> Result<bool> {
+    let memo = store.and_then(|store| {
+        let key = verification_key(expected, &store.compiler_hash,
+            paths.iter().map(PathBuf::as_path), |path| std::fs::metadata(path)).ok()?;
+        Some((store.db.with_file_name(format!("snapshot-{package}.verified")), key))
+    });
+    if let Some((path, key)) = &memo {
+        if std::fs::read(path).ok().as_deref() == Some(key.as_bytes()) { return Ok(true); }
+    }
+    if digest()? != expected { return Ok(false); }
+    if let Some((path, key)) = memo {
+        // Persistence is an optimization; an unwritable build directory must not
+        // change whether an otherwise valid snapshot can be used.
+        let persist = || -> Result<()> {
+            use std::io::Write;
+            let parent = path.parent().expect("memo parent");
+            std::fs::create_dir_all(parent)?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(key.as_bytes())?;
+            file.persist(path)?;
+            Ok(())
+        };
+        if let Err(error) = persist() { log::debug!("Snapshot verification memo not saved: {error}"); }
+    }
+    Ok(true)
+}
+
+/// O(module count) path preparation plus `verified`'s cost. No module core access.
+fn verify_runtime(expected: blake3::Hash, root: &Path, sources: &[(String, PathBuf)], store: Option<&compile::RuntimeStore>) -> Result<bool> {
+    let mut paths = Vec::with_capacity(sources.len() * 2 + 2);
+    paths.push(root.join("rescript.json"));
+    paths.push(root.join("bsconfig.json"));
+    for (_, source) in sources {
+        paths.push(source.clone());
+        paths.push(source.with_extension("resi"));
+    }
+    verified(expected, &paths, store, "runtime", || sources_digest(root, sources))
+}
+
+/// Producer only: O(core bytes + filename bytes), one decode and encode per module.
+/// Runtime and Belt use the same stored-core path rebasing operation.
+fn rebased_runtime_core(bytes: &[u8], from: &Path, to: &Path) -> Option<Vec<u8>> {
+    let mut core = stored_module::decode_core(bytes)?;
+    core.rebase_paths(from, to);
+    Some(stored_module::encode_parts(&stored_module::StoredModuleRef {
+        pers_struct: core.pers_struct.as_ref(), info: &core.info, gentype_declarations: &[],
+    }).1)
+}
+
+/// O(configuration bytes), once per verification. An absent configuration uses
+/// the producer's parsed options; malformed or unreadable configurations fail.
+pub(crate) fn runtime_config(root: &Path) -> Result<crate::config::Config> {
+    match std::fs::metadata(root.join("rescript.json")) {
+        Ok(_) => packages::read_config(root),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            if root.join("bsconfig.json").exists() { return packages::read_config(root); }
+            crate::config::Config::new_from_json_string(include_str!("../../../packages/@rescript/runtime/rescript.json"))
+        }
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// O(options bytes + source bytes), one read per source. Paths and configuration
+/// whitespace are excluded; parsed compiler flags and features determine options.
+fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> Result<blake3::Hash> {
+    let config = runtime_config(runtime_root)?;
+    let mut features = config.get_experimental_features_args();
+    features.sort();
     let mut hasher = blake3::Hasher::new();
     let mut add = |bytes: &[u8]| {
         hasher.update(&(bytes.len() as u64).to_le_bytes());
         hasher.update(bytes);
     };
-    add(&std::fs::read(runtime_root.join("rescript.json"))?);
+    add(config.name.as_bytes());
+    for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&features) {
+        add(flag.as_bytes());
+    }
     for (module_name, path) in runtime_paths {
         add(module_name.as_bytes());
         add(&std::fs::read(path)?);
@@ -346,7 +482,7 @@ fn sources_digest(runtime_root: &Path, runtime_paths: &[(String, PathBuf)]) -> s
                 add(&interface);
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => add(b""),
-            Err(err) => return Err(err),
+            Err(err) => return Err(err.into()),
         }
     }
     Ok(hasher.finalize())
@@ -572,10 +708,12 @@ mod tests {
     }
 
     #[test]
-    fn producer_is_deterministic_and_belt_has_no_build_paths() {
+    fn producer_is_deterministic_and_packages_have_no_build_paths() {
         let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
         let first = compile(&runtime).unwrap();
         assert_eq!(first, compile(&runtime).unwrap());
+        let checkout = runtime.parent().unwrap().parent().unwrap().parent().unwrap();
+        assert!(!contains_bytes(&first, checkout.to_string_lossy().as_bytes()));
         let packages = decode(leak(first)).unwrap();
         let belt = packages.iter().find(|p| p.name == "@rescript/belt").unwrap();
         assert_eq!(belt.recorded_root, "@rescript/belt");
@@ -589,6 +727,111 @@ mod tests {
             assert!(core.pers_struct.unwrap().ps_filename.starts_with("@rescript/belt/src"));
             assert!(core.info.package_root.is_none());
         }
+        // Both assertions run complete builds, which replace the process-wide
+        // type-store generation. Keep them in one sequential test rather than
+        // letting the test runner overlap independent build generations.
+        relocated_runtime_cores_equal_source_compilation_without_config();
+    }
+
+    fn relocated_runtime_cores_equal_source_compilation_without_config() {
+        std::thread::Builder::new().stack_size(256 * 1024 * 1024).spawn(|| {
+            use rescript_compiler::cmi::persistent_env::SnapshotModules;
+            let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
+            let packages = Box::leak(decode(leak(compile(&runtime).unwrap())).unwrap().into_boxed_slice());
+            let index = packages.iter().find(|p| p.name == "@rescript/runtime").unwrap();
+            let installed = tempfile::tempdir().unwrap();
+            for entry in std::fs::read_dir(&runtime).unwrap() {
+                let entry = entry.unwrap();
+                if entry.path().extension().is_some_and(|ext| ext == "res" || ext == "resi") {
+                    std::fs::copy(entry.path(), installed.path().join(entry.file_name())).unwrap();
+                }
+            }
+            let config = runtime_config(installed.path()).unwrap();
+            let paths = compile::runtime_source_paths(installed.path()).unwrap();
+            assert_eq!(sources_digest(installed.path(), &paths).unwrap(), index.sources_digest);
+            rescript_compiler::types::thread_store::begin_build();
+            let registry = Mutex::new(ModuleRegistry::new());
+            let modules = compile::compile_runtime_sources(&registry, installed.path(),
+                &packages::get_build_path(installed.path()), &config, paths).unwrap();
+            let source = compile::encode_runtime_interfaces(&registry, &modules).unwrap();
+            let provider = RuntimePackage { index, root: installed.path().to_path_buf() };
+            for (name, bytes) in source {
+                let core = provider.decode(provider.find(&name).unwrap()).unwrap();
+                let encoded = stored_module::encode_parts(&stored_module::StoredModuleRef {
+                    pers_struct: core.pers_struct.as_ref(), info: &core.info, gentype_declarations: &[],
+                }).1;
+                assert!(encoded == stored_module::split(&bytes).unwrap().1, "runtime core differs: {name}");
+            }
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn require_rejects_every_runtime_fallback_reason() {
+        for reason in ["the snapshot is absent", "its sources differ", "dump flags are not supported", "RESCRIPT_FULL_BUILD is enabled"] {
+            let error = fallback("@rescript/runtime", "require", reason).unwrap_err();
+            assert!(error.to_string().contains(reason));
+            assert!(error.to_string().contains("@rescript/runtime"));
+            assert!(!fallback("@rescript/runtime", "", reason).unwrap());
+        }
+        assert!(!fallback("@rescript/runtime", "off", "disabled by RESCRIPT_SNAPSHOT=off").unwrap());
+    }
+
+    #[test]
+    fn memo_stats_each_of_ten_thousand_paths_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("source.res");
+        std::fs::write(&file, "let x = 1").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let mut steps = 0;
+        verification_key(blake3::hash(b"expected"), "compiler",
+            std::iter::repeat_n(file.as_path(), 10_000), |_| {
+                steps += 1;
+                Ok(meta.clone())
+            }).unwrap();
+        assert_eq!(steps, 10_000);
+    }
+
+    #[test]
+    fn verification_memo_reads_sources_only_on_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Source.res");
+        std::fs::write(&source, "let x = 1").unwrap();
+        let paths = vec![source.clone()];
+        let expected = blake3::hash(b"let x = 1");
+        let store = compile::RuntimeStore { db: dir.path().join("build/rescript.sqlite"), compiler_hash: "compiler".into() };
+        let reads = std::cell::Cell::new(0);
+        let digest = || { reads.set(reads.get() + 1); Ok(blake3::hash(&std::fs::read(&source)?)) };
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 1);
+        std::fs::write(&source, "let x = 100").unwrap();
+        assert!(!verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 2);
+        std::fs::write(&source, "let x = 1").unwrap();
+        std::fs::remove_file(store.db.with_file_name("snapshot-runtime.verified")).unwrap();
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
+    fn runtime_provider_is_one_package_handle() {
+        assert_eq!(std::mem::size_of::<RuntimePackage>(), 32);
+    }
+
+    #[test]
+    fn runtime_index_does_not_decode_unreferenced_modules() {
+        use rescript_compiler::cmi::persistent_env::SnapshotModules;
+        let bytes = leak(encode(&[package(10_000)]).unwrap());
+        let index = &Box::leak(decode(bytes).unwrap().into_boxed_slice())[0];
+        let provider = RuntimePackage { index, root: PathBuf::from("installed") };
+        // Invalid cores are intentional: index attachment and pending queries
+        // must not inspect or decode any core, even across 10,000 lookups.
+        let mut registry = ModuleRegistry::new();
+        registry.register_snapshot(std::sync::Arc::new(provider));
+        for slot in 0..10_000 {
+            assert!(registry.is_pending_stored(&format!("M{slot:05}")));
+        }
+        assert!(RuntimePackage { index, root: PathBuf::from("installed") }.decode(7).is_none());
     }
 
     #[test]
@@ -596,7 +839,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let write_runtime = |root: &Path, source: &str| {
             std::fs::create_dir_all(root).unwrap();
-            std::fs::write(root.join("rescript.json"), "{}").unwrap();
+            std::fs::write(root.join("rescript.json"), include_str!("../../../packages/@rescript/runtime/rescript.json")).unwrap();
             std::fs::write(root.join("A.res"), source).unwrap();
             std::fs::write(root.join("A.resi"), "let a: int").unwrap();
             vec![("A".to_string(), root.join("A.res"))]
@@ -608,11 +851,48 @@ mod tests {
         let digest = sources_digest(&first, &first_paths).unwrap();
         assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
 
+        std::fs::remove_file(second.join("rescript.json")).unwrap();
+        assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
+        let mut config: serde_json::Value = serde_json::from_str(include_str!("../../../packages/@rescript/runtime/rescript.json")).unwrap();
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_eq!(sources_digest(&second, &second_paths).unwrap(), digest);
+        config["name"] = serde_json::json!("different-runtime-package");
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+        config["name"] = serde_json::json!("@rescript/runtime");
+        config["compiler-flags"] = serde_json::json!(["-nostdlib"]);
+        std::fs::write(second.join("rescript.json"), serde_json::to_vec(&config).unwrap()).unwrap();
+        assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+        std::fs::remove_file(second.join("rescript.json")).unwrap();
         std::fs::write(second.join("A.res"), "let a = 2").unwrap();
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
         std::fs::write(second.join("A.res"), "let a = 1").unwrap();
         std::fs::remove_file(second.join("A.resi")).unwrap();
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
+    }
+}
+
+/// One runtime package attachment, not one entry per module.
+struct RuntimePackage {
+    index: &'static PackageIndex,
+    root: PathBuf,
+}
+
+impl rescript_compiler::cmi::persistent_env::SnapshotModules for RuntimePackage {
+    /// O(1), no module index access.
+    fn is_runtime(&self) -> bool { true }
+
+    /// O(log module count), borrowed name comparisons, no allocation.
+    fn find(&self, name: &str) -> Option<u32> {
+        self.index.lookup(name).and_then(|slot| u32::try_from(slot).ok())
+    }
+
+    /// O(core bytes + filename bytes), allocating only the requested core.
+    fn decode(&self, slot: u32) -> Option<stored_module::StoredCore> {
+        let (_, bytes) = self.index.module(slot as usize)?;
+        let mut core = stored_module::decode_core(bytes)?;
+        core.rebase_paths(Path::new(self.index.recorded_root), &self.root);
+        Some(core)
     }
 }
 
@@ -648,10 +928,7 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     anyhow::ensure!(matches!(mode.as_str(), "" | "off" | "require"),
         "RESCRIPT_SNAPSHOT must be off or require (or unset)");
     let mismatch = |reason: &str| -> Result<()> {
-        let message = format!("Not using the prebuilt @rescript/belt: {reason}. Compiling it from source.");
-        if mode == "require" { anyhow::bail!("{message}"); }
-        log::info!("{message}");
-        Ok(())
+        fallback("@rescript/belt", &mode, reason).map(|_| ())
     };
     if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
     if state.check_only { return mismatch("check-only is not supported"); }
@@ -675,7 +952,13 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
         || package.source_files.as_ref().is_none_or(|files|
             files.keys().any(|path| path.parent() != Some(Path::new("src"))))
     { return mismatch("its source layout differs from the snapshot"); }
-    if belt_sources_digest(&package.path)? != index.sources_digest {
+    let mut paths: Vec<_> = package.source_files.as_ref().expect("validated source files")
+        .keys().map(|path| package.path.join(path)).collect();
+    paths.sort_unstable();
+    paths.push(package.path.join("rescript.json"));
+    paths.push(package.path.join("bsconfig.json"));
+    if !verified(index.sources_digest, &paths, compile::RuntimeStore::of_build(state).as_ref(),
+        "belt", || belt_sources_digest(&package.path))? {
         return mismatch("its sources differ from the ones this compiler was built with");
     }
     let provider = std::sync::Arc::new(BeltPackage {

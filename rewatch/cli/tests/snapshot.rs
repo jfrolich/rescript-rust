@@ -14,7 +14,7 @@ fn copy_sources(source: &Path, target: &Path) {
 }
 
 #[test]
-fn one_belt_array_reference_decodes_one_snapshot_module() {
+fn one_belt_array_reference_decodes_one_belt_and_two_runtime_modules() {
     let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
     let project = tempfile::tempdir().unwrap();
     let belt = project.path().join("node_modules/@rescript/belt");
@@ -45,7 +45,9 @@ fn one_belt_array_reference_decodes_one_snapshot_module() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(output.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("Compiled 1 module"), "{stdout}");
-    assert!(stderr.contains("snapshot_modules_decoded=1\n"), "{stderr}");
+    // Belt_Array plus the implicit runtime opens (Stdlib and Pervasives).
+    // Runtime modules now participate in the same decode counter as Belt.
+    assert!(stderr.contains("snapshot_modules_decoded=3\n"), "{stderr}");
 }
 
 #[test]
@@ -135,5 +137,42 @@ fn snapshot_require_rejects_changed_sources_and_off_reports_its_reason() {
         let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         assert_eq!(output.status.success(), success, "{text}");
         assert!(text.contains(reason), "{text}");
+    }
+}
+
+#[test]
+fn relocated_runtime_without_config_honors_require_and_off() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let runtime = tempfile::tempdir().unwrap();
+    copy_sources(&checkout.join("packages/@rescript/runtime"), runtime.path());
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("rescript.json"), r#"{
+        "name":"runtime-snapshot-test", "sources":["src"],
+        "package-specs":{"module":"esmodule","suffix":".mjs","in-source":true}
+    }"#).unwrap();
+    for (mode, patch, success) in [("require", false, true), ("require", true, false), ("off", false, true)] {
+        if patch {
+            use std::io::Write;
+            std::fs::OpenOptions::new().append(true).open(runtime.path().join("Pervasives.res"))
+                .unwrap().write_all(b"\n// patched runtime\n").unwrap();
+        }
+        // Force a compilation so the no-change planner cannot skip verification.
+        std::fs::write(project.path().join("src/Main.res"), format!("let value = list{{1, 2}}->List.length\n// {mode} {patch}\n")).unwrap();
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rescript"))
+            .arg("-v").arg("build").arg(project.path())
+            .env("RESCRIPT_RUNTIME", runtime.path()).env("RESCRIPT_SNAPSHOT", mode)
+            .env_remove("RESCRIPT_FULL_BUILD")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline { child.kill().unwrap(); panic!("runtime fixture exceeded ten seconds"); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.success(), success, "{text}");
+        if patch { assert!(text.contains("Not using the prebuilt @rescript/runtime: its sources differ"), "{text}"); }
+        if mode == "off" { assert!(text.contains("Not using the prebuilt @rescript/runtime: disabled by RESCRIPT_SNAPSHOT=off"), "{text}"); }
     }
 }
