@@ -600,6 +600,18 @@ mod tests {
     }
 
     #[test]
+    fn shared_parameterless_catch_exposes_label_scope_gap() {
+        let mut a = LamArena::new();
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let catch = a.static_catch(body, 1, &[], handler);
+        let root = a.seq_raw(catch, catch);
+        let (binders, _) = sharing_facts(&a, root);
+        assert!(!binders[catch.index()], "no handler parameters");
+        assert!(matches!(import_lambda(&a, root), Err(Unsupported("reused static catch label"))));
+    }
+
+    #[test]
     fn shared_subtree_with_let_is_unsupported() {
         let mut a = LamArena::new();
         let id = Ident::new("x", 1, crate::ident::IdentFlags::NONE);

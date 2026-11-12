@@ -1974,6 +1974,14 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    `lam_pass_lets_dce::LetsState::simplif`: its Var arm reuses the replacement
    handle installed by `simplif_alias`, demonstrated by the bridge regression
    `simplify_lets_creates_shared_constant_occurrences`.
+
+   Remaining integration gap: a shared `StaticCatch` without handler
+   parameters is binder-free by this policy, but the importer's global
+   catch-label table rejects its second occurrence as `reused static catch
+   label` (reproduced in `inline_map2_test.res`). This is not an allowed lower
+   fallback. Importing such occurrences requires scoped fresh labels, or an
+   explicit change to the policy to count catch labels as binders; that choice
+   must be settled before recording the lower-stage baseline.
 2. **New side.** Lower to J; export the J program, not flattened, to a
    `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy
