@@ -41,7 +41,7 @@ def stage(source, destination, seen=None, include_dev=True):
 
 
 def build(project, mode):
-    env = dict(os.environ, RESCRIPT_RUNTIME=str(ROOT / "packages/@rescript/runtime"),
+    env = dict(os.environ, RESCRIPT_RUNTIME=os.environ.get("RESCRIPT_RUNTIME", str(ROOT / "packages/@rescript/runtime")),
                RESCRIPT_SNAPSHOT=mode, RAYON_NUM_THREADS="1", NO_COLOR="1")
     env.pop("RESCRIPT_FULL_BUILD", None)
     env.pop("RESCRIPT_COMPILER_COUNTERS", None)
@@ -118,12 +118,35 @@ def check(source):
               f"{len(expected_js)} JavaScript/TypeScript files; all dependent interface entries; both incremental directions")
 
 
+def check_runtime_laziness():
+    """One List consumer reaches three runtime interfaces, not all 113."""
+    with tempfile.TemporaryDirectory(prefix="snapshot-one-module-") as temporary:
+        project = Path(temporary)
+        (project / "src").mkdir()
+        (project / "src/Main.res").write_text("let value = list{1, 2, 3}->List.length\n")
+        (project / "rescript.json").write_text(json.dumps({
+            "name": "snapshot-one-module", "sources": ["src"],
+            "package-specs": {"module": "esmodule", "in-source": True}, "suffix": ".mjs",
+        }))
+        env = dict(os.environ, RESCRIPT_RUNTIME=os.environ.get("RESCRIPT_RUNTIME", str(ROOT / "packages/@rescript/runtime")),
+                   RESCRIPT_SNAPSHOT="require", RESCRIPT_COMPILER_COUNTERS="1", RAYON_NUM_THREADS="1")
+        result = subprocess.run([str(BINARY), "build", str(project)], env=env,
+                                capture_output=True, text=True, timeout=10)
+        if result.returncode:
+            raise AssertionError(result.stdout + result.stderr)
+        decoded = re.search(r"snapshot_modules_decoded=(\d+)", result.stderr)
+        if decoded is None or int(decoded[1]) != 3:
+            raise AssertionError(f"expected three reached runtime interfaces: {result.stderr}")
+        print("PASS snapshot-one-module: exactly 3 runtime interfaces decoded")
+
+
 def main():
     if not BINARY.is_file():
         raise RuntimeError("build rewatch in release mode, or set RESCRIPT_EXECUTABLE")
     projects = [Path(p).resolve() for p in sys.argv[1:]] or [ROOT / "tests/belt_tests", ROOT / "tests/tests", ROOT / "rewatch/testrepo"]
     for project in projects:
         check(project)
+    check_runtime_laziness()
     with tempfile.TemporaryDirectory(prefix="snapshot-matrix-") as temporary:
         fixture = Path(temporary)
         (fixture / "src").mkdir()

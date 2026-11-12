@@ -41,6 +41,16 @@ pub fn to_vec<T: Serialize + ?Sized>(value: &T) -> Result<Vec<u8>> {
     Ok(serializer.out)
 }
 
+/// Serialize into reusable storage. O(encoded bytes); capacity is retained so
+/// a metadata walk allocates only when its largest payload grows.
+pub(crate) fn to_vec_reuse<T: Serialize + ?Sized>(value: &T, buffer: &mut Vec<u8>) -> Result<()> {
+    let mut serializer = Serializer { out: std::mem::take(buffer) };
+    serializer.out.clear();
+    let result = value.serialize(&mut serializer);
+    *buffer = serializer.out;
+    result
+}
+
 /// Deserialize a `T` from all of `bytes`.
 pub fn from_slice<'de, T: de::Deserialize<'de>>(bytes: &'de [u8]) -> Result<T> {
     let mut deserializer = Deserializer { input: bytes };

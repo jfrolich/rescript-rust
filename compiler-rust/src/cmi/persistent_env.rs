@@ -116,7 +116,7 @@ type PendingModules = Mutex<HashMap<String, Arc<Mutex<Option<PendingCore>>>>>;
 /// costs only its encoded bytes.
 pub struct LazyStoredModules {
     pending: Arc<PendingModules>,
-    snapshot: Option<Arc<dyn SnapshotModules>>,
+    snapshots: Vec<Arc<dyn SnapshotModules>>,
     cached_modules: Arc<RwLock<HashMap<String, Arc<PortablePersStruct>>>>,
     module_info: Arc<RwLock<HashMap<String, InMemoryModuleInfo>>>,
 }
@@ -130,6 +130,8 @@ impl std::fmt::Debug for LazyStoredModules {
 /// An immutable package index. Names are searched in embedded bytes; a slot
 /// identifies its core without a second name lookup or a startup hash table.
 pub trait SnapshotModules: Send + Sync {
+    /// O(1), whether this index supplies the runtime package.
+    fn is_runtime(&self) -> bool { false }
     /// O(log module count) comparisons, no allocation or decoding.
     fn find(&self, name: &str) -> Option<u32>;
     /// O(core bytes + filename bytes), called once for a referenced slot.
@@ -167,8 +169,9 @@ impl LazyStoredModules {
     fn materialize_with(&self, name: &str, bytes: Option<Vec<u8>>) -> bool {
         let pending_index = self.pending.lock().unwrap();
         let Some(entry) = pending_index.get(name).cloned() else {
-            let Some(snapshot) = &self.snapshot else { return false; };
-            let Some(slot) = snapshot.find(name) else { return false; };
+            let Some((snapshot, slot)) = self.snapshots.iter()
+                .find_map(|snapshot| snapshot.find(name).map(|slot| (snapshot, slot)))
+            else { return false; };
             // The existing pending-index acquisition serializes first decodes.
             // Already decoded lookups use the registry maps, not this path.
             if self.module_info.read().unwrap().contains_key(name) { return true; }
@@ -1000,16 +1003,26 @@ impl ModuleRegistry {
         self.cached_modules
             .lazy
             .as_ref()
-            .is_some_and(|lazy| lazy.snapshot.as_ref().is_some_and(|index| index.find(name).is_some())
+            .is_some_and(|lazy| lazy.snapshots.iter().any(|index| index.find(name).is_some())
                 || lazy.pending.lock().unwrap().contains_key(name))
     }
 
+    /// O(package count), no module lookups or allocations.
+    pub fn has_runtime_snapshot(&self) -> bool {
+        self.cached_modules.lazy.as_ref()
+            .is_some_and(|lazy| lazy.snapshots.iter().any(|index| index.is_runtime()))
+    }
+
     /// Attach one immutable snapshot index before workers acquire the registry.
-    /// O(1) package work, preserving any already registered stored cores.
+    /// O(package count), preserving earlier package indexes and stored cores.
+    /// Only package handles are copied, never module names or core bytes.
     pub fn register_snapshot(&mut self, snapshot: Arc<dyn SnapshotModules>) {
-        let pending = self.lazy_stored_modules().pending.clone();
+        let previous = self.lazy_stored_modules();
+        let pending = previous.pending.clone();
+        let mut snapshots = previous.snapshots.clone();
+        snapshots.push(snapshot);
         let lazy = Arc::new(LazyStoredModules {
-            pending, snapshot: Some(snapshot),
+            pending, snapshots,
             cached_modules: self.cached_modules.inner.clone(),
             module_info: self.module_info.inner.clone(),
         });
@@ -1026,7 +1039,7 @@ impl ModuleRegistry {
         }
         let lazy = Arc::new(LazyStoredModules {
             pending: Arc::new(Mutex::new(HashMap::new())),
-            snapshot: None,
+            snapshots: Vec::new(),
             cached_modules: self.cached_modules.inner.clone(),
             module_info: self.module_info.inner.clone(),
         });
@@ -1052,7 +1065,7 @@ impl ModuleRegistry {
                 .cached_modules
                 .lazy
                 .as_ref()
-                .is_none_or(|lazy| lazy.snapshot.is_none() && lazy.pending.lock().unwrap().is_empty())
+                .is_none_or(|lazy| lazy.snapshots.is_empty() && lazy.pending.lock().unwrap().is_empty())
     }
 
     /// Whether registered module `name` belongs to `@rescript/runtime`.
@@ -9089,10 +9102,10 @@ mod snapshot_index_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    struct Index { decodes: AtomicUsize }
+    struct Index { decodes: AtomicUsize, prefix: char }
     impl SnapshotModules for Index {
         fn find(&self, name: &str) -> Option<u32> {
-            name.strip_prefix('M')?.parse::<u32>().ok().filter(|&slot| slot < 10_000)
+            name.strip_prefix(self.prefix)?.parse::<u32>().ok().filter(|&slot| slot < 10_000)
         }
         fn decode(&self, slot: u32) -> Option<super::super::stored_module::StoredCore> {
             self.decodes.fetch_add(1, Ordering::Relaxed);
@@ -9105,9 +9118,11 @@ mod snapshot_index_tests {
 
     #[test]
     fn snapshot_of_ten_thousand_modules_decodes_only_requested_slots() {
-        let index = Arc::new(Index { decodes: AtomicUsize::new(0) });
+        let index = Arc::new(Index { decodes: AtomicUsize::new(0), prefix: 'M' });
         let mut registry = ModuleRegistry::new();
         registry.register_snapshot(index.clone());
+        let other = Arc::new(Index { decodes: AtomicUsize::new(0), prefix: 'N' });
+        registry.register_snapshot(other.clone());
         assert!(!registry.is_empty());
         assert!(registry.is_pending_stored("M9999"));
         assert_eq!(index.decodes.load(Ordering::Relaxed), 0);
@@ -9119,6 +9134,9 @@ mod snapshot_index_tests {
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
         assert!(registry.module_info.with_value("M10000", |_| ()).is_none());
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
+        assert_eq!(other.decodes.load(Ordering::Relaxed), 0);
+        assert!(registry.module_info.with_value("N7", |_| ()).is_some());
+        assert_eq!(other.decodes.load(Ordering::Relaxed), 1);
     }
 }
 

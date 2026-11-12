@@ -4704,7 +4704,12 @@ impl TypeContext {
     }
 
     /// Select the stable namespace before allocating this unit's locations,
-    /// shape blocks or private interface imports.
+    /// shape blocks or private interface imports. O(filename bytes), once per
+    /// compilation, not per location. Installation directories are not identity:
+    /// snapshot relocation must preserve scopes as well as displayed filenames.
+    /// The driver supplies package name plus package-relative path, including
+    /// the extension to distinguish implementation and interface arenas. Imports
+    /// separately namespace these source-local identities by persistent unit.
     pub(crate) fn set_location_namespace(&self, unit: &str) {
         use std::hash::{Hash, Hasher};
         assert_eq!(self.next_identity_scope.get(), 1);

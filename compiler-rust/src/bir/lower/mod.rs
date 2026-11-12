@@ -11,6 +11,10 @@ mod import;
 mod jsx;
 mod prim_cmp;
 mod prim_block;
+mod switch;
+mod variant;
+mod untagged;
+mod location;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -177,6 +181,9 @@ pub trait ProbeRules {
     ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
     /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
+    /// Resolve a child continuation after preceding siblings have completed.
+    /// O(1); string-switch V allocates its result after lowering the scrutinee.
+    fn child_context(&self, cx: Cx, _resume: &Self::Resume, _index: usize) -> Cx { cx }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     /// Consume a child's result before entering its next sibling when required.
     fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed) -> Probed {
@@ -209,6 +216,7 @@ impl SourceProbe {
     ) -> Result<Probed, super::bridge::Unsupported> {
         enum Work<R> {
             Enter(Cx, NodeId),
+            EnterChild(Cx, NodeId, usize, usize),
             Finish(Cx, R, usize),
             Child(Cx, usize, usize),
         }
@@ -216,7 +224,15 @@ impl SourceProbe {
         let mut values = Vec::new();
         let mut children = Vec::new();
         while let Some(task) = work.pop() {
+            let task = match task {
+                Work::EnterChild(cx, node, parent, index) => {
+                    let Work::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
+                    Work::Enter(rules.child_context(cx, resume, index), node)
+                }
+                task => task,
+            };
             match task {
+                Work::EnterChild(..) => unreachable!("resolved child context"),
                 Work::Enter(cx, node) => {
                     self.steps += 1;
                     match rules.enter(cx, node)? {
@@ -227,7 +243,7 @@ impl SourceProbe {
                             work.push(Work::Finish(cx, resume, children.len()));
                             for (index, (cx, node)) in children.drain(..).enumerate().rev() {
                                 work.push(Work::Child(cx, parent, index));
-                                work.push(Work::Enter(cx, node));
+                                work.push(Work::EnterChild(cx, node, parent, index));
                             }
                         }
                     }
@@ -237,6 +253,7 @@ impl SourceProbe {
                         unreachable!("parent resume frame")
                     };
                     let child = values.pop().expect("completed source child");
+                    let cx = rules.child_context(cx, resume, index);
                     values.push(rules.child(cx, resume, index, child));
                 }
                 Work::Finish(cx, resume, count) => {
@@ -256,10 +273,20 @@ impl SourceProbe {
 
 /// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
 /// SExp carrying Out::value for the migration exporter, not an emitted effect.
+#[derive(Clone, Copy, Default, serde::Serialize)]
+pub(crate) struct SwitchStats {
+    pub source_visits: usize,
+    pub fingerprint_visits: usize,
+    pub comparisons: usize,
+    pub compared_pairs: usize,
+    pub location_visits: usize,
+}
+
 pub(crate) struct Lowered {
     pub program: super::bridge_j::Imported,
     pub finished: Finished,
     pub dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    pub switch_stats: SwitchStats,
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
@@ -292,6 +319,17 @@ enum ModuleConstants {
 }
 
 struct State {
+    switches: Vec<Option<switch::Plan>>,
+    variants: Vec<Option<variant::Plan>>,
+    untagged: Vec<Option<untagged::Plan>>,
+    switch_facts: Vec<switch::Facts>,
+    switch_work: Vec<(NodeId, bool)>,
+    switch_pairs: Vec<(NodeId, NodeId)>,
+    switch_primitive_hashes: Vec<u64>,
+    switch_constant_hashes: Vec<u64>,
+    switch_comparisons: usize,
+    switch_compared: usize,
+    switch_visits: usize,
     source: Bir,
     arena: Bir,
     idents: Vec<Ident>,
@@ -309,6 +347,9 @@ struct State {
     cross_module_inline: bool,
     check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
+    switch_locations: Vec<location::Fact>,
+    location_work: Vec<(NodeId,bool)>,
+    location_steps: usize,
     sequence_steps: usize,
     primitive_steps: usize,
     /// Let/Seq nodes read by row R5 step 0 of section 3.6.
@@ -344,6 +385,10 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            switch_facts: vec![switch::Facts::default(); input.arena.nodes.len()],
+            switches: Vec::new(), variants: Vec::new(), untagged: Vec::new(), switch_work: Vec::new(), switch_pairs: Vec::new(),
+            switch_primitive_hashes: Vec::new(), switch_constant_hashes: Vec::new(),
+            switch_comparisons: 0, switch_compared: 0, switch_visits: 0,
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
@@ -361,6 +406,7 @@ impl State {
             cross_module_inline: false,
             check_div_by_zero: true,
             locations: None,
+            switch_locations: Vec::new(), location_work: Vec::new(), location_steps: 0,
             sequence_steps: 0,
             primitive_steps: 0,
             spine_steps: 0,
@@ -427,6 +473,13 @@ impl State {
             program: super::bridge_j::Imported::from_lowering(self.arena, root, self.idents),
             finished: out.finished,
             dynamic_imports: self.dynamic_imports,
+            switch_stats: SwitchStats {
+                source_visits: self.source_steps,
+                fingerprint_visits: self.switch_visits,
+                comparisons: self.switch_comparisons,
+                compared_pairs: self.switch_compared,
+                location_visits: self.location_steps,
+            },
         }
     }
 }
@@ -530,8 +583,20 @@ impl ProbeRules for State {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;
                 return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
             }
-            View::Switch { .. } => return Err(Unsupported("switch")),
-            View::StrSwitch { .. } => return Err(Unsupported("string switch")),
+            View::Switch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                if matches!(self.arena.switch(header).dispatch, crate::lambda::SwitchDispatch::Variant(_)) {
+                    if variant::is_untagged(self.arena.switch(header)) {
+                        return Ok(ProbePlan::Children(expr::Resume::Untagged(self.untagged_switch(cx, scrutinee, operands, header)?)));
+                    }
+                    return Ok(ProbePlan::Children(expr::Resume::Variant(self.named_variant(cx, scrutinee, operands, header)?)));
+                }
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.integer_switch(cx, scrutinee, operands, header)?)));
+            }
+            View::StrSwitch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
+            }
             View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
@@ -598,6 +663,13 @@ impl ProbeRules for State {
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
         self.expression_children(cx, resume, into);
+    }
+    /// V: compile_string_switch_inner. O(1), after the scrutinee allocates
+    /// its temporaries and the switch result obtains its identity.
+    fn child_context(&self, cx: Cx, resume: &Self::Resume, index: usize) -> Cx {
+        if let expr::Resume::Switch(frame) = resume {
+            self.switch_child_context(cx, *frame, index)
+        } else { cx }
     }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed) -> Probed {
