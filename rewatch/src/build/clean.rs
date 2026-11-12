@@ -94,16 +94,19 @@ pub fn write_in_process_record(
             || build_state.modules.get(name).is_none_or(|m| m.compile_dirty))) {
         prepared.clear();
     }
-    let digests = std::sync::OnceLock::new();
+    let packages: Vec<_> = build_state.packages.iter()
+        .map(|(name, package)| (name, package, prepared.remove(name))).collect();
     crate::build::phase_mark("record-digests");
+    // of_compiled itself uses Rayon. Initializing it lazily inside the package
+    // loop can reenter the same OnceLock when Rayon steals another package job.
+    let digests = packages.iter().any(|(_, _, record)| record.is_none())
+        .then(|| build::incremental::UnitDigests::of_compiled(build_state));
     let compiles = build::incremental::CompileRecords::lock(build_state);
     // A successful one-shot build records the compiler identity with it
     // (see `build::CompilerInfoWrite`).
     let source_map_args = build::compiler_info::source_map_args(build_state);
     let with_compiler_info =
         compiler_info_write == build::CompilerInfoWrite::WithRecord && build_state.build_run.succeeded();
-    let packages: Vec<_> = build_state.packages.iter()
-        .map(|(name, package)| (name, package, prepared.remove(name))).collect();
     packages.into_par_iter().for_each(|(package_name, package, prepared)| {
             let mut record = match prepared {
                 Some(mut record) => {
@@ -111,7 +114,7 @@ pub fn write_in_process_record(
                     record
                 }
                 None => build::incremental::current_record(build_state, &compiles, package_name,
-                    digests.get_or_init(|| build::incremental::UnitDigests::of_compiled(build_state))),
+                    digests.as_ref().expect("unprepared packages need final-state digests")),
             };
             if with_compiler_info
                 && let Some(entries) =

@@ -16,11 +16,19 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
     (project / "src").mkdir()
     (project / "rescript.json").write_text(json.dumps({
         "name": "prepared-record", "namespace": True, "sources": ["src"],
-        "gentypeconfig": {"module": "esmodule"},
+        "gentypeconfig": {"module": "esmodule"}, "dependencies": ["local-dep"],
         "package-specs": [{"module": "esmodule", "in-source": True, "suffix": ".mjs"}],
     }))
+    dependency = project / "node_modules/local-dep"
+    (dependency / "src").mkdir(parents=True)
+    (dependency / "package.json").write_text('{"name":"local-dep","version":"1.0.0"}')
+    (dependency / "rescript.json").write_text(json.dumps({
+        "name": "local-dep", "sources": ["src"],
+        "package-specs": [{"module": "esmodule", "in-source": True, "suffix": ".mjs"}],
+    }))
+    (dependency / "src/Dependency.res").write_text("let value = 1\n")
     for name, text in {
-        "A.res": "let n = 1\nlet f = x => x + n\n",
+        "A.res": "let n = Dependency.value\nlet f = x => x + n\n",
         "B.res": "let f = x => A.f(x)\n",
         "C.resi": "let value: int\n",
         "C.res": "let value = B.f(2)\n",
@@ -59,4 +67,10 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
     build(full=True)
     assert incremental == outputs(), "incremental edit and full build differ"
     assert "Compiled 0 modules" in build()
+    # Multiple package jobs must not lazily initialize a shared snapshot whose
+    # constructor itself schedules Rayon work (a reentrant OnceLock deadlock).
+    for workers in (2, 4, 8):
+        env["RAYON_NUM_THREADS"] = str(workers)
+        for _ in range(3):
+            build(full=True)
     print("Prepared/fallback rows identical; incremental edit matches full build; unchanged builds compile zero modules")
