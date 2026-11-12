@@ -175,7 +175,7 @@ entry points `for_function`, `for_let`, `for_trywith`, `for_multiple_match`,
 | --- | --- |
 | Column and row order, splitting into or-groups, variable and constructor groups | `split_precompile`, `Split`, `simplify_cases`, `simplify_or` |
 | Which test is made at each step and how cases are divided | `divide`, `divide_line`, `do_compile_matching` |
-| Sharing of equal actions and creation of exits (`staticcatch` labels) | `StoreExp`, `make_key` (keys are strings built by `key_encode.rs`), `make_catch`, `make_exit`, `comp_exit`, `comp_match_handlers` |
+| Sharing of equal actions and creation of exits (`staticcatch` labels) | `StoreExp`, `make_key` (keys are bytes built by `MakeKeyWriter` and `key_encode.rs`, compared by hash first; D.1), `make_catch`, `make_exit`, `comp_exit`, `comp_match_handlers` |
 | Whether a failure branch exists, from the checker's `partial` flag and from contexts and jump summaries | `check_partial_list`, `Ctx`, `Jumps`, `jumps_union` |
 | Dense switch or tree of comparisons for integers, and its thresholds | `raw_lambda/switch.rs` |
 | Constructor, constant, variant and array dispatch forms | `combine_constructor`, `combine_constant`, `combine_variant`, `combine_array` |
@@ -878,13 +878,27 @@ is visible (A.2). Three things change.
    `RawArena`, then `lower`, then `LamArena`; the constant and primitive
    lowering of `lower.rs` becomes part of the constructors (`norm_prim`,
    `lower_constant`), so a decision tree is written once.
-2. **Action sharing.** `StoreExp` decides that two actions are the same by
-   comparing strings built by `MakeKeyWriter` and `key_encode.rs`
-   (`Lambda.make_key`). In `Bir` the key is a 64-bit structural hash of the
-   normalised action computed bottom-up by the same normalisation
-   (`make_key` renames bound variables to positions and drops locations),
-   confirmed by a structural comparison on hash equality. The equivalence
-   classes are the same by construction; the harness compares exit structure.
+2. **Action sharing.** Done in S5.3, on today's pipeline. `StoreExp` used
+   to decide that two actions are the same by comparing strings built by
+   `MakeKeyWriter` and `key_encode.rs` (`Lambda.make_key`). The key is now a
+   byte string written by the same walk with the same normalisation
+   (`make_key` replaces aliases, renames kept bound variables to positions
+   and drops locations): a tag byte per node, then its fields, each
+   self-delimiting. Its 64-bit hash is computed once; two keys are compared
+   by hash and, on equal hashes, by their bytes, so a collision costs a
+   comparison and changes no answer. The equivalence classes are those of
+   the strings (the walk is the same, only what a step writes changed).
+   The confirmation compares the two byte strings and does not walk the two
+   terms side by side: an alias is replaced by its definition's key, so two
+   terms of different shape can have the same key, and a side-by-side walk
+   would be a second normalisation to keep in step with the first. The
+   writer reads terms through `RawLambdaRead`, so it needs no change for
+   `Bir`; `key_encode.rs` (the payload encoding) stays with it.
+   Four decisions read keys: `StoreExp` (which actions of a switch share an
+   exit), `all_actions_same_tagged` (a constructor or variant switch whose
+   actions are all equal becomes that action), `convert_polyvar_list` (which
+   polymorphic variant cases share a test) and `up_ok_action` (whether a
+   clause may move above another when splitting or-patterns).
 3. **Pattern storage.** Rows are slices of pattern indices into `PatArena`;
    specialisation writes new rows into a row pool instead of cloning
    `Pattern` values (`normalize_pat_owned`, `alloc_cow`, `with_desc` today).
@@ -899,9 +913,13 @@ guards, no or-patterns and variable or wildcard sub-patterns. It emits the
 `Switch` directly.
 
 Saving: match compilation is about 3.5% of the build (measured, half of
-7.1%). How that divides between key strings, pattern copying and context
-operations is unknown; S5 starts with a profile of `matching.rs` on the
-application and the three changes are ordered by it. Estimated result: 1.2%.
+7.1%). The profile of S5.3 on the application divides it (inclusive,
+measured): key strings 1.09% of the build (125,615 keys of about 5,800
+instructions each, plus 48,655 keys compared while written), `as_matrix`
+(the pairwise `le_pats` of `get_mins`) 0.67%, `le_pat` from all callers
+0.47%; `Split::split_or`, which contains most of `as_matrix`, 1.33%. S5.3
+took the keys to 0.5% of the build (measured, by function); the row pool
+and the lazy contexts remain. Estimated result of all three: 1.2%.
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1526,8 +1544,8 @@ model with this document as its specification.
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing; row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | `Check`; each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
-| S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges, `key_encode.rs` | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
 
