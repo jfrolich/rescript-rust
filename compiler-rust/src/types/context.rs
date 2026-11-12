@@ -66,7 +66,8 @@ thread_local! {
 }
 
 impl TypeNodes {
-    const FIRST_LEN: usize = 1 << 14;
+    // Smaller measured arrays exceed the 0.2% instruction budget versus 65536.
+    const FIRST_LEN: usize = 1 << 16;
     const FIRST_CHUNK_BITS: u32 = 8;
     /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
     /// chunks cover every index a `TypeExprRef` can hold.
@@ -5549,6 +5550,11 @@ mod tests {
         });
         assert!(piece.is_none());
         assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+    }
+
+    #[test]
+    fn type_node_size_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<TypeNode>(), 32);
     }
 
     #[test]
