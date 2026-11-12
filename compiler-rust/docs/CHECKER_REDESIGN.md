@@ -5282,9 +5282,9 @@ Short version:
 - Differential check: `scripts/compare_checker_builds.py` on both projects,
   base against each prototype, and the 729 `super_errors` fixtures compiled
   one by one by both and compared as text.
-- Nothing of the tooling or the prototypes is committed: three Python
-  scripts (callgrind parser, symbolizer driver, classifier) and two patches
-  on a copy of the tree (400 lines added, 105 deleted).
+- The two measurement patches are preserved under `prototypes/` (400 lines
+  added, 105 deleted). The three Python profiling scripts (callgrind parser,
+  symbolizer driver, classifier) are not committed.
 
 ### K.2 Anatomy of type checking by kind of work
 
