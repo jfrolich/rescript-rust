@@ -78,7 +78,8 @@ $(YARN_INSTALL_STAMP): $(YARN_INSTALL_SOURCES)
 # Rewatch
 
 REWATCH_SOURCES = $(shell find rewatch/src rewatch/cli -name '*.rs') rewatch/Cargo.toml rewatch/cli/Cargo.toml rewatch/Cargo.lock \
-	$(wildcard packages/@rescript/runtime/*.res packages/@rescript/runtime/*.resi) packages/@rescript/runtime/rescript.json
+	$(wildcard packages/@rescript/runtime/*.res packages/@rescript/runtime/*.resi) packages/@rescript/runtime/rescript.json \
+	$(wildcard packages/@rescript/belt/src/*.res packages/@rescript/belt/src/*.resi) packages/@rescript/belt/rescript.json
 RESCRIPT_EXE = $(BIN_DIR)/rescript.exe
 RESCRIPT_OCAML_EXE := $(BIN_DIR)/rescript-ocaml.exe
 ifdef CI
@@ -224,9 +225,11 @@ test-gentype: lib
 
 test-rewatch: lib
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-rewatch-rust: lib rewatch
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-all: test test-gentype test-analysis test-tools test-rewatch
 
