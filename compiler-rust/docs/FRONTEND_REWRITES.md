@@ -33,25 +33,25 @@ claims that these moves have been implemented.
 | Relative-path module external | Constrained include containing external, preventing cross-module inlining | `rewrite_structure_item_no_spice`, `check_decl`, `is_package_relative_path` | Declaration's module source | Checker declaration entry |
 | `@inline` single nonrecursive constant binding | Inline external primitive | `transform_inline_binding`, `inline_string_semantic` | Binding pattern, recursiveness; semantic literal text | Parser completed binding or checker binding entry |
 | `@inline(value)` signature value | Inline external primitive | `transform_inline_sig_value` | Declared type and payload | Checker signature value entry |
-| Integer expression with `l` suffix | Integer without suffix; original attributes retained | `rewrite_expression` | None | Parser literal completion |
+| Integer expression with `l` suffix | Integer without suffix; original attributes retained | `rewrite_expr` | None | Parser literal completion |
 | Integer pattern with `l` suffix | Pattern constant without suffix | `rewrite_pattern` | None | Parser pattern completion |
 | Binary `a -> f` | Application, constructor/variant application or tuple pipe, with temporary binding when needed | `desugar_pipe`, `rewrite_pipe_rhs`, `pipe_tuple_map`, `pipe_bound`, `fresh_bound_name` | Names in RHS, evaluation count/order | Parser completed pipe or checker expression entry |
-| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | One-case match with merged expression/binding attributes | `rewrite_expression_generic` (`Pexp_let`) | Binding group and RHS shape | Parser completed local binding |
-| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_expression_generic` | Experimental-feature setting, top-level vs local context | Checker binding entry |
-| Simple tuple binding with matching tuple RHS (possibly under opens) | Separate bindings, preserving opens | `flatten_value_binding`, `destruct_open_tuple`, `restore_exp` | Complete pattern/RHS; recursive bindings excluded; value-constraint side data | Parser completed binding group or checker binding entry |
-| Record pattern binding to packed module identifier | Separate bindings referring to module fields | `flatten_value_binding` | Complete RHS and unqualified field patterns | Checker binding entry |
-| Two unguarded true/false match cases | If/then/else with arms in boolean order | `rewrite_expression_generic` (`Pexp_match`) | Both cases | Parser completed match |
-| `async` function | Function body wrapped with promise/unsafe-async operations | `add_promise_to_fun_body`, `wrap_with_unsafe_async` | N-ary parameter/default/newtype side tables, parameter location | Checker function entry |
+| Single nonrecursive record/dictionary-pattern local binding (including alias), except packed module RHS | One-case match with merged expression/binding attributes | `rewrite_single_binding_let` | Binding group and RHS shape | Parser completed local binding |
+| Supported `let?`/unwrap binding | Match with early-return and continuation cases | `classify_let_unwrap_pattern`, `rewrite_single_binding_let` | Experimental-feature setting, top-level vs local context | Checker binding entry |
+| Simple tuple binding with matching tuple RHS (possibly under opens) | Separate bindings, preserving opens | `rewrite_value_binding`, `destruct_open_tuple`, `restore_exp` | Complete pattern/RHS; recursive bindings excluded; value-constraint side data | Parser completed binding group or checker binding entry |
+| Record pattern binding to packed module identifier | Separate bindings referring to module fields | `rewrite_value_binding` | Complete RHS and unqualified field patterns | Checker binding entry |
+| Two unguarded true/false match cases | If/then/else with arms in boolean order | `boolean_match_arms`, `rewrite_expr` (`Pexp_match`) | Both cases | Parser completed match |
+| `async` function | Function body wrapped with promise/unsafe-async operations | `rewrite_fun`, `wrap_with_unsafe_async` | N-ary parameter/default/newtype side tables, parameter location | Checker function entry |
 | `await e` | `Primitive_promise.unsafe_await` application | `transform_await` | Validation needs enclosing async function; generated ghost location comes from operand | Checker expression entry |
 | Awaited module alias, with optional module-type constraint | Dynamic import expression, module unpack and module type declaration | `transform_module_await`, `create_await_module_expression`, `local_module_type_decl` | Per-structure module-type-name deduplication | Checker module entry; not node-local parser work |
-| Local awaited module inside a value binding | Hoisted module type declarations plus rewritten local module | `spelunk_value_bindings_for_await_module_types`, `spelunk_expression_for_await_module_types`, `rewrite_expression_generic` (`Pexp_letmodule`) | Enclosing structure, deduplication, original binding before rewriting | Checker structure/binding entry |
+| Local awaited module inside a value binding | Hoisted module type declarations plus rewritten local module | `spelunk_value_bindings_for_await_module_types`, `spelunk_expression_for_await_module_types`, `rewrite_expr` (`Pexp_letmodule`) | Enclosing structure, deduplication, original binding before rewriting | Checker structure/binding entry |
 | `@this` function | Method callback record/constrained callback/unsafe-to-method application | `rewrite_method_callback_expression`, `split_this_attrs` | Function arity, async body and parameter shape | Checker function entry |
-| `@this` on braces around function | Attribute forwarded through braces to function; unrelated attributes retained | `add_this_to_braced_function`, `rewrite_expression_generic` (`Pexp_braces`) | Braced descendant shape; rewritten inner location | Parser completed braced expression or checker expression entry |
+| `@this` on braces around function | Attribute forwarded through braces to function; unrelated attributes retained | `add_this_to_braced_function`, `rewrite_expr` (`Pexp_braces`) | Braced descendant shape; rewritten inner location | Parser completed braced expression or checker expression entry |
 | `@this` arrow type | `Js.OO.Callback.arityN<...>` type | `rewrite_core_type` | N-ary arrow side table or recorded arity | Checker type entry |
 | Object type field attributes | Last `@this` forwarded to field type; other attributes reversed; `@set` retained for checker | `rewrite_object_fields`, `process_attributes_rev` | Field type | Checker object type entry |
 | `%raw` / `Pexp_raw` expression | Local raw external application, with function-literal information | `handle_raw`, `handle_raw_node`, `raw_expression`, `raw_local_external_apply` | JS parser classification, payload and source locations | Checker expression entry |
 | `%ffi` / raw FFI node | FFI raw expression with literal function arity | `handle_ffi`, `ffi_expression`, `detect_js_function_arity` | JS source classification | Checker expression entry |
-| Regexp literal | Constrained raw expression of `RegExp.t` | `rewrite_expression_generic` (`Pexp_regexp`) | Separate regexp validation/warnings | Parser completed regexp or checker expression entry |
+| Regexp literal | Constrained raw expression of `RegExp.t` | `rewrite_expr` (`Pexp_regexp`) | Separate regexp validation/warnings | Parser completed regexp or checker expression entry |
 | `%todo` / `Pexp_todo` | `Stdlib_JsError.throwWithMessage` with source position and optional message | `handle_extension`, `todo` | Source filename, line, columns; separate warning | Checker expression entry |
 | `%%raw` / `Pstr_raw` | Evaluation of raw-statement external | `handle_raw_structure`, `handle_raw_structure_node`, `raw_structure` | Payload/source location, JS statement validation | Checker structure item entry |
 | Consecutive `%%private` items | Local module and overriding open | `private_extension_structure_items`, `wrap_in_local_module`, `rewrite_structure_impl` | Adjacent items, local-name counter, mapper order | Checker structure entry; not node-local |
@@ -62,7 +62,7 @@ claims that these moves have been implemented.
 | JSX elements/fragments and component declarations (separate mapper) | React/JSX runtime calls, props records and component wrappers/signatures | `parser::jsx_ppx::{transform_jsx_element,transform_jsx_fragment,mk_react_jsx,make_props_record_type,make_props_record_type_sig}` | JSX version/module/mode configuration and component scope | Parser completion with explicit configuration, or checker component entry |
 
 Many comments still describe string-delimiter normalization from an older
-representation. The current `rewrite_expression`/`rewrite_pattern` constant
+representation. The current `rewrite_expr`/`rewrite_pattern` constant
 branches do not rewrite every string: do not infer a trigger from those comments.
 Likewise, `@get`/`@set` object fields are not expanded here; the checker consumes
 them. Unknown attributes still matter because their payloads can contain real
@@ -72,7 +72,7 @@ rewrite targets.
 
 `ParseArena::push_expr` computes a bottom-up certificate using existing child
 certificates. `rewrite_free_exprs` holds two bits per expression, not fields on
-each node (see Validation traversals). `expr_needs_no_rewrite` is an O(1) lookup used by `rewrite_child`.
+each node (see Validation traversals). `expr_needs_no_rewrite` is an O(1) lookup used by `rewrite_expr`.
 The whitelist contains attribute-free ordinary applications (not pipes),
 constants except `l` integers, identifiers, break/continue, tuples, arrays,
 constructors/variants, field access, assertions, sequences, while loops,
@@ -91,6 +91,48 @@ certificates. Certified parents are allocated after their certified children;
 reserved slots are never certified. This deliberately sacrifices some skip
 opportunities rather than keeping stale proofs after mutation. Shared synthetic
 expressions have no certificate. No new global state or unsafe code is used.
+
+## Expansions
+
+The expression mapper (`rewrite_expr`) rebuilds nothing. It visits the
+expressions that have no certificate, where they are, and a construct a
+rewrite applies to gets its desugared form **appended** and recorded with
+`ParseArena::set_expansion(original, expanded)`. The expansion refers to the
+children by their handles as parsed; the node as parsed and all of its
+ancestors keep their nodes. Readers of the tree as compiled resolve a handle
+with `ParseArena::expanded` where they turn it into a node: the checker
+(`typecore.rs`, `typemod.rs`), dependency collection (`deps.rs`), the default
+`AstIter::expr` and `UnusedAttributeSweep`, the v0 mapper (`mapper_to0.rs`)
+and `Ast_payload.unwrap_braces`. `check::Checker` and the printer read the
+tree as written and do not resolve; before the mapper has run, resolving is
+the identity.
+
+The table is two parts: a bit per expression beside the two certificate bits
+(four bits per expression in `rewrite_free_exprs`, one unused), and the
+targets in pages of 64 consecutive expressions, allocated when a page gets
+its first expansion (`expansion_pages`, `expansion_targets`). Resolving a node
+without an expansion is one bit test; with one, two more indexed loads. There
+is no hashing.
+
+A node gets an expansion in two cases:
+
+- a rewrite of the inventory applies to it (the pipe, `let?`, the record
+  `let`, the boolean match, `async` and `@this` functions, `await`, an awaited
+  local module, raw, ffi, regexp, todo, an `l` integer, braces whose location
+  follows a rewritten operand or that forward `@this`);
+- a child that is not an expression changed its handle: a pattern
+  (`rewrite_pat_idx`), a core type (`rewrite_core_type_idx`), a module
+  expression, a value binding that was flattened or carries a locally
+  abstract constraint, or the node's attributes (`rewritten_attributes`). The
+  expansion is then a copy of the node that refers to the changed child.
+  Patterns, core types, module expressions and structure items are still
+  rebuilt by their own mappers; `pattern_needs_no_rewrite` keeps the handle
+  of a pattern that has no attribute, `l` integer, type or extension below
+  it, so that a `switch` or a function does not get an expansion for its
+  patterns alone.
+
+No rewrite of the inventory had to stay a rebuild: every one of them is read
+only by readers that resolve.
 
 ## Validation traversals
 
