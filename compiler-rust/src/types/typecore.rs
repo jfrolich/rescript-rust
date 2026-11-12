@@ -8048,11 +8048,11 @@ pub(crate) enum ValueLookupFailure {
 pub(crate) fn lookup_value_ident(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    lid: &crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+    longident: &Longident,
+    loc: LocIdx,
 ) -> Result<(Path, Arc<ValueDescription>), ValueLookupFailure> {
-    let longident = tctx.arena.get_longident(lid.txt);
     let last = tctx.arena.get_string(longident.last_idx());
-    if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc)).is_err() {
+    if crate::types::env::check_value_name(last, tctx.arena.to_location(loc)).is_err() {
         return Err(ValueLookupFailure::IllegalName);
     }
     mark_open_lid_use(
@@ -8061,7 +8061,7 @@ pub(crate) fn lookup_value_ident(
         tctx.arena,
         longident,
         crate::types::env::OpenLookupKind::Value,
-        Some(lid.loc),
+        Some(loc),
     );
     env.lookup_value_by_lid(
         longident,
@@ -8082,12 +8082,13 @@ pub(crate) fn lookup_value_ident(
 pub(crate) fn note_value_ident_use(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    lid: &crate::parse_arena::Located<crate::parse_arena::LidentIdx>,
+    longident: &Longident,
+    loc: LocIdx,
     path: &Path,
     desc: &ValueDescription,
     function_call: bool,
 ) -> TypeCoreResult<()> {
-    let used_name = tctx.arena.name(tctx.arena.get_longident(lid.txt).last_idx());
+    let used_name = tctx.arena.name(longident.last_idx());
     tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
     let deprecated_context = if function_call {
         crate::types::context::DeprecatedContext::FunctionCall
@@ -8096,14 +8097,14 @@ pub(crate) fn note_value_ident_use(
     };
     record_deprecated_used(
         tctx,
-        lid.loc,
+        loc,
         &desc.val_attributes,
         Some(deprecated_context),
     )?;
     if let Some(warning) = deprecated_warning_for_value(path, desc)
         .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
     {
-        tctx.report_warning(lid.loc, warning);
+        tctx.report_warning(loc, warning);
     }
     Ok(())
 }
@@ -8254,7 +8255,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         let longident = tctx.arena.get_longident(lid.txt);
 
         // Normal identifier expression.
-        let (path, desc) = match lookup_value_ident(tctx, env, lid) {
+        let (path, desc) = match lookup_value_ident(tctx, env, longident, lid.loc) {
             Ok(result) => result,
             Err(ValueLookupFailure::IllegalName) => {
                 return Err(TypeCoreError::IllegalValueName {
@@ -8284,7 +8285,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 return Err(unbound_value_error(tctx, env, lid.loc, longident));
             }
         };
-        note_value_ident_use(tctx, env, lid, &path, &desc, deprecated_function_call)?;
+        note_value_ident_use(tctx, env, longident, lid.loc, &path, &desc, deprecated_function_call)?;
         check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
         let ty = crate::types::instance(ctx, desc.val_type);
@@ -22474,6 +22475,10 @@ impl Env {
 
     /// Look up a value by longident. `None` means the value is unbound; the
     /// caller builds the user-facing error.
+    // Inlined into its two callers: the typing of an identifier expression,
+    // which is hot and had this body inline when it was the only caller, and
+    // the discharge of a derived item.
+    #[inline(always)]
     pub fn lookup_value_by_lid(
         &self,
         lid: &Longident,

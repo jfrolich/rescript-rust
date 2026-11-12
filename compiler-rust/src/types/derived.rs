@@ -20,7 +20,7 @@ use crate::binary_ast::derive::plan::{
     Binding, BindingIdx, DerivedIdx, ExprLoc, Obligation, ObligationIdx, Plans, SkeletonNode, Span,
 };
 use crate::ident::Ident;
-use crate::parse_arena::{Located, ParseArena};
+use crate::parse_arena::ParseArena;
 use crate::types::env::Env;
 use crate::types::path::Path;
 use crate::types::asttypes::ArgLabel;
@@ -351,16 +351,19 @@ fn discharge_binding(
                 expr_loc,
                 called,
             } => {
-                let lid = Located::new(name, name_loc);
+                let longident = arena.get_longident(name);
                 steps.lookup();
-                let (path, desc) = crate::types::typecore::lookup_value_ident(tctx, env, &lid)
-                    .map_err(|_| Fallback)?;
+                let (path, desc) =
+                    crate::types::typecore::lookup_value_ident(tctx, env, longident, name_loc)
+                        .map_err(|_| Fallback)?;
                 // A primitive is not a plain value to the backend.
                 if !matches!(desc.val_kind, crate::types::decl::ValueKind::ValReg) {
                     return Err(Fallback);
                 }
-                crate::types::typecore::note_value_ident_use(tctx, env, &lid, &path, &desc, called)
-                    .map_err(|_| Fallback)?;
+                crate::types::typecore::note_value_ident_use(
+                    tctx, env, longident, name_loc, &path, &desc, called,
+                )
+                .map_err(|_| Fallback)?;
                 let expr_loc = match expr_loc {
                     ExprLoc::OfName => name_loc,
                     ExprLoc::Dummy => arena.dummy_loc(),
