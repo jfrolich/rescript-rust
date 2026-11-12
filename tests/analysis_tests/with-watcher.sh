@@ -14,7 +14,7 @@ watcher=$!
 
 stop_watcher() {
   # The watcher exits when its lock file goes away.
-  rm -f lib/watch.lock
+  rm -f lib/rescript/watch.lock
   for _ in $(seq 1 100); do
     kill -0 "$watcher" 2> /dev/null || break
     sleep 0.1

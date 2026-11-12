@@ -39,25 +39,32 @@ pub fn dump((dir, s): &T) -> String {
     crate::gentype::gen_type_common::node_filename::concat(dir, s)
 }
 
-/// The `.cmt` file of the module imported by `path`, relative to the
-/// directory of `output_file_relative`.
-pub fn to_cmt(config: &crate::gentype::config::T, output_file_relative: &str, path: &T) -> String {
-    let dirname = Path::new(output_file_relative)
-        .parent()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| ".".to_string());
+/// The `.cmt` file of the module imported by `path` when it is a module of
+/// the same package, relative to the compiler's working directory (the
+/// package's flat artifact directory), or `""` for a module of another
+/// package, which has no `.cmt` there. Such a module's import path is
+/// relative, or, from an output file at the project root, starts with one of
+/// its source directories. Mirrors compiler/gentype/import_path.ml `to_cmt`.
+pub fn to_cmt(config: &crate::gentype::config::T, path: &T) -> String {
+    let path = dump(&chop_extension_safe(path));
+    let is_local = path.starts_with("./")
+        || path.starts_with("../")
+        || config
+            .sources
+            .iter()
+            .any(|source| path.starts_with(&format!("{source}/")));
+    if !is_local {
+        return String::new();
+    }
+    let basename = Path::new(&path)
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_default();
     let namespace = match &config.namespace {
         None => String::new(),
         Some(name) => format!("-{name}"),
     };
-    format!(
-        "{}{}{}",
-        Path::new(&dirname)
-            .join(dump(&chop_extension_safe(path)))
-            .to_string_lossy(),
-        namespace,
-        ".cmt"
-    )
+    format!("{basename}{namespace}.cmt")
 }
 
 /// The path as written in an import statement.

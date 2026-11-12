@@ -102,14 +102,14 @@ function checkEditorCompilation(buildDirectory) {
   // and omits generated-JavaScript output while retaining the GenType flags.
   args.splice(args.indexOf("-bs-package-output"), 2);
   args.pop();
-  const incrementalDir = join(buildDirectory, "lib", "bs", "___incremental");
+  const incrementalDir = join(buildDirectory, "lib", "rescript", "incremental");
   mkdirSync(incrementalDir);
   const source = join(incrementalDir, "Editor.res");
   writeFileSync(source, "@genType\nlet value = 42\n");
   const [compiler, compilerArgs] = editorCompiler();
   const compiled = spawnSync(compiler, [...compilerArgs, ...args, source], {
     ...options,
-    cwd: join(buildDirectory, "lib", "bs"),
+    cwd: join(buildDirectory, "lib", "rescript"),
     shell: compiler.endsWith(".cmd"),
   });
   assert.ifError(compiled.error);
