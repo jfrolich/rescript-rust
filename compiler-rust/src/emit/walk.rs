@@ -595,17 +595,12 @@ pub(super) fn rest_declaration(
     }
 }
 
-/// Canonical integer property text is emitted as a numeric index by legacy.
-/// Keep the newly exposed member shape separate from record-rest support.
-pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
-    let (name, _) = member_form(name);
+/// Canonical i64 text is a numeric index; leading zeros, +, -0 and overflow
+/// remain strings (js_ir/printer.rs::print_property_access).
+pub(super) fn numeric_member(name: &str) -> Option<i64> {
     let digits = name.strip_prefix('-').unwrap_or(name);
     let canonical = name == "0" || matches!(digits.as_bytes(), [b'1'..=b'9', ..]);
-    if canonical && name.parse::<i64>().is_ok() {
-        Err(Unsupported("numeric static member"))
-    } else {
-        Ok(())
-    }
+    canonical.then(|| name.parse::<i64>().ok()).flatten()
 }
 
 /// A legacy call of the external `delete` parses as a unary operator, not a

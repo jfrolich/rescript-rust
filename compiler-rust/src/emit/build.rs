@@ -97,7 +97,22 @@ impl<'a, 'r> Build<'a, 'r> {
             Expression::new_computed_member_expression(
                 SPAN,
                 target,
-                self.string_expr(name),
+                if let Some(index) = walk::numeric_member(name) {
+                    let value = Expression::new_numeric_literal(
+                        SPAN,
+                        index.unsigned_abs() as f64,
+                        None,
+                        NumberBase::Decimal,
+                        &self.b,
+                    );
+                    if index < 0 {
+                        self.unary(U::UnaryNegation, value)
+                    } else {
+                        value
+                    }
+                } else {
+                    self.string_expr(name)
+                },
                 false,
                 &self.b,
             )
@@ -962,7 +977,6 @@ impl<'a, 'r> Build<'a, 'r> {
                 &self.b,
             ),
             ExprKind::StaticIndex(e, s, _) => {
-                walk::static_member_supported(a.text(s))?;
                 self.member(self.dot_target(e)?, a.text(s))
             }
             ExprKind::CamlBlockTag(e, s) => {
@@ -2239,6 +2253,33 @@ mod remaining_expression_tests {
             actual
         );
         assert_eq!(reformat(&actual, mode).unwrap(), actual);
+    }
+
+    #[test]
+    fn canonical_numeric_members_match_legacy() {
+        use crate::js_ir::arena::FieldPos;
+        for key in [
+            "0",
+            "1",
+            "-1",
+            "-0",
+            "00",
+            "01",
+            "+1",
+            "9007199254740993",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "9223372036854775808",
+        ] {
+            let mut a = JsArena::new();
+            let value = E::new(ExprKind::Undefined { is_unit: false }, &mut a);
+            let key = a.str(key);
+            let expr = E::new(
+                ExprKind::StaticIndex(value, key, FieldPos::new(None)),
+                &mut a,
+            );
+            oracle(&a, expr);
+        }
     }
 
     #[test]

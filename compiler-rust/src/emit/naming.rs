@@ -668,10 +668,7 @@ fn children(
         | ExprKind::CamlBlockTag(e, _)
         | ExprKind::Await(e)
         | ExprKind::Spread(e) => visit(e)?,
-        ExprKind::StaticIndex(e, name, _) => {
-            walk::static_member_supported(a.text(name))?;
-            visit(e)?;
-        }
+        ExprKind::StaticIndex(e, _, _) => visit(e)?,
         ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
             walk::assignment_target(a, l)?;
             visit(l)?;
