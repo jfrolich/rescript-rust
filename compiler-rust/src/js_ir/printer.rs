@@ -2987,7 +2987,7 @@ fn format_char_comment(codepoint: i32) -> String {
     format!("'{escaped}'")
 }
 
-fn normalize_float_literal_for_js(float_str: &str) -> String {
+pub(crate) fn normalize_float_literal_for_js(float_str: &str) -> String {
     if is_hex_float_literal(float_str) {
         normalize_hex_float_literal(float_str).unwrap_or_else(|| transform_float_literal(float_str))
     } else {
