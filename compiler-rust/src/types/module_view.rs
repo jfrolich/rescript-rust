@@ -287,7 +287,21 @@ pub(crate) fn build_module_view(
     let mut view = frozen.value;
     view.id = ViewId(world.views().next_id.fetch_add(1, Ordering::Relaxed));
     view.nodes = frozen.nodes;
-    crate::perf_counters::world::record_view_build(frozen.nodes);
+    if crate::perf_counters::enabled() {
+        crate::perf_counters::world::record_view_build(
+            frozen.nodes,
+            [
+                view.signature.len(),
+                view.values.iter().flatten().count(),
+                view.constructors.values().map(|bucket| bucket.len()).sum(),
+                view.labels.values().map(|bucket| bucket.len()).sum(),
+                view.opened.values.len(),
+                view.opened.types.len(),
+                view.opened.constructors.len(),
+                view.opened.labels.len(),
+            ],
+        );
+    }
     Some(view)
 }
 

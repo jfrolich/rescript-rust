@@ -706,11 +706,18 @@ pub(crate) mod world {
     static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
     static CHILD_NODES: AtomicU64 = AtomicU64::new(0);
 
-    /// A module view was built; freezing it created `nodes` nodes.
-    pub(crate) fn record_view_build(nodes: usize) {
-        if super::enabled() {
-            VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
-            VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+    /// What the views of a build hold: signature items, values,
+    /// constructors and labels of the lookup tables, then the opened
+    /// values, types, constructors and labels.
+    static VIEW_ITEMS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+    /// A module view was built; freezing it created `nodes` nodes, and it
+    /// holds `items` (see `VIEW_ITEMS`). The caller tests the flag.
+    pub(crate) fn record_view_build(nodes: usize, items: [usize; 8]) {
+        VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
+        VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+        for (total, count) in VIEW_ITEMS.iter().zip(items) {
+            total.fetch_add(count as u64, Ordering::Relaxed);
         }
     }
 
@@ -740,6 +747,9 @@ pub(crate) mod world {
         VIEWS_BUILT.store(0, Ordering::Relaxed);
         VIEWS_ADOPTED.store(0, Ordering::Relaxed);
         VIEWS_FAILED.store(0, Ordering::Relaxed);
+        for total in &VIEW_ITEMS {
+            total.store(0, Ordering::Relaxed);
+        }
         VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
         CHILDREN_FORCED.store(0, Ordering::Relaxed);
         CHILD_NODES.store(0, Ordering::Relaxed);
@@ -757,6 +767,18 @@ pub(crate) mod world {
             VIEWS_ADOPTED.load(Ordering::Relaxed),
             VIEWS_FAILED.load(Ordering::Relaxed),
             CHILDREN_FORCED.load(Ordering::Relaxed),
+        );
+        let items = |index: usize| VIEW_ITEMS[index].load(Ordering::Relaxed);
+        eprintln!(
+            "[compiler-counter] world_view_items signature_items={} values={} constructors={} labels={} opened_values={} opened_types={} opened_constructors={} opened_labels={}",
+            items(0),
+            items(1),
+            items(2),
+            items(3),
+            items(4),
+            items(5),
+            items(6),
+            items(7),
         );
         eprintln!(
             "[compiler-counter] world_view_nodes copied={} shared=0 child_nodes={}",
