@@ -18,10 +18,22 @@ pub(super) fn compare_with_checks(arena: LamArena, root: Lam, checks: bool) {
     compare_with_options(arena, root, None, checks);
 }
 
-fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
+fn compare_with_options(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
+    compare_in_contexts(arena, root, resolver, checks, &[0, 1, 2, 3, 4]);
+}
+
+pub(super) fn compare_in_contexts(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8]) {
+    compare_oracle(arena, root, resolver, checks, contexts, None);
+}
+
+pub(super) fn compare_mapped(arena: LamArena, root: Lam, locations: &crate::lambda::LamLocTable) {
+    compare_oracle(arena, root, None, true, &[0,1,2,3,4], Some(locations));
+}
+
+fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool, contexts: &[u8], locations: Option<&crate::lambda::LamLocTable>) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
-        for context in 0..5 {
+        for &context in contexts {
             let mut input = bridge::import_lambda(&arena, root).unwrap();
             let var = input
                 .arena
@@ -38,6 +50,7 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
             let source_root = input.root;
             let mut state = State::new(input);
             state.direct = direct;
+            state.locations = locations.cloned();
             state.check_div_by_zero = checks;
             state.resolver = resolver.cloned();
             let probed = state.probe(cx, source_root).unwrap();
@@ -59,6 +72,10 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
             }
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
+            if let Some(locations) = locations {
+                compiler.set_source_map_enabled(true);
+                compiler.set_lam_locs(locations.clone());
+            }
             compiler.check_div_by_zero = checks;
             compiler.awaited_units = crate::lambda::lam_compile_main::awaited_units(&arena, root);
             let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
@@ -88,6 +105,14 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
                 )
             };
             assert_eq!(print(&actual), print(&expected), "context {cx:?}, preserve {preserve}");
+            if let Some(locations) = locations {
+                let locations = std::sync::Arc::new(locations.clone());
+                let mapped = |p| crate::js_ir::print_deps_program_with_source_map(
+                    p,None,&[],false,preserve,false,std::path::Path::new("Mapping.js"),
+                    std::path::Path::new("Mapping.res"),crate::js_ir::source_map::SourceMapMode::Hidden,
+                    false,"",locations.clone());
+                assert_eq!(mapped(&actual),mapped(&expected),"mappings, context {cx:?}");
+            }
             }
         }
     }
