@@ -2,6 +2,7 @@
 mod build;
 mod literal;
 mod naming;
+mod bir_naming;
 mod program;
 mod raw;
 pub use raw::RawSegment;
@@ -217,7 +218,7 @@ pub(crate) fn emit_bir(
 ) -> Result<(String, Option<String>), Unsupported> {
     let view = crate::bir::emit_view::EmitterView::new(imported)?;
     let block = view.root();
-    let names = naming::Names::collect_bir(&view, &block, resolver, jsx_preserve)?;
+    let names = bir_naming::Names::collect(&view, &block, resolver, jsx_preserve)?;
     program::emit_named(
         program::Unit { arena: &view, block: &block, modules: view.modules(),
             exports: view.exports(), reservations: view.reservations(), side_effect: view.side_effect() },

@@ -5,7 +5,10 @@ use super::{
     bridge_j::{self, Imported},
     *,
 };
-use crate::emit::{Unsupported, view::View as EmitView};
+use crate::emit::{
+    Unsupported,
+    view::{NameKey, NameSource, View as EmitView},
+};
 use crate::ident::Ident;
 use crate::js_ir::{self as js, arena as j, op::Number};
 use crate::lambda::{LamLoc, SwitchKey};
@@ -14,6 +17,11 @@ use std::borrow::Cow;
 
 pub(crate) struct EmitterView<'a> {
     pub(crate) unit: &'a Imported,
+    identities: Vec<Ident>,
+    module_slots: Vec<usize>,
+    import_slots: Vec<usize>,
+    export_slots: Vec<usize>,
+    reservation_slots: Vec<usize>,
 }
 fn node(i: usize) -> NodeId {
     NodeId(index(i - 2))
@@ -115,7 +123,59 @@ impl<'a> EmitterView<'a> {
             }
             pending.extend(unit.arena.view(n).children());
         }
-        Ok(Self { unit })
+        // Only module/file identities may be absent from the variable table.
+        // Resolve them once at the boundary, never at expression use sites.
+        let mut identities = unit.idents.clone();
+        let mut stamped = ahash::AHashMap::new();
+        let mut globals = ahash::AHashMap::new();
+        for (slot, id) in identities.iter().enumerate() {
+            if id.stamp() == 0 {
+                globals.insert(id.name_atom(), slot);
+            } else {
+                stamped.insert(id.stamp(), slot);
+            }
+        }
+        let mut resolve = |id: Ident| {
+            let existing = if id.stamp() == 0 {
+                globals.get(&id.name_atom())
+            } else {
+                stamped.get(&id.stamp())
+            };
+            if let Some(&slot) = existing {
+                return slot;
+            }
+            let slot = identities.len();
+            identities.push(id);
+            if id.stamp() == 0 {
+                globals.insert(id.name_atom(), slot);
+            } else {
+                stamped.insert(id.stamp(), slot);
+            }
+            slot
+        };
+        let module_slots = unit
+            .arena
+            .pools
+            .j_modules
+            .iter()
+            .map(|m| resolve(m.id))
+            .collect();
+        let import_slots = unit.modules.iter().map(|m| resolve(m.id)).collect();
+        let export_slots = unit.exports.iter().copied().map(&mut resolve).collect();
+        let reservation_slots = unit
+            .reservations
+            .iter()
+            .copied()
+            .map(&mut resolve)
+            .collect();
+        Ok(Self {
+            unit,
+            identities,
+            module_slots,
+            import_slots,
+            export_slots,
+            reservation_slots,
+        })
     }
     fn arena(&self) -> &Bir {
         &self.unit.arena
@@ -149,7 +209,13 @@ impl<'a> EmitterView<'a> {
         }
     }
     pub(crate) fn identities(&self) -> &[Ident] {
-        &self.unit.idents
+        &self.identities
+    }
+    pub(crate) fn reservation_slots(&self) -> &[usize] {
+        &self.reservation_slots
+    }
+    pub(crate) fn node_capacity(&self) -> usize {
+        self.arena().nodes.len() + 2
     }
     pub(crate) fn root(&self) -> Vec<j::Stmt> {
         self.stmts(block(self.unit.root)).into_owned()
@@ -168,6 +234,45 @@ impl<'a> EmitterView<'a> {
     }
 }
 impl EmitView for EmitterView<'_> {
+    fn name_key(&self, source: NameSource) -> NameKey {
+        let slot = match source {
+            NameSource::Variable(id) => id.index() - 2,
+            NameSource::Declaration(id) => {
+                let (View::SDecl { var, .. } | View::SRest { var, .. }) =
+                    self.arena().view(node(id.index()))
+                else {
+                    unreachable!("declaration identity")
+                };
+                var.index()
+            }
+            NameSource::Parameter(id, offset) => {
+                self.arena()
+                    .function(FuncId(index(id.index() - 2)))
+                    .params
+                    .start as usize
+                    + offset
+            }
+            NameSource::Rest(id, offset) => {
+                let JsPayload::Rest(fields) = self.arena().javascript(JsId(index(id.index() - 2)))
+                else {
+                    unreachable!("rest identity")
+                };
+                fields[offset].binding.expect("bound rest field").index()
+            }
+            NameSource::Qualified(id) => {
+                let View::JQualified { module, .. } = self.arena().view(node(id.index())) else {
+                    unreachable!("module identity")
+                };
+                self.module_slots[module.index()]
+            }
+            NameSource::Import(index, _) => self.import_slots[index],
+            NameSource::Export(index, _) => self.export_slots[index],
+        };
+        NameKey {
+            ident: self.identities[slot],
+            slot,
+        }
+    }
     fn ek(&self, e: j::Expr) -> j::ExprKind {
         use j::ExprKind as E;
         let n = node(e.index());
@@ -823,11 +928,20 @@ mod tests {
                 uses.push(value);
                 let ret = b.new_node(View::SReturn { value }, 0);
                 let body = b.new_node(View::SBlock { statements: &[ret] }, 0);
-                let header = b.function_header(VarSpan::default(), FunctionAttribute::default(), LamLoc::NONE);
+                let header = b.function_header(
+                    VarSpan::default(),
+                    FunctionAttribute::default(),
+                    LamLoc::NONE,
+                );
                 let function = b.new_node(View::JFun { body, header }, 0);
                 statements.push(b.new_node(View::SExp { value: function }, 0));
             }
-            let root = b.new_node(View::SBlock { statements: &statements }, 0);
+            let root = b.new_node(
+                View::SBlock {
+                    statements: &statements,
+                },
+                0,
+            );
             b.finish_bulk(root);
             (b, [uses[0], uses[1]])
         }
@@ -843,8 +957,12 @@ mod tests {
             assert_eq!(a.vars().fact(v), b.vars().fact(v));
             assert_eq!(a.vars().printed(v), b.vars().printed(v));
         }
-        let View::Var { var: first_a } = a.view(a_uses[0]) else { unreachable!() };
-        let View::Var { var: first_b } = b.view(b_uses[0]) else { unreachable!() };
+        let View::Var { var: first_a } = a.view(a_uses[0]) else {
+            unreachable!()
+        };
+        let View::Var { var: first_b } = b.view(b_uses[0]) else {
+            unreachable!()
+        };
         assert_ne!(first_a, first_b);
     }
 }

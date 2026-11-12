@@ -642,3 +642,143 @@ pub(super) fn chain_children(
     }
     Ok(None)
 }
+
+pub(super) fn expression_children(
+    a: &impl View,
+    e: Expr,
+    jsx_preserve: bool,
+    mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    match a.ek(e) {
+        ExprKind::Var(_) | ExprKind::Qualified(_) | ExprKind::Fun(_) => {
+            unreachable!("handled by caller")
+        }
+        ExprKind::Number(_)
+        | ExprKind::Str(_)
+        | ExprKind::Bool(_)
+        | ExprKind::Null
+        | ExprKind::Undefined { .. } => {}
+        ExprKind::Length(e, _)
+        | ExprKind::IsNullOrUndefined(e)
+        | ExprKind::Typeof(e)
+        | ExprKind::JsNot(e)
+        | ExprKind::JsBnot(e)
+        | ExprKind::OptionalBlock(e, true)
+        | ExprKind::CamlBlockTag(e, _)
+        | ExprKind::Await(e)
+        | ExprKind::Spread(e) => visit(e)?,
+        ExprKind::StaticIndex(e, _, _) => visit(e)?,
+        ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
+            assignment_target(a, l)?;
+            visit(l)?;
+            visit(r)?;
+        }
+        ExprKind::Bin(op, l, r) => {
+            if let Some(target) = nullish_target(a, op, l, r)? {
+                visit(target)?;
+            } else {
+                visit(l)?;
+                visit(r)?;
+            }
+        }
+        ExprKind::In(l, r) | ExprKind::Seq(l, r) | ExprKind::ArrayIndex(l, r) => {
+            visit(l)?;
+            visit(r)?;
+        }
+        ExprKind::Cond(c, t, f) => {
+            visit(c)?;
+            visit(t)?;
+            visit(f)?;
+        }
+        ExprKind::Call(f, args, _) => {
+            call_supported(a, f)?;
+            visit(f)?;
+            for e in &*a.exprs(args) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::New(f, args) => {
+            visit(f)?;
+            if let Some(args) = args {
+                for e in &*a.exprs(args) {
+                    visit(*e)?;
+                }
+            }
+        }
+        ExprKind::Array(items, _) => {
+            for e in &*a.exprs(items) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::Object(props) => {
+            for (_, e) in &*a.props(props) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::CamlBlock(items, _, tag) => {
+            let (items, tag) = (&*a.exprs(items), a.tag(tag));
+            block_supported(items, tag)?;
+            for (_, e) in block_elements(a, items, tag) {
+                visit(e)?;
+            }
+        }
+        ExprKind::RawJsCode(_) => {}
+        ExprKind::Jsx(id) => {
+            let (jsx, form) = jsx_form(a, id, jsx_preserve)?;
+            if matches!(form, JsxForm::Runtime) {
+                visit(jsx.callee)?;
+            }
+            if !matches!(form, JsxForm::Fragment) {
+                visit(jsx.tag)?;
+            }
+            if !matches!(form, JsxForm::Runtime)
+                && let Some(key) = jsx.key
+            {
+                visit(key)?;
+            }
+            if let Some(spread) = jsx.spread {
+                visit(spread)?;
+            }
+            for (_, value) in &*a.props(jsx.props) {
+                visit(*value)?;
+            }
+            if let Some(children) = jsx.children {
+                for child in &*a.exprs(children) {
+                    visit(*child)?;
+                }
+            }
+            if matches!(form, JsxForm::Runtime)
+                && let Some(key) = jsx.key
+            {
+                visit(key)?;
+            }
+        }
+        ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
+        ExprKind::InterpolatedTemplate(segments, values) => {
+            template_supported(a.segments(segments).len(), a.exprs(values).len())?;
+            for e in &*a.exprs(values) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::TaggedTemplate(tag, strings, values) => {
+            template_supported(a.tagged(strings).len(), a.exprs(values).len())?;
+            visit(tag)?;
+            for e in &*a.exprs(values) {
+                visit(*e)?;
+            }
+        }
+        // Legacy .apply meets the callee before the argument array.
+        ExprKind::FlatCall(func, args) => {
+            visit(func)?;
+            visit(args)?;
+        }
+        ExprKind::OptionalBlock(inner, false) => {
+            if let Some(inner) = optional_argument(a, inner) {
+                visit(inner)?;
+            }
+        }
+        ExprKind::RecordRest(_, source) => visit(source)?,
+        ExprKind::StringAppend(..) => unreachable!("iterative string traversal in caller"),
+    }
+    Ok(())
+}

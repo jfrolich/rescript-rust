@@ -15,7 +15,25 @@ pub(crate) struct Function<'a> {
     pub directive: Option<&'a str>,
 }
 
+/// A binding occurrence's source identity and dense variable slot.
+#[derive(Clone, Copy)]
+pub(crate) struct NameKey {
+    pub ident: Ident,
+    pub slot: usize,
+}
+#[derive(Clone, Copy)]
+pub(crate) enum NameSource {
+    Variable(IdentId),
+    Declaration(VarId),
+    Parameter(IdentList, usize),
+    Rest(RestId, usize),
+    Qualified(QualId),
+    Import(usize, Ident),
+    Export(usize, Ident),
+}
+
 pub(crate) trait View {
+    fn name_key(&self, source: NameSource) -> NameKey;
     fn ek(&self, e: Expr) -> ExprKind;
     fn sk(&self, s: Stmt) -> StmtKind;
     fn stmts(&self, list: StmtList) -> Cow<'_, [Stmt]>;
@@ -48,6 +66,17 @@ pub(crate) trait View {
 }
 
 impl View for JsArena {
+    fn name_key(&self, source: NameSource) -> NameKey {
+        let ident = match source {
+            NameSource::Variable(id) => self.ident(id),
+            NameSource::Declaration(id) => self.var(id).ident,
+            NameSource::Parameter(id, index) => self.ident_slice(id)[index],
+            NameSource::Rest(id, index) => self.rest(id)[index].ident.expect("bound rest field"),
+            NameSource::Qualified(id) => self.qual(id).0.id,
+            NameSource::Import(_, id) | NameSource::Export(_, id) => id,
+        };
+        NameKey { ident, slot: 0 }
+    }
     #[inline]
     fn ek(&self, e: Expr) -> ExprKind {
         JsArena::ek(self, e)
@@ -172,4 +201,12 @@ impl View for JsArena {
     fn stmt_loc(&self, s: Stmt) -> Option<LamLoc> {
         JsArena::stmt_loc(self, s)
     }
+}
+
+/// Assigned names are read independently of input storage.
+pub(crate) trait PrintedNames {
+    fn name(&self, key: NameKey) -> &str;
+    fn method_this_used(&self, f: FunId) -> bool;
+    fn finish(&self, s: Stmt) -> &str;
+    fn raw_prefix_len(&self) -> usize;
 }

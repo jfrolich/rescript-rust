@@ -1,7 +1,9 @@
 //! The only expression/statement layer that knows oxc AST types.
 #[cfg(test)]
 use crate::js_ir::arena::JsArena;
-use super::{Unsupported, literal, naming::Names, view::View, walk};
+#[cfg(test)]
+use super::naming::Names;
+use super::{Unsupported, literal, view::{View, NameSource, PrintedNames}, walk};
 use crate::js_ir::arena::{Expr, ExprKind, FunId, PropName, Stmt, StmtKind};
 use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
@@ -13,10 +15,10 @@ use oxc_syntax::{
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
 };
 
-pub(super) struct Build<'a, 'r, V: View> {
+pub(super) struct Build<'a, 'r, V: View, N: PrintedNames> {
     pub b: AstBuilder<'a>,
     pub arena: &'r V,
-    pub names: &'r Names,
+    pub names: &'r N,
     pub debug: bool,
     pub jsx_preserve: bool,
     rest_name: std::cell::RefCell<String>,
@@ -30,8 +32,8 @@ pub(super) struct Build<'a, 'r, V: View> {
     // S1.2: absent on the default, location-free path.
     pub source_map: Option<&'r super::sourcemap::Spans>,
 }
-impl<'a, 'r, V: View> Build<'a, 'r, V> {
-    pub fn new(alloc: &'a Allocator, arena: &'r V, names: &'r Names) -> Self {
+impl<'a, 'r, V: View, N: PrintedNames> Build<'a, 'r, V, N> {
+    pub fn new(alloc: &'a Allocator, arena: &'r V, names: &'r N) -> Self {
         let mut prefix = oxc_allocator::StringBuilder::from_str_in(super::raw::PREFIX, alloc);
         let prefix_len = names.raw_prefix_len();
         while prefix.len() < prefix_len {
@@ -53,6 +55,9 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
             string_values: Default::default(),
             source_map: None,
         }
+    }
+    fn name(&self, source: NameSource) -> &str {
+        self.names.name(self.arena.name_key(source))
     }
     pub fn text(&self, s: &str) -> &'a str {
         self.b.allocator().alloc_str(s)
@@ -220,7 +225,7 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
                 field
                     .ident
                     .as_ref()
-                    .map(|id| self.names.get(id))
+                    .map(|_| self.name(NameSource::Rest(fields, i)))
                     .unwrap_or(&field.label)
             } else {
                 synthetic.clear();
@@ -918,10 +923,10 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
         let a = self.arena;
         walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
-            ExprKind::Var(id) => self.id(self.names.get(&a.ident(id))),
+            ExprKind::Var(id) => self.id(self.name(NameSource::Variable(id))),
             ExprKind::Qualified(q) => {
                 let (m, field) = a.qual(q);
-                let base = self.id(self.names.get(&m.id));
+                let base = self.id(self.name(NameSource::Qualified(q)));
                 match field {
                     None => base,
                     Some(_) if matches!(m.kind, Kind::External { default: true, .. }) => base,
@@ -1165,14 +1170,14 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
         let info = self.arena.fun(f);
-        for id in self
+        for (index, _) in self
             .arena
             .ident_slice(info.params)
-            .iter()
+            .iter().enumerate()
             .skip(usize::from(info.is_method))
         {
             let pattern =
-                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(self.names.get(id))));
+                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(self.name(NameSource::Parameter(info.params, index)))));
             items.push(FormalParameter::new(
                 SPAN,
                 self.b.vec(),
@@ -1211,9 +1216,8 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
         // Methods omit their first IR parameter and materialize it as `this`
         // only when used. Naming meets that binding before the real parameters.
         if info.is_method && self.names.method_this_used(f) {
-            let this = &(&*self.arena.ident_slice(info.params))[0];
             statements.push(self.variable(
-                self.names.get(this),
+                self.name(NameSource::Parameter(info.params, 0)),
                 Some(Expression::new_this_expression(SPAN, &self.b)),
             ));
         }
@@ -1383,7 +1387,7 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
         let a = self.arena;
         let f = a.for_range(id);
         walk::range_supported(a, f)?;
-        let name = self.names.get(&a.ident(f.ident));
+        let name = self.name(NameSource::Variable(f.ident));
         let finish = walk::finish_binding(a, f.end).then(|| self.names.finish(s));
         let mut declarations = self.b.vec();
         if let Some(e) = f.init {
@@ -1597,7 +1601,7 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
                     walk::Declaration::Effect(e) => return self.effect(e, out),
                     walk::Declaration::Binding => {}
                 }
-                let name = self.names.get(&decl.ident);
+                let name = self.name(NameSource::Declaration(v));
                 if let Some((fields, source)) = walk::rest_declaration(a, decl) {
                     let item = VariableDeclarator::new(
                         SPAN,
@@ -1721,7 +1725,7 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
                     SPAN,
                     VariableDeclarationKind::Let,
                     self.b
-                        .vec1(self.declarator(self.names.get(&a.ident(f.ident)), None)),
+                        .vec1(self.declarator(self.name(NameSource::Variable(f.ident)), None)),
                     false,
                     &self.b,
                 );
@@ -1783,7 +1787,7 @@ impl<'a, 'r, V: View> Build<'a, 'r, V> {
                 let t = a.try_info(id);
                 let handler = if let Some((id, body)) = t.catch {
                     let pattern = BindingPattern::BindingIdentifier(
-                        self.b.alloc(self.binding(self.names.get(&a.ident(id)))),
+                        self.b.alloc(self.binding(self.name(NameSource::Variable(id)))),
                     );
                     Some(self.b.alloc(CatchClause::new(
                         SPAN,

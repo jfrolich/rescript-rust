@@ -58,9 +58,9 @@ pub(super) fn emit(
     )
 }
 
-pub(super) fn emit_named<V: super::view::View>(
+pub(super) fn emit_named<V: super::view::View, N: super::view::PrintedNames>(
     unit: Unit<'_, V>,
-    names: &Names,
+    names: &N,
     resolver: &ModulePathResolver,
     directives: &[String],
     options: FileOptions,
@@ -106,14 +106,14 @@ pub(super) fn emit_named<V: super::view::View>(
             b,
         ));
     }
-    for module in unit.modules {
+    for (index, module) in unit.modules.iter().enumerate() {
         if module.dynamic_import {
             continue;
         }
         let Some(path) = resolver.resolve_module_path(module) else {
             continue;
         };
-        let name = names.get(&module.id);
+        let name = names.name(unit.arena.name_key(super::view::NameSource::Import(index, module.id)));
         let default = matches!(module.kind, Kind::External { default: true, .. });
         if commonjs {
             let call = Expression::new_call_expression(
@@ -174,14 +174,14 @@ pub(super) fn emit_named<V: super::view::View>(
     let no_statements = statements.is_empty();
     body.extend(statements);
     if commonjs {
-        for id in unit.exports {
+        for (index, id) in unit.exports.iter().enumerate() {
             let export = js_export_name(id.name());
             let target = build.member(build.id("exports"), &export);
             let assignment = Expression::new_assignment_expression(
                 SPAN,
                 AssignmentOperator::Assign,
                 build.target(target)?,
-                build.id(names.get(id)),
+                build.id(names.name(unit.arena.name_key(super::view::NameSource::Export(index, *id)))),
                 b,
             );
             body.push(build.expression_statement(assignment));
@@ -199,10 +199,10 @@ pub(super) fn emit_named<V: super::view::View>(
         }
     } else if !unit.exports.is_empty() {
         let mut specifiers = b.vec();
-        for id in unit.exports {
+        for (index, id) in unit.exports.iter().enumerate() {
             let local = ModuleExportName::IdentifierName(IdentifierName::new(
                 SPAN,
-                build.text(names.get(id)),
+                build.text(names.name(unit.arena.name_key(super::view::NameSource::Export(index, *id)))),
                 b,
             ));
             let exported = ModuleExportName::IdentifierName(IdentifierName::new(
