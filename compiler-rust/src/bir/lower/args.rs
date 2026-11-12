@@ -114,6 +114,7 @@ impl State {
                     let children: Vec<_> = values.drain(values.len() - count..).collect();
                     let aux = self.arena.node(old).aux();
                     let cold = self.arena.cold(old);
+                    let located = self.arena.node(old).flags().contains(NodeFlags::JS_LOC_PRESENT);
                     let view = self.arena.view(old);
                     let value = if let View::JOptional { .. } = view {
                         self.pure_expression(View::JOptional { value: children[0] }, aux)
@@ -140,6 +141,11 @@ impl State {
                     };
                     if let Some(cold) = cold {
                         self.arena.set_cold(value, cold);
+                        if located {
+                            let mut flags = self.arena.node(value).flags();
+                            flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                            self.arena.nodes[value.index()].set_flags(flags);
+                        }
                     }
                     self.arena.release(old);
                     values.push(value);
@@ -188,6 +194,7 @@ impl State {
                     };
                     let aux = self.arena.node(value).aux();
                     let cold = self.arena.cold(value);
+                    let located = self.arena.node(value).flags().contains(NodeFlags::JS_LOC_PRESENT);
                     self.arena.detach(object);
                     self.arena.release(value);
                     let (held, object) = self.evaluate_now(object);
@@ -195,6 +202,11 @@ impl State {
                         crate::bir::j::member(&mut self.arena, object, property, position, aux);
                     if let Some(cold) = cold {
                         self.arena.set_cold(value, cold);
+                        if located {
+                            let mut flags = self.arena.node(value).flags();
+                            flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                            self.arena.nodes[value.index()].set_flags(flags);
+                        }
                     }
                     (held, value)
                 } else {
@@ -318,6 +330,11 @@ mod tests {
                     }
                     _ => unreachable!(),
                 };
+                state.arena.set_cold(value, crate::bir::Cold { loc: crate::lambda::LamLoc::NONE, comment: None });
+                let mut flags = state.arena.node(value).flags();
+                flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                state.arena.nodes[value.index()].set_flags(flags);
+                let old_value = legacy.j.with_expr_loc(old_value, Some(crate::lambda::LamLoc::NONE));
                 let start = state.statements.mark();
                 state.statements.reserve();
                 args.push(Out {
@@ -358,6 +375,9 @@ mod tests {
             let value = exp::string("v", &mut legacy.j);
             expected_args.push((vec![statement], value));
             let (span, values) = state.sequence_arguments(method, args);
+            if method || shape != 0 {
+                assert!(state.arena.node(values[0]).flags().contains(NodeFlags::JS_LOC_PRESENT));
+            }
             if !method && shape == 0 {
                 let View::Var { var: first } = state.arena.view(values[0]) else {
                     panic!("held first")
