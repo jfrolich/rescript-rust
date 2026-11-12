@@ -797,3 +797,54 @@ impl EmitView for EmitterView<'_> {
         self.expr_loc(j::Expr::new(s.index()))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::lambda::FunctionAttribute;
+    use crate::name::Name;
+
+    /// Aggregate variable facts are not a function's exact free environment.
+    /// Swapping capture owners leaves every current variable-table column equal.
+    #[test]
+    fn capture_flags_do_not_encode_function_environments() {
+        fn unit(reverse: bool) -> (Bir, [NodeId; 2]) {
+            let mut b = Bir::default();
+            b.begin_bulk();
+            let x = b.new_var_id(Name::new("x"), 1);
+            let y = b.new_var_id(Name::new("x"), 2);
+            b.mark_js_global(x);
+            b.mark_js_global(y);
+            let vars = if reverse { [y, x] } else { [x, y] };
+            let mut uses = Vec::new();
+            let mut statements = Vec::new();
+            for var in vars {
+                let value = b.new_node(View::Var { var }, 0);
+                uses.push(value);
+                let ret = b.new_node(View::SReturn { value }, 0);
+                let body = b.new_node(View::SBlock { statements: &[ret] }, 0);
+                let header = b.function_header(VarSpan::default(), FunctionAttribute::default(), LamLoc::NONE);
+                let function = b.new_node(View::JFun { body, header }, 0);
+                statements.push(b.new_node(View::SExp { value: function }, 0));
+            }
+            let root = b.new_node(View::SBlock { statements: &statements }, 0);
+            b.finish_bulk(root);
+            (b, [uses[0], uses[1]])
+        }
+        let (a, a_uses) = unit(false);
+        let (b, b_uses) = unit(true);
+        for i in 0..a.vars().len() {
+            let v = VarId(index(i));
+            assert_eq!(a.vars().name(v), b.vars().name(v));
+            assert_eq!(a.vars().order(v), b.vars().order(v));
+            assert_eq!(a.vars().uses(v), b.vars().uses(v));
+            assert_eq!(a.vars().flags(v), b.vars().flags(v));
+            assert_eq!(a.vars().binder(v), b.vars().binder(v));
+            assert_eq!(a.vars().fact(v), b.vars().fact(v));
+            assert_eq!(a.vars().printed(v), b.vars().printed(v));
+        }
+        let View::Var { var: first_a } = a.view(a_uses[0]) else { unreachable!() };
+        let View::Var { var: first_b } = b.view(b_uses[0]) else { unreachable!() };
+        assert_ne!(first_a, first_b);
+    }
+}

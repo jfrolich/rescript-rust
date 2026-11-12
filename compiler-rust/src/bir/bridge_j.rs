@@ -1623,7 +1623,7 @@ mod tests {
     macro_rules! expr_case {
         ($name:ident,|$a:ident,$x:ident,$y:ident|$body:expr) => {
             #[test]
-            pub(super) fn $name() {
+            fn $name() {
                 expression(|$a, $x, $y| $body);
             }
         };
@@ -1809,7 +1809,7 @@ mod tests {
     macro_rules! stmt_case {
         ($name:ident,|$a:ident,$x:ident,$b:ident|$body:expr) => {
             #[test]
-            pub(super) fn $name() {
+            fn $name() {
                 statement(|$a, $x, $b| $body);
             }
         };
