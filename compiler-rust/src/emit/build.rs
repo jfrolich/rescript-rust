@@ -16,6 +16,10 @@ pub(super) struct Build<'a, 'r> {
     pub arena: &'r JsArena,
     pub names: &'r Names,
     pub debug: bool,
+    pub jsx_preserve: bool,
+    rest_name: std::cell::RefCell<String>,
+    string_tasks: std::cell::RefCell<Vec<(Expr, bool)>>,
+    string_values: std::cell::RefCell<Vec<Expression<'a>>>,
     pub raw_prefix: &'a str,
     pub raw_pieces: std::cell::RefCell<ArenaVec<'a, super::raw::Piece<'a>>>,
     // S1.2: absent on the default, location-free path.
@@ -35,6 +39,10 @@ impl<'a, 'r> Build<'a, 'r> {
             arena,
             names,
             debug: false,
+            jsx_preserve: false,
+            rest_name: Default::default(),
+            string_tasks: Default::default(),
+            string_values: Default::default(),
             source_map: None,
         }
     }
@@ -162,6 +170,189 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(result)
     }
+    /// Record-rest expressions are an immediately called destructuring arrow;
+    /// declarations instead bind the real fields and rest name. Synthetic names
+    /// __unusedN and __rest never enter naming. Only source is an expression.
+    fn rest_pattern(
+        &self,
+        fields: crate::js_ir::arena::RestId,
+        rest: &str,
+        declaration: bool,
+    ) -> BindingPattern<'a> {
+        use std::fmt::Write;
+        let mut props = self.b.vec();
+        let mut synthetic = self.rest_name.borrow_mut();
+        for (i, field) in self.arena.rest(fields).iter().enumerate() {
+            let name = if declaration {
+                field
+                    .ident
+                    .as_ref()
+                    .map(|id| self.names.get(id))
+                    .unwrap_or(&field.label)
+            } else {
+                synthetic.clear();
+                write!(synthetic, "__unused{i}").expect("writing a String cannot fail");
+                &synthetic
+            };
+            let computed = field.label == "__proto__";
+            let (label, bare) = walk::member_form(&field.label);
+            let key = if bare && !computed {
+                PropertyKey::StaticIdentifier(self.b.alloc(IdentifierName::new(
+                    SPAN,
+                    self.text(label),
+                    &self.b,
+                )))
+            } else {
+                PropertyKey::from(self.string_expr(label))
+            };
+            props.push(BindingProperty::new(
+                SPAN,
+                key,
+                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(name))),
+                declaration && name == field.label,
+                computed,
+                &self.b,
+            ));
+        }
+        BindingPattern::ObjectPattern(self.b.alloc(ObjectPattern::new(
+            SPAN,
+            props,
+            Some(self.b.alloc(BindingRestElement::new(
+                SPAN,
+                BindingPattern::BindingIdentifier(self.b.alloc(self.binding(rest))),
+                &self.b,
+            ))),
+            &self.b,
+        )))
+    }
+
+    fn record_rest(
+        &self,
+        fields: crate::js_ir::arena::RestId,
+        source: Expr,
+    ) -> Result<Expression<'a>, Unsupported> {
+        let param = FormalParameter::new(
+            SPAN,
+            self.b.vec(),
+            self.rest_pattern(fields, "__rest", false),
+            None,
+            None,
+            false,
+            None,
+            false,
+            false,
+            &self.b,
+        );
+        let params = self.b.alloc(FormalParameters::new(
+            SPAN,
+            FormalParameterKind::FormalParameter,
+            self.b.vec1(param),
+            None,
+            &self.b,
+        ));
+        let callee = Expression::new_arrow_function_expression(
+            SPAN,
+            false,
+            None,
+            params,
+            None,
+            ArrowFunctionBody::from(self.id("__rest")),
+            &self.b,
+        );
+        Ok(self.call(callee, self.b.vec1(Argument::from(self.expr(source)?))))
+    }
+
+    /// Runtime JSX prints callee(tag, props[, key]). Names are encountered in
+    /// that order, with spread before properties and children. oxc supplies
+    /// call/object/array parentheses, matching printer::print_jsx_call.
+    fn jsx_call(&self, id: crate::js_ir::arena::JsxId) -> Result<Expression<'a>, Unsupported> {
+        let jsx = walk::jsx_runtime(self.arena, id, self.jsx_preserve)?;
+        let callee = self.expr(jsx.callee)?;
+        let mut args = self.b.vec1(Argument::from(self.expr(jsx.tag)?));
+        let props = self.arena.props(jsx.props);
+        let value = if let Some(spread) = jsx
+            .spread
+            .filter(|_| props.is_empty() && jsx.children.is_none())
+        {
+            self.expr(spread)?
+        } else {
+            let mut properties = self.b.vec();
+            if let Some(spread) = jsx.spread {
+                properties.push(ObjectPropertyKind::SpreadProperty(
+                    self.b
+                        .alloc(SpreadElement::new(SPAN, self.expr(spread)?, &self.b)),
+                ));
+            }
+            for (key, value) in props {
+                let PropName::Lit(name) = key else {
+                    return Err(Unsupported("symbol JSX key"));
+                };
+                properties.push(self.block_property(self.arena.text(*name), self.expr(*value)?));
+            }
+            if let Some(children) = jsx.children {
+                let children = self.arena.exprs(children);
+                let value = if let [child] = children
+                    && !jsx.multi
+                {
+                    self.expr(*child)?
+                } else {
+                    let mut elements = self.b.vec();
+                    for child in children {
+                        elements.push(ArrayExpressionElement::from(self.expr(*child)?));
+                    }
+                    Expression::new_array_expression(SPAN, elements, &self.b)
+                };
+                properties.push(self.block_property("children", value));
+            }
+            Expression::new_object_expression(SPAN, properties, &self.b)
+        };
+        args.push(Argument::from(value));
+        if let Some(key) = jsx.key {
+            args.push(Argument::from(self.expr(key)?));
+        }
+        Ok(self.call(callee, args))
+    }
+
+    fn call(&self, callee: Expression<'a>, args: ArenaVec<'a, Argument<'a>>) -> Expression<'a> {
+        Expression::new_call_expression(SPAN, callee, None, args, false, &self.b)
+    }
+
+    /// StringAppend uses Plus's (11, 11, 12) precedence in the legacy printer:
+    /// the right child remains grouped, unlike logical chains. Visit leaves
+    /// left to right and build postorder without recursing through the chain.
+    fn string_append(&self, root: Expr) -> Result<Expression<'a>, Unsupported> {
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: string concatenation"));
+        }
+        let mut tasks = self.string_tasks.take();
+        let mut values = self.string_values.take();
+        tasks.push((root, false));
+        let result = (|| {
+            while let Some((expr, finish)) = tasks.pop() {
+                walk::expression_comment(self.arena, expr)?;
+                if let Some((left, right)) = walk::string_children(self.arena, expr) {
+                    if finish {
+                        let right = values.pop().unwrap();
+                        let left = values.pop().unwrap();
+                        values.push(self.binary(B::Addition, left, right));
+                    } else {
+                        tasks.push((expr, true));
+                        tasks.push((right, false));
+                        tasks.push((left, false));
+                    }
+                } else {
+                    values.push(self.expr(expr)?);
+                }
+            }
+            Ok(values.pop().unwrap())
+        })();
+        tasks.clear();
+        values.clear();
+        self.string_tasks.replace(tasks);
+        self.string_values.replace(values);
+        result
+    }
+
     fn sequence(&self, e: Expr, out: &mut ArenaVec<'a, Expression<'a>>) -> Result<(), Unsupported> {
         if let ExprKind::Seq(l, r) = self.arena.ek(e) {
             self.sequence(l, out)?;
@@ -186,8 +377,12 @@ impl<'a, 'r> Build<'a, 'r> {
         if walk::negation_form(self.arena, op, l) {
             return Ok(self.unary(U::UnaryNegation, self.expr(r)?));
         }
-        if walk::possible_nullish(self.arena, op, l, r) {
-            return Err(Unsupported("nullish comparison rewrite"));
+        if let Some(target) = walk::nullish_target(self.arena, op, l, r)? {
+            return Ok(self.binary(
+                B::Equality,
+                self.expr(target)?,
+                Expression::new_null_literal(SPAN, &self.b),
+            ));
         }
         if matches!(op, BinOp::And | BinOp::Or | BinOp::Bor) {
             let mut operands = Vec::new();
@@ -505,9 +700,7 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::Null => Expression::new_null_literal(SPAN, &self.b),
             ExprKind::Undefined { .. } => self.id("undefined"),
             ExprKind::Bin(op, l, r) => self.bin(op, l, r)?,
-            ExprKind::StringAppend(_, _) => {
-                return Err(Unsupported("string concatenation association"));
-            }
+            ExprKind::StringAppend(_, _) => self.string_append(e)?,
             ExprKind::In(l, r) => self.binary(B::In, self.expr(l)?, self.expr(r)?),
             ExprKind::IsNullOrUndefined(e) => self.binary(
                 B::Equality,
@@ -549,9 +742,11 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.args(args.map_or(&[], |args| a.exprs(args)))?,
                 &self.b,
             ),
-            ExprKind::StaticIndex(e, s, _) | ExprKind::CamlBlockTag(e, s) => {
+            ExprKind::StaticIndex(e, s, _) => {
+                walk::static_member_supported(a.text(s))?;
                 self.member(self.expr(e)?, a.text(s))
             }
+            ExprKind::CamlBlockTag(e, s) => self.member(self.expr(e)?, a.text(s)),
             ExprKind::Length(e, _) => self.member(self.expr(e)?, "length"),
             ExprKind::ArrayIndex(e, i) => Expression::new_computed_member_expression(
                 SPAN,
@@ -617,10 +812,16 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::Fun(f) => self.function_expr(f)?,
             ExprKind::Await(e) => Expression::new_await_expression(SPAN, self.expr(e)?, &self.b),
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
-            ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
+            ExprKind::OptionalBlock(inner, false) => {
+                let mut args = self.b.vec();
+                if let Some(inner) = walk::optional_argument(a, inner) {
+                    args.push(Argument::from(self.expr(inner)?));
+                }
+                self.call(self.member(self.id("Primitive_option"), "some"), args)
+            }
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(id) => self.raw(id, walk::RawContext::Expression)?,
-            ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
+            ExprKind::Jsx(id) => self.jsx_call(id)?,
             ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
                 self.b
                     .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
@@ -640,9 +841,14 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
             }
             ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
-            ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
+            ExprKind::FlatCall(func, args) => self.call(self.member(self.expr(func)?, "apply"), {
+                let mut values = self.b.vec();
+                values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
+                values.push(Argument::from(self.expr(args)?));
+                values
+            }),
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
-            ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
+            ExprKind::RecordRest(fields, source) => self.record_rest(fields, source)?,
         })
     }
     /// The first line receives oxc's surrounding indentation; continuation
@@ -714,7 +920,13 @@ impl<'a, 'r> Build<'a, 'r> {
 
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
-        for id in self.arena.ident_slice(self.arena.fun(f).params) {
+        let info = self.arena.fun(f);
+        for id in self
+            .arena
+            .ident_slice(info.params)
+            .iter()
+            .skip(usize::from(info.is_method))
+        {
             let pattern =
                 BindingPattern::BindingIdentifier(self.b.alloc(self.binding(self.names.get(id))));
             items.push(FormalParameter::new(
@@ -745,6 +957,15 @@ impl<'a, 'r> Build<'a, 'r> {
         let info = self.arena.fun(f);
         let body = walk::function_body(self.arena, self.arena.stmts(info.body));
         let mut statements = self.b.vec();
+        // Methods omit their first IR parameter and materialize it as `this`
+        // only when used. Naming meets that binding before the real parameters.
+        if info.is_method && self.names.method_this_used(f) {
+            let this = &self.arena.ident_slice(info.params)[0];
+            statements.push(self.variable(
+                self.names.get(this),
+                Some(Expression::new_this_expression(SPAN, &self.b)),
+            ));
+        }
         for (index, s) in body.iter().enumerate() {
             self.stmt(
                 *s,
@@ -778,12 +999,23 @@ impl<'a, 'r> Build<'a, 'r> {
         let body = match walk::function_form(self.arena, f, false)? {
             walk::FunctionForm::Eta(e) => return self.expr(e),
             walk::FunctionForm::ArrowExpression(e) => {
-                ArrowFunctionBody::from(if let ExprKind::RawJsCode(id) = self.arena.ek(e) {
+                let mut value = if let ExprKind::RawJsCode(id) = self.arena.ek(e) {
                     walk::expression_comment(self.arena, e)?;
                     self.raw(id, walk::RawContext::Arrow)?
                 } else {
                     self.expr(e)?
-                })
+                };
+                // Legacy groups Fun bodies. oxc records parenthesized functions
+                // as PIFEs even with preserve_parens=false; a ParenthesizedExpression
+                // alone is ignored by codegen and does not reproduce these tokens.
+                if matches!(self.arena.ek(e), ExprKind::Fun(_)) {
+                    match &mut value {
+                        Expression::ArrowFunctionExpression(f) => f.pife = true,
+                        Expression::FunctionExpression(f) => f.pife = true,
+                        _ => {} // Eta reduction prints an identifier, not a function.
+                    }
+                }
+                ArrowFunctionBody::from(value)
             }
             walk::FunctionForm::ArrowEmpty => ArrowFunctionBody::FunctionBody(
                 self.b
@@ -791,6 +1023,22 @@ impl<'a, 'r> Build<'a, 'r> {
             ),
             walk::FunctionForm::ArrowBlock => {
                 ArrowFunctionBody::FunctionBody(self.function_body(f)?)
+            }
+            walk::FunctionForm::Method => {
+                return Ok(Expression::new_function_expression(
+                    SPAN,
+                    FunctionType::FunctionExpression,
+                    None,
+                    false,
+                    self.arena.fun(f).async_,
+                    false,
+                    None,
+                    None,
+                    self.params(f),
+                    None,
+                    Some(self.function_body(f)?),
+                    &self.b,
+                ));
             }
             walk::FunctionForm::Declaration => unreachable!(),
         };
@@ -1088,6 +1336,25 @@ impl<'a, 'r> Build<'a, 'r> {
                     walk::Declaration::Binding => {}
                 }
                 let name = self.names.get(&decl.ident);
+                if let Some((fields, source)) = walk::rest_declaration(a, decl) {
+                    let item = VariableDeclarator::new(
+                        SPAN,
+                        self.rest_pattern(fields, name, true),
+                        None,
+                        Some(self.expr(source)?),
+                        false,
+                        &self.b,
+                    );
+                    out.push(Statement::new_variable_declaration(
+                        SPAN,
+                        VariableDeclarationKind::Let,
+                        self.b.vec1(item),
+                        false,
+                        &self.b,
+                    ));
+                    return Ok(());
+                }
+
                 if let Some(e) = decl.value
                     && let ExprKind::Fun(f) = a.ek(e)
                 {
@@ -1704,5 +1971,170 @@ mod statement_tests {
             let s = a.stmt(StmtKind::Variable(v));
             oracle(a, vec![s]);
         }
+    }
+}
+
+#[cfg(test)]
+mod remaining_expression_tests {
+    use super::*;
+    use crate::js_ir::build::exp as E;
+    use js_reformat::{ReformatOptions, reformat};
+
+    fn oracle(arena: &JsArena, expr: Expr) {
+        let legacy = crate::js_ir::printer::print_expr_with_options(arena, expr, 1, false, false);
+        let alloc = Allocator::default();
+        let names = Names::default();
+        let build = Build::new(&alloc, arena, &names);
+        let stmt = build.variable("value", Some(build.expr(expr).unwrap()));
+        let program = Program::new(
+            SPAN,
+            oxc_span::SourceType::mjs(),
+            "",
+            build.b.vec(),
+            None,
+            build.b.vec(),
+            build.b.vec1(stmt),
+            &build.b,
+        );
+        let actual = oxc_codegen::Codegen::new().build(&program).code;
+        let mode = ReformatOptions {
+            drop_decoration_comments: true,
+            ..Default::default()
+        };
+        assert_eq!(
+            reformat(&format!("let value = {legacy};"), mode).unwrap(),
+            actual
+        );
+        assert_eq!(reformat(&actual, mode).unwrap(), actual);
+    }
+
+    #[test]
+    fn runtime_jsx_and_rest_expression_oracle() {
+        let mut a = JsArena::new();
+        let value = E::new(ExprKind::Undefined { is_unit: false }, &mut a);
+        for multi in [false, true] {
+            for spread in [None, Some(value)] {
+                for has_children in [false, true] {
+                    let props = a.prop_list(&[]);
+                    let children = has_children.then(|| a.expr_list(&[value]));
+                    let jsx = a.jsx_id(crate::js_ir::arena::JsxInfo {
+                        callee: value,
+                        tag: value,
+                        spread,
+                        props,
+                        children,
+                        key: Some(value),
+                        multi,
+                        fragment: false,
+                    });
+                    let expr = a.expr(ExprKind::Jsx(jsx));
+                    oracle(&a, expr);
+                }
+            }
+        }
+        for labels in [vec![], vec!["a", "with-dash", "__proto__"]] {
+            let fields = a.rest_id(
+                labels
+                    .into_iter()
+                    .map(|label| crate::js_ir::RecordRestField {
+                        label: label.into(),
+                        ident: None,
+                    })
+                    .collect(),
+            );
+            let expr = a.expr(ExprKind::RecordRest(fields, value));
+            oracle(&a, expr);
+        }
+    }
+
+    #[test]
+    fn string_spine_does_not_bypass_comment_rejection() {
+        let mut a = JsArena::new();
+        let value = a.expr(ExprKind::Null);
+        let inner = a.expr_commented(ExprKind::StringAppend(value, value), "keep me");
+        let root = a.expr(ExprKind::StringAppend(value, inner));
+        let alloc = Allocator::default();
+        let names = Names::default();
+        let error = Build::new(&alloc, &a, &names).expr(root).unwrap_err();
+        assert_eq!(error, Unsupported("non-decoration expression comment"));
+        assert_eq!(walk::string_leaves(&a, root, &mut Vec::new(), |_| Ok(())), Err(error));
+    }
+
+    #[test]
+    fn nullish_comparison_oracle() {
+        let mut a = JsArena::new();
+        let value = a.expr(ExprKind::Bool(true));
+        let null = a.expr(ExprKind::Null);
+        let undefined = a.expr(ExprKind::Undefined { is_unit: false });
+        for (left, right) in [(null, undefined), (undefined, null), (null, null)] {
+            let left = a.expr(ExprKind::Bin(BinOp::EqEqEq, value, left));
+            let right = a.expr(ExprKind::Bin(BinOp::EqEqEq, value, right));
+            let expr = a.expr(ExprKind::Bin(BinOp::Or, left, right));
+            oracle(&a, expr);
+        }
+    }
+
+    #[test]
+    fn string_append_preserves_both_associations() {
+        let mut a = JsArena::new();
+        let one = E::number(Number::int(1), &mut a);
+        let two = E::number(Number::int(2), &mut a);
+        let three = E::number(Number::int(3), &mut a);
+        let pair = E::new(ExprKind::StringAppend(one, two), &mut a);
+        let left = E::new(ExprKind::StringAppend(pair, three), &mut a);
+        let right = E::new(ExprKind::StringAppend(three, pair), &mut a);
+        oracle(&a, left);
+        oracle(&a, right);
+    }
+
+    #[test]
+    fn optional_helper_omits_only_synthetic_unit() {
+        let mut a = JsArena::new();
+        for unit in [true, false] {
+            let value = E::new(ExprKind::Undefined { is_unit: unit }, &mut a);
+            let expr = E::new(ExprKind::OptionalBlock(value, false), &mut a);
+            oracle(&a, expr);
+        }
+        let number = E::number(Number::int(1), &mut a);
+        let expr = E::new(ExprKind::OptionalBlock(number, false), &mut a);
+        oracle(&a, expr);
+    }
+
+    #[test]
+    fn flat_call_uses_apply_null_array() {
+        let mut a = JsArena::new();
+        let value = E::new(ExprKind::Undefined { is_unit: false }, &mut a);
+        let expr = E::new(ExprKind::FlatCall(value, value), &mut a);
+        oracle(&a, expr);
+    }
+
+    #[test]
+    fn ten_thousand_term_string_chain_builds_and_names_iteratively() {
+        let mut a = JsArena::new();
+        let value = E::number(Number::int(1), &mut a);
+        let mut expr = value;
+        for _ in 1..10_000 {
+            expr = E::new(ExprKind::StringAppend(value, expr), &mut a);
+        }
+        let mut count = 0;
+        walk::string_leaves(&a, expr, &mut Vec::new(), |_| {
+            count += 1;
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(count, 10_000);
+        let alloc = Allocator::default();
+        let names = Names::default();
+        Build::new(&alloc, &a, &names).expr(expr).unwrap();
+        let stmt = a.stmt(StmtKind::Exp(expr));
+        let program = crate::js_ir::arena::JsDepsProgram {
+            program: crate::js_ir::arena::JsProgram::new_in(vec![stmt], vec![], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver = crate::js_ir::ModulePathResolver::from_compile_options(
+            None, None, None, None, None, None, false,
+        );
+        Names::collect(&program, &resolver).unwrap();
     }
 }

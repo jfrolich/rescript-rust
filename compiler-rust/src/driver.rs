@@ -9860,10 +9860,25 @@ fn render_js_program(
     } = settings;
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
         let mut raw_audit = stats.raw_audit_buffer();
-        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
-            render_oxc_source_map(program, resolver, JsFileSettings {
-                file_directives, debug, jsx_preserve,
-            }, options, output_path, lam_locs.clone())
+        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None
+            && std::env::var("RESCRIPT_JS_PRINTER_SOURCE_MAPS").as_deref() == Ok("legacy")
+        {
+            Err(crate::emit::Unsupported(
+                "source maps: parity legacy policy",
+            ))
+        } else if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
+            render_oxc_source_map(
+                program,
+                resolver,
+                JsFileSettings {
+                    file_directives,
+                    debug,
+                    jsx_preserve,
+                },
+                options,
+                output_path,
+                lam_locs.clone(),
+            )
         } else {
             crate::emit::emit_audited(
                 program,
@@ -9876,6 +9891,13 @@ fn render_js_program(
             )
         };
         stats.record(&result);
+        if let Err(error) = stats.report_output(
+            &result,
+            options.source_filename.as_deref().map(FsPath::new),
+            output_path,
+        ) {
+            log::error!("oxc printer coverage report: {error}");
+        }
         if result.is_ok() {
             stats.record_raw(raw_audit);
         }

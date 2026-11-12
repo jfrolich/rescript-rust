@@ -96,6 +96,55 @@ impl PrinterStats {
         }
     }
 
+    /// Opt-in per-output evidence for build-level parity coverage. Immutable
+    /// outcomes prevent repeated invocations from hiding an earlier fallback.
+    pub(crate) fn report_output(
+        &self,
+        result: &Result<(String, Option<String>), Unsupported>,
+        source: Option<&std::path::Path>,
+        output: Option<&std::path::Path>,
+    ) -> anyhow::Result<()> {
+        use std::hash::{Hash, Hasher};
+        let Some(directory) = std::env::var_os("RESCRIPT_JS_PRINTER_STATS") else {
+            return Ok(());
+        };
+        let Some(output) = output else {
+            return Ok(());
+        };
+        let absolute = |p: &std::path::Path| -> std::io::Result<std::path::PathBuf> {
+            Ok(if p.is_absolute() {
+                p.into()
+            } else {
+                std::env::current_dir()?.join(p)
+            })
+        };
+        let output = absolute(output)?;
+        let source = source.map(absolute).transpose()?;
+        let reason = result.as_ref().err().map(|e| e.0);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        output.hash(&mut hash);
+        reason.hash(&mut hash);
+        let directory = std::path::Path::new(&directory);
+        std::fs::create_dir_all(directory)?;
+        let path = directory.join(format!("{:016x}.json", hash.finish()));
+        let mut file = match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(file) => file,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => return Ok(()),
+            Err(e) => return Err(e.into()),
+        };
+        serde_json::to_writer(
+            &mut file,
+            &serde_json::json!({
+                "source": source, "output": output, "emitted": result.is_ok(), "unsupported": reason,
+            }),
+        )?;
+        Ok(())
+    }
+
     /// Read counters without resetting them.
     pub fn snapshot(&self) -> Coverage {
         self.coverage
@@ -111,15 +160,14 @@ pub fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
+    jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         None,
     )
@@ -130,7 +178,7 @@ pub(crate) fn emit_audited(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
+    jsx_preserve: bool,
     header: bool,
     audit: Option<&mut Vec<RawSegment>>,
 ) -> Result<(String, Option<String>), Unsupported> {
@@ -138,8 +186,7 @@ pub(crate) fn emit_audited(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         audit,
     )
@@ -149,14 +196,13 @@ pub(crate) fn emit_audited(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
     program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
-    debug: bool, _jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         Some(options),
         None,
     )
@@ -200,6 +246,10 @@ mod oracle_tests {
     fn oracle(source: &str, commonjs: bool) {
         let stats = Arc::new(PrinterStats::with_raw_audit());
         let mut options = CompilerOptions {
+            include_paths: vec![
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../packages/@rescript/runtime/lib/rescript"),
+            ],
             js_printer: PrinterMode::Legacy,
             output_module_format: Some(if commonjs {
                 crate::js_ir::ModuleFormat::CommonJs
@@ -253,6 +303,23 @@ mod oracle_tests {
             masked,
             "masked fixed point: {source}"
         );
+    }
+
+    #[test]
+    fn remaining_expressions_source_oracle() {
+        for source in [
+            "let f = @this self => self + 1",
+            "let f = @this (self: int) => 1",
+            "let f = x => y => z => x + y + z",
+            "let f = x => async y => x + y",
+            "type rest = {b: int}; type t = {a: int, b: int}; let f = (r: t) => {let {a, ...rest as other} = r; (a, other)}",
+            "let f = x => Some(x)",
+            "let f = x => x ++ (x ++ x)",
+        ] {
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
+        }
     }
 
     #[test]

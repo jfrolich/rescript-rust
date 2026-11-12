@@ -1341,6 +1341,7 @@ fn small_enough(n: usize, slice: &[Ctx<'_>]) -> bool {
 
 /// Shift left for a list of contexts, with pruning when too large.
 pub fn ctx_lshift<'p>(pa: &PatArena<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+    count_contexts_built(ctx.len());
     if small_enough(31, ctx) {
         ctx.iter().map(lshift).collect()
     } else {
@@ -1746,6 +1747,7 @@ pub fn filter_ctx<'p>(
             None => crate::misc::fatal_error("Matching.filter_ctx"),
         }
     }
+    count_contexts_built(out.len());
     out
 }
 
@@ -1802,6 +1804,197 @@ pub fn ctx_lub<'p>(pa: &'p PatArena<'p>, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec
 pub fn ctx_match(pa: &PatArena<'_>, ctx: &[Ctx<'_>], pss: &Matrix<'_>) -> bool {
     ctx.iter()
         .any(|c| pss.iter().any(|ps| may_compats(pa, &c.right, ps)))
+}
+
+// ============================================================================
+// Context pool — context lists built when read
+// ============================================================================
+
+/// A context list of the match being compiled: a handle into its
+/// [`CtxPool`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CtxId(u32);
+
+/// How a pooled context list is obtained.
+enum CtxRecipe<'p> {
+    /// Built.
+    Built(std::rc::Rc<[Ctx<'p>]>),
+    /// `filter_ctx q parent`, not built.
+    Filter { parent: CtxId, q: &'p Pattern },
+    /// `ctx_lshift parent`, not built.
+    Shift { parent: CtxId },
+}
+
+struct CtxEntry<'p> {
+    recipe: CtxRecipe<'p>,
+    /// `Some(n)` when the list is known to be one context whose right
+    /// columns are `n` wildcards; `None` otherwise.
+    wild: Option<u32>,
+}
+
+/// The context lists of one match compilation.
+///
+/// A context list says which values can reach a matching (`compiler/ml/
+/// matching.ml:54-230`). The compilation passes it down through every test
+/// (`filter_ctx`) and column shift (`ctx_lshift`) and reads it in few
+/// places: when an exit is taken (the list enters a jump summary), when
+/// the constructors a switch does not mention are sent to default matrices,
+/// when an or-pattern handler selects its columns, and when `compile_list`
+/// asks whether a cell's list is empty. Most matches reach none of the
+/// first three, so their lists are built for the emptiness question alone.
+///
+/// The pool answers that question without building, in the one case where
+/// the answer is known: the parent is a single context whose right columns
+/// are all wildcards (the starting context is one). Then `filter_ctx q`
+/// gives exactly one context, the pattern `q` normalized moved left and its
+/// wildcard arguments followed by the remaining wildcards on the right
+/// (every arm of `ctx_matcher` accepts a wildcard head, and
+/// `normalize_pat` makes every argument a wildcard), and `ctx_lshift` gives
+/// exactly one context with one wildcard moved left. Both results are
+/// again of that form and not empty. Such a list is stored as its recipe
+/// and built, by the same `filter_ctx` and `ctx_lshift`, when it is read.
+///
+/// Costs: `filter` and `lshift` on a wildcard parent are O(1) and build
+/// nothing; on another parent they build the list as before. `get` builds
+/// the unbuilt lists from the handle up to its nearest built ancestor, each
+/// once, and is O(1) afterwards. `is_empty` is O(1) and builds nothing.
+#[derive(Default)]
+pub struct CtxPool<'p> {
+    entries: RefCell<Vec<CtxEntry<'p>>>,
+}
+
+/// The number of right columns when `ctx` is one context whose right
+/// columns are all wildcards.
+fn wild_width(ctx: &[Ctx<'_>]) -> Option<u32> {
+    match ctx {
+        [c] if c
+            .right
+            .iter()
+            .all(|p| matches!(p.pat_desc, PatternDesc::Tpat_any)) =>
+        {
+            Some(c.right.len() as u32)
+        }
+        _ => None,
+    }
+}
+
+/// The number of arguments `ctx_matcher q` puts on the right for a wildcard
+/// head, after the checks `ctx_matcher` and `normalize_pat` make on `q`.
+fn ctx_matcher_arity(pa: &PatArena<'_>, q: &Pattern) -> usize {
+    match &q.pat_desc {
+        PatternDesc::Tpat_alias(q, _, _) => ctx_matcher_arity(pa, pa.pat(*q)),
+        PatternDesc::Tpat_construct(_, _, args)
+        | PatternDesc::Tpat_array(args)
+        | PatternDesc::Tpat_tuple(args) => args.len(),
+        PatternDesc::Tpat_interval(..) if int_range(q).is_none() => {
+            crate::misc::fatal_error("Matching.ctx_matcher")
+        }
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => 0,
+        PatternDesc::Tpat_variant(_, arg, _) => usize::from(arg.is_some()),
+        PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => fields.len(),
+        PatternDesc::Tpat_or(..) => crate::misc::fatal_error("Parmatch.normalize_pat"),
+        PatternDesc::Tpat_dict(_) => {
+            crate::misc::fatal_error("Parmatch.normalize_pat: dict pattern")
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_record(..) => {
+            crate::misc::fatal_error("Matching.ctx_matcher")
+        }
+    }
+}
+
+impl<'p> CtxPool<'p> {
+    fn push(&self, recipe: CtxRecipe<'p>, wild: Option<u32>) -> CtxId {
+        let mut entries = self.entries.borrow_mut();
+        let id = CtxId(entries.len() as u32);
+        entries.push(CtxEntry { recipe, wild });
+        id
+    }
+
+    /// A built list.
+    pub fn built(&self, ctx: Vec<Ctx<'p>>) -> CtxId {
+        let wild = wild_width(&ctx);
+        self.push(CtxRecipe::Built(ctx.into()), wild)
+    }
+
+    fn wild(&self, id: CtxId) -> Option<u32> {
+        self.entries.borrow()[id.0 as usize].wild
+    }
+
+    /// `filter_ctx q parent`. O(1) for a wildcard parent.
+    pub fn filter(
+        &self,
+        ctx_ref: Option<&TypeContext>,
+        pa: &'p PatArena<'p>,
+        q: &'p Pattern,
+        parent: CtxId,
+    ) -> CtxId {
+        match self.wild(parent) {
+            Some(width) => {
+                // The failures of `ctx_matcher`, then of `filter_ctx`.
+                let arity = ctx_matcher_arity(pa, q) as u32;
+                if width == 0 {
+                    crate::misc::fatal_error("Matching.filter_ctx")
+                }
+                self.push(CtxRecipe::Filter { parent, q }, Some(width - 1 + arity))
+            }
+            None => self.built(filter_ctx(ctx_ref, pa, q, &self.get(pa, parent))),
+        }
+    }
+
+    /// `ctx_lshift parent`. O(1) for a wildcard parent.
+    pub fn lshift(&self, pa: &'p PatArena<'p>, parent: CtxId) -> CtxId {
+        match self.wild(parent) {
+            Some(0) => panic!("lshift: empty right"),
+            Some(width) => self.push(CtxRecipe::Shift { parent }, Some(width - 1)),
+            None => self.built(ctx_lshift(pa, &self.get(pa, parent))),
+        }
+    }
+
+    /// Whether the list is empty, without building it.
+    pub fn is_empty(&self, id: CtxId) -> bool {
+        let entries = self.entries.borrow();
+        let entry = &entries[id.0 as usize];
+        match &entry.recipe {
+            CtxRecipe::Built(ctx) => ctx.is_empty(),
+            CtxRecipe::Filter { .. } | CtxRecipe::Shift { .. } => {
+                debug_assert!(entry.wild.is_some());
+                false
+            }
+        }
+    }
+
+    /// The list, built if it was not.
+    pub fn get(&self, pa: &'p PatArena<'p>, id: CtxId) -> std::rc::Rc<[Ctx<'p>]> {
+        let (parent, q) = match &self.entries.borrow()[id.0 as usize].recipe {
+            CtxRecipe::Built(ctx) => return ctx.clone(),
+            CtxRecipe::Filter { parent, q } => (*parent, Some(*q)),
+            CtxRecipe::Shift { parent } => (*parent, None),
+        };
+        let parent = self.get(pa, parent);
+        let ctx: std::rc::Rc<[Ctx<'p>]> = match q {
+            // The parent's head is a wildcard, and no arm of `ctx_matcher`
+            // reads the type context for a wildcard head.
+            Some(q) => filter_ctx(None, pa, q, &parent).into(),
+            None => ctx_lshift(pa, &parent).into(),
+        };
+        let entry = &mut self.entries.borrow_mut()[id.0 as usize];
+        debug_assert_eq!(wild_width(&ctx), entry.wild);
+        entry.recipe = CtxRecipe::Built(ctx.clone());
+        ctx
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Contexts built by `filter_ctx` and `ctx_lshift`, for the step-count
+    /// tests.
+    static CONTEXTS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_contexts_built(_n: usize) {
+    #[cfg(test)]
+    CONTEXTS_BUILT.with(|steps| steps.set(steps.get() + _n as u64));
 }
 
 // ============================================================================
@@ -1978,7 +2171,39 @@ pub struct PmOrCompiled<'p> {
     /// Handlers for or-patterns: (matrix, exit_number, idents, pattern_matching).
     pub handlers: Vec<OrHandler<'p>>,
     /// The or-pattern matrix.
-    pub or_matrix: Matrix<'p>,
+    or_matrix: OrMatrix<'p>,
+}
+
+/// The matrix of a [`PmOrCompiled`]: `as_matrix` of the rows it was split
+/// from. Nothing reads it unless the matching is consed onto a default
+/// environment or flattened, so it is kept as its rows until then.
+#[derive(Clone)]
+enum OrMatrix<'p> {
+    /// Not computed: the matrix of the first `plain` cases of the body
+    /// followed by `ors`, the or-pattern rows the handlers were made from.
+    Rows {
+        plain: usize,
+        ors: Vec<Clause<'p>>,
+    },
+    /// Computed and flattened (`flatten_precompiled`).
+    Flat(Matrix<'p>),
+}
+
+impl<'p> PmOrCompiled<'p> {
+    /// The or-pattern matrix. Cost: one [`as_matrix`] of the rows when it
+    /// was not flattened, a copy of the matrix when it was.
+    fn or_matrix(&self, pa: &PatArena<'p>) -> Matrix<'p> {
+        match &self.or_matrix {
+            OrMatrix::Rows { plain, ors } => as_matrix_rows(
+                pa,
+                self.body.cases[..*plain]
+                    .iter()
+                    .chain(ors)
+                    .map(|(row, _)| row.as_slice()),
+            ),
+            OrMatrix::Flat(matrix) => matrix.clone(),
+        }
+    }
 }
 
 /// Half-compiled pattern matching.
@@ -2002,11 +2227,15 @@ pub struct PmVarCompiled<'p> {
 }
 
 /// Half-compiled pattern matching with associated info.
+///
+/// OCaml's record also carries `matrix`, the matrix of `me`. It is a
+/// function of `me` (`rebuild_matrix`) and is read only when `me` becomes
+/// an entry of a default environment, that is when `me` is not the first
+/// group of its split. It is computed there and nowhere else: a split into
+/// one group, the common case, never compares its rows.
 pub struct PmHalfCompiledInfo<'p> {
     /// The half-compiled pattern matching.
     pub me: PmHalfCompiled<'p>,
-    /// The associated matrix.
-    pub matrix: Matrix<'p>,
     /// The top-level default environment.
     pub top_default: DefaultEnv<'p>,
 }
@@ -3252,14 +3481,54 @@ fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
+///
+/// Cost: at most n(n-1) row comparisons for n rows (two passes of
+/// [`get_mins_indices`]), none for one row, and one row copy per kept row.
 fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
+    as_matrix_rows(pa, cases.iter().map(|(row, _)| row.as_slice()))
+}
+
+/// [`as_matrix`] over rows.
+fn as_matrix_rows<'a, 'p: 'a>(
+    pa: &PatArena<'p>,
+    rows: impl Iterator<Item = &'a [&'p Pattern]>,
+) -> Matrix<'p> {
+    let rows: smallvec::SmallVec<[&[&'p Pattern]; 8]> = rows.collect();
     get_mins_indices(
-        |a: &Clause<'p>, b: &Clause<'p>| le_pats(pa, &a.0, &b.0),
-        cases,
+        |a: &&[&'p Pattern], b: &&[&'p Pattern]| {
+            count_row_comparison();
+            le_pats(pa, a, b)
+        },
+        &rows,
     )
     .iter()
-    .map(|&i| cases[i].0.clone())
+    .map(|&i| rows[i].to_vec())
     .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Steps of `do_split_or`'s loop over its work lists, for the step-count
+    /// tests: one per row and one to finish.
+    static WORK_LIST_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_work_list_row() {
+    #[cfg(test)]
+    WORK_LIST_STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Row comparisons made by [`as_matrix`], for the step-count tests.
+    static ROW_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_row_comparison() {
+    #[cfg(test)]
+    ROW_COMPARISONS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -3872,11 +4141,19 @@ fn insert_or_append<'p>(
 // ============================================================================
 
 /// Reconstruct a matrix from a half-compiled pattern matching.
-/// Equivalent to OCaml's `rebuild_matrix`.
+/// Equivalent to OCaml's `rebuild_matrix`, and the `matrix` field of OCaml's
+/// `pm_half_compiled_info`: every split function builds that field as
+/// `as_matrix` of the cases of a `Pm`, as the or-pattern matrix of a `PmOr`,
+/// or by adding a wildcard column to the matrix of what a `PmVar` wraps,
+/// which is what this computes from the finished matching. `as_matrix` only
+/// reads patterns, so computing it here, later, gives the same matrix.
+///
+/// Cost: one [`as_matrix`] of the innermost matching's rows, plus one row
+/// copy per kept row and `PmVar` level.
 fn rebuild_matrix<'p>(pa: &PatArena<'p>, pmh: &PmHalfCompiled<'p>) -> Matrix<'p> {
     match pmh {
         PmHalfCompiled::Pm(pm) => as_matrix(pa, &pm.cases),
-        PmHalfCompiled::PmOr(por) => por.or_matrix.clone(),
+        PmHalfCompiled::PmOr(por) => por.or_matrix(pa),
         PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(pa, &x.inside)),
     }
 }
@@ -3955,6 +4232,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         } = *self;
         let cls = simplify_cases(ctx_ref, pa, arena, args, cls);
 
+        // One row that does not start with an or-pattern: `do_split_or`
+        // would find nothing to compare it with (`up_ok` over no rows makes
+        // no comparison and takes no identifier), put it in `before` and,
+        // with no or-pattern row and no row left, call `split_constr` on it
+        // with this default environment and no next matching. Call it
+        // directly: O(1), no work list, and the environment is not copied.
+        if let [(row, _)] = cls.as_slice()
+            && let Some((p, ps)) = row.split_first()
+            && !is_or(p, ps)
+        {
+            return self.split_constr(&cls, def, Vec::new());
+        }
         self.do_split_or(cls.into(), &def)
     }
 
@@ -3976,6 +4265,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // deep `do_split_or` stacks. Keep the exact branch order but run it as an
         // explicit loop.
         loop {
+            count_work_list_row();
             let Some(cl) = rest.pop_front() else {
                 let before = rev_deque_to_vec(before);
                 let ors = rev_deque_to_vec(ors);
@@ -4029,10 +4319,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             let idef = bump_raise_count(self.next_raise);
             let PmHalfCompiledInfo {
                 me: next,
-                matrix,
                 top_default,
             } = info;
-            let new_def = cons_default(matrix, idef, top_default);
+            let new_def = cons_default(rebuild_matrix(self.pa, &next), idef, top_default);
             let mut new_nexts = vec![(idef, next)];
             new_nexts.extend(nexts);
             self.precompile_or(yes, yesor, new_def, new_nexts)
@@ -4078,11 +4367,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             None => (
                 PmHalfCompiledInfo {
                     me: PmHalfCompiled::Pm(PatternMatching {
-                        cases: yes.clone(),
+                        cases: yes,
                         args: args.clone(),
                         default: def.clone(),
                     }),
-                    matrix: as_matrix(pa, &yes),
                     top_default: def,
                 },
                 k,
@@ -4100,20 +4388,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4125,20 +4411,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
-                    let new_def = cons_default(matrix, idef, top_default);
+                    let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                     let mut new_nexts = vec![(idef, next)];
                     new_nexts.extend(nexts);
                     (
                         PmHalfCompiledInfo {
                             me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
+                                cases: yes,
                                 args: args.clone(),
                                 default: new_def.clone(),
                             }),
-                            matrix: as_matrix(pa, &yes),
                             top_default: new_def,
                         },
                         new_nexts,
@@ -4166,9 +4450,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(self.pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4239,11 +4523,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 None => (
                     PmHalfCompiledInfo {
                         me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
+                            cases: yes,
                             args: args.clone(),
                             default: def.clone(),
                         }),
-                        matrix: as_matrix(pa, &yes),
                         top_default: def,
                     },
                     k,
@@ -4264,20 +4547,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4329,9 +4610,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4401,7 +4682,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     Some(v) => {
                         if cls.len() == 1 {
                             // as split as it can
-                            dont_precompile_var(pa, args, cls, def, k)
+                            dont_precompile_var(args, cls, def, k)
                         } else {
                             // Precompile: strip first pattern from each case
                             let var_cls: Vec<Clause<'p>> = cls
@@ -4432,14 +4713,13 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             // Compute top information
                             if nexts.is_empty() {
                                 // If you need
-                                dont_precompile_var(pa, args, cls, def, k)
+                                dont_precompile_var(args, cls, def, k)
                             } else {
                                 let rfirst = PmHalfCompiledInfo {
                                     me: PmHalfCompiled::PmVar(PmVarCompiled {
                                         inside: Box::new(first_info.me),
                                         var_arg: av,
                                     }),
-                                    matrix: add_omega_column(&first_info.matrix),
                                     top_default: rebuild_default(pa, &nexts, def),
                                 };
                                 let rnexts = rebuild_nexts(&av, nexts, k);
@@ -4447,10 +4727,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             }
                         }
                     }
-                    _ => dont_precompile_var(pa, args, cls, def, k),
+                    _ => dont_precompile_var(args, cls, def, k),
                 }
             }
-            _ => dont_precompile_var(pa, args, cls, def, k),
+            _ => dont_precompile_var(args, cls, def, k),
         }
     }
 
@@ -4463,7 +4743,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         def: DefaultEnv<'p>,
         k: Vec<(i32, PmHalfCompiled<'p>)>,
     ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-        let Split { pa, args, .. } = *self;
+        let Split { args, .. } = *self;
         if ors.is_empty() {
             return self.split_constr(&cls, def, k);
         }
@@ -4471,7 +4751,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // do_cases processes the or-pattern list
         let (end_body, handlers) = self.do_cases_or(&ors, &def);
 
-        let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
+        let plain = cls.len();
         let body = PatternMatching {
             cases: [cls, end_body].concat(),
             args: args.clone(),
@@ -4482,9 +4762,8 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 me: PmHalfCompiled::PmOr(PmOrCompiled {
                     body,
                     handlers,
-                    or_matrix: matrix.clone(),
+                    or_matrix: OrMatrix::Rows { plain, ors },
                 }),
-                matrix,
                 top_default: def,
             },
             k,
@@ -4590,7 +4869,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
 /// Don't precompile: just wrap the cases in a PatternMatching.
 /// Equivalent to OCaml's `dont_precompile_var`.
 fn dont_precompile_var<'p>(
-    pa: &PatArena<'p>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
     def: DefaultEnv<'p>,
@@ -4599,11 +4877,10 @@ fn dont_precompile_var<'p>(
     (
         PmHalfCompiledInfo {
             me: PmHalfCompiled::Pm(PatternMatching {
-                cases: cls.clone(),
+                cases: cls,
                 args: args.clone(),
                 default: def.clone(),
             }),
-            matrix: as_matrix(pa, &cls),
             top_default: def,
         },
         k,
@@ -4649,7 +4926,7 @@ fn rev_deque_to_vec<T>(v: VecDeque<T>) -> Vec<T> {
 /// Equivalent to OCaml's `cell`.
 struct MatchCell<'p> {
     pm: PatternMatching<'p>,
-    ctx: Vec<Ctx<'p>>,
+    ctx: CtxId,
     pat: &'p Pattern,
 }
 
@@ -4681,11 +4958,11 @@ fn add<'p, K>(
 /// Iterating from the tail, pushing, and reversing once preserves the same
 /// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
 fn divide<'p, K>(
-    make: impl Fn(&'p Pattern, &DefaultEnv<'p>, &[Ctx<'p>], &MatchArgs) -> MatchCell<'p>,
+    make: impl Fn(&'p Pattern, &DefaultEnv<'p>, CtxId, &MatchArgs) -> MatchCell<'p>,
     eq_key: impl Fn(&K, &K) -> bool,
     get_key: impl Fn(&'p Pattern) -> K,
     get_args: impl Fn(&'p Pattern, &[&'p Pattern]) -> Vec<&'p Pattern>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(K, MatchCell<'p>)> {
     let mut division: Vec<(K, MatchCell<'p>)> = Vec::new();
@@ -4720,11 +4997,11 @@ fn divide<'p, K>(
 /// consing shape as `divide`; use push + one suffix reverse to keep that order
 /// without shifting the whole Rust vector per case.
 fn divide_line<'p>(
-    make_ctx: impl Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
+    make_ctx: impl Fn(CtxId) -> CtxId,
     make: impl Fn(&DefaultEnv<'p>, &MatchArgs) -> PatternMatching<'p>,
     get_args: impl Fn(&'p Pattern, &[&'p Pattern]) -> Vec<&'p Pattern>,
     pat: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     let mut divided = make(&pm.default, &pm.args);
@@ -4832,9 +5109,10 @@ fn get_args_constant<'p>(_p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Patter
 /// Equivalent to OCaml's `make_constant_matching`.
 fn make_constant_matching<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
@@ -4842,7 +5120,7 @@ fn make_constant_matching<'p>(
         Some(_) => {
             let key = get_key_constant("make", p);
             let def = make_default(pa, &|p2, rem| matcher_const(pa, &key, p2, rem), def);
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -4903,8 +5181,9 @@ fn column_int_ranges(pa: &PatArena<'_>, m: &PatternMatching<'_>) -> Option<Vec<(
 /// the ranges.
 fn divide_constant_ranges<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     ranges: &[(i64, i64)],
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Vec<(ConstantKey, MatchCell<'p>)> {
     let mut cuts: Vec<i64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi + 1]).collect();
@@ -4937,7 +5216,7 @@ fn divide_constant_ranges<'p>(
     for i in (0..n).rev() {
         if let Some(head) = heads[i] {
             let p = pa.alloc(make_int_range(head, cuts[i], cuts[i + 1] - 1));
-            let mut cell = make_constant_matching(pa, p, &m.default, ctx, &m.args);
+            let mut cell = make_constant_matching(pa, cp, p, &m.default, ctx, &m.args);
             cell.pm.cases = std::mem::take(&mut rows[i]);
             cells.push((get_key_constant("divide", p), cell));
         }
@@ -4950,13 +5229,14 @@ fn divide_constant_ranges<'p>(
 /// Equivalent to OCaml's `divide_constant`.
 fn divide_constant<'p>(
     pa: &'p PatArena<'p>,
-    ctx: &[Ctx<'p>],
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Vec<(ConstantKey, MatchCell<'p>)> {
     match column_int_ranges(pa, m) {
-        Some(ranges) => divide_constant_ranges(pa, &ranges, ctx, m),
+        Some(ranges) => divide_constant_ranges(pa, cp, &ranges, ctx, m),
         None => divide(
-            |p, d, c, a| make_constant_matching(pa, p, d, c, a),
+            |p, d, c, a| make_constant_matching(pa, cp, p, d, c, a),
             |(c, _), (d, _)| const_compare(c, d) == std::cmp::Ordering::Equal,
             |p| get_key_constant("divide", p),
             get_args_constant,
@@ -5155,14 +5435,18 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 /// Make a constructor matching cell.
 /// Equivalent to OCaml's `make_constr_matching`.
 fn make_constr_matching<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_constr_matching"),
@@ -5267,7 +5551,7 @@ fn make_constr_matching<'p, B: RawLambdaBuilder>(
                         def,
                     ),
                 },
-                ctx: filter_ctx(Some(ctx_ref), pa, p, ctx),
+                ctx: cp.filter(Some(ctx_ref), pa, p, ctx),
                 pat: normalize_pat(pa, p),
             }
         }
@@ -5279,12 +5563,19 @@ fn make_constr_matching<'p, B: RawLambdaBuilder>(
 fn divide_constructor<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
+    let cx = MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    };
     divide(
-        |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, arena, p, def, ctx_inner, args),
+        |p, def, ctx_inner, args| make_constr_matching(cx, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
         |p, rem| get_args_constr(pa, p, rem),
@@ -5319,10 +5610,11 @@ fn matcher_variant_const<'p>(
 /// Equivalent to OCaml's `make_variant_matching_constant`.
 fn make_variant_matching_constant<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
@@ -5334,7 +5626,7 @@ fn make_variant_matching_constant<'p>(
                 &|p2, rem| matcher_variant_const(pa, &lab_owned, p2, rem),
                 def,
             );
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -5375,14 +5667,14 @@ fn matcher_variant_nonconst<'p>(
 /// Make a variant matching cell for non-constant variants.
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
 fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
@@ -5394,7 +5686,7 @@ fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
                 &|p2, rem| matcher_variant_nonconst(pa, &lab_owned, p2, rem),
                 def,
             );
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             let new_args = MatchArgs::cons(
                 (
                     b.prim(
@@ -5424,9 +5716,10 @@ fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
 fn divide_variant<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     row: &RowDesc,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<((String, bool), MatchCell<'p>)> {
     let row = btype::row_repr(ctx_ref, row);
@@ -5436,10 +5729,12 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
         row: &RowDesc,
         cases: &[Clause<'p>],
         def: &DefaultEnv<'p>,
-        ctx: &[Ctx<'p>],
+        ctx: CtxId,
         al: &MatchArgs,
     ) -> Vec<((String, bool), MatchCell<'p>)> {
-        let MatchCx { ctx_ref, pa, arena } = cx;
+        let MatchCx {
+            ctx_ref, pa, cp, ..
+        } = cx;
         match cases.split_first() {
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
@@ -5472,7 +5767,7 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
                                         add(
                                             |a| {
                                                 make_variant_matching_constant(
-                                                    pa, p, lab, def, ctx, a,
+                                                    pa, cp, p, lab, def, ctx, a,
                                                 )
                                             },
                                             variants,
@@ -5489,7 +5784,7 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
                                         add(
                                             |a| {
                                                 make_variant_matching_nonconst(
-                                                    pa, arena, p, lab, def, ctx, a,
+                                                    cx, p, lab, def, ctx, a,
                                                 )
                                             },
                                             variants,
@@ -5512,7 +5807,12 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
     }
 
     divide_rec(
-        MatchCx { ctx_ref, pa, arena },
+        MatchCx {
+            ctx_ref,
+            pa,
+            arena,
+            cp,
+        },
         &row,
         &pm.cases,
         &pm.default,
@@ -5558,11 +5858,12 @@ fn make_var_matching<'p>(
 /// Equivalent to OCaml's `divide_var`.
 fn divide_var<'p>(
     pa: &'p PatArena<'p>,
-    ctx: &[Ctx<'p>],
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     divide_line(
-        |c| ctx_lshift(pa, c),
+        |c| cp.lshift(pa, c),
         |def, args| make_var_matching(pa, def, args),
         get_args_var,
         omega(),
@@ -5654,15 +5955,16 @@ fn make_tuple_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `divide_tuple`.
 fn divide_tuple<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     arity: usize,
     p: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     let b = arena.b;
     divide_line(
-        |c| filter_ctx(None, pa, p, c),
+        |c| cp.filter(None, pa, p, c),
         |def, args| make_tuple_matching(b, pa, arena.lam_loc(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(pa, arity, pat, rem),
         p,
@@ -5809,18 +6111,22 @@ fn make_record_matching<'p, B: RawLambdaBuilder>(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     let num_fields = all_labels.len();
     divide_line(
-        |c| filter_ctx(Some(ctx_ref), pa, p, c),
+        |c| cp.filter(Some(ctx_ref), pa, p, c),
         |def, args| make_record_matching(b, pa, arena.lam_loc(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(pa, num_fields, pat, rem),
         p,
@@ -5876,10 +6182,11 @@ fn matcher_array<'p>(
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     let b = arena.b;
@@ -5907,7 +6214,7 @@ fn make_array_matching<'p, B: RawLambdaBuilder>(
             }
             new_args.extend(argl.iter().cloned());
             let def = make_default(pa, &|p2, rem| matcher_array(pa, len, p2, rem), def);
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -5925,12 +6232,13 @@ fn make_array_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `divide_array`.
 fn divide_array<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
     divide(
-        |p, d, c, a| make_array_matching(pa, arena, p, d, c, a),
+        |p, d, c, a| make_array_matching(pa, cp, arena, p, d, c, a),
         |a, b| a == b,
         get_key_array,
         |p, rem| get_args_array(pa, p, rem),
@@ -6752,15 +7060,17 @@ fn get_variant_constructors_from_env(
 /// Equivalent to OCaml's `mk_failaction_neg`.
 fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
     b: &B,
+    pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     def: &DefaultEnv<'p>,
 ) -> (Option<RawLambda>, Jumps<'p>) {
     match partial {
         Partial::Partial => match def.first() {
             Some((_, idef)) => (
                 Some(b.static_raise(*idef, &[])),
-                jumps_singleton(*idef, ctx.to_vec()),
+                jumps_singleton(*idef, cp.get(pa, ctx).to_vec()),
             ),
             None => {
                 // Act as Total: if no default matrix exists, the switch cannot fail
@@ -6775,26 +7085,36 @@ fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos<'p, B: RawLambdaBuilder>(
-    b: &B,
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     seen: &[&'p Pattern],
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     defs: &DefaultEnv<'p>,
 ) -> (Option<RawLambda>, Vec<ConstrCase>, Jumps<'p>) {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
+    let b = arena.b;
     let fail_pats = complete_pats_constrs(ctx_ref, pa, seen);
-    if fail_pats.len() < 32 {
+    if fail_pats.is_empty() {
+        // `scan_def` with nothing to test: no case and no jump, and the
+        // contexts are not read.
+        (None, Vec::new(), jumps_empty())
+    } else if fail_pats.len() < 32 {
+        let ctx = cp.get(pa, ctx);
         let to_test: Vec<(&'p Pattern, Vec<Ctx<'p>>)> = fail_pats
             .iter()
-            .map(|pat| (*pat, ctx_lub(pa, pat, ctx)))
+            .map(|pat| (*pat, ctx_lub(pa, pat, &ctx)))
             .collect();
 
-        let (fail, jmps) = scan_def(b, pa, ctx, Vec::new(), to_test, defs);
+        let (fail, jmps) = scan_def(b, pa, &ctx, Vec::new(), to_test, defs);
         (None, fail, jmps)
     } else {
         // Too many non-matched constructors -> reduced information
-        let (fail, jumps) = mk_failaction_neg(b, partial, ctx, defs);
+        let (fail, jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, defs);
         (fail, Vec::new(), jumps)
     }
 }
@@ -6923,7 +7243,7 @@ struct CombineSite<'p, 'a, B: RawLambdaBuilder> {
     loc: LamLoc,
     arg: RawLambda,
     partial: &'a Partial,
-    ctx: &'a [Ctx<'p>],
+    ctx: CtxId,
     def: &'a DefaultEnv<'p>,
 }
 
@@ -6943,7 +7263,7 @@ fn combine_constant<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { pa, arena, .. },
+        cx: MatchCx { pa, arena, cp, .. },
         loc,
         arg,
         partial,
@@ -6952,7 +7272,7 @@ fn combine_constant<'p, B: RawLambdaBuilder>(
     } = *site;
     let b = arena.b;
     let (const_lambda_list, total, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
     let lambda1 = match cst {
         // `char` is an alias of `int`, so a column can mix both. Its keys
         // are ranges. Match intervals use ReScript's int32 bounds.
@@ -7225,7 +7545,13 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7237,7 +7563,7 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
 
     if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
         // Special cases for extensions
-        let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+        let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
         let lambda1 = {
             let extension_cases = get_extension_cases(tag_lambda_list);
             // OCaml compiler/ml/matching.ml:2118-2139 uses the first extension
@@ -7291,7 +7617,7 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
-            mk_failaction_pos(b, ctx_ref, pa, partial, &pats, ctx, def)
+            mk_failaction_pos(site.cx, partial, &pats, ctx, def)
         };
 
         // OCaml shares the immutable list cells/actions here:
@@ -7645,7 +7971,13 @@ fn combine_variant<'p, B: RawLambdaBuilder>(
     c_div: CompiledCells<'p, (String, bool)>,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7685,7 +8017,7 @@ fn combine_variant<'p, B: RawLambdaBuilder>(
     let (fail, local_jumps) = if sig_complete || matches!(partial, Partial::Total) {
         (None, jumps_empty())
     } else {
-        mk_failaction_neg(b, partial, ctx, def)
+        mk_failaction_neg(b, pa, cp, partial, ctx, def)
     };
 
     let actions_all_same = fail.is_none() && all_actions_same_tagged(b, &tag_lambda_list);
@@ -7730,7 +8062,13 @@ fn combine_array<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7739,7 +8077,7 @@ fn combine_array<'p, B: RawLambdaBuilder>(
     } = *site;
     let b = arena.b;
     let (len_lambda_list, total1, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
     let lambda1 = {
         let newvar = ctx_ref.create_ident("len");
         let int_lambda_list: Vec<(i32, RawLambda)> = len_lambda_list
@@ -7784,28 +8122,29 @@ type CompiledCells<'p, K> = (Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>);
 
 /// Compiles one divided cell, given its contexts (`compile_list`).
 type CellCompiler<'p, 'f> =
-    dyn FnMut(&[Ctx<'p>], PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+    dyn FnMut(CtxId, PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
 
 /// Compiles an or-pattern handler's matching (`compile_orhandlers`).
 type OrHandlerCompiler<'p, 'f> =
-    dyn FnMut(&[Ctx<'p>], &PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+    dyn FnMut(CtxId, &PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
 
 /// Compiles one half-compiled match (`comp_match_handlers`).
-type HalfCompiledCompiler<'p, 'f> = dyn FnMut(&Partial, &[Ctx<'p>], &RawLambda, &PmHalfCompiled<'p>) -> Result<Compiled<'p>, Unused>
+type HalfCompiledCompiler<'p, 'f> = dyn FnMut(&Partial, CtxId, &RawLambda, &PmHalfCompiled<'p>) -> Result<Compiled<'p>, Unused>
     + 'f;
 
 /// Divides a matching into cells by key (`compile_test`'s `divide`).
-type Divider<'p, 'f, K> = dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)> + 'f;
+type Divider<'p, 'f, K> = dyn Fn(CtxId, &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)> + 'f;
 
 /// Combines the compiled cells into one test (`compile_test`'s `combine`).
 type Combiner<'p, 'f, K> =
-    dyn Fn(&[Ctx<'p>], &DefaultEnv<'p>, CompiledCells<'p, K>, &mut i32) -> Compiled<'p> + 'f;
+    dyn Fn(CtxId, &DefaultEnv<'p>, CompiledCells<'p, K>, &mut i32) -> Compiled<'p> + 'f;
 
 /// Compile a list of divided cells.
 /// Returns (key-action list, total jumps, pattern list).
 /// Equivalent to OCaml's `compile_list`.
 fn compile_list<'p, K: Clone>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     compile_fun: &mut CellCompiler<'p, '_>,
     division: Vec<(K, MatchCell<'p>)>,
 ) -> Result<CompiledCells<'p, K>, Unused> {
@@ -7814,10 +8153,10 @@ fn compile_list<'p, K: Clone>(
     let mut new_pats = Vec::new();
 
     for (key, cell) in division {
-        if cell.ctx.is_empty() {
+        if cp.is_empty(cell.ctx) {
             continue;
         }
-        if let Ok((lambda1, total1)) = compile_fun(&cell.ctx, cell.pm) {
+        if let Ok((lambda1, total1)) = compile_fun(cell.ctx, cell.pm) {
             // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
             // tail with `jumps_map ctx_combine total1 :: totals`, then
             // conses `(key, lambda1)` and `cell.pat` onto the returned
@@ -7837,12 +8176,11 @@ fn compile_list<'p, K: Clone>(
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
 fn compile_orhandlers<'p, B: RawLambdaBuilder>(
-    b: &B,
-    pa: &'p PatArena<'p>,
+    cx: MatchCx<'p, '_, B>,
     compile_fun: &mut OrHandlerCompiler<'p, '_>,
     lambda1: RawLambda,
     total1: Jumps<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     to_catch: &[OrHandler<'p>],
 ) -> Compiled<'p> {
     /// `add_raised_exits raised lam`: adds the static exits `lam` jumps to.
@@ -7863,25 +8201,26 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
     }
 
     fn do_rec<'p, B: RawLambdaBuilder>(
-        b: &B,
-        pa: &'p PatArena<'p>,
+        cx: MatchCx<'p, '_, B>,
         compile_fun: &mut OrHandlerCompiler<'p, '_>,
         raised: &mut std::collections::HashSet<i32>,
         (r, total_r): Compiled<'p>,
-        ctx: &[Ctx<'p>],
+        ctx: CtxId,
         to_catch: &[OrHandler<'p>],
     ) -> Compiled<'p> {
+        let MatchCx { pa, arena, cp, .. } = cx;
+        let b = arena.b;
         match to_catch.split_first() {
             None => (r, total_r),
             // The or-pattern is unreachable, e.g. after a wildcard. Its
             // handler is not compiled: with a guard and no default, its
             // failure has no exit.
             Some(((_, i, _, _), rem)) if !raised.contains(i) => {
-                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
+                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
             }
             Some(((mat, i, vars, pm), rem)) => {
-                let ctx_i = select_columns(pa, mat, ctx);
-                match compile_fun(&ctx_i, pm) {
+                let ctx_i = cp.built(select_columns(pa, mat, &cp.get(pa, ctx)));
+                match compile_fun(ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
                         add_raised_exits(&*b.get(), raised, handler_i);
                         match raw_static_raise(b, r) {
@@ -7894,8 +8233,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                         bind(b, LetKind::Alias, var, arg, body)
                                     });
                                 do_rec(
-                                    b,
-                                    pa,
+                                    cx,
                                     compile_fun,
                                     raised,
                                     (body, jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i)),
@@ -7908,11 +8246,10 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
+                                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
                             }
                             None => do_rec(
-                                b,
-                                pa,
+                                cx,
                                 compile_fun,
                                 raised,
                                 (
@@ -7929,8 +8266,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                         }
                     }
                     Err(Unused) => do_rec(
-                        b,
-                        pa,
+                        cx,
                         compile_fun,
                         raised,
                         (b.static_catch(r, *i, vars, lambda_unit(b)), total_r),
@@ -7944,10 +8280,9 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
 
     // The exits of the match and of the handlers compiled so far.
     let mut raised = std::collections::HashSet::new();
-    add_raised_exits(&*b.get(), &mut raised, lambda1);
+    add_raised_exits(&*cx.arena.b.get(), &mut raised, lambda1);
     do_rec(
-        b,
-        pa,
+        cx,
         compile_fun,
         &mut raised,
         (lambda1, total1),
@@ -8058,11 +8393,16 @@ fn bind_check<B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `comp_exit`.
 fn comp_exit<'p, B: RawLambdaBuilder>(
     b: &B,
-    ctx: &[Ctx<'p>],
+    pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Result<Compiled<'p>, Unused> {
     match m.default.first() {
-        Some((_, i)) => Ok((b.static_raise(*i, &[]), jumps_singleton(*i, ctx.to_vec()))),
+        Some((_, i)) => Ok((
+            b.static_raise(*i, &[]),
+            jumps_singleton(*i, cp.get(pa, ctx).to_vec()),
+        )),
         None => crate::misc::fatal_error("Matching.comp_exit"),
     }
 }
@@ -8073,7 +8413,7 @@ fn comp_match_handlers<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     arg: &RawLambda,
     first_match: &PmHalfCompiled<'p>,
     next_matchs: &[(i32, PmHalfCompiled<'p>)],
@@ -8105,7 +8445,7 @@ fn c_rec<'p, B: RawLambdaBuilder>(
     (body, total_body): Compiled<'p>,
     rest: &[(i32, PmHalfCompiled<'p>)],
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     match rest.split_first() {
         None => Ok((body, total_body)),
@@ -8123,7 +8463,7 @@ fn c_rec<'p, B: RawLambdaBuilder>(
                 } else {
                     Partial::Partial
                 };
-                match comp_fun(&this_partial, &ctx_i, arg, pm) {
+                match comp_fun(&this_partial, cp.built(ctx_i), arg, pm) {
                     Ok((li, total_i)) => c_rec(
                         cx,
                         comp_fun,
@@ -8238,7 +8578,7 @@ fn compile_match<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     _repr: Option<()>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
@@ -8250,7 +8590,7 @@ fn compile_match<'p, B: RawLambdaBuilder>(
 fn compile_match_owned<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
@@ -8260,14 +8600,19 @@ fn compile_match_owned<'p, B: RawLambdaBuilder>(
 fn compile_match_cow<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: Cow<'_, PatternMatching<'p>>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { ctx_ref, pa, arena } = cx;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     match (m.cases.as_slice(), m.args.as_slice()) {
-        ([], []) => comp_exit(b, ctx, &m),
+        ([], []) => comp_exit(b, pa, cp, ctx, &m),
         ([(pats, action), ..], _) if pats.is_empty() => {
             if action.is_guarded() {
                 let action = action.clone();
@@ -8312,7 +8657,7 @@ fn compile_match_cow<'p, B: RawLambdaBuilder>(
             let first_match = info.me;
 
             let mut comp_fn = |partial: &Partial,
-                               ctx: &[Ctx<'p>],
+                               ctx: CtxId,
                                arg: &RawLambda,
                                pmh: &PmHalfCompiled<'p>|
              -> Result<Compiled<'p>, Unused> {
@@ -8350,20 +8695,24 @@ fn compile_match_cow<'p, B: RawLambdaBuilder>(
 fn do_compile_matching<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { ctx_ref, pa, arena } = cx;
-    let b = arena.b;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
             match &pat.pat_desc {
                 PatternDesc::Tpat_any => compile_no_test(
                     cx,
-                    &|ctx, pm| divide_var(pa, ctx, pm),
+                    &|ctx, pm| divide_var(pa, cp, ctx, pm),
                     &|ctx| ctx_rshift(ctx),
                     partial,
                     ctx,
@@ -8375,7 +8724,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         cx,
-                        &move |ctx, pm| divide_tuple(pa, arena, arity, norm_pat, ctx, pm),
+                        &move |ctx, pm| divide_tuple(pa, cp, arena, arity, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8388,9 +8737,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         cx,
-                        &move |ctx, pm| {
-                            divide_record(ctx_ref, pa, arena, &all_labels, norm_pat, ctx, pm)
-                        },
+                        &move |ctx, pm| divide_record(cx, &all_labels, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8405,7 +8752,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_constant(pa, ctx, pm),
+                        &|ctx, pm| divide_constant(pa, cp, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
                                 &CombineSite {
@@ -8434,7 +8781,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_constructor(ctx_ref, pa, arena, ctx, pm),
+                        &|ctx, pm| divide_constructor(ctx_ref, pa, cp, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
                                 &CombineSite {
@@ -8462,7 +8809,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_array(pa, arena, ctx, pm),
+                        &|ctx, pm| divide_array(pa, cp, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
                                 &CombineSite {
@@ -8491,7 +8838,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
+                        &move |ctx, pm| divide_variant(ctx_ref, pa, cp, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
                                 &CombineSite {
@@ -8518,7 +8865,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
             let (lam, total) = do_compile_matching(
                 cx,
                 partial,
-                &ctx_lshift(pa, ctx),
+                cp.lshift(pa, ctx),
                 var_arg,
                 inside,
                 next_raise_count,
@@ -8528,12 +8875,11 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
-                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                |ctx: CtxId, pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
@@ -8548,15 +8894,15 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
-    divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
+    divide_fn: &dyn Fn(CtxId, &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     to_match: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
     let cell = divide_fn(ctx, to_match);
-    let (lambda, total) = compile_match_owned(cx, partial, &cell.ctx, cell.pm, next_raise_count)?;
+    let (lambda, total) = compile_match_owned(cx, partial, cell.ctx, cell.pm, next_raise_count)?;
     Ok((lambda, jumps_map(|c| up_ctx(&c), total)))
 }
 
@@ -8570,11 +8916,11 @@ fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
     partial: &Partial,
     divide_fn: &Divider<'p, '_, K>,
     combine_fn: &Combiner<'p, '_, K>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let raise_counter = std::cell::Cell::new(*next_raise_count);
 
@@ -8584,21 +8930,23 @@ fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
     // Step 2: compile_list
     let c_div = {
         let mut compile_fn =
-            |ctx: &[Ctx<'p>], pm: PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+            |ctx: CtxId, pm: PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                 let mut next_raise = raise_counter.get();
                 let result = compile_match_owned(cx, partial, ctx, pm, &mut next_raise);
                 raise_counter.set(next_raise);
                 result
             };
-        compile_list(pa, &mut compile_fn, division)?
+        compile_list(pa, cp, &mut compile_fn, division)?
     };
 
     // Step 3: combine
     let result = match &c_div {
-        (list, _, _) if list.is_empty() => match mk_failaction_neg(b, partial, ctx, &pm.default) {
-            (None, _) => Err(Unused),
-            (Some(l), total) => Ok((l, total)),
-        },
+        (list, _, _) if list.is_empty() => {
+            match mk_failaction_neg(b, pa, cp, partial, ctx, &pm.default) {
+                (None, _) => Err(Unused),
+                (Some(l), total) => Ok((l, total)),
+            }
+        }
         _ => {
             let mut next_raise = raise_counter.get();
             let result = combine_fn(ctx, &pm.default, c_div, &mut next_raise);
@@ -8835,6 +9183,8 @@ struct MatchCx<'p, 'a, B: RawLambdaBuilder> {
     ctx_ref: &'a TypeContext,
     pa: &'p PatArena<'p>,
     arena: &'a LocArena<'a, B>,
+    /// The context lists of this match.
+    cp: &'a CtxPool<'p>,
 }
 
 impl<'p, 'a, B: RawLambdaBuilder> Copy for MatchCx<'p, 'a, B> {}
@@ -8880,6 +9230,7 @@ pub fn compile_matching<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         handler_fun,
         arg,
@@ -8897,7 +9248,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     match partial {
@@ -8911,7 +9262,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm, next_raise_count) {
                 Ok((lambda, total)) => check_total(b, &total, lambda, raise_num, handler_fun),
                 Err(Unused) => panic!("compile_matching: Unused"),
             }
@@ -8925,7 +9276,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm, next_raise_count) {
                 Ok((lambda, total)) => {
                     assert!(jumps_is_empty(&total));
                     lambda
@@ -9086,6 +9437,7 @@ pub fn for_tupled_function<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         loc,
         paraml,
@@ -9103,7 +9455,7 @@ fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let pats_act_list: Vec<Clause<'p>> = pats_act_list
         .into_iter()
@@ -9117,7 +9469,13 @@ fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
         args: MatchArgs::new(paraml.iter().map(|id| (b.var(*id), LetKind::Strict))),
         default: vec![(omegas_row, raise_num)],
     };
-    match compile_match_owned(cx, &partial, &start_ctx(paraml.len()), pm, next_raise_count) {
+    match compile_match_owned(
+        cx,
+        &partial,
+        cp.built(start_ctx(paraml.len())),
+        pm,
+        next_raise_count,
+    ) {
         Ok((lambda, total)) => {
             let loc_clone = loc;
             check_total(b, &total, lambda, raise_num, || {
@@ -9241,12 +9599,11 @@ fn flatten_precompiled<'p>(
 ) -> Result<PmHalfCompiled<'p>, CannotFlattenExn> {
     match pmh {
         PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(pa, size, args.clone(), &pm)?)),
-        PmHalfCompiled::PmOr(PmOrCompiled {
-            body,
-            handlers,
-            or_matrix,
-        }) => {
-            let flat_body = flatten_pm(pa, size, args.clone(), &body)?;
+        PmHalfCompiled::PmOr(por) => {
+            let flat_body = flatten_pm(pa, size, args.clone(), &por.body)?;
+            // Flattening the matrix can fail, so it is computed here.
+            let or_matrix = por.or_matrix(pa);
+            let handlers = por.handlers;
             let flat_handlers: Vec<_> = handlers
                 .into_iter()
                 .map(|(mat, i, vars, pm)| {
@@ -9258,7 +9615,7 @@ fn flatten_precompiled<'p>(
             Ok(PmHalfCompiled::PmOr(PmOrCompiled {
                 body: flat_body,
                 handlers: flat_handlers,
-                or_matrix: flat_or_matrix,
+                or_matrix: OrMatrix::Flat(flat_or_matrix),
             }))
         }
         PmHalfCompiled::PmVar(_) => panic!("flatten_precompiled: PmVar"),
@@ -9271,24 +9628,21 @@ fn flatten_precompiled<'p>(
 fn compile_flattened<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     _arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
-    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => compile_match(cx, None, partial, ctx, pm, next_raise_count),
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
-                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                |ctx: CtxId, pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
@@ -9310,7 +9664,12 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { ctx_ref, pa, arena } = cx;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
@@ -9372,7 +9731,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
             .collect::<Result<_, CannotFlattenExn>>()?;
 
         let mut compile_fn = |partial: &Partial,
-                              ctx: &[Ctx<'p>],
+                              ctx: CtxId,
                               arg: &RawLambda,
                               pmh: &PmHalfCompiled<'p>|
          -> Result<Compiled<'p>, Unused> {
@@ -9384,7 +9743,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
             cx,
             &mut compile_fn,
             &partial,
-            &start_ctx(size),
+            cp.built(start_ctx(size)),
             &dummy_arg,
             &flat_next,
             &flat_nexts,
@@ -9413,7 +9772,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
         Ok(lam) => lam,
         Err(CannotFlattenExn) => {
             // Fallback: compile without flattening
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm1, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm1, next_raise_count) {
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
                         let loc_clone = loc;
@@ -9487,6 +9846,7 @@ pub fn for_multiple_match<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         loc,
         new_paraml,
@@ -9633,6 +9993,328 @@ mod tests {
         let before = KEY_STEPS.with(|steps| steps.get());
         run();
         KEY_STEPS.with(|steps| steps.get()) - before
+    }
+
+    fn row_comparisons(run: impl FnOnce()) -> u64 {
+        let before = super::ROW_COMPARISONS.with(|steps| steps.get());
+        run();
+        super::ROW_COMPARISONS.with(|steps| steps.get()) - before
+    }
+
+    /// The rows of a one-column matching: `groups` runs of distinct string
+    /// constants, of the given lengths, each followed by a wildcard row.
+    fn constant_runs<'p>(
+        pa: &'p PatArena<'p>,
+        b: &RawArena,
+        runs: &[usize],
+    ) -> PatternMatching<'p> {
+        use crate::lambda::lam_constant::Constant as LamConstant;
+        let mut cases = Vec::new();
+        for (run, &len) in runs.iter().enumerate() {
+            for i in 0..len {
+                let constant = Constant::String(format!("{run}-{i}"));
+                let pat = pa.alloc(make_pat(
+                    PatternDesc::Tpat_constant(constant),
+                    omega().pat_type,
+                    omega().pat_env,
+                ));
+                let action = b.const_(LamConstant::int(cases.len() as i32));
+                cases.push((vec![pat], MatchAction::new(action)));
+            }
+            let action = b.const_(LamConstant::int(cases.len() as i32));
+            cases.push((vec![omega()], MatchAction::new(action)));
+        }
+        PatternMatching {
+            cases,
+            args: MatchArgs::new([(b.var(Ident::create_local("x")), LetKind::Alias)]),
+            default: Vec::new(),
+        }
+    }
+
+    fn split_runs(runs: &[usize]) -> (u64, Vec<usize>) {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        let pm = constant_runs(&pa, &b, runs);
+        let mut next_raise = 0;
+        let mut default_rows = Vec::new();
+        let steps = row_comparisons(|| {
+            let (first, nexts) = split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("the first group is a plain matching");
+            };
+            default_rows = first.default.iter().map(|(rows, _)| rows.len()).collect();
+            assert_eq!(nexts.len(), first.default.len());
+        });
+        (steps, default_rows)
+    }
+
+    /// A matching that splits into one group never compares its rows: the
+    /// matrix of a group is computed only for a default environment, and
+    /// the first group of a split is in none.
+    #[test]
+    fn splitting_into_one_group_compares_no_rows() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        for n in [1, 4, 64, 512] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            // Drop the wildcard row: constants only, one group.
+            pm.cases.pop();
+            let mut next_raise = 0;
+            let steps = row_comparisons(|| {
+                let (first, nexts) =
+                    split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+                assert!(nexts.is_empty());
+                let PmHalfCompiled::Pm(first) = first else {
+                    panic!("one plain matching");
+                };
+                assert_eq!(first.cases.len(), n);
+            });
+            assert_eq!(steps, 0, "n = {n}");
+            // Asking for the matrix is what costs: n rows, none below another.
+            let steps = row_comparisons(|| assert_eq!(as_matrix(&pa, &pm.cases).len(), n));
+            assert_eq!(steps as usize, n * (n - 1), "n = {n}");
+        }
+    }
+
+    /// A matching of one row that does not start with an or-pattern is
+    /// split without `split_or`'s work lists; a matching of n rows takes
+    /// n + 1 steps of them. Both give the matching the lists would give.
+    #[test]
+    fn one_row_split_uses_no_work_list() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        fn steps_of<'p>(
+            pa: &'p PatArena<'p>,
+            arena: &LocArena<'_, RawArena>,
+            pm: &PatternMatching<'p>,
+        ) -> u64 {
+            let before = WORK_LIST_STEPS.with(|steps| steps.get());
+            let mut next_raise = 0;
+            let (first, nexts) = split_precompile(None, pa, arena, &None, pm, &mut next_raise);
+            assert!(nexts.is_empty());
+            assert_eq!(next_raise, 0);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("one plain matching");
+            };
+            assert_eq!(first.cases.len(), pm.cases.len());
+            for ((row, _), (given, _)) in first.cases.iter().zip(&pm.cases) {
+                assert!(std::ptr::eq(row[0], given[0]));
+            }
+            assert_eq!(first.default.len(), pm.default.len());
+            WORK_LIST_STEPS.with(|steps| steps.get()) - before
+        }
+        for n in [1usize, 2, 64] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            pm.cases.pop();
+            pm.default = vec![(vec![vec![omega()]], 7)];
+            let expected = if n == 1 { 0 } else { n as u64 + 1 };
+            assert_eq!(steps_of(&pa, &arena, &pm), expected, "n = {n}");
+        }
+        // One wildcard row: the variable case of `split_constr`.
+        let mut pm = constant_runs(&pa, &b, &[0]);
+        pm.default = Vec::new();
+        assert_eq!(pm.cases.len(), 1);
+        assert_eq!(steps_of(&pa, &arena, &pm), 0);
+    }
+
+    /// Splitting costs the row comparisons of the groups that become default
+    /// environment entries, whatever the size of the first group: here the
+    /// entries are a wildcard row, `m` constants and a wildcard row, so at
+    /// most m(m-1) comparisons for any `n`.
+    #[test]
+    fn splitting_compares_only_rows_of_default_entries() {
+        for m in [2, 8] {
+            let mut steps_for_n = Vec::new();
+            for n in [1, 64, 512] {
+                let (steps, default_rows) = split_runs(&[n, m]);
+                assert_eq!(default_rows, vec![1, m, 1], "n = {n}, m = {m}");
+                assert!(steps as usize <= m * (m - 1), "n = {n}, m = {m}: {steps}");
+                steps_for_n.push(steps);
+            }
+            assert!(steps_for_n.iter().all(|steps| *steps == steps_for_n[0]));
+        }
+    }
+
+    fn contexts_built(run: impl FnOnce()) -> u64 {
+        let before = super::CONTEXTS_BUILT.with(|steps| steps.get());
+        run();
+        super::CONTEXTS_BUILT.with(|steps| steps.get()) - before
+    }
+
+    /// `(inner, _)` nested `depth` times around a wildcard.
+    fn nested_pairs<'p>(pa: &'p PatArena<'p>, depth: usize) -> &'p Pattern {
+        let mut pat = omega();
+        for _ in 0..depth {
+            let args = pa.push_list([pa.handle(pat), pa.omega_idx()]);
+            pat = pa.alloc(make_pat(
+                PatternDesc::Tpat_tuple(args),
+                omega().pat_type,
+                omega().pat_env,
+            ));
+        }
+        pat
+    }
+
+    fn same_contexts(a: &[Ctx<'_>], b: &[Ctx<'_>]) -> bool {
+        let same_row = |x: &[&Pattern], y: &[&Pattern]| {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|(p, q)| {
+                    std::ptr::eq(*p, *q)
+                        || (matches!(p.pat_desc, PatternDesc::Tpat_any)
+                            && matches!(q.pat_desc, PatternDesc::Tpat_any))
+                        || matches!(
+                            (&p.pat_desc, &q.pat_desc),
+                            (PatternDesc::Tpat_tuple(x), PatternDesc::Tpat_tuple(y)) if x.len() == y.len()
+                        )
+                })
+        };
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(c, d)| same_row(&c.left, &d.left) && same_row(&c.right, &d.right))
+    }
+
+    /// A context list derived from an all-wildcard context by `depth` tests
+    /// and column shifts costs nothing until it is read; reading it builds
+    /// the `2 * depth` lists on the way once, the lists `filter_ctx` and
+    /// `ctx_lshift` build; reading again builds nothing.
+    #[test]
+    fn unread_contexts_are_not_built() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        for depth in [1usize, 8, 64, 512] {
+            let pool = CtxPool::default();
+            let pair = nested_pairs(&pa, 1);
+            let start = pool.built(start_ctx(1));
+            let mut ids = Vec::new();
+            let derive = contexts_built(|| {
+                let mut ctx = start;
+                for _ in 0..depth {
+                    // Test the pair, then step over its first component.
+                    ctx = pool.filter(None, &pa, pair, ctx);
+                    assert!(!pool.is_empty(ctx));
+                    ctx = pool.lshift(&pa, ctx);
+                    assert!(!pool.is_empty(ctx));
+                    ids.push(ctx);
+                }
+            });
+            assert_eq!(derive, 0, "depth = {depth}");
+
+            // What the eager functions build, one context per list.
+            let mut eager = start_ctx(1);
+            let eager_steps = contexts_built(|| {
+                for _ in 0..depth {
+                    eager = filter_ctx(None, &pa, pair, &eager);
+                    eager = ctx_lshift(&pa, &eager);
+                }
+            });
+            assert_eq!(eager_steps as usize, 2 * depth);
+
+            let last = *ids.last().expect("depth > 0");
+            let read = contexts_built(|| {
+                let ctx = pool.get(&pa, last);
+                assert!(same_contexts(&ctx, &eager), "depth = {depth}");
+                assert_eq!(ctx[0].left.len(), 2 * depth);
+                assert_eq!(ctx[0].right.len(), 1);
+            });
+            assert_eq!(read as usize, 2 * depth, "depth = {depth}");
+            let again = contexts_built(|| {
+                pool.get(&pa, last);
+                pool.get(&pa, ids[depth / 2]);
+            });
+            assert_eq!(again, 0, "depth = {depth}");
+        }
+    }
+
+    /// A list that is not one all-wildcard context is built when derived,
+    /// as before, so its emptiness is what `filter_ctx` finds.
+    #[test]
+    fn contexts_with_patterns_are_filtered_when_derived() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let constant = |text: &str| -> &Pattern {
+            pa.alloc(make_pat(
+                PatternDesc::Tpat_constant(Constant::String(text.to_string())),
+                omega().pat_type,
+                omega().pat_env,
+            ))
+        };
+        let (a, b) = (constant("a"), constant("b"));
+        let pool = CtxPool::default();
+        let known_a = pool.built(vec![Ctx {
+            left: Vec::new(),
+            right: vec![a],
+        }]);
+        let steps = contexts_built(|| {
+            let same = pool.filter(None, &pa, a, known_a);
+            assert!(!pool.is_empty(same));
+            let other = pool.filter(None, &pa, b, known_a);
+            assert!(pool.is_empty(other));
+            assert!(pool.get(&pa, other).is_empty());
+        });
+        assert_eq!(steps, 1);
+    }
+
+    /// Compiling a match that takes no exit reads no context: a total
+    /// match on pairs nested `depth` deep builds only the starting context.
+    #[test]
+    fn total_match_without_exits_builds_no_context() {
+        use crate::lambda::lam_constant::Constant as LamConstant;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ta = crate::types::typedtree::TypedArena::new();
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        for depth in [1usize, 4, 32] {
+            let store = PatStore::default();
+            let pa = PatArena::new(&ta, &store);
+            let b = RawArena::new();
+            let arena = LocArena::new(&parse_arena, &locs, &b);
+            let pool = CtxPool::default();
+            let cx = MatchCx {
+                ctx_ref: &ctx,
+                pa: &pa,
+                arena: &arena,
+                cp: &pool,
+            };
+            let pm = PatternMatching {
+                cases: vec![(
+                    vec![nested_pairs(&pa, depth)],
+                    MatchAction::new(b.const_(LamConstant::int(1))),
+                )],
+                args: MatchArgs::new([(b.var(Ident::create_local("x")), LetKind::Strict)]),
+                default: Vec::new(),
+            };
+            let start = pool.built(start_ctx(1));
+            let mut next_raise = 0;
+            let steps = contexts_built(|| {
+                let Ok((_, total)) =
+                    compile_match_owned(cx, &Partial::Total, start, pm, &mut next_raise)
+                else {
+                    panic!("the match compiles");
+                };
+                assert!(jumps_is_empty(&total));
+            });
+            assert_eq!(steps, 0, "depth = {depth}");
+            // The match made 2 * depth + 1 context lists; none was built.
+            assert!(pool.entries.borrow().len() > 2 * depth);
+        }
     }
 
     /// An action whose key is a little over `size` bytes; actions of

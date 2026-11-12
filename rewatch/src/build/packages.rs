@@ -52,6 +52,13 @@ struct Dependency {
     is_local_dep: bool,
 }
 
+type DirectoryEntries = AHashMap<PathBuf, AHashSet<std::ffi::OsString>>;
+type SourceWalk = (
+    AHashMap<PathBuf, SourceFileMeta>,
+    Vec<PathBuf>,
+    DirectoryEntries,
+);
+
 #[derive(Debug, Clone)]
 pub struct Package {
     pub check_only: bool,
@@ -70,6 +77,9 @@ pub struct Package {
     /// hold only `.ts` shim files and therefore are absent from `dirs`.
     /// Populated during package discovery only when gentype is enabled.
     pub gentype_dirs: Option<Vec<PathBuf>>,
+    /// Directory entries observed during source discovery. Missing directories
+    /// remain unknown, including unusual configured output paths outside sources.
+    pub gentype_outputs: Option<DirectoryEntries>,
     pub is_local_dep: bool,
     pub is_root: bool,
 }
@@ -99,6 +109,17 @@ fn get_esmodule_path(canonical_path: &Path) -> PathBuf {
 }
 
 impl Package {
+    /// Whether a completed source-directory listing proves this path absent.
+    /// Unknown directories preserve the compiler's ordinary filesystem check.
+    pub fn gentype_output_absent(&self, path: &Path) -> bool {
+        let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+            return false;
+        };
+        self.gentype_outputs.as_ref()
+            .and_then(|dirs| dirs.get(parent))
+            .is_some_and(|entries| !entries.contains(name))
+    }
+
     /// The package's flat artifact directory, `lib/rescript`.
     pub fn get_build_path(&self) -> PathBuf {
         get_build_path(&self.path)
@@ -141,7 +162,7 @@ fn read_folders(
     recurse: bool,
     is_type_dev: bool,
 ) -> Result<AHashMap<PathBuf, SourceFileMeta>> {
-    read_folders_and_dirs(filter, package_dir, path, recurse, is_type_dev).map(|(map, _)| map)
+    read_folders_and_dirs(filter, package_dir, path, recurse, is_type_dev, false).map(|(map, _, _)| map)
 }
 
 /// The source files under `path` with their metadata, and the folders the
@@ -155,9 +176,12 @@ fn read_folders_and_dirs(
     path: &Path,
     recurse: bool,
     is_type_dev: bool,
-) -> Result<(AHashMap<PathBuf, SourceFileMeta>, Vec<PathBuf>)> {
+    record_entries: bool,
+) -> Result<SourceWalk> {
     let mut map: AHashMap<PathBuf, SourceFileMeta> = AHashMap::new();
     let mut dirs = vec![path.to_path_buf()];
+    let mut outputs = AHashMap::new();
+    let mut entries = AHashSet::new();
     let path_buf = PathBuf::from(path);
     fs::metadata(package_dir.join(path))?;
     // Each subfolder, and whether it is reached through a symlink.
@@ -189,6 +213,9 @@ fn read_folders_and_dirs(
             continue;
         };
 
+        if record_entries {
+            entries.insert(entry.file_name());
+        }
         let path_ext = entry_path_buf.extension().and_then(|x| x.to_str());
         if is_dir && recurse {
             subdirs.push((path_buf.join(&name), followed.is_some()));
@@ -217,21 +244,26 @@ fn read_folders_and_dirs(
         }
     }
 
+    if record_entries {
+        outputs.insert(package_dir.join(path), entries);
+    }
+
     // Large source trees dominate package discovery; walk sibling folders in
     // parallel.
-    let nested: Vec<Result<(AHashMap<PathBuf, SourceFileMeta>, Vec<PathBuf>)>> = subdirs
+    let nested: Vec<Result<SourceWalk>> = subdirs
         .par_iter()
-        .map(|(subdir, _)| read_folders_and_dirs(filter, package_dir, subdir, recurse, is_type_dev))
+        .map(|(subdir, _)| read_folders_and_dirs(filter, package_dir, subdir, recurse, is_type_dev, record_entries))
         .collect();
     for (folder, (_, through_symlink)) in nested.into_iter().zip(&subdirs) {
-        let (folder, folder_dirs) = folder?;
+        let (folder, folder_dirs, folder_outputs) = folder?;
+        outputs.extend(folder_outputs);
         map.extend(folder);
         if !through_symlink {
             dirs.extend(folder_dirs);
         }
     }
 
-    Ok((map, dirs))
+    Ok((map, dirs, outputs))
 }
 
 /// Given a projects' root folder and a `config::Source`, this recursively creates all the
@@ -615,6 +647,7 @@ This inconsistency will cause issues with package resolution.\n",
             .expect("Could not canonicalize"),
         dirs: None,
         gentype_dirs: None,
+        gentype_outputs: None,
         is_local_dep,
         is_root,
     })
@@ -673,7 +706,8 @@ fn get_source_files(
     filter: &Option<regex::Regex>,
     source: &config::PackageSource,
     build_dev_deps: bool,
-) -> Result<(AHashMap<PathBuf, SourceFileMeta>, Option<Vec<PathBuf>>)> {
+    record_entries: bool,
+) -> Result<(AHashMap<PathBuf, SourceFileMeta>, Option<Vec<PathBuf>>, DirectoryEntries)> {
     let recurse = match source {
         config::PackageSource {
             subdirs: Some(config::Subdirs::Recurse(subdirs)),
@@ -686,10 +720,10 @@ fn get_source_files(
     let is_type_dev = source.is_type_dev();
 
     if !build_dev_deps && is_type_dev {
-        return Ok((AHashMap::new(), None));
+        return Ok((AHashMap::new(), None, AHashMap::new()));
     }
 
-    let (map, dirs) = read_folders_and_dirs(filter, package_dir, path_dir, recurse, is_type_dev)
+    let (map, dirs, outputs) = read_folders_and_dirs(filter, package_dir, path_dir, recurse, is_type_dev, record_entries)
         .with_context(|| {
             format!(
                 "Could not read source folder {:?} specified by package {} at {:?}",
@@ -697,7 +731,7 @@ fn get_source_files(
             )
         })?;
 
-    Ok((map, Some(dirs)))
+    Ok((map, Some(dirs), outputs))
 }
 
 /// This takes the tree of packages, and finds all the source files for each, adding them to the
@@ -720,11 +754,14 @@ fn extend_with_children(
                     filter,
                     source,
                     package.is_local_dep && !prod,
+                    package.config.gentype_config.is_some(),
                 )
             })
             .collect::<Result<Vec<_>>>()?;
         let mut walked_dirs = Vec::with_capacity(source_maps.len());
-        for (source, (source_map, dirs)) in sources.into_iter().zip(source_maps) {
+        let mut outputs = AHashMap::new();
+        for (source, (source_map, dirs, source_outputs)) in sources.into_iter().zip(source_maps) {
+            outputs.extend(source_outputs);
             map.extend(source_map);
             walked_dirs.push((source, dirs));
         }
@@ -752,6 +789,7 @@ fn extend_with_children(
         if package.config.gentype_config.is_some() {
             package.gentype_dirs = Some(collect_gentype_source_dirs(package, Some(&walked_dirs)));
         }
+        package.gentype_outputs = package.config.gentype_config.as_ref().map(|_| outputs);
         package.source_files = Some(map);
     }
     Ok(build)
@@ -1373,6 +1411,32 @@ fn unallowed_dependents_hint() -> String {
     )
 }
 
+/// Watch content edits do not repeat package discovery. Refresh the shared
+/// directory inventory once before such a build, including manual file changes.
+/// An unreadable directory leaves presence unknown; the old per-file behavior
+/// remains the fallback, rather than treating a failed listing as empty.
+pub fn refresh_gentype_outputs(packages: &mut AHashMap<String, Package>) {
+    for package in packages.values_mut() {
+        if package.config.gentype_config.is_none() {
+            continue;
+        }
+        package.gentype_outputs = (|| -> std::io::Result<DirectoryEntries> {
+            let mut outputs = AHashMap::new();
+            if let Some(dirs) = &package.dirs {
+                for dir in dirs {
+                    let dir = package.path.join(dir);
+                    let entries = fs::read_dir(&dir)?
+                        .map(|entry| entry.map(|entry| entry.file_name()))
+                        .collect::<std::io::Result<AHashSet<_>>>()?;
+                    outputs.insert(dir, entries);
+                }
+            }
+            Ok(outputs)
+        })()
+        .ok();
+    }
+}
+
 #[cfg(test)]
 mod test {
     use crate::config;
@@ -1410,6 +1474,7 @@ mod test {
             path: PathBuf::from("./something"),
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_root: false,
             is_local_dep: false,
         }
@@ -1424,7 +1489,7 @@ mod test {
             feature: None,
         };
 
-        let error = get_source_files(&"package".to_string(), temp_dir.path(), &None, &source, true)
+        let error = get_source_files(&"package".to_string(), temp_dir.path(), &None, &source, true, false)
             .expect_err("missing source directory must abort package discovery");
 
         assert!(error.to_string().contains("Could not read source folder"));
@@ -1690,6 +1755,7 @@ mod test {
             path: PathBuf::from("."),
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }
@@ -1774,6 +1840,7 @@ mod test {
                 path: PathBuf::from("."),
                 dirs: None,
                 gentype_dirs: None,
+                gentype_outputs: None,
                 is_local_dep: true,
                 is_root: true,
             },
@@ -1827,6 +1894,7 @@ mod test {
                 path: PathBuf::from("."),
                 dirs: None,
                 gentype_dirs: None,
+                gentype_outputs: None,
                 is_local_dep: true,
                 is_root: true,
             },
@@ -1898,6 +1966,7 @@ mod test {
                 path: PathBuf::from("."),
                 dirs: None,
                 gentype_dirs: None,
+                gentype_outputs: None,
                 is_local_dep: true,
                 is_root: true,
             },
@@ -1970,8 +2039,8 @@ mod test {
             feature: None,
         };
         for subdirs in [true, false] {
-            let (_, walked) =
-                super::read_folders_and_dirs(&None, pkg, std::path::Path::new("src"), subdirs, false)
+            let (_, walked, _) =
+                super::read_folders_and_dirs(&None, pkg, std::path::Path::new("src"), subdirs, false, false)
                     .expect("read_folders");
             let mut package = create_package(CreatePackageArgs {
                 name: "p".to_string(),
@@ -1988,5 +2057,35 @@ mod test {
                 expected,
             );
         }
+    }
+
+    #[test]
+    fn gentype_inventory_knows_only_listed_directories() {
+        let temp = tempfile::tempdir().unwrap();
+        let src = temp.path().join("src");
+        std::fs::create_dir(&src).unwrap();
+        std::fs::write(src.join("Plain.res"), "type t = int").unwrap();
+        std::fs::write(src.join("Plain.custom.ts"), "manual").unwrap();
+        let (_, _, entries) = super::read_folders_and_dirs(
+            &None,
+            temp.path(),
+            std::path::Path::new("src"),
+            false,
+            false,
+            true,
+        )
+        .unwrap();
+        let mut package = create_package(CreatePackageArgs {
+            name: "inventory".to_string(),
+            bs_deps: vec![],
+            build_dev_deps: vec![],
+            allowed_dependents: None,
+        });
+        package.gentype_outputs = Some(entries);
+        assert!(package.gentype_output_absent(&src.join("Plain.gen.tsx")));
+        assert!(!package.gentype_output_absent(&src.join("Plain.custom.ts")));
+        assert!(!package.gentype_output_absent(&src.join("other/Plain.gen.tsx")));
+        package.gentype_outputs = None;
+        assert!(!package.gentype_output_absent(&src.join("Plain.gen.tsx")));
     }
 }
