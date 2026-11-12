@@ -659,8 +659,8 @@ the unchanged build). The clean build's BLAKE3 function self costs include
 120,526 in `ChunkState::update`, 62,524 in `Hasher::update`, and 59,253 in
 `Hasher::merge_cv_stack`. These are **not** an inclusive runtime-verification
 cost: fat LTO inlines the digest caller, and hashing also serves other work.
-A complete attribution remains to be measured; these self costs must not be
-reported as the total saving available.
+Inclusive follow-up attribution is recorded in B.5; these self costs must not
+be reported as the total saving available.
 
 Code/document disagreement: `compile::compile` returns before runtime
 precompilation when there are no dirty modules and no support work. Thus this
@@ -690,6 +690,53 @@ runtime sources (and on Belt verification when Belt is present).
 
 ### F.3 S3: index lookup, memoised verification, cheaper fallback
 
+#### SN2 measurements after implementation
+
+The following measurements compare fat-LTO release builds of trunk
+`73a1901ea` and `f2fb16c9a`, on x86-64 Linux. The latter includes S2/S3 and
+package-relative declaration identities. A later prefix-rejection optimization
+avoids walking longident names as paths; its final measurements and CI results
+are reported in the pull request.
+
+| `snapshot-one-module` build | Trunk instructions | S2/S3 instructions |
+| --- | ---: | ---: |
+| Clean | 17,798,956 | 18,472,399 |
+| Immediately repeated, unchanged | 6,172,142 | 6,174,289 |
+| Changed application source, unchanged runtime | 18,177,203 | 14,126,711 |
+
+The changed-source build saves 4,050,492 instructions. The first clean build
+saves nothing: verification now also records metadata for subsequent builds.
+The unchanged no-Belt build already skips runtime loading; its small total
+variation is not a claimed saving. Executable sizes are 36,971,216 bytes and
+37,001,880 bytes respectively.
+
+For a 3,735-module application, `scripts/bench_project.sh` reports 67,454,164,984
+versus 67,391,542,409 instructions (-0.0928%), with identical generated outputs.
+`scripts/compare_checker_builds.py` reports no differences in 3,735 signatures,
+32 diagnostics in 18 files, or 3,980 generated files. Hyperfine (two warmups,
+eight clean-build runs) measures trunk 1.843 ± 0.198 s (1.667–2.213 s), versus
+S2/S3 1.774 ± 0.106 s (1.603–1.922 s). The variance does not establish a large
+wall-time improvement; the measured instruction saving is small.
+
+Local verification on the merged trunk:
+
+- Runtime relocated with `rescript.json` absent: snapshot/source equivalence
+  passes for `tests/belt_tests` (80 generated files), `tests/tests` (743), and
+  all twelve supported configuration cases, including both incremental switch
+  directions. The one-module fixture decodes exactly three reached runtime
+  interfaces. All runtime stored cores match a from-source compile.
+- Twelve snapshot unit tests, four CLI snapshot tests, eighteen portable-type
+  tests, the registry index test and package-relative identity test pass.
+- JavaScript parity: 729/729; diagnostics including `super_errors`: 2,124/2,124;
+  runtime output: 113/113; the two in-repository genType suites: 2/2.
+- `make test-rewatch` reaches `watch/04-watch-config-change.sh`, whose broad
+  `find . -name '*.res.mjs'` also finds four pre-shipped files in installed
+  `sury`, outside the project dependency graph. The unchanged baseline fails
+  identically. Those files and the gate are not removed or weakened.
+- Searching the entire embedded container finds zero checkout-path occurrences.
+  No runtime per-module snapshot-registration loop remains.
+
+
 #### Code/document corrections found by SN2
 
 - Current published runtime sources are flat `*.res`/`*.resi`, already listed in
@@ -703,8 +750,8 @@ runtime sources (and on Belt verification when Belt is present).
   replace Belt. It now retains both package indexes, without per-module entries.
 - Filenames were also hashed into declaration allocation identities. Source
   scopes now use the package name plus package-relative source path (including
-  extension), and imported scopes use the qualified persistent module name, keeping namespaces separate but allowing
-  relocation. Every runtime stored core is compared against source compilation
+  extension), and imported scopes use the qualified persistent module name,
+  keeping namespaces separate but allowing relocation. Every runtime stored core is compared against source compilation
   in a copied runtime with no configuration file.
 - Rebasing must not eagerly decode unused raw signatures. A stored unit retains
   its prefix mapping and applies it to filename side tables during the existing
