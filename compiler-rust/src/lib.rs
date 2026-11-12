@@ -31,6 +31,7 @@ pub mod ast_raw;
 pub mod ast_todo;
 pub mod binary_ast;
 pub mod binser;
+pub mod bir;
 #[cfg(feature = "native")]
 pub mod cli;
 /// CMI file loading infrastructure.

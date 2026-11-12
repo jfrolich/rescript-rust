@@ -74,8 +74,20 @@ pub struct Package {
     pub is_root: bool,
 }
 
-fn get_build_path(canonical_path: &Path) -> PathBuf {
-    canonical_path.join("lib").join("bs")
+/// A package's artifact directory: every build artifact, flat (the
+/// compiler's file name of a module names its files), and the build and
+/// watch locks.
+pub fn get_build_path(canonical_path: &Path) -> PathBuf {
+    canonical_path.join("lib").join("rescript")
+}
+
+/// Where ReScript 12 and earlier, and earlier versions of this build system,
+/// kept a package's artifacts: nested like the sources in `lib/bs`, and copied
+/// flat into `lib/ocaml`. A build that finds one cleans the package, which
+/// removes them (as rewatch-ocaml's `Build_artifacts.legacy_artifact_dirs`).
+pub fn legacy_build_paths(canonical_path: &Path) -> [PathBuf; 2] {
+    let lib = canonical_path.join("lib");
+    [lib.join("bs"), lib.join("ocaml")]
 }
 
 fn get_js_path(canonical_path: &Path) -> PathBuf {
@@ -86,17 +98,15 @@ fn get_esmodule_path(canonical_path: &Path) -> PathBuf {
     canonical_path.join("lib").join("es6")
 }
 
-pub fn get_ocaml_build_path(canonical_path: &Path) -> PathBuf {
-    canonical_path.join("lib").join("ocaml")
-}
-
 impl Package {
-    pub fn get_ocaml_build_path(&self) -> PathBuf {
-        get_ocaml_build_path(&self.path)
-    }
-
+    /// The package's flat artifact directory, `lib/rescript`.
     pub fn get_build_path(&self) -> PathBuf {
         get_build_path(&self.path)
+    }
+
+    /// The artifact directories of earlier versions (see [`legacy_build_paths`]).
+    pub fn legacy_build_paths(&self) -> [PathBuf; 2] {
+        legacy_build_paths(&self.path)
     }
 
     fn get_js_path(&self) -> PathBuf {
@@ -961,11 +971,8 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
         if let Some(package_modules) = &package.modules {
             build_state.module_names.extend(package_modules.iter().cloned())
         }
-        let build_path_abs = package.get_build_path();
-        let bs_build_path = package.get_ocaml_build_path();
         if !build_state.check_only {
-            create_dir(&build_path_abs)?;
-            create_dir(&bs_build_path)?;
+            create_dir(&package.get_build_path())?;
         }
 
         for spec in package_specs.iter() {
@@ -1021,7 +1028,15 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                 .filter(|module_name| helpers::is_non_exotic_module_name(module_name))
                 .collect::<AHashSet<String>>();
 
-            let mlmap = namespaces::gen_mlmap(package, &namespace, &depending_modules)?;
+            // Only the file-backed reference build reads the map; in-process
+            // builds register the namespace from the package (see
+            // `compile::namespace_aliases`), so a check-only build, which
+            // writes nothing, only names it.
+            let mlmap = if build_state.check_only {
+                namespaces::mlmap_path(package, &namespace)
+            } else {
+                namespaces::gen_mlmap(package, &namespace, &depending_modules)?
+            };
 
             // mlmap will be compiled in the AST generation step
             // compile_mlmap(&package, namespace, &project_root);

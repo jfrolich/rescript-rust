@@ -1788,10 +1788,9 @@ pub fn compiler_args(
     Ok(vec![
         namespace_args,
         read_cmi_args,
-        vec![
-            "-I".to_string(),
-            Path::new("..").join("ocaml").to_string_lossy().to_string(),
-        ],
+        // bsc runs in the package's flat artifact directory, which holds the
+        // package's compiled modules (rewatch-ocaml's `-I .`).
+        vec!["-I".to_string(), ".".to_string()],
         runtime_path_args,
         dependency_paths,
         jsx_args,
@@ -1882,7 +1881,7 @@ fn get_dependency_paths(
             .map(|canonicalized_path| {
                 vec![
                     "-I".to_string(),
-                    packages::get_ocaml_build_path(&canonicalized_path)
+                    packages::get_build_path(&canonicalized_path)
                         .to_string_lossy()
                         .to_string(),
                 ]
@@ -2104,10 +2103,10 @@ fn build_package_compiler_options(
     // Collect -I paths from all dependencies (same logic as get_dependency_paths)
     let mut include_paths: Vec<PathBuf> = Vec::new();
 
-    // Add the package's own lib/ocaml directory
-    include_paths.push(package.get_ocaml_build_path());
+    // Add the package's own artifact directory
+    include_paths.push(package.get_build_path());
 
-    // Add dependency lib/ocaml paths
+    // Add the dependencies' artifact directories
     let dep_names: Vec<&str> = package
         .config
         .dependencies
@@ -2116,7 +2115,7 @@ fn build_package_compiler_options(
         .unwrap_or_default();
     for dep_name in dep_names {
         if let Some(dep_pkg) = build_state.packages.get(dep_name) {
-            include_paths.push(dep_pkg.get_ocaml_build_path());
+            include_paths.push(dep_pkg.get_build_path());
         }
     }
 
@@ -2133,7 +2132,7 @@ fn build_package_compiler_options(
     for dep_name in visible_deps {
         if let Some(dep_pkg) = build_state.packages.get(&dep_name) {
             visible_package_roots.push(dep_pkg.path.clone());
-            let dep_include = dep_pkg.get_ocaml_build_path();
+            let dep_include = dep_pkg.get_build_path();
             if !include_paths.contains(&dep_include) {
                 include_paths.push(dep_include);
             }
@@ -2283,8 +2282,6 @@ fn build_package_compiler_options(
     Ok(rescript_compiler::driver::CompilerOptions {
         check_only: build_command_state.check_only,
         include_paths,
-        // The file build compiled from `lib/bs` with `-I ../ocaml` first.
-        interface_cmi_dir: Some(PathBuf::from("../ocaml")),
         runtime_path,
         open_modules,
         collect_unit_reads: true,
@@ -2610,9 +2607,6 @@ impl DigestPrep {
 struct JsWriteJob {
     module_name: String,
     outputs: Vec<rescript_compiler::driver::JsOutput>,
-    /// Sources to mirror into the build directories (see
-    /// [`source_copies_for_build_dirs`]).
-    source_copies: Vec<SourceCopy>,
 }
 
 /// Writes compiled JS on one dedicated thread. The kernel serializes file
@@ -2636,7 +2630,6 @@ impl JsWriter {
                     if let Err(err) = write_js_write_job(&job.outputs) {
                         failures.push((job.module_name, err));
                     }
-                    copy_sources(&job.source_copies);
                 }
                 failures
             })
@@ -2681,51 +2674,6 @@ fn write_compiled_js_outputs(
         return write_js_output(fallback_js_output, package, source_file_path, root_config);
     }
     write_js_write_job(js_outputs)
-}
-
-/// A source file and the build-directory paths it is mirrored to.
-struct SourceCopy {
-    source: PathBuf,
-    destinations: [PathBuf; 2],
-}
-
-/// A runtime module's `.res`/`.resi` sources and their copies next to its
-/// build artifacts in `lib/bs` and in the flat `lib/ocaml` directory. The
-/// published runtime ships only `lib`, and the runtime precompile of an
-/// installed copy reads `lib/ocaml/*.res`.
-fn source_copies_for_build_dirs(package: &packages::Package, module: &Module) -> Vec<SourceCopy> {
-    let SourceType::SourceFile(source_file) = &module.source_type else {
-        return Vec::new();
-    };
-    let interface_path = source_file.interface.as_ref().map(|interface| &interface.path);
-    interface_path
-        .into_iter()
-        .chain([&source_file.implementation.path])
-        .filter_map(|path| {
-            let file_name = path.file_name()?;
-            Some(SourceCopy {
-                source: Path::new(&package.path).join(path),
-                destinations: [
-                    package.get_build_path().join(path),
-                    package.get_ocaml_build_path().join(file_name),
-                ],
-            })
-        })
-        .collect()
-}
-
-/// Read each source once and write it to its copies, leaving an identical
-/// copy untouched. Failures are ignored, as a missing copy only matters to
-/// tools reading the build directory.
-fn copy_sources(copies: &[SourceCopy]) {
-    for copy in copies {
-        let Ok(contents) = std::fs::read(&copy.source) else {
-            continue;
-        };
-        for destination in &copy.destinations {
-            let _ = write_file_creating_parent_on_missing(destination, &contents);
-        }
-    }
 }
 
 /// Register namespace module signatures in the PersistentEnv for --in-process mode.
@@ -2891,13 +2839,9 @@ fn register_source_fallback_paths(build_state: &BuildCommandState) {
     // resolved via RESCRIPT_RUNTIME. In file-based mode, runtime modules
     // are loaded from .cmi files on the load path. In --in-process mode,
     // we need source fallback paths so they can be type-checked on demand.
-    let runtime_path = build_state
-        .build_state
-        .compiler_info
-        .runtime_path
-        .join("lib")
-        .join("ocaml");
-    if let Ok(entries) = std::fs::read_dir(runtime_path) {
+    // The runtime package ships its sources at its root.
+    let runtime_root = &build_state.build_state.compiler_info.runtime_path;
+    if let Ok(entries) = std::fs::read_dir(runtime_root) {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(ext) = path.extension().and_then(|e| e.to_str())
@@ -3131,8 +3075,10 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     let runtime_timing_before = runtime_timing_enabled.then(rescript_compiler::timing::snapshot);
     let runtime_config = packages::read_config(runtime_root)
         .with_context(|| format!("failed to read runtime config from {}", runtime_root.display()))?;
-    let runtime_path = runtime_root.join("lib").join("ocaml");
-    let runtime_paths = runtime_source_paths(&runtime_path)?;
+    // The runtime package ships its sources at its root; its compiled
+    // modules would be in its artifact directory, the runtime's `-I`.
+    let runtime_path = packages::get_build_path(runtime_root);
+    let runtime_paths = runtime_source_paths(runtime_root)?;
     tracing::Span::current().record("runtime_modules", runtime_paths.len());
 
     if runtime_paths.is_empty() {
@@ -3532,15 +3478,15 @@ fn compile_runtime_module_from_source(
 
 /// List the runtime `.res` sources as `(module name, path)`, sorted by module
 /// name.
-pub(crate) fn runtime_source_paths(runtime_path: &Path) -> Result<Vec<(String, PathBuf)>> {
+pub(crate) fn runtime_source_paths(runtime_root: &Path) -> Result<Vec<(String, PathBuf)>> {
     let mut paths = Vec::new();
-    for entry in std::fs::read_dir(runtime_path)
-        .with_context(|| format!("failed to read runtime directory {}", runtime_path.display()))?
+    for entry in std::fs::read_dir(runtime_root)
+        .with_context(|| format!("failed to read runtime directory {}", runtime_root.display()))?
     {
         let entry = entry.with_context(|| {
             format!(
                 "failed to read runtime directory entry in {}",
-                runtime_path.display()
+                runtime_root.display()
             )
         })?;
         let path = entry.path();
@@ -3948,7 +3894,7 @@ fn compile_with_location_retry<T>(
         );
         return super::parse::reparse_with_locations(ast).and_then(|located| compile(&located, options));
     }
-    if !build.diagnostic_locations && build.dump.is_none() && result.is_err() {
+    if !build.parses_with_locations() && result.is_err() {
         // Type errors can quote declarations from dependency interfaces.
         // Rebuild those with locations as well before reporting the error.
         build
@@ -4364,7 +4310,7 @@ fn finish_in_process_js(
         metadata_tx,
         write_tx,
     );
-    if !build_command_state.diagnostic_locations && build_command_state.dump.is_none() && result.is_err() {
+    if !build_command_state.parses_with_locations() && result.is_err() {
         build_command_state
             .diagnostic_retry
             .store(true, std::sync::atomic::Ordering::Relaxed);
@@ -4534,16 +4480,6 @@ fn finish_in_process_js_inner(
         });
     }
 
-    // Only the runtime package ships its sources, in `lib/ocaml`, for the
-    // runtime precompile of installed copies; other packages' build
-    // directories get no source copies. Written by the writer thread with
-    // the JS, or here when the JS is written inline.
-    let mut source_copies = if is_runtime {
-        source_copies_for_build_dirs(package, module)
-    } else {
-        Vec::new()
-    };
-
     let mut write_duration = Duration::default();
     {
         let _write_span = info_span!(
@@ -4563,17 +4499,14 @@ fn finish_in_process_js_inner(
                 &implementation_path,
                 root_config,
             )?;
-            copy_sources(&std::mem::take(&mut source_copies));
         } else {
             let outputs = std::mem::take(&mut compile_result.js_outputs);
             let job = JsWriteJob {
                 module_name: module_name.clone(),
                 outputs,
-                source_copies: std::mem::take(&mut source_copies),
             };
             if let Err(mpsc::SendError(job)) = write_tx.send(job) {
                 write_js_write_job(&job.outputs)?;
-                copy_sources(&job.source_copies);
             }
         }
         if let Some(write_start) = write_start {

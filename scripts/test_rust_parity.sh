@@ -53,6 +53,10 @@ VERBOSE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        --reformat)
+            PARITY_COMPARE_MODE=reformat
+            shift
+            ;;
         --skip-syntax)
             SKIP_SYNTAX=true
             shift
@@ -78,6 +82,7 @@ while [[ $# -gt 0 ]]; do
             echo "Options:"
             echo "  --skip-syntax      Skip syntax tests"
             echo "  --skip-js          Skip JS compilation snapshot tests"
+            echo "  --reformat         Normalize JS comparisons (default: exact)"
             echo "  --release          Use target/release Rust compiler/parser artifacts"
             echo "  --verbose, -v      Show more detailed output"
             echo "  --help, -h         Show this help message"
@@ -89,6 +94,9 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_init_comparison
 
 # Utility functions
 print_header() {
@@ -319,7 +327,7 @@ run_js_compilation_tests() {
     # Expected snapshots there are checked-in .bs.js files next to sources.
     if [[ -d "$TELLA_DIR" ]]; then
         find "$TELLA_DIR" \
-            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/rescript" -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
             -o -type f -name "*.res" -print 2>/dev/null | \
             sort >> "$TEMP_DIR/js_files.txt"
     fi
@@ -402,12 +410,11 @@ run_js_compilation_tests() {
         if $compile_ok; then
             # Check if output file was created
             if [[ -f "$actual_mjs" ]]; then
-                if diff -q "$expected_file" "$actual_mjs" > /dev/null 2>&1; then
+                if parity_compare_js "$expected_file" "$actual_mjs" > "$DIFF_DIR/js_$(echo "$res_file" | tr '/' '_').diff" 2>&1; then
                     pass_count=$((pass_count + 1))
                 else
                     diff_count=$((diff_count + 1))
                     failed_files="$failed_files$res_file (output differs)\n"
-                    diff -u "$expected_file" "$actual_mjs" > "$DIFF_DIR/js_$(echo "$res_file" | tr '/' '_').diff" 2>&1 || true
                 fi
             else
                 compile_error_count=$((compile_error_count + 1))

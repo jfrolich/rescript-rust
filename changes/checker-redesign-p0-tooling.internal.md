@@ -1,0 +1,1 @@
+- Add tooling for the type checker redesign: a canonical signature dump (`rescript build --dump sig`), type checker counters behind `RESCRIPT_COMPILER_COUNTERS`, and `scripts/compare_checker_builds.py`, which compares two `rescript` executables on one project.

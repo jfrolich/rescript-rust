@@ -19,6 +19,7 @@ USAGE:
   ./scripts/test_js_output_parity_fixtures.sh [OPTIONS] [FILE|PATTERN]
 
 OPTIONS:
+  --reformat       Normalize JavaScript before comparison (default: exact)
   --release        Use target/release Rust compiler and rewatch artifacts
   -q, --quick       Stop on first mismatch
   -v, --verbose     Print each fixture/mode
@@ -34,6 +35,10 @@ EOF
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --reformat)
+            PARITY_COMPARE_MODE=reformat
+            shift
+            ;;
         --release)
             RUST_TARGET=release
             REWATCH_TARGET=release
@@ -75,6 +80,8 @@ PROJECT_ROOT=$(cd "$script_dir/.."; pwd -P)
 RUST_TARGET="${RUST_TARGET:-debug}"
 REWATCH_TARGET="${REWATCH_TARGET:-$RUST_TARGET}"
 OCAML_BSC="${OCAML_BSC:-$PROJECT_ROOT/packages/@rescript/$("$PROJECT_ROOT/scripts/platform.sh")/bin/bsc.exe}"
+source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_init_comparison
 if [[ -z "${RUST_BSC:-}" ]]; then
     # The default Rust bsc is the wrapper script around the linked compiler.
     RUST_BSC="$PROJECT_ROOT/rewatch/target/$RUST_TARGET/bsc"
@@ -120,9 +127,7 @@ if [[ ! -d "$RESCRIPT_RUNTIME" ]]; then
     exit 2
 fi
 export RESCRIPT_RUNTIME
-# The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc
-# (after the in-process build that provides its lib/ocaml sources).
-"$REWATCH_BIN" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+# The OCaml side reads the runtime's .cmi files: build it with the OCaml bsc.
 if ! "$REWATCH_BIN" build-reference --bsc "$OCAML_BSC" "$RESCRIPT_RUNTIME" > /dev/null; then
     echo -e "${RED}OCaml reference build of the runtime failed${RESET}" >&2
     exit 2
@@ -309,9 +314,9 @@ compare_directory_case() {
             record_failure "$source [$mode_name]" "missing output" || return 1
             return 0
         fi
-        if ! cmp -s "$ocaml_out" "$rust_out"; then
+        if ! parity_compare_js "$ocaml_out" "$rust_out" > "$diff_out" 2>&1; then
             output_diff="$CACHE_DIR/diffs/${safe}_$(safe_name "$file").diff"
-            diff -u --text "$ocaml_out" "$rust_out" > "$output_diff" 2>&1 || true
+            cp "$diff_out" "$output_diff"
             {
                 echo "Output differs for $file"
                 echo "See: $output_diff"
@@ -470,8 +475,7 @@ compare_case() {
             cat "$rust_log"
         } > "$diff_out"
         record_failure "$source [$mode_name]" "missing output" || return 1
-    elif ! cmp -s "$ocaml_out" "$rust_out"; then
-        diff -u --text "$ocaml_out" "$rust_out" > "$diff_out" 2>&1 || true
+    elif ! parity_compare_js "$ocaml_out" "$rust_out" > "$diff_out" 2>&1; then
         record_failure "$source [$mode_name]" "output differs" || return 1
     else
         pass=$((pass + 1))
@@ -523,7 +527,7 @@ if [[ "$fail" -gt 0 ]]; then
     echo ""
     echo -e "${BOLD}${RED}Failures:${RESET}"
     echo -e "$failed_files" | grep -v '^$' | sed -n '1,30p'
-    first_failed=$(find "$CACHE_DIR/diffs" -type f -name '*.diff' | sort | sed -n '1p')
+    first_failed=$(find "$CACHE_DIR/diffs" -type f -name '*.diff' -size +0c | sort | sed -n '1p')
     if [[ -n "$first_failed" && -f "$first_failed" ]]; then
         echo ""
         echo -e "${BOLD}First diff:${RESET} $first_failed"

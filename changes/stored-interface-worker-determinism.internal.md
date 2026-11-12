@@ -1,0 +1,1 @@
+- Allocate stored-interface location and variant-shape identities independently of worker count and scheduling; compare clean one-worker and eight-worker builds in validation.

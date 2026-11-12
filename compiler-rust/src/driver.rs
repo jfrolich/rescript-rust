@@ -502,16 +502,21 @@ pub enum DumpKind {
     Lambda,
     /// `-dlambda-sexp-locs`
     LambdaLocs,
+    /// The unit's exported signature in canonical form
+    /// (`types::canonical_sig`): for an interface file, and for an
+    /// implementation without one.
+    Sig,
 }
 
 impl DumpKind {
     /// Every dump kind.
-    pub const ALL: [DumpKind; 5] = [
+    pub const ALL: [DumpKind; 6] = [
         DumpKind::TypedTree,
         DumpKind::TypedTreeLocs,
         DumpKind::RawLambda,
         DumpKind::Lambda,
         DumpKind::LambdaLocs,
+        DumpKind::Sig,
     ];
 
     /// The name used on the command line and as the dump file extension.
@@ -522,6 +527,7 @@ impl DumpKind {
             DumpKind::RawLambda => "rawlambda",
             DumpKind::Lambda => "lambda",
             DumpKind::LambdaLocs => "lambda-locs",
+            DumpKind::Sig => "sig",
         }
     }
 
@@ -536,6 +542,37 @@ impl DumpKind {
             DumpKind::RawLambda | DumpKind::Lambda | DumpKind::LambdaLocs
         )
     }
+
+    /// Whether the dump prints source locations or text, so that the
+    /// compile needs a parse that stores them.
+    pub fn needs_locations(self) -> bool {
+        match self {
+            DumpKind::TypedTree
+            | DumpKind::TypedTreeLocs
+            | DumpKind::RawLambda
+            | DumpKind::Lambda
+            | DumpKind::LambdaLocs => true,
+            DumpKind::Sig => false,
+        }
+    }
+}
+
+/// The `DumpKind::Sig` dump of a unit's exported signature.
+fn canonical_signature_dump(
+    type_ctx: &TypeContext,
+    module_name: &str,
+    signature: &[crate::types::decl::SignatureItem],
+    deprecated: Option<&str>,
+    arena: &ParseArena,
+) -> (DumpKind, String) {
+    let text = crate::types::canonical_sig::canonical_signature(
+        type_ctx,
+        module_name,
+        signature,
+        deprecated,
+        Some(arena),
+    );
+    (DumpKind::Sig, latin1_dump(text.into_bytes()))
 }
 
 /// The dump's bytes, one `char` per byte. Dump printers write source text
@@ -607,7 +644,7 @@ pub struct CompilerOptions {
     /// Include paths for finding .cmi files (from -I flags)
     pub include_paths: Vec<PathBuf>,
     /// Runtime package path (from -runtime-path flag)
-    /// Used to locate stdlib CMIs at {runtime_path}/lib/ocaml/
+    /// Used to locate stdlib CMIs at {runtime_path}/lib/rescript/
     pub runtime_path: Option<PathBuf>,
     /// Additional modules opened implicitly from `-open` flags.
     pub open_modules: Vec<String>,
@@ -683,12 +720,6 @@ pub struct CompilerOptions {
     pub make_runtime: bool,
     /// Mirror `Clflags.assume_no_mli := Mli_exists` from `-bs-read-cmi`.
     pub assume_compiled_interface: bool,
-    /// Where the file compile finds the interface's `.cmi`, spelled as its
-    /// `-I` entry (`find_in_path_uncap`, typemod.ml:1742-1749), for the
-    /// interface-mismatch report: a build's is `../ocaml`, its package's
-    /// `lib/ocaml` seen from `lib/bs`. `None`: next to the source, where
-    /// `bsc` writes it.
-    pub interface_cmi_dir: Option<PathBuf>,
     /// GenType configuration derived from `-bs-gentype-*` flags.
     pub gentype_config: Option<std::sync::Arc<crate::gentype::config::T>>,
     /// Build-scoped GenType module resolver shared by in-process compilations.
@@ -883,7 +914,6 @@ impl Default for CompilerOptions {
             package_name: None,
             make_runtime: false,
             assume_compiled_interface: false,
-            interface_cmi_dir: None,
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
@@ -6575,6 +6605,7 @@ fn compile_source_to_js_with_options_inner(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7794,6 +7825,7 @@ pub fn typecheck_interface_source(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7968,7 +8000,7 @@ pub fn compile_file_to_js_with_options(
 ///
 /// Matches OCaml's `res_compmisc.ml:init_path()`:
 /// - Expands `-I` directories
-/// - Appends `{runtime_path}/lib/ocaml` as the stdlib directory (unless no_stdlib)
+/// - Appends `{runtime_path}/lib/rescript` as the stdlib directory (unless no_stdlib)
 fn build_load_path(options: &CompilerOptions) -> Vec<PathBuf> {
     build_load_path_with_display(options).0
 }
@@ -8023,7 +8055,7 @@ fn build_load_path_with_display(options: &CompilerOptions) -> (Vec<PathBuf>, Vec
     let stdlib_dir = options
         .runtime_path
         .as_ref()
-        .map(|runtime_path| runtime_path.join("lib").join("ocaml"));
+        .map(|runtime_path| runtime_path.join("lib").join("rescript"));
     let cwd = crate::process_cwd::current_dir().ok();
 
     let mut paths = Vec::new();
@@ -10133,6 +10165,7 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10183,6 +10216,7 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10239,7 +10273,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
-            || !options.dumps.is_empty())
+            || options.dumps.iter().any(|kind| kind.needs_locations()))
     {
         return Err(LocationRetry::Output.into());
     }
@@ -10274,6 +10308,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -10576,6 +10611,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     &tctx.warnings,
                 )
             })?;
+        if type_ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_exported_signature(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+            );
+        }
+        if options.dumps.contains(&DumpKind::Sig) {
+            dumps.push(canonical_signature_dump(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+                deprecated.as_deref(),
+                arena,
+            ));
+        }
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
@@ -11264,6 +11315,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -11490,6 +11542,18 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &tctx.warnings,
             )
         })?;
+    if type_ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+    }
+    if options.dumps.contains(&DumpKind::Sig) {
+        dumps.push(canonical_signature_dump(
+            &type_ctx,
+            module_name,
+            &raw_signature,
+            deprecated.as_deref(),
+            arena,
+        ));
+    }
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
@@ -12012,10 +12076,12 @@ mod tests {
 
     #[test]
     fn normalize_load_path_entry_expands_relative_paths_against_cwd() {
-        let cwd = std::path::Path::new("/repo/tests/tests/lib/bs");
+        let cwd = std::path::Path::new("/repo/tests/tests/lib/rescript");
         let normalized =
-            normalize_load_path_entry(std::path::Path::new("../ocaml"), None, Some(cwd));
-        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/ocaml"));
+            normalize_load_path_entry(std::path::Path::new("../../src"), None, Some(cwd));
+        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/src"));
+        let normalized = normalize_load_path_entry(std::path::Path::new("."), None, Some(cwd));
+        assert_eq!(normalized, PathBuf::from("/repo/tests/tests/lib/rescript"));
     }
 
     #[test]
@@ -12042,12 +12108,12 @@ mod tests {
     fn normalize_load_path_entry_expands_plus_paths_from_stdlib() {
         let normalized = normalize_load_path_entry(
             std::path::Path::new("+compiler-libs"),
-            Some(std::path::Path::new("/runtime/lib/ocaml")),
+            Some(std::path::Path::new("/runtime/lib/rescript")),
             Some(std::path::Path::new("/repo")),
         );
         assert_eq!(
             normalized,
-            PathBuf::from("/runtime/lib/ocaml/compiler-libs")
+            PathBuf::from("/runtime/lib/rescript/compiler-libs")
         );
     }
 

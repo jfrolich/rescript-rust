@@ -53,8 +53,9 @@ class Side:
         self.env = dict(os.environ, RESCRIPT_RUNTIME=str(self.runtime), RAYON_NUM_THREADS="1")
 
     def prepare(self):
-        # Builds read the runtime's lib/ocaml folder, which only a build of
-        # the runtime writes. Not measured.
+        # Builds of versions before the flat lib/rescript read the runtime's
+        # lib/ocaml folder, which only a build of the runtime writes; later
+        # ones read the runtime's sources. Not measured.
         run([self.exe, "build", str(self.runtime)], self.env)
 
     def measure(self, index):

@@ -13,7 +13,7 @@ fn runtime_dir() -> PathBuf {
 }
 
 /// A registry that type checks the runtime from its sources, so the test
-/// needs no built `lib/ocaml`.
+/// needs no built `lib/rescript`.
 fn registry() -> ModuleRegistry {
     let mut registry = ModuleRegistry::new();
     let mut entries: Vec<PathBuf> = std::fs::read_dir(runtime_dir())

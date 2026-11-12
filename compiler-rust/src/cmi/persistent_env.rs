@@ -435,11 +435,9 @@ pub enum CmjFileCase {
 }
 
 /// What generating an import of a dependency needs to know of it
-/// (`Lam_compile_env.get_package_path_from_cmj`).
+/// (`Lam_compile_env.get_package_info_from_cmj`).
 #[derive(Debug, Clone)]
 pub struct CmjModuleImportInfo {
-    /// The dependency's package root.
-    pub package_path: PathBuf,
     /// The dependency's package and output directories.
     pub package_spec: CmjPackageSpec,
     /// The case of the dependency's JavaScript file name.
@@ -2223,7 +2221,7 @@ impl PersistentEnv {
     }
 
     /// Return package metadata recorded in a dependency `.cmj`, matching
-    /// `Lam_compile_env.get_package_path_from_cmj`.
+    /// `Lam_compile_env.get_package_info_from_cmj`.
     pub fn module_cmj_import_info(&self, name: &str) -> Option<CmjModuleImportInfo> {
         if let Some(info) = self.in_memory_info(name) {
             if let Some(package_name) = &info.package_name {
@@ -2236,7 +2234,6 @@ impl PersistentEnv {
                     .and_then(|name| name.chars().next())
                     .is_some_and(|c| c.is_ascii_lowercase());
                 return Some(CmjModuleImportInfo {
-                    package_path: info.package_root.as_deref().cloned().unwrap_or_default(),
                     package_spec: CmjPackageSpec {
                         name: CmjPackageName::Normal(package_name.to_string()),
                         module_systems: info.package_outputs.as_ref().clone(),
@@ -2249,7 +2246,6 @@ impl PersistentEnv {
                 });
             }
             return Some(CmjModuleImportInfo {
-                package_path: PathBuf::new(),
                 package_spec: CmjPackageSpec {
                     name: CmjPackageName::Empty,
                     module_systems: Vec::new(),
@@ -2260,9 +2256,7 @@ impl PersistentEnv {
 
         let path = self.resolve_module_cmj_path(name)?;
         let metadata = decode_cmj_module_metadata(&self.cmj_value(&path)?)?;
-        let package_path = path.parent()?.parent()?.parent()?.to_path_buf();
         Some(CmjModuleImportInfo {
-            package_path,
             package_spec: metadata.package_spec,
             file_case: metadata.file_case,
         })
@@ -3183,7 +3177,7 @@ mod cmj_export_tests {
     #[test]
     fn in_process_ignores_bogus_cmi_on_load_path() {
         let tmp = tempdir().expect("failed to create tempdir");
-        let load_path = tmp.path().join("lib").join("ocaml");
+        let load_path = tmp.path().join("lib").join("rescript");
         std::fs::create_dir_all(&load_path).expect("failed to create load path");
         std::fs::write(load_path.join("Foo.cmi"), b"bogus cmi").expect("failed to write bogus cmi");
 

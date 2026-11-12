@@ -491,7 +491,12 @@ pub(crate) fn declaration_shape(
         match declared_runtime_annotation(ctx, decl).map_err(annotation_error)? {
             None => ValueShape::Unstated,
             Some(RuntimeAnnotation::TypeOf(block_type)) => {
-                ValueShape::recognized_as(block_type, ShapeBlocks::fresh())
+                ValueShape::recognized_as(
+                    block_type,
+                    ShapeBlocks {
+                        block: ctx.fresh_shape_allocation(),
+                    },
+                )
             }
             Some(RuntimeAnnotation::InstanceOf(path)) => {
                 let name = declared_class_name(ctx, decl, &path)?;
@@ -505,7 +510,7 @@ pub(crate) fn declaration_shape(
                         crate::types::decl::AttributePayload::SemanticString(payload)
                             if payload.template =>
                         {
-                            ShapeString::Allocation(ShapeAllocation::fresh())
+                            ShapeString::Allocation(ctx.fresh_shape_allocation())
                         }
                         _ => ShapeString::attribute(ctx, attr.attr_name.loc),
                     })
@@ -535,7 +540,7 @@ pub(crate) fn declaration_shape(
                             } else {
                                 (
                                     std::iter::once(inner).chain(ancestors).collect(),
-                                    std::iter::once((ShapeAllocation::fresh(), blocks.name))
+                                    std::iter::once((ctx.fresh_shape_allocation(), blocks.name))
                                         .chain(blocks.ancestors)
                                         .collect(),
                                 )
@@ -548,12 +553,14 @@ pub(crate) fn declaration_shape(
                         name,
                         ancestors,
                         blocks: ClassBlocks {
-                            block: ShapeAllocation::fresh(),
+                            block: ctx.fresh_shape_allocation(),
                             name: name_string,
                             ancestors: ancestor_blocks,
                         },
                     }),
-                    ShapeBlocks::fresh(),
+                    ShapeBlocks {
+                        block: ctx.fresh_shape_allocation(),
+                    },
                 )
             }
             Some(RuntimeAnnotation::NotUndefined) => {

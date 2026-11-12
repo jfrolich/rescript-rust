@@ -1667,13 +1667,13 @@ let concurrent_async_context_tests _context =
   with_temp_dir "rewatch-driver-async-domains-" (fun root ->
       (* `await` is typed through the runtime's Primitive_promise. Compile
          it here from the runtime source, so the test does not depend on a
-         build of the runtime package having written its lib/ocaml. *)
-      let runtime_ocaml = Filename.concat root "runtime" in
-      ensure_dir runtime_ocaml;
-      write runtime_ocaml "Primitive_promise.res"
+         build of the runtime package having written its lib/rescript. *)
+      let runtime_artifacts = Filename.concat root "runtime" in
+      ensure_dir runtime_artifacts;
+      write runtime_artifacts "Primitive_promise.res"
         (read_file
            (Filename.concat (Runtime_package.get_path ()) "Primitive_promise.res"));
-      expect_code 0 (snd (run runtime_ocaml "Primitive_promise.res"));
+      expect_code 0 (snd (run runtime_artifacts "Primitive_promise.res"));
       let async_source =
         "external get: unit => promise<int> = \"get\"\n"
         ^ (List.init 80 (fun index ->
@@ -1707,7 +1707,7 @@ let concurrent_async_context_tests _context =
               List.iter
                 (fun input ->
                   let _, result =
-                    run directory ~extra:["-I"; runtime_ocaml] input
+                    run directory ~extra:["-I"; runtime_artifacts] input
                   in
                   if result.exit_code <> 0 then
                     assert_failure (Printf.sprintf "%s: %s" input result.stderr))

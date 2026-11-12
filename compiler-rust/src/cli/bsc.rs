@@ -535,7 +535,6 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         package_name: opts.package_name.clone(),
         make_runtime: opts.make_runtime,
         assume_compiled_interface: opts.read_cmi,
-        interface_cmi_dir: None,
         gentype_config: opts.gentype.then(|| {
             std::sync::Arc::new(crate::gentype::config::build_config_from_flags(
                 opts.namespace.clone(),

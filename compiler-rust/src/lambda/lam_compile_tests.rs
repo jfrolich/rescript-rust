@@ -60,13 +60,13 @@ fn test_compiler_options(repo_root: &std::path::Path) -> crate::driver::Compiler
                 .join("tests")
                 .join("tests")
                 .join("lib")
-                .join("ocaml"),
+                .join("rescript"),
             repo_root
                 .join("tests")
                 .join("dependencies")
                 .join("rescript-react")
                 .join("lib")
-                .join("ocaml"),
+                .join("rescript"),
         ],
         runtime_path: Some(
             repo_root
@@ -178,7 +178,7 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
             .join("tests")
             .join("tests")
             .join("lib")
-            .join("ocaml"),
+            .join("rescript"),
     );
     persistent_env.add_load_path(
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -188,7 +188,7 @@ pub(super) fn resolver_with_checked_in_cmj() -> ModulePathResolver {
             .join("@rescript")
             .join("runtime")
             .join("lib")
-            .join("ocaml"),
+            .join("rescript"),
     );
     let mut belt_constants = ahash::AHashMap::new();
     belt_constants.insert(

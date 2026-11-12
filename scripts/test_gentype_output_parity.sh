@@ -515,8 +515,7 @@ run_suite() {
         set -e
         cd "$0"
         # The OCaml side reads the runtime .cmi files: build the runtime with
-        # the OCaml bsc after the in-process build of its lib/ocaml sources.
-        "$2" build "$RESCRIPT_RUNTIME" > /dev/null 2>&1 || true
+        # the OCaml bsc.
         "$2" build-reference --bsc "$1" "$RESCRIPT_RUNTIME"
         "$2" clean
         "$2" build-reference --bsc "$1" .
