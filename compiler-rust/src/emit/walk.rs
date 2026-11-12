@@ -376,3 +376,37 @@ pub(super) fn range_supported(
     }
     Ok(())
 }
+
+/// Legacy OptionalBlock(false) spells Primitive_option.some, a fixed global
+/// (not a named IR identifier), followed by the operand except synthetic unit.
+/// Calls supply the parentheses; no synthetic identifier enters naming.
+pub(super) fn optional_argument(a: &JsArena, e: Expr) -> Option<Expr> {
+    (!matches!(a.ek(e), ExprKind::Undefined { is_unit: true })).then_some(e)
+}
+
+/// Unlike logical operators, string + preserves right association: the legacy
+/// printer uses Plus's right precedence 12, above its own precedence 11.
+pub(super) fn string_children(a: &JsArena, e: Expr) -> Option<(Expr, Expr)> {
+    match a.ek(e) {
+        ExprKind::StringAppend(l, r) => Some((l, r)),
+        _ => None,
+    }
+}
+
+/// Traverse string leaves in printed order, without stack growth with depth.
+pub(super) fn string_leaves(
+    a: &JsArena,
+    root: Expr,
+    mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    let mut pending = vec![root];
+    while let Some(e) = pending.pop() {
+        if let Some((l, r)) = string_children(a, e) {
+            pending.push(r);
+            pending.push(l);
+        } else {
+            visit(e)?;
+        }
+    }
+    Ok(())
+}

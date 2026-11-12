@@ -580,7 +580,7 @@ fn children(
         | ExprKind::JsNot(e)
         | ExprKind::JsBnot(e)
         | ExprKind::StaticIndex(e, _, _)
-        | ExprKind::OptionalBlock(e, _)
+        | ExprKind::OptionalBlock(e, true)
         | ExprKind::CamlBlockTag(e, _)
         | ExprKind::Await(e)
         | ExprKind::Spread(e) => visit(e)?,
@@ -638,9 +638,13 @@ fn children(
         | ExprKind::InterpolatedTemplate(..)
         | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
         ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
-        ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
+        // Legacy .apply meets the callee before the argument array.
+        ExprKind::FlatCall(func, args) => { visit(func)?; visit(args)?; }
+        ExprKind::OptionalBlock(inner, false) => {
+            if let Some(inner) = walk::optional_argument(a, inner) { visit(inner)?; }
+        }
         ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
-        ExprKind::StringAppend(..) => return Err(Unsupported("string concatenation association")),
+        ExprKind::StringAppend(..) => walk::string_leaves(a, e, visit)?,
     }
     Ok(())
 }

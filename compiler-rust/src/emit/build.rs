@@ -150,6 +150,34 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(result)
     }
+    fn call(&self, callee: Expression<'a>, args: ArenaVec<'a, Argument<'a>>) -> Expression<'a> {
+        Expression::new_call_expression(SPAN, callee, None, args, false, &self.b)
+    }
+
+    /// StringAppend uses Plus's (11, 11, 12) precedence in the legacy printer:
+    /// the right child remains grouped, unlike logical chains. Visit leaves
+    /// left to right and build postorder without recursing through the chain.
+    fn string_append(&self, root: Expr) -> Result<Expression<'a>, Unsupported> {
+        let mut tasks = vec![(root, false)];
+        let mut values = self.b.vec();
+        while let Some((expr, finish)) = tasks.pop() {
+            if let Some((left, right)) = walk::string_children(self.arena, expr) {
+                if finish {
+                    let right = values.pop().unwrap();
+                    let left = values.pop().unwrap();
+                    values.push(self.binary(B::Addition, left, right));
+                } else {
+                    tasks.push((expr, true));
+                    tasks.push((right, false));
+                    tasks.push((left, false));
+                }
+            } else {
+                values.push(self.expr(expr)?);
+            }
+        }
+        Ok(values.pop().unwrap())
+    }
+
     fn sequence(&self, e: Expr, out: &mut ArenaVec<'a, Expression<'a>>) -> Result<(), Unsupported> {
         if let ExprKind::Seq(l, r) = self.arena.ek(e) {
             self.sequence(l, out)?;
@@ -479,9 +507,7 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::Null => Expression::new_null_literal(SPAN, &self.b),
             ExprKind::Undefined { .. } => self.id("undefined"),
             ExprKind::Bin(op, l, r) => self.bin(op, l, r)?,
-            ExprKind::StringAppend(_, _) => {
-                return Err(Unsupported("string concatenation association"));
-            }
+            ExprKind::StringAppend(_, _) => self.string_append(e)?,
             ExprKind::In(l, r) => self.binary(B::In, self.expr(l)?, self.expr(r)?),
             ExprKind::IsNullOrUndefined(e) => self.binary(
                 B::Equality,
@@ -586,7 +612,13 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::Fun(f) => self.function_expr(f)?,
             ExprKind::Await(e) => Expression::new_await_expression(SPAN, self.expr(e)?, &self.b),
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
-            ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
+            ExprKind::OptionalBlock(inner, false) => {
+                let mut args = self.b.vec();
+                if let Some(inner) = walk::optional_argument(a, inner) {
+                    args.push(Argument::from(self.expr(inner)?));
+                }
+                self.call(self.member(self.id("Primitive_option"), "some"), args)
+            }
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
@@ -594,7 +626,15 @@ impl<'a, 'r> Build<'a, 'r> {
             | ExprKind::InterpolatedTemplate(..)
             | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
             ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
-            ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
+            ExprKind::FlatCall(func, args) => self.call(
+                self.member(self.expr(func)?, "apply"),
+                {
+                    let mut values = self.b.vec();
+                    values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
+                    values.push(Argument::from(self.expr(args)?));
+                    values
+                },
+            ),
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         })
@@ -1518,5 +1558,76 @@ mod statement_tests {
             let s = a.stmt(StmtKind::Variable(v));
             oracle(a, vec![s]);
         }
+    }
+}
+
+#[cfg(test)]
+mod remaining_expression_tests {
+    use super::*;
+    use crate::js_ir::build::exp as E;
+    use js_reformat::{ReformatOptions, reformat};
+
+    fn oracle(arena: &JsArena, expr: Expr) {
+        let legacy = crate::js_ir::printer::print_expr_with_options(arena, expr, 1, false, false);
+        let alloc = Allocator::default();
+        let names = Names::default();
+        let build = Build::new(&alloc, arena, &names);
+        let stmt = build.variable("value", Some(build.expr(expr).unwrap()));
+        let program = Program::new(SPAN, oxc_span::SourceType::mjs(), "", build.b.vec(),
+            None, build.b.vec(), build.b.vec1(stmt), &build.b);
+        let actual = oxc_codegen::Codegen::new().build(&program).code;
+        let mode = ReformatOptions { drop_decoration_comments: true, ..Default::default() };
+        assert_eq!(reformat(&format!("let value = {legacy};"), mode).unwrap(), actual);
+        assert_eq!(reformat(&actual, mode).unwrap(), actual);
+    }
+
+    #[test]
+    fn string_append_preserves_both_associations() {
+        let mut a = JsArena::new();
+        let one = E::number(Number::int(1), &mut a);
+        let two = E::number(Number::int(2), &mut a);
+        let three = E::number(Number::int(3), &mut a);
+        let pair = E::new(ExprKind::StringAppend(one, two), &mut a);
+        let left = E::new(ExprKind::StringAppend(pair, three), &mut a);
+        let right = E::new(ExprKind::StringAppend(three, pair), &mut a);
+        oracle(&a, left);
+        oracle(&a, right);
+    }
+
+    #[test]
+    fn optional_helper_omits_only_synthetic_unit() {
+        let mut a = JsArena::new();
+        for unit in [true, false] {
+            let value = E::new(ExprKind::Undefined { is_unit: unit }, &mut a);
+            let expr = E::new(ExprKind::OptionalBlock(value, false), &mut a);
+            oracle(&a, expr);
+        }
+        let number = E::number(Number::int(1), &mut a);
+        let expr = E::new(ExprKind::OptionalBlock(number, false), &mut a);
+        oracle(&a, expr);
+    }
+
+    #[test]
+    fn flat_call_uses_apply_null_array() {
+        let mut a = JsArena::new();
+        let value = E::new(ExprKind::Undefined { is_unit: false }, &mut a);
+        let expr = E::new(ExprKind::FlatCall(value, value), &mut a);
+        oracle(&a, expr);
+    }
+
+    #[test]
+    fn ten_thousand_term_string_chain_builds_and_names_iteratively() {
+        let mut a = JsArena::new();
+        let value = E::number(Number::int(1), &mut a);
+        let mut expr = value;
+        for _ in 1..10_000 {
+            expr = E::new(ExprKind::StringAppend(value, expr), &mut a);
+        }
+        let mut count = 0;
+        walk::string_leaves(&a, expr, |_| { count += 1; Ok(()) }).unwrap();
+        assert_eq!(count, 10_000);
+        let alloc = Allocator::default();
+        let names = Names::default();
+        Build::new(&alloc, &a, &names).expr(expr).unwrap();
     }
 }
