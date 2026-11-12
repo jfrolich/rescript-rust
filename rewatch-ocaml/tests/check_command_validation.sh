@@ -747,8 +747,8 @@ run_case build-no-timing-preserves-folder exit2 accept build --no-timing "$proje
 run_case compiler-args-source accept accept compiler-args "$project/src/A.res"
 run_case compiler-args-extension exit2 exit2 compiler-args "$project/src/A.txt"
 require_both_errors_contain compiler-args-extension 'is not a .res or .resi source file'
-run_case compiler-args-missing panic reject compiler-args "$project/src/Missing.res"
-run_case compiler-args-no-project panic reject compiler-args "$work/orphan/A.res"
+run_case compiler-args-missing reject reject compiler-args "$project/src/Missing.res"
+run_case compiler-args-no-project reject reject compiler-args "$work/orphan/A.res"
 
 run_missing_bsc_case build-missing-bsc build "$project"
 run_missing_bsc_case format-missing-bsc format "$project/src/A.res"
@@ -903,7 +903,7 @@ require_both_errors_contain build-malformed-parent \
 run_case build-config-path-is-directory reject reject build "$work/config-directory"
 require_both_errors_contain build-config-path-is-directory \
   "$work/config-directory"
-run_case after-build-nonzero-is-not-ignored accept reject build --after-build \
+run_case after-build-nonzero-is-not-ignored reject reject build --after-build \
   "node $command_work/failing-after-build.js" "$project"
 if ! grep -F 'hook failed' "$work/rust.err" >/dev/null || \
   ! grep -F -- '--after-build command failed with exit code 7' \
@@ -913,7 +913,7 @@ if ! grep -F 'hook failed' "$work/rust.err" >/dev/null || \
   dump_both
   exit 1
 fi
-run_case after-build-empty panic reject build --after-build '' "$project"
+run_case after-build-empty reject reject build --after-build '' "$project"
 if ! grep -F -- '--after-build command cannot be empty' \
   "$work/ocaml.err" >/dev/null; then
   echo "Empty --after-build did not produce a contextual OCaml error" >&2
@@ -924,7 +924,7 @@ fi
 run_case after-build-missing-program reject reject build --after-build \
   rewatch-command-that-does-not-exist "$project"
 require_both_errors_contain after-build-missing-program \
-  '--after-build command failed'
+  'after-build command failed with exit code'
 if ! grep -F -- '--after-build command failed' \
     "$work/ocaml.err" >/dev/null || \
   ! grep -F 'rewatch-command-that-does-not-exist' \
