@@ -3,6 +3,38 @@
 use std::fs;
 use std::io;
 
+// Count logical file operations only in tests; production has no counters.
+#[cfg(test)]
+thread_local! {
+    static FILE_OPERATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn file_operation() {
+    #[cfg(test)]
+    FILE_OPERATIONS.with(|count| count.set(count.get() + 1));
+}
+
+#[cfg(test)]
+pub(crate) fn take_file_operations() -> usize {
+    FILE_OPERATIONS.with(|count| count.replace(0))
+}
+
+pub(crate) fn file_exists(path: &str) -> bool {
+    file_operation();
+    std::path::Path::new(path).exists()
+}
+
+pub(crate) fn remove_file(path: &str) -> io::Result<()> {
+    file_operation();
+    fs::remove_file(path)
+}
+
+fn read_contents(path: &str) -> io::Result<String> {
+    file_operation();
+    fs::read_to_string(path)
+}
+
 /// What happened to a generated file, for the debug log.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileAction {
@@ -34,7 +66,7 @@ pub fn log_file_action(file_action: FileAction, file_name: &str) {
 
 /// The lines of `file`.
 pub fn read_lines(file: &str) -> io::Result<Vec<String>> {
-    let contents = fs::read_to_string(file)?;
+    let contents = read_contents(file)?;
     Ok(contents.lines().map(|line| line.to_string()).collect())
 }
 
@@ -46,6 +78,7 @@ pub fn read_file(file: &str) -> io::Result<String> {
 
 /// Write `contents` to `file_path`.
 pub fn write_file(file_path: &str, contents: &str) -> io::Result<()> {
+    file_operation();
     fs::write(file_path, contents)
 }
 
@@ -71,8 +104,8 @@ fn joined_lines_equal(raw: &str, expected: &str) -> bool {
 /// Write `file_contents` to `output_file` unless the file already has them,
 /// so unchanged files keep their modification time.
 pub fn write_file_if_required(output_file: &str, file_contents: &str) -> io::Result<()> {
-    if std::path::Path::new(output_file).exists() {
-        let identical = joined_lines_equal(&fs::read_to_string(output_file)?, file_contents);
+    if file_exists(output_file) {
+        let identical = joined_lines_equal(&read_contents(output_file)?, file_contents);
         if identical {
             log_file_action(FileAction::Identical, output_file);
         } else {
