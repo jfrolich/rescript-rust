@@ -835,13 +835,14 @@ impl LambdaCompiler {
             let before = if CHECK { Some(deps.clone()) } else { None };
             let deps = self.finish_lowered_output(deps, &possible_required_modules);
             let checked = candidate.map(|candidate| match candidate {
-                Ok((j, compiled, dynamic)) => {
+                Ok((j, compiled, dynamic, stats)) => {
                     let saved_stamp = self.id_gen.current_stamp();
                     let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
                     self.id_gen.restore_current_stamp(saved_stamp);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
+                        stats,
                         before: [before.expect("check capture"), new_before],
                         after: [deps.clone(), new_after],
                         locations: self.source_map_enabled.then(|| std::sync::Arc::new(self.lam_locs.clone())),

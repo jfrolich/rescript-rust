@@ -53,6 +53,8 @@ struct UnitReport<'a> {
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     shared_catch_only: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    lower: Option<super::lower::SwitchStats>,
 }
 
 #[derive(serde::Serialize)]
@@ -71,7 +73,7 @@ fn report(
     unsupported: Option<&'static str>,
     norm: Option<NormReport>,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, None, false)
+    write_report(unit, stage, unsupported, norm, None, false, None)
 }
 
 fn report_with_facts(
@@ -81,14 +83,14 @@ fn report_with_facts(
     norm: Option<NormReport>,
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, facts, false)
+    write_report(unit, stage, unsupported, norm, facts, false, None)
 }
 
 fn report_with_sharing(
     unit: &str, stage: &'static str, unsupported: Option<&'static str>,
     norm: Option<NormReport>, shared_catch_only: bool,
 ) -> anyhow::Result<()> {
-    write_report(unit, stage, unsupported, norm, None, shared_catch_only)
+    write_report(unit, stage, unsupported, norm, None, shared_catch_only, None)
 }
 
 fn write_report(
@@ -98,6 +100,7 @@ fn write_report(
     norm: Option<NormReport>,
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
     shared_catch_only: bool,
+    lower: Option<super::lower::SwitchStats>,
 ) -> anyhow::Result<()> {
     let Some(directory) = std::env::var_os("RESCRIPT_BACKEND_STATS") else {
         return Ok(());
@@ -135,6 +138,7 @@ fn write_report(
         norm,
         facts,
         shared_catch_only,
+        lower,
     })?;
     file.write_all(&data)?;
     Ok(())
@@ -910,6 +914,7 @@ pub(crate) enum LowerCheck {
 }
 
 pub(crate) struct LowerPair {
+    pub stats: super::lower::SwitchStats,
     pub before: [crate::js_ir::arena::JsDepsProgram; 2],
     pub after: [crate::js_ir::arena::JsDepsProgram; 2],
     pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
@@ -928,6 +933,7 @@ pub(crate) fn prepare_lower(
         crate::js_ir::arena::JsArena,
         crate::lambda::lam_compile::Compiled,
         Vec<crate::js_ir::ModuleId>,
+        super::lower::SwitchStats,
     ),
     LowerFailure,
 > {
@@ -983,6 +989,7 @@ pub(crate) fn prepare_lower(
             finished,
         },
         lowered.dynamic_imports,
+        lowered.switch_stats,
     ))
 }
 
@@ -997,7 +1004,7 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
         }
         LowerCheck::Supported(pair) => {
-            let LowerPair { before, after, locations } = *pair;
+            let LowerPair { before, after, locations, stats } = *pair;
             for (text, pair) in [("lower", before), ("lower+passes", after)] {
                 let print = |p| {
                     crate::js_ir::print_deps_program_with_directives_and_options(
@@ -1022,7 +1029,7 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
                     compare_lower_text(unit, &format!("{text} mappings"), &left_map.unwrap_or_default(), &right_map.unwrap_or_default())?;
                 }
             }
-            report(unit, "lower", None, None)
+            write_report(unit, "lower", None, None, None, false, Some(stats))
         }
     }
 }
@@ -1071,9 +1078,9 @@ mod lower_tests {
             let same = [empty.clone(), empty.clone()];
             let different = [empty.clone(), changed.clone()];
             let check = if after_changed {
-                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None }))
+                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None, stats: Default::default() }))
             } else {
-                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None }))
+                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None, stats: Default::default() }))
             };
             let text = if after_changed { "lower+passes" } else { "lower" };
             let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();
