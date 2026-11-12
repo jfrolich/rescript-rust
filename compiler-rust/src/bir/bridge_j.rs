@@ -22,6 +22,12 @@ pub struct Imported {
     export_set: ahash::AHashSet<Ident>,
     pub(super) reservations: Vec<Ident>,
     pub(super) side_effect: Option<String>,
+    // Legacy identity associations use the existing VarTable namespace too.
+    pub(super) module_variables: Vec<VarId>,
+    pub(super) import_variables: Vec<VarId>,
+    pub(super) export_variables: Vec<VarId>,
+    pub(super) reservation_variables: Vec<VarId>,
+    pub(super) syntax_variable_count: usize,
     /// Number of source occurrences decoded, including statement lists.
     pub steps: usize,
 }
@@ -818,10 +824,16 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
         }
     }
     let root = values[0];
-    for &id in &p.program.exports {
+    let export_variables = p.program.exports.iter().map(|&id| {
         let v = i.var(id);
         i.b.export(v, id.name_atom());
-    }
+        v
+    }).collect();
+    let syntax_variable_count = i.ids.len();
+    let module_identities: Vec<_> = i.b.pools.j_modules.iter().map(|m| m.id).collect();
+    let module_variables = module_identities.into_iter().map(|id| i.var(id)).collect();
+    let import_variables = p.modules.iter().map(|m| i.var(m.id)).collect();
+    let reservation_variables = p.program.name_reservations.iter().map(|&id| i.var(id)).collect();
     for v in 0..i.ids.len() {
         let v = VarId(index(v));
         if i.b.vars.binder(v).is_none() {
@@ -842,6 +854,8 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
         reservations: p.program.name_reservations.clone(),
         side_effect: p.side_effect.clone(),
         steps,
+        module_variables, import_variables, export_variables, reservation_variables,
+        syntax_variable_count,
     })
 }
 

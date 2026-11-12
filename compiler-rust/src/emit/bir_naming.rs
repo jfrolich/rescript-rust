@@ -100,7 +100,7 @@ impl Names {
             raw: a
                 .identities()
                 .iter()
-                .take(a.unit.arena.vars().len())
+                .take(a.syntax_variable_count())
                 .filter(|id| crate::js_ir::arena::is_raw_js_name(id))
                 .map(|id| id.name_atom())
                 .collect(),
@@ -410,7 +410,9 @@ impl Names {
                 this.add(a, a.name_key(NameSource::Import(i, m.id)).slot, true)?;
             }
         }
-        this.reserve(a, a.reservation_slots())?;
+        for v in a.reservation_slots() {
+            this.reserve(a, &[v])?;
+        }
         enum Choice {
             Event(Event),
             Leave,

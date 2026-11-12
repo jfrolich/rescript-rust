@@ -17,11 +17,6 @@ use std::borrow::Cow;
 
 pub(crate) struct EmitterView<'a> {
     pub(crate) unit: &'a Imported,
-    identities: Vec<Ident>,
-    module_slots: Vec<usize>,
-    import_slots: Vec<usize>,
-    export_slots: Vec<usize>,
-    reservation_slots: Vec<usize>,
 }
 fn node(i: usize) -> NodeId {
     NodeId(index(i - 2))
@@ -123,60 +118,9 @@ impl<'a> EmitterView<'a> {
             }
             pending.extend(unit.arena.view(n).children());
         }
-        // Only module/file identities may be absent from the variable table.
-        // Resolve them once at the boundary, never at expression use sites.
-        let mut identities = unit.idents.clone();
-        let mut stamped = ahash::AHashMap::new();
-        let mut globals = ahash::AHashMap::new();
-        for (slot, id) in identities.iter().enumerate() {
-            if id.stamp() == 0 {
-                globals.insert(id.name_atom(), slot);
-            } else {
-                stamped.insert(id.stamp(), slot);
-            }
-        }
-        let mut resolve = |id: Ident| {
-            let existing = if id.stamp() == 0 {
-                globals.get(&id.name_atom())
-            } else {
-                stamped.get(&id.stamp())
-            };
-            if let Some(&slot) = existing {
-                return slot;
-            }
-            let slot = identities.len();
-            identities.push(id);
-            if id.stamp() == 0 {
-                globals.insert(id.name_atom(), slot);
-            } else {
-                stamped.insert(id.stamp(), slot);
-            }
-            slot
-        };
-        let module_slots = unit
-            .arena
-            .pools
-            .j_modules
-            .iter()
-            .map(|m| resolve(m.id))
-            .collect();
-        let import_slots = unit.modules.iter().map(|m| resolve(m.id)).collect();
-        let export_slots = unit.exports.iter().copied().map(&mut resolve).collect();
-        let reservation_slots = unit
-            .reservations
-            .iter()
-            .copied()
-            .map(&mut resolve)
-            .collect();
-        Ok(Self {
-            unit,
-            identities,
-            module_slots,
-            import_slots,
-            export_slots,
-            reservation_slots,
-        })
+        Ok(Self { unit })
     }
+
     fn arena(&self) -> &Bir {
         &self.unit.arena
     }
@@ -209,10 +153,13 @@ impl<'a> EmitterView<'a> {
         }
     }
     pub(crate) fn identities(&self) -> &[Ident] {
-        &self.identities
+        &self.unit.idents
     }
-    pub(crate) fn reservation_slots(&self) -> &[usize] {
-        &self.reservation_slots
+    pub(crate) fn reservation_slots(&self) -> impl Iterator<Item = usize> + '_ {
+        self.unit.reservation_variables.iter().map(|v| v.index())
+    }
+    pub(crate) fn syntax_variable_count(&self) -> usize {
+        self.unit.syntax_variable_count
     }
     pub(crate) fn node_capacity(&self) -> usize {
         self.arena().nodes.len() + 2
@@ -263,13 +210,13 @@ impl EmitView for EmitterView<'_> {
                 let View::JQualified { module, .. } = self.arena().view(node(id.index())) else {
                     unreachable!("module identity")
                 };
-                self.module_slots[module.index()]
+                self.unit.module_variables[module.index()].index()
             }
-            NameSource::Import(index, _) => self.import_slots[index],
-            NameSource::Export(index, _) => self.export_slots[index],
+            NameSource::Import(index, _) => self.unit.import_variables[index].index(),
+            NameSource::Export(index, _) => self.unit.export_variables[index].index(),
         };
         NameKey {
-            ident: self.identities[slot],
+            ident: self.unit.idents[slot],
             slot,
         }
     }
