@@ -1,0 +1,1 @@
+- Check embedded runtime and Belt snapshots against their sources after building the libraries.
