@@ -474,6 +474,12 @@ impl SharedTypePool {
         StrIdx::from_raw(raw)
     }
 
+    pub(crate) fn with_longident_names<T>(
+        &self, read: impl FnOnce(&HashMap<u32, String>) -> T,
+    ) -> T {
+        read(&self.longident_names.read().unwrap())
+    }
+
     pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {
         let raw = idx.raw();
         if !(SHARED_LONGIDENT_IDX_BASE..0xE000_0000).contains(&raw) {

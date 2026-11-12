@@ -185,6 +185,36 @@ impl TypeGraph for FrozenGraph<'_> {
         )
     }
 
+    fn hash_package_lids(&self, lids: &[Longident], hasher: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        // Match PortableLongident's derived Hash, borrowing the interned names
+        // under one read lock instead of allocating a portable tree per node.
+        fn lid(l: &Longident, names: &AHashMap<u32, String>, h: &mut impl std::hash::Hasher) {
+            match l {
+                Longident::Lident(name) => {
+                    0isize.hash(h);
+                    names.get(&name.raw()).expect("shared constraint name").hash(h);
+                }
+                Longident::Ldot(prefix, name) => {
+                    1isize.hash(h);
+                    lid(prefix, names, h);
+                    names.get(&name.raw()).expect("shared constraint name").hash(h);
+                }
+                Longident::Lapply(functor, arg) => {
+                    2isize.hash(h);
+                    lid(functor, names, h);
+                    lid(arg, names, h);
+                }
+            }
+        }
+        self.pool.with_longident_names(|names| {
+            lids.len().hash(hasher);
+            for l in lids {
+                lid(l, names, hasher);
+            }
+        });
+    }
+
     fn layout(&self, layout: VariantLayoutRef) -> Option<&VariantLayout> {
         if !layout.is_shared() {
             return None;

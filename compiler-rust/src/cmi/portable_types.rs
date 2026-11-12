@@ -2831,6 +2831,47 @@ mod identity_tests {
     }
 
     #[test]
+    fn shared_hash_walk_is_linear_in_chains_and_shared_children() {
+        use super::super::graph_hash::GraphWalk;
+        use super::super::shared_reader::FrozenGraph;
+        const N: usize = 10_000;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let pool = ctx.thread_store().shared_pool();
+        for shared_child in [false, true] {
+            let mut entries: Vec<_> = (0..N).map(|i| PortableTypeEntry {
+                desc: if shared_child {
+                    if i == 0 { PortableTypeDesc::Tnil } else { PortableTypeDesc::Ttuple(vec![0]) }
+                } else if i + 1 == N {
+                    PortableTypeDesc::Tnil
+                } else {
+                    PortableTypeDesc::Ttuple(vec![i + 1])
+                },
+                level: GENERIC_LEVEL,
+            }).collect();
+            let root = if shared_child {
+                entries.push(PortableTypeEntry {
+                    desc: PortableTypeDesc::Ttuple((1..N).collect()), level: GENERIC_LEVEL,
+                });
+                N
+            } else { 0 };
+            let graph = PortableTypeGraph { entries, variant_layouts: vec![], mutabilities: vec![] };
+            let intern = |name: &str| pool.intern_longident_name(name);
+            let files = FileRemap::new(&[], &intern);
+            let (_, base) = internalize_signature_into_shared(
+                &vec![], &graph, &DeclLocTable::default(), &files, pool, Some("Steps.res"),
+            ).unwrap();
+            let pages = pool.pages();
+            let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+            let mut walk = GraphWalk::new(&frozen);
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            walk.type_ref(&mut h, crate::types::shared_store::shared_ref(base, root));
+            assert_eq!(walk.records(), graph.entries.len() as u64);
+            walk.type_ref(&mut h, crate::types::shared_store::shared_ref(base, root));
+            assert_eq!(walk.records(), graph.entries.len() as u64);
+        }
+    }
+
+    #[test]
     fn a_frozen_graph_reads_back_without_portable_side_inputs() {
         use super::super::shared_reader::{FrozenGraph, portable_signature};
         use crate::types::asttypes::MutableFlag;
