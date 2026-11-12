@@ -12,6 +12,30 @@ impl Bir {
         self.new_node_in(view, aux, 1)
     }
 
+    /// Attach a finalized lowering statement list without copying its elements
+    /// a second time. Bulk construction owns each detached statement once.
+    pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
+        self.attach_list(Node::block_list(list), list)
+    }
+
+    /// [`Self::block_from_list`] for an explicit block statement (B:1225).
+    pub(crate) fn explicit_block_from_list(&mut self, list: ListId) -> NodeId {
+        self.attach_list(Node::explicit_block_list(list), list)
+    }
+
+    fn attach_list(&mut self, node: Node, list: ListId) -> NodeId {
+        assert!(self.bulk, "statement-stack blocks require bulk construction");
+        let id = self.allocate(node);
+        for i in 0..self.lists.get(list).len() {
+            let child = self.lists.get(list)[i];
+            self.node(child);
+            assert!(self.parents[child.index()].is_none(), "statement already attached");
+            self.parents[child.index()] = Some(id);
+        }
+        self.repair(id);
+        id
+    }
+
     /// [`Self::new_node`] for a root that will fill a slot of use weight
     /// `weight` ([`Self::weight_of`] of the slot). Children that already carry
     /// the weight the new node gives them (see [`Self::detach`]) are attached
@@ -142,7 +166,6 @@ impl Bir {
 
     fn allocate(&mut self, node: Node) -> NodeId {
         self.visit();
-        self.tails_valid = false;
         self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
@@ -411,6 +434,12 @@ impl Bir {
         )
     }
     fn register_kind(&mut self, node: Node, add: bool) {
+        if node.op() == Op::Var {
+            if let Some(scope) = &mut self.js_scope {
+                let View::Var { var } = node.view(&self.lists) else { unreachable!() };
+                scope.occurrence(var, add);
+            }
+        }
         if self.is_weighted_switch(node) {
             if add {
                 self.weighted_switches += 1;
@@ -521,11 +550,13 @@ impl Bir {
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
         let children = self.view(id).children();
+        let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
         let all_pure = children.iter().all(|&c| child_effects(c).0);
         let no_alloc = children.iter().all(|&c| child_effects(c).1);
-        match self.view(id) {
+        let effects = match self.view(id) {
             View::Var { .. }
             | View::Global { .. }
+            | View::JQualified { .. }
             | View::JNumber { .. }
             | View::JStr { .. }
             | View::JBool
@@ -583,7 +614,8 @@ impl Bir {
             }
             // Property access, coercions, proxies, calls and raw JS may run user code.
             _ => (false, false),
-        }
+        };
+        (j_pure.unwrap_or(effects.0), effects.1)
     }
     fn repair(&mut self, mut id: NodeId) {
         loop {
@@ -591,7 +623,8 @@ impl Bir {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
-            let old_flags = self.node(id).flags();
+            let old_node = self.node(id);
+            let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
             if pure {
@@ -599,6 +632,18 @@ impl Bir {
             }
             if no_alloc {
                 flags.0 |= NodeFlags::NO_ALLOC;
+            }
+            if !matches!(old_node.view(&self.lists), View::Var { .. }) {
+                if let Some(strict) = j::facts::purity(self, id, true, |c| {
+                    matches!(self.view(c), View::Var { .. }) || j::facts::strictly_pure(self, c)
+                }) {
+                    flags.0 &= !NodeFlags::STRICT;
+                    if strict { flags.0 |= NodeFlags::STRICT; }
+                    flags.0 &= !NodeFlags::J_SUBEXPR;
+                    if j::facts::subexpression(self, id, |c| matches!(self.view(c), View::Var { .. }) || self.node(c).flags().contains(NodeFlags::J_SUBEXPR)) {
+                        flags.0 |= NodeFlags::J_SUBEXPR;
+                    }
+                }
             }
             self.nodes[id.index()].set_flags(flags);
             let facts_changed = self.update_facts(id);
@@ -724,71 +769,6 @@ impl Bir {
         }
     }
 
-    /// Compute tail positions and function self-tail-call flags explicitly.
-    /// Edits invalidate these flags; consumers run this once before reading them.
-    pub fn mark_tail_positions(&mut self, root: NodeId) {
-        assert!(
-            self.parents[root.index()].is_none(),
-            "tail marking starts at a root"
-        );
-        let mut stack = vec![(root, false, None::<FuncId>, None::<VarId>)];
-        while let Some((id, tail, function, self_var)) = stack.pop() {
-            let mut flags = self.node(id).flags();
-            flags.0 &= !NodeFlags::TAIL;
-            if tail {
-                flags.0 |= NodeFlags::TAIL;
-            }
-            self.nodes[id.index()].set_flags(flags);
-            if let View::Fun { body, header } | View::JFun { body, header } = self.view(id) {
-                self.pools.funcs[header.index()].flags &= !FuncHeader::SELF_TAILCALL;
-                let own = self.parents[id.index()].and_then(|parent| match self.view(parent) {
-                    View::Let {
-                        var,
-                        value: Some(value),
-                        ..
-                    } if value == id => Some(var),
-                    View::LetRec { first, values, .. } => values
-                        .iter()
-                        .position(|&v| v == id)
-                        .map(|i| VarId(first.0 + index(i))),
-                    _ => None,
-                });
-                stack.push((body, true, Some(header), own));
-                continue;
-            }
-            if tail {
-                if let View::Apply { callee, .. } = self.view(id) {
-                    if let View::Var { var } = self.view(callee) {
-                        if Some(var) == self_var {
-                            if let Some(header) = function {
-                                self.pools.funcs[header.index()].flags |= FuncHeader::SELF_TAILCALL;
-                            }
-                        }
-                    }
-                }
-            }
-            for child in self.view(id).children() {
-                let child_tail = tail && self.tail_child(id, child);
-                stack.push((child, child_tail, function, self_var));
-            }
-        }
-        self.tails_valid = true;
-    }
-    pub(super) fn tail_child(&self, id: NodeId, child: NodeId) -> bool {
-        match self.view(id) {
-            View::Let { body, .. } | View::LetRec { body, .. } => body == child,
-            View::If { then_, else_, .. } | View::JCond { then_, else_, .. } => {
-                child == then_ || child == else_
-            }
-            View::Switch { scrutinee, .. } | View::StrSwitch { scrutinee, .. } => {
-                child != scrutinee
-            }
-            View::Catch { body, handler, .. } => child == body || child == handler,
-            View::Seq { second, .. } | View::JSeq { second, .. } => second == child,
-            _ => false,
-        }
-    }
-
     /// Overwrite a live slot with a detached tree or a descendant of that slot.
     /// The replacement handle is invalid afterwards; the target handle survives.
     ///
@@ -839,14 +819,13 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC;
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
         let cold = self.cold.get(replacement.index()).copied().flatten();
         self.unbind(replacement);
         self.nodes[target.index()] = content;
-        self.tails_valid = false;
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
             self.parents[child.index()] = Some(target);
@@ -880,8 +859,17 @@ impl Bir {
                 self.view(parent),
                 View::Prim { args, .. } if args.get(1) == Some(&target)
             );
-            if effects_changed || second_operand || self.update_facts(parent) {
+            let j_shape = matches!(self.view(parent), View::JBin { .. } | View::JCall { .. });
+            if effects_changed || second_operand || j_shape || self.update_facts(parent) {
                 self.repair(parent);
+            }
+            // Array.isArray recognises a two-edge callee shape, not just purity.
+            if matches!(self.view(parent), View::JDot { .. }) {
+                if let Some(grandparent) = self.parents[parent.index()] {
+                    if matches!(self.view(grandparent), View::JCall { .. }) {
+                        self.repair(grandparent);
+                    }
+                }
             }
         }
         // Moving a subtree up to an ancestor's slot removes boundaries between
@@ -910,7 +898,6 @@ impl Bir {
             self.weights[node.index()] = weight;
         }
         self.parents[node.index()] = None;
-        self.tails_valid = false;
     }
 
     /// The use weight of a slot: 1, doubled for each switch default above it
@@ -952,7 +939,6 @@ impl Bir {
         self.drain_dead();
     }
     fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
-        self.tails_valid = false;
         let root_weight = if self.bulk { 1 } else { self.weight(root) };
         let mut stack = std::mem::take(&mut self.release_stack);
         debug_assert!(stack.is_empty());
@@ -1016,6 +1002,19 @@ impl Bir {
     /// Copy a subtree, freshening every internal binder and static label. Explicit
     /// renaming applies only to free variables; internal binders always win.
     pub fn copy_subtree(&mut self, root: NodeId, renaming: &[(VarId, VarId)]) -> NodeId {
+        self.copy_subtree_recording(root, renaming, &mut Vec::new(), &mut Vec::new())
+    }
+
+    /// [`Self::copy_subtree`], appending `(fresh, source)` for every binder
+    /// it freshens, in allocation order (the bridge names fresh variables in
+    /// that order), and `(fresh, source)` for every static label.
+    pub fn copy_subtree_recording(
+        &mut self,
+        root: NodeId,
+        renaming: &[(VarId, VarId)],
+        fresh_vars: &mut Vec<(VarId, VarId)>,
+        fresh_labels: &mut Vec<(u32, u32)>,
+    ) -> NodeId {
         let mut order = Vec::new();
         let mut stack = vec![root];
         while let Some(id) = stack.pop() {
@@ -1028,6 +1027,7 @@ impl Bir {
                 let fresh = self.new_var_id(self.vars.name(var), index(self.vars.len()));
                 self.vars.flags[fresh.index()].0 =
                     self.vars.flags[var.index()].0 & !VarFlags::EXPORTED;
+                fresh_vars.push((fresh, var));
                 vars.insert(var, fresh);
             }
         }
@@ -1061,6 +1061,7 @@ impl Bir {
                     };
                     let new = self.catch_header(label, params);
                     catches.insert(header, new);
+                    fresh_labels.push((label, old.label));
                     labels.insert(old.label, label);
                 }
                 _ => {}
@@ -1130,7 +1131,7 @@ mod tests {
         b.new_node(View::Var { var: v }, 0)
     }
     fn valid(b: &Bir, root: NodeId) {
-        b.validate(Some(root), false)
+        b.validate(Some(root))
             .unwrap_or_else(|e| panic!("{e}\n{}", b.dump()));
     }
 
@@ -1180,7 +1181,7 @@ mod tests {
         b.replace(root, body);
         valid(&b, root);
         b.release(root);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
         let reused = lit(&mut b);
         assert_eq!(root, reused);
         valid(&b, reused);
@@ -1244,7 +1245,7 @@ mod tests {
         };
         assert_ne!(b.function(copied_h).params, params);
         b.release(root);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
     }
 
     #[test]
@@ -1344,7 +1345,7 @@ mod tests {
         let root = var(&mut b, v);
         b.vars.uses[v.index()] += 1;
         assert!(
-            b.validate(Some(root), false)
+            b.validate(Some(root))
                 .unwrap_err()
                 .contains("use count")
         );
@@ -1352,7 +1353,7 @@ mod tests {
         valid(&b, root);
         let other = lit(&mut b);
         assert!(
-            b.validate(Some(root), false)
+            b.validate(Some(root))
                 .unwrap_err()
                 .contains("unreachable")
         );
@@ -1394,7 +1395,7 @@ mod tests {
         let vars: Vec<_> = (0..8).map(|i| b.new_var_id(Name::new("free"), i)).collect();
         let initial = var(&mut b, vars[0]);
         let mut root = with_weighted_default(&mut b, initial);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         for step in 0..5000 {
             // Start every edit in a weighted module with all cache entries warm,
             // so the oracle also detects missing local invalidation.
@@ -1481,15 +1482,14 @@ mod tests {
                 }
                 _ => {
                     b.release(root);
-                    b.validate(None, false).unwrap();
+                    b.validate(None).unwrap();
                     root = lit(&mut b);
                 }
             }
             if b.weighted_switches == 0 {
                 root = with_weighted_default(&mut b, root);
             }
-            b.mark_tail_positions(root);
-            b.validate(Some(root), true)
+            b.validate(Some(root))
                 .unwrap_or_else(|e| panic!("step {step}: {e}\n{}", b.dump()));
         }
     }
@@ -1511,7 +1511,7 @@ mod constructor_tests {
                 let mut $b = Bir::default();
                 let root = $build;
                 assert_eq!($b.node(root).op(), Op::$op);
-                $b.validate(Some(root), false).unwrap();
+                $b.validate(Some(root)).unwrap();
                 let copied = $b.copy_subtree(root, &[]);
                 let pair = $b.new_node(
                     View::Seq {
@@ -1520,11 +1520,11 @@ mod constructor_tests {
                     },
                     0,
                 );
-                $b.validate(Some(pair), false).unwrap();
+                $b.validate(Some(pair)).unwrap();
                 $b.replace(pair, copied);
-                $b.validate(Some(pair), false).unwrap();
+                $b.validate(Some(pair)).unwrap();
                 $b.release(pair);
-                $b.validate(None, false).unwrap();
+                $b.validate(None).unwrap();
             }
         };
     }
@@ -2401,52 +2401,8 @@ mod constructor_tests {
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
-    use crate::lambda::{ApInfo, ApplyStatus, SwitchDispatch};
+    use crate::lambda::SwitchDispatch;
     use crate::name::Name;
-
-    #[test]
-    fn tail_calls_follow_binding_and_replacement() {
-        let mut b = Bir::default();
-        let v = b.new_var_id(Name::new("f"), 0);
-        let callee = b.new_node(View::Var { var: v }, 0);
-        let info = b.apply_info(ApInfo {
-            loc: LamLoc::NONE,
-            status: ApplyStatus::Na,
-        });
-        let call = b.new_node(
-            View::Apply {
-                callee,
-                args: &[],
-                info,
-            },
-            0,
-        );
-        let header = b.function_header(
-            VarSpan::default(),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        );
-        let fun = b.new_node(View::Fun { body: call, header }, 0);
-        let body = b.new_node(View::Var { var: v }, 0);
-        let root = b.new_node(
-            View::LetRec {
-                first: v,
-                values: &[fun],
-                body,
-            },
-            0,
-        );
-        b.mark_tail_positions(root);
-        assert!(b.node(call).flags().contains(NodeFlags::TAIL));
-        assert_eq!(b.function(header).flags & 1, 1);
-        b.validate(Some(root), false).unwrap();
-        let replacement = b.new_node(View::JNull, 0);
-        b.replace(call, replacement);
-        b.mark_tail_positions(root);
-        assert!(b.node(call).flags().contains(NodeFlags::TAIL));
-        assert_eq!(b.function(header).flags & 1, 0);
-        b.validate(Some(root), false).unwrap();
-    }
 
     #[test]
     fn switch_default_multipliers_compose_and_stop_at_full_tables() {
@@ -2480,13 +2436,13 @@ mod boundary_tests {
                 );
             }
             assert_eq!(b.vars.uses(var), count);
-            b.validate(Some(root), false).unwrap();
+            b.validate(Some(root)).unwrap();
             let copy = b.copy_subtree(root, &[]);
             b.replace(root, copy);
             assert_eq!(b.vars.uses(var), count);
-            b.validate(Some(root), false).unwrap();
+            b.validate(Some(root)).unwrap();
             b.release(root);
-            b.validate(None, false).unwrap();
+            b.validate(None).unwrap();
         }
     }
 
@@ -2531,11 +2487,11 @@ mod boundary_tests {
             },
             0,
         );
-        b.validate(Some(pair), false).unwrap();
+        b.validate(Some(pair)).unwrap();
         b.release(pair);
         assert_eq!(b.catch(header).uses(), 0);
         assert_eq!(b.catch(new_header).uses(), 0);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
     }
 
     #[test]
@@ -2571,7 +2527,7 @@ mod boundary_tests {
             },
             0,
         );
-        b.validate(Some(pair), false).unwrap();
+        b.validate(Some(pair)).unwrap();
     }
 
     #[test]
@@ -2589,7 +2545,7 @@ mod boundary_tests {
             )
         }));
         assert!(result.is_err());
-        b.validate(Some(child), false).unwrap();
+        b.validate(Some(child)).unwrap();
     }
 
     #[test]
@@ -2605,14 +2561,14 @@ mod boundary_tests {
         let root = b.new_node(View::Fun { body, header }, 0);
         b.vars.flags[var.index()].0 &= !VarFlags::CAPTURED;
         assert!(
-            b.validate(Some(root), false)
+            b.validate(Some(root))
                 .unwrap_err()
                 .contains("capture")
         );
         b.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
         b.nodes[root.index()].set_flags(NodeFlags(0));
         assert!(
-            b.validate(Some(root), false)
+            b.validate(Some(root))
                 .unwrap_err()
                 .contains("effect")
         );
@@ -2670,10 +2626,10 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         let copy = b.copy_subtree(root, &[]);
         b.replace(root, copy);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         let View::SBlock { statements } = b.view(root) else {
             panic!()
         };
@@ -2736,7 +2692,7 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(pair), false).unwrap();
+        b.validate(Some(pair)).unwrap();
     }
 
     #[test]
@@ -2763,7 +2719,7 @@ mod js_metadata_tests {
             },
             0,
         );
-        b.validate(Some(pair), false).unwrap();
+        b.validate(Some(pair)).unwrap();
     }
 }
 
@@ -2798,7 +2754,7 @@ mod cost_measurements {
             "COST replace 100 times at depth 1000: {} visits",
             b.steps.get()
         );
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         let mut b = Bir::default();
         for i in 0..5000 {
             b.intern_text(&format!("symbol_{i}"));
@@ -2845,9 +2801,7 @@ mod incremental_cost_tests {
         let steps = b.steps.get();
         println!("COST build 100000 nodes: {steps} visits (bound 24*n)");
         assert!(steps <= 24 * 100_000, "{steps} visits");
-        b.validate(Some(root), false).unwrap();
-        b.mark_tail_positions(root);
-        b.validate(Some(root), true).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]
@@ -2862,7 +2816,7 @@ mod incremental_cost_tests {
         let steps = b.steps.get();
         println!("COST replace 10000 times at depth 10000: {steps} visits (bound 64*n)");
         assert!(steps <= 64 * 10_000, "{steps} visits");
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]
@@ -2895,7 +2849,7 @@ mod incremental_cost_tests {
             0,
         );
         b.replace(value, switch);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         assert_eq!(b.weighted_switches, 1);
         assert_eq!(b.weights[leaf.index()], 0);
         b.steps.set(0);
@@ -2908,7 +2862,7 @@ mod incremental_cost_tests {
             "COST weighted-module replace 10000 times at depth 10000: {steps} visits (bound 64*n)"
         );
         assert!(steps <= 64 * 10_000, "{steps} visits");
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]
@@ -2944,43 +2898,7 @@ mod incremental_cost_tests {
         b.replace(body, replacement);
         assert!(b.vars.flags(free).contains(VarFlags::CAPTURED));
         assert!(b.steps.get() < 25 * 10_000);
-        b.validate(Some(root), false).unwrap();
-    }
-
-    #[test]
-    fn optional_tail_validation_rejects_stale_and_corrupt_results() {
-        let mut b = Bir::default();
-        let body = b.new_node(View::JNull, 0);
-        let header = b.function_header(
-            VarSpan::default(),
-            FunctionAttribute::default(),
-            LamLoc::NONE,
-        );
-        let root = b.new_node(View::Fun { body, header }, 0);
-        assert!(
-            b.validate(Some(root), true)
-                .unwrap_err()
-                .contains("need marking")
-        );
-        b.mark_tail_positions(root);
-        b.validate(Some(root), true).unwrap();
-        let mut flags = b.node(body).flags();
-        flags.0 &= !NodeFlags::TAIL;
-        b.nodes[body.index()].set_flags(flags);
-        b.validate(Some(root), false).unwrap();
-        assert!(
-            b.validate(Some(root), true)
-                .unwrap_err()
-                .contains("tail position")
-        );
-        b.mark_tail_positions(root);
-        let new = b.new_node(View::JNull, 0);
-        b.replace(body, new);
-        assert!(
-            b.validate(Some(root), true)
-                .unwrap_err()
-                .contains("need marking")
-        );
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]
@@ -3033,9 +2951,9 @@ mod incremental_cost_tests {
             },
             0,
         );
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         b.release(root);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
         let (body, leaf) = chain(&mut b, 1000);
         let scrutinee = b.new_node(View::JNull, 0);
         let header = b.switch_header(SwitchHeader {
@@ -3061,10 +2979,10 @@ mod incremental_cost_tests {
             assert_eq!(b.weight(leaf), 2);
         }
         assert_eq!(b.steps.get(), 10_000);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         b.release(root);
         assert_eq!(b.weighted_switches, 0);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
     }
 }
 
@@ -3089,7 +3007,7 @@ mod bulk_tests {
         println!("bulk 4001 nodes: {steps} steps");
         assert!(steps <= 40 * 4_001, "{steps}");
         assert!(bir.vars.flags(free).contains(VarFlags::CAPTURED));
-        bir.validate(Some(root), false).unwrap();
+        bir.validate(Some(root)).unwrap();
     }
 
     fn sample(seed: u64, bulk: bool) -> Bir {
@@ -3118,7 +3036,7 @@ mod bulk_tests {
         let header = b.function_header(vars, FunctionAttribute::default(), LamLoc::NONE);
         root = b.new_node(View::Fun { body: root, header }, 0);
         if bulk { b.finish_bulk(root); }
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         b
     }
 
@@ -3181,7 +3099,7 @@ mod local_weight_tests {
             },
             0,
         );
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         assert_eq!(b.vars.uses(var), 4);
 
         // Promote the default out of its weighted parent: the surviving slot
@@ -3191,7 +3109,7 @@ mod local_weight_tests {
         assert_eq!(b.weights[right.index()], 1);
         assert_eq!(b.weights[moved.index()], 0);
         assert_eq!(b.vars.uses(var), 3);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
 
         // Slot reuse starts unknown, even when that slot used to have weight 2.
         let reused = b.new_node(View::Var { var }, 0);
@@ -3203,7 +3121,7 @@ mod local_weight_tests {
         assert_eq!(b.weights[reused.index()], 0);
         assert_eq!(b.weight(reused), 2);
         assert_eq!(b.vars.uses(var), 4);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
 
         // Replacing a switch by an ordinary node and releasing its old default
         // must not invalidate a cached default in a different subtree.
@@ -3212,9 +3130,9 @@ mod local_weight_tests {
         assert_eq!(b.weights[left_use.index()], 2);
         assert_eq!(b.weights[reused.index()], 0);
         assert_eq!(b.vars.uses(var), 2);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
         b.release(root);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
     }
 
     #[test]
@@ -3241,7 +3159,7 @@ mod local_weight_tests {
         assert_eq!(b.weights[inner_use.index()], 0);
         assert_eq!(b.weight(inner_use), 2);
         assert_eq!(b.vars.uses(var), 3);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 
     #[test]
@@ -3279,6 +3197,6 @@ mod local_weight_tests {
         assert!(b.release_stack.is_empty());
         assert_eq!(b.release_stack.as_ptr(), release_buffer);
         assert_eq!(b.release_stack.capacity(), release_capacity);
-        b.validate(None, false).unwrap();
+        b.validate(None).unwrap();
     }
 }

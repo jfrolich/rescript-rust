@@ -605,7 +605,7 @@ fn semantic_string_payload(
     let mut inner = expr;
     while let crate::parser::ast::ExpressionDesc::Pexp_braces(b) = &inner.pexp_desc {
         braces += 1;
-        inner = arena.get_expr(b.expr);
+        inner = arena.get_expanded_expr(b.expr);
     }
     let template = matches!(
         inner.pexp_desc,
@@ -655,7 +655,7 @@ fn parser_attr_to_decl_attr(
                 if let crate::parser::ast::StructureItemDesc::Pstr_eval(eval_box) = &item.pstr_desc
                 {
                     let (expr_idx, _attrs) = eval_box.as_ref();
-                    let expr = arena.get_expr(*expr_idx);
+                    let expr = arena.get_expanded_expr(*expr_idx);
                     if let Some(payload) = semantic_string_payload(arena, ctx, expr) {
                         crate::types::decl::AttributePayload::SemanticString(Box::new(payload))
                     } else if let crate::parser::ast::ExpressionDesc::Pexp_constant(c) =
@@ -698,7 +698,7 @@ fn parser_attr_to_decl_attr(
                         && let Some(strings) = arena
                             .expr_list(*elements)
                             .iter()
-                            .map(|element| match &arena.get_expr(*element).pexp_desc {
+                            .map(|element| match &arena.get_expanded_expr(*element).pexp_desc {
                                 crate::parser::ast::ExpressionDesc::Pexp_constant(
                                     crate::parser::ast::Constant::String(value),
                                 ) => Some(value.semantic(arena).to_string()),
@@ -789,7 +789,7 @@ fn parser_warning_attribute_payload<'a>(
     // builtin_attributes.ml `string_of_payload`: the payload's semantic
     // string, raising on an invalid template. `@ppwarning` is reported at
     // the payload item's `pstr_loc`.
-    let spec = crate::ast_payload::semantic_string_of_expression(arena, arena.get_expr(*expr_idx))
+    let spec = crate::ast_payload::semantic_string_of_expression(arena, arena.get_expanded_expr(*expr_idx))
         .map_err(invalid_string_escape)?;
     Ok(spec.map(|spec| (spec, item.pstr_loc)))
 }
@@ -989,7 +989,7 @@ fn parser_deprecated_payload_to_decl_payload(
     };
     let (expr_idx, _attrs) = eval_box.as_ref();
     // builtin_attributes.ml: `Ast_payload.unwrap_payload_expression payload`.
-    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expanded_expr(*expr_idx));
 
     // The plain `string_of_payload` form (builtin_attributes.ml
     // `string_of_payload`); `Deprecated` is kept for the record form. A
@@ -1013,7 +1013,7 @@ fn parser_deprecated_payload_to_decl_payload(
             let marshal_template = |expr_idx| {
                 let mut writer = crate::binary_ast::MarshalWriter::new();
                 writer.set_arena(arena);
-                crate::binary_ast::Marshal::marshal(arena.get_expr(expr_idx), &mut writer);
+                crate::binary_ast::Marshal::marshal(arena.get_expanded_expr(expr_idx), &mut writer);
                 writer.fragment()
             };
             for field in fields {
@@ -1023,7 +1023,7 @@ fn parser_deprecated_payload_to_decl_payload(
                     // builtin_attributes.ml:72-78: the first `reason` field
                     // that is a string; reading one raises on a template
                     // with an invalid escape.
-                    let field_expr = arena.get_expr(field.expr);
+                    let field_expr = arena.get_expanded_expr(field.expr);
                     reason = crate::ast_payload::semantic_string_of_expression(arena, field_expr)
                         .map_err(|error| ctx.intern_ast_loc(arena, error.loc));
                 } else if is_field("migrate") {
@@ -4751,6 +4751,41 @@ fn check_unboxed_type_attributes(
             message: "extensible variant types cannot be unboxed".to_string(),
         }),
         crate::parser::ast::TypeKind::Ptype_variant(_) => Ok(()),
+    }
+}
+
+/// The representation of a declaration with `has_unboxed` (`@unboxed`), as
+/// OCaml `compiler/ml/typedecl.ml:451-461` decides it. Only a record with one
+/// immutable field, or a variant whose single constructor has a non-empty
+/// tuple or a one-field immutable inline record, is unboxed: `@unboxed type t =
+/// C({a: string, b: int})` is an untagged variant whose value is the record
+/// object. A variant spread always counts as more than one constructor, since
+/// OCaml keeps the `...t` marker next to the constructors it expands to
+/// (variant_type_spread.ml:66).
+fn unboxed_type_representation(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    has_unboxed: bool,
+) -> crate::types::TypeRepresentation {
+    use crate::parser::ast::{ConstructorArguments, LabelDeclaration, MutableFlag, TypeKind};
+    let one_immutable_field = |labels: &[LabelDeclaration]| {
+        matches!(labels, [label] if matches!(label.pld_mutable, MutableFlag::Immutable))
+    };
+    let unboxable = match &decl.ptype_kind {
+        TypeKind::Ptype_variant(cstrs) => match cstrs.as_slice() {
+            [cstr] if arena.get_string(cstr.pcd_name.txt) != "..." => match &cstr.pcd_args {
+                ConstructorArguments::Pcstr_tuple(args) => !args.is_empty(),
+                ConstructorArguments::Pcstr_record(labels) => one_immutable_field(labels),
+            },
+            _ => false,
+        },
+        TypeKind::Ptype_record(labels) => one_immutable_field(labels),
+        TypeKind::Ptype_abstract | TypeKind::Ptype_open => false,
+    };
+    if has_unboxed && unboxable {
+        crate::types::TypeRepresentation::Unboxed
+    } else {
+        crate::types::TypeRepresentation::Boxed
     }
 }
 
@@ -11309,7 +11344,7 @@ pub fn lookup_module_type_from_parsed_module_expr<'a>(
                 .or_else(|| lookup_module_type_from_parsed_module_expr(tctx, env, arena, inner))
         }
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
-            let expr = arena.get_expr(*expr_idx);
+            let expr = arena.get_expanded_expr(*expr_idx);
             lookup_module_type_from_unpack_expr(tctx, env, arena, expr)
         }
         _ => None,
@@ -11873,18 +11908,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
                             let type_representation = typed_type_decl_hint
                                 .map(|typed_decl| typed_decl.typ_type.type_representation)
-                                .unwrap_or_else(|| match &type_kind {
-                                    crate::types::TypeKind::TypeVariant(cstrs, _)
-                                        if decl_has_unboxed_attr && cstrs.len() <= 1 =>
-                                    {
-                                        crate::types::TypeRepresentation::Unboxed
-                                    }
-                                    crate::types::TypeKind::TypeRecord(labels, _)
-                                        if decl_has_unboxed_attr && labels.len() == 1 =>
-                                    {
-                                        crate::types::TypeRepresentation::Unboxed
-                                    }
-                                    _ => crate::types::TypeRepresentation::Boxed,
+                                .unwrap_or_else(|| {
+                                    unboxed_type_representation(arena, decl, decl_has_unboxed_attr)
                                 });
                             // Keep module-type declaration conversion aligned with
                             // OCaml `compiler/ml/typedecl.ml:2005`; this path
@@ -15179,7 +15204,7 @@ fn type_module_expr_with_alias_inner<'a>(
 
         ParsedModuleExprDesc::Pmod_unpack(expr_idx) => {
             // Unpack: unpack(E)
-            let expr = arena.get_expr(*expr_idx);
+            let expr = arena.get_expanded_expr(*expr_idx);
             // Matches compiler/ml/typemod.ml:1358-1366: `Pmod_unpack` types
             // its payload with `Typecore.type_exp`, not top-level
             // `type_expression`, so no extra begin_def/end_def scope is added.
@@ -16162,7 +16187,11 @@ fn type_structure_unscoped<'a>(
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
         tctx.set_unify_env(&current_env);
-        let (typed_item, item_sig, new_env) = type_structure_item(tctx, &current_env, arena, item)?;
+        let (typed_item, item_sig, new_env) = if tctx.derived_census.is_some() {
+            type_structure_item_with_census(tctx, &current_env, arena, item)
+        } else {
+            type_structure_item(tctx, &current_env, arena, item)
+        }?;
         if let StructureItemDesc::Tstr_include(incl) = &typed_item.str_desc {
             // OCaml compiler/ml/typemod.ml:1579.
             check_included_signature_names(&mut names, item.pstr_loc, &incl.incl_type)?;
@@ -16184,6 +16213,44 @@ fn type_structure_unscoped<'a>(
     };
 
     Ok((structure, current_env))
+}
+
+/// O(1) census bookkeeping around the existing item checker. Keep timer/counter
+/// snapshots and attribution outside the ordinary structure loop's code and stack.
+#[cold]
+#[inline(never)]
+fn type_structure_item_with_census<'a>(
+    tctx: &mut TypeCheckContext<'a>,
+    env: &Env,
+    arena: &'a ParseArena,
+    item: &ParsedStructureItem,
+) -> TypeModResult<(StructureItem, Vec<crate::types::decl::SignatureItem>, Env)> {
+    let census_start = crate::derived_census::start(true);
+    let census_before = tctx
+        .derived_census
+        .as_ref()
+        .map_or(0, |c| c.typecheck.total());
+    let counter_before = tctx
+        .derived_census
+        .as_ref()
+        .and_then(|c| c.counter_snapshot());
+    let (typed_item, item_sig, new_env) = type_structure_item(tctx, env, arena, item)?;
+    if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
+        let derived = match item.pstr_desc {
+            ParsedStructureItemDesc::Pstr_value((_, group)) => arena.is_derived_value_group(group),
+            _ => false,
+        };
+        census.account_counters(derived, counter_before);
+        let children = census.typecheck.total() - census_before;
+        census.typecheck.add(
+            derived,
+            crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
+        );
+        if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
+            census.mark_typed_group(group.start());
+        }
+    }
+    Ok((typed_item, item_sig, new_env))
 }
 
 fn closed_modtype(
@@ -16756,7 +16823,7 @@ fn type_structure_item<'a>(
             // OCaml compiler/ml/typemod.ml:1391-1394 scopes warnings from
             // `Pstr_eval` attributes around expression typing.
             let typed_expr = with_warning_scope(tctx, arena, attrs, true, |tctx| {
-                type_expression(tctx, env, arena.get_expr(*expr)).map_err(TypeModError::CoreError)
+                type_expression(tctx, env, arena.get_expanded_expr(*expr)).map_err(TypeModError::CoreError)
             })?;
 
             let desc = StructureItemDesc::Tstr_eval(tctx.push_expr(typed_expr), attrs.clone());
@@ -17278,36 +17345,13 @@ fn type_structure_item<'a>(
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
                         let mut cstr_descs = Vec::new();
-                        // Count consts/nonconsts including expanded spreads
-                        // Spread markers are NOT counted - only expanded constructors
-                        let (num_consts, num_nonconsts) = {
-                            let mut nc = 0i32;
-                            let mut nnc = 0i32;
-                            for (idx, cstr) in cstrs.iter().enumerate() {
-                                if let Some((ref source_cstrs, _)) = spread_sources[idx] {
-                                    // Count only the expanded source constructors (not the spread marker)
-                                    for sc in source_cstrs {
-                                        match &sc.cd_args {
-                                            crate::types::ConstructorArguments::CstrTuple(args)
-                                                if args.is_empty() =>
-                                            {
-                                                nc += 1
-                                            }
-                                            _ => nnc += 1,
-                                        }
-                                    }
-                                } else {
-                                    let is_const = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
-                                    if is_const { nc += 1 } else { nnc += 1 }
-                                }
-                            }
-                            (nc, nnc)
-                        };
-
                         // @unboxed is only the single-constructor OCaml-style unboxed
-                        // when there's exactly one constructor. Multi-constructor
-                        // @unboxed is ReScript's "untagged variants" which uses different handling.
-                        let has_unboxed = decl_has_unboxed_attr && num_consts + num_nonconsts == 1;
+                        // when there's exactly one constructor with an unboxable payload.
+                        // Otherwise @unboxed is ReScript's "untagged variants" which uses
+                        // different handling.
+                        let has_unboxed =
+                            unboxed_type_representation(arena, decl, decl_has_unboxed_attr)
+                                == crate::types::TypeRepresentation::Unboxed;
 
                         for (cstr_idx, cstr) in cstrs.iter().enumerate() {
                             // typedecl.ml:589-591: each constructor is made in
@@ -18153,11 +18197,8 @@ fn type_structure_item<'a>(
 
                 let type_attributes =
                     parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
-                let type_representation = if decl_has_unboxed_attr && constructors.len() <= 1 {
-                    crate::types::TypeRepresentation::Unboxed
-                } else {
-                    crate::types::TypeRepresentation::Boxed
-                };
+                let type_representation =
+                    unboxed_type_representation(arena, decl, decl_has_unboxed_attr);
                 let type_immediate = compute_type_immediacy(
                     ctx,
                     &temp_env,
@@ -20479,19 +20520,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
             let type_attributes =
                 parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
-            let type_representation = match &internal_type_kind {
-                crate::types::TypeKind::TypeVariant(cstrs, _)
-                    if decl_has_unboxed_attr && cstrs.len() <= 1 =>
-                {
-                    crate::types::TypeRepresentation::Unboxed
-                }
-                crate::types::TypeKind::TypeRecord(labels, _)
-                    if decl_has_unboxed_attr && labels.len() == 1 =>
-                {
-                    crate::types::TypeRepresentation::Unboxed
-                }
-                _ => crate::types::TypeRepresentation::Boxed,
-            };
+            let type_representation =
+                unboxed_type_representation(arena, decl, decl_has_unboxed_attr);
             // OCaml computes signature declaration immediacy after translating
             // the declaration body (`compiler/ml/typedecl.ml:2005`), using the
             // same `compute_immediacy` helper as implementation declarations.
@@ -20966,7 +20996,7 @@ mod tests {
         impl crate::binary_ast::ast_iter::AstIter for BadStrings {
             fn expr(&mut self, arena: &ParseArena, idx: crate::parse_arena::ExprIdx) {
                 if let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) =
-                    &arena.get_expr(idx).pexp_desc
+                    &arena.get_expanded_expr(idx).pexp_desc
                     && let crate::parser::ast::Constant::String(value) = constant
                     && value.semantic(arena) == "BAD"
                 {
@@ -20980,7 +21010,7 @@ mod tests {
         let source_idx = arena.intern("Fo\\xo");
         let mut locs = Vec::new();
         for expr_idx in found.0 {
-            let loc = arena.get_expr(expr_idx).pexp_loc;
+            let loc = arena.get_expanded_expr(expr_idx).pexp_loc;
             locs.push(loc);
             arena.get_expr_mut(expr_idx).pexp_desc =
                 crate::parser::ast::ExpressionDesc::Pexp_template(Box::new(

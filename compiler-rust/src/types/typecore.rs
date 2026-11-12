@@ -69,7 +69,7 @@ fn extension_eval_string(
     let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
-    let expr = arena.get_expr(eval.0);
+    let expr = arena.get_expanded_expr(eval.0);
     let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &expr.pexp_desc else {
         return None;
     };
@@ -194,27 +194,24 @@ fn ocaml_hash_final_mix(mut h: u32) -> u32 {
 }
 
 fn generalizable_at_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) -> bool {
-    fn check(ctx: &TypeContext, level: i32, ty: TypeExprRef) -> bool {
+    fn check(ctx: &TypeContext, level: i32, ty: TypeExprRef,
+        visited: &mut crate::types::type_marks::TypeNodeTable<()>) -> bool {
         let ty = ctx.repr(ty);
         let ty_level = ctx.get_level(ty);
-        if ty_level < crate::types::type_expr::LOWEST_LEVEL {
+        if ty_level < crate::types::type_expr::LOWEST_LEVEL || !visited.visit(ty) {
             return true;
         }
         if ty_level <= level {
             return false;
         }
-        crate::types::btype::mark_type_node(ctx, ty);
         let mut children = Vec::new();
         crate::types::iter_type_expr(ctx, ty, |child| children.push(child));
-        children.into_iter().all(|child| check(ctx, level, child))
+        children.into_iter().all(|child| check(ctx, level, child, visited))
     }
 
-    // OCaml compiler/ml/typecore.ml:2104-2120 marks visited nodes while
-    // checking whether any reachable type level is at or below `level`, then
-    // always unmarks the original type graph.
-    let result = check(ctx, level, ty);
-    crate::types::btype::unmark_type(ctx, ty);
-    result
+    // compiler/ml/typecore.ml:2104-2120: visit each node once without
+    // changing the levels of the graph being checked.
+    check(ctx, level, ty, &mut crate::types::type_marks::visit_set())
 }
 
 fn ocaml_hashtbl_hash_string(s: &str) -> u32 {
@@ -975,6 +972,125 @@ pub enum TypeClashContext {
     LetUnwrapReturn,
 }
 
+/// Where a type clash would be reported, as the walk passes it down: handles
+/// only, so passing it on copies a few words. [`ClashSite::resolve`] makes
+/// the owned [`TypeClashContext`] when an error is built.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum ClashSite {
+    /// In a function call.
+    FunctionCall,
+    /// In a function argument.
+    FunctionArgument {
+        optional: bool,
+        name: Option<StrIdx>,
+    },
+    /// In a JSX component position.
+    JsxComponent,
+    /// In a statement that discards a function call result.
+    StatementFunctionCall,
+    /// In a comparison operator.
+    ComparisonOperator,
+    /// In a string concatenation operator.
+    StringConcat,
+    /// In a mathematical operator.
+    MathOperator {
+        for_float: bool,
+        operator: &'static str,
+        is_constant: Option<StrIdx>,
+    },
+    /// In a braced identifier.
+    BracedIdent,
+    /// In a record spread.
+    RecordSpread,
+    /// In a record field value.
+    RecordField {
+        field_name: crate::name::Name,
+        optional: bool,
+        jsx: Option<JsxPropKind>,
+    },
+    /// In a record field assignment.
+    SetRecordField { field_name: crate::name::Name },
+    /// In an array literal.
+    ArrayLiteral,
+    /// In a `${...}` interpolation of a tagged-template literal.
+    TaggedTemplateValue,
+    /// In a tuple.
+    Tuple,
+    /// In an if condition.
+    IfCondition,
+    /// In an if expression branch return.
+    IfReturn,
+    /// In a ternary expression branch return.
+    TernaryReturn,
+    /// In a while loop condition.
+    WhileCondition,
+    /// In a for loop bound.
+    ForLoopCondition,
+    /// In an assertion condition.
+    AssertCondition,
+    /// In an awaited expression.
+    Await,
+    /// In a switch expression.
+    SwitchExpression,
+    /// In a try/catch expression handler return.
+    TryReturn,
+    /// In a let? rewritten match return.
+    LetUnwrapReturn,
+}
+
+impl ClashSite {
+    /// The owned context an error carries.
+    pub(crate) fn resolve(self, arena: &ParseArena) -> TypeClashContext {
+        match self {
+            ClashSite::FunctionCall => TypeClashContext::FunctionCall,
+            ClashSite::FunctionArgument { optional, name } => TypeClashContext::FunctionArgument {
+                optional,
+                name: name.map(|name| arena.get_string(name).to_string()),
+            },
+            ClashSite::JsxComponent => TypeClashContext::JsxComponent,
+            ClashSite::StatementFunctionCall => TypeClashContext::StatementFunctionCall,
+            ClashSite::ComparisonOperator => TypeClashContext::ComparisonOperator,
+            ClashSite::StringConcat => TypeClashContext::StringConcat,
+            ClashSite::MathOperator {
+                for_float,
+                operator,
+                is_constant,
+            } => TypeClashContext::MathOperator {
+                for_float,
+                operator: operator.to_string(),
+                is_constant: is_constant.map(|text| arena.get_string(text).to_string()),
+            },
+            ClashSite::BracedIdent => TypeClashContext::BracedIdent,
+            ClashSite::RecordSpread => TypeClashContext::RecordSpread,
+            ClashSite::RecordField {
+                field_name,
+                optional,
+                jsx,
+            } => TypeClashContext::RecordField {
+                field_name: field_name.as_str().to_string(),
+                optional,
+                jsx,
+            },
+            ClashSite::SetRecordField { field_name } => TypeClashContext::SetRecordField {
+                field_name: field_name.as_str().to_string(),
+            },
+            ClashSite::ArrayLiteral => TypeClashContext::ArrayLiteral,
+            ClashSite::TaggedTemplateValue => TypeClashContext::TaggedTemplateValue,
+            ClashSite::Tuple => TypeClashContext::Tuple,
+            ClashSite::IfCondition => TypeClashContext::IfCondition,
+            ClashSite::IfReturn => TypeClashContext::IfReturn,
+            ClashSite::TernaryReturn => TypeClashContext::TernaryReturn,
+            ClashSite::WhileCondition => TypeClashContext::WhileCondition,
+            ClashSite::ForLoopCondition => TypeClashContext::ForLoopCondition,
+            ClashSite::AssertCondition => TypeClashContext::AssertCondition,
+            ClashSite::Await => TypeClashContext::Await,
+            ClashSite::SwitchExpression => TypeClashContext::SwitchExpression,
+            ClashSite::TryReturn => TypeClashContext::TryReturn,
+            ClashSite::LetUnwrapReturn => TypeClashContext::LetUnwrapReturn,
+        }
+    }
+}
+
 /// JSX prop error info.
 #[derive(Debug, Clone)]
 pub struct JsxPropErrorInfo {
@@ -987,7 +1103,7 @@ pub struct JsxPropErrorInfo {
 }
 
 /// JSX prop record kind.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub enum JsxPropKind {
     /// JSX fragment props.
     Fragment,
@@ -1324,6 +1440,8 @@ struct DelayedOpenCheck {
 
 /// Context for type checking.
 pub struct TypeCheckContext<'a> {
+    /// Optional item accounting; absent in ordinary compilation.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1540,6 +1658,7 @@ impl<'a> TypeCheckContext<'a> {
     pub fn new(type_ctx: &'a TypeContext, arena: &'a ParseArena) -> Self {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
+            derived_census: None,
             type_ctx,
             arena,
             typed: TypedArena::new(),
@@ -4128,7 +4247,7 @@ fn normalize_constructor_expr_args(
     sargs: &Located<crate::parse_arena::ExprList>,
 ) -> Vec<crate::parse_arena::ExprIdx> {
     match arena.expr_list(sargs.txt) {
-        [se] if arity > 1 => match &arena.get_expr(*se).pexp_desc {
+        [se] if arity > 1 => match &arena.get_expanded_expr(*se).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => arena.expr_list(*args).to_vec(),
             _ => vec![*se],
         },
@@ -6492,9 +6611,17 @@ fn type_pattern_record(
         }
 
         // `Label.disambiguate` calls the chosen label's `use ()`, which marks
-        // its type (`Env.lookup_all_labels`, env.ml:1230-1238).
+        // its type and, for a label in scope through an `open`, that open
+        // (`Env.lookup_all_labels`, env.ml:1230-1238; typecore.ml:912-922).
         if let Some(label) = label.as_ref() {
             mark_type_path_of(ctx, env, label.lbl_res);
+            let generated = tctx
+                .generated_pattern_labels
+                .iter()
+                .any(|(name, _)| name == &field_name);
+            if matches!(resolved_lid, Longident::Lident(_)) && !generated {
+                use_in_scope_label_of_type(ctx, env, field_name.as_str(), label);
+            }
         }
         pending_fields.push(PendingRecordPatternField {
             lid: field.lid,
@@ -7563,7 +7690,7 @@ pub(crate) fn type_exp<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     if matches!(
         expr.pexp_desc,
@@ -7697,14 +7824,14 @@ fn final_subexpression<'e>(
             },
             _ => return sexp,
         };
-        sexp = arena.get_expr(next);
+        sexp = arena.get_expanded_expr(next);
     }
 }
 
-fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<TypeClashContext> {
+fn type_clash_context_in_statement(expr: &ParsedExpression) -> Option<ClashSite> {
     match &expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_apply(inner) if !inner.transformed_jsx => {
-            Some(TypeClashContext::StatementFunctionCall)
+            Some(ClashSite::StatementFunctionCall)
         }
         _ => None,
     }
@@ -7911,12 +8038,12 @@ fn deprecated_warning_for_type(
 }
 
 /// Type check an expression against an expected type.
-pub fn type_expect<'a>(
+pub(crate) fn type_expect<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     type_expect_with_recarg(tctx, env, expr, expected_ty, context, RecArg::Rejected)
 }
@@ -7926,7 +8053,7 @@ fn type_expect_with_recarg<'a>(
     env: &Env,
     expr: &ParsedExpression,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     recarg: RecArg,
 ) -> TypeCoreResult<Expression> {
     type_expect_full(tctx, env, expr, expected_ty, context, recarg, None)
@@ -7938,7 +8065,7 @@ fn type_expect_full<'a>(
     env: &Env,
     expr: &ParsedExpression,
     expected_ty: impl Into<Expected>,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
@@ -7977,7 +8104,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     env: &Env,
     expr: &ParsedExpression,
     mut expected_ty: Expected,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
@@ -7992,11 +8119,11 @@ fn type_expect_with_recarg_unscoped<'a>(
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
             if matches!(
-                &tctx.arena.get_expr(braces.expr).pexp_desc,
+                &tctx.arena.get_expanded_expr(braces.expr).pexp_desc,
                 ED::Pexp_ident(_)
             ) =>
         {
-            Some(TypeClashContext::BracedIdent)
+            Some(ClashSite::BracedIdent)
         }
         _ => context,
     };
@@ -8065,7 +8192,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 // `Button.make`. The module exists (otherwise the lookup
                 // reports it as unbound), but it defines no component.
                 if let Longident::Ldot(module_lid, last) = longident
-                    && matches!(context, Some(TypeClashContext::JsxComponent))
+                    && matches!(context, Some(ClashSite::JsxComponent))
                     && tctx.arena.get_string(*last) == "make"
                 {
                     let module_lid = tctx.longident_to_string(module_lid);
@@ -8116,7 +8243,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         });
     }
     if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
-        let record_expr = tctx.arena.get_expr(*record_expr_idx);
+        let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
         let typed_field = type_field(
             tctx,
             env,
@@ -8131,7 +8258,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     }
     if let ED::Pexp_apply(inner) = &expr.pexp_desc {
         let typed_apply =
-            type_application(tctx, env, expr, inner, &mut expected_ty, context.clone())?;
+            type_application(tctx, env, expr, inner, &mut expected_ty, context)?;
         // The two rue checks share one expected type, including when an Infer
         // request must be materialised by the first check or a lowered apply.
         finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
@@ -8143,7 +8270,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_braces(braces) => {
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
-            let inner = tctx.arena.get_expr(braces.expr);
+            let inner = tctx.arena.get_expanded_expr(braces.expr);
             tctx.deprecated_function_call = deprecated_function_call;
             let exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
             let mut attrs = expr.pexp_attributes.clone();
@@ -8214,7 +8341,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Type check each element
             let mut typed_exprs = Vec::new();
             for (e, ty) in tctx.arena.expr_list(*exprs).iter().zip(elem_types.iter()) {
-                let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(*e), *ty, None)?;
+                let typed_expr = type_expect(tctx, env, tctx.arena.get_expanded_expr(*e), *ty, None)?;
                 typed_exprs.push(typed_expr);
             }
 
@@ -8301,7 +8428,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             )?;
 
             // Type check body in extended environment
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
@@ -8328,7 +8455,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_sequence(e1_idx, e2_idx) => {
             // Sequence expression: e1; e2
-            let e1 = tctx.arena.get_expr(*e1_idx);
+            let e1 = tctx.arena.get_expanded_expr(*e1_idx);
             let typed_e1 = type_statement(tctx, env, e1)?;
             if matches!(
                 &typed_e1.exp_desc,
@@ -8339,7 +8466,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
 
             // e2 has the expected type
-            let e2 = tctx.arena.get_expr(*e2_idx);
+            let e2 = tctx.arena.get_expanded_expr(*e2_idx);
             let typed_e2 = type_expect(tctx, env, e2, expected_ty, None)?;
             let e2_type = typed_e2.exp_type;
 
@@ -8362,13 +8489,13 @@ fn type_expect_with_recarg_unscoped<'a>(
             // typecore.ml `(Pexp_ifthenelse _ | Pexp_ternary _) as conditional`.
             let (cond_idx, then_idx, else_idx, return_context) = match &expr.pexp_desc {
                 ED::Pexp_ifthenelse(inner) => {
-                    (inner.0, inner.1, inner.2, Some(TypeClashContext::IfReturn))
+                    (inner.0, inner.1, inner.2, Some(ClashSite::IfReturn))
                 }
                 ED::Pexp_ternary(inner) => (
                     inner.0,
                     inner.1,
                     Some(inner.2),
-                    Some(TypeClashContext::TernaryReturn),
+                    Some(ClashSite::TernaryReturn),
                 ),
                 _ => unreachable!(),
             };
@@ -8377,24 +8504,24 @@ fn type_expect_with_recarg_unscoped<'a>(
             let bool_ty = env.type_bool(ctx);
 
             // Condition should be bool
-            let cond = tctx.arena.get_expr(*cond_idx);
+            let cond = tctx.arena.get_expanded_expr(*cond_idx);
             let typed_cond = type_expect(
                 tctx,
                 env,
                 cond,
                 bool_ty,
-                Some(TypeClashContext::IfCondition),
+                Some(ClashSite::IfCondition),
             )?;
-            let then_branch = tctx.arena.get_expr(*then_idx);
-            let else_branch = else_idx.map(|idx| tctx.arena.get_expr(idx));
+            let then_branch = tctx.arena.get_expanded_expr(*then_idx);
+            let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
 
             match else_branch {
                 Some(else_branch) => {
                     // OCaml keeps sharing by unifying else with then.exp_type.
                     let typed_then =
-                        type_expect(tctx, env, then_branch, expected_ty, return_context.clone())?;
+                        type_expect(tctx, env, then_branch, expected_ty, return_context)?;
                     let typed_else =
-                        type_expect(tctx, env, else_branch, expected_ty, return_context.clone())?;
+                        type_expect(tctx, env, else_branch, expected_ty, return_context)?;
                     unify_expression_types(
                         tctx,
                         loc,
@@ -8454,15 +8581,15 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Use separate unit types for body and result (matching OCaml's rue pattern).
             let bool_ty = env.type_bool(ctx);
 
-            let cond = tctx.arena.get_expr(*cond_idx);
+            let cond = tctx.arena.get_expanded_expr(*cond_idx);
             let typed_cond = type_expect(
                 tctx,
                 env,
                 cond,
                 bool_ty,
-                Some(TypeClashContext::WhileCondition),
+                Some(ClashSite::WhileCondition),
             )?;
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, env, body))?;
 
             // OCaml typecore.ml:3082-3090: `rue { ... exp_type = instance_def
@@ -8489,13 +8616,13 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Assert expression
             let bool_ty = env.type_bool(ctx);
 
-            let e = tctx.arena.get_expr(*e_idx);
+            let e = tctx.arena.get_expanded_expr(*e_idx);
             let typed_e = type_expect(
                 tctx,
                 env,
                 e,
                 bool_ty,
-                Some(TypeClashContext::AssertCondition),
+                Some(ClashSite::AssertCondition),
             )?;
 
             // assert(false) has the expected type (polymorphic), others have type unit
@@ -8537,9 +8664,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 let typed_e = type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*e),
+                    tctx.arena.get_expanded_expr(*e),
                     elem_ty,
-                    Some(TypeClashContext::ArrayLiteral),
+                    Some(ClashSite::ArrayLiteral),
                 )?;
                 typed_exprs.push(typed_e);
             }
@@ -8577,14 +8704,14 @@ fn type_expect_with_recarg_unscoped<'a>(
                                 txt: tctx.arena.get_string(key.txt).to_string(),
                                 loc: key.loc,
                             },
-                            { let value = type_expect(tctx, env, tctx.arena.get_expr(*svalue), ty, None)?; tctx.push_expr(value) },
+                            { let value = type_expect(tctx, env, tctx.arena.get_expanded_expr(*svalue), ty, None)?; tctx.push_expr(value) },
                         )
                     }
                     crate::parser::ast::DictEntry::Pdict_spread(sspread) => {
                         TypedDictEntry::Tdict_spread({ let value = type_expect(
                             tctx,
                             env,
-                            tctx.arena.get_expr(*sspread),
+                            tctx.arena.get_expanded_expr(*sspread),
                             dict_type(ty),
                             None,
                         )?; tctx.push_expr(value) })
@@ -8631,7 +8758,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 parts.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(spart),
+                    tctx.arena.get_expanded_expr(spart),
                     container_type(ty),
                     None,
                 )?);
@@ -8666,9 +8793,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 values.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*value),
+                    tctx.arena.get_expanded_expr(*value),
                     string_ty,
-                    Some(TypeClashContext::StringConcat),
+                    Some(ClashSite::StringConcat),
                 )?);
             }
             ctx.end_def();
@@ -8693,7 +8820,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         // value of the builtin `taggedTemplate<'param, 'output>` type.
         ED::Pexp_tagged_template(template) => {
             ctx.begin_def();
-            let stag = tctx.arena.get_expr(template.tag);
+            let stag = tctx.arena.get_expanded_expr(template.tag);
             let tag_var = ctx.new_var(None);
             tctx.deprecated_function_call = true;
             let tag = type_expect(tctx, env, stag, tag_var, None)?;
@@ -8722,9 +8849,9 @@ fn type_expect_with_recarg_unscoped<'a>(
                 values.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*value),
+                    tctx.arena.get_expanded_expr(*value),
                     param_ty,
-                    Some(TypeClashContext::TaggedTemplateValue),
+                    Some(ClashSite::TaggedTemplateValue),
                 )?);
             }
             unify_expression_types(tctx, loc, ctx.new_var(None), tag.exp_type, None)?;
@@ -8755,7 +8882,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
-            let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
+            let scrutinee = tctx.arena.get_expanded_expr(*scrutinee_idx);
 
             // Normal match expression
             type_match(
@@ -8772,14 +8899,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_try(inner) => {
             let (ref body_idx, ref handlers, ref finally) = *inner;
             // Try expression
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_try(
                 tctx,
                 env,
                 expr,
                 body,
                 tctx.arena.case_list(*handlers),
-                finally.map(|finally| tctx.arena.get_expr(finally)),
+                finally.map(|finally| tctx.arena.get_expanded_expr(finally)),
                 expected_ty,
             )
         }
@@ -8865,7 +8992,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 expr,
                 label,
-                sarg.map(|idx| tctx.arena.get_expr(idx)),
+                sarg.map(|idx| tctx.arena.get_expanded_expr(idx)),
                 expected_ty,
                 context,
             )
@@ -8879,7 +9006,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `sexp.pexp_attributes` at the result uses the spread expression's
             // attributes, not the record expression's attributes.
             let attrs = match base {
-                Some(base_expr) => &tctx.arena.get_expr(*base_expr).pexp_attributes,
+                Some(base_expr) => &tctx.arena.get_expanded_expr(*base_expr).pexp_attributes,
                 None => &expr.pexp_attributes,
             };
             type_record(tctx, env, loc, inner, expected_ty, attrs, recarg)
@@ -8890,8 +9017,8 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_setfield(inner) => {
             let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
             // Field assignment
-            let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            let new_value = tctx.arena.get_expr(*new_value_idx);
+            let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
+            let new_value = tctx.arena.get_expanded_expr(*new_value_idx);
             type_setfield(
                 tctx,
                 env,
@@ -8908,7 +9035,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_constraint(inner) => {
             let (ref inner_expr_idx, ref core_type) = **inner;
             // Type constraint
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             let core_type_ref = tctx.arena.get_core_type(*core_type);
             type_constraint(
                 tctx,
@@ -8924,7 +9051,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_coerce(inner) => {
             let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             let to_type_ref = tctx.arena.get_core_type(*to_type);
             let opt_from_type_ref = opt_from_type.map(|idx| tctx.arena.get_core_type(idx));
             type_coerce(
@@ -8942,14 +9069,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_open(inner) => {
             let (ref override_flag, ref lid, ref body_idx) = **inner;
             // Open expression: M.{ E } or open M; E
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_open(tctx, env, expr, override_flag, lid, body, expected_ty)
         }
 
         ED::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             // Newtype expression: (type t) => E
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_newtype(
                 tctx,
                 env,
@@ -8963,7 +9090,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_await(inner_expr_idx) => {
             // Await expression: await E
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             type_await(
                 tctx,
                 env,
@@ -8978,7 +9105,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_object_get(inner) => {
             let (ref obj_expr_idx, ref method) = **inner;
             // Method send: E#m
-            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
+            let obj_expr = tctx.arena.get_expanded_expr(*obj_expr_idx);
             type_object_get(
                 tctx,
                 env,
@@ -8993,8 +9120,8 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_object_set(inner) => {
             let (ref obj_expr_idx, ref field, ref value_idx) = **inner;
-            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
-            let value = tctx.arena.get_expr(*value_idx);
+            let obj_expr = tctx.arena.get_expanded_expr(*obj_expr_idx);
+            let value = tctx.arena.get_expanded_expr(*value_idx);
             type_object_set(
                 tctx,
                 env,
@@ -9021,7 +9148,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_letexception(inner) => {
             let (ref ext_constr, ref body_idx) = **inner;
             // Let exception: { exception C; E }
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_letexception(
                 tctx,
                 env,
@@ -9056,7 +9183,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let (ref name, ref module_expr, ref body_idx) = **inner;
             // Let module: { module M = ME; E }
             let module_expr_ref = tctx.arena.get_mod_expr(*module_expr);
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_letmodule(
                 tctx,
                 env,
@@ -9098,7 +9225,7 @@ fn finish_expected(
     expr: &ParsedExpression,
     ty: TypeExprRef,
     expected: &mut Expected,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     if let Expected::Infer { level, .. } = *expected
         && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
@@ -9141,7 +9268,7 @@ fn unify_expression_types(
     loc: LocIdx,
     ty1: TypeExprRef,
     ty2: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     use crate::types::unify;
 
@@ -9165,7 +9292,7 @@ fn unify_expression_types(
             Err(TypeCoreError::ExprTypeClash {
                 loc,
                 trace,
-                context,
+                context: context.map(|site| site.resolve(tctx.arena)),
                 env,
             })
         }
@@ -9203,7 +9330,7 @@ fn rue_unify(
     loc: LocIdx,
     exp_ty: TypeExprRef,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
     let inst = crate::types::instance(tctx.type_ctx, expected_ty);
     unify_expression_types(tctx, loc, exp_ty, inst, context)
@@ -9342,7 +9469,7 @@ fn translate_unified_ops(
     apply: &PexpApply,
     typed_funct: &Expression,
     expected_ty: &mut Expected,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> Option<TypeCoreResult<Expression>> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
@@ -9369,8 +9496,8 @@ fn translate_unified_ops(
 
     match entry.form {
         UnifiedOpForm::Binary if args.len() == 2 => {
-            let lhs_expr = tctx.arena.get_expr(args[0].1);
-            let rhs_expr = tctx.arena.get_expr(args[1].1);
+            let lhs_expr = tctx.arena.get_expanded_expr(args[0].1);
+            let rhs_expr = tctx.arena.get_expanded_expr(args[1].1);
 
             let lhs = match type_exp(tctx, env, lhs_expr, None) {
                 Ok(e) => e,
@@ -9462,7 +9589,7 @@ fn translate_unified_ops(
             }))
         }
         UnifiedOpForm::Unary if args.len() == 1 => {
-            let arg_expr = tctx.arena.get_expr(args[0].1);
+            let arg_expr = tctx.arena.get_expanded_expr(args[0].1);
             let arg = match type_exp(tctx, env, arg_expr, None) {
                 Ok(e) => e,
                 Err(e) => return Some(Err(e)),
@@ -9741,67 +9868,64 @@ fn find_arity_suggestion_for_expression(
     find_arity_suggestion_for_function(tctx, env, tctx.arena.get_longident(lid.txt), target_arity)
 }
 
-fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -> TypeClashContext {
+fn function_argument_type_clash_context(typed_funct_value_path: Option<&Path>) -> ClashSite {
     if let Some(path) = typed_funct_value_path {
         if is_comparison_operator_name(path.head_name()) {
-            return TypeClashContext::ComparisonOperator;
+            return ClashSite::ComparisonOperator;
         }
 
         if path.head_name() == "++" {
-            return TypeClashContext::StringConcat;
+            return ClashSite::StringConcat;
         }
 
         if let Some((for_float, operator)) = math_operator_from_name(path.head_name()) {
-            return TypeClashContext::MathOperator {
+            return ClashSite::MathOperator {
                 for_float,
-                operator: operator.to_string(),
+                operator,
                 is_constant: None,
             };
         }
 
         if path.name_eq("Primitive_promise.unsafe_await") {
-            return TypeClashContext::Await;
+            return ClashSite::Await;
         }
     }
 
-    TypeClashContext::FunctionCall
+    ClashSite::FunctionCall
 }
 
-fn math_operator_constant_text(expr: &ParsedExpression, arena: &ParseArena) -> Option<String> {
+fn math_operator_constant_text(expr: &ParsedExpression) -> Option<StrIdx> {
     match &expr.pexp_desc {
         crate::parser::ast::ExpressionDesc::Pexp_constant(
             ParsedConstant::Integer(txt, _) | ParsedConstant::Float(txt, _),
-        ) => Some(arena.get_string(*txt).to_string()),
+        ) => Some(*txt),
         _ => None,
     }
 }
 
 fn type_clash_context_for_function_argument(
-    context: &TypeClashContext,
+    context: ClashSite,
     label: &ArgLabel,
-    arena: &ParseArena,
     arg_expr: &ParsedExpression,
-) -> TypeClashContext {
+) -> ClashSite {
     match context {
-        TypeClashContext::MathOperator {
+        ClashSite::MathOperator {
             for_float,
             operator,
             ..
-        } => TypeClashContext::MathOperator {
-            for_float: *for_float,
-            operator: operator.clone(),
-            is_constant: math_operator_constant_text(arg_expr, arena),
+        } => ClashSite::MathOperator {
+            for_float,
+            operator,
+            is_constant: math_operator_constant_text(arg_expr),
         },
-        TypeClashContext::FunctionCall => TypeClashContext::FunctionArgument {
+        ClashSite::FunctionCall => ClashSite::FunctionArgument {
             optional: false,
             name: match label {
                 ArgLabel::Nolabel => None,
-                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
-                    Some(arena.get_string(loc.txt).to_string())
-                }
+                ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => Some(loc.txt),
             },
         },
-        _ => context.clone(),
+        _ => context,
     }
 }
 
@@ -9831,12 +9955,12 @@ fn type_application(
     sexp: &ParsedExpression,
     apply: &PexpApply,
     expected_ty: &mut Expected,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let arena = tctx.arena;
-    let funct = arena.get_expr(apply.funct);
+    let funct = arena.get_expanded_expr(apply.funct);
     let args = arena.apply_args(apply.args);
     let partial = apply.partial;
     let transformed_jsx = apply.transformed_jsx;
@@ -9853,7 +9977,7 @@ fn type_application(
             .find(|(label, _)| !matches!(label, ArgLabel::Nolabel))
     {
         return Err(TypeCoreError::MisplacedLabelSyntax {
-            loc: tctx.arena.get_expr(*arg_idx).pexp_loc,
+            loc: tctx.arena.get_expanded_expr(*arg_idx).pexp_loc,
         });
     }
 
@@ -9863,7 +9987,7 @@ fn type_application(
             expr: &'a ParsedExpression,
             expected_ty: TypeExprRef,
             unify_ty: TypeExprRef,
-            context: TypeClashContext,
+            context: ClashSite,
             enforce_optional: bool,
             /// OCaml's type_unknown_args only calls type_expect, with no
             /// subsequent unify_exp. Skip the post-typing unify for this path.
@@ -9878,7 +10002,7 @@ fn type_application(
         },
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Copy)]
     /// An omitted parameter: OCaml keeps its `lbl` (typecore.ml:4191-4200).
     struct OmittedArrow {
         param: TypeArg,
@@ -9989,7 +10113,7 @@ fn type_application(
         }
     }
     let function_arg_context = if transformed_jsx {
-        TypeClashContext::JsxComponent
+        ClashSite::JsxComponent
     } else {
         function_argument_type_clash_context(typed_funct_value_path.as_ref())
     };
@@ -10010,7 +10134,7 @@ fn type_application(
         apply,
         &typed_funct,
         expected_ty,
-        context.clone(),
+        context,
     ) {
         ctx.end_def();
         return result;
@@ -10036,7 +10160,7 @@ fn type_application(
         );
         if ctx.get_level(uncommitted_funct_ty) >= ctx.get_level(ret) && !is_identity {
             for (_, arg) in args {
-                tctx.report_warning(tctx.arena.get_expr(*arg).pexp_loc, Warning::UnusedArgument);
+                tctx.report_warning(tctx.arena.get_expanded_expr(*arg).pexp_loc, Warning::UnusedArgument);
             }
         }
         let arrow = ctx.new_type(TypeDesc::Tarrow { args: params, ret });
@@ -10095,9 +10219,9 @@ fn type_application(
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
     let mut remaining_args: smallvec::SmallVec<[usize; 8]> = (0..args.len()).collect();
-    let mut argument_thunks: Vec<ApplyArgThunk<'_>> = Vec::with_capacity(function_arity);
-    let mut omitted: Vec<OmittedArrow> = Vec::new();
-    let mut ignored: Vec<OmittedArrow> = Vec::new();
+    let mut argument_thunks: smallvec::SmallVec<[ApplyArgThunk<'_>; 6]> = smallvec::SmallVec::new();
+    let mut omitted: smallvec::SmallVec<[OmittedArrow; 2]> = smallvec::SmallVec::new();
+    let mut ignored: smallvec::SmallVec<[OmittedArrow; 2]> = smallvec::SmallVec::new();
 
     for (param, inst_param) in ctx
         .type_args(declared_params)
@@ -10110,7 +10234,7 @@ fn type_application(
         {
             let arg_index = remaining_args.remove(match_index);
             let (call_label, arg_expr_idx) = &args[arg_index];
-            let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
+            let arg_expr = tctx.arena.get_expanded_expr(*arg_expr_idx);
             let call_is_optional = call_label.is_optional();
             if !param.label().is_optional() && call_is_optional {
                 tctx.report_warning(
@@ -10131,35 +10255,31 @@ fn type_application(
             } else {
                 inst_param.typ
             };
-            let arg_context = if matches!(function_arg_context, TypeClashContext::JsxComponent) {
+            let arg_context = if matches!(function_arg_context, ClashSite::JsxComponent) {
                 if argument_thunks.is_empty() {
-                    TypeClashContext::JsxComponent
+                    ClashSite::JsxComponent
                 } else {
                     type_clash_context_for_function_argument(
-                        &TypeClashContext::FunctionCall,
+                        ClashSite::FunctionCall,
                         call_label,
-                        tctx.arena,
                         arg_expr,
                     )
                 }
             } else if param.label().is_optional()
                 && !call_is_optional
-                && matches!(function_arg_context, TypeClashContext::FunctionCall)
+                && matches!(function_arg_context, ClashSite::FunctionCall)
             {
-                TypeClashContext::FunctionArgument {
+                ClashSite::FunctionArgument {
                     optional: true,
                     name: match call_label {
                         ArgLabel::Nolabel => None,
-                        ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => {
-                            Some(tctx.arena.get_string(loc.txt).to_string())
-                        }
+                        ArgLabel::Labelled(loc) | ArgLabel::Optional(loc) => Some(loc.txt),
                     },
                 }
             } else {
                 type_clash_context_for_function_argument(
-                    &function_arg_context,
+                    function_arg_context,
                     call_label,
-                    tctx.arena,
                     arg_expr,
                 )
             };
@@ -10203,13 +10323,13 @@ fn type_application(
         let unit_sentinel = remaining_args.len() == 1
             && matches!(args[remaining_args[0]].0, ArgLabel::Nolabel)
             && matches!(
-                &tctx.arena.get_expr(args[remaining_args[0]].1).pexp_desc,
+                &tctx.arena.get_expanded_expr(args[remaining_args[0]].1).pexp_desc,
                 crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args)
                     if tctx.arena.is_lident(lid.txt, "()") && args.txt.is_empty()
             );
         if !(all_ignored_optional && unit_sentinel) {
             let (label, arg_idx) = &args[remaining_args[0]];
-            let arg_expr = tctx.arena.get_expr(*arg_idx);
+            let arg_expr = tctx.arena.get_expanded_expr(*arg_idx);
             let result_ty = if omitted.is_empty() && ignored.is_empty() {
                 declared_ret
             } else {
@@ -10247,7 +10367,7 @@ fn type_application(
     let provided = ignored.len() + args.len();
     let fully_applied = provided >= function_arity;
     let current_ty0 = inst_ret;
-    let mut typed_args = Vec::with_capacity(argument_thunks.len());
+    let mut typed_args: smallvec::SmallVec<[ApplyArg; 6]> = smallvec::SmallVec::new();
     for pending_arg in argument_thunks.into_iter() {
         match pending_arg {
             ApplyArgThunk::Provided {
@@ -10266,7 +10386,7 @@ fn type_application(
                     .filter(|saved_env| saved_env.id() != env.id())
                     .cloned();
                 let typed_arg_result =
-                    type_expect(tctx, env, expr, arg_expected_ty, Some(context.clone()));
+                    type_expect(tctx, env, expr, arg_expected_ty, Some(context));
 
                 let typed_arg = typed_arg_result?;
                 if let Some(saved_env) = saved_unify_env {
@@ -10287,7 +10407,7 @@ fn type_application(
                         typed_arg.exp_loc,
                         typed_arg.exp_type,
                         unify_ty,
-                        Some(context.clone()),
+                        Some(context),
                     )?;
                 }
                 let typed_arg = if enforce_optional {
@@ -10401,8 +10521,12 @@ fn type_application(
             result_ty,
             tctx.type_ctx.store_typed_env(env),
         );
-        tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
+        if attributes.is_empty() {
+            typed_node
+        } else {
+            tctx.typed
+                .with_exp_attributes(typed_node, attributes.to_vec().into())
+        }
     })
 }
 
@@ -10997,7 +11121,7 @@ fn type_match_cases_sequential(
     cases: &[&crate::parser::ast::Case],
     scrutinee: CaseScrutinee,
     body_ty: TypeExprRef,
-    body_context: Option<TypeClashContext>,
+    body_context: Option<ClashSite>,
     lev: i32,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     // OCaml compiler/ml/typecore.ml:4420-4438 builds `pat_env_list` for all
@@ -11039,7 +11163,7 @@ fn type_match_cases_sequential(
             env,
             pending,
             body_ty,
-            body_context.clone(),
+            body_context,
         )?);
     }
     Ok(typed_cases)
@@ -11198,7 +11322,7 @@ fn type_match_cases_batch_non_gadt<'a>(
     cases: &[&'a crate::parser::ast::Case],
     scrutinee: CaseScrutinee,
     body_ty: TypeExprRef,
-    body_context: Option<TypeClashContext>,
+    body_context: Option<ClashSite>,
 ) -> TypeCoreResult<Vec<crate::types::typedtree::Case>> {
     let CaseScrutinee {
         ty: ty_arg,
@@ -11386,14 +11510,14 @@ fn type_match_cases_batch_non_gadt<'a>(
         for pending in pending_cases {
             let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
                 let bool_ty = env.type_bool(ctx);
-                let guard_expr = tctx.arena.get_expr(*guard);
+                let guard_expr = tctx.arena.get_expanded_expr(*guard);
                 Some(type_expect_with_module_unpacks(
                     tctx,
                     &pending.case_env,
                     guard_expr,
                     bool_ty,
                     &pending.unpacks,
-                    Some(TypeClashContext::IfCondition),
+                    Some(ClashSite::IfCondition),
                 )?)
             } else {
                 None
@@ -11410,14 +11534,14 @@ fn type_match_cases_batch_non_gadt<'a>(
                 body_ty
             };
 
-            let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+            let body_expr = tctx.arena.get_expanded_expr(pending.parsed_case.pc_rhs);
             let typed_body = type_expect_with_module_unpacks(
                 tctx,
                 &pending.case_env,
                 body_expr,
                 case_body_ty,
                 &pending.unpacks,
-                body_context.clone(),
+                body_context,
             )?;
             // Match OCaml type_cases: `exp_type = instance env ty_res'` where
             // `ty_res'` is corrected per-case when the pattern contains GADTs.
@@ -11465,9 +11589,9 @@ fn type_match(
                 .iter()
                 .any(|attr| tctx.arena.get_string(attr.0.txt) == "let.unwrap")
             {
-                Some(TypeClashContext::LetUnwrapReturn)
+                Some(ClashSite::LetUnwrapReturn)
             } else {
-                Some(TypeClashContext::SwitchExpression)
+                Some(ClashSite::SwitchExpression)
             }
         }
     };
@@ -11583,7 +11707,7 @@ fn type_match(
                 erase_either,
             },
             ty_res,
-            body_context.clone(),
+            body_context,
             gadt_lev,
         )
     } else {
@@ -11597,7 +11721,7 @@ fn type_match(
                 erase_either,
             },
             ty_res,
-            body_context.clone(),
+            body_context,
         ) {
             Ok(cases) => Ok(cases),
             Err(err) => {
@@ -11736,7 +11860,7 @@ fn type_match(
                 erase_either: false,
             },
             expected_ty,
-            body_context.clone(),
+            body_context,
         )?;
         // `type_cases ... Predef.type_exn ty_expected false loc exn_caselist`
         // runs after the value cases were checked, and also checks unused
@@ -12026,13 +12150,13 @@ fn collect_lident_idents_in_module_expr(
             for item in items.iter() {
                 match &item.pstr_desc {
                     SID::Pstr_eval(inner) => {
-                        collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+                        collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
                     }
                     SID::Pstr_value(inner) => {
                         for binding in arena.vb_list(inner.1).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
-                                arena.get_expr(binding.pvb_expr),
+                                arena.get_expanded_expr(binding.pvb_expr),
                                 out,
                             );
                         }
@@ -12083,7 +12207,7 @@ fn collect_lident_idents_in_module_expr(
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*inner), out);
         }
         MED::Pmod_unpack(expr) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
         }
     }
 }
@@ -12111,56 +12235,56 @@ fn collect_lident_idents_in_expression(
         | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
             for binding in arena.vb_list(inner.1).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(binding.pvb_expr), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_fun(inner) => {
             if let Some(default) = inner.default {
-                collect_lident_idents_in_expression(arena, arena.get_expr(default), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(default), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.rhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.rhs), out);
         }
         ED::Pexp_apply(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.funct), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.funct), out);
             for (_label, arg) in arena.apply_args(inner.args) {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_template(template) => {
             for value in &template.values {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
             }
         }
         ED::Pexp_tagged_template(template) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(template.tag), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(template.tag), out);
             for value in &template.values {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
             }
         }
         ED::Pexp_match((scrutinee, cases)) | ED::Pexp_try((scrutinee, cases, None)) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*scrutinee), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*scrutinee), out);
             for case in arena.case_list(*cases).iter() {
                 if let Some(guard) = case.pc_guard {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(guard), out);
                 }
-                collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(case.pc_rhs), out);
             }
         }
         // typecore.ml `iter_expression`: `expr e; List.iter case pel; Option.iter expr finally`.
         ED::Pexp_try((body, cases, Some(finally))) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*body), out);
             for case in arena.case_list(*cases).iter() {
                 if let Some(guard) = case.pc_guard {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(guard), out);
                 }
-                collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(case.pc_rhs), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(*finally), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*finally), out);
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
             for item in arena.expr_list(*items).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*item), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*item), out);
             }
         }
         ED::Pexp_dict(entries) => {
@@ -12168,108 +12292,108 @@ fn collect_lident_idents_in_expression(
                 match entry {
                     crate::parser::ast::DictEntry::Pdict_entry(_, e)
                     | crate::parser::ast::DictEntry::Pdict_spread(e) => {
-                        collect_lident_idents_in_expression(arena, arena.get_expr(*e), out)
+                        collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*e), out)
                     }
                 }
             }
         }
         ED::Pexp_spread(_, elements) => {
             for element in arena.spread_element_list(*elements) {
-                collect_lident_idents_in_expression(arena, arena.get_expr(element.expr()), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(element.expr()), out);
             }
         }
         ED::Pexp_construct(_, args) => {
             for arg in arena.expr_list(args.txt).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_variant(inner) => {
             for arg in arena.expr_list(inner.1.txt).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_record(inner) => {
             for field in arena.expr_field_list(inner.0).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(field.expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(field.expr), out);
             }
             if let Some(base) = inner.1 {
-                collect_lident_idents_in_expression(arena, arena.get_expr(base), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(base), out);
             }
         }
         ED::Pexp_field(expr, _) | ED::Pexp_assert(expr) | ED::Pexp_await(expr) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
         }
         ED::Pexp_setfield(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_ifthenelse(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
             if let Some(else_expr) = inner.2 {
-                collect_lident_idents_in_expression(arena, arena.get_expr(else_expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(else_expr), out);
             }
         }
         ED::Pexp_ternary(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_braces(braces) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(braces.expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(braces.expr), out);
         }
         ED::Pexp_regexp(_) => {}
         ED::Pexp_sequence(lhs, rhs) | ED::Pexp_while(lhs, rhs) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*lhs), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(*rhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*lhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*rhs), out);
         }
         ED::Pexp_for(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.4), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.4), out);
         }
         ED::Pexp_for_of(inner) | ED::Pexp_for_await_of(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_constraint(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_coerce(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_object_get(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_object_set(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_object_literal(fields) => {
             for (_, field) in fields.iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*field), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*field), out);
             }
         }
         ED::Pexp_letmodule(inner) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_letexception(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
         }
         ED::Pexp_newtype(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
         }
         ED::Pexp_pack(mod_expr) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*mod_expr), out);
         }
         ED::Pexp_open(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_jsx_element(inner) => match &**inner {
             JsxElement::Fragment(fragment) => {
                 for child in fragment.children.iter() {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(*child), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*child), out);
                 }
             }
             JsxElement::Unary(unary) => {
@@ -12277,10 +12401,10 @@ fn collect_lident_idents_in_expression(
                     match prop {
                         JsxProp::Punning { .. } => {}
                         JsxProp::Value { value, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
                         }
                         JsxProp::Spreading { expr, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
                         }
                     }
                 }
@@ -12290,15 +12414,15 @@ fn collect_lident_idents_in_expression(
                     match prop {
                         JsxProp::Punning { .. } => {}
                         JsxProp::Value { value, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
                         }
                         JsxProp::Spreading { expr, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
                         }
                     }
                 }
                 for child in container.children.iter() {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(*child), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*child), out);
                 }
             }
         },
@@ -12319,13 +12443,13 @@ fn all_idents_cases_with_generalized_constructor_order(
         if let Some(guard) = case.pc_guard {
             collect_lident_idents_in_expression(
                 tctx.arena,
-                tctx.arena.get_expr(guard),
+                tctx.arena.get_expanded_expr(guard),
                 &mut encountered,
             );
         }
         collect_lident_idents_in_expression(
             tctx.arena,
-            tctx.arena.get_expr(case.pc_rhs),
+            tctx.arena.get_expanded_expr(case.pc_rhs),
             &mut encountered,
         );
     }
@@ -12603,21 +12727,21 @@ fn type_pending_case_body(
     env: &Env,
     pending: PendingSequentialMatchCase<'_>,
     body_ty: TypeExprRef,
-    body_context: Option<TypeClashContext>,
+    body_context: Option<ClashSite>,
 ) -> TypeCoreResult<crate::types::typedtree::Case> {
     // OCaml compiler/ml/typecore.ml:4473-4505 types guards and bodies only
     // after every pattern in `pat_env_list` has been built.
     // Type check the guard if present.
     let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
-        let guard_expr = tctx.arena.get_expr(*guard);
+        let guard_expr = tctx.arena.get_expanded_expr(*guard);
         Some(type_expect_with_module_unpacks(
             tctx,
             &pending.case_env,
             guard_expr,
             bool_ty,
             &pending.unpacks,
-            Some(TypeClashContext::IfCondition),
+            Some(ClashSite::IfCondition),
         )?)
     } else {
         None
@@ -12629,7 +12753,7 @@ fn type_pending_case_body(
     } else {
         body_ty
     };
-    let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+    let body_expr = tctx.arena.get_expanded_expr(pending.parsed_case.pc_rhs);
     let typed_body = type_expect_with_module_unpacks(
         tctx,
         &pending.case_env,
@@ -12695,7 +12819,7 @@ fn type_try(
             erase_either: false,
         },
         expected_ty,
-        Some(TypeClashContext::TryReturn),
+        Some(ClashSite::TryReturn),
     )?;
     finish_non_gadt_type_cases(
         tctx,
@@ -12748,7 +12872,7 @@ fn desugar_nary_function_defaults(
             let crate::parser::ast::ArgLabel::Optional(label) = param.p_lbl else {
                 unreachable!("defaults are only valid on optional parameters");
             };
-            let default_loc = arena.get_expr(default_idx).pexp_loc;
+            let default_loc = arena.get_expanded_expr(default_idx).pexp_loc;
             let source_pat_loc = arena.get_pat(param.p_pat).ppat_loc;
             let sloc_start = arena.loc_start_idx(source_pat_loc);
             let sloc_end = arena.loc_end_idx(default_loc);
@@ -13429,7 +13553,7 @@ fn type_function_nary(
     let typed_body = type_expect_with_module_unpacks(
         tctx,
         &body_env,
-        tctx.arena.get_expr(body),
+        tctx.arena.get_expanded_expr(body),
         body_result_type,
         &unpacks,
         None,
@@ -13589,16 +13713,16 @@ fn type_for(
     sexp: &ParsedExpression,
     for_loop: &ForLoop,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let arena = tctx.arena;
     let (pat, start_expr, end_expr, direction, body) = *for_loop;
     let pat = arena.get_pat(pat);
-    let start_expr = arena.get_expr(start_expr);
-    let end_expr = arena.get_expr(end_expr);
-    let body = arena.get_expr(body);
+    let start_expr = arena.get_expanded_expr(start_expr);
+    let end_expr = arena.get_expanded_expr(end_expr);
+    let body = arena.get_expanded_expr(body);
     let ctx = tctx.type_ctx;
     // OCaml passes Predef.type_int (generic singleton) to type_expect for each bound.
     // Inside type_expect, `rue` calls instance(ty_expected) — creating a FRESH copy
@@ -13612,14 +13736,14 @@ fn type_for(
         env,
         start_expr,
         start_int_ty,
-        Some(TypeClashContext::ForLoopCondition),
+        Some(ClashSite::ForLoopCondition),
     )?;
     let typed_end = type_expect(
         tctx,
         env,
         end_expr,
         end_int_ty,
-        Some(TypeClashContext::ForLoopCondition),
+        Some(ClashSite::ForLoopCondition),
     )?;
 
     // OCaml only accepts `_` or a variable for `for` loop indices.
@@ -13769,7 +13893,7 @@ fn type_for_of(
     sexp: &ParsedExpression,
     for_of: &ForOfLoop,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
@@ -13780,8 +13904,8 @@ fn type_for_of(
     let arena = tctx.arena;
     let (pat, iterable_expr, body) = *for_of;
     let pat = arena.get_pat(pat);
-    let iterable_expr = arena.get_expr(iterable_expr);
-    let body = arena.get_expr(body);
+    let iterable_expr = arena.get_expanded_expr(iterable_expr);
+    let body = arena.get_expanded_expr(body);
     let ctx = tctx.type_ctx;
 
     // OCaml only accepts `_` or a variable for the for-of binding.
@@ -14190,14 +14314,14 @@ fn type_construct(
     let recarg = if cstr_desc.cstr_inlined.is_none() {
         RecArg::Rejected
     } else {
-        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expr(*arg_idx).pexp_desc {
+        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expanded_expr(*arg_idx).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_ident(_) => true,
             crate::parser::ast::ExpressionDesc::Pexp_record(inner) => {
                 let (_, base) = inner;
                 match base {
                     None => true,
                     Some(base_idx) => matches!(
-                        &tctx.arena.get_expr(*base_idx).pexp_desc,
+                        &tctx.arena.get_expanded_expr(*base_idx).pexp_desc,
                         crate::parser::ast::ExpressionDesc::Pexp_ident(_)
                     ),
                 }
@@ -14219,7 +14343,7 @@ fn type_construct(
         .zip(arg_types_for_expect.iter())
         .zip(arg_types_for_unify.iter())
     {
-        let arg_expr = tctx.arena.get_expr(*arg_idx);
+        let arg_expr = tctx.arena.get_expanded_expr(*arg_idx);
         let typed_arg = type_expect_with_recarg(tctx, env, arg_expr, *arg_ty, None, recarg)?;
         unify_expression_types(tctx, loc, typed_arg.exp_type, *arg_ty0, None)?;
         typed_args.push(typed_arg);
@@ -14253,7 +14377,7 @@ fn type_variant(
     label: &str,
     arg: Option<&ParsedExpression>,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
@@ -14915,7 +15039,7 @@ fn type_record(
 ) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
     let fields = arena.expr_field_list(record.0);
-    let base = record.1.map(|idx| arena.get_expr(idx));
+    let base = record.1.map(|idx| arena.get_expanded_expr(idx));
     let ctx = tctx.type_ctx;
     // typecore.ml Pexp_record: record syntax on a dict points to `dict{...}`,
     // checked against the expected type and, with a spread, its type.
@@ -15346,7 +15470,7 @@ fn type_record(
 
                     if field.opt && !env_label.lbl_optional {
                         return Err(TypeCoreError::FieldNotOptional {
-                            loc: tctx.arena.get_expr(field.expr).pexp_loc,
+                            loc: tctx.arena.get_expanded_expr(field.expr).pexp_loc,
                             name: env_label.lbl_name.to_string(),
                             typ: env_label.lbl_res,
                         });
@@ -15496,19 +15620,19 @@ fn type_record(
                     });
                 };
 
-            let field_context = Some(TypeClashContext::RecordField {
-                field_name: field_name.to_string(),
+            let field_context = Some(ClashSite::RecordField {
+                field_name: crate::name::Name::new(field_name),
                 optional: label_desc.lbl_optional && !field.opt,
                 jsx: jsx_component_error_info
                     .as_ref()
-                    .map(|info| info.jsx_type.clone()),
+                    .map(|info| info.jsx_type),
             });
             let typed_expr = type_expect(
                 tctx,
                 env,
-                tctx.arena.get_expr(field.expr),
+                tctx.arena.get_expanded_expr(field.expr),
                 field_input_ty,
-                field_context.clone(),
+                field_context,
             )?;
             // OCaml `type_argument`: after typing against `ty_expected'`, unify with
             // a fresh `instance` of that type to preserve sharing behavior.
@@ -15548,7 +15672,7 @@ fn type_record(
             // typecore.ml:2373-2379 builds `Some e` with `~loc:e.pexp_loc`
             // before typing, so it keeps the field expression's own location
             // (for `{ open M; body }` the block's, not the body's).
-            let wrapped_loc = tctx.arena.get_expr(field.expr).pexp_loc;
+            let wrapped_loc = tctx.arena.get_expanded_expr(field.expr).pexp_loc;
             let wrapped_env = typed_expr.exp_env;
             Expression::new(
                 ExpressionDesc::Texp_construct(
@@ -16299,7 +16423,7 @@ fn type_setfield(
     field_lid: &Located<LidentIdx>,
     new_value: &ParsedExpression,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -16496,8 +16620,8 @@ fn type_setfield(
                 });
             };
 
-            let field_context = Some(TypeClashContext::SetRecordField {
-                field_name: field_context_name.to_string(),
+            let field_context = Some(ClashSite::SetRecordField {
+                field_name: crate::name::Name::new(&field_context_name),
             });
             let typed_value = type_expect(tctx, env, new_value, field_ty, field_context)?;
             // OCaml compiler/ml/typecore.ml:3740-3743 uses `type_argument`, which
@@ -16577,7 +16701,7 @@ fn type_constraint(
     inner_expr: &ParsedExpression,
     core_type: &crate::parser::ast::CoreType,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
@@ -16852,10 +16976,10 @@ fn type_value_binding_expression(
         .value_constraint(binding.pvb_pat)
         .and_then(|constraint| constraint.pvc_expression)
     {
-        let expression = tctx.arena.get_expr(expression).clone();
+        let expression = tctx.arena.get_expanded_expr(expression).clone();
         type_expect(tctx, env, &expression, expected_ty, None)
     } else {
-        let expression = tctx.arena.get_expr(binding.pvb_expr).clone();
+        let expression = tctx.arena.get_expanded_expr(binding.pvb_expr).clone();
         let match_context = (let_check == LetCheck::FakeOptional).then_some(MatchContext::Function);
         type_expect_full(
             tctx,
@@ -17020,7 +17144,7 @@ fn type_await(
     loc: LocIdx,
     inner_expr: &ParsedExpression,
     expected_ty: TypeExprRef,
-    _context: Option<TypeClashContext>,
+    _context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     // For await, the inner expression should be a Promise<T>
@@ -17119,7 +17243,7 @@ fn type_object_get(
     obj_expr: &ParsedExpression,
     field: &Located<std::borrow::Cow<'static, str>>,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -17186,7 +17310,7 @@ fn type_object_set(
     field: &Located<std::borrow::Cow<'static, str>>,
     svalue: &ParsedExpression,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
@@ -17300,14 +17424,14 @@ fn type_object_literal(
         crate::parse_arena::ExprIdx,
     )],
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     let ctx = tctx.type_ctx;
     let mut seen: HashMap<String, TypeExprRef> = HashMap::new();
     let mut fields: Vec<(Located<String>, TExprIdx)> = Vec::with_capacity(sfields.len());
     for (name, sfield) in sfields {
-        let sfield = tctx.arena.get_expr(*sfield);
+        let sfield = tctx.arena.get_expanded_expr(*sfield);
         let field = match seen.get(name.txt.as_ref()).copied() {
             Some(ty) => type_expect(tctx, env, sfield, ty, None)?,
             None => {
@@ -18465,7 +18589,7 @@ fn type_pack(
     loc: LocIdx,
     module_expr: &crate::parser::ast::ModuleExpr,
     expected_ty: TypeExprRef,
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
     attributes: &[crate::parser::ast::Attribute],
 ) -> TypeCoreResult<Expression> {
     // Matches OCaml `Pexp_pack` in compiler/ml/typecore.ml:3518-3525:
@@ -18758,7 +18882,7 @@ fn type_pack(
         .env()
         .cloned();
     tctx.unify_state.set_env(&package_env);
-    let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context.clone());
+    let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context);
     if let Some(saved_env) = saved_unify_env {
         tctx.unify_state.set_env(&saved_env);
     }
@@ -18826,7 +18950,7 @@ fn type_expect_with_module_unpacks(
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     unpacks: &[PatternVariable],
-    context: Option<TypeClashContext>,
+    context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
     fn ensure_string_idx(arena: &ParseArena, s: &str) -> StrIdx {
         if let Some(idx) = arena.find_string_idx(s) {
@@ -19366,11 +19490,11 @@ fn type_approx_for_rec_let(
 
     match &sexp.pexp_desc {
         ED::Pexp_braces(braces) => {
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(braces.expr))
         }
         ED::Pexp_let(inner) => {
             let (_, _, body) = inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*body))
         }
         ED::Pexp_fun(inner) => {
             let params = tctx.arena.nary_fun_params(inner).into_owned();
@@ -19387,47 +19511,47 @@ fn type_approx_for_rec_let(
                     typ,
                 )
             }));
-            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(body))?;
+            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?;
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
             let (_, cases) = inner;
             match tctx.arena.case_list(*cases).first() {
-                Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(case.pc_rhs)),
+                Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
             }
         }
         ED::Pexp_try(inner) => {
             let (expr, _, _) = inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
             let tys: TypeCoreResult<Vec<_>> = tctx
                 .arena
                 .expr_list(*items)
                 .iter()
-                .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*item)))
+                .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*item)))
                 .collect();
             Ok(ctx.new_tuple(tys?))
         }
         ED::Pexp_ifthenelse(inner) => {
             let (_, then_expr, _) = &**inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*then_expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*then_expr))
         }
-        ED::Pexp_ternary(inner) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(inner.1)),
+        ED::Pexp_ternary(inner) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(inner.1)),
         ED::Pexp_sequence(_, expr) => {
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))
         }
         ED::Pexp_constraint(inner) => {
             let (expr, sty) = &**inner;
-            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))?;
+            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))?;
             let ty1 = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*sty));
             unify_expression_types(tctx, loc, ty, ty1, None)?;
             Ok(ty1)
         }
         ED::Pexp_coerce(inner) => {
             let (expr, _sty1, sty2) = &**inner;
-            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))?;
+            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))?;
             let ty1 = ctx.new_var(None);
             let ty2 = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*sty2));
             unify_expression_types(tctx, loc, ty, ty1, None)?;
@@ -20700,7 +20824,7 @@ fn type_let_bindings(
         if rec_flag == RecFlag::Recursive {
             for (typed_pat, binding) in typed_patterns.iter().zip(bindings.iter()) {
                 let approx_ty =
-                    type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(binding.pvb_expr))?;
+                    type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(binding.pvb_expr))?;
                 let pat_ty_for_unify = {
                     let pat_ty = typed_pat.pat_type;
                     let pat_repr = ctx.repr(pat_ty);
@@ -29683,6 +29807,97 @@ fn parmatch_check_unused(
 mod tests {
     use super::*;
     use crate::context::IdGenerator;
+
+    #[test]
+    fn clash_site_resolves_owned_payloads() {
+        fn assert_copy<T: Copy>() {}
+        assert_copy::<ClashSite>();
+        let mut arena = ParseArena::new();
+        let name = arena.intern_string("value");
+        let literal = arena.intern_string("1_000.0");
+        for optional in [false, true] {
+            let site = ClashSite::FunctionArgument {
+                optional,
+                name: Some(name),
+            };
+            let TypeClashContext::FunctionArgument {
+                optional: actual,
+                name,
+            } = site.resolve(&arena)
+            else {
+                panic!("wrong argument context");
+            };
+            assert_eq!(actual, optional);
+            assert_eq!(name.as_deref(), Some("value"));
+        }
+        let site = ClashSite::MathOperator {
+            for_float: true,
+            operator: "+.",
+            is_constant: Some(literal),
+        };
+        let TypeClashContext::MathOperator {
+            for_float,
+            operator,
+            is_constant,
+        } = site.resolve(&arena)
+        else {
+            panic!("wrong operator context");
+        };
+        assert!(for_float);
+        assert_eq!(operator, "+.");
+        assert_eq!(is_constant.as_deref(), Some("1_000.0"));
+        for jsx in [
+            None,
+            Some(JsxPropKind::Fragment),
+            Some(JsxPropKind::CustomComponent),
+        ] {
+            let site = ClashSite::RecordField {
+                field_name: crate::name::Name::new("value"),
+                optional: true,
+                jsx,
+            };
+            let TypeClashContext::RecordField {
+                field_name,
+                optional,
+                jsx: actual,
+            } = site.resolve(&arena)
+            else {
+                panic!("wrong field context");
+            };
+            assert_eq!(field_name, "value");
+            assert!(optional);
+            assert_eq!(format!("{actual:?}"), format!("{jsx:?}"));
+        }
+        let site = ClashSite::SetRecordField {
+            field_name: crate::name::Name::new("value"),
+        };
+        let TypeClashContext::SetRecordField { field_name } = site.resolve(&arena) else {
+            panic!("wrong assignment context");
+        };
+        assert_eq!(field_name, "value");
+    }
+
+    #[test]
+    fn generalizable_at_level_preserves_levels() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let node = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 5);
+        assert!(generalizable_at_level(&ctx, 4, node));
+        assert!(!generalizable_at_level(&ctx, 5, node));
+        assert_eq!(ctx.get_level(node), 5);
+    }
+
+    #[test]
+    fn generalizable_at_level_checks_shared_and_lower_children() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let shared = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 5);
+        let low = ctx.alloc_type_at_level(TypeDesc::Tvar(None), 2);
+        let root = ctx.alloc_type_at_level(TypeDesc::Ttuple(ctx.new_type_list(&[shared, shared, low])), 5);
+        assert!(!generalizable_at_level(&ctx, 3, root));
+        assert!(generalizable_at_level(&ctx, 1, root));
+        assert_eq!(ctx.get_level(shared), 5);
+        assert_eq!(ctx.get_level(low), 2);
+        assert_eq!(ctx.get_level(root), 5);
+    }
 
     /// typetexp.ml:419-426 names every unnamed proxy, including an instance
     /// of a copied variable; descriptor allocation is not a naming condition.

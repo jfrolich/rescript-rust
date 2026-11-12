@@ -16,8 +16,6 @@ impl NodeFlags {
     pub const NO_ALLOC: u8 = 2;
     /// Source metadata is present.
     pub const HAS_LOC: u8 = 4;
-    /// Tail position in a function.
-    pub const TAIL: u8 = 8;
     /// The expression's value is discarded.
     pub const VALUE_UNUSED: u8 = 16;
     /// A let's released, pure value is no longer evaluated.
@@ -26,6 +24,12 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
+    /// J-only: strict purity.
+    pub const STRICT: u8 = 8;
+    /// J-only: removable by E:146 is_pure_subexpression (not general purity).
+    pub const J_SUBEXPR: u8 = Self::DEAD;
+    /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
+    pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -344,6 +348,12 @@ impl Node {
     pub fn aux(self) -> u16 {
         self.aux
     }
+    /// O(1): retain the existing primitive operand-list handle without copying
+    /// its elements into a traversal resume record.
+    pub(crate) fn primitive_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Prim);
+        ListId(self.words[0])
+    }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
         (self.op == Op::JNumber && self.flags.contains(NodeFlags::JS_CHAR_PRESENT))
@@ -353,6 +363,12 @@ impl Node {
         assert_eq!(self.op, Op::JNumber);
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
+    }
+    pub(super) fn block_list(list: ListId) -> Self {
+        Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
+    }
+    pub(super) fn explicit_block_list(list: ListId) -> Self {
+        Self { aux: 1, ..Self::block_list(list) }
     }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;

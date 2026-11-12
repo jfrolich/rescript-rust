@@ -5,9 +5,8 @@ impl Bir {
     /// Recount live uses and exits, rebuild parent/binder information and effects,
     /// and check the tree, cached facts, conservative captures and dead bindings.
     /// `None` validates a completely released arena. Detached temporary roots are
-    /// rejected: finish constructing/replacing before invoking this gate. Set
-    /// `check_tails` only after `mark_tail_positions`; edits invalidate that pass.
-    pub fn validate(&self, root: Option<NodeId>, check_tails: bool) -> Result<(), String> {
+    /// rejected: finish constructing/replacing before invoking this gate.
+    pub fn validate(&self, root: Option<NodeId>) -> Result<(), String> {
         let fail = |message: &str| Err(message.to_owned());
         if self.nodes.len() != self.parents.len()
             || (!self.cold.is_empty() && self.cold.len() != self.nodes.len())
@@ -27,9 +26,6 @@ impl Bir {
         .any(|n| n != nvars)
         {
             return fail("parallel variable arrays differ in length");
-        }
-        if check_tails && root.is_some() && !self.tails_valid {
-            return fail("tail positions need marking after edits");
         }
         let mut weighted_switches = 0;
         let mut boundaries = 0;
@@ -177,9 +173,24 @@ impl Bir {
             }
         }
         let mut effects = vec![(false, false); self.nodes.len()];
+        let mut strict = vec![false; self.nodes.len()];
+        let mut subexpression = vec![false; self.nodes.len()];
         for &id in order.iter().rev() {
             let actual = self.effects(id, |c| effects[c.index()]);
             effects[id.index()] = actual;
+            if let Some(actual) = j::facts::purity(self, id, true, |c| strict[c.index()]) {
+                strict[id.index()] = actual;
+                let sub = j::facts::subexpression(self, id, |c| subexpression[c.index()]);
+                subexpression[id.index()] = sub;
+                if !matches!(self.view(id), View::Var { .. }) && self.node(id).flags().contains(NodeFlags::J_SUBEXPR) != sub {
+                    return fail("stale J subexpression fact");
+                }
+                if !matches!(self.view(id), View::Var { .. })
+                    && self.node(id).flags().contains(NodeFlags::STRICT) != actual
+                {
+                    return fail("stale strict purity flag");
+                }
+            }
             let flags = self.node(id).flags();
             if flags.contains(NodeFlags::PURE) != actual.0
                 || flags.contains(NodeFlags::NO_ALLOC) != actual.1
@@ -213,7 +224,7 @@ impl Bir {
                         return fail("live let has no value");
                     }
                 }
-                _ if flags.contains(NodeFlags::DEAD) => return fail("DEAD flag on non-let"),
+                _ if flags.contains(NodeFlags::DEAD) && j::facts::purity(self, id, false, |_| false).is_none() => return fail("DEAD flag on non-let"),
                 _ => {}
             }
         }
@@ -225,64 +236,6 @@ impl Bir {
         for &(var, _) in &self.exports {
             if var.index() >= nvars || !self.vars.flags(var).contains(VarFlags::EXPORTED) {
                 return fail("missing export flag");
-            }
-        }
-        if check_tails {
-            if let Some(root) = root {
-                self.validate_tails(root)?;
-            }
-        }
-        Ok(())
-    }
-
-    fn validate_tails(&self, root: NodeId) -> Result<(), String> {
-        let mut self_calls = vec![false; self.pools.funcs.len()];
-        let mut functions = Vec::new();
-        let mut stack = vec![(root, false, None::<(FuncId, Option<VarId>)>)];
-        while let Some((id, expected, context)) = stack.pop() {
-            if self.node(id).flags().contains(NodeFlags::TAIL) != expected {
-                return Err("incorrect tail position".into());
-            }
-            match self.view(id) {
-                View::Fun { body, header } | View::JFun { body, header } => {
-                    functions.push(header);
-                    let own = self.parents[id.index()].and_then(|parent| match self.view(parent) {
-                        View::Let {
-                            var,
-                            value: Some(value),
-                            ..
-                        } if value == id => Some(var),
-                        View::LetRec { first, values, .. } => values
-                            .iter()
-                            .position(|&v| v == id)
-                            .map(|i| VarId(first.0 + index(i))),
-                        _ => None,
-                    });
-                    stack.push((body, true, Some((header, own))));
-                }
-                _ => {
-                    if expected {
-                        if let (View::Apply { callee, .. }, Some((function, own))) =
-                            (self.view(id), context)
-                        {
-                            if let View::Var { var } = self.view(callee) {
-                                if Some(var) == own {
-                                    self_calls[function.index()] = true;
-                                }
-                            }
-                        }
-                    }
-                    for child in self.view(id).children() {
-                        stack.push((child, expected && self.tail_child(id, child), context));
-                    }
-                }
-            }
-        }
-        for header in functions {
-            if (self.function(header).flags & FuncHeader::SELF_TAILCALL != 0)
-                != self_calls[header.index()]
-            {
-                return Err("incorrect self-tail-call flag".into());
             }
         }
         Ok(())

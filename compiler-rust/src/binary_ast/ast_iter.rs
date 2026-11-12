@@ -35,7 +35,7 @@ pub trait AstIter {
     }
     /// Visit an expression; the default calls [`walk_expr`].
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
-        walk_expr(self, arena, idx);
+        walk_expr(self, arena, arena.expanded(idx));
     }
     /// Visit an extension node (`%name`); the default calls [`walk_extension`].
     fn extension(&mut self, arena: &ParseArena, ext: &Extension) {

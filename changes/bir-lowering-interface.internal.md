@@ -1,0 +1,1 @@
+- Add opt-in, stack-safe Bir-to-J lowering for variables, modules, constants, functions, nonrecursive bindings and sequences, checked against legacy output before and after JS passes (including source maps). The default backend is unchanged.

@@ -3,9 +3,9 @@
 //! Every worker of an in-process build loads the same `.cmi`-equivalent
 //! signatures (OCaml: one `persistent_structures` entry per process,
 //! `compiler/ml/env.ml:669-678`). The per-worker `ThreadTypeStore` already
-//! avoids re-internalizing a signature for every unit on one worker; this pool
-//! goes one step further and internalizes each dependency graph once per
-//! build, for all workers.
+//! keeps what one worker builds; this pool holds each dependency graph once
+//! per build, for all workers. It belongs to the build's `World`
+//! (`types/world.rs`), whose unit table says which graph is which unit's.
 //!
 //! Layout follows Zig's `InternPool`: a node index is a position in one
 //! global index space, split into fixed-size pages. Each published graph owns
@@ -25,22 +25,16 @@ use super::type_expr::{
 };
 use crate::parser::longident::Longident;
 use super::variant_runtime::{Layout, LayoutRef};
-use crate::cmi::persistent_env::PersStruct;
-use crate::cmi::portable_types::PortablePersStruct;
 use crate::fast_hash::AHashMap as HashMap;
 use crate::intern::StrIdx;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 const PAGE_BITS: u32 = 10;
 const PAGE_SIZE: u32 = 1 << PAGE_BITS;
 /// Index space of one pool (64M nodes, a 64K-entry page table); a graph
 /// that does not fit falls back to worker-local internalization.
 const MAX_SHARED_INDEX: u32 = 1 << 26;
-
-/// Node ids of shared nodes: disjoint from compilation-local ids and from
-/// worker-store ids (`thread_store::STORE_TYPE_ID_BASE = 1 << 30`).
-const SHARED_TYPE_ID_BASE: i32 = 0x6000_0000;
 
 /// First synthetic longident component index owned by the pool. Worker
 /// stores use `0xE000_0000..`, compilation contexts `0xF000_0000..`.
@@ -51,7 +45,6 @@ const SHARED_LONGIDENT_IDX_BASE: u32 = 0xD000_0000;
 pub(crate) struct SharedTypeNode {
     pub(crate) desc: TypeDesc,
     pub(crate) level: i32,
-    pub(crate) id: i32,
 }
 
 /// One published dependency graph: nodes and variant layouts at
@@ -70,9 +63,89 @@ pub(crate) struct SharedGraph {
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
     locations: super::decl_loc::DeclLocTable,
+    /// Cold serialization metadata; never consulted by type-node readers.
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 impl SharedGraph {
+    /// A graph retained for hashing/storage, before any importer needs pool addresses.
+    pub(crate) fn detached(parts: SharedGraphParts) -> Self {
+        let mut graph = Self::from_parts(0, parts);
+        graph.base = u32::MAX;
+        graph
+    }
+
+    pub(crate) fn is_detached(&self) -> bool {
+        self.base == u32::MAX
+    }
+
+    /// The first importer gives an immutable detached graph pool addresses.
+    /// Storage may still be reading the original arrays concurrently.
+    pub(crate) fn copy_parts(&self) -> SharedGraphParts {
+        SharedGraphParts {
+            nodes: self.nodes.iter().map(|n| (n.desc, n.level)).collect(),
+            payloads: SharedGraphPayloads {
+                lists: self.lists.to_vec(),
+                args: self.args.to_vec(),
+                rows: self.rows.to_vec(),
+                lids: self.lids.to_vec(),
+            },
+            layouts: self.layouts.to_vec(),
+            locations: self.locations.clone(),
+            carried: self.carried.clone(),
+        }
+    }
+
+    pub(crate) fn sizes(&self) -> SharedGraphSizes {
+        SharedGraphSizes {
+            nodes: self.nodes.len(),
+            layouts: self.layouts.len(),
+            list_items: self.lists.len(),
+            arg_items: self.args.len(),
+            rows: self.rows.len(),
+            lids: self.lids.len(),
+        }
+    }
+
+    /// Move an exclusively owned detached graph into its reserved pool slot.
+    pub(crate) fn take_parts(&mut self) -> SharedGraphParts {
+        assert!(self.is_detached());
+        SharedGraphParts {
+            nodes: std::mem::take(&mut self.nodes)
+                .into_vec()
+                .into_iter()
+                .map(|n| (n.desc, n.level))
+                .collect(),
+            payloads: SharedGraphPayloads {
+                lists: std::mem::take(&mut self.lists).into_vec(),
+                args: std::mem::take(&mut self.args).into_vec(),
+                rows: std::mem::take(&mut self.rows).into_vec(),
+                lids: std::mem::take(&mut self.lids).into_vec(),
+            },
+            layouts: std::mem::take(&mut self.layouts).into_vec(),
+            locations: std::mem::take(&mut self.locations),
+            carried: std::mem::take(&mut self.carried),
+        }
+    }
+
+    fn from_parts(base: u32, parts: SharedGraphParts) -> Self {
+        Self {
+            base,
+            nodes: parts
+                .nodes
+                .into_iter()
+                .map(|(desc, level)| SharedTypeNode { desc, level })
+                .collect(),
+            lists: parts.payloads.lists.into_boxed_slice(),
+            args: parts.payloads.args.into_boxed_slice(),
+            rows: parts.payloads.rows.into_boxed_slice(),
+            lids: parts.payloads.lids.into_boxed_slice(),
+            layouts: parts.layouts.into_boxed_slice(),
+            locations: parts.locations.without_interning_indexes(),
+            carried: parts.carried,
+        }
+    }
+
     /// The graph's first shared index.
     pub(crate) fn base(&self) -> u32 {
         self.base
@@ -96,6 +169,9 @@ impl SharedGraph {
     /// The offset of the node `r` names, `None` when it is no node of this
     /// graph.
     pub(crate) fn node_offset(&self, r: TypeExprRef) -> Option<usize> {
+        if self.is_detached() {
+            return (!r.is_store() && r.index() < self.nodes.len()).then_some(r.index());
+        }
         if !r.is_shared() {
             return None;
         }
@@ -113,7 +189,11 @@ impl SharedGraph {
         if list.is_empty() {
             return &[];
         }
-        let start = self.payload_offset(list.raw_start()) - self.nodes.len();
+        let start = if self.is_detached() {
+            list.raw_start() as usize
+        } else {
+            self.payload_offset(list.raw_start()) - self.nodes.len()
+        };
         &self.lists[start..start + list.len()]
     }
 
@@ -122,23 +202,36 @@ impl SharedGraph {
         if list.is_empty() {
             return &[];
         }
-        let start = self.payload_offset(list.raw_start()) - self.nodes.len() - self.lists.len();
+        let start = if self.is_detached() {
+            list.raw_start() as usize
+        } else {
+            self.payload_offset(list.raw_start()) - self.nodes.len() - self.lists.len()
+        };
         &self.args[start..start + list.len()]
     }
 
     /// The row of a variant node of this graph.
     pub(crate) fn row(&self, row: RowDescRef) -> &RowDesc {
-        &self.rows
-            [self.payload_offset(row.raw()) - self.nodes.len() - self.lists.len() - self.args.len()]
+        let index = if self.is_detached() {
+            row.raw() as usize
+        } else {
+            self.payload_offset(row.raw()) - self.nodes.len() - self.lists.len() - self.args.len()
+        };
+        &self.rows[index]
     }
 
     /// The constraint names of a package node of this graph.
     pub(crate) fn lids(&self, lids: PackageLidsRef) -> &[Longident] {
-        &self.lids[self.payload_offset(lids.raw())
-            - self.nodes.len()
-            - self.lists.len()
-            - self.args.len()
-            - self.rows.len()]
+        let index = if self.is_detached() {
+            lids.raw() as usize
+        } else {
+            self.payload_offset(lids.raw())
+                - self.nodes.len()
+                - self.lists.len()
+                - self.args.len()
+                - self.rows.len()
+        };
+        &self.lids[index]
     }
 }
 
@@ -149,14 +242,6 @@ pub(crate) fn graph_at(pages: &[OnceLock<Arc<SharedGraph>>], base: u32) -> &Arc<
         .expect("no shared graph is published at this index");
     assert_eq!(graph.base, base, "shared index is not the base of a graph");
     graph
-}
-
-/// Internalization slot of one portable dependency signature.
-struct PersSlot {
-    /// Keeps the portable struct alive so its address cannot be reused as a
-    /// key for another graph.
-    _owner: Arc<PortablePersStruct>,
-    ps: OnceLock<Option<Arc<PersStruct>>>,
 }
 
 /// Page table: page number -> the graph published on that page. Readers keep
@@ -297,14 +382,15 @@ pub(crate) struct SharedGraphParts {
     pub(crate) payloads: SharedGraphPayloads,
     pub(crate) layouts: Vec<Layout>,
     pub(crate) locations: super::decl_loc::DeclLocTable,
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 pub(crate) struct SharedTypePool {
-    generation: u64,
     pages: SharedPages,
     next_index: AtomicU32,
-    pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
-    longident_names: RwLock<HashMap<u32, String>>,
+    shuffle: Option<u64>,
+    reservations: AtomicU32,
+    longident_names: Arc<RwLock<HashMap<u32, String>>>,
     next_longident_idx: AtomicU32,
 }
 
@@ -321,16 +407,23 @@ impl SharedTypePool {
 
 
 
-    fn new(generation: u64) -> Self {
+    pub(crate) fn new() -> Self {
+        static SEED: OnceLock<Option<u64>> = OnceLock::new();
+        Self::with_seed(*SEED.get_or_init(|| {
+            std::env::var("RESCRIPT_WORLD_SHUFFLE").ok()?.parse().ok()
+        }))
+    }
+
+    fn with_seed(shuffle: Option<u64>) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
             .map(|_| OnceLock::new())
             .collect();
         SharedTypePool {
-            generation,
             pages,
             next_index: AtomicU32::new(0),
-            pers: Mutex::new(HashMap::new()),
-            longident_names: RwLock::new(HashMap::new()),
+            shuffle,
+            reservations: AtomicU32::new(0),
+            longident_names: Arc::new(RwLock::new(HashMap::new())),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
         }
     }
@@ -364,7 +457,18 @@ impl SharedTypePool {
     fn reserve(&self, nodes: usize, layouts: usize) -> Option<(u32, u32)> {
         let len = u32::try_from(nodes.max(layouts).max(1)).ok()?;
         let reserved = len.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
-        let base = self.next_index.fetch_add(reserved, Ordering::Relaxed);
+        let base = if let Some(seed) = self.shuffle {
+            let n = self.reservations.fetch_add(1, Ordering::Relaxed);
+            // SplitMix64: a fixed mixer, independent of process hash seeds.
+            let mut hash = seed.wrapping_add(u64::from(n).wrapping_mul(0x9e3779b97f4a7c15));
+            hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d049bb133111eb);
+            hash ^= hash >> 31;
+            let skip = (hash % 4) as u32 * PAGE_SIZE;
+            self.next_index.fetch_add(reserved + skip, Ordering::Relaxed) + skip
+        } else {
+            self.next_index.fetch_add(reserved, Ordering::Relaxed)
+        };
         let end = base.checked_add(reserved)?;
         (end <= MAX_SHARED_INDEX).then_some((base, end))
     }
@@ -382,6 +486,7 @@ impl SharedTypePool {
             payloads,
             layouts: built_layouts,
             locations,
+            carried,
         } = build(base);
         assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
         assert_eq!(
@@ -409,54 +514,15 @@ impl SharedTypePool {
             sizes.layouts,
             "shared graph layout count changed"
         );
-        let graph = Arc::new(SharedGraph {
-            base,
-            nodes: descs
-                .into_iter()
-                .enumerate()
-                .map(|(offset, (desc, level))| SharedTypeNode {
-                    desc,
-                    level,
-                    id: SHARED_TYPE_ID_BASE + (base as i32) + offset as i32,
-                })
-                .collect(),
-            lists: payloads.lists.into_boxed_slice(),
-            args: payloads.args.into_boxed_slice(),
-            rows: payloads.rows.into_boxed_slice(),
-            lids: payloads.lids.into_boxed_slice(),
-            layouts: built_layouts.into_boxed_slice(),
-            locations,
-        });
+        crate::perf_counters::record_signature_nodes_frozen(sizes.nodes);
+        let graph = Arc::new(SharedGraph::from_parts(base, SharedGraphParts {
+            nodes: descs, payloads, layouts: built_layouts, locations, carried,
+        }));
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
             assert!(published.is_ok(), "shared type page published twice");
         }
         Some(base)
-    }
-
-    /// The shared internalization of `pps`, building it with `build` the
-    /// first time any worker asks. Concurrent requests for the same struct
-    /// wait for the first builder. `None` when `build` could not place the
-    /// graph in the pool.
-    pub(crate) fn pers_struct(
-        &self,
-        pps: &Arc<PortablePersStruct>,
-        build: impl FnOnce() -> Option<Arc<PersStruct>>,
-    ) -> Option<Arc<PersStruct>> {
-        let key = Arc::as_ptr(pps) as usize;
-        let slot = self
-            .pers
-            .lock()
-            .unwrap()
-            .entry(key)
-            .or_insert_with(|| {
-                Arc::new(PersSlot {
-                    _owner: pps.clone(),
-                    ps: OnceLock::new(),
-                })
-            })
-            .clone();
-        slot.ps.get_or_init(build).clone()
     }
 
     pub(crate) fn intern_longident_name(&self, name: &str) -> StrIdx {
@@ -467,6 +533,14 @@ impl SharedTypePool {
             .unwrap()
             .insert(raw, name.to_string());
         StrIdx::from_raw(raw)
+    }
+
+    pub(crate) fn names(&self) -> Arc<RwLock<HashMap<u32, String>>> {
+        self.longident_names.clone()
+    }
+
+    pub(crate) fn names_ref(&self) -> &RwLock<HashMap<u32, String>> {
+        &self.longident_names
     }
 
     pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {
@@ -484,22 +558,6 @@ pub(crate) fn shared_ref(base: u32, offset: usize) -> TypeExprRef {
     TypeExprRef::from_shared_index(base + offset as u32)
 }
 
-static POOL: Mutex<Option<Arc<SharedTypePool>>> = Mutex::new(None);
-
-/// The pool of build `generation`; a pool from an earlier build is replaced
-/// (and freed once the last worker store holding it is dropped).
-pub(crate) fn pool_for(generation: u64) -> Arc<SharedTypePool> {
-    let mut slot = POOL.lock().unwrap();
-    match &*slot {
-        Some(pool) if pool.generation == generation => pool.clone(),
-        _ => {
-            let pool = Arc::new(SharedTypePool::new(generation));
-            *slot = Some(pool.clone());
-            pool
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -507,8 +565,50 @@ mod tests {
 
 
     #[test]
+    fn shuffled_graphs_keep_descriptors_and_levels() {
+        let pools = [
+            SharedTypePool::with_seed(Some(1)),
+            SharedTypePool::with_seed(Some(2)),
+        ];
+        let mut bases = [Vec::new(), Vec::new()];
+        for (index, pool) in pools.iter().enumerate() {
+            for graph in 0..3 {
+                let base = pool
+                    .publish(
+                        SharedGraphSizes {
+                            nodes: 2,
+                            ..Default::default()
+                        },
+                        |_| SharedGraphParts {
+                            nodes: vec![(TypeDesc::Tnil, graph), (TypeDesc::Tvar(None), graph + 1)],
+                            payloads: Default::default(),
+                            layouts: Vec::new(),
+                            locations: Default::default(),
+                            carried: Default::default(),
+                        },
+                    )
+                    .unwrap();
+                bases[index].push(base);
+                assert!(matches!(page_node(&pool.pages, base).desc, TypeDesc::Tnil));
+                assert!(matches!(
+                    page_node(&pool.pages, base + 1).desc,
+                    TypeDesc::Tvar(None)
+                ));
+                assert_eq!(page_node(&pool.pages, base).level, graph);
+                assert_eq!(page_node(&pool.pages, base + 1).level, graph + 1);
+            }
+        }
+        assert_ne!(bases[0], bases[1]);
+        assert!(
+            bases
+                .iter()
+                .any(|bases| bases.windows(2).any(|pair| pair[1] - pair[0] > PAGE_SIZE))
+        );
+    }
+
+    #[test]
     fn published_graphs_are_readable_from_other_threads() {
-        let pool = Arc::new(SharedTypePool::new(u64::MAX));
+        let pool = Arc::new(SharedTypePool::new());
         let base = pool
             .publish(
                 SharedGraphSizes {
@@ -528,6 +628,7 @@ mod tests {
                     ],
                     payloads: Default::default(),
                     layouts: Vec::new(),
+                    carried: Default::default(),
                     locations: [crate::location::Location::in_file(StrIdx::from_raw(4))]
                         .into_iter()
                         .collect(),
@@ -545,6 +646,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .unwrap();

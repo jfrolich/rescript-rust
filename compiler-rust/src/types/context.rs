@@ -43,6 +43,11 @@ use std::sync::Arc;
 /// allocation does not copy earlier nodes and reads take no borrow flag; a
 /// node's position is its `TypeExprRef` index.
 pub(crate) struct TypeNodes {
+    /// Leased for this store's lifetime; only initialized slots below `len`
+    /// may be read. Reusing an array does not clear its previous contents.
+    first: Rc<[TypeNode; Self::FIRST_LEN]>,
+    /// FIRST_LEN normally, zero while a store build must observe local reads.
+    fast_limit: Cell<u32>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
     len: Cell<usize>,
 }
@@ -55,14 +60,84 @@ struct TypeNode {
     id: Cell<i32>,
 }
 
+thread_local! {
+    // The list retains one owner. A second owner leases the array exclusively.
+    static FIRST_NODE_ARRAYS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+    #[cfg(test)]
+    static FIRST_ARRAY_LEASE_PROBES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static FIRST_ARRAY_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
+/// Lease one array: at most one reference-count probe per retained array,
+/// no initialization on reuse, or exactly N initializations and one amortized
+/// O(1) list append on a new allocation. Called once per pool, not per lookup.
+pub(crate) fn lease_first_array<T, const N: usize>(
+    arrays: &RefCell<Vec<Rc<[T; N]>>>,
+    mut init: impl FnMut() -> T,
+) -> Rc<[T; N]> {
+    let mut arrays = arrays.borrow_mut();
+    #[cfg(test)]
+    let mut probes = 0;
+    let free = arrays.iter().find(|array| {
+        #[cfg(test)]
+        {
+            probes += 1;
+        }
+        Rc::strong_count(array) == 1
+    });
+    #[cfg(test)]
+    {
+        FIRST_ARRAY_LEASE_PROBES.with(|count| count.set(probes));
+        FIRST_ARRAY_INITIALIZATIONS.with(|count| count.set(0));
+    }
+    if let Some(free) = free {
+        return Rc::clone(free);
+    }
+    // Collect on the heap rather than constructing a large stack array.
+    #[cfg(test)]
+    let mut initialized = 0;
+    let array: Rc<[T]> = (0..N)
+        .map(|_| {
+            #[cfg(test)]
+            {
+                initialized += 1;
+            }
+            init()
+        })
+        .collect();
+    #[cfg(test)]
+    FIRST_ARRAY_INITIALIZATIONS.with(|count| count.set(initialized));
+    let array: Rc<[T; N]> = match array.try_into() {
+        Ok(array) => array,
+        Err(_) => unreachable!("first array has N elements"),
+    };
+    arrays.push(Rc::clone(&array));
+    array
+}
+
 impl TypeNodes {
+    // Smaller measured arrays exceed the 0.2% instruction budget versus 65536.
+    const FIRST_LEN: usize = 1 << 16;
     const FIRST_CHUNK_BITS: u32 = 8;
     /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
     /// chunks cover every index a `TypeExprRef` can hold.
     const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
 
+    /// One thread-local acquisition and at most one reference-count probe per
+    /// retained array. Reuse initializes no nodes; a fresh lease initializes
+    /// FIRST_LEN nodes and appends one Rc to the list (amortized O(1)).
     pub(crate) fn new() -> Self {
+        let first = FIRST_NODE_ARRAYS.with(|arrays| {
+            lease_first_array(arrays, || TypeNode {
+                desc: Cell::new(TypeDesc::Tnil),
+                level: Cell::new(0),
+                id: Cell::new(0),
+            })
+        });
         TypeNodes {
+            first,
+            fast_limit: Cell::new(Self::FIRST_LEN as u32),
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
         }
@@ -76,10 +151,39 @@ impl TypeNodes {
         (bit - Self::FIRST_CHUNK_BITS as usize, biased - (1 << bit))
     }
 
+    /// One comparison excludes tagged handles, far nodes and active store builds.
+    /// The mask makes the array bound explicit without a second runtime check.
+    /// Cost: O(1), one limit comparison and, on success, one indexed address;
+    /// no allocation, reference-count update or thread-local access.
+    #[inline(always)]
+    fn direct(&self, raw: u32) -> Option<&TypeNode> {
+        if raw < self.fast_limit.get() {
+            Some(&self.first[raw as usize & (Self::FIRST_LEN - 1)])
+        } else {
+            None
+        }
+    }
+
+    /// Cost: O(1), select the limit and write one Cell; no node traversal.
+    fn set_direct(&self, on: bool) {
+        self.fast_limit.set(if on { Self::FIRST_LEN as u32 } else { 0 });
+    }
+
     /// Node `idx` (a local index or a store index with the tag stripped).
     #[inline(always)]
     fn node(&self, idx: usize) -> &TypeNode {
-        let (chunk, offset) = Self::locate(idx);
+        if idx < Self::FIRST_LEN {
+            return &self.first[idx];
+        }
+        self.node_far(idx)
+    }
+
+    /// Cost: O(1), one chunk calculation and two indexed loads, no traversal
+    /// or allocation. Kept out of line because first-array reads dominate.
+    #[cold]
+    #[inline(never)]
+    fn node_far(&self, idx: usize) -> &TypeNode {
+        let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
         &self.chunks[chunk]
             .get()
             .expect("type node index refers to an unallocated chunk")[offset]
@@ -105,24 +209,28 @@ impl TypeNodes {
         self.node(idx).level.set(level);
     }
 
-    #[inline]
-    pub(crate) fn id(&self, idx: usize) -> i32 {
+    #[cfg(test)]
+    fn id(&self, idx: usize) -> i32 {
         self.node(idx).id.get()
     }
 
     /// Append a node and return its index.
     pub(crate) fn push(&self, desc: TypeDesc, level: i32, id: i32) -> usize {
         let idx = self.len.get();
-        let (chunk, offset) = Self::locate(idx);
-        let node = &self.chunks[chunk].get_or_init(|| {
-            (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
-                .map(|_| TypeNode {
-                    desc: Cell::new(TypeDesc::Tnil),
-                    level: Cell::new(0),
-                    id: Cell::new(0),
-                })
-                .collect()
-        })[offset];
+        let node = if idx < Self::FIRST_LEN {
+            &self.first[idx]
+        } else {
+            let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
+            &self.chunks[chunk].get_or_init(|| {
+                (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
+                    .map(|_| TypeNode {
+                        desc: Cell::new(TypeDesc::Tnil),
+                        level: Cell::new(0),
+                        id: Cell::new(0),
+                    })
+                    .collect()
+            })[offset]
+        };
         node.desc.set(desc);
         node.level.set(level);
         node.id.set(id);
@@ -297,12 +405,73 @@ impl ActiveTypeSnapshot {
 /// are kept in the Rust copiers' caches instead of on the source nodes.)
 #[derive(Default)]
 struct CopySession {
-    saved_mutabilities: Vec<(MutabilityRef, FieldMutability)>,
+    saved_mutabilities: Vec<(MutabilityRef, Option<FieldMutability>)>,
     new_mutabilities: Vec<MutabilityRef>,
     copy_policy_memo: crate::fast_hash::AHashMap<TypeExprRef, bool>,
 }
 
+/// A cell in the immutable graph whose value this compilation replaced.
+#[derive(Clone, Copy)]
+enum FrozenCell {
+    Desc(TypeExprRef),
+    Level(TypeExprRef),
+    Memo(AbbrevMemoRef),
+    RowField(RowFieldRef),
+    Mutability(MutabilityRef),
+}
+
+#[derive(Default)]
+struct FrozenWrites {
+    any: Cell<bool>,
+    descs: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeDesc>>,
+    levels: RefCell<crate::fast_hash::AHashMap<TypeExprRef, i32>>,
+    memos: RefCell<crate::fast_hash::AHashMap<AbbrevMemoRef, AbbrevMemo>>,
+    row_fields: RefCell<crate::fast_hash::AHashMap<RowFieldRef, Option<RowField>>>,
+    mutabilities: RefCell<crate::fast_hash::AHashMap<MutabilityRef, FieldMutability>>,
+    #[cfg(test)]
+    probes: Cell<usize>,
+}
+
+impl FrozenWrites {
+    #[inline]
+    fn probe(&self) {
+        #[cfg(test)]
+        self.probes.set(self.probes.get() + 1);
+    }
+
+    fn contains(&self, cell: FrozenCell) -> bool {
+        if !self.any.get() {
+            return false;
+        }
+        match cell {
+            FrozenCell::Desc(r) => self.descs.borrow().contains_key(&r),
+            FrozenCell::Level(r) => self.levels.borrow().contains_key(&r),
+            FrozenCell::Memo(r) => self.memos.borrow().contains_key(&r),
+            FrozenCell::RowField(r) => self.row_fields.borrow().contains_key(&r),
+            FrozenCell::Mutability(r) => self.mutabilities.borrow().contains_key(&r),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.descs.borrow().is_empty() && self.levels.borrow().is_empty()
+            && self.memos.borrow().is_empty() && self.row_fields.borrow().is_empty()
+            && self.mutabilities.borrow().is_empty()
+    }
+
+    fn remove(&self, cell: FrozenCell) {
+        match cell {
+            FrozenCell::Desc(r) => { self.descs.borrow_mut().remove(&r); }
+            FrozenCell::Level(r) => { self.levels.borrow_mut().remove(&r); }
+            FrozenCell::Memo(r) => { self.memos.borrow_mut().remove(&r); }
+            FrozenCell::RowField(r) => { self.row_fields.borrow_mut().remove(&r); }
+            FrozenCell::Mutability(r) => { self.mutabilities.borrow_mut().remove(&r); }
+        }
+        self.any.set(!self.is_empty());
+    }
+}
+
 enum TypeMutation {
+    FrozenAbsent(FrozenCell),
     TypeDesc(TypeExprRef, TypeDesc),
     /// btype.ml `Ccompress (ty, old_desc, Tlink target)`: path compression by
     /// `repr`, logged whatever the node's age.
@@ -589,27 +758,9 @@ pub struct TypeContext {
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
     store: super::thread_store::StoreLease,
-    /// Descriptor writes preserve the stored handle's physical identity, but
-    /// live only for this compilation. The append-only arena keeps descriptor
-    /// borrows valid while another stored node is written.
-    store_descs: TypeNodes,
     /// Type lists (`TypeRefList`) allocated by this compilation.
     type_lists: super::type_expr::TypePayloadPool,
-    store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
-    /// Level marking and lowering are also compilation-local, including on
-    /// diagnostic exits that do not finish a mark/unmark traversal.
-    store_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
-    /// This compilation's writes to abbreviation memo cells of store nodes;
-    /// unset cells read the store's initial `Mnil`, matching a fresh process
-    /// (`compiler/ml/subst.ml:173-177`).
-    store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
-    /// This compilation's writes to row field cells of store rows.
-    store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
-    /// The same overlays for nodes of the process-wide shared pool, keyed by
-    /// shared index (descriptor overlays point into `store_descs`).
-    shared_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
-    shared_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
-    shared_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    frozen_writes: FrozenWrites,
     /// Direct handle to the shared pool's page table for node reads. Never
     /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
     /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
@@ -623,6 +774,8 @@ pub struct TypeContext {
     /// place.
     store_build_type_start: Cell<usize>,
     store_build_row_start: Cell<usize>,
+    /// Memo ownership boundary used only by the frozen-write counters.
+    store_build_abbrev_start: Cell<usize>,
     /// The current store build read compilation-local state, so its result
     /// must stay private to this compilation.
     store_build_poisoned: Cell<bool>,
@@ -696,8 +849,6 @@ pub struct TypeContext {
 
     /// Object-field mutability cells of this compilation's graph.
     mutabilities: RefCell<Vec<Cell<FieldMutability>>>,
-    /// This compilation's writes to persistent (dependency) mutability cells.
-    mutability_overlay: RefCell<crate::fast_hash::AHashMap<MutabilityRef, FieldMutability>>,
     /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
@@ -732,8 +883,9 @@ pub struct TypeContext {
     /// cached component view without `PersistentEnv`; it must not be inferred
     /// from flattened module-name spelling.
     component_alias_sources: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
-    /// Component-table name indexes of compilation-local signatures, keyed by
-    /// address; the entry keeps the signature alive so the key stays unique.
+    /// Component-table name indexes of the signatures this compilation has
+    /// indexed (a unit's comes from the world), keyed by address; the entry
+    /// keeps the signature alive so the key stays unique.
     signature_indexes: RefCell<crate::fast_hash::AHashMap<usize, IndexedSignature>>,
     component_paths_by_alias_source: RefCell<crate::fast_hash::AHashMap<SamePathKey, AliasPaths>>,
 
@@ -1112,20 +1264,14 @@ impl TypeContext {
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: OwnTypeNodes(TypeNodes::new()),
+            frozen_writes: FrozenWrites::default(),
             store,
-            store_descs: TypeNodes::new(),
             type_lists: Default::default(),
-            store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             shared_pages,
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
             store_build_row_start: Cell::new(0),
+            store_build_abbrev_start: Cell::new(0),
             store_build_poisoned: Cell::new(false),
             store_build_effects: RefCell::new(Vec::new()),
             store_build_guards: RefCell::new(Vec::new()),
@@ -1154,7 +1300,6 @@ impl TypeContext {
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             mutabilities: RefCell::new(Vec::new()),
-            mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
             counted_copy_nodes: Cell::new(0),
             counted_call_reentered: Cell::new(false),
@@ -1342,6 +1487,12 @@ impl TypeContext {
             .get(&idx.raw())
             .cloned()
             .or_else(|| self.store.shared_pool().longident_name(idx))
+    }
+
+    /// The world of the build this compilation belongs to.
+    #[inline]
+    pub(crate) fn world(&self) -> &Arc<super::world::World> {
+        self.store.world()
     }
 
     /// The worker's persistent store leased by this compilation.
@@ -1554,14 +1705,16 @@ impl TypeContext {
         &self,
         sig: &Arc<super::decl::Signature>,
     ) -> Arc<super::env_lazy::SignatureIndex> {
-        if self.store.owns_signature(sig) {
-            return self.store.signature_index(sig);
-        }
         let key = Arc::as_ptr(sig) as usize;
         if let Some((_, found)) = self.signature_indexes.borrow().get(&key) {
             return found.clone();
         }
-        let built = Arc::new(super::env_lazy::SignatureIndex::build(sig));
+        // A unit's index is built once per build and read from the world once
+        // per compilation; any other signature is indexed here.
+        let built = self
+            .world()
+            .unit_signature_index(sig)
+            .unwrap_or_else(|| Arc::new(super::env_lazy::SignatureIndex::build(sig)));
         self.signature_indexes
             .borrow_mut()
             .insert(key, (sig.clone(), built.clone()));
@@ -2539,19 +2692,25 @@ impl TypeContext {
     // ========================================================================
 
     /// The descriptor of a stored (worker-store or shared) node: this
-    /// compilation's overlay copy if it wrote one, else the immutable
+    /// compilation's exception table copy if it wrote one, else the immutable
     /// published descriptor.
     #[inline(never)]
     fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
-        if r.is_shared() {
-            let idx = r.shared_index();
-            if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
-                return self.store_descs.desc(*index);
-            }
-            return super::shared_store::page_node(&self.shared_pages, idx).desc;
+        if self.compiler_counters_enabled && !self.store_build_owns(r) {
+            crate::perf_counters::frozen::record(if r.is_shared() {
+                crate::perf_counters::frozen::Kind::DescReadShared
+            } else {
+                crate::perf_counters::frozen::Kind::DescReadWorker
+            });
         }
-        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-            return self.store_descs.desc(*index);
+        if self.frozen_writes.any.get() {
+            self.frozen_writes.probe();
+            if let Some(desc) = self.frozen_writes.descs.borrow().get(&r) {
+                return *desc;
+            }
+        }
+        if r.is_shared() {
+            return super::shared_store::page_node(&self.shared_pages, r.shared_index()).desc;
         }
         self.store.desc(r)
     }
@@ -2561,6 +2720,17 @@ impl TypeContext {
     /// into callers.
     #[inline(always)]
     fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.desc.get();
+        }
+        self.desc_indirect(r)
+    }
+
+    /// Cost: O(1) local addressing or the existing stored-node lookup (expected
+    /// O(1) exception-table probe when writes exist). Active builds also mark
+    /// local reads as poisoned; optional debug tracing is outside this bound.
+    #[inline(never)]
+    fn desc_indirect(&self, r: TypeExprRef) -> TypeDesc {
         if r.is_store() {
             return self.store_desc(r);
         }
@@ -2591,6 +2761,17 @@ impl TypeContext {
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.level.get();
+        }
+        self.level_indirect(r)
+    }
+
+    /// Cost: O(1) local addressing or the existing stored-level lookup (expected
+    /// O(1) exception-table probe when writes exist), plus poison bookkeeping.
+    /// Optional debug tracing is outside this bound.
+    #[inline(never)]
+    fn level_indirect(&self, r: TypeExprRef) -> i32 {
         if r.is_store() {
             return self.store_level(r);
         }
@@ -2600,27 +2781,44 @@ impl TypeContext {
 
     #[inline(never)]
     fn store_level(&self, r: TypeExprRef) -> i32 {
-        if r.is_shared() {
-            let idx = r.shared_index();
-            return self
-                .shared_level_overlay
-                .borrow()
-                .get(idx as usize)
-                .copied()
-                .unwrap_or_else(|| {
-                    super::shared_store::page_node(&self.shared_pages, idx).level
-                });
+        if self.compiler_counters_enabled && !self.store_build_owns(r) {
+            crate::perf_counters::frozen::record(if r.is_shared() {
+                crate::perf_counters::frozen::Kind::LevelReadShared
+            } else {
+                crate::perf_counters::frozen::Kind::LevelReadWorker
+            });
         }
-        self.store_level_overlay
-            .borrow()
-            .get(r.store_index())
-            .copied()
-            .unwrap_or_else(|| self.store.level(r))
+        if self.frozen_writes.any.get() {
+            self.frozen_writes.probe();
+            if let Some(level) = self.frozen_writes.levels.borrow().get(&r) {
+                return *level;
+            }
+        }
+        if r.is_shared() {
+            return super::shared_store::page_node(&self.shared_pages, r.shared_index()).level;
+        }
+        self.store.level(r)
     }
 
     /// Number of allocated type expressions.
     pub fn type_expr_count(&self) -> usize {
         self.types.len()
+    }
+
+    /// Preserve absence, not a copy of the published value, on the trail.
+    fn frozen_mutation(&self, mutation: TypeMutation) -> TypeMutation {
+        let cell = match &mutation {
+            TypeMutation::TypeDesc(r, _) if r.is_store() => FrozenCell::Desc(*r),
+            TypeMutation::TypeLevel(r, _) if r.is_store() => FrozenCell::Level(*r),
+            TypeMutation::RowField(r, _) if r.is_store() => FrozenCell::RowField(*r),
+            TypeMutation::Mutability(r, _) if r.is_persistent() => FrozenCell::Mutability(*r),
+            _ => return mutation,
+        };
+        if self.frozen_writes.contains(cell) {
+            mutation
+        } else {
+            TypeMutation::FrozenAbsent(cell)
+        }
     }
 
     #[inline]
@@ -2635,7 +2833,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_type(ty) {
-            journal.entries.push(mutation());
+            journal.entries.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(kind);
             }
@@ -2651,7 +2849,7 @@ impl TypeContext {
         if !self.mutation_logging.full() {
             return;
         }
-        self.mutation_journal.borrow_mut().entries.push(mutation());
+        self.mutation_journal.borrow_mut().entries.push(self.frozen_mutation(mutation()));
         if self.compiler_counters_enabled {
             crate::perf_counters::record_type_mutation(kind);
         }
@@ -2664,7 +2862,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_row_field(row) {
-            journal.entries.push(mutation());
+            journal.entries.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
                     crate::perf_counters::TypeMutationKind::Row,
@@ -2675,7 +2873,7 @@ impl TypeContext {
 
     /// Set the level of a type. Stored nodes are never written in place
     /// unless the current store build is still creating them: the write goes
-    /// to this compilation's overlay.
+    /// to this compilation's exception table.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         self.record_type_mutation(
@@ -2714,20 +2912,40 @@ impl TypeContext {
     /// Level write without journaling (also used to undo).
     #[inline]
     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.level.set(level);
+            return;
+        }
+        self.write_level_indirect(r, level)
+    }
+
+    /// Cost: O(1) for local/build-owned nodes, expected amortized O(1) for an
+    /// existing frozen-write table insertion otherwise. No graph traversal;
+    /// optional poison debug tracing is outside this bound.
+    #[inline(never)]
+    fn write_level_indirect(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
             if r.is_shared() {
-                self.shared_level_overlay
-                    .borrow_mut()
-                    .set(r.shared_index() as usize, level);
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::frozen::record(
+                        crate::perf_counters::frozen::Kind::LevelWriteShared,
+                    );
+                }
+                self.frozen_writes.levels.borrow_mut().insert(r, level);
+                self.frozen_writes.any.set(true);
                 return;
             }
             if self.store_build_owns(r) {
                 self.store.set_level_backing(r, level);
                 return;
             }
-            self.store_level_overlay
-                .borrow_mut()
-                .set(r.store_index(), level);
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::LevelWriteWorker,
+                );
+            }
+            self.frozen_writes.levels.borrow_mut().insert(r, level);
+            self.frozen_writes.any.set(true);
         } else {
             self.poison_store_build();
             self.types.set_level(r.index(), level);
@@ -2748,9 +2966,30 @@ impl TypeContext {
     /// Descriptor write without journaling (also used to undo).
     #[inline]
     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.desc.set(desc);
+            return;
+        }
+        self.write_desc_indirect(r, desc)
+    }
+
+    /// Cost: O(1) for local nodes, expected amortized O(1) for a frozen-write
+    /// insertion. Build-owned descriptors retain the existing list-copy and
+    /// validation cost, proportional to their payload. Optional poison debug
+    /// tracing is outside these bounds.
+    #[inline(never)]
+    fn write_desc_indirect(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
             if r.is_shared() {
-                self.set_shared_desc(r, desc);
+                if self.compiler_counters_enabled {
+                    crate::perf_counters::frozen::record(if matches!(desc, TypeDesc::Tlink(_)) {
+                        crate::perf_counters::frozen::Kind::LinkShared
+                    } else {
+                        crate::perf_counters::frozen::Kind::DescWriteShared
+                    });
+                }
+                self.frozen_writes.descs.borrow_mut().insert(r, desc);
+                self.frozen_writes.any.set(true);
                 return;
             }
             if self.store_build_owns(r) {
@@ -2759,45 +2998,14 @@ impl TypeContext {
                 self.store.set_desc_backing(r, desc);
                 return;
             }
-            let index = self
-                .store_desc_overlay
-                .borrow()
-                .get(r.store_index())
-                .copied();
-            if let Some(index) = index {
-                self.store_descs.set_desc(index, desc);
-            } else {
-                let index = self
-                    .store_descs
-                    .push(desc, self.store.level(r), self.store.id(r));
-                self.store_desc_overlay
-                    .borrow_mut()
-                    .set(r.store_index(), index);
+            if self.compiler_counters_enabled && matches!(desc, TypeDesc::Tlink(_)) {
+                crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::LinkWorker);
             }
+            self.frozen_writes.descs.borrow_mut().insert(r, desc);
+            self.frozen_writes.any.set(true);
         } else {
             self.poison_store_build();
             self.types.set_desc(r.index(), desc);
-        }
-    }
-
-    /// Descriptor write to a shared dependency node: copy-on-write into this
-    /// compilation's overlay; the published node is never mutated.
-    #[inline(never)]
-    fn set_shared_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        let idx = r.shared_index();
-        let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
-        if let Some(index) = index {
-            self.store_descs.set_desc(index, desc);
-        } else {
-            let (level, id) = {
-                let pages = &self.shared_pages;
-                let original = super::shared_store::page_node(pages, idx);
-                (original.level, original.id)
-            };
-            let index = self.store_descs.push(desc, level, id);
-            self.shared_desc_overlay
-                .borrow_mut()
-                .set(idx as usize, index);
         }
     }
 
@@ -3070,7 +3278,8 @@ impl TypeContext {
         let has_changes = mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                TypeMutation::TypeDesc(..)
+                TypeMutation::FrozenAbsent(..)
+                    | TypeMutation::TypeDesc(..)
                     | TypeMutation::Compress(..)
                     | TypeMutation::TypeLevel(..)
                     | TypeMutation::RowField(..)
@@ -3086,6 +3295,10 @@ impl TypeContext {
         let mut restored = 0;
         for mutation in mutations.into_iter().rev() {
             match mutation {
+                TypeMutation::FrozenAbsent(cell) => {
+                    self.frozen_writes.remove(cell);
+                    restored += 1;
+                }
                 TypeMutation::TypeDesc(ty, desc) | TypeMutation::Compress(ty, desc, _) => {
                     self.write_desc_raw(ty, desc);
                     restored += 1;
@@ -3260,22 +3473,17 @@ impl TypeContext {
         self.memoized_abbrev_refs.borrow_mut().clear();
     }
 
-    /// Current value of a memo cell: this compilation's overlay for store
+    /// Current value of a memo cell: this compilation's exception table for store
     /// cells, the local table otherwise. Missing cells read as `Mnil`.
     fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
-        if memo.is_shared() {
-            return self
-                .shared_abbrev_overlay
-                .borrow()
-                .get(memo.shared_index())
-                .cloned()
-                .unwrap_or(AbbrevMemo::Mnil);
-        }
         if memo.is_store() {
-            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
-                return value.clone();
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.memos.borrow().get(&memo) {
+                    return value.clone();
+                }
             }
-            return self.store.abbrev(memo);
+            return if memo.is_shared() { AbbrevMemo::Mnil } else { self.store.abbrev(memo) };
         }
         let abbrevs = self.abbrevs.borrow();
         abbrevs
@@ -3287,17 +3495,14 @@ impl TypeContext {
     /// Apply `f` to a memo cell without copying it (the chain scans below
     /// only compare paths and follow `next`).
     fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
-        if memo.is_shared() {
-            return match self.shared_abbrev_overlay.borrow().get(memo.shared_index()) {
-                Some(value) => f(value),
-                None => f(&AbbrevMemo::Mnil),
-            };
-        }
         if memo.is_store() {
-            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
-                return f(value);
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.memos.borrow().get(&memo) {
+                    return f(value);
+                }
             }
-            return self.store.with_abbrev(memo, f);
+            return if memo.is_shared() { f(&AbbrevMemo::Mnil) } else { self.store.with_abbrev(memo, f) };
         }
         let abbrevs = self.abbrevs.borrow();
         match abbrevs.get(memo.index()) {
@@ -3309,16 +3514,38 @@ impl TypeContext {
     /// Write a memo cell; store cells are written to this compilation's
     /// overlay only. Missing local cells are ignored.
     fn write_abbrev(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
-        if memo.is_shared() {
-            self.shared_abbrev_overlay
-                .borrow_mut()
-                .set(memo.shared_index(), value);
-            return;
+        if self.compiler_counters_enabled
+            && memo.is_store()
+            && (memo.is_shared()
+                || !self.in_store_build()
+                || memo.store_index() < self.store_build_abbrev_start.get())
+        {
+            crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::MemoWrite);
         }
         if memo.is_store() {
-            self.store_abbrev_overlay
-                .borrow_mut()
-                .set(memo.store_index(), value);
+            if !memo.is_shared() && self.in_store_build()
+                && memo.store_index() >= self.store_build_abbrev_start.get()
+            {
+                match &value {
+                    AbbrevMemo::Mcons { abbrev, expansion, next, .. } => {
+                        self.check_store_ref(*abbrev);
+                        self.check_store_ref(*expansion);
+                        self.check_store_memo(*next);
+                    }
+                    AbbrevMemo::Mlink(next) => self.check_store_memo(*next),
+                    AbbrevMemo::Mnil => {}
+                }
+                self.store.set_abbrev_backing(memo, value);
+                return;
+            }
+            // Memos are caches, not semantic trail entries (btype.ml:692-700).
+            // Shared memos are published empty, so clearing one removes its exception.
+            if memo.is_shared() && matches!(value, AbbrevMemo::Mnil) {
+                self.frozen_writes.remove(FrozenCell::Memo(memo));
+            } else {
+                self.frozen_writes.memos.borrow_mut().insert(memo, value);
+                self.frozen_writes.any.set(true);
+            }
             return;
         }
         let abbrevs = self.abbrevs.borrow();
@@ -3537,8 +3764,11 @@ impl TypeContext {
             return None;
         }
         if rf.is_store() {
-            if let Some(value) = self.store_row_field_overlay.borrow().get(rf.store_index()) {
-                return value.clone();
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.row_fields.borrow().get(&rf) {
+                    return value.clone();
+                }
             }
             return self.store.row_field(rf);
         }
@@ -3568,7 +3798,7 @@ impl TypeContext {
 
     /// Row field write without journaling (also used to undo). Store rows
     /// still being built are written in place; other store rows go to this
-    /// compilation's overlay.
+    /// compilation's exception table.
     fn write_row_field_raw(&self, rf: RowFieldRef, value: Option<RowField>) {
         if rf.is_null() {
             return;
@@ -3581,9 +3811,13 @@ impl TypeContext {
                 self.store.set_row_field_backing(rf, value);
                 return;
             }
-            self.store_row_field_overlay
-                .borrow_mut()
-                .set(rf.store_index(), value);
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::RowFieldWrite,
+                );
+            }
+            self.frozen_writes.row_fields.borrow_mut().insert(rf, value);
+            self.frozen_writes.any.set(true);
             return;
         }
         let row_fields = self.row_fields.borrow();
@@ -3614,8 +3848,11 @@ impl TypeContext {
     /// The contents of a mutability cell (OCaml `!r`).
     pub fn get_mutability(&self, r: MutabilityRef) -> FieldMutability {
         if r.is_persistent() {
-            if let Some(value) = self.mutability_overlay.borrow().get(&r) {
-                return *value;
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.mutabilities.borrow().get(&r) {
+                    return *value;
+                }
             }
             return FieldMutability::Value(r.persistent_value());
         }
@@ -3655,7 +3892,7 @@ impl TypeContext {
             self.mutation_journal
                 .borrow_mut()
                 .entries
-                .push(TypeMutation::Mutability(r, old));
+                .push(self.frozen_mutation(TypeMutation::Mutability(r, old)));
         }
         self.write_mutability_raw(r, value);
     }
@@ -3663,7 +3900,13 @@ impl TypeContext {
     /// Unlogged cell write (copy-session links and their restoration, undo).
     fn write_mutability_raw(&self, r: MutabilityRef, value: FieldMutability) {
         if r.is_persistent() {
-            self.mutability_overlay.borrow_mut().insert(r, value);
+            if self.compiler_counters_enabled {
+                crate::perf_counters::frozen::record(
+                    crate::perf_counters::frozen::Kind::MutabilityWrite,
+                );
+            }
+            self.frozen_writes.mutabilities.borrow_mut().insert(r, value);
+            self.frozen_writes.any.set(true);
             return;
         }
         self.mutabilities.borrow()[r.index()].set(value);
@@ -3747,8 +3990,11 @@ impl TypeContext {
             .borrow_mut()
             .pop()
             .expect("copy session stack underflow");
-        for (r, value) in session.saved_mutabilities {
-            self.write_mutability_raw(r, value);
+        for (r, value) in session.saved_mutabilities.into_iter().rev() {
+            match value {
+                Some(value) => self.write_mutability_raw(r, value),
+                None => self.frozen_writes.remove(FrozenCell::Mutability(r)),
+            }
         }
     }
 
@@ -3780,7 +4026,14 @@ impl TypeContext {
                 .last_mut()
                 .expect("dup_mutability outside a copy session");
             session.new_mutabilities.push(r2);
-            session.saved_mutabilities.push((r, old));
+            let saved = if r.is_persistent()
+                && !self.frozen_writes.contains(FrozenCell::Mutability(r))
+            {
+                None
+            } else {
+                Some(old)
+            };
+            session.saved_mutabilities.push((r, saved));
         }
         self.write_mutability_raw(r, FieldMutability::Link(r2));
         r2
@@ -4643,11 +4896,16 @@ impl TypeContext {
         if depth == 0 {
             self.store_build_type_start.set(self.store.type_count());
             self.store_build_row_start.set(self.store.row_field_count());
+            if self.compiler_counters_enabled {
+                self.store_build_abbrev_start.set(self.store.abbrev_count());
+            }
         }
         self.store_build_depth.set(depth + 1);
+        self.types.set_direct(depth + 1 == 0);
         super::thread_store::set_store_build_depth(depth + 1);
         let result = build();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         if depth == 0 && self.compiler_counters_enabled {
             crate::perf_counters::record_store_build_nodes(
@@ -4809,9 +5067,11 @@ impl TypeContext {
     /// separately.
     pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
         let depth = self.store_build_depth.replace(0);
+        self.types.set_direct(true);
         super::thread_store::set_store_build_depth(0);
         let result = f();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         result
     }
@@ -5073,9 +5333,11 @@ impl TypeContext {
         }
 
         // Path compression: relink all traversed nodes to the representative
-        // (OCaml `Btype.repr_link`). Stored handles use compilation-local
-        // descriptor overlays, just like ordinary unification writes.
+        // (OCaml `Btype.repr_link`). Frozen nodes are followed, never compressed.
         for &node in &chain[..chain_len] {
+            if node.is_store() && !self.store_build_owns(node) {
+                continue;
+            }
             if node != current {
                 // A direct link already points at the representative. OCaml
                 // btype.ml:107-115 does not log/write it (`compress = false`);
@@ -5103,6 +5365,142 @@ impl TypeContext {
 mod tests {
     use super::*;
     use proptest::prelude::*;
+
+    fn frozen_arrows(ctx: &TypeContext) -> [TypeExprRef; 4] {
+        use super::super::shared_store::{SharedGraphParts, SharedGraphPayloads, SharedGraphSizes, shared_ref};
+        let sizes = SharedGraphSizes { nodes: 4, arg_items: 2, ..Default::default() };
+        let base = ctx.store.shared_pool().publish(sizes, |base| {
+            let var = shared_ref(base, 0);
+            let int = shared_ref(base, 1);
+            SharedGraphParts {
+                nodes: vec![
+                    (TypeDesc::Tvar(None), GENERIC_LEVEL),
+                    (TypeDesc::Tconstr {
+                        path: Path::pident(Ident::create_persistent("int")),
+                        args: TypeRefList::EMPTY,
+                        abbrev: AbbrevMemoRef::nil(),
+                    }, GENERIC_LEVEL),
+                    (TypeDesc::Tarrow {
+                        args: TypeArgList::from_parts(shared_ref(base, sizes.args_start()).0, 1),
+                        ret: int,
+                    }, GENERIC_LEVEL),
+                    (TypeDesc::Tarrow {
+                        args: TypeArgList::from_parts(shared_ref(base, sizes.args_start() + 1).0, 1),
+                        ret: int,
+                    }, GENERIC_LEVEL),
+                ],
+                payloads: SharedGraphPayloads {
+                    args: vec![TypeArg::new(ArgLabel::Nolabel, var), TypeArg::new(ArgLabel::Nolabel, int)],
+                    ..Default::default()
+                },
+                layouts: Vec::new(),
+                locations: Default::default(),
+                carried: Default::default(),
+            }
+        }).unwrap();
+        std::array::from_fn(|i| shared_ref(base, i))
+    }
+
+    fn assert_no_frozen_writes(ctx: &TypeContext) {
+        assert!(!ctx.frozen_writes.any.get());
+        assert!(ctx.frozen_writes.descs.borrow().is_empty());
+        assert!(ctx.frozen_writes.levels.borrow().is_empty());
+        assert!(ctx.frozen_writes.memos.borrow().is_empty());
+        assert!(ctx.frozen_writes.row_fields.borrow().is_empty());
+        assert!(ctx.frozen_writes.mutabilities.borrow().is_empty());
+    }
+
+    #[test]
+    fn type_mutation_size_stays_40_bytes() {
+        assert_eq!(std::mem::size_of::<TypeMutation>(), 40);
+    }
+
+    #[test]
+    fn frozen_read_does_not_probe_when_nothing_was_written() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let nodes = frozen_arrows(&ctx);
+        for i in 0..1_000 {
+            ctx.get_desc(nodes[i % nodes.len()]);
+            assert_eq!(ctx.get_level(nodes[i % nodes.len()]), GENERIC_LEVEL);
+        }
+        assert_eq!(ctx.frozen_writes.probes.get(), 0);
+        assert_no_frozen_writes(&ctx);
+        // Positive control: the counter really sees exception-table probes.
+        ctx.set_level(nodes[0], 1);
+        ctx.get_level(nodes[0]);
+        assert_eq!(ctx.frozen_writes.probes.get(), 1);
+        let local = ctx.new_var(None);
+        ctx.get_level(local);
+        ctx.get_desc(local);
+        assert_eq!(ctx.frozen_writes.probes.get(), 1);
+    }
+
+    #[test]
+    fn matches_on_frozen_types_leaves_no_exception() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let [var, _, generic, concrete] = frozen_arrows(&ctx);
+        // A rigid 'a cannot match int, but int can match an instantiable 'a.
+        assert!(!super::super::ctype::matches(&ctx, &Env::empty(), generic, concrete));
+        assert_no_frozen_writes(&ctx);
+        assert!(super::super::ctype::matches(&ctx, &Env::empty(), concrete, generic));
+        assert_no_frozen_writes(&ctx);
+        assert!(matches!(*ctx.borrow_desc(var), TypeDesc::Tvar(None)));
+        assert_eq!(ctx.get_level(var), GENERIC_LEVEL);
+    }
+
+    #[test]
+    fn lasting_link_on_frozen_node_is_seen_only_here() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let [var, int, _, _] = frozen_arrows(&ctx);
+        let other = TypeContext::new(Arc::new(IdGenerator::new()));
+        super::super::ctype::link_type(&ctx, var, int);
+        assert_eq!(ctx.repr(var), int);
+        assert_eq!(other.repr(var), var);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_desc(var, TypeDesc::Tnil);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(ctx.repr(var), int);
+        assert!(ctx.frozen_writes.any.get());
+        assert_eq!(ctx.frozen_writes.descs.borrow().len(), 1);
+        assert_no_frozen_writes(&other);
+    }
+
+    #[test]
+    fn frozen_mutabilities_restore_absence_and_existing_entries() {
+        use super::super::asttypes::MutableFlag;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let cell = MutabilityRef::new_persistent(MutableFlag::Immutable);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_mutability(cell, FieldMutability::Value(MutableFlag::Mutable));
+        ctx.with_copy_session(|| {
+            let copy = ctx.dup_mutability(cell);
+            assert_eq!(ctx.mutability_ref_repr(cell), copy);
+            ctx.with_copy_session(|| { ctx.dup_mutability(cell); });
+            assert_eq!(ctx.mutability_ref_repr(cell), copy);
+        });
+        assert_eq!(ctx.mutability_repr(cell), MutableFlag::Mutable);
+        ctx.restore_type_state(snapshot);
+        assert_no_frozen_writes(&ctx);
+        ctx.with_copy_session(|| { ctx.dup_mutability(cell); });
+        assert_no_frozen_writes(&ctx);
+        assert_eq!(ctx.mutability_repr(cell), MutableFlag::Immutable);
+    }
+
+    #[test]
+    fn store_build_writes_do_not_create_exceptions() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        ctx.build_in_store(|| {
+            let ty = ctx.new_generic_var(None);
+            let row = ctx.alloc_row_field(Some(RowField::Rabsent));
+            let memo = ctx.alloc_abbrev_nil();
+            ctx.set_desc(ty, TypeDesc::Tnil);
+            ctx.set_level(ty, 12);
+            ctx.clear_row_field(row);
+            ctx.write_abbrev(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
+            assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mlink(_)));
+            assert_no_frozen_writes(&ctx);
+        });
+    }
 
     #[test]
     fn module_signature_cache_separates_scope_keys() {
@@ -5146,9 +5544,122 @@ mod tests {
     }
 
     #[test]
+    fn type_nodes_lease_scan_is_linear_at_10000_entries() {
+        std::thread::spawn(|| {
+            let busy = TypeNodes::new();
+            // Simulate 10,000 occupied entries without allocating 10,000 arrays.
+            // Each alias is busy because this test retains the original lease.
+            FIRST_NODE_ARRAYS.with(|arrays| {
+                let mut arrays = arrays.borrow_mut();
+                arrays.extend((1..10_000).map(|_| Rc::clone(&busy.first)));
+            });
+            let fresh = TypeNodes::new();
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_000));
+            FIRST_ARRAY_INITIALIZATIONS.with(|count| {
+                assert_eq!(count.get(), TypeNodes::FIRST_LEN);
+            });
+            assert!(!Rc::ptr_eq(&busy.first, &fresh.first));
+            drop(fresh);
+            let reused = TypeNodes::new();
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_001));
+            FIRST_ARRAY_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+            assert_eq!(reused.len(), 0);
+            // Leave only the first entry; the next lease must stop after one probe.
+            drop(reused);
+            FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow_mut().truncate(1));
+            drop(busy);
+            let reused = TypeNodes::new();
+            FIRST_ARRAY_LEASE_PROBES.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(reused.len(), 0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn type_nodes_lease_exclusively_and_reuse_without_clearing() {
+        // A fresh thread gives this test a fresh lease list.
+        std::thread::spawn(|| {
+            let first = TypeContext::new(Arc::new(IdGenerator::new()));
+            let second = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert!(!Rc::ptr_eq(&first.types.first, &second.types.first));
+            let address = Rc::as_ptr(&first.types.first);
+            let idx = first.types.push(TypeDesc::Tvar(None), 37, 91);
+            drop(first);
+            let reused = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert_eq!(Rc::as_ptr(&reused.types.first), address);
+            assert_eq!(reused.types.len(), 0);
+            // Inspect the backing slot, not a live handle: leasing must not clear it.
+            assert_eq!(reused.types.first[idx].level.get(), 37);
+            assert_eq!(reused.types.push(TypeDesc::Tnil, 4, 5), idx);
+            assert!(matches!(reused.types.desc(idx), TypeDesc::Tnil));
+            assert_eq!(reused.types.level(idx), 4);
+            assert_eq!(reused.types.id(idx), 5);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn type_nodes_direct_excludes_far_and_tagged_handles() {
+        let nodes = TypeNodes::new();
+        assert!(nodes.direct(0).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32 - 1).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32).is_none());
+        assert!(nodes.direct(1 << 30).is_none());
+        assert!(nodes.direct(1 << 31).is_none());
+        nodes.set_direct(false);
+        assert!(nodes.direct(0).is_none());
+        nodes.set_direct(true);
+        assert!(nodes.direct(0).is_some());
+    }
+
+    #[test]
+    fn local_node_access_poisons_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        for access in 0..4 {
+            let (_, piece) = ctx.build_in_store(|| {
+                assert_eq!(ctx.types.fast_limit.get(), 0);
+                match access {
+                    0 => { ctx.desc(local); }
+                    1 => { ctx.get_level(local); }
+                    2 => ctx.write_desc_raw(local, TypeDesc::Tnil),
+                    3 => ctx.write_level_raw(local, 7),
+                    _ => unreachable!(),
+                }
+            });
+            assert!(piece.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+        }
+    }
+
+    #[test]
+    fn local_node_direct_limit_tracks_nested_and_suspended_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        let (_, piece) = ctx.build_in_store(|| {
+            ctx.suspend_store_build(|| {
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+                assert!(matches!(ctx.desc(local), TypeDesc::Tnil));
+                let (_, nested) = ctx.build_in_store(|| ctx.get_level(local));
+                assert!(nested.is_none());
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+            });
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+            let (_, nested) = ctx.build_in_store(|| ctx.desc(local));
+            assert!(nested.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+        });
+        assert!(piece.is_none());
+        assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+    }
+
+    #[test]
+    fn type_node_size_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<TypeNode>(), 32);
+    }
+
+    #[test]
     fn type_nodes_address_every_node_across_chunks() {
         let nodes = TypeNodes::new();
-        let count = (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
+        let count = TypeNodes::FIRST_LEN + (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
         for i in 0..count {
             assert_eq!(nodes.push(TypeDesc::Tnil, i as i32, -(i as i32)), i);
         }
@@ -5201,6 +5712,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .expect("pool has room");
@@ -5401,7 +5913,7 @@ mod tests {
     }
 
     #[test]
-    fn store_access_and_overlay_backtracking() {
+    fn store_access_and_exception_backtracking() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let local = ctx.new_var(None);
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
@@ -5421,9 +5933,16 @@ mod tests {
         assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
         assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
+        let nested = ctx.snapshot_type_state();
+        ctx.clear_row_field(row);
+        ctx.restore_type_state(nested);
+        assert!(matches!(ctx.get_row_field(row), Some(RowField::Rpresent(Some(t))) if t == local));
         ctx.restore_type_state(snapshot);
+        assert!(ctx.frozen_writes.row_fields.borrow().is_empty());
+        assert_eq!(ctx.frozen_writes.memos.borrow().len(), 1);
+        assert!(ctx.frozen_writes.any.get());
         // Memo contents are not part of the trail (btype.ml:692-700); store
-        // memos stay in this compilation's overlay.
+        // memos stay in this compilation's exception table.
         assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
         assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.get_row_field(row), Some(RowField::Rabsent)));
@@ -5435,6 +5954,82 @@ mod tests {
         ctx.restore_abbrev_memo(memo, AbbrevMemo::Mlink(AbbrevMemoRef::nil()));
         ctx.clear_abbrev_memos();
         assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mnil));
+    }
+
+    #[test]
+    fn frozen_counters_exclude_local_owned_and_disabled_accesses() {
+        use crate::perf_counters::frozen::{Kind, count};
+        let mut ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
+        let memo = ctx.store.alloc_abbrev(AbbrevMemo::Mnil);
+        let read_before = count(Kind::DescReadWorker);
+        let level_before = count(Kind::LevelReadWorker);
+        let write_before = count(Kind::LinkWorker);
+        let memo_before = count(Kind::MemoWrite);
+        ctx.compiler_counters_enabled = false;
+        ctx.get_desc(stored);
+        ctx.get_level(stored);
+        ctx.write_desc_raw(stored, TypeDesc::Tlink(stored));
+        ctx.write_abbrev(memo, AbbrevMemo::Mnil);
+        assert_eq!(count(Kind::DescReadWorker), read_before);
+        assert_eq!(count(Kind::LevelReadWorker), level_before);
+        assert_eq!(count(Kind::LinkWorker), write_before);
+        assert_eq!(count(Kind::MemoWrite), memo_before);
+        ctx.compiler_counters_enabled = true;
+        let local = ctx.new_var(None);
+        ctx.get_desc(local);
+        ctx.get_level(local);
+        ctx.write_desc_raw(local, TypeDesc::Tlink(stored));
+        ctx.build_in_store(|| {
+            let owned = ctx.new_generic_type(TypeDesc::Tnil);
+            ctx.get_desc(owned);
+            ctx.get_level(owned);
+            ctx.write_desc_raw(owned, TypeDesc::Tlink(stored));
+            let owned_memo = ctx.alloc_abbrev_nil();
+            ctx.write_abbrev(owned_memo, AbbrevMemo::Mnil);
+        });
+        assert_eq!(count(Kind::DescReadWorker), read_before);
+        assert_eq!(count(Kind::LevelReadWorker), level_before);
+        assert_eq!(count(Kind::LinkWorker), write_before);
+        assert_eq!(count(Kind::MemoWrite), memo_before);
+        ctx.get_desc(stored);
+        ctx.get_level(stored);
+        ctx.write_desc_raw(stored, TypeDesc::Tlink(local));
+        ctx.write_abbrev(memo, AbbrevMemo::Mnil);
+        assert_eq!(count(Kind::DescReadWorker), read_before + 1);
+        assert_eq!(count(Kind::LevelReadWorker), level_before + 1);
+        assert_eq!(count(Kind::LinkWorker), write_before + 1);
+        assert_eq!(count(Kind::MemoWrite), memo_before + 1);
+
+        let base = ctx
+            .store
+            .shared_pool()
+            .publish(
+                super::super::shared_store::SharedGraphSizes {
+                    nodes: 1,
+                    ..Default::default()
+                },
+                |_| super::super::shared_store::SharedGraphParts {
+                    nodes: vec![(TypeDesc::Tnil, GENERIC_LEVEL)],
+                    payloads: Default::default(),
+                    layouts: Vec::new(),
+                    locations: Default::default(),
+                    carried: Default::default(),
+                },
+            )
+            .unwrap();
+        let shared = super::super::shared_store::shared_ref(base, 0);
+        let links = count(Kind::LinkShared);
+        let descriptors = count(Kind::DescWriteShared);
+        let levels = count(Kind::LevelWriteShared);
+        let snapshot = ctx.snapshot_type_state();
+        ctx.set_desc(shared, TypeDesc::Tlink(local));
+        ctx.set_level(shared, 1);
+        ctx.restore_type_state(snapshot);
+        assert_eq!(count(Kind::LinkShared), links + 1);
+        // Restoring absence removes the exception without writing a value.
+        assert_eq!(count(Kind::DescWriteShared), descriptors);
+        assert_eq!(count(Kind::LevelWriteShared), levels + 1);
     }
 
     #[test]
@@ -5550,14 +6145,19 @@ mod tests {
     }
 
     #[test]
-    fn store_links_compress_without_mutating_dependencies() {
+    fn store_links_are_followed_without_compressing_dependencies() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let target = ctx.new_var(None);
         let middle = ctx.new_link(target);
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
         super::super::ctype::link_type(&ctx, stored, middle);
+        let snapshot = ctx.snapshot_type_state();
+        let entries = ctx.mutation_journal.borrow().entries.len();
         assert_eq!(ctx.repr(stored), target);
-        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == target));
+        assert_eq!(ctx.mutation_journal.borrow().entries.len(), entries);
+        assert_eq!(ctx.frozen_writes.descs.borrow().len(), 1);
+        ctx.restore_type_state(snapshot);
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == middle));
         assert!(matches!(ctx.store.desc(stored), TypeDesc::Tnil));
     }
 

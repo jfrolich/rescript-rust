@@ -80,3 +80,6 @@ pub use types::{Path, TypeContext, TypeExpr, Variance};
 
 // Binary AST exports
 pub use binary_ast::{Marshal, MarshalWriter};
+
+/// Generic cost accounting for generated items, implemented behind the derive seam.
+pub use binary_ast::derive::census as derived_census;

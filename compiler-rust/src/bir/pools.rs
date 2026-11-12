@@ -55,6 +55,14 @@ impl Lists {
         self.0.extend_from_slice(items);
         id
     }
+    /// Consume a statement-stack run directly, without an intermediate vector.
+    pub(super) fn push_iter(&mut self, len: usize, items: impl Iterator<Item = NodeId>) -> ListId {
+        let id = ListId(index(self.0.len()));
+        self.0.push(NodeId(index(len)));
+        self.0.extend(items);
+        assert_eq!(self.0.len(), id.index() + 1 + len);
+        id
+    }
     pub(super) fn get(&self, id: ListId) -> &[NodeId] {
         let start = id.index();
         &self.0[start + 1..start + 1 + self.0[start].index()]
@@ -182,12 +190,10 @@ pub struct FuncHeader {
     /// Source location.
     pub loc: LamLoc,
     pub(super) attr: u32,
-    /// Function properties, including self tail calls.
+    /// Function properties.
     pub flags: u32,
 }
 impl FuncHeader {
-    /// A tail-position application calls the function's own binding.
-    pub const SELF_TAILCALL: u32 = 1;
     /// Print as a method-capable function, preserving `this`.
     pub const METHOD: u32 = 2;
 }

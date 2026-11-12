@@ -186,7 +186,7 @@ class Side:
             [self.executable, *args], env=self.env, capture_output=True, text=True, errors="replace"
         )
 
-    def build(self, with_signatures):
+    def build(self, with_signatures, candidates=generated_candidates):
         if self.runtime:
             result = self.run("build", self.env["RESCRIPT_RUNTIME"])
             if result.returncode != 0:
@@ -196,7 +196,7 @@ class Side:
         if result.returncode != 0:
             sys.stderr.write(result.stdout + result.stderr)
             fail(f"{self.name}: `rescript clean` failed")
-        before = generated_candidates(self.project)
+        before = candidates(self.project)
 
         build = ["build", str(self.project), *self.build_args]
         if with_signatures:
@@ -216,7 +216,7 @@ class Side:
             text = log.read_text(errors="replace")
             for source, blocks in diagnostics_of(self.project, text).items():
                 self.diagnostics.setdefault(source, []).extend(blocks)
-        for relative, stat in generated_candidates(self.project).items():
+        for relative, stat in candidates(self.project).items():
             if before.get(relative) == stat:
                 continue
             copy = self.generated_directory / relative

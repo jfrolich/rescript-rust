@@ -1,0 +1,1 @@
+- Run the snapshot equivalence check (prebuilt Belt against Belt compiled from source) in CI.

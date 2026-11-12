@@ -539,12 +539,8 @@ impl LambdaCompiler {
     }
 
     pub(crate) fn compile_switch(&mut self, a: &mut LamArena, scrut: Lam, sw: Sw) -> Compiled {
-        // OCaml's `compile_switch` builds `switch_cxt = enter_switch cxt`
-        // and threads it into every case body and the default branch
-        // (compiler/core/lam_compile.ml). Wrap the whole switch with
-        // `with_switch_depth` so any nested `Lbreak`/`Lcontinue` knows it
-        // must use a labeled JS break/continue to escape the loop.
-        //
+        // Named dispatch enters the switch context only in its general
+        // switch arm, not the small conditional arms (compiler/core/lam_compile.ml:793).
         // An untagged plan enters the switch context only for the bodies of
         // its `switch` statements (lam_compile.ml `compile_untagged_plan`).
         if let Some(plan) = sw.untagged_plan(a) {
@@ -567,7 +563,11 @@ impl LambdaCompiler {
             };
         }
         let switch = &sw.decode(a);
-        self.with_switch_depth(|this| this.compile_switch_inner(a, scrut, switch))
+        if switch.is_named() {
+            self.compile_switch_inner(a, scrut, switch)
+        } else {
+            self.with_switch_depth(|this| this.compile_switch_inner(a, scrut, switch))
+        }
     }
 
     fn untagged_fallback_block(
@@ -1282,40 +1282,44 @@ impl LambdaCompiler {
         cases: &[(SwitchCaseTag, Lam)],
         default: Option<Lam>,
     ) -> Block {
-        let filtered_cases = self.filtered_switch_case_refs(a, cases, default);
-        let clauses = stable_group_switch_cases(a, filtered_cases, |_, _| true)
-            .into_iter()
-            .map(|(tag, body, is_last)| StringClauseInfo {
-                tag_type: tag,
-                clause: if is_last {
-                    Clause {
-                        source_loc: self.source_loc_of_lam(a, body),
-                        body: {
-                            let body = {
-                                let value_block = self.compile_switch_value_block(a, result, body);
-                                self.with_block_source_loc(a, body, value_block)
-                            };
-                            JS::list(&body, &mut self.j)
-                        },
-                        should_break: false,
-                        comment: None,
-                    }
-                } else {
-                    self.empty_switch_case_clause_for(a, body)
-                },
-            })
-            .collect();
+        // compiler/core/lam_compile.ml:793: only actual JS switch arms
+        // enter the switch context; small conditional dispatch does not.
+        self.with_switch_depth(|this| {
+            let filtered_cases = this.filtered_switch_case_refs(a, cases, default);
+            let clauses = stable_group_switch_cases(a, filtered_cases, |_, _| true)
+                .into_iter()
+                .map(|(tag, body, is_last)| StringClauseInfo {
+                    tag_type: tag,
+                    clause: if is_last {
+                        Clause {
+                            source_loc: this.source_loc_of_lam(a, body),
+                            body: {
+                                let body = {
+                                    let value_block = this.compile_switch_value_block(a, result, body);
+                                    this.with_block_source_loc(a, body, value_block)
+                                };
+                                JS::list(&body, &mut this.j)
+                            },
+                            should_break: false,
+                            comment: None,
+                        }
+                    } else {
+                        this.empty_switch_case_clause_for(a, body)
+                    },
+                })
+                .collect();
 
-        let default_block = default.map(|fallback| {
-            let block = self.compile_assign_to_target_block(a, result, fallback);
-            self.with_block_source_loc(a, fallback, block)
-        });
-        vec![JS::string_switch(
-            test,
-            clauses,
-            default_block.map(|b| JS::list(&b, &mut self.j)),
-            &mut self.j,
-        )]
+            let default_block = default.map(|fallback| {
+                let block = this.compile_assign_to_target_block(a, result, fallback);
+                this.with_block_source_loc(a, fallback, block)
+            });
+            vec![JS::string_switch(
+                test,
+                clauses,
+                default_block.map(|b| JS::list(&b, &mut this.j)),
+                &mut this.j,
+            )]
+        })
     }
 
     pub(crate) fn compile_named_string_switch_assignment(
@@ -1423,83 +1427,87 @@ impl LambdaCompiler {
             }
         }
 
-        let filtered_cases = self.filtered_switch_case_refs(a, cases, default);
-        let grouped_cases = stable_group_switch_cases(a, filtered_cases, |_, _| true);
-        let mut shared_tail = None;
-        let clauses = if default.is_none() && self.active_fallthrough_return_handler().is_none() {
-            let mut clauses = Vec::with_capacity(grouped_cases.len());
-            let mut group_start = 0;
-            while group_start < grouped_cases.len() {
-                let mut group_end = group_start;
-                while !grouped_cases[group_end].2 {
-                    group_end += 1;
-                }
+        // compiler/core/lam_compile.ml:793: only actual JS switch arms
+        // enter the switch context; small conditional dispatch does not.
+        self.with_switch_depth(|this| {
+            let filtered_cases = this.filtered_switch_case_refs(a, cases, default);
+            let grouped_cases = stable_group_switch_cases(a, filtered_cases, |_, _| true);
+            let mut shared_tail = None;
+            let clauses = if default.is_none() && this.active_fallthrough_return_handler().is_none() {
+                let mut clauses = Vec::with_capacity(grouped_cases.len());
+                let mut group_start = 0;
+                while group_start < grouped_cases.len() {
+                    let mut group_end = group_start;
+                    while !grouped_cases[group_end].2 {
+                        group_end += 1;
+                    }
 
-                let (_, body, _) = &grouped_cases[group_end];
-                let compiled_output = self.compile_hoisted_named_string_return_tail(a, *body);
-                let compiled_finished = compiled_output.finished;
-                let compiled_body = compiled_output.block;
-                let hoist_shared_tail = group_start != group_end
-                    && group_end + 1 == grouped_cases.len()
-                    && self.should_hoist_grouped_named_string_return_tail(a, *body)
-                    && !compiled_body.is_empty()
-                    && compiled_finished == OutputFinished::True;
+                    let (_, body, _) = &grouped_cases[group_end];
+                    let compiled_output = this.compile_hoisted_named_string_return_tail(a, *body);
+                    let compiled_finished = compiled_output.finished;
+                    let compiled_body = compiled_output.block;
+                    let hoist_shared_tail = group_start != group_end
+                        && group_end + 1 == grouped_cases.len()
+                        && this.should_hoist_grouped_named_string_return_tail(a, *body)
+                        && !compiled_body.is_empty()
+                        && compiled_finished == OutputFinished::True;
 
-                for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
+                    for (tag, case_lam, _) in &grouped_cases[group_start..group_end] {
+                        clauses.push(StringClauseInfo {
+                            tag_type: tag.clone(),
+                            clause: this.empty_switch_case_clause_for(a, *case_lam),
+                        });
+                    }
                     clauses.push(StringClauseInfo {
-                        tag_type: tag.clone(),
-                        clause: self.empty_switch_case_clause_for(a, *case_lam),
+                        tag_type: grouped_cases[group_end].0.clone(),
+                        clause: if hoist_shared_tail {
+                            shared_tail = Some(compiled_body);
+                            Clause {
+                                source_loc: None,
+                                body: crate::js_ir::arena::StmtList::EMPTY,
+                                should_break: true,
+                                comment: None,
+                            }
+                        } else {
+                            // Mirror `grouped_return_string_clauses`'s break
+                            // calculation from `compile_general_cases`
+                            // (compiler/core/lam_compile.ml:610-624) and
+                            // `Js_output.to_break_block`
+                            // (compiler/core/js_output.ml:88-100).
+                            let should_break = return_case_needs_break(a, *body, compiled_finished);
+                            Clause {
+                                source_loc: this.source_loc_of_lam(a, *body),
+                                body: {
+                                    let body = this.with_block_source_loc(a, *body, compiled_body);
+                                    JS::list(&body, &mut this.j)
+                                },
+                                should_break,
+                                comment: None,
+                            }
+                        },
                     });
+
+                    group_start = group_end + 1;
                 }
-                clauses.push(StringClauseInfo {
-                    tag_type: grouped_cases[group_end].0.clone(),
-                    clause: if hoist_shared_tail {
-                        shared_tail = Some(compiled_body);
-                        Clause {
-                            source_loc: None,
-                            body: crate::js_ir::arena::StmtList::EMPTY,
-                            should_break: true,
-                            comment: None,
-                        }
-                    } else {
-                        // Mirror `grouped_return_string_clauses`'s break
-                        // calculation from `compile_general_cases`
-                        // (compiler/core/lam_compile.ml:610-624) and
-                        // `Js_output.to_break_block`
-                        // (compiler/core/js_output.ml:88-100).
-                        let should_break = return_case_needs_break(a, *body, compiled_finished);
-                        Clause {
-                            source_loc: self.source_loc_of_lam(a, *body),
-                            body: {
-                                let body = self.with_block_source_loc(a, *body, compiled_body);
-                                JS::list(&body, &mut self.j)
-                            },
-                            should_break,
-                            comment: None,
-                        }
-                    },
-                });
+                clauses
+            } else {
+                this.grouped_return_string_clauses(a, grouped_cases, |tag| tag)
+            };
 
-                group_start = group_end + 1;
+            let default_block = default
+                .map(|fallback| this.compile_return_block(a, fallback))
+                .filter(|body| !body.is_empty());
+            let mut block = vec![JS::string_switch(
+                test,
+                clauses,
+                default_block.map(|b| JS::list(&b, &mut this.j)),
+                &mut this.j,
+            )];
+            if let Some(tail) = shared_tail {
+                block.extend(tail);
             }
-            clauses
-        } else {
-            self.grouped_return_string_clauses(a, grouped_cases, |tag| tag)
-        };
-
-        let default_block = default
-            .map(|fallback| self.compile_return_block(a, fallback))
-            .filter(|body| !body.is_empty());
-        let mut block = vec![JS::string_switch(
-            test,
-            clauses,
-            default_block.map(|b| JS::list(&b, &mut self.j)),
-            &mut self.j,
-        )];
-        if let Some(tail) = shared_tail {
-            block.extend(tail);
-        }
-        block
+            block
+        })
     }
 
     pub(crate) fn compile_named_string_switch_return(
@@ -1634,24 +1642,28 @@ impl LambdaCompiler {
             return block;
         }
 
-        let filtered_cases = self.filtered_switch_case_refs(a, cases, default);
-        let clauses = self.grouped_tail_loop_return_string_clauses(
-            a,
-            stable_group_switch_cases(a, filtered_cases, |_, _| true),
-            |tag| tag,
-            tail_loop,
-        );
+        // compiler/core/lam_compile.ml:793: only actual JS switch arms
+        // enter the switch context; small conditional dispatch does not.
+        self.with_switch_depth(|this| {
+            let filtered_cases = this.filtered_switch_case_refs(a, cases, default);
+            let clauses = this.grouped_tail_loop_return_string_clauses(
+                a,
+                stable_group_switch_cases(a, filtered_cases, |_, _| true),
+                |tag| tag,
+                tail_loop,
+            );
 
-        let default_block = default
-            .map(|fallback| self.compile_tail_loop_return_block(a, fallback, tail_loop))
-            .filter(|body| !body.is_empty());
+            let default_block = default
+                .map(|fallback| this.compile_tail_loop_return_block(a, fallback, tail_loop))
+                .filter(|body| !body.is_empty());
 
-        vec![JS::string_switch(
-            test,
-            clauses,
-            default_block.map(|b| JS::list(&b, &mut self.j)),
-            &mut self.j,
-        )]
+            vec![JS::string_switch(
+                test,
+                clauses,
+                default_block.map(|b| JS::list(&b, &mut this.j)),
+                &mut this.j,
+            )]
+        })
     }
 
     pub(crate) fn compile_named_string_switch_effect_with_strategy(
@@ -1677,44 +1689,48 @@ impl LambdaCompiler {
             }
         }
 
-        let filtered_cases = self.filtered_switch_case_refs(a, cases, default);
-        let clauses: Vec<_> = stable_group_switch_cases(a, filtered_cases, |_, _| true)
-            .into_iter()
-            .map(|(tag, body, is_last)| {
-                let clause = if is_last {
-                    let source_loc = self.source_loc_of_lam(a, body);
-                    // `Js_output.to_break_block` (js_output.ml:88-100).
-                    let body_output = self.compile_effect_block_output(a, body);
-                    let should_break = body_output.finished != OutputFinished::True;
-                    let body = self.with_block_source_loc(a, body, body_output.block);
-                    Clause {
-                        source_loc,
-                        should_break,
-                        body: JS::list(&body, &mut self.j),
-                        comment: None,
+        // compiler/core/lam_compile.ml:793: only actual JS switch arms
+        // enter the switch context; small conditional dispatch does not.
+        self.with_switch_depth(|this| {
+            let filtered_cases = this.filtered_switch_case_refs(a, cases, default);
+            let clauses: Vec<_> = stable_group_switch_cases(a, filtered_cases, |_, _| true)
+                .into_iter()
+                .map(|(tag, body, is_last)| {
+                    let clause = if is_last {
+                        let source_loc = this.source_loc_of_lam(a, body);
+                        // `Js_output.to_break_block` (js_output.ml:88-100).
+                        let body_output = this.compile_effect_block_output(a, body);
+                        let should_break = body_output.finished != OutputFinished::True;
+                        let body = this.with_block_source_loc(a, body, body_output.block);
+                        Clause {
+                            source_loc,
+                            should_break,
+                            body: JS::list(&body, &mut this.j),
+                            comment: None,
+                        }
+                    } else {
+                        this.empty_switch_case_clause_for(a, body)
+                    };
+                    StringClauseInfo {
+                        tag_type: tag,
+                        clause,
                     }
-                } else {
-                    self.empty_switch_case_clause_for(a, body)
-                };
-                StringClauseInfo {
-                    tag_type: tag,
-                    clause,
-                }
-            })
-            .collect();
+                })
+                .collect();
 
-        let default_block = default
-            .map(|fallback| {
-                let block = self.compile_effect_block(a, fallback);
-                self.with_block_source_loc(a, fallback, block)
-            })
-            .filter(|body| !body.is_empty());
-        vec![JS::string_switch(
-            test,
-            clauses,
-            default_block.map(|b| JS::list(&b, &mut self.j)),
-            &mut self.j,
-        )]
+            let default_block = default
+                .map(|fallback| {
+                    let block = this.compile_effect_block(a, fallback);
+                    this.with_block_source_loc(a, fallback, block)
+                })
+                .filter(|body| !body.is_empty());
+            vec![JS::string_switch(
+                test,
+                clauses,
+                default_block.map(|b| JS::list(&b, &mut this.j)),
+                &mut this.j,
+            )]
+        })
     }
 
     pub(crate) fn compile_named_string_switch_effect(

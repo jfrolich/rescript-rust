@@ -265,6 +265,53 @@ jobs:
             rewatch/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # The same build-system tests on macOS. Linux and macOS differ where the
+  # build touches the file system (file locks, rename, case folding), and a
+  # change that hangs or fails only there is otherwise seen by nobody: every
+  # other job runs on Linux.
+  build-system-tests-macos:
+    name: build-system-tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: ./.github/actions/setup-node
+
+      - name: Test release build system
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Check signature publication and stored interface determinism
+        run: python3 scripts/test_signature_publication.py
+
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   # The parity scripts' own tests. They need nothing built.
   script-tests:
     runs-on: ubuntu-24.04-arm
@@ -298,6 +345,9 @@ jobs:
 
       - name: Test printer parity aggregation and ratchets
         run: python3 -m unittest discover -s scripts -p test_printer_parity_test.py
+
+      - name: Test the worker-count determinism gate
+        run: python3 -m unittest discover -s scripts -p test_worker_determinism_test.py
 
   compiler-tests:
     runs-on: ubuntu-24.04-arm
@@ -404,6 +454,25 @@ jobs:
           python3 -m unittest discover -s scripts -p test_signature_equality_test.py
           python3 scripts/test_signature_equality.py
 
+  # A dependency served from the prebuilt snapshot must give the JavaScript,
+  # diagnostics and stored records that compiling it from source gives.
+  snapshot-equivalence:
+    name: Snapshot equivalence
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Compare snapshot and from-source builds
+        run: |
+          export RESCRIPT_RUNTIME="$PWD/packages/@rescript/runtime"
+          # The two projects whose dependencies this job has; the script's
+          # default list adds a workspace that needs its own package install.
+          RESCRIPT_EXECUTABLE="$PWD/rewatch/target/release/rescript" \
+            ./scripts/test_snapshot_equivalence.sh tests/belt_tests tests/tests
+
   # The output suites again with the Rust side printed by the opt-in oxc
   # printer: JavaScript is compared with the OCaml reference after
   # reformatting both, and a per-corpus ratchet
@@ -460,6 +529,7 @@ jobs:
               python3 scripts/test_marshal_debug_flags.py
               ./scripts/test_js_output_parity.sh --release
               python3 scripts/test_stored_interface_determinism.py
+              python3 scripts/test_worker_determinism.py
           - suite: diagnostics
             # Compare normal user-facing errors, not runtime-specific backtraces.
             run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
@@ -472,6 +542,11 @@ jobs:
               REWATCH_BIN="$PWD/rewatch/target/release/rescript" \
               RUST_BSC="$PWD/rewatch/target/release/bsc" \
                 ./scripts/test_gentype_output_parity.sh
+          - suite: analysis
+            # The Rust editor analysis against the OCaml analysis snapshots.
+            run: |
+              ./tests/analysis_tests/no-watcher.sh
+              ./tests/analysis_tests/test-rust.sh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node

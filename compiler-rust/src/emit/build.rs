@@ -18,6 +18,9 @@ pub(super) struct Build<'a, 'r> {
     pub debug: bool,
     pub jsx_preserve: bool,
     rest_name: std::cell::RefCell<String>,
+    chain_tasks: std::cell::RefCell<Vec<Expr>>,
+    jsx_indent: std::cell::Cell<usize>,
+    suppress_call_indent: std::cell::Cell<bool>,
     string_tasks: std::cell::RefCell<Vec<(Expr, bool)>>,
     string_values: std::cell::RefCell<Vec<Expression<'a>>>,
     pub raw_prefix: &'a str,
@@ -41,6 +44,9 @@ impl<'a, 'r> Build<'a, 'r> {
             debug: false,
             jsx_preserve: false,
             rest_name: Default::default(),
+            chain_tasks: Default::default(),
+            jsx_indent: Default::default(),
+            suppress_call_indent: Default::default(),
             string_tasks: Default::default(),
             string_values: Default::default(),
             source_map: None,
@@ -91,7 +97,22 @@ impl<'a, 'r> Build<'a, 'r> {
             Expression::new_computed_member_expression(
                 SPAN,
                 target,
-                self.string_expr(name),
+                if let Some(index) = walk::numeric_member(name) {
+                    let value = Expression::new_numeric_literal(
+                        SPAN,
+                        index.unsigned_abs() as f64,
+                        None,
+                        NumberBase::Decimal,
+                        &self.b,
+                    );
+                    if index < 0 {
+                        self.unary(U::UnaryNegation, value)
+                    } else {
+                        value
+                    }
+                } else {
+                    self.string_expr(name)
+                },
                 false,
                 &self.b,
             )
@@ -155,17 +176,27 @@ impl<'a, 'r> Build<'a, 'r> {
             e
         })
     }
-    fn args(&self, args: &[Expr]) -> Result<ArenaVec<'a, Argument<'a>>, Unsupported> {
+    fn argument(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
+        let extra = !self.suppress_call_indent.get()
+            && crate::js_ir::printer::call_argument_needs_extra_group_indent(
+                self.arena,
+                e,
+                level,
+                self.jsx_indent.get(),
+            );
+        self.indented_expr(e, usize::from(extra))
+    }
+    fn args(&self, args: &[Expr], level: u8) -> Result<ArenaVec<'a, Argument<'a>>, Unsupported> {
         let mut result = self.b.vec();
         for e in args {
             result.push(if let ExprKind::Spread(inner) = self.arena.ek(*e) {
                 Argument::SpreadElement(self.b.alloc(SpreadElement::new(
                     SPAN,
-                    self.expr(inner)?,
+                    self.high_expr(inner)?,
                     &self.b,
                 )))
             } else {
-                Argument::from(self.expr(*e)?)
+                Argument::from(self.argument(*e, level)?)
             });
         }
         Ok(result)
@@ -265,40 +296,68 @@ impl<'a, 'r> Build<'a, 'r> {
     /// Runtime JSX prints callee(tag, props[, key]). Names are encountered in
     /// that order, with spread before properties and children. oxc supplies
     /// call/object/array parentheses, matching printer::print_jsx_call.
-    fn jsx_call(&self, id: crate::js_ir::arena::JsxId) -> Result<Expression<'a>, Unsupported> {
-        let jsx = walk::jsx_runtime(self.arena, id, self.jsx_preserve)?;
-        let callee = self.expr(jsx.callee)?;
-        let mut args = self.b.vec1(Argument::from(self.expr(jsx.tag)?));
+    fn jsx_call(
+        &self,
+        id: crate::js_ir::arena::JsxId,
+        level: u8,
+    ) -> Result<Expression<'a>, Unsupported> {
+        let (jsx, form) = walk::jsx_form(self.arena, id, self.jsx_preserve)?;
+        match form {
+            walk::JsxForm::Fragment => {
+                return Ok(Expression::new_jsx_fragment(
+                    SPAN,
+                    JSXOpeningFragment::new(SPAN, &self.b),
+                    self.jsx_children(&jsx, false)?,
+                    JSXClosingFragment::new(SPAN, &self.b),
+                    &self.b,
+                ));
+            }
+            walk::JsxForm::Element => return self.jsx_element(&jsx),
+            walk::JsxForm::Runtime => {}
+        }
+        let callee = self.expr_at(jsx.callee, 15)?;
+        let mut args = self.b.vec1(Argument::from(self.argument(jsx.tag, level)?));
         let props = self.arena.props(jsx.props);
+        let extra = usize::from(
+            level == 15 && self.jsx_indent.get() == 0 && !self.suppress_call_indent.get(),
+        );
         let value = if let Some(spread) = jsx
             .spread
             .filter(|_| props.is_empty() && jsx.children.is_none())
         {
-            self.expr(spread)?
+            self.argument(spread, level)?
         } else {
             let mut properties = self.b.vec();
             if let Some(spread) = jsx.spread {
-                properties.push(ObjectPropertyKind::SpreadProperty(
-                    self.b
-                        .alloc(SpreadElement::new(SPAN, self.expr(spread)?, &self.b)),
-                ));
+                properties.push(ObjectPropertyKind::SpreadProperty(self.b.alloc(
+                    SpreadElement::new(
+                        SPAN,
+                        self.with_indent(1 + extra, || self.high_expr(spread))?,
+                        &self.b,
+                    ),
+                )));
             }
             for (key, value) in props {
                 let PropName::Lit(name) = key else {
                     return Err(Unsupported("symbol JSX key"));
                 };
-                properties.push(self.block_property(self.arena.text(*name), self.expr(*value)?));
+                properties.push(self.block_property(
+                    self.arena.text(*name),
+                    self.indented_expr(*value, 1 + extra)?,
+                ));
             }
             if let Some(children) = jsx.children {
                 let children = self.arena.exprs(children);
                 let value = if let [child] = children
                     && !jsx.multi
                 {
-                    self.expr(*child)?
+                    self.indented_expr(*child, 1 + extra)?
                 } else {
                     let mut elements = self.b.vec();
                     for child in children {
-                        elements.push(ArrayExpressionElement::from(self.expr(*child)?));
+                        elements.push(ArrayExpressionElement::from(
+                            self.indented_expr(*child, 2 + extra)?,
+                        ));
                     }
                     Expression::new_array_expression(SPAN, elements, &self.b)
                 };
@@ -308,9 +367,150 @@ impl<'a, 'r> Build<'a, 'r> {
         };
         args.push(Argument::from(value));
         if let Some(key) = jsx.key {
-            args.push(Argument::from(self.expr(key)?));
+            args.push(Argument::from(self.argument(key, level)?));
         }
         Ok(self.call(callee, args))
+    }
+
+    fn jsx_tag(&self, tag: Expr) -> Result<JSXElementName<'a>, Unsupported> {
+        if let ExprKind::Str(name) = self.arena.ek(tag) {
+            return Ok(JSXElementName::Identifier(self.b.alloc(
+                JSXIdentifier::new(SPAN, self.text(self.arena.text(name)), &self.b),
+            )));
+        }
+        let mut value = self.expr(tag)?;
+        let mut properties = self.b.vec();
+        while let Expression::StaticMemberExpression(member) = value {
+            let member = member.unbox();
+            properties.push(member.property.name);
+            value = member.object;
+        }
+        let Expression::Identifier(id) = value else {
+            return Err(Unsupported("JSX computed tag"));
+        };
+        if properties.is_empty() {
+            return Ok(JSXElementName::IdentifierReference(id));
+        }
+        let mut object = JSXMemberExpressionObject::IdentifierReference(id);
+        while let Some(name) = properties.pop() {
+            object = JSXMemberExpressionObject::new_member_expression(
+                SPAN,
+                object,
+                JSXIdentifier::new(SPAN, name, &self.b),
+                &self.b,
+            );
+        }
+        let JSXMemberExpressionObject::MemberExpression(member) = object else {
+            unreachable!()
+        };
+        Ok(JSXElementName::MemberExpression(member))
+    }
+
+    /// Every legacy JSX attribute is an expression container, even strings.
+    /// Preserve key-before-spread ordering; tag and attribute spelling are
+    /// checked by the same jsx_form decision used in naming.
+    fn jsx_element(
+        &self,
+        jsx: &crate::js_ir::arena::JsxInfo,
+    ) -> Result<Expression<'a>, Unsupported> {
+        let mut attributes = self.b.vec();
+        let attribute = |name: &str, value: Expr| -> Result<JSXAttributeItem<'a>, Unsupported> {
+            Ok(JSXAttributeItem::Attribute(self.b.alloc(
+                JSXAttribute::new(
+                    SPAN,
+                    JSXAttributeName::Identifier(self.b.alloc(JSXIdentifier::new(
+                        SPAN,
+                        self.text(name),
+                        &self.b,
+                    ))),
+                    Some(JSXAttributeValue::ExpressionContainer(self.b.alloc(
+                        JSXExpressionContainer::new(
+                            SPAN,
+                            JSXExpression::from(self.indented_expr(value, 1)?),
+                            &self.b,
+                        ),
+                    ))),
+                    &self.b,
+                ),
+            )))
+        };
+        let name = self.jsx_tag(jsx.tag)?;
+        if let Some(key) = jsx.key {
+            attributes.push(attribute("key", key)?);
+        }
+        if let Some(spread) = jsx.spread {
+            attributes.push(JSXAttributeItem::SpreadAttribute(self.b.alloc(
+                JSXSpreadAttribute::new(
+                    SPAN,
+                    self.with_indent(1, || self.high_expr(spread))?,
+                    &self.b,
+                ),
+            )));
+        }
+        for (key, value) in self.arena.props(jsx.props) {
+            let PropName::Lit(key) = key else {
+                unreachable!("validated JSX property")
+            };
+            attributes.push(attribute(
+                walk::member_form(self.arena.text(*key)).0,
+                *value,
+            )?);
+        }
+        let children = self.jsx_children(jsx, !attributes.is_empty())?;
+        let closing = if jsx.children.is_some() {
+            Some(self.b.alloc(JSXClosingElement::new(
+                SPAN,
+                self.jsx_tag(jsx.tag)?,
+                &self.b,
+            )))
+        } else {
+            None
+        };
+        Ok(Expression::new_jsx_element(
+            SPAN,
+            self.b.alloc(JSXOpeningElement::new(
+                SPAN, name, None, attributes, &self.b,
+            )),
+            children,
+            closing,
+            &self.b,
+        ))
+    }
+
+    fn jsx_children(
+        &self,
+        jsx: &crate::js_ir::arena::JsxInfo,
+        has_attrs: bool,
+    ) -> Result<ArenaVec<'a, JSXChild<'a>>, Unsupported> {
+        let mut children = self.b.vec();
+        let Some(list) = jsx.children else {
+            return Ok(children);
+        };
+        let expressions = self.arena.exprs(list);
+        let whitespace = |indent: usize| {
+            let text = self.text(&format!("\n{}", "  ".repeat(indent)));
+            JSXChild::Text(
+                self.b
+                    .alloc(JSXText::new(SPAN, text, Some(text.into()), &self.b)),
+            )
+        };
+        for e in expressions {
+            children.push(whitespace(self.jsx_indent.get() + 1));
+            let expression = self.indented_expr(*e, 1)?;
+            children.push(match expression {
+                Expression::JSXElement(element) => JSXChild::Element(element),
+                Expression::JSXFragment(fragment) => JSXChild::Fragment(fragment),
+                value => JSXChild::ExpressionContainer(self.b.alloc(JSXExpressionContainer::new(
+                    SPAN,
+                    JSXExpression::from(value),
+                    &self.b,
+                ))),
+            });
+        }
+        if has_attrs || !expressions.is_empty() {
+            children.push(whitespace(self.jsx_indent.get()));
+        }
+        Ok(children)
     }
 
     fn call(&self, callee: Expression<'a>, args: ArenaVec<'a, Argument<'a>>) -> Expression<'a> {
@@ -341,7 +541,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         tasks.push((left, false));
                     }
                 } else {
-                    values.push(self.expr(expr)?);
+                    values.push(self.high_expr(expr)?);
                 }
             }
             Ok(values.pop().unwrap())
@@ -362,50 +562,47 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(())
     }
-    // The legacy printer omits parentheses on either side of these chains.
-    fn chain(&self, op: BinOp, e: Expr, out: &mut Vec<Expr>) {
-        if let ExprKind::Bin(child, l, r) = self.arena.ek(e)
-            && child == op
-        {
-            self.chain(op, l, out);
-            self.chain(op, r, out);
-        } else {
-            out.push(e);
-        }
-    }
     fn bin(&self, op: BinOp, l: Expr, r: Expr) -> Result<Expression<'a>, Unsupported> {
         if walk::negation_form(self.arena, op, l) {
-            return Ok(self.unary(U::UnaryNegation, self.expr(r)?));
+            return Ok(self.unary(U::UnaryNegation, self.high_expr(r)?));
         }
         if let Some(target) = walk::nullish_target(self.arena, op, l, r)? {
             return Ok(self.binary(
                 B::Equality,
-                self.expr(target)?,
+                self.high_expr(target)?,
                 Expression::new_null_literal(SPAN, &self.b),
             ));
         }
         if matches!(op, BinOp::And | BinOp::Or | BinOp::Bor) {
-            let mut operands = Vec::new();
-            self.chain(op, l, &mut operands);
-            self.chain(op, r, &mut operands);
-            let mut iter = operands.into_iter();
-            let mut expr = self.expr(iter.next().expect("two operands"))?;
-            for e in iter {
-                let right = self.expr(e)?;
-                expr = if op == BinOp::Bor {
-                    self.binary(B::BitwiseOR, expr, right)
-                } else {
-                    Expression::new_logical_expression(
-                        SPAN,
-                        expr,
-                        if op == BinOp::And { L::And } else { L::Or },
-                        right,
-                        &self.b,
-                    )
-                };
-            }
-            return Ok(expr);
+            let mut pending = self.chain_tasks.take();
+            pending.extend([r, l]);
+            let result = (|| {
+                let mut value = None;
+                while let Some(e) = pending.pop() {
+                    if let Some((l, r)) = walk::chain_children(self.arena, op, e)? {
+                        pending.extend([r, l]);
+                        continue;
+                    }
+                    let right = self.high_expr(e)?;
+                    value = Some(match value {
+                        None => right,
+                        Some(left) if op == BinOp::Bor => self.binary(B::BitwiseOR, left, right),
+                        Some(left) => Expression::new_logical_expression(
+                            SPAN,
+                            left,
+                            if op == BinOp::And { L::And } else { L::Or },
+                            right,
+                            &self.b,
+                        ),
+                    });
+                }
+                Ok(value.expect("binary chain has operands"))
+            })();
+            pending.clear();
+            self.chain_tasks.replace(pending);
+            return result;
         }
+
         let operator = match op {
             BinOp::Eq => {
                 walk::assignment_target(self.arena, l)?;
@@ -439,7 +636,7 @@ impl<'a, 'r> Build<'a, 'r> {
             BinOp::In => B::In,
             BinOp::And | BinOp::Or | BinOp::Bor => unreachable!(),
         };
-        Ok(self.binary(operator, self.expr(l)?, self.expr(r)?))
+        Ok(self.binary(operator, self.high_expr(l)?, self.high_expr(r)?))
     }
     /// Shapes from `js_ir::printer::print_caml_block` (OCaml js_dump.ml:859-947).
     ///
@@ -658,8 +855,50 @@ impl<'a, 'r> Build<'a, 'r> {
             T::Undefined => self.id("undefined"),
         })
     }
+    /// Layout matters only to preserved JSXText. Mirror legacy grouping at
+    /// construction edges, not codegen formatting (which has different layout).
+    fn with_indent<T>(&self, extra: usize, f: impl FnOnce() -> T) -> T {
+        let previous = self.jsx_indent.get();
+        self.jsx_indent.set(previous + extra);
+        let result = f();
+        self.jsx_indent.set(previous);
+        result
+    }
+    fn high_expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        self.expr_at(e, 3)
+    }
+    fn dot_target(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let previous = self.suppress_call_indent.replace(true);
+        let result = self.expr_at(e, 15);
+        self.suppress_call_indent.set(previous);
+        result
+    }
+    fn indented_expr(&self, e: Expr, extra: usize) -> Result<Expression<'a>, Unsupported> {
+        self.with_indent(extra, || self.expr(e))
+    }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
-        let mut expression = self.expr_unmapped(e)?;
+        self.expr_at(e, 0)
+    }
+    fn expr_at(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
+        let extra = match self.arena.ek(e) {
+            ExprKind::Cond(..) => usize::from(level > 2),
+            ExprKind::CamlBlock(items, _, tag)
+                if self.arena.exprs(items).len() == 2
+                    && matches!(self.arena.tag(tag), crate::lambda::TagInfo::Constructor(c) if c.name == "::") =>
+            {
+                0
+            }
+            ExprKind::Array(..) | ExprKind::CamlBlock(..) => 1,
+            ExprKind::Object(props) => usize::from(
+                !self
+                    .arena
+                    .props(props)
+                    .iter()
+                    .all(|(key, _)| matches!(key, PropName::Spread | PropName::RecordSpread)),
+            ),
+            _ => 0,
+        };
+        let mut expression = self.with_indent(extra, || self.expr_unmapped(e, level))?;
         // S1.2: only kinds with a codegen start-token mapping are supported.
         if let Some(maps) = self.source_map {
             if maps.is_located(self.arena.expr_loc(e)) {
@@ -674,7 +913,7 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(expression)
     }
-    fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+    fn expr_unmapped(&self, e: Expr, level: u8) -> Result<Expression<'a>, Unsupported> {
         let a = self.arena;
         walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
@@ -705,17 +944,17 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::In(l, r) => self.binary(B::In, self.expr(l)?, self.expr(r)?),
             ExprKind::IsNullOrUndefined(e) => self.binary(
                 B::Equality,
-                self.expr(e)?,
+                self.high_expr(e)?,
                 Expression::new_null_literal(SPAN, &self.b),
             ),
-            ExprKind::JsNot(e) => self.unary(U::LogicalNot, self.expr(e)?),
-            ExprKind::JsBnot(e) => self.unary(U::BitwiseNot, self.expr(e)?),
-            ExprKind::Typeof(e) => self.unary(U::Typeof, self.expr(e)?),
+            ExprKind::JsNot(e) => self.unary(U::LogicalNot, self.high_expr(e)?),
+            ExprKind::JsBnot(e) => self.unary(U::BitwiseNot, self.high_expr(e)?),
+            ExprKind::Typeof(e) => self.unary(U::Typeof, self.high_expr(e)?),
             ExprKind::Cond(c, t, f) => Expression::new_conditional_expression(
                 SPAN,
-                self.expr(c)?,
-                self.expr(t)?,
-                self.expr(f)?,
+                self.high_expr(c)?,
+                self.with_indent(1, || self.high_expr(t))?,
+                self.with_indent(1, || self.high_expr(f))?,
                 &self.b,
             ),
             ExprKind::Seq(..) => {
@@ -727,9 +966,9 @@ impl<'a, 'r> Build<'a, 'r> {
                 walk::call_supported(a, f)?;
                 let mut call = CallExpression::new(
                     SPAN,
-                    self.expr(f)?,
+                    self.expr_at(f, 15)?,
                     None,
-                    self.args(walk::arguments(a, a.exprs(args)))?,
+                    self.args(walk::arguments(a, a.exprs(args)), level)?,
                     false,
                     &self.b,
                 );
@@ -738,21 +977,20 @@ impl<'a, 'r> Build<'a, 'r> {
             }
             ExprKind::New(f, args) => Expression::new_new_expression(
                 SPAN,
-                self.expr(f)?,
+                self.expr_at(f, 16)?,
                 None,
-                self.args(args.map_or(&[], |args| a.exprs(args)))?,
+                self.args(args.map_or(&[], |args| a.exprs(args)), level)?,
                 &self.b,
             ),
-            ExprKind::StaticIndex(e, s, _) => {
-                walk::static_member_supported(a.text(s))?;
-                self.member(self.expr(e)?, a.text(s))
+            ExprKind::StaticIndex(e, s, _) => self.member(self.dot_target(e)?, a.text(s)),
+            ExprKind::CamlBlockTag(e, s) => {
+                self.member(self.with_indent(1, || self.expr_at(e, 15))?, a.text(s))
             }
-            ExprKind::CamlBlockTag(e, s) => self.member(self.expr(e)?, a.text(s)),
-            ExprKind::Length(e, _) => self.member(self.expr(e)?, "length"),
+            ExprKind::Length(e, _) => self.member(self.dot_target(e)?, "length"),
             ExprKind::ArrayIndex(e, i) => Expression::new_computed_member_expression(
                 SPAN,
-                self.expr(e)?,
-                self.expr(i)?,
+                self.with_indent(1, || self.expr_at(e, 15))?,
+                self.indented_expr(i, 2)?,
                 false,
                 &self.b,
             ),
@@ -762,7 +1000,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     elements.push(if let ExprKind::Spread(e) = a.ek(*e) {
                         ArrayExpressionElement::SpreadElement(self.b.alloc(SpreadElement::new(
                             SPAN,
-                            self.expr(e)?,
+                            self.high_expr(e)?,
                             &self.b,
                         )))
                     } else {
@@ -811,8 +1049,10 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_object_expression(SPAN, properties, &self.b)
             }
             ExprKind::Fun(f) => self.function_expr(f)?,
-            ExprKind::Await(e) => Expression::new_await_expression(SPAN, self.expr(e)?, &self.b),
-            ExprKind::OptionalBlock(e, true) => self.expr(e)?,
+            ExprKind::Await(e) => {
+                Expression::new_await_expression(SPAN, self.high_expr(e)?, &self.b)
+            }
+            ExprKind::OptionalBlock(e, true) => self.expr_at(e, level)?,
             ExprKind::OptionalBlock(inner, false) => {
                 let mut args = self.b.vec();
                 if let Some(inner) = walk::optional_argument(a, inner) {
@@ -822,7 +1062,7 @@ impl<'a, 'r> Build<'a, 'r> {
             }
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(id) => self.raw(id, walk::RawContext::Expression)?,
-            ExprKind::Jsx(id) => self.jsx_call(id)?,
+            ExprKind::Jsx(id) => self.jsx_call(id, level)?,
             ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
                 self.b
                     .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
@@ -842,12 +1082,14 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
             }
             ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
-            ExprKind::FlatCall(func, args) => self.call(self.member(self.expr(func)?, "apply"), {
-                let mut values = self.b.vec();
-                values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
-                values.push(Argument::from(self.expr(args)?));
-                values
-            }),
+            ExprKind::FlatCall(func, args) => {
+                self.call(self.member(self.expr_at(func, 15)?, "apply"), {
+                    let mut values = self.b.vec();
+                    values.push(Argument::from(Expression::new_null_literal(SPAN, &self.b)));
+                    values.push(Argument::from(self.expr(args)?));
+                    values
+                })
+            }
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(fields, source) => self.record_rest(fields, source)?,
         })
@@ -888,7 +1130,7 @@ impl<'a, 'r> Build<'a, 'r> {
         let source = literal::arena_string(source, self.b.allocator());
         oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
             .parse_expression()
-            .map_err(|_| Unsupported("invalid JSON or directive"))
+            .map_err(|_| Unsupported("invalid JSON expression"))
     }
 
     /// See `walk::template_supported`: source spelling, not the cooked value,
@@ -955,6 +1197,12 @@ impl<'a, 'r> Build<'a, 'r> {
         &self,
         f: FunId,
     ) -> Result<oxc_allocator::Box<'a, FunctionBody<'a>>, Unsupported> {
+        self.with_indent(1, || self.function_body_inner(f))
+    }
+    fn function_body_inner(
+        &self,
+        f: FunId,
+    ) -> Result<oxc_allocator::Box<'a, FunctionBody<'a>>, Unsupported> {
         let info = self.arena.fun(f);
         let body = walk::function_body(self.arena, self.arena.stmts(info.body));
         let mut statements = self.b.vec();
@@ -977,17 +1225,28 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         let mut directives = self.b.vec();
         if let Some(directive) = info.directive {
-            // The legacy directive includes its quotes. It precedes every body
-            // statement and meets no identifiers; codegen supplies the semicolon.
-            let Expression::StringLiteral(value) = self.json(self.arena.text(directive))? else {
+            // Legacy prints the supplied text followed by a semicolon, even
+            // when it already ends in one. Retain resulting empty statements.
+            let source = literal::arena_string(self.arena.text(directive), self.b.allocator());
+            let source = self.text(&format!("{source};"));
+            let parsed =
+                oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
+                    .parse();
+            if !parsed.diagnostics.is_empty()
+                || parsed.program.directives.len() != 1
+                || !parsed.program.comments.is_empty()
+                || !parsed
+                    .program
+                    .body
+                    .iter()
+                    .all(|s| matches!(s, Statement::EmptyStatement(_)))
+            {
                 return Err(Unsupported("non-string function directive"));
-            };
-            directives.push(Directive::new(
-                SPAN,
-                value.unbox(),
-                self.text(self.arena.text(directive).trim_matches(['\'', '"'])),
-                &self.b,
-            ));
+            }
+            directives = parsed.program.directives;
+            let mut prefix = parsed.program.body;
+            prefix.extend(statements);
+            statements = prefix;
         }
         Ok(self
             .b
@@ -1009,7 +1268,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 // Legacy groups Fun bodies. oxc records parenthesized functions
                 // as PIFEs even with preserve_parens=false; a ParenthesizedExpression
                 // alone is ignored by codegen and does not reproduce these tokens.
-                if matches!(self.arena.ek(e), ExprKind::Fun(_)) {
+                if walk::arrow_function_body(self.arena, e) {
                     match &mut value {
                         Expression::ArrowFunctionExpression(f) => f.pife = true,
                         Expression::FunctionExpression(f) => f.pife = true,
@@ -1082,7 +1341,7 @@ impl<'a, 'r> Build<'a, 'r> {
     ) -> Result<oxc_allocator::Box<'a, BlockStatement<'a>>, Unsupported> {
         Ok(self.b.alloc(BlockStatement::new(
             SPAN,
-            self.block(self.arena.stmts(b), false)?,
+            self.with_indent(1, || self.block(self.arena.stmts(b), false))?,
             &self.b,
         )))
     }
@@ -1189,7 +1448,7 @@ impl<'a, 'r> Build<'a, 'r> {
         test: Expression<'a>,
         c: &crate::js_ir::arena::Clause,
     ) -> Result<SwitchCase<'a>, Unsupported> {
-        let mut body = self.block(self.arena.stmts(c.body), false)?;
+        let mut body = self.with_indent(2, || self.block(self.arena.stmts(c.body), false))?;
         if c.should_break {
             body.push(Statement::new_break_statement(SPAN, None, &self.b));
         }
@@ -1424,14 +1683,18 @@ impl<'a, 'r> Build<'a, 'r> {
                 } else {
                     Some(Statement::new_block_statement(
                         SPAN,
-                        self.block(f, false)?,
+                        self.with_indent(1, || self.block(f, false))?,
                         &self.b,
                     ))
                 };
                 out.push(Statement::new_if_statement(
                     SPAN,
-                    self.expr(c)?,
-                    Statement::new_block_statement(SPAN, self.block(a.stmts(t), false)?, &self.b),
+                    self.indented_expr(c, 1)?,
+                    Statement::new_block_statement(
+                        SPAN,
+                        self.with_indent(1, || self.block(a.stmts(t), false))?,
+                        &self.b,
+                    ),
                     alternate,
                     &self.b,
                 ));
@@ -1442,7 +1705,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     label,
                     Statement::new_while_statement(
                         SPAN,
-                        self.expr(cond)?,
+                        self.indented_expr(cond, 1)?,
                         Statement::BlockStatement(self.brace(body)?),
                         &self.b,
                     ),
@@ -1466,7 +1729,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         SPAN,
                         matches!(a.sk(s), StmtKind::ForAwaitOf(_)),
                         ForStatementLeft::VariableDeclaration(self.b.alloc(decl)),
-                        self.expr(f.iterable)?,
+                        self.indented_expr(f.iterable, 1)?,
                         Statement::BlockStatement(self.brace(f.body)?),
                         &self.b,
                     ),
@@ -1482,7 +1745,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.block(a.stmts(b), false)?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }
@@ -1503,7 +1766,7 @@ impl<'a, 'r> Build<'a, 'r> {
                     cases.push(SwitchCase::new(
                         SPAN,
                         None,
-                        self.block(a.stmts(b), false)?,
+                        self.with_indent(2, || self.block(a.stmts(b), false))?,
                         &self.b,
                     ));
                 }
@@ -1615,7 +1878,10 @@ mod block_tests {
                     build.b.vec1(stmt),
                     &build.b,
                 );
-                let actual = oxc_codegen::Codegen::new().build(&program).code;
+                let actual = oxc_codegen::Codegen::new()
+                    .with_options(crate::emit::program::codegen_options())
+                    .build(&program)
+                    .code;
                 let mode = ReformatOptions {
                     drop_decoration_comments: true,
                     ..Default::default()
@@ -1997,7 +2263,10 @@ mod remaining_expression_tests {
             build.b.vec1(stmt),
             &build.b,
         );
-        let actual = oxc_codegen::Codegen::new().build(&program).code;
+        let actual = oxc_codegen::Codegen::new()
+            .with_options(crate::emit::program::codegen_options())
+            .build(&program)
+            .code;
         let mode = ReformatOptions {
             drop_decoration_comments: true,
             ..Default::default()
@@ -2007,6 +2276,33 @@ mod remaining_expression_tests {
             actual
         );
         assert_eq!(reformat(&actual, mode).unwrap(), actual);
+    }
+
+    #[test]
+    fn canonical_numeric_members_match_legacy() {
+        use crate::js_ir::arena::FieldPos;
+        for key in [
+            "0",
+            "1",
+            "-1",
+            "-0",
+            "00",
+            "01",
+            "+1",
+            "9007199254740993",
+            "9223372036854775807",
+            "-9223372036854775808",
+            "9223372036854775808",
+        ] {
+            let mut a = JsArena::new();
+            let value = E::new(ExprKind::Undefined { is_unit: false }, &mut a);
+            let key = a.str(key);
+            let expr = E::new(
+                ExprKind::StaticIndex(value, key, FieldPos::new(None)),
+                &mut a,
+            );
+            oracle(&a, expr);
+        }
     }
 
     #[test]
@@ -2136,6 +2432,6 @@ mod remaining_expression_tests {
         let resolver = crate::js_ir::ModulePathResolver::from_compile_options(
             None, None, None, None, None, None, false,
         );
-        Names::collect(&program, &resolver).unwrap();
+        Names::collect(&program, &resolver, false).unwrap();
     }
 }

@@ -762,12 +762,58 @@ cleared, which is conservative in the same direction as today's count.
 
 Rules that need a count as today's snapshot had it are discussed in C.2.
 
+Amended in S4.4, where every binder's fact was compared with the entry
+`lam_pass_collect` holds, on every unit of the four corpora (313,000 binders
+on the application). The maintained fact is the legacy entry except in four
+places, which `bir/l/alias.rs` (`Table::build`) maps when a round reads a
+fact:
+
+| Fact | Legacy entry | Why |
+| --- | --- | --- |
+| `MutableBlock(node)` | none | `collect_bind` records immutable blocks only |
+| `NullableOptional(x, _)`, `x` not a variable | none | the legacy arm needs a variable operand |
+| `Param` on a static handler's parameter | none | only function parameters are `Parameter` |
+| `Alias(y)` | the entry of `y` | `alias_ident_or_global` copies it |
+
+A round reads facts by value, not through the node they name. The entry of
+a block is its elements (`Lam_util.element_of_lambda`: a variable, a
+constant, a module field of a module or of a variable, or nothing), the
+entry of `Some(x)` is `x` when it is a variable or a constant. Entries are
+a dense table indexed by variable, built from the frozen fact when the
+sweep reaches the binding or at the first read, whichever is first; cost
+one entry, or one element per field, once a round. Nodes stay 16 bytes and
+no edit pays for it.
+
+**The arity of a bound function is not a maintained fact** and cannot be
+"read from the node" as the sketch above says. `get_arity` reads the
+recorded arity of the variables a body ends in, the table is filled in
+visiting order and is never cleared, so a function visited before the one
+it calls sees the arity that one had after the previous `collect_info`:
+`let rec f = x => g(x) and g = (y, z) => 1` records `[1]` for `f` after one
+collection and `[1, 1]` after two, on the same tree. Maintaining it would
+need, per edit, the arities of every function whose body ends in the edited
+binding, in the order of a traversal that has not happened yet.
+`bir/l/arity.rs` therefore reproduces each `collect_info` as one ordered
+walk over a dense table carried between walks; it costs the nodes of the
+unit plus the tail of each bound function and exported value. The alias
+round does not read arities; the round that ports `alpha_conversion` does.
+This is the second exception, after the exit count of S4.3, to the goal of
+no recollection.
+
+**A static label is an identity.** `Bir` identifies a handler by its label;
+`Lam_bounded_vars.rewrite` keeps the label when it copies a handler, so
+after inlining the legacy tree holds a label twice. A copy in `Bir` gets a
+new label and the bridge exports it under the label it copies
+(`Engine::copy_catch_header`, `Imported::register_label`), as it does for
+identifiers. Open for the later exits rounds: `count_helper` counts by
+label, so in the legacy pipeline the copies of a handler share one count.
+
 Queries that walk today and do not in `Bir`:
 
 | Today | In `Bir` |
 | --- | --- |
 | `no_side_effects(lam)` | `PURE` flag |
-| `collect_info` (five walks) | `fact`, set when a binder is created or its value replaced |
+| `collect_info` (five walks) | `fact`, set when a binder is created or its value replaced; the arity is not a fact and takes one ordered walk per legacy collection (S4.4, `bir/l/arity.rs`) |
 | `arena_assigned_variables` (three walks) | `ASSIGNED` flag |
 | `collect_occurs` | `uses`, `CAPTURED` |
 | `count_helper` for exits | S4.3 correction: catch headers maintain structural weighted counts, not the ordered reachable-handler count; exits takes that count before rewriting (C.3) |
@@ -898,6 +944,48 @@ later).
 | 13 | Printer: names are chosen in print order. | R. The naming step walks in print order (E.3). |
 | 14 | Import order: emulated OCaml hash table order, then heap sort. | R. `OcamlModuleSet` and `ocaml_sort_modules` are kept as they are and move to the emit step. |
 
+Amended in S4.4, the first round that reads `ident_tbl` and inlines.
+
+Row 1, as built. (a) Only functions are copied. For the other facts that
+name a node (a block's fields, the content of `Some`) the round keeps the
+legacy entry by value, built before anything below the binding is edited
+(B.4): one element per field instead of a copy of the block's subtree,
+which may hold closures. (b) The copy is still taken before the first edit
+inside the function, and only for a function that passes
+`may_be_inlined` when the round starts: not async, no directive, and a
+functor, or marked for inlining, or smaller than 10, or a switch or
+conditional on a parameter. That is a necessary condition of
+`ok_to_inline_fun_when_app` that does not read the arguments. (c) The
+converse matters: a function that fails the test at the start is never
+inlined in the round, even when the sweep has since made it small. Without
+that rule a function whose body is a string switch on a bound constant is
+too big for the legacy pass and, once the round folded the switch, small
+enough here (found on `tests/tests`, now a unit test). (d) The scopes are
+opened by the stateful driver (`Engine::guard_enter`, `guard_exit`), which
+C.7 said was not possible; a driver must not hold a shell open inside a
+scope, because a snapshot copies the tree as it stands. (e) An application
+may lie inside the function it applies (a member of a recursive group): the
+rule takes the pending snapshots (`Engine::flush_guards`) before it detaches
+the arguments, and copies from the snapshot. (f) A snapshot's binders and
+static labels are fresh; their provenance is recorded so that the bridge
+can name what a reduction copies from them.
+
+Row 2, as built. The count of nested sweeps is driver state; a reduced
+non-recursive body is swept again one level deeper, a functor, an applied
+function and a function of another module at the same level, a member of a
+recursive group not at all. Only round 2 is built; rounds 3 and 5 are the
+same round after their collections.
+
+Row 3, measured. With every binder compared on every unit of the four
+corpora, no entry of the first collection survived in a form the second
+did not overwrite: the frozen fact equalled the table everywhere. The
+"frozen bit" is not needed for round 2. It may be for rounds 3 and 5,
+whose table also holds what earlier alias sweeps registered.
+
+`assignable` (`arena_assigned_variables` at the start of the pass) is the
+`ASSIGNED` flag, which is never cleared; the legacy set is recomputed. No
+unit showed a difference at this cut, where only source assignments exist.
+
 ### C.3 Rounds
 
 Level L rounds replace `simplify_in_arena`. "Sweeps" compares with A.4.
@@ -906,7 +994,7 @@ Level L rounds replace `simplify_in_arena`. "Sweeps" compares with A.4.
 | ---: | --- | --- | --- |
 | 0 | alias collapse (`collapse`) | no sweep: when conversion builds `let[Alias] x = y`, later uses of `x` are built as `y`; the binding itself is built only if `x` is exported | |
 | 1 | `deep_flatten`; then exits (`subst_helper`) | flatten: `Order::Stateful`, explicit `aux`/`flatten` continuations; exits: `Order::Stateful`, handler before body | flatten: no `Let` or `LetRec`; exits: no `Catch` |
-| 2 | `simplify_alias` | `simpl`'s recursion | |
+| 2 | `simplify_alias` | `Order::Stateful` (S4.4): a conditional is rewritten before the kept branch is visited, the arguments of an application before the decision, a field after its operand, an inlined body again with a nesting count | no application, primitive, conditional or string switch |
 | 3 | `deep_flatten`, then `simplify_alias` | two sweeps | |
 | 4 | `deep_flatten`, then `alpha_conversion` | two sweeps | flatten: no `Let` whose value is a `Let`, `Seq`, `LetRec` or named block |
 | 5 | exits, then `simplify_alias` | two sweeps | exits: no `Catch` |
@@ -952,8 +1040,9 @@ Level J rounds replace the JS passes:
 | `refine_let` | `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
 | `deep_flatten` (`flatten`, `eliminate_tuple`) | `bir/l/flatten.rs`: explicit continuations, binding groups, tuple projection elimination and `refine` | pass, rounds 1, 3, 4; first call checked in S4.2 |
 | `simplify_exits` | `bir/l/exits.rs`: `catch`, `raise`, `shallow`, explicit handler continuations and argument substitution | pass, rounds 1, 5, 7; first call checked in S4.3 |
-| `simplify_alias` field, option, boolean cases | `fold_field`, `fold_is_some`, `fold_if_var`, `fold_str_switch`, `unwrap_some` | pass, rounds 2, 3, 5 |
-| `simplify_alias` inlining, `lam_beta_reduce` | `inline_call`, `inline_external`, `beta` | pass, rounds 2, 3, 5 |
+| `simplify_alias` field, option, boolean cases | `bir/l/alias.rs`: `field`, `unwrap_some`, `if_`, `truth`, `nullable`, `str_switch`, the JSX-preserve arm of `prim` | pass, rounds 2, 3, 5; first call checked in S4.4 |
+| `simplify_alias` inlining, `lam_beta_reduce` | `bir/l/alias.rs`: `apply`, `apply_known`, `inline`; `bir/l/beta.rs`: `simple`, `reduce`, `copy` and the analyses | pass, rounds 2, 3, 5; first call checked in S4.4 |
+| `collect_info`'s arities | `bir/l/arity.rs`: one ordered walk per legacy collection | explicit pass (B.4) |
 | `alpha_conversion`, `transform_under_supply` | `uncurry_apply` | pass, round 4 |
 | `simplify_lets` | `drop_let`, `subst_alias`, `reduce_applied_fun`, `fold_string_add` | pass, round 6 |
 | `lam_pass_sroa` | `scalarise_block` | pass, round 6 |
@@ -1050,8 +1139,9 @@ explicit stack. A round whose mask misses the root's summary does nothing.
 `Order::Stateful` additionally lets a pass carry continuations and groups through
 its own explicit stack, using the same edit API. Its driver must call
 `enter_candidate` before aux descent and `finish_candidate` on return; the
-latter refreshes the summary in O(children). Snapshot guards are not yet
-supported for stateful drivers (the engine rejects them). The flatten driver
+latter refreshes the summary in O(children). A stateful driver opens
+its own snapshot scopes (`guard_enter`, `guard_exit`; S4.4, item 10 of C.7).
+The flatten driver
 precomputes beta-residue suffixes in one linear scan, then visits its input
 nodes once. Candidate scans (`hit`, `safe_alias`, and legacy purity) cost the
 candidate subtree, explicitly in addition to the sweep; these are not bounded
@@ -1133,9 +1223,8 @@ pass.
    `Order::Stateful` with an explicit continuation stack when a later pass
    needs this interleaving; otherwise keep Pre/Post. Its driver owns the
    ordering, calls `enter_candidate`/`finish_candidate`, edits only through
-   the engine, and documents any candidate scans. A stateful driver cannot
-   yet request snapshot guards: extend the guard-scope API and tests before
-   using this order for an inlining round that needs snapshots.
+   the engine, and documents any candidate scans. Since S4.4 a stateful
+   driver opens snapshot scopes itself (item 10).
    Code correction: `LamArena::shallow_map_impl` currently calls `if_` and
    `seq` on changed children too, unlike C.1's S4.1 description. Flatten's
    renorm mask includes IF and SEQ; other rounds must read their actual
@@ -1175,6 +1264,24 @@ pass.
 9. Deaths stay deferred until the round that ports `simplify_lets`, which
    starts with `engine.resume_deaths()`. Before that, an export never meets
    a released `let` value.
+10. S4.4, for a round that reads facts or inlines. Read a binder through a
+    table of entries built from `engine.fact` (`bir/l/alias.rs`, `Table`),
+    not through the node a fact names. A stateful driver opens a snapshot
+    scope with `engine.guard_enter(function)` around the sweep of a bound
+    function it may read later and closes it with `guard_exit`; no shell
+    may be open inside. A rule that copies a body renames with
+    `engine.rename_var` in the legacy order and builds each node with
+    `engine.node` followed by `engine.normalise` where the legacy code calls
+    a smart constructor (`beta::copy` is the model); a copied handler gets
+    `engine.copy_catch_header`. What a round needs from outside the unit
+    comes through `Engine::host`; variables the host imports are recorded
+    with their own identity. `Engine::replace` walks the replacement and the
+    ancestors of the target for the capture flags: a rule that puts new
+    variable uses outside every function and loop uses `fill`, and the
+    driver counts the functions and loops around the node it sweeps.
+    Report a shape the round cannot represent through
+    `engine.stats.unsupported`. The stage is called where the legacy pass
+    is, so that it gets the same resolvers (`LambdaCompiler::set_shadow_unit`).
 
 ## D. Match compilation into the IR
 
@@ -1520,18 +1627,27 @@ Comments today's output contains (counted over `tests/tests/src`):
 | Header, trailer, empty-output | every file | file assembly (E.4.1) |
 | `/* @__PURE__ */` before exception creation calls | 74 | `CallExpression::pure`; oxc prints the annotation itself |
 | Comment-only raw JS statements written by the user (`// ...`, `/* ... */`) | 2 | statement-level oxc comments, text in the synthetic source |
-| Constructor names on integer constants, `/* [] */0` | 372 | dropped |
-| Character comments on numbers, `/* 'a' */97` | 108 | dropped |
+| Constructor names on integer constants, `/* [] */0` | 372 | retain if measured cheap; currently dropped |
+| Character comments on numbers, `/* 'a' */97` | 108 | retain if measured cheap; currently dropped |
 
 The last two are decorations from `pointer_info_comment_text` and
 `format_char_comment`. oxc cannot print a comment at an arbitrary expression
 position: reformatting the reference keeps `tl: /* [] */ 0` in a property
 value and drops `return /* [] */0` (1,230 comments in, 1,108 out over the
 test outputs). Reproducing oxc's partial behaviour would tie the output to an
-accident. Decision: decoration comments are not part of the output contract
-and are not emitted; the gate removes them from the reference (S0). This is
-the one visible change to the emitted text besides layout, and it needs the
-project owner's confirmation (section I).
+accident. Decision: prefer retaining these decorations if it costs no more
+than about 0.1% of an oxc-mode build. They remain outside the equivalence
+contract: the gate removes them on both sides. The opt-in emitter currently
+drops them until retention has a measured implementation within that budget.
+
+The existing raw-JavaScript placeholder/substitution path is a candidate,
+not NumericLiteral.raw (ignored outside TypeScript). Native oxc comments
+cannot retain them at every expression position, as the experiment above
+shows. A placeholder needs correct numeric precedence/member-target wrapping
+and fixed-point coverage, not just textual replacement. Files already having
+raw pieces can share their scan; raw-free files currently only copy the
+codegen buffer, so adding decorations introduces a scan plus per-hole work.
+Measure those costs separately before retaining comments by default.
 
 **E.4.3 Raw JS.** `%raw` expressions and statements are printed verbatim
 today. oxc has no verbatim node, so raw JS is parsed with `oxc_parser` into
@@ -1639,10 +1755,12 @@ The inlining rule that protects JSX tags in preserve mode
 
 ### E.8 Printing, source maps, allocator
 
-Printing: `Codegen::new().with_options(options).build(&program)`, default
-options (tabs, double quotes), as the reformat tool. Layout options are not
-exposed; if two-space indentation is wanted it is one option
-(`indent_char`, `indent_width`) set identically in the compiler and the tool.
+Printing: `Codegen::new().with_options(options).build(&program)`, with
+`indent_char = IndentChar::Space` and `indent_width = 2`, in both the opt-in
+emitter and the reformat tool. Two spaces, not tabs, is the chosen layout;
+double quotes and the remaining codegen options keep their defaults. The
+fixed-point gate uses these identical options. This does not switch the
+default printer.
 
 Source maps. What today's contract needs (`js_ir/source_map.rs`): Source Map
 v3 with `file`, `sourceRoot`, `sources` relative to the output, optional
@@ -1931,7 +2049,8 @@ model with this document as its specification.
 | S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
 | S4.2 | Deep flatten, explicit continuations, fresh-identity export and `lambda-flatten` diagnostic comparison | `bir/l/flatten.rs`, engine, bridge, shadow and coverage ratchet | see S4.2 results below | implemented | S4.1 | yes |
 | S4.3 | Stateful exit counting and substitution; `lambda-exits` after the first flatten | `bir/l/exits.rs`, engine, shadow, coverage and documentation | all four corpora identical; ordered counts and exact identifiers; deep/wide cost tests | implemented | S4.2 | yes |
-| S4.4 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
+| S4.4 | First alias round with inlining; facts and arities compared with the legacy table; `lambda-alias` | `bir/l/{alias,beta,arity}.rs`, engine, bridge, shadow, the stage's call site, coverage and documentation | see S4.4 results below | implemented | S4.3 | yes |
+| S4.5 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
@@ -2002,6 +2121,82 @@ ratchets remain unchanged; the J bridge stage is retained too. Later exits
 cuts are **not measured**: reaching them requires the external-inline/arity
 resolvers and mutable `LamStats` used by intervening alias/alpha passes, which
 the shadow hook does not receive. No later-cut identity is claimed.
+
+### S4.4: first alias round
+
+`RESCRIPT_BACKEND=check` runs the stage `lambda-alias` where the Lambda
+passes run (`LambdaCompiler::compile_deps_program_in_arena`), with the
+external-arity and external-inline resolvers and `jsx_preserve` they get.
+The Bir side runs the flatten, exits and alias rounds; the legacy side runs
+`deep_flatten`, `collect_info`, `simplify_exits`, `collect_info`,
+`simplify_alias` on a cloned arena with the same counter seed. Before the
+alias round the stage compares, for every binder, the entry the round
+reads and its recorded arity with the legacy table; after it, the dumps
+and the name, stamp and flags of every identifier. A difference is an
+error. The whole pass is ported, including the inlining of applications:
+the plan to hold units back with the reasons "alias: inline application"
+and "alias: external inline" was not needed, and neither reason exists.
+
+| Corpus | Units | Identical | Unsupported |
+| --- | ---: | ---: | ---: |
+| runtime | 113 | 113 | 0 |
+| tests/tests | 718 | 718 | 0 |
+| fixtures | 480 | 480 | 0 |
+| 3,735-module application, built from its own directory (with the runtime it compiles: 3,848 units) | 3,848 | 3,848 | 0 |
+
+Binders compared with the legacy table, per kind of entry ("arity": the
+binders with a function entry, whose arity was compared too):
+
+| Kind | Runtime | tests/tests | Fixtures | Application build |
+| --- | ---: | ---: | ---: | ---: |
+| none | 698 | 6,187 | 4,896 | 153,164 |
+| parameter | 688 | 6,004 | 4,928 | 103,528 |
+| function | 337 | 2,800 | 2,832 | 31,301 |
+| constant | 94 | 1,044 | 456 | 3,611 |
+| immutable block | 79 | 713 | 1,128 | 4,366 |
+| nullable conversion | 12 | 20 | 64 | 579 |
+| `Some` | 1 | 47 | 0 | 44 |
+| module | 1 | 48 | 0 | 26 |
+| arity | 364 | 3,889 | 4,024 | 36,986 |
+
+Rules fired. The four `inline-` rows and `beta-` rows are the decisions
+that the split plan would have held back:
+
+| Rule | Runtime | tests/tests | Fixtures | Application build |
+| --- | ---: | ---: | ---: | ---: |
+| field-of-module | 2 | 499 | 0 | 1,470 |
+| field-of-block | 7 | 356 | 592 | 3,242 |
+| field-of-constant | 0 | 62 | 120 | 888 |
+| unwrap-some | 12 | 29 | 64 | 402 |
+| unwrap-not-nested | 27 | 182 | 440 | 11,075 |
+| if-known | 0 | 12 | 0 | 3 |
+| if-nullable | 12 | 19 | 64 | 396 |
+| switch-on-constant | 0 | 2 | 0 | 0 |
+| inline-application (bound, non-recursive) | 104 | 708 | 617 | 3,782 |
+| inline-recursive (member of a group) | 0 | 2 | 0 | 0 |
+| inline-functor | 16 | 41 | 40 | 56 |
+| inline-applied-function | 0 | 16 | 24 | 13,212 |
+| inline-external | 13 | 0 | 3 | 19 |
+| beta-simple (`simple_beta_reduce`) | 79 | 333 | 339 | 2,880 |
+| beta-copy (`propagate`) | 54 | 434 | 345 | 14,189 |
+
+Step counts (a step is a node read, an allocation or a worklist push):
+10,000 aliases in a chain, 140,106 steps for 20,009 nodes; a 10,000-field
+block read 10,000 times, 1,130,023 for 60,003; 10,000 inlined call sites of
+one small function at the top level, 2,860,056 for 50,009 (286 a call
+site). A unit without a candidate enters no node.
+
+Open after S4.4. (a) An inlined call site under a function or a loop still
+pays `Bir::replace`'s capture walk, the ancestors of the call site up to
+the root: linear in the depth per inlining. The walk can stop once it has
+passed the binders of the uses it moved; that is an arena change. (b) The
+later exits rounds meet copies of one handler under distinct labels (B.4).
+(c) Rounds 3 and 5 read a table that also holds what earlier alias sweeps
+registered for the parameters they bound (C.2 row 3). (d) A function body
+of another module whose static labels collide with the unit's falls back
+with the bridge's `reused static catch label`; no unit of the four corpora
+has one. (e) `tests/tests` has 718 units on trunk today; the ratchet
+entries of the earlier stages still say 711, which the ratchet accepts.
 
 ### H.2 Stage S1 in full
 

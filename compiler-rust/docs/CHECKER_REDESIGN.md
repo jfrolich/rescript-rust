@@ -17,6 +17,13 @@ plan: the end state as checks on the code, the frozen pool, the slices with
 their prompts, and the saving re-derived from measurements. Where J and
 those sections disagree, J holds.
 
+**What a different representation saves is measured in section K.** Section
+I dropped the new core because sharing is observable. Section K keeps the
+rules of I.3.3 and measures everything else about representation on real
+builds: 6.3% of the build from the layout of nodes and lists alone, with the
+same output. Where K and I.5 or I.6 disagree about what is worth building, K
+holds.
+
 ## 0. Summary
 
 ### The problem
@@ -5197,3 +5204,605 @@ application with 8 workers for base and candidate (the measurement of J.1).
 - Not measured: anything on the fat-LTO or profile-guided executable; the
   saving of any slice (no slice is built); the node count of whole views
   (bounded, not counted); watch-mode rebuilds.
+
+## K. What a different representation saves: measurement and verdict
+
+Section I dropped the new core (P7 to P9) with an argument about one design,
+item by item: each saving F.10 claimed came from sharing ground terms, and
+sharing is observable. That does not bound what a core with a different data
+representation saves when sharing is left exactly as it is. I.5 left the
+split of `unify` and of expansion "unknown", I.6 did not estimate the walk.
+This section measures it. The rules of I.3.3 are fixed and were kept by
+every binary measured here: one node per occurrence, links on structure
+nodes, levels written on every node, copy decided by the level.
+
+Short version:
+
+- 32% of the instructions of type checking address a node or a list and
+  test which storage tier it is in. Another 34% is allocation, copying,
+  reference counts and hashing. 34% is the checking itself (K.2).
+- A prototype that changes only where local nodes and lists live and how a
+  read finds them saves **6.3% of the application's build** and 5.9% of
+  `tests/tests`, with no difference in signatures, diagnostics or generated
+  files (K.3).
+- Rewriting the application path of the walk the way a full rewrite would
+  saves a further 0.36% of the build; the same treatment of the rest of the
+  walk is bounded at about 2% (K.4).
+- Verdict: 6.7% measured, 7-10% with the extrapolated parts. That is above
+  the 3% line, so K.6 is the build plan. It is not a new core: it is five
+  slices on today's `TypeContext`, the first two of which carry the measured
+  part.
+
+### K.1 Method
+
+- Machine: x86-64 Linux, 8 cores. Trunk 77b9188b1. `rescript` built with the
+  release profile (fat LTO) and line tables
+  (`CARGO_PROFILE_RELEASE_DEBUG=1`), not the profile-guided build. Projects:
+  `tests/tests` (717 modules compiled) and a 3,735-module application.
+- Instructions: `valgrind --tool=callgrind`, `RAYON_NUM_THREADS=1`, clean
+  build. The whole build, and type checking alone with
+  `--collect-atstart=no --toggle-collect='*typemod::type_structure'`, which
+  counts `type_structure` and everything it calls, into the allocator,
+  `memcpy`, hashing and drop glue. The toggled count equals the inclusive
+  cost of `type_structure` in the full profile (1,475.04 M against
+  1,475.01 M on `tests/tests`).
+- Attribution is per instruction address, not per function. The profile is
+  taken with `--dump-instr=yes`; every address of the executable is resolved
+  to its stack of inlined frames (`llvm-symbolizer --inlines`). An address
+  gets the kind of the innermost inlined frame that belongs to a mechanism
+  (the tables below name the mechanisms and the symbols that define them);
+  an address with no such frame, in a function of the compiler, is the
+  checking itself. Addresses in libc and in the allocator are classified by
+  symbol. This matters because the node accessors are `#[inline]`: by
+  function, `unify_types` is one number; by address, 60% of its own
+  instructions are `TypeNodes::node`, `locate` and `desc`.
+- Owner (core, walk, environment, other) is the innermost frame that lies in
+  a file with an owner: `types/ctype.rs` is the core, `types/typecore.rs`
+  and `types/typemod.rs` the walk, `types/env*.rs` and `cmi/` the
+  environment. An instruction in a shared callee that has no such frame (the
+  allocator, `memcpy`, a hash table, out-of-line context functions such as
+  `repr_chain`) is divided between owners in proportion to the inclusive
+  cost of the calls into it, iterated over the call graph.
+- Share that could not be attributed: 0.00% by kind (4 M of 31.2 G
+  instructions lie in neither the executable, libc's string functions nor
+  the allocator). By owner everything is assigned, but 39% of type checking
+  on the application is in shared callees and is assigned by the
+  proportional rule, not by a frame.
+- What the kinds do not say. Kind (d) contains the load of the node itself,
+  which no layout removes: the prototype of K.3 still spends 3.4% of type
+  checking in its one-compare read. Kind (e) contains moves of values inside
+  checker functions. So (a) to (d) is an upper bound of what a
+  representation can remove and not an estimate; K.3 is the estimate.
+- Cache misses: one callgrind run of type checking with `--cache-sim=yes`
+  (the simulated first-level and last-level caches of the machine), and
+  `perf stat` on whole builds (`instructions:u`, `cycles:u`,
+  `cache-misses:u`, `L1-dcache-load-misses:u`, `branch-misses:u`), one
+  worker, seven runs a side, interleaved.
+- Wall time: `hyperfine`, clean build, 7 runs with one worker, 10 with eight.
+- Differential check: `scripts/compare_checker_builds.py` on both projects,
+  base against each prototype, and the 729 `super_errors` fixtures compiled
+  one by one by both and compared as text.
+- The two measurement patches are preserved under `prototypes/` (400 lines
+  added, 105 deleted). The three Python profiling scripts (callgrind parser,
+  symbolizer driver, classifier) are not committed.
+
+### K.2 Anatomy of type checking by kind of work
+
+Type checking is 31.20 G of the application's 74.21 G instructions (42.0%)
+and 1.475 G of the 4.297 G of `tests/tests` (34.3%). All shares below are of
+type checking.
+
+**Application.**
+
+| Kind | All | Core | Walk | Environment | Other |
+|---|---|---|---|---|---|
+| (a) allocation and freeing | 10.0% | 2.5% | 5.0% | 1.4% | 1.1% |
+| (b) copying, cloning, dropping | 9.6% | 2.2% | 3.8% | 1.0% | 2.6% |
+| (b) reference counts | 3.5% | 0.3% | 0.5% | 2.7% | 0.0% |
+| (c) hashing and table probes | 11.1% | 3.3% | 2.4% | 3.6% | 1.8% |
+| (d) node and list addressing, tier tests, borrow flags, the journal | 32.0% | 27.0% | 3.9% | 0.7% | 0.5% |
+| (e) the checking itself | 33.8% | 15.6% | 10.4% | 3.2% | 4.7% |
+| Sum | 100.0% | 50.9% | 26.0% | 12.5% | 10.6% |
+
+**`tests/tests`.**
+
+| Kind | All | Core | Walk | Environment | Other |
+|---|---|---|---|---|---|
+| (a) allocation and freeing | 10.7% | 2.4% | 5.2% | 1.6% | 1.5% |
+| (b) copying, cloning, dropping | 9.5% | 1.9% | 4.1% | 1.3% | 2.2% |
+| (b) reference counts | 3.0% | 0.2% | 0.4% | 2.3% | 0.1% |
+| (c) hashing and table probes | 11.4% | 3.0% | 4.4% | 2.5% | 1.5% |
+| (d) node and list addressing, tier tests, borrow flags, the journal | 32.1% | 25.3% | 5.3% | 0.9% | 0.6% |
+| (e) the checking itself | 33.3% | 13.4% | 10.1% | 2.2% | 7.5% |
+| Sum | 100.0% | 46.2% | 29.5% | 10.9% | 13.4% |
+
+"Other" is pattern-match analysis (`parmatch.rs`), signature inclusion,
+variance, and the parts of the driver under `type_structure`. (a) includes
+the 1.8% that creates type nodes (`alloc_type`, `TypeNodes::push`, type
+identifiers).
+
+So the two shapes are opposite. In the core, 69% is not checking (53% of the
+core is kind (d)). In the walk, 60% is not checking and it is spread:
+allocation 19%, copies and reference counts 17%, hashing 9%, node access
+15%.
+
+**Kind (d) in detail** (application):
+
+| Mechanism | Share of type checking | Symbols |
+|---|---|---|
+| Finding a local node: `locate` (add, count leading zeros, shifts), the chunk's `OnceCell`, the bounds check, the load | 16.4% | `TypeNodes::{node, locate, desc, level, set_desc}`, 8.3% + 5.4% + 2.7% |
+| Which tier, and is a store build active | 6.9% | `poison_store_build_for` 1.4%, `TypeExprRef::is_store` 0.9%, `TypeContext::desc` 0.8%, `store_desc` and `shared_store::page_node` 0.7%, the overlays 0.4%, `write_desc_raw`, `get_level`, the rest |
+| Finding a type list or parameter list (the same chunk ladder), iterating it through `PoolSlice` | 4.0% | `PayloadChunks::{slots, locate}`, `PoolIter::next`, the `SmallVec` a list is collected into |
+| The mutation journal: opening and closing a snapshot for each unification, deciding whether a write is logged | 2.6% | `snapshot_type_state_with`, `TypeMutationJournal::finish`, `TypeMutationSnapshot::drop`, `record_type_mutation`, `TrailLogging` |
+| `RefCell` borrow flags | 1.6% | `BorrowRef::new`, `BorrowRefMut::new` |
+| `Once` and thread-local initialisation checks | 0.6% | |
+
+A descriptor read of a local node is about 24 instructions before the load
+(read in the disassembly of `repr_chain`): the tier bit, the store-build
+depth, `idx + 256`, `bsr`, two shifts, the chunk pointer, its null test, the
+offset, the bounds check, a shift by 5.
+
+**Cache misses** (application, type checking only, simulated):
+
+| Kind | Instructions | First-level data read misses | First-level data write misses | Last-level read misses | Last-level write misses |
+|---|---|---|---|---|---|
+| (a) allocation and node creation | 10.0% | 19.4% | 13.0% | 15.4% | 25.9% |
+| (b) copies, clones, drops, reference counts | 13.1% | 19.7% | 33.9% | 11.6% | 55.6% |
+| (c) hashing | 11.1% | 13.5% | 7.4% | 14.3% | 4.9% |
+| (d) node and list access | 32.0% | 10.1% | 12.9% | 5.4% | 11.4% |
+| (e) checking | 33.8% | 37.2% | 32.8% | 53.4% | 2.3% |
+| Total | 31.19 G | 193 M | 130 M | 12.7 M | 15.4 M |
+
+Node and list access is a third of the instructions and a tenth of the
+misses. The nodes of a module are in cache; what is paid is the arithmetic
+to reach them. So the gain of a node layout is in instructions, and an
+instruction count does not hide a larger gain in misses. The misses are in
+allocation, copying and hashing: the walk's and the environment's kinds.
+
+### K.3 The core prototype
+
+[Core measurement prototype](prototypes/core-prototype.patch): measurement prototype, not reviewed code.
+
+**Method chosen: the proposed layout behind today's handle API, on real
+builds** (the second of the two the task allowed). A replayed trace would
+need the argument graphs of every operation, and expansion and unification
+read declarations from the environment in between, so the replayer would
+have to carry an environment too: more code, and a number that depends on
+the trace being faithful. Behind the handle API the whole compiler is the
+harness, and `compare_checker_builds.py` says whether the work is the same.
+
+What the prototype changes, three things at once, 215 lines:
+
+1. **Local nodes.** The first 65,536 nodes of a compilation are one
+   fixed-size array, leased from a per-thread list and returned when the
+   compilation ends, without being cleared (a handle only ever refers to a
+   node below the current length). Later nodes go to today's chunk ladder.
+2. **One compare for the read.** `TypeNodes` keeps a `fast_limit`: 65,536,
+   or 0 while a store build is active. `desc`, `get_level`, `write_desc_raw`
+   and `write_level_raw` start with `raw < fast_limit`, on the raw handle.
+   A worker-store or shared handle has a high bit set, so it fails the
+   compare: the one test covers the tier, the chunk bound and the store-build
+   check, and the node is `first[raw]`. Everything else takes today's path,
+   out of line.
+3. **Lists.** Type lists and parameter lists get the same first array
+   (65,536 slots each) in front of their chunk ladder.
+
+Not changed: `TypeDesc`, the node (24-byte descriptor, level, id), handles,
+every tier, the overlays, the journal, the copy session, `ctype.rs` (not one
+line), the walk. Rules 1 to 8 of I.3.3 hold by construction: the patch
+changes where a node is stored, never when one is made, linked, levelled or
+copied.
+
+| Workload | Measure | Trunk | Prototype | Change |
+|---|---|---|---|---|
+| Application | instructions, build (callgrind) | 74.206 G | 69.524 G | **-6.31%** |
+| Application | instructions, type checking | 31.203 G | 27.088 G | -13.19% |
+| `tests/tests` | instructions, build | 4,297.2 M | 4,044.2 M | **-5.89%** |
+| `tests/tests` | instructions, type checking | 1,475.1 M | 1,269.7 M | -13.93% |
+| Application | `instructions:u` (`perf stat`, smallest of 7) | 70.76 G | 66.11 G | -6.6% |
+| Application | `cycles:u`, smallest of 7 / median | 39.86 G / 41.34 G | 38.11 G / 40.24 G | -4.4% / -2.7% |
+| Application | `cache-misses:u`, smallest of 7 | 605 M | 586 M | -3.3% |
+| Application | `L1-dcache-load-misses:u`, smallest of 7 | 875 M | 866 M | -1.0% |
+| Application | `branch-misses:u`, smallest of 7 | 269.9 M | 269.2 M | -0.3% |
+| Application | wall time, one worker, 7 runs | 10.51 s ± 0.20 | 9.58 s ± 0.55 | -9% ± 6 |
+| Application | peak resident memory, 8 workers | 1.49 GB | 1.60 GB | +7% |
+| Both | `compare_checker_builds.py` | | | no difference: 717 and 3,735 signatures, 1 and 19 diagnostics files, 711 and 3,980 generated files |
+
+Step by step on `tests/tests` (build instructions): the first array alone
+-3.70%; with the lists -4.01%; with the single compare -5.89%.
+
+Two measurements that do not agree, and why. Instructions fall by 6.3 to
+6.6%, cycles by 2.7 to 4.4%. The removed instructions are register
+arithmetic and predicted branches, cheaper than the average instruction, so
+time falls by less than the count. The wall-time figure has a spread as
+large as the effect; the cycle counts are the better guide: about 3 to 4% of
+single-worker time.
+
+Memory is a cost of the prototype's fixed sizes (three arrays of 2.0, 1.6
+and 0.3 MB per leased compilation, several live per worker), not of the
+idea: the application's compilations average 2,600 local nodes. A slice
+sizes the first array smaller and measures it (K.6, C1).
+
+A first attempt gave +17% instead; the copy of the tree lacked the runtime
+package, so the executable embedded no runtime and compiled it in every
+build. It is mentioned because the same mistake makes any two-binary
+comparison meaningless: build both sides in a complete checkout.
+
+**What is left in the prototype** (application, type checking 26.79 G, with
+the walk patch of K.4):
+
+| Kind | Share of type checking | Of the base build |
+|---|---|---|
+| (a) | 10.5% | 3.8% |
+| (b) with reference counts | 16.3% | 5.9% |
+| (c) | 13.1% | 4.7% |
+| (d) | 21.7% (core 17.0%) | 7.8% |
+| (e) | 38.5% | 13.9% |
+
+Of (d): the one-compare read and its load 6.8% (the floor for a read), the
+far path and store tiers 2.7%, lists 3.8%, the journal 2.9%, borrow flags
+1.9%. The journal, the borrow flags, the store tiers and half of the list
+cost are what a further change of representation could still reach: 2.5 G,
+3.4% of the build, not measured as a saving.
+
+### K.4 Calibration on the walk: the application path
+
+[Walk measurement prototype](prototypes/walk-prototype.patch): measurement prototype, not reviewed code.
+
+The hottest family of the walk is application: `type_application` with what
+it calls of the walk's own (`unify_expression_types`, `finish_expected`, the
+clash context) is 1.3 G on the application, 4.2% of type checking, of which
+0.50 G is kinds (a) and (b).
+
+Rewritten as a full rewrite would have it, on top of the core prototype:
+
+- **Ownership.** The context a type clash would be reported with is passed
+  down the whole walk as `Option<TypeClashContext>`, an enum that owns
+  `String`s, cloned at every level and dropped unused. It becomes
+  `ClashSite`, a `Copy` enum of handles (an interned name, a `StrIdx`, a
+  `&'static str` for the operator), in all 25 functions that take it; the
+  owned form is made in the one place that builds the error. This is a
+  walk-wide change, made once.
+- **Typed-tree construction.** The argument thunks, the omitted and ignored
+  parameters and the typed arguments are built on the stack and written once
+  into the typed arena; the attribute vector is copied only when there are
+  attributes.
+- **Environment handling.** Unchanged: the family clones an `Env` only when
+  the unifier's environment differs from the argument's, and
+  `store_typed_env` already caches the last environment. The per-line
+  profile of the family shows no environment item to remove.
+
+| Workload | Measure | Core prototype | With the application path | Change | Of the trunk build |
+|---|---|---|---|---|---|
+| Application | instructions, build | 69.524 G | 69.255 G | -0.39% | **-0.36%** |
+| Application | instructions, type checking | 27.088 G | 26.794 G | -1.09% | |
+| `tests/tests` | instructions, build | 4,044.2 M | 4,037.7 M | -0.16% | -0.15% |
+| Application | `instructions:u`, smallest of 7 | 66.11 G | 65.85 G | -0.4% | |
+| Application | `cycles:u`, median of 7 | 40.24 G | 39.75 G | -1.2% | |
+| Application | wall time, 8 workers, 10 runs (trunk 1.912 s ± 0.097) | | 1.796 s ± 0.040 | | -6% ± 5, both patches |
+| Both | `compare_checker_builds.py`; 729 `super_errors` fixtures | | | no difference | |
+
+`type_application` itself goes from 1,014 M to 903 M; the clone of the
+context (94 M) is gone; the allocator calls under the family halve (203 M to
+115 M).
+
+What it implies for the rest of the walk. The family had 0.50 G of
+allocation and copying and lost 0.27 G: 54%. The walk as a whole has 2.57 G
+of kinds (a) and (b) (its own and in the allocator and `memcpy` under it),
+3.5% of the build. If the other families (records, `let` bindings,
+constructors, functions, patterns, path lookup) give up the same 54%, that
+is 1.4 G, 1.9% of the build, of which 0.36% is the part measured. That number is an extrapolation from one family
+and from one walk-wide change that is already spent.
+
+What it does not imply. Nothing about hashing (the walk's 0.86 G of probes
+are lookups by name and by path: environment design, J and P3 to P6), about
+the 10.4% of type checking that is the walk's own checking, or about a
+different shape of the walk (one pass over a flat tree): the calibration
+kept the recursion as it is. The walk also showed no second mechanism like
+the node read, where one change pays everywhere: after the clash context,
+its allocation and copying are spread over many sites.
+
+### K.5 Verdict
+
+| Input | Value | Status |
+|---|---|---|
+| Type checking, share of the application build | 42.0% | measured |
+| Kinds (a) to (d), share of type checking: all, core, walk | 66%, 35%, 16% | measured (an upper bound, K.1) |
+| Layout of local nodes and lists, one-compare read | 6.3% of the build (5.9% on `tests/tests`) | measured, output identical |
+| of which also claimed by J (W6, deleting the store-build check) | about 0.6% | measured as a share (`poison_store_build_for`), not as a saving |
+| Journal, borrow flags, store tiers, half of the list cost | 0 to 2.5% | extrapolated: 3.4% of the build is spent there after the prototype; no patch |
+| Application path of the walk, with the clash context walk-wide | 0.36% (0.15% on `tests/tests`) | measured, output identical |
+| The other walk families, same treatment | 0 to 1.5% | extrapolated from one family |
+| Time against instructions | cycles fall by half to two thirds of the instruction change | measured |
+
+- **The core's representation: 6.3% of the build measured, 6 to 9% as a
+  range.** Not by a new core. The measured part is 215 lines in
+  `types/context.rs` and `types/type_expr.rs`.
+- **A restructured walk: 0.4% measured, 0.4 to 2% as a range.**
+- **Together: 6.7% measured, 7 to 10%.** The build goes from 74.2 G to 69.3 G
+  instructions measured, 67 to 69 G as a range; type checking from 42.0% of
+  the build to 38.7%, and from about 47,500 to about 40,800 instructions
+  per source line (656,667 lines).
+
+Against section I: I.5's estimate for P8 was "zero, for 7,000 lines". Zero
+is right for what P8 was, sharing. The objection was right as well: the
+cost was never in how many nodes there are but in reaching each one, and
+that was outside what I.5 examined ("`repr_chain` is 1.2% of the build
+(self)" counted the out-of-line part of a mechanism that is 16% of type
+checking inline). The corrected totals of I.5: 21-29% becomes 28-39% with
+the measured 6.7% and the range above, against the needed 30% (less the
+0.6% J's W6 also counts).
+
+The two are 3% of the build or more, so the plan follows.
+
+### K.6 Build plan
+
+No slice builds a second core or a switch. Each replaces a mechanism in
+place and deletes it in the same pull request. Gates of every slice, not
+repeated: `cargo build` and `cargo test` for `compiler-rust` and `rewatch`;
+CI green with the four output parity suites and the instruction count;
+`scripts/compare_checker_builds.py` with no difference on `tests/tests` and
+on the application; `scripts/test_worker_determinism.py`; the fixtures of
+I.2.3 where they exist.
+
+**End state**, as checks run from `compiler-rust/`:
+
+| Fact | Check |
+|---|---|
+| A local node read is one compare and one indexed load | `rg -n 'fn direct' -A8 src/types/context.rs` shows `raw < self.fast_limit.get()` and no call; `rg -n 'fn locate' src/types/context.rs` gives 1, used only by `node_far` and `push` |
+| The four accessors try it first | `rg -n 'self.types.direct\(' src/types/context.rs` gives 4 (`desc`, `get_level`, `write_desc_raw`, `write_level_raw`) |
+| No store-build test on the local path | `rg -n 'poison_store_build\(\)' src/types/context.rs` shows no call inside `desc` or `get_level` |
+| Lists the same | `rg -n 'struct ListChunks' -A6 src/types/type_expr.rs` shows a `first` field; `rg -n 'type ListChunks' src/types/type_expr.rs` gives 0 |
+| The walk passes no owned clash context | `rg -n 'Option<TypeClashContext>' src/types/typecore.rs` gives the fields of `TypeCoreError` only; `rg -n 'context\.clone\(\)' src/types/typecore.rs` gives 0 |
+| A struct-size test pins the node | `rg -n 'size_of::<TypeNode>\(\), 32' src/types/context.rs` gives 1 |
+
+| # | Slice | Lines | Depends on | Less capable model | Saving (application build) |
+|---|---|---|---|---|---|
+| C1 | Local type nodes: leased first array, one-compare read and write | 250 | - | yes | 5.6% on `tests/tests` (measured: the prototype without the lists); the application was measured only with the lists, 6.3% |
+| C2 | Type lists and parameter lists: the same first array | 150 | C1 | yes | 0.3% on `tests/tests` (measured before the one-compare read) |
+| C3 | Clash context as a `Copy` site; application path built on the stack | 400 | - | yes | 0.36% (measured) |
+| C4 | The other walk families: no per-node `Vec`, `String`, `Arc` or attribute copy | 1,500 in 5 pull requests | C3 | no: the first of each kind by the stronger model, then yes | 0-1.5% (extrapolated) |
+| C5 | Snapshots without journal bookkeeping per unification; borrow flags off the node paths | 600 | C1, and J's W2 for the frozen writes | no | 0-1.5% (extrapolated) |
+
+With C1 and C2 the measured 6.3% is in; with C3, 6.7%. C4 and C5 are worth
+starting only with a probe first: each has an upper bound, not a
+measurement, and each first pull request is its own measurement.
+
+Order against J. C1 to C3 do not depend on J and J does not depend on them.
+J's W6 deletes store builds: after it `fast_limit` is a constant and
+`set_direct` is deleted (one line each in W6). J's W7 deletes the
+worker-store tier: the far path of C1 loses one branch. J's W9 (one context
+per worker) makes the lease of C1 trivial: the array belongs to the context
+that is reset. If W9 lands first, C1 keeps the array in the context and has
+no thread-local list.
+
+#### C1. Local type nodes
+
+- **Files.** `types/context.rs` (`TypeNodes`, `TypeContext::{desc,
+  get_level, write_desc_raw, write_level_raw}`, the three places that set
+  `store_build_depth`).
+- **Added.** `TypeNodes::first`, an `Rc<[TypeNode; FIRST_LEN]>` leased from
+  a thread-local list (an entry whose only owner is the list is free);
+  `fast_limit`; `direct`; `set_direct`; `node_far` (today's `node`, cold).
+  `FIRST_LEN` is chosen by measurement: 65,536 costs +7% peak memory on the
+  application, where the mean compilation has 2,600 nodes; try 8,192 and
+  16,384 and take the smallest that keeps the instruction count within 0.2%
+  of 65,536.
+- **Deleted.** The inline `locate` on the read path; the `is_store` test and
+  the `poison_store_build` call on the local path of the four accessors
+  (they stay on the out-of-line path, where a read of a local node during a
+  store build still poisons, because `fast_limit` is 0 then).
+- **Tests.** `type_nodes_address_every_node_across_chunks` extended past
+  `FIRST_LEN`; a test that a read of a local node inside `build_in_store`
+  poisons the build (it does today); a test that two contexts alive on one
+  thread get different arrays and that a dropped context's array is reused.
+- **Instructions.** -5% or better on `tests/tests`.
+
+#### C2. Lists
+
+- **Files.** `types/type_expr.rs` (`ListChunks`, `TypePayloadPool`).
+- **Added.** `ListChunks { first, far, len }` with `append` and `slots` as
+  in K.3; the lease shared with C1's helper.
+- **Deleted.** `type ListChunks<T> = PayloadChunks<Cell<T>, 8>` and its
+  `append`.
+- **Tests.** A list that straddles the end of the first array goes whole to
+  the ladder; handles and tags are unchanged (`TypeRefList::from_parts`).
+
+#### C3. Clash site
+
+- **Files.** `types/typecore.rs`, nothing else (`driver/type_clash.rs` keeps
+  reading `TypeClashContext` from the error).
+- **Added.** `ClashSite` (`Copy`) and `ClashSite::resolve`.
+- **Deleted.** Every `context.clone()` in `typecore.rs` (14); the `Vec`s of
+  `type_application`.
+- **Tests.** The 729 `super_errors` fixtures unchanged, which cover every
+  variant's text.
+
+#### C4 and C5
+
+C4: one pull request per family (`type_record` and label lookup; `let`
+bindings and usage checks; constructors and `disambiguate_constructor`;
+`type_function_nary` and cases; patterns), each starting from the per-line
+profile of that family (K.1's tooling: self cost by kind and callee cost per
+source line) and removing what is kind (a) or (b) at more than 0.02% of the
+build. Stop when a family's pull request saves under 0.1%.
+
+C5: a probe first. Unification opens a snapshot per top-level call
+(`snapshot_type_state_with`, an entry pushed on `active`, `TrailLogging`
+recomputed, the same on drop): 2.9% of type checking. OCaml's trail is a
+counter and a list. The design question is whether a snapshot can be a
+cursor into the journal with no `active` vector, given that nested
+snapshots are restored out of order in a few callers; that needs the
+stronger model.
+
+#### Prompt for C1
+
+```text
+Task C1: store the first local type nodes of a compilation in one leased
+array and read them with one compare.
+
+Read first: compiler-rust/docs/CHECKER_REDESIGN.md sections I.3.3, K.2, K.3
+and K.6 (C1); in compiler-rust/src/types/context.rs: TypeNodes and TypeNode,
+TypeContext::desc, store_desc, get_level, store_level, write_level_raw,
+write_desc_raw, poison_store_build_for, build_in_store_with_guards,
+suspend_store_build.
+
+Do, in three commits:
+
+1. "Keep the first local type nodes in one leased array". In TypeNodes add
+   `first: Rc<[TypeNode; Self::FIRST_LEN]>` (FIRST_LEN = 1 << 14 to start).
+   `TypeNodes::new` takes it from a thread_local
+   `RefCell<Vec<Rc<[TypeNode; FIRST_LEN]>>>`: the first entry whose
+   Rc::strong_count is 1 is free and is cloned; otherwise a new array is
+   made, pushed and cloned. Do not clear a reused array. `node(idx)` returns
+   `&self.first[idx]` when idx < FIRST_LEN, else calls `node_far(idx)`, a
+   `#[cold] #[inline(never)]` function holding today's body with
+   `idx - FIRST_LEN`. `push` writes into `first` below FIRST_LEN and into
+   the chunk ladder at `idx - FIRST_LEN` above.
+
+2. "Read and write local type nodes with one compare". Add
+   `fast_limit: Cell<u32>` to TypeNodes (FIRST_LEN, or 0), and
+   `#[inline(always)] fn direct(&self, raw: u32) -> Option<&TypeNode>`
+   returning `Some(&self.first[raw as usize & (FIRST_LEN - 1)])` when
+   `raw < self.fast_limit.get()`. `set_direct(on)` sets the limit. In
+   TypeContext, `desc`, `get_level`, `write_level_raw` and `write_desc_raw`
+   first try `self.types.direct(r.0)`; their present bodies move unchanged
+   into `#[inline(never)]` functions `desc_indirect`, `level_indirect`,
+   `write_level_indirect`, `write_desc_indirect`. Call
+   `self.types.set_direct(depth == 0)` at every place that changes
+   `store_build_depth` (three sets and the `replace(0)` in
+   suspend_store_build, which turns direct reads on for its duration).
+
+3. "Size the first node array". Build release binaries with FIRST_LEN =
+   1 << 13, 1 << 14 and 1 << 16. For each, on tests/tests and on the
+   application: instructions (scripts/compare_build_instructions.py or
+   scripts/bench_project.sh) and peak resident memory of an 8-worker build
+   (/usr/bin/time -v, two runs). Keep the smallest size whose instruction
+   count is within 0.2% of 1 << 16; put the table in the pull request. Add
+   `assert_eq!(size_of::<TypeNode>(), 32)` to the tests.
+
+You must not: change TypeDesc, TypeNode's fields, TypeExprRef or its tag
+bits; change ctype.rs, typecore.rs or typemod.rs; add `unsafe`; clear or
+re-initialise a leased array; make `direct` succeed while a store build is
+active (a local read then must reach poison_store_build, as today); keep a
+second copy of the old read path under a flag.
+
+These count as failure: any difference from
+scripts/compare_checker_builds.py on tests/tests or the application; an
+instruction count on tests/tests that falls by less than 4%; a `direct`
+that the compiler does not inline (check that `rescript_compiler::types::
+context::TypeNodes>::direct` is not a symbol of the release binary); peak
+memory on the application up by more than 2%.
+
+The reviewer will run: cargo test for both crates; the instruction count
+check; compare_checker_builds.py on both projects;
+scripts/test_worker_determinism.py; `rg -n 'self.types.direct\(' src/types/
+context.rs` (4 lines); a build with RESCRIPT_STORE_DEBUG set, comparing the
+number of `[store-poison] local-read` lines with trunk's on tests/tests.
+```
+
+#### Prompt for C2
+
+```text
+Task C2: give type lists and parameter lists the first-array layout of C1.
+
+Read first: CHECKER_REDESIGN.md K.3 and K.6 (C1, C2);
+compiler-rust/src/types/type_expr.rs from `struct PayloadChunks` to the end
+of `impl TypePayloadPool`; the leased array of C1 in types/context.rs.
+
+Do, in one commit, "Keep the first type lists of a compilation in one leased
+array": replace `type ListChunks<T> = PayloadChunks<Cell<T>, 8>` with
+`struct ListChunks<T: ListElem> { first: Rc<[Cell<T>; LIST_FIRST_LEN]>,
+far: PayloadChunks<Cell<T>, 8>, len: Cell<usize> }`. `ListElem` is a
+crate-private trait with `const FILL: Self` and `fn first_chunk()`,
+implemented for TypeExprRef and TypeArg, each with its own thread-local
+list, leased as in C1 (share the helper). `append(items)`: when
+`len + n <= LIST_FIRST_LEN`, write into `first` and return the old `len`;
+otherwise set `len` to LIST_FIRST_LEN for good and return
+`far.reserve(..) + LIST_FIRST_LEN`. `slots(start, n)`: `&first[start..start
++ n]` when `start < LIST_FIRST_LEN`, else a `#[cold] #[inline(never)]`
+`far_slots`. Use the element count C1 settled on, scaled by measurement the
+same way (table in the pull request).
+
+You must not: change TypeRefList, TypeArgList, their tags or `from_parts`;
+change OnceChunks (rows and package names); split one list between the
+array and the ladder; add `unsafe`.
+
+These count as failure: any difference from compare_checker_builds.py; an
+instruction count on tests/tests that does not fall; the tag-range assert of
+`reserve` no longer covering `start + LIST_FIRST_LEN + n`.
+
+The reviewer will run: cargo test; the instruction count check;
+compare_checker_builds.py on both projects; a unit test that appends lists
+until one no longer fits the first array and reads every list back.
+```
+
+#### Prompt for C3
+
+```text
+Task C3: pass the type-clash context through the walk as a Copy value, and
+build the application's typed arguments without heap vectors.
+
+Read first: CHECKER_REDESIGN.md K.4 and K.6 (C3); in
+compiler-rust/src/types/typecore.rs: enum TypeClashContext, every function
+with a parameter `context: Option<TypeClashContext>` (25), type_application,
+type_clash_context_for_function_argument, function_argument_type_clash_context,
+math_operator_constant_text, unify_expression_types;
+compiler-rust/src/driver/type_clash.rs (reads only).
+
+Do, in two commits:
+
+1. "Pass the clash context down the walk as a Copy site". Add
+   `#[derive(Debug, Clone, Copy)] pub(crate) enum ClashSite` with the
+   variants of TypeClashContext, its payloads as handles: FunctionArgument
+   { optional, name: Option<StrIdx> }, MathOperator { for_float, operator:
+   &'static str, is_constant: Option<StrIdx> }, RecordField { field_name:
+   crate::name::Name, optional, jsx: Option<JsxPropKind> }, SetRecordField
+   { field_name: crate::name::Name }. JsxPropKind becomes Copy. Add
+   `ClashSite::resolve(self, arena: &ParseArena) -> TypeClashContext`,
+   listing every variant (no wildcard arm). Every walk function takes and
+   passes `Option<ClashSite>`; TypeCoreError keeps `Option<TypeClashContext>`
+   and is given `site.resolve(tctx.arena)` where the error is built
+   (unify_expression_types and any other constructor of ExprTypeClash).
+   Remove every `.clone()` of a context.
+
+2. "Build an application's arguments on the stack". In type_application:
+   `argument_thunks`, `omitted`, `ignored` and `typed_args` become SmallVecs
+   (inline 6, 2, 2, 6); OmittedArrow becomes Copy; the final
+   `with_exp_attributes(.., attributes.to_vec().into())` runs only when
+   `attributes` is not empty.
+
+You must not: change TypeClashContext, TypeCoreError's fields or anything in
+driver/type_clash.rs; intern a string on a path that did not allocate one
+before, except the two record-field names (Name::new of the label's name);
+change the order of any unification, instance or level call in
+type_application; touch ctype.rs.
+
+These count as failure: a difference in any super_errors expectation or
+from scripts/test_error_output_parity.sh; any difference from
+compare_checker_builds.py; `rg -n 'context\.clone\(\)' src/types/typecore.rs`
+not empty; an instruction count on tests/tests that does not fall.
+
+The reviewer will run: cargo test; the super_errors build tests; the error
+output parity script; compare_checker_builds.py on both projects; the
+instruction count check.
+```
+
+### K.7 Risks and what was not measured
+
+- The executable measured is the fat-LTO build, not the profile-guided one
+  that ships. Profile-guided layout does not remove the address arithmetic,
+  but the percentages may differ by a few tenths.
+- The prototypes' unit tests were not run; they were checked by the
+  differential comparison on 4,452 modules and 729 error fixtures only. The
+  slices run everything.
+- Kinds are assigned by inlined frame. A read whose result the compiler
+  merged with checking code is counted as checking; the split is exact to
+  the address, not to the intent.
+- Compilations with more nodes than the first array pay today's cost plus
+  one compare for the nodes above it. The application's largest
+  compilations are there; the 6.3% includes them.
+- Not measured: the saving of C4 and C5; memory at other array sizes;
+  watch-mode rebuilds; eight-worker instruction counts (the mechanisms are
+  per compilation, so the share is expected to hold; wall time with eight
+  workers moved by 6% ± 5 for both patches together).

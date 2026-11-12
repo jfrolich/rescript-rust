@@ -164,6 +164,11 @@ impl ArenaIdx for ArityIdx {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExprIdx(pub u32);
 
+/// Bit 2 of an expression's entry in `ParseArena::rewrite_free_exprs`.
+const EXPANSION_BIT: u64 = 4;
+/// Expressions per page of `ParseArena::expansion_targets`.
+const EXPANSION_PAGE: usize = 64;
+
 impl ArenaIdx for ExprIdx {
     fn from_u32(idx: u32) -> Self {
         ExprIdx(idx)
@@ -483,6 +488,8 @@ struct ExprOverrides {
 /// indices.
 #[derive(Debug)]
 pub struct ParseArena {
+    /// Optional module-owned census, absent on the default compilation path.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// Location-free builds retain node identity and generated/source provenance,
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
@@ -537,6 +544,9 @@ pub struct ParseArena {
     type_lists: ListPool<CoreTypeIdx>,
     /// Pool behind `let` value binding lists (`Pexp_let`, `Pstr_value`).
     vb_lists: ListPool<ValueBinding>,
+    /// Derived structure-value groups, indexed by their binding-list start.
+    /// Only group starts have a bit; no source-location or identifier keys.
+    derived_value_groups: Vec<u64>,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -751,15 +761,26 @@ pub struct ParseArena {
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
-    /// Expression locations rewritten via the default/generic PPX mapper path.
+    /// The locations of the expressions the built-in mapper visited, one bit
+    /// per location index.
     ///
-    /// This lets marshal distinguish mapper-rebuilt expression attributes
-    /// (fresh payload wrappers) from parser-preserved ones.
-    rewritten_expr_locs: HashSet<LocIdx>,
-    /// Two bits per expression, proved bottom-up at allocation: no builtin
-    /// rewrite/checker targets (bit 0), and no unused-attribute sweep targets
-    /// (bit 1). Unknown kinds and mutable slots are never certified.
+    /// This lets marshal distinguish the attributes of expressions the OCaml
+    /// mapper rebuilt (fresh payload wrappers) from parser-preserved ones.
+    rewritten_expr_locs: Vec<u64>,
+    /// Four bits per expression, sixteen expressions per word: two proofs
+    /// computed bottom-up at allocation (no builtin rewrite/checker targets,
+    /// bit 0; no unused-attribute sweep targets, bit 1), and "has an
+    /// expansion" (bit 2, see `set_expansion`). Bit 3 is unused. Unknown kinds
+    /// and mutable slots are never certified.
     rewrite_free_exprs: Vec<u64>,
+    /// The expansions of the built-in rewrites, in pages of
+    /// `EXPANSION_PAGE` consecutive expressions: `expansion_pages[idx / 64]`
+    /// is 0 for a page without expansions, or 1 + the page's position in
+    /// `expansion_targets`. The nodes as parsed are never overwritten.
+    expansion_pages: Vec<u32>,
+    /// `EXPANSION_PAGE` targets per allocated page; an entry is meaningful
+    /// only where bit 2 of `rewrite_free_exprs` is set.
+    expansion_targets: Vec<ExprIdx>,
     /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
     dummy_loc: LocIdx,
     /// Spice PPX local caches for generated location/string/lident nodes.
@@ -1043,6 +1064,8 @@ impl Default for ParseArena {
             pat_lists: ListPool::default(),
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
+            derived_value_groups: Vec::new(),
+            derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),
@@ -1118,8 +1141,10 @@ impl Default for ParseArena {
             ppx_undefined_str,
             template_concat_str,
             local_module_counter: 0,
-            rewritten_expr_locs: HashSet::new(),
+            rewritten_expr_locs: Vec::new(),
             rewrite_free_exprs: Vec::new(),
+            expansion_pages: Vec::new(),
+            expansion_targets: Vec::new(),
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
             shareable_literal_strs: HashSet::new(),
@@ -2579,14 +2604,39 @@ impl ParseArena {
         self.local_module_counter = 0;
     }
 
-    /// Mark an expression location as rewritten by the generic PPX mapper path.
-    pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
-        self.rewritten_expr_locs.insert(loc);
+    /// The bit of `loc` in `rewritten_expr_locs`: two per location index,
+    /// for the location and its ghost (bit 30 of a `LocIdx`). `None` for a
+    /// synthetic location of the type checker, which the mapper never sees.
+    #[inline]
+    fn rewritten_expr_loc_bit(loc: LocIdx) -> Option<usize> {
+        (loc.0 < SYNTHETIC_LOCATION_BASE)
+            .then(|| (loc.0 & 0x3FFF_FFFF) as usize * 2 + (loc.0 >> 30) as usize)
     }
 
-    /// Returns true when this expression location was rewritten generically.
+    /// Mark an expression location as visited by the built-in mapper.
+    ///
+    /// Cost: one bit set; the bit vector grows to the location's word.
+    #[inline]
+    pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
+        let Some(bit) = Self::rewritten_expr_loc_bit(loc) else {
+            return;
+        };
+        if bit / 64 >= self.rewritten_expr_locs.len() {
+            self.rewritten_expr_locs.resize(bit / 64 + 1, 0);
+        }
+        self.rewritten_expr_locs[bit / 64] |= 1 << (bit % 64);
+    }
+
+    /// Returns true when the built-in mapper visited an expression at this
+    /// location.
+    ///
+    /// Cost: one bit test.
     pub fn is_rewritten_expr_loc(&self, loc: LocIdx) -> bool {
-        self.rewritten_expr_locs.contains(&loc)
+        Self::rewritten_expr_loc_bit(loc).is_some_and(|bit| {
+            self.rewritten_expr_locs
+                .get(bit / 64)
+                .is_some_and(|word| word & (1 << (bit % 64)) != 0)
+        })
     }
 
     /// Record the source constructor string identity for a varified type var.
@@ -2693,9 +2743,11 @@ impl ParseArena {
         let certificates = self.expression_certificates(&expr);
         let idx = self.expressions.push(expr);
         if certificates != 0 {
-            let word = idx.0 as usize / 32;
-            self.rewrite_free_exprs.resize(word + 1, 0);
-            self.rewrite_free_exprs[word] |= certificates << (2 * (idx.0 % 32));
+            let word = idx.0 as usize / 16;
+            if word >= self.rewrite_free_exprs.len() {
+                self.rewrite_free_exprs.resize(word + 1, 0);
+            }
+            self.rewrite_free_exprs[word] |= certificates << (4 * (idx.0 % 16));
         }
         idx
     }
@@ -2756,8 +2808,58 @@ impl ParseArena {
     #[inline]
     fn expr_certificates(&self, idx: ExprIdx) -> u64 {
         self.rewrite_free_exprs
-            .get(idx.0 as usize / 32)
-            .map_or(0, |word| (word >> (2 * (idx.0 % 32))) & 3)
+            .get(idx.0 as usize / 16)
+            .map_or(0, |word| (word >> (4 * (idx.0 % 16))) & 3)
+    }
+
+    /// Record `expanded` as what the compiler reads in place of `original`.
+    /// The node at `original` and every ancestor of it stay as parsed;
+    /// `expanded` is a node appended after it. Recording a second expansion
+    /// for the same node replaces the first.
+    ///
+    /// Cost: one bit set and one store; the first expansion in a page of
+    /// `EXPANSION_PAGE` expressions also appends that page (256 bytes).
+    pub fn set_expansion(&mut self, original: ExprIdx, expanded: ExprIdx) {
+        debug_assert_ne!(original, expanded, "an expansion must be a new node");
+        debug_assert_eq!(self.expr_certificates(original), 0, "a certified node has no rewrite");
+        debug_assert!(original.0 < SHARED_EXPRESSION_BASE);
+        let slot = original.0 as usize;
+        let word = slot / 16;
+        if word >= self.rewrite_free_exprs.len() {
+            self.rewrite_free_exprs.resize(word + 1, 0);
+        }
+        self.rewrite_free_exprs[word] |= EXPANSION_BIT << (4 * (slot % 16));
+        let page = slot / EXPANSION_PAGE;
+        if page >= self.expansion_pages.len() {
+            self.expansion_pages.resize(page + 1, 0);
+        }
+        if self.expansion_pages[page] == 0 {
+            let len = self.expansion_targets.len();
+            self.expansion_targets.resize(len + EXPANSION_PAGE, original);
+            self.expansion_pages[page] = (len / EXPANSION_PAGE) as u32 + 1;
+        }
+        let base = (self.expansion_pages[page] as usize - 1) * EXPANSION_PAGE;
+        self.expansion_targets[base + slot % EXPANSION_PAGE] = expanded;
+    }
+
+    /// The node the compiler reads for `idx`: its expansion when a built-in
+    /// rewrite recorded one, otherwise `idx` itself. Readers of the tree as
+    /// compiled (the checker, dependency collection, the unused-attribute
+    /// sweep, the v0 mapper) call this where they turn a handle into a node;
+    /// readers of the tree as written (the printer, `check::Checker`) do not.
+    ///
+    /// Cost: one bit test for a node without an expansion (a load, a shift
+    /// and a branch); two more indexed loads for a node with one. No hashing.
+    #[inline]
+    pub fn expanded(&self, idx: ExprIdx) -> ExprIdx {
+        let slot = idx.0 as usize;
+        match self.rewrite_free_exprs.get(slot / 16) {
+            Some(word) if word & (EXPANSION_BIT << (4 * (slot % 16))) != 0 => {
+                let base = (self.expansion_pages[slot / EXPANSION_PAGE] as usize - 1) * EXPANSION_PAGE;
+                self.expansion_targets[base + slot % EXPANSION_PAGE]
+            }
+            _ => idx,
+        }
     }
 
     /// No builtin rewrite, Checker diagnostic, or nested external can occur.
@@ -2775,11 +2877,20 @@ impl ParseArena {
     /// Parents are allocated after children. A mutation invalidates both
     /// proofs for the node and all possible parents, without a reverse-edge
     /// table or tree walk. Reserved slots are never certified.
+    ///
+    /// Cost: the words after `idx`'s, which keep only their expansion bits.
+    /// Nothing on a compile path mutates an expression after the built-in
+    /// rewrites have recorded an expansion.
     fn invalidate_rewrite_free_exprs(&mut self, idx: ExprIdx) {
-        let word = idx.0 as usize / 32;
+        let word = idx.0 as usize / 16;
         if word < self.rewrite_free_exprs.len() {
-            self.rewrite_free_exprs.truncate(word + 1);
-            self.rewrite_free_exprs[word] &= (1u64 << (2 * (idx.0 % 32))) - 1;
+            // The proofs go; the expansions stay: their nodes still exist.
+            const EXPANSION_BITS: u64 = 0x4444_4444_4444_4444;
+            self.rewrite_free_exprs[word] &=
+                ((1u64 << (4 * (idx.0 % 16))) - 1) | EXPANSION_BITS;
+            for bits in &mut self.rewrite_free_exprs[word + 1..] {
+                *bits &= EXPANSION_BITS;
+            }
         }
     }
     /// Reserve an expression index using a placeholder node.
@@ -2867,6 +2978,27 @@ impl ParseArena {
     /// Borrow the core-type indices stored in a list handle.
     pub fn type_list(&self, list: TypeList) -> &[CoreTypeIdx] {
         self.type_lists.get(list)
+    }
+
+    /// Mark a structure value group produced by a derive.
+    /// Cost: one bitmap write plus O(new words) zero initialization on growth.
+    /// Across all marks, at most ceil(highest binding slot / 64) words are
+    /// initialized; remarking a group never grows or scans the table.
+    pub(crate) fn mark_derived_value_group(&mut self, list: VbList) {
+        assert!(!list.is_empty());
+        let index = list.start() as usize;
+        self.derived_value_groups.resize(
+            self.derived_value_groups.len().max(index / 64 + 1), 0,
+        );
+        self.derived_value_groups[index / 64] |= 1 << (index % 64);
+    }
+
+    /// Provenance of a structure value group, independent of names and locations.
+    /// Cost: O(1), at most one word read, with no allocation or synchronization.
+    pub fn is_derived_value_group(&self, list: VbList) -> bool {
+        let index = list.start() as usize;
+        !list.is_empty() && self.derived_value_groups.get(index / 64)
+            .is_some_and(|word| word & (1 << (index % 64)) != 0)
     }
 
     /// Store the value bindings of a `let`.
@@ -2968,6 +3100,12 @@ impl ParseArena {
                 .get((raw - SHARED_EXPRESSION_BASE) as usize)
                 .expect("shared expression read before it was pushed")
         }
+    }
+
+    /// Read the built-in expansion at a compiler consumer's handle boundary.
+    #[inline]
+    pub fn get_expanded_expr(&self, idx: ExprIdx) -> &Expression {
+        self.get_expr(self.expanded(idx))
     }
 
     /// Append an expression while the arena is shared. Such expressions have
@@ -4318,6 +4456,103 @@ mod tests {
         assert_eq!(seconds, vec![c]);
     }
 
+    /// An expression without a certificate, like every node a rewrite
+    /// applies to.
+    fn uncertified_expr(arena: &mut ParseArena) -> ExprIdx {
+        let operand = arena.push_expr(ParseArena::placeholder_expr());
+        let idx = arena.push_expr(Expression {
+            pexp_desc: ExpressionDesc::Pexp_await(operand),
+            ..ParseArena::placeholder_expr()
+        });
+        assert!(!arena.expr_needs_no_rewrite(idx));
+        idx
+    }
+
+    #[test]
+    fn an_expansion_is_read_through_expanded_and_the_original_stays() {
+        let mut arena = ParseArena::new();
+        let original = uncertified_expr(&mut arena);
+        let neighbour = uncertified_expr(&mut arena);
+        assert_eq!(arena.expanded(original), original);
+        let before = arena.get_expr(original).clone();
+        let expanded = arena.push_expr(ParseArena::placeholder_expr());
+        arena.set_expansion(original, expanded);
+        assert_eq!(arena.expanded(original), expanded);
+        assert_eq!(arena.get_expr(original), &before);
+        // A neighbour in the same page, and nodes past the table's end.
+        assert_eq!(arena.expanded(neighbour), neighbour);
+        assert_eq!(arena.expanded(expanded), expanded);
+        assert_eq!(arena.expanded(ExprIdx(1 << 20)), ExprIdx(1 << 20));
+        // A certificate elsewhere in the same word is not disturbed.
+        assert!(arena.expr_needs_no_rewrite(expanded));
+        // The last expansion recorded for a node is the one read.
+        let second = arena.push_expr(ParseArena::placeholder_expr());
+        arena.set_expansion(original, second);
+        assert_eq!(arena.expanded(original), second);
+    }
+
+    #[test]
+    fn expansions_survive_the_invalidation_of_certificates() {
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..70).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for &idx in &[nodes[7], nodes[8], nodes[42], nodes[69]] {
+            arena.set_expansion(idx, target);
+        }
+        assert!(arena.expr_needs_no_rewrite(target));
+        arena.get_expr_mut(nodes[0]).pexp_desc = ExpressionDesc::Pexp_break;
+        assert!(!arena.expr_needs_no_rewrite(target));
+        for &idx in &[nodes[7], nodes[8], nodes[42], nodes[69]] {
+            assert_eq!(arena.expanded(idx), target);
+        }
+        assert_eq!(arena.expanded(nodes[22]), nodes[22]);
+    }
+
+    #[test]
+    fn ten_thousand_expansions_take_one_page_per_sixty_four_expressions() {
+        // Dense: 10,000 consecutive pairs (operand, await), each await expanded.
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..10_000).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for &idx in &nodes {
+            arena.set_expansion(idx, ExprIdx(target.0 + idx.0));
+        }
+        for &idx in &nodes {
+            assert_eq!(arena.expanded(idx), ExprIdx(target.0 + idx.0));
+            assert_eq!(arena.expanded(ExprIdx(idx.0 - 1)), ExprIdx(idx.0 - 1));
+        }
+        let pages = (2 * 10_000usize).div_ceil(EXPANSION_PAGE);
+        assert_eq!(arena.expansion_targets.len(), pages * EXPANSION_PAGE);
+
+        // Sparse: one expansion every 1,000 expressions costs one page each,
+        // not an entry per expression.
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..50_000).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for idx in nodes.iter().step_by(500) {
+            arena.set_expansion(*idx, target);
+        }
+        assert_eq!(arena.expansion_targets.len(), 100 * EXPANSION_PAGE);
+        // The page index ends at the last page with an expansion.
+        assert_eq!(arena.expansion_pages.len(), (2 * 49_500 + 1) / EXPANSION_PAGE + 1);
+    }
+
+    #[test]
+    fn a_visited_location_and_its_ghost_are_two_bits_of_one_word() {
+        let mut arena = ParseArena::new();
+        let (loc, ghost) = (LocIdx(5), LocIdx(5 | 0x4000_0000));
+        arena.mark_rewritten_expr_loc(ghost);
+        assert!(arena.is_rewritten_expr_loc(ghost));
+        assert!(!arena.is_rewritten_expr_loc(loc));
+        arena.mark_rewritten_expr_loc(loc);
+        assert!(arena.is_rewritten_expr_loc(loc));
+        assert!(!arena.is_rewritten_expr_loc(LocIdx(6)));
+        // A synthetic location of the type checker is never marked.
+        arena.mark_rewritten_expr_loc(LocIdx(SYNTHETIC_LOCATION_BASE + 5));
+        assert!(!arena.is_rewritten_expr_loc(LocIdx(SYNTHETIC_LOCATION_BASE + 5)));
+        assert_eq!(arena.rewritten_expr_locs.len(), 1);
+    }
+
     #[test]
     fn validation_certificates_preserve_overflow_and_invalidate_parents() {
         let mut arena = ParseArena::new();
@@ -4355,4 +4590,29 @@ mod tests {
         assert!(!arena.expr_needs_no_attribute_sweep(reserved));
     }
 
+}
+
+#[cfg(test)]
+#[test]
+fn derived_group_bitmap_growth_is_linear_at_ten_thousand_slots() {
+    let mut arena = ParseArena::new();
+    let mut initialized_words = 0;
+    for slot in 0..10_000 {
+        let before = arena.derived_value_groups.len();
+        let group = VbList::from_range(slot, 1);
+        arena.mark_derived_value_group(group);
+        initialized_words += arena.derived_value_groups.len() - before;
+        assert!(arena.is_derived_value_group(group));
+        assert!(!arena.is_derived_value_group(VbList::from_range(slot + 1, 1)));
+    }
+    // 10,000 direct bit writes; resize initializes each word exactly once.
+    assert_eq!(initialized_words, 157);
+    assert_eq!(arena.derived_value_groups.len(), 157);
+    for slot in 0..10_000 {
+        arena.mark_derived_value_group(VbList::from_range(slot, 1));
+    }
+    assert_eq!(arena.derived_value_groups.len(), initialized_words);
+    assert!(!arena.is_derived_value_group(VbList::EMPTY));
+    // Provenance does not enlarge the handle passed through the frontend.
+    assert_eq!(std::mem::size_of::<VbList>(), 8);
 }

@@ -355,6 +355,15 @@ impl Project for WatchProject<'_> {
         }
     }
 
+    fn namespace_aliases(&self, module_name: &str) -> Option<Vec<(String, String)>> {
+        let module = self.build_state.modules.get(module_name)?;
+        let SourceType::MlMap(_) = module.source_type else {
+            return None;
+        };
+        let package = self.build_state.packages.get(&module.package_name)?;
+        compile::namespace_aliases(package).map(|(_, aliases)| aliases)
+    }
+
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource> {
         let result = match self.project_source(module_name) {
             Some(source) => self.typecheck_project_module(&source, interface),

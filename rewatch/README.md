@@ -20,7 +20,7 @@ dependencies, and invokes the compiler in dependency order.
   command-line parsing and dispatch. The `rescript` executable is the
   [`cli`](cli) package, whose [build script](cli/build.rs) compiles
   `packages/@rescript/runtime` into it
-  ([`src/build/embedded_runtime.rs`](src/build/embedded_runtime.rs)).
+  ([`src/build/snapshot.rs`](src/build/snapshot.rs)).
 
 Focused documentation:
 

@@ -114,7 +114,7 @@ fn named(e: &Engine<'_>, n: NodeId, var: VarId) -> bool {
 /// Legacy `Lam_hit.hit_variable`, used by eliminate_tuple (lines 62-66)
 /// and refine_let (lam_util.rs:110-115). A candidate scan, not a whole-unit
 /// fact. Assignment targets count as occurrences too.
-fn hit(e: &Engine<'_>, root: NodeId, var: VarId) -> bool {
+pub(crate) fn hit(e: &Engine<'_>, root: NodeId, var: VarId) -> bool {
     let mut work = vec![root];
     while let Some(n) = work.pop() {
         match e.bir().view(n) {
@@ -156,7 +156,7 @@ fn eliminate_tuple(
 }
 
 /// Legacy is_safe_to_alias (lam_util.rs:15-32; lam_util.ml:79-98).
-fn safe_alias(e: &Engine<'_>, mut n: NodeId) -> bool {
+pub(crate) fn safe_alias(e: &Engine<'_>, mut n: NodeId) -> bool {
     loop {
         match e.bir().view(n) {
             View::Var { .. } | View::Const { .. } => return true,
@@ -176,7 +176,7 @@ fn safe_alias(e: &Engine<'_>, mut n: NodeId) -> bool {
 
 /// Legacy no_side_effects, lam_analysis.rs:215-265. Bir PURE is deliberately
 /// more conservative; using it here would retain Strict instead of StrictOpt.
-fn pure(e: &Engine<'_>, root: NodeId) -> bool {
+pub(crate) fn pure(e: &Engine<'_>, root: NodeId) -> bool {
     use crate::lambda::lam_constant::Constant as C;
     let mut work = vec![root];
     while let Some(n) = work.pop() {
@@ -234,7 +234,7 @@ fn pure(e: &Engine<'_>, root: NodeId) -> bool {
 }
 
 /// Legacy refine_let_parts, lam_util.rs:66-140 (lam_util.ml:68-138).
-fn refine(e: &mut Engine<'_>, n: NodeId) -> Changed {
+pub(crate) fn refine(e: &mut Engine<'_>, n: NodeId) -> Changed {
     let View::Let {
         var,
         value: Some(value),
@@ -749,7 +749,7 @@ mod tests {
         for &(var, source) in &stats.renames {
             imported.register_rename(var, source).unwrap();
         }
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let actual = export_lambda(&imported).unwrap();
         assert_eq!(
             identities(&actual.arena, actual.root),
@@ -898,7 +898,7 @@ mod tests {
             };
             let nodes = if wide { 30_001 } else { 20_001 };
             assert!(steps <= 90 * nodes, "wide={wide}, steps={steps}");
-            imported.arena.validate(Some(imported.root), false).unwrap();
+            imported.arena.validate(Some(imported.root)).unwrap();
             eprintln!("flatten wide={wide}: {steps} steps");
         }
     }

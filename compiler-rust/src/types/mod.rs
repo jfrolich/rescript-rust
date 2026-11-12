@@ -63,6 +63,7 @@ pub mod unit_reads;
 pub mod usage;
 pub mod variance;
 pub mod variant_runtime;
+pub(crate) mod world;
 pub(crate) mod variant_layout;
 
 // Re-exports for convenience
@@ -95,8 +96,8 @@ pub use variant_runtime::{
 // btype exports
 pub use btype::{
     hash_variant, is_row_name, is_tconstr, is_tunivar, is_tvar, iter_type_expr,
-    iter_type_expr_kind, mark_type_node, row_field, row_field_repr, row_fixed, row_more, row_repr,
-    static_row, unmark_type,
+    iter_type_expr_kind, row_field, row_field_repr, row_fixed, row_more, row_repr,
+    static_row,
 };
 
 // ctype exports

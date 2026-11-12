@@ -242,66 +242,6 @@ fn constructor_runtime_tag(
     })
 }
 
-fn config_payload_flags_contains(
-    payload: &crate::parser::ast::Payload,
-    value: &str,
-    arena: &ParseArena,
-) -> bool {
-    use crate::parser::ast::{Constant as PConstant, ExpressionDesc as PExpressionDesc};
-    use crate::parser::longident::Longident;
-
-    let crate::parser::ast::Payload::PStr(items) = payload else {
-        return false;
-    };
-
-    items.iter().any(|item| {
-        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
-            return false;
-        };
-        let (expr_idx, _) = &**inner;
-        let expr = arena.get_expr(*expr_idx);
-        let PExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
-            return false;
-        };
-        let (fields, _) = record;
-        arena.expr_field_list(*fields).iter().any(|field| {
-            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-                return false;
-            };
-            if arena.get_string(*name_idx) != "flags" {
-                return false;
-            }
-            let field_expr = arena.get_expr(field.expr);
-            let PExpressionDesc::Pexp_array(elements) = &field_expr.pexp_desc else {
-                return false;
-            };
-            arena.expr_list(*elements).iter().any(|elem_idx| {
-                let elem = arena.get_expr(*elem_idx);
-                matches!(
-                    &elem.pexp_desc,
-                    PExpressionDesc::Pexp_constant(c)
-                        if matches!(c, PConstant::String(s) if s.semantic(arena) == value)
-                )
-            })
-        })
-    })
-}
-
-fn structure_has_config_string(
-    ta: &TypedArena,
-    structure: &Structure,
-    value: &str,
-    arena: &ParseArena,
-) -> bool {
-    ta.structure_items(structure.str_items).iter().any(|item| {
-        let StructureItemDesc::Tstr_attribute(attr) = &item.str_desc else {
-            return false;
-        };
-        arena.get_string(attr.0.txt) == "config"
-            && config_payload_flags_contains(&attr.1, value, arena)
-    })
-}
-
 fn raw_polyvariant_const<B: RawLambdaBuilder>(rb: &B, tag: &str) -> RawLambda {
     rb.const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
@@ -433,6 +373,8 @@ pub struct RawLambdaDiagnostic {
 
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a, B: RawLambdaBuilder> {
+    /// Optional binding accounting, owned by this conversion.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     arena: &'a ParseArena,
     /// Node storage of the typed tree being lowered.
     ta: &'a TypedArena,
@@ -469,6 +411,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -501,6 +444,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -534,6 +478,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -2922,9 +2867,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        if structure_has_config_string(self.ta, structure, "-bs-noassertfalse", self.arena) {
-            self.no_assert_false = true;
-        }
         // The typed tree is complete: repeated type queries on it have one
         // answer per (env, type).
         self.type_ctx.set_typeopt_cache(true);
@@ -4795,7 +4737,12 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body)
+                // O(1) disabled probe; the same converter runs without preserving
+                // census state across its mutable recursive calls.
+                if self.derived_census.is_none() {
+                    return self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
+                }
+                self.convert_let_with_census(*rec_flag, self.ta.value_bindings(*bindings), body, bindings.start())
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();
@@ -6167,6 +6114,33 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
             }
             _ => unreachable!("expected irrefutable pattern"),
         }
+    }
+
+    /// O(1) accounting around ordinary conversion; no profiling locals in the
+    /// disabled structure traversal. The conversion itself is unchanged.
+    #[cold]
+    #[inline(never)]
+    fn convert_let_with_census(
+        &mut self,
+        rec_flag: crate::parser::ast::RecFlag,
+        bindings: &[ValueBinding],
+        body: RawLambda,
+        group_start: u32,
+    ) -> RawLambda {
+        let census_start = crate::derived_census::start(true);
+        let census_before = self
+            .derived_census
+            .as_ref()
+            .map_or(0, |c| c.conversion.total());
+        let result = self.convert_let_with_body_raw(rec_flag, bindings, body);
+        if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
+            let children = census.conversion.total() - census_before;
+            census.conversion.add(
+                census.typed_group(group_start),
+                crate::derived_census::nanos(start.elapsed()).saturating_sub(children),
+            );
+        }
+        result
     }
 
     fn convert_let_with_body_raw(

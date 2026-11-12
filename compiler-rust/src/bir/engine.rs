@@ -190,7 +190,31 @@ pub struct Stats {
     /// Pass rules fired, deterministically ordered for reporting.
     pub rules: std::collections::BTreeMap<&'static str, u64>,
     /// (Fresh variable, source identity), in allocation order for the bridge.
+    /// A variable that is its own source was imported by the [`Host`], which
+    /// knows its identity.
     pub renames: Vec<(VarId, VarId)>,
+    /// (Fresh static label, the label it copies), in allocation order. Bir
+    /// identifies a handler by its label, so a copied handler gets a new
+    /// one; the legacy passes keep the label in the copy, and the bridge
+    /// exports it under that name.
+    pub labels: Vec<(u32, u32)>,
+    /// A shape the round cannot represent: the unit falls back.
+    pub unsupported: Option<&'static str>,
+}
+
+/// What a round asks of the compilation outside the unit.
+pub trait Host {
+    /// `Lam_compile_env.query_external_id_info` for inlining: the exported
+    /// function `field` of `module`, imported into `bir` as a detached
+    /// function node with fresh variables, or `None` when the module exports
+    /// no function body under that name. Called once per candidate
+    /// application, as the legacy resolver is.
+    fn external_function(
+        &mut self,
+        bir: &mut Bir,
+        module: ImportId,
+        field: &str,
+    ) -> Result<Option<NodeId>, bridge::Unsupported>;
 }
 
 /// Detached children and the shell of a stateful traversal frame.
@@ -228,6 +252,11 @@ pub struct Engine<'a> {
     snapshots: AHashMap<NodeId, NodeId>,
     snapshot_roots: Vec<NodeId>,
     stamp: u32,
+    /// The compilation outside the unit, for rounds that inline across
+    /// modules.
+    pub host: Option<&'a mut dyn Host>,
+    /// `Clflags.jsx_preserve`.
+    pub jsx_preserve: bool,
     /// Counters.
     pub stats: Stats,
 }
@@ -248,6 +277,8 @@ impl<'a> Engine<'a> {
             snapshots: AHashMap::default(),
             snapshot_roots: Vec::new(),
             stamp: 0,
+            host: None,
+            jsx_preserve: false,
             stats: Stats::default(),
         }
     }
@@ -255,6 +286,11 @@ impl<'a> Engine<'a> {
     /// Start a round's private identifier counter. Constant time.
     pub fn set_current_stamp(&mut self, stamp: u32) {
         self.stamp = stamp;
+    }
+
+    /// The round counter, to carry it into the engine of the next round.
+    pub fn current_stamp(&self) -> u32 {
+        self.stamp
     }
 
     /// Rename in O(1) amortized time, recording provenance for diagnostic export.
@@ -373,13 +409,7 @@ impl<'a> Engine<'a> {
             // summaries of the ancestors: recompute before the next round.
             self.summaries_valid = false;
         }
-        for i in 0..self.guards.len() {
-            if !self.guards[i].taken {
-                self.guards[i].taken = true;
-                let node = self.guards[i].node;
-                self.take_snapshot(node);
-            }
-        }
+        self.flush_guards();
     }
 
     /// The use weight of a slot, for [`Engine::node`].
@@ -584,7 +614,8 @@ impl<'a> Engine<'a> {
         }
         self.in_sweep = true;
         if let Order::Stateful(driver) = round.order {
-            assert!(round.guard.is_none(), "stateful drivers must maintain snapshot scopes");
+            // A stateful driver opens and closes its own snapshot scopes
+            // (`guard_enter`, `guard_exit`); `round.guard` documents them.
             let changed = driver(self, root);
             self.in_sweep = false;
             self.frozen = false;
@@ -695,12 +726,102 @@ impl<'a> Engine<'a> {
         }
     }
 
+    /// Open a snapshot scope for a stateful driver: `node` is copied before
+    /// the first edit made while the scope is open. The driver must not use
+    /// [`Engine::open_shell`] inside a scope: a snapshot copies the tree as
+    /// it stands, and a shell leaves it without its children. Constant time.
+    pub fn guard_enter(&mut self, node: NodeId) {
+        let taken = self.snapshots.contains_key(&node);
+        self.guards.push(Guard { node, taken });
+    }
+
+    /// Close the scope opened last.
+    pub fn guard_exit(&mut self) {
+        self.guards.pop();
+    }
+
+    /// Take the snapshots of every open scope now. A rule calls this before
+    /// it reads a guarded node it is about to edit inside.
+    pub fn flush_guards(&mut self) {
+        for i in 0..self.guards.len() {
+            if !self.guards[i].taken {
+                self.guards[i].taken = true;
+                let node = self.guards[i].node;
+                self.take_snapshot(node);
+            }
+        }
+    }
+
+    /// The variables allocated since `first` were imported by the host:
+    /// record them for the bridge, in allocation order.
+    pub fn record_host_vars(&mut self, first: usize) {
+        for index in first..self.bir.vars().len() {
+            let var = VarId(index as u32);
+            self.stats.renames.push((var, var));
+        }
+    }
+
+    /// Ask the host for the exported function `field` of `module`
+    /// ([`Host::external_function`]). Without a host there is none.
+    pub fn external_function(
+        &mut self,
+        module: ImportId,
+        field: &str,
+    ) -> Result<Option<NodeId>, bridge::Unsupported> {
+        let Some(host) = self.host.take() else {
+            return Ok(None);
+        };
+        let first = self.bir.vars().len();
+        let result = host.external_function(self.bir, module, field);
+        self.host = Some(host);
+        self.record_host_vars(first);
+        result
+    }
+
+    /// The header of a handler a rule copies from the handler labelled
+    /// `source`, under a new label recorded as a copy of `source`. The
+    /// header exists before the handler's exits are built; its parameters
+    /// are set with [`Engine::set_catch_params`] before the handler node is.
+    /// Constant time.
+    pub fn copy_catch_header(&mut self, source: u32) -> (u32, CatchId) {
+        let label = u32::try_from(self.bir.pools.next_label).expect("static label overflow");
+        self.stats.labels.push((label, source));
+        (label, self.bir.catch_header(label, VarSpan::default()))
+    }
+
+    /// Set the parameters of a header no node uses yet.
+    pub fn set_catch_params(&mut self, header: CatchId, params: VarSpan) {
+        self.bir.pools.catches[header.index()].params = params;
+    }
+
+    /// A function header for a function node a rule builds.
+    pub fn function_header(&mut self, params: VarSpan, like: FuncId) -> FuncId {
+        let old = *self.bir.function(like);
+        let attrs = self.bir.function_attributes(like).clone();
+        let new = self.bir.function_header(params, attrs, old.loc);
+        self.bir.pools.funcs[new.index()].flags = old.flags;
+        new
+    }
+
+    /// Copy the source metadata of `from` to `to`.
+    pub fn copy_cold(&mut self, from: NodeId, to: NodeId) {
+        if let Some(cold) = self.bir.cold(from) {
+            self.bir.set_cold(to, cold);
+        }
+    }
+
     fn take_snapshot(&mut self, node: NodeId) {
         if self.snapshots.contains_key(&node) {
             return;
         }
         self.stats.snapshots += 1;
-        let copy = self.bir.copy_subtree(node, &[]);
+        let mut fresh = std::mem::take(&mut self.stats.renames);
+        let mut labels = std::mem::take(&mut self.stats.labels);
+        let copy = self
+            .bir
+            .copy_subtree_recording(node, &[], &mut fresh, &mut labels);
+        self.stats.renames = fresh;
+        self.stats.labels = labels;
         self.snapshots.insert(node, copy);
         self.snapshot_roots.push(copy);
     }
@@ -877,7 +998,7 @@ mod tests {
         let before = e.stats.entered;
         assert_eq!(e.run(&round(drop_identity), unit.root), Changed::No);
         assert_eq!(e.stats.entered, before);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -915,7 +1036,7 @@ mod tests {
             e.stats.entered
         );
         assert!(e.steps() <= 24 * nodes, "{}", e.steps());
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -982,7 +1103,7 @@ mod tests {
         );
         assert!(e.steps() <= 128, "{}", e.steps());
         assert_eq!(unit.arena.vars().uses(var), 2 * 5_002);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     fn function_with_identity(a: &mut LamArena, param: i32) -> crate::lambda::arena::Lam {
@@ -1040,7 +1161,7 @@ mod tests {
         let after: Vec<u32> = (0..4).map(|v| unit.arena.vars().uses(VarId(v))).collect();
         assert_eq!(uses, after);
         assert!(unit.arena.nodes.len() <= nodes + 3);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     fn check_frozen(e: &mut Engine<'_>, node: NodeId) -> Changed {
@@ -1070,7 +1191,7 @@ mod tests {
             ..round(check_frozen)
         };
         assert_eq!(e.run(&frozen, unit.root), Changed::Yes);
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -1102,6 +1223,6 @@ mod tests {
             e.bir().view(unit.root),
             View::Let { value: None, .. }
         ));
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 }

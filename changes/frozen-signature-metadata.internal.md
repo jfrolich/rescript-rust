@@ -1,0 +1,1 @@
+- Retain signature serialization metadata in frozen shared graphs so the equality check reconstructs stored bytes without portable-side inputs.

@@ -4,8 +4,6 @@
 //! forests are permitted while building an edit. `validate` checks a finished
 //! tree, including all allocated slots. Handles belong to one arena and become
 //! invalid when released (slots are reused). No compiler pipeline uses this IR.
-//! `TAIL` and function self-tail-call flags are valid only after explicitly
-//! running `mark_tail_positions`; edits invalidate that analysis.
 //!
 //! Ordinary constructors touch direct operands. Capture boundaries inspect their
 //! captured subtree; attaching a doubled switch default updates its affected use
@@ -16,6 +14,8 @@ pub mod bridge;
 pub mod bridge_j;
 pub mod engine;
 pub mod l;
+pub mod j;
+pub mod lower;
 pub mod replay;
 pub mod shadow;
 mod dump;
@@ -34,6 +34,8 @@ pub use vars::*;
 /// One compilation unit. Parent links support local ancestor repair after edits.
 #[derive(Default)]
 pub struct Bir {
+    /// Logical normalisation costs for the opt-in J backend.
+    pub j_stats: j::Stats,
     nodes: Vec<Node>,
     parents: Vec<Option<NodeId>>,
     cold: Vec<Option<ColdId>>,
@@ -42,6 +44,7 @@ pub struct Bir {
     pools: Pools,
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
+    js_scope: Option<lower::scope::Scope>,
     death_candidates: Vec<NodeId>,
     deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
@@ -58,7 +61,6 @@ pub struct Bir {
     capture_chain: Vec<(u64, bool)>,
     capture_stack: Vec<NodeId>,
     capture_uses: Vec<VarId>,
-    tails_valid: bool,
     bulk: bool,
     bulk_binders: Vec<(u64, u32)>,
     #[cfg(test)]
@@ -133,6 +135,7 @@ impl Bir {
         self.vars.binder.push(None);
         self.vars.fact.push(Fact::Unknown);
         self.vars.printed.push(None);
+        if let Some(scope) = &mut self.js_scope { scope.push(); }
         id
     }
     /// Allocate a contiguous run of fresh parameters/binders.
