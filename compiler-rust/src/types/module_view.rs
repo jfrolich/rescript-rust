@@ -843,6 +843,11 @@ impl ModuleView {
         &self.alias_sources
     }
 
+    /// The view this one's build read: the view it is a child of. `None`
+    /// for a unit's view. One upgrade of a weak reference.
+    pub(crate) fn parent_view(&self) -> Option<Arc<ModuleView>> {
+        self.parent.as_ref()?.0.upgrade()
+    }
 
     /// `comp_values` after the component substitution. One probe of the
     /// name index and one read of the value table; the description is
@@ -2026,6 +2031,51 @@ mod tests {
             // Asking again reads the cell.
             assert!(Arc::ptr_eq(&child_view_of(parent, "Chain"), child));
             assert_eq!(cell.builds.load(Ordering::Relaxed), 1);
+        }
+    }
+
+    #[test]
+    fn adoption_is_transitive_and_happens_once() {
+        // `Unit.Chain.Chain.Chain`: adopting the innermost view adopts the
+        // three views it is built from, each once and under its own path.
+        let shape = Shape {
+            chain: 3,
+            ..Shape::default()
+        };
+        let unit = unit_of("Transitive", shape);
+        let root = view_of(&unit);
+        let first = child_view_of(&root, "Chain");
+        let second = child_view_of(&first, "Chain");
+        let third = child_view_of(&second, "Chain");
+        let key = |view: &Arc<ModuleView>| {
+            QualifiedModuleComponentsCacheKey::new(*view.access_path(), None)
+        };
+        let ctx = compilation();
+        ctx.adopt_view(key(&third), third.clone());
+        assert_eq!(ctx.view_adoptions.get(), 4);
+        for view in [&root, &first, &second, &third] {
+            assert!(ctx.holds_view(&key(view), view), "{view:?}");
+        }
+        // The unit's view is held under the key a lookup of the unit uses.
+        assert!(ctx.holds_view(&key_of(&unit), &root));
+        // Adopting any of them again, in any order, adopts nothing.
+        for view in [&third, &root, &second, &first, &third] {
+            ctx.adopt_view(key(view), (*view).clone());
+        }
+        assert_eq!(ctx.view_adoptions.get(), 4);
+        // What the unit's view owes the alias tables was registered with
+        // it, once: `Alias` is an alias child of the unit.
+        let component = Path::pdot(*root.access_path(), "Alias");
+        for _ in 0..2 {
+            let sources = ctx.alias_sources_for_component_path(&component);
+            assert_eq!(sources.len(), 1);
+            assert_eq!(sources[0].name(), "Other_unit");
+            let components =
+                ctx.component_paths_for_alias_source(&Path::pident(Ident::create_persistent(
+                    "Other_unit",
+                )));
+            assert_eq!(components.len(), 1);
+            assert!(components[0].same(&component));
         }
     }
 
