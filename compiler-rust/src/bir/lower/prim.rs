@@ -713,6 +713,8 @@ impl State {
                     finished: Finished::True,
                 }));
             }
+            Primitive::Pduprecord => self.duplicate_record(values[0]),
+            Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
             Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
             Primitive::Pstringlength => {
@@ -731,8 +733,7 @@ impl State {
             | Primitive::PjsFnMethod
             | Primitive::Pjsx(_)
             | Primitive::Pimport(_)
-            | Primitive::Pduprecord
-            | Primitive::PrecordRest(_) => {
+            => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }
             Primitive::PextensionSlotEq => {
@@ -751,7 +752,7 @@ impl State {
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.
     /// O(s) to inspect the s statement slots, then O(1) conversion.
-    fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
+    pub(super) fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
             self.probe_leaf(cx, value)

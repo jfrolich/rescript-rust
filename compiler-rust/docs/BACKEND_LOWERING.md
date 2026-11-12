@@ -608,7 +608,7 @@ by `LetRec` goes through 5.1 instead.
 
 **`Let(kind, id, value, body)`** in continuation k:
 
-1. the record-copy form is tried: `value` is `Pduprecord(init)` and `body` is
+1. except in **D**, the record-copy form is tried: `value` is `Pduprecord(init)` and `body` is
    a sequence of `Psetfield`s of `id` that ends in `id`
    (`try_compile_record_spread` (C:1450)). Then `init` and each written value are
    lowered in **V**, left to right, statements concatenated (not sequenced),
@@ -616,6 +616,11 @@ by `LetRec` goes through 5.1 instead.
    fields **in reverse source order**; conv to k. Incidental: the reversal
    comes from a fold that prepends (C:1487); it stays in the lowering;
 2. otherwise `D(kind, id)(value)`, then `k(body)`, appended.
+
+S3.9 oracle correction: `compile_let_binding_output` does not try the
+record-copy collapse in its `Let` arm. For `let copy = Pduprecord(source) in
+copy`, **D** emits `let copy = {...source}; let result = copy;`, unlike the
+other continuations. The lowering preserves that declaration boundary.
 
 Finished-binding detail (`compile_expr`'s `Let` arm, versus
 `compile_effect_output`): in **V**, a finished binding discards the body's

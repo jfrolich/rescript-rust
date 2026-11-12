@@ -6,6 +6,7 @@ mod cond;
 mod expr;
 mod konst;
 mod prim;
+mod record;
 mod prim_cmp;
 mod prim_block;
 #[cfg(test)]
@@ -449,6 +450,11 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
             }
             View::Let { var, value, body } => {
+                if !matches!(cx.cont, Cont::Declare(..)) && let Some(value) = value {
+                    if let Some(record) = self.record_copy(var, value, body) {
+                        return Ok(ProbePlan::Children(expr::Resume::Record(record)));
+                    }
+                }
                 let kind = match self.source.node(node).aux() & 3 {
                     0 => LetKind::Strict,
                     1 => LetKind::Alias,
@@ -499,8 +505,6 @@ impl ProbeRules for State {
                     | Primitive::PjsFnMethod => "external",
                     Primitive::Pjsx(_) => "jsx",
                     Primitive::Pimport(_) => "import",
-                    Primitive::Pduprecord => "record copy",
-                    Primitive::PrecordRest(_) => "record rest",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
                         source: node, primitive, operands: self.source.node(node).primitive_arguments(),
                     }))),
@@ -593,6 +597,7 @@ impl ProbeRules for State {
     ) -> Result<Probed, Unsupported> {
         match resume {
             expr::Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
+            expr::Resume::Record(record) => Ok(self.finish_record(cx, record, children)),
             resume => Ok(self.finish_expression(cx, resume, children)),
         }
     }
