@@ -35,6 +35,9 @@ use crate::types::type_expr::{
     TypeArg, TypeDesc, TypeExprRef,
 };
 
+use super::graph_hash::{
+    ArgKind, GraphWalk, Node, Row, RowFieldView, TypeGraph, hash_path_by_name,
+};
 use super::persistent_env::PersStruct;
 
 // ============================================================================
@@ -464,6 +467,13 @@ impl std::ops::Deref for HashGraph<'_> {
 /// Public API for computing a fingerprint outside of `serialize_pers_struct`
 /// (e.g., for namespace signatures synthesized directly).
 pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
+    signature_fingerprint(entries, sig)
+}
+
+/// The fingerprint of `sig`, whose types are nodes of `graph`: one hash of
+/// the whole signature, so types shared between items are hashed once
+/// (`graph_hash`). Linear in the signature and the nodes it reaches.
+pub fn signature_fingerprint<G: TypeGraph>(graph: &G, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
     use std::hash::BuildHasher;
@@ -471,216 +481,163 @@ pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) 
         ahash::RandomState::with_seeds(0x5245_5343, 0x5249_5054, 0x4649_4e47, 0x4552_5052)
             .build_hasher();
 
-    // Hash the public signature through its remapped TypeExprRef roots instead
-    // of hashing the portable arena linearly. The same interface can serialize
-    // its internal type graph in a different allocation order depending on
-    // whether it was produced during a cold parallel build or a later watch
-    // rebuild; dependency invalidation needs the interface shape, not arena
-    // ordering.
-    hash_signature(&mut hasher, sig, entries);
+    // Hash the public signature through its type roots instead of hashing
+    // the graph's storage linearly. The same interface can store its nodes
+    // in a different order depending on whether it was produced during a
+    // cold parallel build or a later watch rebuild; dependency invalidation
+    // needs the interface's graph, not the order it is stored in.
+    hash_signature(&mut hasher, sig, &mut GraphWalk::new(graph));
 
     hasher.finish()
 }
 
-/// Hash a Path using only names, not stamps. This makes the fingerprint stable
-/// across recompilations where dependency stamps may shift.
-fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
-    use crate::types::path::PathView as P;
-    match path.view() {
-        P::Pident(ident) => {
-            0u8.hash(hasher);
-            ident.name().hash(hasher);
-        }
-        P::Pdot(base, field, _pos) => {
-            1u8.hash(hasher);
-            hash_path_by_name(hasher, base);
-            field.hash(hasher);
-        }
-        P::Papply(f, x) => {
-            2u8.hash(hasher);
-            hash_path_by_name(hasher, f);
-            hash_path_by_name(hasher, x);
-        }
-    }
-}
+impl super::graph_hash::TypeGraph for HashGraph<'_> {
+    type Ref = usize;
+    type Arg = (ArgLabel, usize);
+    type Row = PortableRowDesc;
+    type RowField = PortableRowField;
+    type Mutability = usize;
+    type Lid = PortableLongident;
 
-fn hash_type_ref(
-    hasher: &mut impl Hasher,
-    idx: usize,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    if idx >= entries.len() {
-        0xfeu8.hash(hasher);
-        idx.hash(hasher);
-        return;
+    fn slots(&self) -> usize {
+        self.entries.len()
     }
 
-    if let Some(pos) = visiting.iter().position(|seen| *seen == idx) {
-        0xffu8.hash(hasher);
-        pos.hash(hasher);
-        return;
+    fn slot(&self, r: usize) -> Option<usize> {
+        (r < self.entries.len()).then_some(r)
     }
 
-    visiting.push(idx);
-    hash_portable_desc(hasher, &entries[idx].desc, entries, visiting);
-    visiting.pop();
-}
-
-fn hash_type_refs(
-    hasher: &mut impl Hasher,
-    refs: &[usize],
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    refs.len().hash(hasher);
-    for idx in refs {
-        hash_type_ref(hasher, *idx, entries, visiting);
+    fn root(&self, r: TypeExprRef) -> usize {
+        r.index()
     }
-}
 
-fn hash_portable_desc(
-    hasher: &mut impl Hasher,
-    desc: &PortableTypeDesc,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    std::mem::discriminant(desc).hash(hasher);
-    match desc {
-        PortableTypeDesc::Tvar(name) => name.hash(hasher),
-        PortableTypeDesc::Tarrow { args, ret } => {
-            args.len().hash(hasher);
-            for (label, arg) in args {
-                // The label's kind and name; not where it was written.
-                std::mem::discriminant(label).hash(hasher);
-                match label {
-                    crate::types::asttypes::ArgLabel::Nolabel => {}
-                    crate::types::asttypes::ArgLabel::Labelled(name)
-                    | crate::types::asttypes::ArgLabel::Optional(name) => name.txt.hash(hasher),
-                }
-                hash_type_ref(hasher, *arg, entries, visiting);
-            }
-            hash_type_ref(hasher, *ret, entries, visiting);
-        }
-        PortableTypeDesc::Ttuple(elems) => hash_type_refs(hasher, elems, entries, visiting),
-        PortableTypeDesc::Tconstr { path, args } => {
-            hash_path_by_name(hasher, path);
-            hash_type_refs(hasher, args, entries, visiting);
-        }
-        PortableTypeDesc::Tobject { fields } => {
-            hash_type_ref(hasher, *fields, entries, visiting);
-        }
-        PortableTypeDesc::Tfield {
-            name,
-            mutability,
-            typ,
-            rest,
-        } => {
-            name.hash(hasher);
-            entries.mutabilities.get(*mutability).hash(hasher);
-            hash_type_ref(hasher, *typ, entries, visiting);
-            hash_type_ref(hasher, *rest, entries, visiting);
-        }
-        PortableTypeDesc::Tnil => {}
-        PortableTypeDesc::Tlink(idx) => hash_type_ref(hasher, *idx, entries, visiting),
-        PortableTypeDesc::Tsubst(idx) => hash_type_ref(hasher, *idx, entries, visiting),
-        PortableTypeDesc::Tvariant(rd) => hash_portable_row_desc(hasher, rd, entries, visiting),
-        PortableTypeDesc::Tunivar(name) => name.hash(hasher),
-        PortableTypeDesc::Tpoly { body, vars } => {
-            hash_type_ref(hasher, *body, entries, visiting);
-            hash_type_refs(hasher, vars, entries, visiting);
-        }
-        PortableTypeDesc::Tpackage { path, lids, args } => {
-            hash_path_by_name(hasher, path);
-            lids.hash(hasher);
-            hash_type_refs(hasher, args, entries, visiting);
+    fn node(&self, slot: usize) -> Node<'_, Self> {
+        match &self.entries[slot].desc {
+            PortableTypeDesc::Tvar(name) => Node::Tvar(*name),
+            PortableTypeDesc::Tarrow { args, ret } => Node::Tarrow { args, ret: *ret },
+            PortableTypeDesc::Ttuple(elems) => Node::Ttuple(elems),
+            PortableTypeDesc::Tconstr { path, args } => Node::Tconstr { path: *path, args },
+            PortableTypeDesc::Tobject { fields } => Node::Tobject { fields: *fields },
+            PortableTypeDesc::Tfield {
+                name,
+                mutability,
+                typ,
+                rest,
+            } => Node::Tfield {
+                name: *name,
+                mutability: *mutability,
+                typ: *typ,
+                rest: *rest,
+            },
+            PortableTypeDesc::Tnil => Node::Tnil,
+            PortableTypeDesc::Tlink(target) => Node::Tlink(*target),
+            PortableTypeDesc::Tsubst(target) => Node::Tsubst(*target),
+            PortableTypeDesc::Tvariant(row) => Node::Tvariant(row),
+            PortableTypeDesc::Tunivar(name) => Node::Tunivar(*name),
+            PortableTypeDesc::Tpoly { body, vars } => Node::Tpoly { body: *body, vars },
+            PortableTypeDesc::Tpackage { path, lids, args } => Node::Tpackage {
+                path: *path,
+                lids,
+                args,
+            },
         }
     }
-}
 
-fn hash_portable_row_desc(
-    hasher: &mut impl Hasher,
-    rd: &PortableRowDesc,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    rd.row_fields.len().hash(hasher);
-    for (label, field) in &rd.row_fields {
-        label.hash(hasher);
-        hash_portable_row_field(hasher, field, entries, visiting);
+    fn arg<'a>(&'a self, arg: &'a (ArgLabel, usize)) -> (ArgKind, Option<&'a str>, usize) {
+        match &arg.0 {
+            ArgLabel::Nolabel => (ArgKind::Nolabel, None, arg.1),
+            ArgLabel::Labelled(name) => (ArgKind::Labelled, Some(&name.txt), arg.1),
+            ArgLabel::Optional(name) => (ArgKind::Optional, Some(&name.txt), arg.1),
+        }
     }
-    hash_type_ref(hasher, rd.row_more, entries, visiting);
-    rd.row_closed.hash(hasher);
-    rd.row_fixed.hash(hasher);
-    if let Some((p, args)) = &rd.row_name {
-        true.hash(hasher);
-        hash_path_by_name(hasher, p);
-        hash_type_refs(hasher, args, entries, visiting);
-    } else {
-        false.hash(hasher);
-    }
-}
 
-fn hash_portable_row_field(
-    hasher: &mut impl Hasher,
-    rf: &PortableRowField,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    std::mem::discriminant(rf).hash(hasher);
-    match rf {
-        PortableRowField::Rpresent(opt) => {
-            if let Some(idx) = opt {
-                true.hash(hasher);
-                hash_type_ref(hasher, *idx, entries, visiting);
-            } else {
-                false.hash(hasher);
-            }
+    fn row<'a>(&'a self, row: &'a PortableRowDesc) -> Row<'a, Self> {
+        Row {
+            fields: &row.row_fields,
+            more: row.row_more,
+            closed: row.row_closed,
+            fixed: row.row_fixed,
+            name: row
+                .row_name
+                .as_ref()
+                .map(|(path, args)| (*path, args.as_slice())),
         }
-        PortableRowField::Reither {
-            constant,
-            types,
-            matched,
-        } => {
-            constant.hash(hasher);
-            hash_type_refs(hasher, types, entries, visiting);
-            matched.hash(hasher);
+    }
+
+    fn row_field<'a>(&'a self, field: &'a PortableRowField) -> RowFieldView<'a, Self> {
+        match field {
+            PortableRowField::Rpresent(typ) => RowFieldView::Rpresent(*typ),
+            PortableRowField::Reither {
+                constant,
+                types,
+                matched,
+            } => RowFieldView::Reither {
+                constant: *constant,
+                types,
+                matched: *matched,
+            },
+            PortableRowField::Rabsent => RowFieldView::Rabsent,
         }
-        PortableRowField::Rabsent => {}
+    }
+
+    fn mutability(&self, cell: usize) -> Option<crate::types::asttypes::MutableFlag> {
+        self.mutabilities.get(cell).copied()
+    }
+
+    fn package_lids<'a>(
+        &'a self,
+        lids: &'a [PortableLongident],
+    ) -> std::borrow::Cow<'a, [PortableLongident]> {
+        std::borrow::Cow::Borrowed(lids)
+    }
+
+    fn layout(
+        &self,
+        layout: crate::types::VariantLayoutRef,
+    ) -> Option<&crate::types::VariantLayout> {
+        self.layouts.get(layout.0 as usize)
     }
 }
 
 /// Hash the signature structure: item names and kinds.
 /// Uses name-based identity for all paths.
-fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &HashGraph<'_>) {
+fn hash_signature<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    sig: &Signature,
+    walk: &mut GraphWalk<'_, G>,
+) {
     sig.len().hash(hasher);
     for item in sig {
-        hash_sig_item(hasher, item, entries);
+        hash_sig_item(hasher, item, walk);
     }
 }
 
 /// The fingerprint contribution of one signature item.
-pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
+pub fn hash_sig_item<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    item: &SignatureItem,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(item).hash(hasher);
     match item {
         SignatureItem::SigValue(ident, vd) => {
             ident.name().hash(hasher);
-            hash_value_desc(hasher, vd, entries);
+            hash_value_desc(hasher, vd, walk);
         }
         SignatureItem::SigType(ident, td, rec) => {
             ident.name().hash(hasher);
             std::mem::discriminant(rec).hash(hasher);
-            hash_type_decl(hasher, td, entries);
+            hash_type_decl(hasher, td, walk);
         }
         SignatureItem::SigTypext(ident, ext, es) => {
             ident.name().hash(hasher);
             std::mem::discriminant(es).hash(hasher);
-            hash_extension_constructor(hasher, ext, entries);
+            hash_extension_constructor(hasher, ext, walk);
         }
         SignatureItem::SigModule(ident, md, _rec) => {
             ident.name().hash(hasher);
             hash_attributes(hasher, &md.md_attributes);
-            hash_module_type(hasher, &md.md_type, entries);
+            hash_module_type(hasher, &md.md_type, walk);
             match &md.md_path {
                 Some(path) => {
                     true.hash(hasher);
@@ -691,7 +648,7 @@ pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &H
         }
         SignatureItem::SigModtype(ident, mtd) => {
             ident.name().hash(hasher);
-            hash_modtype_decl(hasher, mtd, entries);
+            hash_modtype_decl(hasher, mtd, walk);
         }
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
@@ -707,8 +664,12 @@ fn hash_attributes(hasher: &mut impl Hasher, attrs: &[crate::types::decl::Attrib
     }
 }
 
-fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &HashGraph<'_>) {
-    hash_type_ref(hasher, vd.val_type.index(), entries, &mut Vec::new());
+fn hash_value_desc<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    vd: &ValueDescription,
+    walk: &mut GraphWalk<'_, G>,
+) {
+    walk.type_ref(hasher, vd.val_type);
     hash_attributes(hasher, &vd.val_attributes);
     match &vd.val_kind {
         ValueKind::ValReg => {
@@ -731,14 +692,18 @@ fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &Ha
     }
 }
 
-fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &HashGraph<'_>) {
+fn hash_type_decl<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    td: &TypeDeclaration,
+    walk: &mut GraphWalk<'_, G>,
+) {
     td.type_arity.hash(hasher);
     hash_attributes(hasher, &td.type_attributes);
-    hash_type_expr_refs(hasher, &td.type_params, entries);
+    hash_type_expr_refs(hasher, &td.type_params, walk);
     td.type_private.hash(hasher);
     if let Some(manifest) = td.type_manifest {
         true.hash(hasher);
-        hash_type_ref(hasher, manifest.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, manifest);
     } else {
         false.hash(hasher);
     }
@@ -752,33 +717,41 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &Hash
     } else {
         false.hash(hasher);
     }
-    hash_type_kind(hasher, &td.type_kind, entries);
+    hash_type_kind(hasher, &td.type_kind, walk);
     td.type_inlined_types.len().hash(hasher);
     for inlined in &td.type_inlined_types {
         match inlined {
             TypeInlinedType::Record { type_name, labels } => {
                 type_name.hash(hasher);
-                hash_label_decls(hasher, labels, entries);
+                hash_label_decls(hasher, labels, walk);
             }
         }
     }
 }
 
-fn hash_type_expr_refs(hasher: &mut impl Hasher, refs: &[TypeExprRef], entries: &HashGraph<'_>) {
+fn hash_type_expr_refs<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    refs: &[TypeExprRef],
+    walk: &mut GraphWalk<'_, G>,
+) {
     refs.len().hash(hasher);
     for r in refs {
-        hash_type_ref(hasher, r.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, *r);
     }
 }
 
-fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph<'_>) {
+fn hash_type_kind<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    kind: &TypeKind,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(kind).hash(hasher);
     match kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
         // The representations decide dependents' JS (`@unboxed`, `@tag`,
         // inlined records).
         TypeKind::TypeRecord(labels, repr) => {
-            hash_label_decls(hasher, labels, entries);
+            hash_label_decls(hasher, labels, walk);
             std::mem::discriminant(repr).hash(hasher);
             match repr {
                 crate::types::decl::RecordRepresentation::RecordUnboxed(flag) => flag.hash(hasher),
@@ -790,7 +763,7 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
                     representation.position.hash(hasher);
                     format!(
                         "{:?}",
-                        entries.layouts.get(representation.variant.0 as usize)
+                        walk.graph().layout(representation.variant)
                     )
                     .hash(hasher);
                 }
@@ -798,17 +771,17 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
             }
         }
         TypeKind::TypeVariant(ctors, layout) => {
-            format!("{:?}", entries.layouts.get(layout.0 as usize)).hash(hasher);
+            format!("{:?}", walk.graph().layout(*layout)).hash(hasher);
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
                 // The run-time tag (`@as`).
                 format!("{:?}", ctor.cd_runtime_tag).hash(hasher);
                 hash_attributes(hasher, &ctor.cd_attributes);
-                hash_constructor_args(hasher, &ctor.cd_args, entries);
+                hash_constructor_args(hasher, &ctor.cd_args, walk);
                 if let Some(res) = ctor.cd_res {
                     true.hash(hasher);
-                    hash_type_ref(hasher, res.index(), entries, &mut Vec::new());
+                    walk.type_ref(hasher, res);
                 } else {
                     false.hash(hasher);
                 }
@@ -817,10 +790,10 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
     }
 }
 
-fn hash_label_decls(
+fn hash_label_decls<G: TypeGraph>(
     hasher: &mut impl Hasher,
     labels: &[LabelDeclaration],
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     labels.len().hash(hasher);
     for label in labels {
@@ -830,34 +803,34 @@ fn hash_label_decls(
         hash_attributes(hasher, &label.ld_attributes);
         label.ld_mutable.hash(hasher);
         label.ld_optional.hash(hasher);
-        hash_type_ref(hasher, label.ld_type.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, label.ld_type);
     }
 }
 
-fn hash_constructor_args(
+fn hash_constructor_args<G: TypeGraph>(
     hasher: &mut impl Hasher,
     args: &ConstructorArguments,
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     std::mem::discriminant(args).hash(hasher);
     match args {
-        ConstructorArguments::CstrTuple(types) => hash_type_expr_refs(hasher, types, entries),
-        ConstructorArguments::CstrRecord(labels) => hash_label_decls(hasher, labels, entries),
+        ConstructorArguments::CstrTuple(types) => hash_type_expr_refs(hasher, types, walk),
+        ConstructorArguments::CstrRecord(labels) => hash_label_decls(hasher, labels, walk),
     }
 }
 
-fn hash_extension_constructor(
+fn hash_extension_constructor<G: TypeGraph>(
     hasher: &mut impl Hasher,
     ext: &ExtensionConstructor,
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     hash_path_by_name(hasher, &ext.ext_type_path);
     hash_attributes(hasher, &ext.ext_attributes);
-    hash_type_expr_refs(hasher, &ext.ext_type_params, entries);
-    hash_constructor_args(hasher, &ext.ext_args, entries);
+    hash_type_expr_refs(hasher, &ext.ext_type_params, walk);
+    hash_constructor_args(hasher, &ext.ext_args, walk);
     if let Some(ret) = ext.ext_ret_type {
         true.hash(hasher);
-        hash_type_ref(hasher, ret.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, ret);
     } else {
         false.hash(hasher);
     }
@@ -865,21 +838,29 @@ fn hash_extension_constructor(
     ext.ext_is_exception.hash(hasher);
 }
 
-fn hash_modtype_decl(hasher: &mut impl Hasher, mtd: &ModtypeDeclaration, entries: &HashGraph<'_>) {
+fn hash_modtype_decl<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    mtd: &ModtypeDeclaration,
+    walk: &mut GraphWalk<'_, G>,
+) {
     hash_attributes(hasher, &mtd.mtd_attributes);
     if let Some(mty) = &mtd.mtd_type {
         true.hash(hasher);
-        hash_module_type(hasher, mty, entries);
+        hash_module_type(hasher, mty, walk);
     } else {
         false.hash(hasher);
     }
 }
 
-fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &HashGraph<'_>) {
+fn hash_module_type<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    mty: &ModuleType,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(mty).hash(hasher);
     match mty {
         ModuleType::MtyIdent(path) => hash_path_by_name(hasher, path),
-        ModuleType::MtySignature(sig) => hash_signature(hasher, sig, entries),
+        ModuleType::MtySignature(sig) => hash_signature(hasher, sig, walk),
         ModuleType::MtyFunctor {
             param,
             param_type,
@@ -887,9 +868,9 @@ fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &HashGr
         } => {
             param.name().hash(hasher);
             if let Some(pt) = param_type {
-                hash_module_type(hasher, pt, entries);
+                hash_module_type(hasher, pt, walk);
             }
-            hash_module_type(hasher, result, entries);
+            hash_module_type(hasher, result, walk);
         }
         ModuleType::MtyAlias(_presence, path) => hash_path_by_name(hasher, path),
     }

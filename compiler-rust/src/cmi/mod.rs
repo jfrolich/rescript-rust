@@ -14,6 +14,7 @@
 pub mod cmi_format;
 pub mod digest_ser;
 pub mod ffi_decode;
+pub mod graph_hash;
 pub mod item_deps;
 pub mod marshal_reader;
 pub mod persistent_env;
