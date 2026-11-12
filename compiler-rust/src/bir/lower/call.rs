@@ -125,7 +125,7 @@ impl State {
                 ),
                 ApplyStatus::Na => {
                     if let Some(arity) = arity.filter(|arity| !arity.is_na()) {
-                        self.apply_with_arity(callee, arity, values)
+                        self.apply_with_arity(callee, arity, values.into_vec())
                     } else {
                         self.call_node(callee, &values, crate::js_ir::CallInfo::default())
                     }
