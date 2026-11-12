@@ -15327,7 +15327,6 @@ fn type_record(
                             lbl_repres: env_label.lbl_repres.clone(),
                             lbl_private: env_label.lbl_private,
                             lbl_loc: env_label.lbl_loc,
-                            lbl_attributes: env_label.lbl_attributes.clone(),
                         },
                         input_ty,
                         original_label_arg,

@@ -419,14 +419,8 @@ impl From<Location> for SrcLoc {
 }
 
 /// A record label as `resolve_all_record_labels` reports it: name, position,
-/// mutability, record representation and attributes.
-type RecordLabelInfo = (
-    String,
-    i32,
-    TypeMutableFlag,
-    RecordRepresentation,
-    Vec<crate::types::decl::Attribute>,
-);
+/// mutability and record representation.
+type RecordLabelInfo = (String, i32, TypeMutableFlag, RecordRepresentation);
 
 /// An error found while translating to raw Lambda.
 #[derive(Debug, Clone)]
@@ -948,7 +942,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         label.lbl_pos,
                         label.lbl_mut,
                         label.lbl_repres,
-                        label.lbl_attributes,
                     )
                 })
                 .collect(),
@@ -5961,10 +5954,10 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
 
                 if let Some(all_labels) = all_labels {
                     // Handle unboxed records separately (field IS the scrutinee)
-                    if all_labels.iter().any(|(_, _, _, repr, _)| {
+                    if all_labels.iter().any(|(_, _, _, repr)| {
                         matches!(repr, RecordRepresentation::RecordUnboxed(_))
                     }) {
-                        for (_, pos, _, repr, _) in all_labels.iter() {
+                        for (_, pos, _, repr) in all_labels.iter() {
                             if !matches!(repr, RecordRepresentation::RecordUnboxed(_)) {
                                 continue;
                             }
@@ -5985,7 +5978,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         // them past existing Alias Llets. StrictOpt (mutable) fields stay
                         // at the outermost position. We simulate this reordering here.
                         let mut field_indices: Vec<(usize, LetKind)> = Vec::new();
-                        for (idx, (_, _, mutflag, _, _)) in all_labels.iter().enumerate() {
+                        for (idx, (_, _, mutflag, _)) in all_labels.iter().enumerate() {
                             let kind = if matches!(mutflag, TypeMutableFlag::Mutable) {
                                 LetKind::StrictOpt
                             } else {
@@ -6016,7 +6009,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         // Iterate in REVERSE of ocaml_order for inside-out wrapping.
                         // Last in ocaml_order (innermost) is wrapped first.
                         for &(idx, _) in ocaml_order.iter().rev() {
-                            let (name, pos, mutflag, repr, _) = &all_labels[idx];
+                            let (name, pos, mutflag, repr) = &all_labels[idx];
 
                             let field_pos = match repr {
                                 RecordRepresentation::RecordExtension => pos + 1,

@@ -282,7 +282,6 @@ pub(crate) fn label_descrs(
             lbl_repres: repr.clone(),
             lbl_private: private,
             lbl_loc: ld.ld_loc,
-            lbl_attributes: ld.ld_attributes.clone(),
         })
         .collect();
     adjust(&mut descs);
