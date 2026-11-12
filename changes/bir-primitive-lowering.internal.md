@@ -1,0 +1,1 @@
+- Lower arithmetic, comparisons, options, blocks, fields, templates, dictionaries and control primitives through the checked Bir backend, retaining the legacy backend for emitted code.

@@ -184,6 +184,12 @@ impl ModulePathResolver {
     }
 
     #[cfg(test)]
+    pub(crate) fn set_bir_test_constant(&self, module: &str, field: &str, constant: CmjExportConstant) {
+        self.cmj_export_constants_cache.borrow_mut().insert(module.to_owned(),
+            Some(Arc::new(AHashMap::from_iter([(field.to_owned(), constant)]))));
+    }
+
+    #[cfg(test)]
     pub(crate) fn set_bir_test_export(
         &self,
         module: &str,

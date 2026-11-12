@@ -589,6 +589,15 @@ by `LetRec` goes through 5.1 instead.
    comes from a fold that prepends (C:1487); it stays in the lowering;
 2. otherwise `D(kind, id)(value)`, then `k(body)`, appended.
 
+Finished-binding detail (`compile_expr`'s `Let` arm, versus
+`compile_effect_output`): in **V**, a finished binding discards the body's
+statements but retains its value and keeps `finished = True`. In **E** the
+value becomes `undefined`; in **D**, **A**, **R** it is absent. The retained
+export-block value is needed by the shared export coercion to declare the
+exports of a unit that throws. Truncated J statements must be released, not
+merely removed from the statement stack. The S3.3c oracle and shared-tail
+tests cover both cases.
+
 `D(kind, id)` of a value that is itself a `Let` or `Seq` continues through
 it: the inner binding or the head first, then `D(kind, id)` of the rest
 (the `Let` and `Sequence` arms, C:2419 and C:2487). A sequence that ends in the unit value thus
@@ -665,7 +674,29 @@ externals add what S3.8 specifies.
 | JSX, import | `Pjsx`, `Pimport` | S3.9 | |
 
 The row of every primitive is the arm of `compile_primitive_js` (P:188) with its
-name; the port is arm by arm. Facts read by primitives: the option
+name; the port is arm by arm.
+
+Details verified by the S3.3c primitive oracle tests:
+
+- Both `Pstringrefs` and `Pstringrefu` call `Primitive_string.getChar`;
+  only `Parrayrefu` is a direct index. "Checked forms" does not distinguish
+  the two string primitives.
+- `Pdebugger` uses `compile_debugger`, not the nominal arm in
+  `compile_primitive_js`: its result is unit `undefined` (`is_unit = true`),
+  after lowering its arguments in **E**. `Praise`'s placeholder is non-unit
+  `undefined` in a value continuation; it never emits a binding or return.
+- `Pmakedict` recognizes exactly one array argument and extracts only
+  two-field block entries whose key is a string literal. Other entries are
+  skipped; a non-array argument produces `undefined`. `PdictSpread` flattens
+  objects only when every property is a literal key or a symbol.
+- `PisNotNone` folds an optional block to `true` without a purity guard,
+  including an effectful payload. `Psome` marks the optional block as an
+  identity for null, objects, numbers, blocks, arrays, strings and plain
+  template literals, not for booleans or interpolated templates.
+- Null-to-option conversion is inlined only for a variable, null or
+  undefined; qualified reads and all other expressions call the runtime.
+
+These are lowering policies, not new J constructor rules. Facts read by primitives: the option
 `check_div_by_zero`; for `Pfield(Module)` of a `Global`, the other module's
 constant exports (`resolve_cmj_module_field_constant` (K:163): `true`, `false`,
 `null`, `undefined` are inlined, anything else is `JQualified(m, name)`); for
@@ -2078,6 +2109,24 @@ positions.
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
+
+S3.3c primitive costs: the resume is three `u32` handles (12 bytes), retaining
+an existing source-list handle rather than allocating an operand vector. Up to
+four sequenced outputs and values are inline. Literal min/max duplication copies
+only leaf handles and decoration, never a generic subtree/hash-map copier.
+Module constant summaries are acquired once per imported module into an
+`ImportId`-indexed table; the summary state is 16 bytes. Export lookup still uses
+field names because the summary interface has no field-index handle.
+
+The primitive cost tests include 10,000 nested identities and a 10,000-element
+block (10,001 source visits / 10,000 argument steps each), 10,000 dictionary
+entries (30,002 source visits / 30,001 argument steps / 50,003 immediate
+primitive steps), and 10,000 runtime-compare shells stripped by one comparison
+(20,003 source visits / 20,002 argument steps / 40,004 immediate primitive
+steps). These are opt-in lowering costs: this slice claims no improvement to
+the default emitted backend. Arena-owned variable-width cold payloads (block
+metadata, property lists, templates) continue to use the existing J pool API;
+this slice does not replace those representations.
 
 ### 7.4 Step-count tests each stage adds
 
