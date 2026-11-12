@@ -924,6 +924,7 @@ mod tests {
         let config_path = root.join("rescript.json");
         std::fs::write(&config_path, r#"{"name":"pkg"}"#).unwrap();
         Package {
+            prebuilt: false,
             check_only: false,
             name: "pkg".to_string(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {

@@ -144,6 +144,7 @@ pub fn get_deps(build_state: &mut BuildCommandState, deleted_modules: &AHashSet<
                 let package = build_state
                     .get_package(&module.package_name)
                     .expect("Package not found");
+                if package.prebuilt { return None; }
                 if module.deps_dirty || !build_state.deps_initialized {
                     let ctx = DepContext {
                         namespace: package.namespace.to_suffix(),

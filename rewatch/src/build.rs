@@ -660,12 +660,16 @@ pub fn incremental_build_without_lock(
     if fresh_in_process {
         incremental::collect_source_mtimes(build_state);
     }
+    snapshot::prepare_belt(build_state).map_err(|err| IncrementalBuildError {
+        kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())), plain_output,
+    })?;
     if incremental {
         incremental::seed_recorded_deps(build_state);
     } else if fresh_in_process {
         mark_modules_dirty(build_state);
     }
 
+    snapshot::suppress_prebuilt_parses(build_state);
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
     let pb = if !plain_output && show_progress {
         ProgressBar::new(num_dirty_modules)

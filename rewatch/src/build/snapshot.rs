@@ -587,3 +587,61 @@ mod tests {
         assert_ne!(sources_digest(&second, &second_paths).unwrap(), digest);
     }
 }
+
+/// Build-specific package fields. One allocation per selected package; module
+/// names and cores remain in the executable until a lookup requests a slot.
+struct BeltPackage {
+    index: &'static PackageIndex,
+    package: packages::Package,
+    root_config: crate::config::Config,
+}
+
+impl rescript_compiler::cmi::persistent_env::SnapshotModules for BeltPackage {
+    fn find(&self, name: &str) -> Option<u32> {
+        self.index.lookup(name).and_then(|slot| u32::try_from(slot).ok())
+    }
+
+    fn decode(&self, slot: u32) -> Option<stored_module::StoredCore> {
+        let (_, bytes) = self.index.module(slot as usize)?;
+        let mut core = stored_module::decode_core(bytes)?;
+        core.rebase_paths(Path::new(self.index.recorded_root), &self.package.path);
+        compile::configure_snapshot_module(&mut core.info, &self.package, &self.root_config);
+        Some(core)
+    }
+}
+
+/// Select Belt once per build: O(source bytes) verification, one package clone
+/// and one registry attachment. No core is read or copied by this operation.
+pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) -> Result<()> {
+    let Some(package) = state.packages.get("@rescript/belt") else { return Ok(()); };
+    if package.is_root || state.check_only || state.dump.is_some()
+        || state.source_map_command == crate::config::SourceMapCommand::Watch
+        || std::env::var_os("RESCRIPT_FULL_BUILD").is_some()
+        || !state.get_root_config().get_source_map_args(state.source_map_command).is_empty()
+    { return Ok(()); }
+    let Some(index) = EMBEDDED.get().and_then(Option::as_ref)
+        .and_then(|packages| packages.iter().find(|p| p.name == "@rescript/belt"))
+    else { return Ok(()); };
+    if belt_sources_digest(&package.path)? != index.sources_digest { return Ok(()); }
+    let provider = std::sync::Arc::new(BeltPackage {
+        index, package: package.clone(), root_config: state.get_root_config().clone(),
+    });
+    state.module_registry.lock().unwrap().register_snapshot(provider);
+    state.build_state.packages.get_mut("@rescript/belt").unwrap().prebuilt = true;
+    Ok(())
+}
+
+/// Clear scheduling flags after the normal incremental plan seeds them.
+/// O(module count), no core lookup, allocation or source-file access.
+pub(crate) fn suppress_prebuilt_parses(state: &mut super::build_types::BuildCommandState) {
+    for module in state.build_state.modules.values_mut() {
+        if state.build_state.packages[&module.package_name].prebuilt {
+            module.compile_dirty = false;
+            module.deps_dirty = false;
+            if let super::build_types::SourceType::SourceFile(source) = &mut module.source_type {
+                source.implementation.parse_dirty = false;
+                if let Some(interface) = &mut source.interface { interface.parse_dirty = false; }
+            }
+        }
+    }
+}

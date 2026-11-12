@@ -2401,6 +2401,17 @@ fn package_outputs(
         .collect()
 }
 
+/// Compute the same package fields for a decoded snapshot as for a compiled
+/// module. O(package spec count + path bytes), once per decoded module.
+pub(crate) fn configure_snapshot_module(
+    info: &mut InMemoryModuleInfo, package: &packages::Package, root_config: &config::Config,
+) {
+    info.package_outputs = Arc::new(package_outputs(package, root_config, &info.source_path));
+    info.package_name = Some(package.name.clone().into());
+    info.package_root = Some(Arc::new(package.path.clone()));
+    info.js_output_suffix = js_output_suffix_for_registry(root_config).map(Into::into);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn in_memory_module_info_for_package(
     package: &packages::Package,
@@ -4767,6 +4778,7 @@ mod tests {
 
     fn test_package(name: &str, path: PathBuf) -> Package {
         Package {
+            prebuilt: false,
             check_only: false,
             name: name.to_string(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
