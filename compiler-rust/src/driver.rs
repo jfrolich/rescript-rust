@@ -9852,7 +9852,22 @@ fn render_js_program(
         debug,
         jsx_preserve,
     } = settings;
-    if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
+    if let crate::emit::PrinterMode::Oxc(stats) | crate::emit::PrinterMode::OxcBir(stats) = &options.js_printer {
+        // Transitional wiring: the byte-equality gate is established before
+        // replacing this round trip with a direct J-level emitter view.
+        let bridged = if matches!(options.js_printer, crate::emit::PrinterMode::OxcBir(_)) {
+            match crate::bir::bridge_j::import_js(program) {
+                Ok(imported) => Some(crate::bir::bridge_j::export_js(&imported)
+                    .expect("an unmodified J import must export")),
+                Err(reason) => {
+                    stats.record_bridge_unsupported(reason.0);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        let program = bridged.as_ref().unwrap_or(program);
         let mut raw_audit = stats.raw_audit_buffer();
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None
             && std::env::var("RESCRIPT_JS_PRINTER_SOURCE_MAPS").as_deref() == Ok("legacy")

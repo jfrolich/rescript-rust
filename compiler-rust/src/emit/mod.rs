@@ -24,6 +24,8 @@ pub enum PrinterMode {
     Legacy,
     /// Experimental AST output, with whole-file fallback.
     Oxc(Arc<PrinterStats>),
+    /// Experimental J-level bridge output, with JS-IR fallback on import limits.
+    OxcBir(Arc<PrinterStats>),
 }
 
 impl PrinterMode {
@@ -35,6 +37,7 @@ impl PrinterMode {
     fn from_value(value: Option<&str>) -> Self {
         match value {
             Some("oxc") => Self::Oxc(Arc::default()),
+            Some("oxc-bir") => Self::OxcBir(Arc::default()),
             _ => Self::Legacy,
         }
     }
@@ -54,6 +57,8 @@ pub struct Coverage {
     pub supported: usize,
     /// Number of legacy fallbacks by first unsupported construct.
     pub unsupported: BTreeMap<&'static str, usize>,
+    /// Bridge import limits, counted independently of printer fallback.
+    pub bridge_unsupported: BTreeMap<&'static str, usize>,
 }
 
 impl PrinterStats {
@@ -82,6 +87,11 @@ impl PrinterStats {
             .as_ref()
             .map(|raw| std::mem::take(&mut *raw.lock().expect("raw audit lock poisoned")))
             .unwrap_or_default()
+    }
+
+    pub(crate) fn record_bridge_unsupported(&self, reason: &'static str) {
+        *self.coverage.lock().expect("printer coverage lock poisoned")
+            .bridge_unsupported.entry(reason).or_default() += 1;
     }
 
     /// Count one attempted output.
@@ -224,6 +234,26 @@ mod tests {
             PrinterMode::from_value(Some("oxc")),
             PrinterMode::Oxc(_)
         ));
+    }
+
+    #[test]
+    fn bir_selection_is_explicit() {
+        assert!(matches!(PrinterMode::from_value(Some("oxc-bir")), PrinterMode::OxcBir(_)));
+    }
+
+    #[test]
+    fn bir_wiring_emits_with_oxc() {
+        use crate::driver::{CompilerOptions, compile_source_to_js_with_options};
+        let source = "let identity = x => x; let value = identity(42)";
+        let mut options = CompilerOptions::default();
+        options.js_printer = PrinterMode::Oxc(Arc::default());
+        let expected = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
+        let stats = Arc::new(PrinterStats::default());
+        options.js_printer = PrinterMode::OxcBir(stats.clone());
+        let actual = compile_source_to_js_with_options(source, "Bir.res", &options).unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(stats.snapshot().supported, 1);
+        assert!(stats.snapshot().bridge_unsupported.is_empty());
     }
 
     #[test]
