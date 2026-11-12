@@ -432,7 +432,10 @@ fn generate_ast(
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
     }
-    let gentype_annotations = package.config.gentype_config.as_ref()
+    let gentype_annotations = package
+        .config
+        .gentype_config
+        .as_ref()
         .map(|_| parsed_gentype_annotations(&stored_ast));
     Ok(GeneratedAst {
         gentype_annotations,
@@ -463,8 +466,12 @@ fn parsed_gentype_annotations(ast: &StoredAst) -> bool {
     }
     let mut flags = Flags(false);
     match ast {
-        StoredAst::Structure(ast) => ast_iter::walk_structure(&mut flags, &ast.arena, &ast.structure),
-        StoredAst::Signature(ast) => ast_iter::walk_signature(&mut flags, &ast.arena, &ast.signature),
+        StoredAst::Structure(ast) => {
+            ast_iter::walk_structure(&mut flags, &ast.arena, &ast.structure)
+        }
+        StoredAst::Signature(ast) => {
+            ast_iter::walk_signature(&mut flags, &ast.arena, &ast.signature)
+        }
     }
     flags.0
 }
@@ -731,7 +738,10 @@ impl ParseSinks<'_> {
             None => (ParseState::Success, false),
         };
         if let Some(annotated) = generated.gentype_annotations {
-            self.gentype_annotations.lock().unwrap().insert(key.clone(), annotated);
+            self.gentype_annotations
+                .lock()
+                .unwrap()
+                .insert(key.clone(), annotated);
         }
         if let Some(ast) = generated.stored_ast {
             self.stored_asts.lock().unwrap().insert(key.clone(), ast);
@@ -752,7 +762,10 @@ fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_na
 
 #[cfg(test)]
 mod tests {
-    use super::{parsed_gentype_annotations, Parser, module, StoredAst, StoredStructureAst, StoredSignatureAst, Arc};
+    use super::{
+        Arc, Parser, StoredAst, StoredSignatureAst, StoredStructureAst, module,
+        parsed_gentype_annotations,
+    };
     use super::{
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
@@ -771,7 +784,10 @@ mod tests {
                     let structure = module::parse_structure(&mut parser);
                     assert!(!parser.has_errors(), "{source}");
                     let ast = StoredAst::Structure(Arc::new(StoredStructureAst {
-                        arena: parser.into_arena(), structure, source_len: source.len(), retry_source: None,
+                        arena: parser.into_arena(),
+                        structure,
+                        source_len: source.len(),
+                        retry_source: None,
                     }));
                     assert!(parsed_gentype_annotations(&ast), "{source}");
                 }
@@ -779,16 +795,26 @@ mod tests {
                 let mut parser = Parser::new("Flags.resi", &source);
                 let signature = module::parse_signature(&mut parser);
                 assert!(!parser.has_errors());
-                assert!(parsed_gentype_annotations(&StoredAst::Signature(Arc::new(StoredSignatureAst {
-                    arena: parser.into_arena(), signature, source_len: source.len(), retry_source: None,
-                }))));
+                assert!(parsed_gentype_annotations(&StoredAst::Signature(Arc::new(
+                    StoredSignatureAst {
+                        arena: parser.into_arena(),
+                        signature,
+                        source_len: source.len(),
+                        retry_source: None,
+                    }
+                ))));
             }
         }
         let mut parser = Parser::new("Plain.res", "type t = int\nlet x = 1");
         let structure = module::parse_structure(&mut parser);
-        assert!(!parsed_gentype_annotations(&StoredAst::Structure(Arc::new(StoredStructureAst {
-            arena: parser.into_arena(), structure, source_len: 0, retry_source: None,
-        }))));
+        assert!(!parsed_gentype_annotations(&StoredAst::Structure(
+            Arc::new(StoredStructureAst {
+                arena: parser.into_arena(),
+                structure,
+                source_len: 0,
+                retry_source: None,
+            })
+        )));
     }
 
     #[test]

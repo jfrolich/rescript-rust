@@ -524,7 +524,9 @@ fn read_parse_warnings(conn: &Connection) -> rusqlite::Result<BTreeMap<String, S
 
 fn read_deps(conn: &Connection) -> rusqlite::Result<BTreeMap<String, SourceDeps>> {
     let mut deps = BTreeMap::new();
-    let mut stmt = conn.prepare("SELECT source, mtime, deps, gentype_annotations, gentype_declarations FROM deps")?;
+    let mut stmt = conn.prepare(
+        "SELECT source, mtime, deps, gentype_annotations, gentype_declarations FROM deps",
+    )?;
     for row in stmt.query_map([], |row| {
         Ok((
             row.get::<_, String>(0)?,
@@ -807,7 +809,17 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 &deps_rows,
                 partial,
                 |source| delete_deps.execute(params![source]).map(drop),
-                |source, row, deps| set_deps.execute(params![source, row.mtime, deps, row.gentype_annotations, row.gentype_declarations]).map(drop),
+                |source, row, deps| {
+                    set_deps
+                        .execute(params![
+                            source,
+                            row.mtime,
+                            deps,
+                            row.gentype_annotations,
+                            row.gentype_declarations
+                        ])
+                        .map(drop)
+                },
             )?;
         }
         tx.commit()

@@ -2,8 +2,8 @@ use super::build_types::*;
 use super::packages;
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
-use std::path::PathBuf;
 use rescript_compiler::binary_ast::Dependencies;
+use std::path::PathBuf;
 
 /// What resolving a module's raw dependency names needs from its package.
 struct DepContext<'a> {
@@ -229,36 +229,72 @@ mod tests {
 pub fn plan_gentype(build_state: &mut BuildCommandState) {
     let annotations = build_state.gentype_annotations.lock().unwrap();
     let roots = build_state.modules.iter().filter_map(|(name, module)| {
-        let SourceType::SourceFile(source) = &module.source_type else { return None; };
-        let enabled = build_state.packages.get(&module.package_name)
+        let SourceType::SourceFile(source) = &module.source_type else {
+            return None;
+        };
+        let enabled = build_state
+            .packages
+            .get(&module.package_name)
             .is_some_and(|package| package.config.gentype_config.is_some());
-        if !enabled { return None; }
-        let annotated = annotations.get(&format!("{name}:impl")).copied().unwrap_or(true)
+        if !enabled {
+            return None;
+        }
+        let annotated = annotations
+            .get(&format!("{name}:impl"))
+            .copied()
+            .unwrap_or(true)
             || (source.interface.is_some()
-                && annotations.get(&format!("{name}:intf")).copied().unwrap_or(true));
+                && annotations
+                    .get(&format!("{name}:intf"))
+                    .copied()
+                    .unwrap_or(true));
         annotated.then(|| name.clone())
     });
     let needed = gentype_closure(&build_state.modules, roots);
     drop(annotations);
     if rescript_compiler::perf_counters::enabled() {
-        eprintln!("[compiler-counter] gentype_closure needed={} total={}",
-            needed.len(), build_state.modules.len());
+        eprintln!(
+            "[compiler-counter] gentype_closure needed={} total={}",
+            needed.len(),
+            build_state.modules.len()
+        );
     }
     // Also mark unparsed, stored modules, so a closure bug cannot turn a
     // missing cache entry into a silently ignored CMT lookup.
     for (name, module) in &build_state.modules {
-        if needed.contains(name) { continue; }
-        let SourceType::SourceFile(source) = &module.source_type else { continue; };
+        if needed.contains(name) {
+            continue;
+        }
+        let SourceType::SourceFile(source) = &module.source_type else {
+            continue;
+        };
         let package = &build_state.packages[&module.package_name];
-        if package.config.gentype_config.is_none() { continue; }
-        let suffix = package.namespace.to_suffix().map(|ns| format!("-{ns}")).unwrap_or_default();
+        if package.config.gentype_config.is_none() {
+            continue;
+        }
+        let suffix = package
+            .namespace
+            .to_suffix()
+            .map(|ns| format!("-{ns}"))
+            .unwrap_or_default();
         let paths = std::iter::once((&source.implementation.path, "cmt"))
-            .chain(source.interface.as_ref().map(|interface| (&interface.path, "cmti")))
+            .chain(
+                source
+                    .interface
+                    .as_ref()
+                    .map(|interface| (&interface.path, "cmti")),
+            )
             .map(|(path, extension)| {
-                PathBuf::from(&package.path).join("lib/rescript")
-                    .join(format!("{}{suffix}.{extension}", path.file_stem().unwrap().to_string_lossy()))
-                    .to_string_lossy().into_owned()
-            }).collect::<Vec<_>>();
+                PathBuf::from(&package.path)
+                    .join("lib/rescript")
+                    .join(format!(
+                        "{}{suffix}.{extension}",
+                        path.file_stem().unwrap().to_string_lossy()
+                    ))
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
         rescript_compiler::gentype::main::skip_type_declarations(name, &paths);
     }
     build_state.gentype_needed = Some(needed);
@@ -271,7 +307,9 @@ fn gentype_closure(
     let mut needed = AHashSet::new();
     let mut pending: Vec<_> = roots.collect();
     while let Some(name) = pending.pop() {
-        if !needed.insert(name.clone()) { continue; }
+        if !needed.insert(name.clone()) {
+            continue;
+        }
         if let Some(module) = modules.get(&name) {
             pending.extend(module.deps.iter().cloned());
         }
@@ -286,17 +324,33 @@ mod gentype_tests {
     #[test]
     fn closure_includes_transitive_dependencies_and_terminates_on_cycles() {
         let mut modules = AHashMap::new();
-        for (name, deps) in [("Output", vec!["Alias"]), ("Alias", vec!["Types"]),
-            ("Types", vec!["Alias"]), ("Unused", vec![])] {
-            modules.insert(name.to_string(), Module {
-                source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
-                deps: deps.into_iter().map(str::to_string).collect(),
-                dependents: AHashSet::new(), package_name: name.to_string(),
-                compile_dirty: false, deps_dirty: false, is_type_dev: false,
-            });
+        for (name, deps) in [
+            ("Output", vec!["Alias"]),
+            ("Alias", vec!["Types"]),
+            ("Types", vec!["Alias"]),
+            ("Unused", vec![]),
+        ] {
+            modules.insert(
+                name.to_string(),
+                Module {
+                    source_type: SourceType::MlMap(MlMap { parse_dirty: false }),
+                    deps: deps.into_iter().map(str::to_string).collect(),
+                    dependents: AHashSet::new(),
+                    package_name: name.to_string(),
+                    compile_dirty: false,
+                    deps_dirty: false,
+                    is_type_dev: false,
+                },
+            );
         }
         let needed = gentype_closure(&modules, ["Output".to_string()].into_iter());
-        assert_eq!(needed, ["Output", "Alias", "Types"].into_iter().map(str::to_string).collect());
+        assert_eq!(
+            needed,
+            ["Output", "Alias", "Types"]
+                .into_iter()
+                .map(str::to_string)
+                .collect()
+        );
         assert!(gentype_closure(&modules, std::iter::empty()).is_empty());
     }
 }

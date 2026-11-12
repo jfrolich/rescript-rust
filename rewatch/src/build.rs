@@ -731,7 +731,9 @@ pub fn incremental_build_without_lock(
         deps::plan_gentype(build_state);
         if incremental::mark_missing_gentype_declarations(build_state) {
             warnings.push_str(&parse::generate_asts(
-                build_state, || pb.inc(1), parse::ParseWarningLog::Append,
+                build_state,
+                || pb.inc(1),
+                parse::ParseWarningLog::Append,
             )?);
         }
         Ok(warnings)

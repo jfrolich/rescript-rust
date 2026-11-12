@@ -495,12 +495,20 @@ pub fn current_record(
                 (Some(deps), Some(mtime)) => Some(SourceDeps {
                     mtime: *mtime,
                     deps: deps.iter().cloned().collect(),
-                    gentype_annotations: build_state.gentype_annotations.lock().unwrap()
-                        .get(&key).copied().unwrap_or(true),
+                    gentype_annotations: build_state
+                        .gentype_annotations
+                        .lock()
+                        .unwrap()
+                        .get(&key)
+                        .copied()
+                        .unwrap_or(true),
                     gentype_declarations: if build_state.compiled_modules.contains(module_name) {
-                        rescript_compiler::gentype::main::has_type_declarations_for_module(module_name)
+                        rescript_compiler::gentype::main::has_type_declarations_for_module(
+                            module_name,
+                        )
                     } else {
-                        previous.and_then(|p| p.state.deps.get(&key))
+                        previous
+                            .and_then(|p| p.state.deps.get(&key))
                             .is_some_and(|row| row.gentype_declarations)
                     },
                 }),
@@ -894,24 +902,38 @@ pub fn decode_recorded_imports(
 /// and before choosing the second parse round. Watch builds use it too.
 /// Returns whether any newly required source still needs parsing.
 pub fn mark_missing_gentype_declarations(build_state: &mut BuildCommandState) -> bool {
-    let Some(needed) = &build_state.gentype_needed else { return false; };
+    let Some(needed) = &build_state.gentype_needed else {
+        return false;
+    };
     let mut reparse = false;
     let asts = build_state.stored_asts.lock().unwrap();
     for name in needed {
-        let Some(module) = build_state.build_state.modules.get_mut(name) else { continue; };
-        let SourceType::SourceFile(source) = &mut module.source_type else { continue; };
-        if build_state.build_state.packages[&module.package_name].config.gentype_config.is_none() {
+        let Some(module) = build_state.build_state.modules.get_mut(name) else {
+            continue;
+        };
+        let SourceType::SourceFile(source) = &mut module.source_type else {
+            continue;
+        };
+        if build_state.build_state.packages[&module.package_name]
+            .config
+            .gentype_config
+            .is_none()
+        {
             continue;
         }
         let available = if build_state.compiled_modules.contains(name) {
             rescript_compiler::gentype::main::has_type_declarations_for_module(name)
         } else {
-            build_state.previous_in_process.as_ref()
+            build_state
+                .previous_in_process
+                .as_ref()
                 .and_then(|previous| previous.packages.get(&module.package_name))
                 .and_then(|package| package.state.deps.get(&format!("{name}:impl")))
                 .is_some_and(|row| row.gentype_declarations)
         };
-        if available { continue; }
+        if available {
+            continue;
+        }
         module.compile_dirty = true;
         if !asts.contains_key(&format!("{name}:impl")) {
             source.implementation.parse_dirty = true;

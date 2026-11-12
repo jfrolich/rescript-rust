@@ -37,7 +37,8 @@ impl GentypeCounts {
 
     fn record(&self, declarations: usize) {
         self.modules.fetch_add(1, Ordering::Relaxed);
-        self.declarations.fetch_add(declarations as u64, Ordering::Relaxed);
+        self.declarations
+            .fetch_add(declarations as u64, Ordering::Relaxed);
     }
 
     fn snapshot(&self) -> (u64, u64) {

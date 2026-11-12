@@ -278,12 +278,19 @@ fn register_in_process_type_declarations(
 /// path resolution reach the missing-declaration error instead of silently
 /// treating a skipped artifact as a nonexistent external CMT.
 pub fn skip_type_declarations(module_name: &str, artifact_paths: &[String]) {
-    let keys: Vec<_> = artifact_paths.iter().map(|path| normalize_cmt_cache_key(path)).collect();
+    let keys: Vec<_> = artifact_paths
+        .iter()
+        .map(|path| normalize_cmt_cache_key(path))
+        .collect();
     let mut cache = in_process_type_declarations_cache().lock().unwrap();
     if let Some(old_keys) = cache.by_module.remove(module_name) {
-        for key in old_keys { cache.by_cmt.remove(&key); }
+        for key in old_keys {
+            cache.by_cmt.remove(&key);
+        }
     }
-    for key in keys { cache.skipped.insert(key, module_name.to_string()); }
+    for key in keys {
+        cache.skipped.insert(key, module_name.to_string());
+    }
 }
 
 /// Additional debug-build audit; a skipped lookup is an error in release too.
@@ -292,9 +299,17 @@ pub fn verify_skipped_declarations() -> Result<(), String> {
     if std::env::var_os("RESCRIPT_VERIFY_GENTYPE_CLOSURE").is_some() {
         let cache = in_process_type_declarations_cache().lock().unwrap();
         if !cache.skipped_requests.is_empty() {
-            return Err(format!("Internal genType closure error: skipped requests {:?}", cache.skipped_requests));
+            return Err(format!(
+                "Internal genType closure error: skipped requests {:?}",
+                cache.skipped_requests
+            ));
         }
-        assert!(cache.skipped.keys().all(|key| !cache.by_cmt.contains_key(key)));
+        assert!(
+            cache
+                .skipped
+                .keys()
+                .all(|key| !cache.by_cmt.contains_key(key))
+        );
     }
     Ok(())
 }
@@ -306,17 +321,26 @@ fn skipped_declaration_error(cmt_file: &str, importer: &str) -> Option<String> {
     #[cfg(debug_assertions)]
     {
         drop(cache);
-        in_process_type_declarations_cache().lock().unwrap()
-            .skipped_requests.push((importer.to_string(), module.clone()));
+        in_process_type_declarations_cache()
+            .lock()
+            .unwrap()
+            .skipped_requests
+            .push((importer.to_string(), module.clone()));
     }
-    Some(format!("Internal genType dependency-closure error: module {importer} requested skipped declarations of module {module}"))
+    Some(format!(
+        "Internal genType dependency-closure error: module {importer} requested skipped declarations of module {module}"
+    ))
 }
 
 /// Whether this process has translated declarations for a module (including
 /// an empty translation). Does not decode the cached result.
 pub fn has_type_declarations_for_module(module_name: &str) -> bool {
-    in_process_type_declarations_cache().lock().unwrap().by_module
-        .get(module_name).is_some_and(|keys| !keys.is_empty())
+    in_process_type_declarations_cache()
+        .lock()
+        .unwrap()
+        .by_module
+        .get(module_name)
+        .is_some_and(|keys| !keys.is_empty())
 }
 
 /// The type declarations `module_name`'s typed artifacts registered, by
@@ -889,8 +913,10 @@ fn plan_output(
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
         let read_declarations = |notes: &crate::gentype::log_::Notes,
-            config: &mut crate::gentype::config::T, output: &str,
-            resolver: &crate::gentype::module_resolver::Resolver, cmt: &str| {
+                                 config: &mut crate::gentype::config::T,
+                                 output: &str,
+                                 resolver: &crate::gentype::module_resolver::Resolver,
+                                 cmt: &str| {
             if let Some(error) = skipped_declaration_error(cmt, &artifact.compiler_module_name) {
                 return Err(error);
             }
@@ -962,7 +988,15 @@ fn unneeded_artifact(config: &crate::gentype::config::T, artifact: &TypedArtifac
         return Outcome::default();
     }
     let source = artifact.source_file.map(str::to_owned).unwrap_or_else(|| {
-        format!("{}{}", artifact.file_name, if artifact.is_interface { ".resi" } else { ".res" })
+        format!(
+            "{}{}",
+            artifact.file_name,
+            if artifact.is_interface {
+                ".resi"
+            } else {
+                ".res"
+            }
+        )
     });
     Outcome {
         result: Ok(Some(Output::NoMatch {
@@ -1216,7 +1250,12 @@ mod tests {
         gentype_outcome_with_needed(root, module, source, true)
     }
 
-    fn gentype_outcome_with_needed(root: &Path, module: &str, source: &str, needed: bool) -> Outcome {
+    fn gentype_outcome_with_needed(
+        root: &Path,
+        module: &str,
+        source: &str,
+        needed: bool,
+    ) -> Outcome {
         let id_gen = IdGenerator::with_start_stamp(999);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let source_file = format!("src/{module}.res");
@@ -1321,7 +1360,10 @@ mod tests {
         assert!(error.contains("module Missing"), "{error}");
         assert!(type_declarations_of_module("Missing").is_empty());
         #[cfg(debug_assertions)]
-        in_process_type_declarations_cache().lock().unwrap().skipped_requests
+        in_process_type_declarations_cache()
+            .lock()
+            .unwrap()
+            .skipped_requests
             .retain(|(importer, owner)| importer != "Importer" || owner != "Missing");
     }
 
