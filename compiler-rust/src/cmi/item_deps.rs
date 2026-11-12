@@ -488,22 +488,32 @@ impl SignatureSummary {
         crate::perf_counters::assert_signature_released();
         let unit = Name::new(unit);
         let graph = super::portable_types::HashGraph::of(&sig.type_graph);
-        let item_hashes = sig
-            .ps_sig
-            .iter()
-            .filter_map(|item| {
-                let (kind, name) = sig_item_kind_name(item)?;
-                let mut hasher = std::collections::hash_map::DefaultHasher::new();
-                super::portable_types::hash_sig_item(&mut hasher, item, &graph);
-                Some((kind, name, hasher.finish()))
-            })
-            .collect();
+        let item_hashes = item_declaration_hashes(&graph, &sig.ps_sig);
         SignatureSummary {
             unit,
             item_hashes,
             refs: Arc::new(signature_refs(unit, sig)),
         }
     }
+}
+
+/// Kind, name and declaration digest of each top-level item of `sig`, whose
+/// types are nodes of `graph`, in signature order. Each item is hashed on
+/// its own (`graph_hash`): linear in the item and the nodes it reaches.
+pub fn item_declaration_hashes<G: super::graph_hash::TypeGraph>(
+    graph: &G,
+    sig: &Signature,
+) -> Vec<(Kind, Name, u64)> {
+    let mut walk = super::graph_hash::GraphWalk::new(graph);
+    sig.iter()
+        .filter_map(|item| {
+            let (kind, name) = sig_item_kind_name(item)?;
+            walk.begin_scope();
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            super::portable_types::hash_sig_item(&mut hasher, item, &mut walk);
+            Some((kind, name, hasher.finish()))
+        })
+        .collect()
 }
 
 fn sort_refs(refs: &mut Vec<UnitRead>) {
