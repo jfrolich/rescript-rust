@@ -2,6 +2,7 @@
 import contextlib
 import io
 import os
+import sqlite3
 from pathlib import Path
 import tempfile
 import unittest
@@ -72,6 +73,28 @@ class WorkerDeterminismTests(unittest.TestCase):
                 except SystemExit as error:
                     result = error.code
             return result, output.getvalue(), trace.read_text().splitlines()
+
+    def test_workspace_collects_child_interfaces_but_rejects_all_empty(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            paths = [root / "lib/rescript/rescript.sqlite",
+                     root / "child/lib/rescript/rescript.sqlite"]
+            for path in paths:
+                path.parent.mkdir(parents=True)
+                with sqlite3.connect(path) as db:
+                    for table in ("interfaces", "interface_extras", "runtime_interfaces"):
+                        db.execute(f"CREATE TABLE {table} (module TEXT, data BLOB)")
+            with contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
+                gate.interfaces(root)
+            self.assertEqual(error.exception.code, 2)
+            with sqlite3.connect(paths[1]) as db:
+                db.execute("INSERT INTO interfaces VALUES (?, ?)", ("Child", b"signature"))
+            self.assertEqual(gate.interfaces(root), {
+                ("child/lib/rescript/rescript.sqlite/interfaces", "Child"): b"signature",
+            })
+            # The existing standalone check remains strict by default.
+            with self.assertRaises(ValueError):
+                gate.read_interfaces(paths[0])
 
     def test_four_distinct_builds_and_inherited_shuffle_is_cleared(self):
         result, output, trace = self.run_gate("equal")

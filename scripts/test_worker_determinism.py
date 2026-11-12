@@ -56,10 +56,10 @@ def interfaces(project):
     for path in sorted(walk(project)):
         if path.name == "rescript.sqlite" and path.parent.name in ("rescript", "bs"):
             prefix = path.relative_to(project).as_posix()
-            for (table, module), data in read_interfaces(path).items():
+            for (table, module), data in read_interfaces(path, allow_empty=True).items():
                 result[(f"{prefix}/{table}", module)] = data
-    if not result:
-        fail("build produced no stored interfaces")
+    if not any(table.endswith("/interfaces") for table, _ in result):
+        fail("build produced no stored module interfaces")
     return result
 
 
