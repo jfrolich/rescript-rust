@@ -76,6 +76,7 @@ pub(super) struct Names {
     converted: HashMap<Name, Name>,
     free: HashMap<FunId, Vec<Ident>>,
     method_this: HashSet<FunId>,
+    jsx_preserve: bool,
     string_tasks: Vec<Expr>,
     steps: usize,
     budget: usize,
@@ -257,6 +258,7 @@ impl Names {
     pub(super) fn collect(
         p: &JsDepsProgram,
         resolver: &ModulePathResolver,
+        jsx_preserve: bool,
     ) -> Result<Self, Unsupported> {
         #[derive(Default)]
         struct Input {
@@ -309,6 +311,7 @@ impl Names {
         let mut input = Input::default();
         walk_block(&mut input, a, &p.program.block);
         let mut names = Self {
+            jsx_preserve,
             budget: 64
                 * (input.count
                     + p.modules.len()
@@ -413,7 +416,9 @@ impl Names {
             ExprKind::StringAppend(..) => {
                 self.string_leaves(a, e, |this, e| this.analyze_expr(a, e, defined, used))?
             }
-            _ => children(a, e, |e| self.analyze_expr(a, e, defined, used))?,
+            _ => children(a, e, self.jsx_preserve, |e| {
+                self.analyze_expr(a, e, defined, used)
+            })?,
         }
         Ok(())
     }
@@ -524,7 +529,7 @@ impl Names {
             ExprKind::Qualified(q) => self.add(a.qual(q).0.id, true),
             ExprKind::Fun(f) => self.function(a, f, None, false),
             ExprKind::StringAppend(..) => self.string_leaves(a, e, |this, e| this.expr(a, e)),
-            _ => children(a, e, |e| self.expr(a, e)),
+            _ => children(a, e, self.jsx_preserve, |e| self.expr(a, e)),
         }
     }
     fn block(
@@ -642,6 +647,7 @@ impl Names {
 fn children(
     a: &JsArena,
     e: Expr,
+    jsx_preserve: bool,
     mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
 ) -> Result<(), Unsupported> {
     match a.ek(e) {
@@ -722,9 +728,18 @@ fn children(
         }
         ExprKind::RawJsCode(_) => {}
         ExprKind::Jsx(id) => {
-            let jsx = walk::jsx_runtime(a, id, false)?;
-            visit(jsx.callee)?;
-            visit(jsx.tag)?;
+            let (jsx, form) = walk::jsx_form(a, id, jsx_preserve)?;
+            if matches!(form, walk::JsxForm::Runtime) {
+                visit(jsx.callee)?;
+            }
+            if !matches!(form, walk::JsxForm::Fragment) {
+                visit(jsx.tag)?;
+            }
+            if !matches!(form, walk::JsxForm::Runtime)
+                && let Some(key) = jsx.key
+            {
+                visit(key)?;
+            }
             if let Some(spread) = jsx.spread {
                 visit(spread)?;
             }
@@ -736,7 +751,9 @@ fn children(
                     visit(*child)?;
                 }
             }
-            if let Some(key) = jsx.key {
+            if matches!(form, walk::JsxForm::Runtime)
+                && let Some(key) = jsx.key
+            {
                 visit(key)?;
             }
         }
@@ -927,7 +944,7 @@ mod tests {
                     let resolver = ModulePathResolver::from_compile_options(
                         None, None, None, None, None, None, false,
                     );
-                    let names = Names::collect(&p, &resolver).unwrap();
+                    let names = Names::collect(&p, &resolver, false).unwrap();
                     assert_eq!(names.get(&id("x", depth)), format!("x${depth}"));
                     assert!(names.steps < depth as usize * 40, "{}", names.steps);
                     names.steps

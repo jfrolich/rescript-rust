@@ -51,7 +51,7 @@ pub(super) fn emit(
             None => (text, None),
         });
     }
-    let names = Names::collect(program, resolver)?;
+    let names = Names::collect(program, resolver, jsx_preserve)?;
     let allocator = Allocator::default();
     let mut build = Build::new(&allocator, &p.arena, &names);
     build.debug = debug;

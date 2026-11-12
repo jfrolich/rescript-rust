@@ -268,7 +268,20 @@ impl<'a, 'r> Build<'a, 'r> {
     /// that order, with spread before properties and children. oxc supplies
     /// call/object/array parentheses, matching printer::print_jsx_call.
     fn jsx_call(&self, id: crate::js_ir::arena::JsxId) -> Result<Expression<'a>, Unsupported> {
-        let jsx = walk::jsx_runtime(self.arena, id, self.jsx_preserve)?;
+        let (jsx, form) = walk::jsx_form(self.arena, id, self.jsx_preserve)?;
+        match form {
+            walk::JsxForm::Fragment => {
+                return Ok(Expression::new_jsx_fragment(
+                    SPAN,
+                    JSXOpeningFragment::new(SPAN, &self.b),
+                    self.b.vec(),
+                    JSXClosingFragment::new(SPAN, &self.b),
+                    &self.b,
+                ));
+            }
+            walk::JsxForm::Element => return self.jsx_element(&jsx),
+            walk::JsxForm::Runtime => {}
+        }
         let callee = self.expr(jsx.callee)?;
         let mut args = self.b.vec1(Argument::from(self.expr(jsx.tag)?));
         let props = self.arena.props(jsx.props);
@@ -313,6 +326,107 @@ impl<'a, 'r> Build<'a, 'r> {
             args.push(Argument::from(self.expr(key)?));
         }
         Ok(self.call(callee, args))
+    }
+
+    fn jsx_tag(&self, tag: Expr) -> Result<JSXElementName<'a>, Unsupported> {
+        if let ExprKind::Str(name) = self.arena.ek(tag) {
+            return Ok(JSXElementName::Identifier(self.b.alloc(
+                JSXIdentifier::new(SPAN, self.text(self.arena.text(name)), &self.b),
+            )));
+        }
+        let mut value = self.expr(tag)?;
+        let mut properties = self.b.vec();
+        while let Expression::StaticMemberExpression(member) = value {
+            let member = member.unbox();
+            properties.push(member.property.name);
+            value = member.object;
+        }
+        let Expression::Identifier(id) = value else {
+            return Err(Unsupported("JSX computed tag"));
+        };
+        if properties.is_empty() {
+            return Ok(JSXElementName::IdentifierReference(id));
+        }
+        let mut object = JSXMemberExpressionObject::IdentifierReference(id);
+        while let Some(name) = properties.pop() {
+            object = JSXMemberExpressionObject::new_member_expression(
+                SPAN,
+                object,
+                JSXIdentifier::new(SPAN, name, &self.b),
+                &self.b,
+            );
+        }
+        let JSXMemberExpressionObject::MemberExpression(member) = object else {
+            unreachable!()
+        };
+        Ok(JSXElementName::MemberExpression(member))
+    }
+
+    /// Every legacy JSX attribute is an expression container, even strings.
+    /// Preserve key-before-spread ordering; tag and attribute spelling are
+    /// checked by the same jsx_form decision used in naming.
+    fn jsx_element(
+        &self,
+        jsx: &crate::js_ir::arena::JsxInfo,
+    ) -> Result<Expression<'a>, Unsupported> {
+        let mut attributes = self.b.vec();
+        let attribute = |name: &str, value: Expr| -> Result<JSXAttributeItem<'a>, Unsupported> {
+            Ok(JSXAttributeItem::Attribute(self.b.alloc(
+                JSXAttribute::new(
+                    SPAN,
+                    JSXAttributeName::Identifier(self.b.alloc(JSXIdentifier::new(
+                        SPAN,
+                        self.text(name),
+                        &self.b,
+                    ))),
+                    Some(JSXAttributeValue::ExpressionContainer(self.b.alloc(
+                        JSXExpressionContainer::new(
+                            SPAN,
+                            JSXExpression::from(self.expr(value)?),
+                            &self.b,
+                        ),
+                    ))),
+                    &self.b,
+                ),
+            )))
+        };
+        let name = self.jsx_tag(jsx.tag)?;
+        if let Some(key) = jsx.key {
+            attributes.push(attribute("key", key)?);
+        }
+        if let Some(spread) = jsx.spread {
+            attributes
+                .push(JSXAttributeItem::SpreadAttribute(self.b.alloc(
+                    JSXSpreadAttribute::new(SPAN, self.expr(spread)?, &self.b),
+                )));
+        }
+        for (key, value) in self.arena.props(jsx.props) {
+            let PropName::Lit(key) = key else {
+                unreachable!("validated JSX property")
+            };
+            attributes.push(attribute(
+                walk::member_form(self.arena.text(*key)).0,
+                *value,
+            )?);
+        }
+        let closing = if jsx.children.is_some() {
+            Some(self.b.alloc(JSXClosingElement::new(
+                SPAN,
+                self.jsx_tag(jsx.tag)?,
+                &self.b,
+            )))
+        } else {
+            None
+        };
+        Ok(Expression::new_jsx_element(
+            SPAN,
+            self.b.alloc(JSXOpeningElement::new(
+                SPAN, name, None, attributes, &self.b,
+            )),
+            self.b.vec(),
+            closing,
+            &self.b,
+        ))
     }
 
     fn call(&self, callee: Expression<'a>, args: ArenaVec<'a, Argument<'a>>) -> Expression<'a> {
@@ -2129,6 +2243,6 @@ mod remaining_expression_tests {
         let resolver = crate::js_ir::ModulePathResolver::from_compile_options(
             None, None, None, None, None, None, false,
         );
-        Names::collect(&program, &resolver).unwrap();
+        Names::collect(&program, &resolver, false).unwrap();
     }
 }

@@ -3714,11 +3714,11 @@ fn is_jsx_tag(a: &JsArena, tag: Expr) -> bool {
     }
 }
 
-fn is_empty_fragment(a: &JsArena, jsx: &JsxInfo) -> bool {
+pub(crate) fn is_empty_fragment(a: &JsArena, jsx: &JsxInfo) -> bool {
     jsx.fragment && jsx.spread.is_none() && a.props(jsx.props).is_empty() && jsx.key.is_none()
 }
 
-fn jsx_printable(a: &JsArena, jsx: &JsxInfo, jsx_preserve: bool) -> bool {
+pub(crate) fn jsx_printable(a: &JsArena, jsx: &JsxInfo, jsx_preserve: bool) -> bool {
     jsx_preserve
         && (is_empty_fragment(a, jsx) || is_jsx_tag(a, jsx.tag))
         && a.props(jsx.props).iter().all(|(name, _)| match name {

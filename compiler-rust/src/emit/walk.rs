@@ -529,16 +529,21 @@ pub(super) fn string_leaves(
     Ok(())
 }
 
-/// Preserve-mode JSX needs a separate AST shape; runtime-mode JSX prints a
-/// normal call and never drops its tag, props or key, even when they are unit.
-pub(super) fn jsx_runtime(
+#[derive(Clone, Copy)]
+pub(super) enum JsxForm {
+    Runtime,
+    Element,
+    Fragment,
+}
+
+/// Legacy JSX meets tag, key, spread, props, children (never the runtime
+/// callee). Whitespace between children is literal JSXText, not layout:
+/// retain fallback until its exact legacy indentation can be represented.
+pub(super) fn jsx_form(
     a: &JsArena,
     id: crate::js_ir::arena::JsxId,
     preserve: bool,
-) -> Result<crate::js_ir::arena::JsxInfo, Unsupported> {
-    if preserve {
-        return Err(Unsupported("JSX preserve mode"));
-    }
+) -> Result<(crate::js_ir::arena::JsxInfo, JsxForm), Unsupported> {
     let jsx = a.jsx(id);
     if a.props(jsx.props)
         .iter()
@@ -546,7 +551,40 @@ pub(super) fn jsx_runtime(
     {
         return Err(Unsupported("symbol JSX key"));
     }
-    Ok(jsx)
+    if !crate::js_ir::printer::jsx_printable(a, &jsx, preserve) {
+        return Ok((jsx, JsxForm::Runtime));
+    }
+    if jsx.children.is_some_and(|c| !a.exprs(c).is_empty()) {
+        return Err(Unsupported("JSX children whitespace"));
+    }
+    let fragment = crate::js_ir::printer::is_empty_fragment(a, &jsx);
+    if !fragment
+        && jsx.children.is_some()
+        && (jsx.key.is_some() || jsx.spread.is_some() || !a.props(jsx.props).is_empty())
+    {
+        return Err(Unsupported("JSX children whitespace"));
+    }
+    for value in jsx
+        .key
+        .into_iter()
+        .chain(a.props(jsx.props).iter().map(|(_, v)| *v))
+    {
+        let mut value = value;
+        while let ExprKind::OptionalBlock(inner, true) = a.ek(value) {
+            value = inner;
+        }
+        if matches!(a.ek(value), ExprKind::Seq(..)) {
+            return Err(Unsupported("JSX sequence container"));
+        }
+    }
+    Ok((
+        jsx,
+        if fragment {
+            JsxForm::Fragment
+        } else {
+            JsxForm::Element
+        },
+    ))
 }
 
 /// Destructuring declarations meet excluded-field binders before the rest
