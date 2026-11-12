@@ -85,10 +85,15 @@ pub enum Phase {
     RecordSqlDeps,
     /// Detailed persistence subphase: SqlCommit.
     RecordSqlCommit,
+    /// Whole-record publication: rename.
     RecordRename,
+    /// Whole-record publication: recover.
     RecordRecover,
+    /// Whole-record publication: publish lock.
     RecordPublishLock,
+    /// Whole-record publication: image write.
     RecordImageWrite,
+    /// Whole-record publication: serialize.
     RecordSerialize,
     /// GenType child buckets. They are reported separately, not added again
     /// to the top-level recorded total. Counts are artifact-phase invocations.
@@ -240,10 +245,15 @@ pub struct PhaseTimingSnapshot {
     pub record_sql_deps: Duration,
     /// Detailed persistence subphase (SqlCommit); nested in record_write.
     pub record_sql_commit: Duration,
+    /// Whole-record publication: rename.
     pub record_rename: Duration,
+    /// Whole-record publication: recover.
     pub record_recover: Duration,
+    /// Whole-record publication: publish lock.
     pub record_publish_lock: Duration,
+    /// Whole-record publication: image write.
     pub record_image_write: Duration,
+    /// Whole-record publication: serialize.
     pub record_serialize: Duration,
 
 }

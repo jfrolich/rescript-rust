@@ -53,7 +53,11 @@ for source_runtime in (False, True):
             assert runtime_rows() > 0
         for hook in ("RESCRIPT_TEST_ABORT_RECORD_WRITE", "RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE",
                      "RESCRIPT_TEST_ABORT_AFTER_RECORD_MARKER"):
-            aborted = build({"RESCRIPT_FULL_BUILD": "1", hook: "interrupted-store"}, False)
+            # Keep this on the sparse incremental transaction path. Whole
+            # records now use atomic image publication (tested separately).
+            with (project / "src/A.res").open("a") as file:
+                file.write("\n// Force a sparse edit.\n")
+            aborted = build({hook: "interrupted-store"}, False)
             assert "Finished compilation" in aborted, aborted
             assert (project / "lib/rescript/rescript.sqlite.pending").exists()
             recovered = build()

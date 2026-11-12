@@ -62,7 +62,7 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
     assert fresh == rows(), "fresh preparation and final-state fallback differ"
     assert "Compiled 0 modules" in build()
     (project / "src/C.res").write_text("let value = B.f(4)\n")
-    build()
+    assert "Compiled 1 module" in build(), "editing C must not recompile unrelated modules"
     incremental = outputs()
     build(full=True)
     assert incremental == outputs(), "incremental edit and full build differ"

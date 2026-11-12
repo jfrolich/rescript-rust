@@ -423,13 +423,21 @@ fn open_existing(path: &Path) -> Option<Connection> {
 }
 
 fn lock_writer(path: &Path) -> std::io::Result<std::fs::File> {
+    lock_database(path, true)
+}
+
+fn lock_database(path: &Path, exclusive: bool) -> std::io::Result<std::fs::File> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
     }
     let file = std::fs::OpenOptions::new()
         .read(true).write(true).create(true).truncate(false)
         .open(path.with_extension("sqlite.guard"))?;
-    fs2::FileExt::lock_exclusive(&file)?;
+    if exclusive {
+        fs2::FileExt::lock_exclusive(&file)?;
+    } else {
+        fs2::FileExt::lock_shared(&file)?;
+    }
     Ok(file)
 }
 
@@ -522,6 +530,10 @@ fn read_meta_from(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String
 /// database.
 pub fn read(package: &Package) -> Option<PackageState> {
     let db = path(package);
+    if !db.try_exists().ok()? { return None; }
+    // Several connections below open by path. Pin the published generation
+    // across all those opens/reads, excluding replacement and in-place writers.
+    let _guard = lock_database(&db, false).ok()?;
     let conn = open_existing(&db)?;
     // Check before reading any build rows. open_existing already rejected an
     // external incomplete marker, including a kill during the SQLite commit.
@@ -913,22 +925,25 @@ impl MemoryRecord {
 
     pub(super) fn publish(self, package: &Package) -> anyhow::Result<()> {
         use std::io::Write;
+        publication_test_hook(package, "before-commit");
         self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')", [META_RECORD_COMPLETE])?;
         timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
+        publication_test_hook(package, "after-commit");
         let image = timing::measure(Phase::RecordSerialize, || self.conn.serialize(rusqlite::DatabaseName::Main))?;
+        publication_test_hook(package, "after-serialize");
         let db = path(package);
         std::fs::create_dir_all(package.get_build_path())?;
         let mut temp = tempfile::NamedTempFile::new_in(package.get_build_path())?;
         timing::measure(Phase::RecordImageWrite, || temp.write_all(&image))?;
         drop(image);
         drop(self);
+        publication_test_hook(package, "after-write");
         let _guard = timing::measure(Phase::RecordPublishLock, || lock_writer(&db))?;
+        publication_test_hook(package, "after-lock");
         timing::measure(Phase::RecordRecover, || recover_before_replace(&db))?;
-        #[cfg(debug_assertions)]
-        if std::env::var("RESCRIPT_TEST_ABORT_BEFORE_RENAME").ok().as_deref() == Some(&package.name) {
-            std::process::abort();
-        }
+        publication_test_hook(package, "before-rename");
         timing::measure(Phase::RecordRename, || temp.persist(&db))?;
+        publication_test_hook(package, "after-rename");
         // Compatibility with a killed writer using the incremental path's
         // external marker. This path never creates a marker of its own.
         match std::fs::remove_file(pending_path(&db)) {
@@ -936,11 +951,15 @@ impl MemoryRecord {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
             Err(e) => return Err(e.into()),
         }
-        #[cfg(debug_assertions)]
-        if std::env::var("RESCRIPT_TEST_ABORT_AFTER_RENAME").ok().as_deref() == Some(&package.name) {
-            std::process::abort();
-        }
         Ok(())
+    }
+}
+
+fn publication_test_hook(_package: &Package, _phase: &str) {
+    #[cfg(debug_assertions)]
+    if std::env::var("RESCRIPT_TEST_ABORT_PUBLICATION").ok().as_deref()
+        == Some(&format!("{}:{_phase}", _package.name)) {
+        std::process::abort();
     }
 }
 
@@ -1290,7 +1309,11 @@ mod tests {
             .map(|key| conn.query_row(&format!("PRAGMA {key}"), [], |row| Ok(format!("{:?}", row.get_ref(0)?))).unwrap());
         let file_pragmas = pragmas(&old_reader);
         let second = state(23, None);
-        MemoryRecord::new(&second, &[]).unwrap().publish(&package).unwrap();
+        let record = MemoryRecord::new(&second, &[]).unwrap();
+        record.conn.execute_batch("COMMIT").unwrap();
+        assert!(matches!(record.conn.serialize(rusqlite::DatabaseName::Main).unwrap(), rusqlite::serialize::Data::Shared(_)));
+        record.conn.execute_batch("BEGIN").unwrap();
+        record.publish(&package).unwrap();
         let conn = Connection::open(path(&package)).unwrap();
         assert_eq!(pragmas(&conn), file_pragmas);
         assert_eq!(read(&package).as_ref(), Some(&second));
@@ -1381,6 +1404,7 @@ mod tests {
             .unwrap();
         assert_eq!(version, SCHEMA_VERSION);
         drop(conn);
+        drop(_guard);
         // A schema alone is not a completed build.
         assert!(read(&package).is_none());
         assert!(read_meta(&package).unwrap().is_empty());
