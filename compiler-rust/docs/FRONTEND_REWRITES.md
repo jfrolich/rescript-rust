@@ -339,3 +339,7 @@ The candidate timing sample has a large outlier; it does **not** demonstrate a
 wall-time improvement. Instruction counts, rather than this noisy timing,
 are the performance evidence. CI's repeated instruction-count gate is the
 acceptance check.
+
+CI Instruction count (five runs, minimum of each side): **4,508,872,410 →
+4,464,721,357**, a reduction of **44,151,053 instructions (0.979%)** across
+711 modules. [Comparison run](https://github.com/jfrolich/rescript-rust/actions/runs/43125250180).

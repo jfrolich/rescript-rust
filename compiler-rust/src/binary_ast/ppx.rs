@@ -11784,7 +11784,7 @@ type envelope = Story(Story.event)
                     arena.get_expr_mut(ExprIdx(0));
                 }
                 let (result, warnings) = rewrite_structure_with_warnings(&items, &mut arena, true);
-                let result = match result {
+                match result {
                     Ok(items) => {
                         if disable_skipping {
                             arena.get_expr_mut(ExprIdx(0));
@@ -11794,8 +11794,7 @@ type envelope = Story(Story.event)
                         format!("{warnings:?}; {sweep:?}; {error:?}")
                     }
                     Err(error) => format!("{warnings:?}; {error:?}"),
-                };
-                result
+                }
             };
             assert_eq!(run(false), run(true), "{source}");
         }
