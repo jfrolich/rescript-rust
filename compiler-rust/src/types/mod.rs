@@ -33,6 +33,7 @@
 
 pub mod asttypes;
 pub mod btype;
+pub mod canonical_sig;
 pub mod context;
 pub mod ctype;
 pub mod decl;

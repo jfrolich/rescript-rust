@@ -72,7 +72,7 @@ find syntax_tests/data/printer -name "*.res" -o -name "*.resi" 2>/dev/null | sor
 TELLA_DIR="${TELLA_DIR:-$HOME/dev/tella-fusion}"
 if [[ -d "$TELLA_DIR" ]]; then
     find "$TELLA_DIR" \
-        -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+        -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/rescript" -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
         -o -type f \( -name "*.res" -o -name "*.resi" \) -print 2>/dev/null | \
         sort >> "$TEMP_DIR/files.txt"
 fi

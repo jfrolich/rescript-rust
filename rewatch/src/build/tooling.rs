@@ -111,8 +111,10 @@ struct Runtime {
 impl Runtime {
     fn load(root: &Path) -> Option<Runtime> {
         let config = packages::read_config(root).ok()?;
-        let path = root.join("lib").join("ocaml");
-        let modules = compile::runtime_source_paths(&path).ok()?.into_iter().collect();
+        // The runtime ships its sources at its root; `path` is its artifact
+        // directory, the runtime compile's `-I`.
+        let path = packages::get_build_path(root);
+        let modules = compile::runtime_source_paths(root).ok()?.into_iter().collect();
         Some(Runtime {
             root: root.to_path_buf(),
             path,

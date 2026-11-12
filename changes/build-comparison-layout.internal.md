@@ -1,0 +1,1 @@
+- Follow the `lib/rescript` build layout in interface and checker comparisons, retain legacy-directory support, and reject missing databases or compiler logs instead of reporting empty comparisons.
