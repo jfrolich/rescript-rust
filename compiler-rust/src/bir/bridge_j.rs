@@ -188,14 +188,21 @@ struct Importer {
     params: AHashMap<j::FunId, VarSpan>,
     existing_loop_depth: usize,
     rest_binders: crate::fast_hash::AHashSet<VarId>,
+    identity_error: Option<Unsupported>,
 }
 impl Importer {
     fn var(&mut self, id: Ident) -> VarId {
-        *self.vars.entry(id).or_insert_with(|| {
+        let v = *self.vars.entry(id).or_insert_with(|| {
             let v = self.b.new_var_id(id.name_atom(), id.stamp() as u32);
             self.ids.push(id);
             v
-        })
+        });
+        // Ident equality deliberately ignores names on stamped locals and all
+        // flags. The bridge cannot silently unify different printed identities.
+        if self.ids[v.index()].cmp(&id) != std::cmp::Ordering::Equal {
+            self.identity_error = Some(Unsupported("inconsistent JS identifier metadata"));
+        }
+        v
     }
     fn text(&mut self, a: &j::JsArena, id: j::StrId) -> StrId {
         self.b.intern_text(a.text(id))
@@ -225,6 +232,9 @@ impl Importer {
     }
     fn module(&mut self, m: &js::ModuleId) -> ImportId {
         if let Some(&id) = self.modules.get(m) {
+            if self.b.pools.j_modules[id.index()].id.cmp(&m.id) != std::cmp::Ordering::Equal {
+                self.identity_error = Some(Unsupported("inconsistent JS module identity"));
+            }
             return id;
         }
         let path = self.b.intern_text(match &m.kind {
@@ -691,6 +701,9 @@ impl Importer {
                 }
             },
         };
+        if let Some(error) = self.identity_error {
+            return Err(error);
+        }
         let binder = match view {
             View::SDecl { var, .. }
             | View::SRest { var, .. }
@@ -814,6 +827,9 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
         if i.b.vars.binder(v).is_none() {
             i.b.mark_js_global(v);
         }
+    }
+    if let Some(error) = i.identity_error {
+        return Err(error);
     }
     i.b.try_finish_bulk(root)?;
     Ok(Imported {
@@ -2155,6 +2171,20 @@ mod tests {
         assert_eq!(
             q.program.arena.stmt_cold(q.program.block[0]).source_loc,
             Some(LamLoc::NONE)
+        );
+    }
+    #[test]
+    fn equal_stamps_do_not_hide_distinct_identifier_metadata() {
+        let mut a = j::JsArena::new();
+        let x = a.ident_id(ident(1));
+        let y = a.ident_id(Ident::new("different", 1, crate::ident::IdentFlags::NONE));
+        let x = a.expr(E::Var(x));
+        let y = a.expr(E::Var(y));
+        let pair = a.expr(E::Seq(x, y));
+        let s = a.stmt(S::Exp(pair));
+        assert_eq!(
+            import_js(&program(a, vec![s])).err().unwrap(),
+            Unsupported("inconsistent JS identifier metadata")
         );
     }
     #[test]
