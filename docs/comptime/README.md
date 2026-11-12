@@ -76,6 +76,14 @@ The loop prints a value as the ReScript that makes it, which the JavaScript
 value alone does not say (`Some(3)` is `3` at run time): the compiler gives
 the shape of each value's type with the compiled input.
 
+The loop and the editors of the examples complete what is being written:
+the members of a module after `Json.`, the macros of a module after
+`%Debug.` and `@Enum.`, the fields of a record after `user.`, and after
+`users->` the functions that take an array first. The type before a `.` or
+a `->` is the one the compiler gives the expression where it stands, so a
+function parameter completes like a top-level name. Tab or Enter takes a
+completion.
+
 ## Why
 
 ReScript code generation is done by PPXs today: native executables, written
