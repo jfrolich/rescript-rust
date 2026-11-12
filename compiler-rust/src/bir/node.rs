@@ -26,6 +26,10 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
+    /// J-only: strict purity, reusing the L tail-position bit after lowering.
+    pub const STRICT: u8 = Self::TAIL;
+    /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
+    pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -353,6 +357,9 @@ impl Node {
         assert_eq!(self.op, Op::JNumber);
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
+    }
+    pub(super) fn block_list(list: ListId) -> Self {
+        Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;

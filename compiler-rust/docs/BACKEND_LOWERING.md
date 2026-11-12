@@ -2000,8 +2000,28 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    (`compile_deps_program_in_arena` (C:663)), imported into a fresh `Bir`
    (`bridge::import_lambda`, S2.2). Until S4 switches on, this is the only source of
    level L for the lowering, so both sides start from the same tree.
+
+   The simplified cut can share source handles. `import_lambda` treats
+   binder-free shared subtrees as occurrences, copying once per incoming edge,
+   as the legacy lowering does. One memoized bottom-up pass establishes
+   binder-freedom. The expansion is bounded to four times the reachable source
+   nodes. A repeated subtree containing a binder returns
+   `Unsupported("shared Lambda subtree with binder")`; exceeding the budget
+   returns `Unsupported("shared Lambda expansion")`. These two bridge reasons
+   are permitted for the `lower` stage and counted separately. Earlier stage
+   baselines are unchanged. A concrete sharing producer is
+   `lam_pass_lets_dce::LetsState::simplif`: its Var arm reuses the replacement
+   handle installed by `simplif_alias`, demonstrated by the bridge regression
+   `simplify_lets_creates_shared_constant_occurrences`.
+
+   A static-catch label is itself a binder, including catches without handler
+   parameters. Shared catches therefore use the binder fallback; labels are
+   never freshened per occurrence. This also covers distinct rebuilt catch
+   nodes that retain the same label identity. The lower-stage report separately counts
+   units blocked only by shared catch labels, in addition to the total binder
+   fallback count. A catch-only share above 5% of a corpus is reported prominently.
 2. **New side.** Lower to J; export the J program, not flattened, to a
-   `JsArena` with plain constructors (`bridge::export_js`, new in S3.3: no
+   `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy
    pass 1 of the shared tail until S3.2 replaces it. Variables the lowering created get
    identifiers whose stamps follow their `order`, above every stamp of the

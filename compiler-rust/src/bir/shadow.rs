@@ -44,6 +44,8 @@ struct UnitReport<'a> {
     /// per kind of fact.
     #[serde(skip_serializing_if = "Option::is_none")]
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    shared_catch_only: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -62,7 +64,7 @@ fn report(
     unsupported: Option<&'static str>,
     norm: Option<NormReport>,
 ) -> anyhow::Result<()> {
-    report_with_facts(unit, stage, unsupported, norm, None)
+    write_report(unit, stage, unsupported, norm, None, false)
 }
 
 fn report_with_facts(
@@ -71,6 +73,24 @@ fn report_with_facts(
     unsupported: Option<&'static str>,
     norm: Option<NormReport>,
     facts: Option<std::collections::BTreeMap<&'static str, u64>>,
+) -> anyhow::Result<()> {
+    write_report(unit, stage, unsupported, norm, facts, false)
+}
+
+fn report_with_sharing(
+    unit: &str, stage: &'static str, unsupported: Option<&'static str>,
+    norm: Option<NormReport>, shared_catch_only: bool,
+) -> anyhow::Result<()> {
+    write_report(unit, stage, unsupported, norm, None, shared_catch_only)
+}
+
+fn write_report(
+    unit: &str,
+    stage: &'static str,
+    unsupported: Option<&'static str>,
+    norm: Option<NormReport>,
+    facts: Option<std::collections::BTreeMap<&'static str, u64>>,
+    shared_catch_only: bool,
 ) -> anyhow::Result<()> {
     let Some(directory) = std::env::var_os("RESCRIPT_BACKEND_STATS") else {
         return Ok(());
@@ -107,6 +127,7 @@ fn report_with_facts(
         unsupported,
         norm,
         facts,
+        shared_catch_only,
     })?;
     file.write_all(&data)?;
     Ok(())
@@ -864,5 +885,202 @@ mod tests {
                     .unwrap();
             assert_eq!(actual, expected);
         }
+    }
+}
+
+/// Failure classification is preserved through the compiler's infallible IR API.
+/// Only Unsupported becomes a fallback; export/validation failures remain errors.
+pub(crate) enum LowerFailure {
+    Unsupported(super::bridge::Unsupported, bool),
+    Error(anyhow::Error),
+}
+
+/// Captures the same program points on both sides of the shared legacy tail.
+pub(crate) enum LowerCheck {
+    Failed(LowerFailure),
+    Supported(Box<LowerPair>),
+}
+
+pub(crate) struct LowerPair {
+    pub before: [crate::js_ir::arena::JsDepsProgram; 2],
+    pub after: [crate::js_ir::arena::JsDepsProgram; 2],
+    pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
+}
+
+/// Import exactly the simplified root about to enter legacy compile_expr.
+pub(crate) fn prepare_lower(
+    arena: &LamArena,
+    root: Lam,
+    locations: Option<&crate::lambda::LamLocTable>,
+) -> Result<
+    (
+        crate::js_ir::arena::JsArena,
+        crate::lambda::lam_compile::Compiled,
+    ),
+    LowerFailure,
+> {
+    let (input, catch_only) = super::bridge::import_for_lowering(arena, root);
+    let input = input.map_err(|reason| match reason.0 {
+        "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
+        _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
+    })?;
+    let lowered = super::lower::lower(input, locations, false).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
+    lowered
+        .program
+        .arena
+        .validate(Some(lowered.program.root), false)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
+    // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
+    // smart constructor and no normalize. The last SExp transports Out::value.
+    let mut exported = super::bridge_j::export_js(&lowered.program)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
+    #[cfg(debug_assertions)]
+    if arena.node_count() <= 128 {
+        let (direct, _) = super::bridge::import_for_lowering(arena, root);
+        let direct = direct.map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct import: {e}")))?;
+        let direct = super::lower::lower(direct, locations, true)
+            .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct lower: {e}")))?;
+        let direct = super::bridge_j::export_js(&direct.program)
+            .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct export: {e}")))?;
+        let print = |p| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+        compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
+            .map_err(LowerFailure::Error)?;
+    }
+    let value =
+        exported.program.block.pop().ok_or_else(|| {
+            LowerFailure::Error(anyhow::anyhow!("lower export lacks output value"))
+        })?;
+    let crate::js_ir::arena::StmtKind::Exp(expr) = exported.program.arena.sk(value) else {
+        return Err(LowerFailure::Error(anyhow::anyhow!(
+            "lower export value is not SExp"
+        )));
+    };
+    use crate::lambda::lam_compile::OutputFinished;
+    let finished = match lowered.finished {
+        super::lower::Finished::True => OutputFinished::True,
+        super::lower::Finished::False => OutputFinished::False,
+        super::lower::Finished::Dummy => OutputFinished::Dummy,
+    };
+    Ok((
+        exported.program.arena,
+        crate::lambda::lam_compile::Compiled {
+            prelude: exported.program.block,
+            expr,
+            finished,
+        },
+    ))
+}
+
+/// Two independent texts through the legacy ES module printer; when requested,
+/// also compare source-map mappings. Mismatches never become Unsupported.
+pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> anyhow::Result<()> {
+    match check {
+        LowerCheck::Failed(LowerFailure::Unsupported(reason, catch_only)) => {
+            report_with_sharing(unit, "lower", Some(reason.0), None, catch_only)
+        }
+        LowerCheck::Failed(LowerFailure::Error(error)) => {
+            Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
+        }
+        LowerCheck::Supported(pair) => {
+            let LowerPair { before, after, locations } = *pair;
+            for (text, pair) in [("lower", before), ("lower+passes", after)] {
+                let print = |p| {
+                    crate::js_ir::print_deps_program_with_directives_and_options(
+                        p,
+                        None,
+                        &[],
+                        false,
+                        jsx_preserve,
+                        false,
+                    )
+                };
+                compare_lower_text(unit, text, &print(&pair[0]), &print(&pair[1]))?;
+                if let Some(locations) = &locations {
+                    let mapped = |p| crate::js_ir::print_deps_program_with_source_map(
+                        p, None, &[], false, jsx_preserve, false,
+                        std::path::Path::new("lower.js"), std::path::Path::new(unit),
+                        crate::js_ir::source_map::SourceMapMode::Hidden, false, "", locations.clone()
+                    );
+                    let (left_text, left_map) = mapped(&pair[0]);
+                    let (right_text, right_map) = mapped(&pair[1]);
+                    compare_lower_text(unit, text, &left_text, &right_text)?;
+                    compare_lower_text(unit, &format!("{text} mappings"), &left_map.unwrap_or_default(), &right_map.unwrap_or_default())?;
+                }
+            }
+            report(unit, "lower", None, None)
+        }
+    }
+}
+
+fn compare_lower_text(unit: &str, text: &str, expected: &str, actual: &str) -> anyhow::Result<()> {
+    if expected != actual {
+        let line = expected
+            .split_inclusive('\n')
+            .zip(actual.split_inclusive('\n'))
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()))
+            + 1;
+        anyhow::bail!(
+            "{unit}: {text} mismatch at line {line}: expected {:?}, got {:?}",
+            expected.split_inclusive('\n').nth(line - 1),
+            actual.split_inclusive('\n').nth(line - 1)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod lower_tests {
+    use super::*;
+    #[test]
+    fn both_text_mismatches_are_errors_with_first_line() {
+        for text in ["lower", "lower+passes"] {
+            let error = compare_lower_text("Example.res", text, "same\nold\n", "same\nnew\n")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("Example.res: {text} mismatch at line 2")));
+        }
+        assert!(compare_lower_text("Example.res", "lower", "same\n", "same").is_err());
+    }
+    #[test]
+    fn supported_gate_checks_both_program_points() {
+        use crate::js_ir::arena::{JsArena, JsDepsProgram, JsProgram, StmtKind};
+        let empty = JsDepsProgram {
+            program: JsProgram::new_in(vec![], vec![], JsArena::new()),
+            modules: vec![], side_effect: None,
+        };
+        let mut changed = empty.clone();
+        let statement = changed.program.arena.stmt(StmtKind::Debugger);
+        changed.program.block.push(statement);
+        for after_changed in [false, true] {
+            let same = [empty.clone(), empty.clone()];
+            let different = [empty.clone(), changed.clone()];
+            let check = if after_changed {
+                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None }))
+            } else {
+                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None }))
+            };
+            let text = if after_changed { "lower+passes" } else { "lower" };
+            let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();
+            assert!(error.contains(&format!("Gate.res: {text} mismatch at line")));
+        }
+    }
+    #[test]
+    fn shared_binder_is_the_explicit_bridge_fallback() {
+        let mut arena = LamArena::new();
+        let constant = arena.const_(crate::lambda::lam_constant::Constant::JsNull);
+        let id = crate::ident::Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let body = arena.var(id);
+        let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
+        let root = arena.seq_raw(binding, binding);
+        let result = prepare_lower(&arena, root, None);
+        assert!(matches!(result, Err(LowerFailure::Unsupported(
+            super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
+        ))));
+    }
+    #[test]
+    fn export_errors_are_not_fallbacks() {
+        let check = LowerCheck::Failed(LowerFailure::Error(anyhow::anyhow!("bad exported tree")));
+        assert!(check_lower(check, "Example.res", false).is_err());
     }
 }

@@ -299,6 +299,9 @@ jobs:
       - name: Test printer parity aggregation and ratchets
         run: python3 -m unittest discover -s scripts -p test_printer_parity_test.py
 
+      - name: Test the worker-count determinism gate
+        run: python3 -m unittest discover -s scripts -p test_worker_determinism_test.py
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
@@ -460,6 +463,7 @@ jobs:
               python3 scripts/test_marshal_debug_flags.py
               ./scripts/test_js_output_parity.sh --release
               python3 scripts/test_stored_interface_determinism.py
+              python3 scripts/test_worker_determinism.py
           - suite: diagnostics
             # Compare normal user-facing errors, not runtime-specific backtraces.
             run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release

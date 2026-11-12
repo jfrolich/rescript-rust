@@ -7087,11 +7087,10 @@ fn compile_source_to_js_with_options_inner(
             lowered_root,
         );
     all_possible_required_modules.extend(possible_required_modules.iter().cloned());
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_arena,
-        lowered_root,
-        all_possible_required_modules,
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_arena, lowered_root,
+        all_possible_required_modules, options, jsx_preserve, filename,
+    )?;
     #[cfg(test)]
     if let Some(trace) = discriminator_trace {
         trace.js_program = format!("{program:#?}");
@@ -10005,6 +10004,24 @@ fn js_backend_compiler(
     compiler
 }
 
+// Keep the opt-in capture off the monomorphized legacy path.
+fn compile_with_lower_check(
+    compiler: &mut LambdaCompiler,
+    arena: crate::lambda::arena::LamArena,
+    root: crate::lambda::arena::Lam,
+    possible: AHashSet<ModuleId>,
+    options: &CompilerOptions,
+    jsx_preserve: bool,
+    unit: &str,
+) -> Result<DepsProgram> {
+    if options.backend == crate::bir::shadow::BackendMode::Legacy {
+        return Ok(compiler.compile_deps_program_in_arena(arena, root, possible));
+    }
+    let (program, check) = compiler.compile_deps_program_with_lower_check::<true>(arena, root, possible);
+    crate::bir::shadow::check_lower(check.expect("opt-in capture"), unit, jsx_preserve)?;
+    Ok(program)
+}
+
 fn finish_js_backend(
     mut compiler: LambdaCompiler,
     program: DepsProgram,
@@ -10081,11 +10098,11 @@ fn compile_js_program_for_output(
     );
     // `possible_required_modules` already holds the modules of the lowered
     // program (collected at the pre-JS boundary).
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_lambda.arena.clone(),
-        lowered_lambda.root,
-        possible_required_modules.clone(),
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_lambda.arena.clone(), lowered_lambda.root,
+        possible_required_modules.clone(), options, jsx_preserve,
+        options.source_filename.as_deref().unwrap_or("_none_"),
+    )?;
     finish_js_backend(compiler, program, options)
 }
 
@@ -10125,11 +10142,11 @@ fn compile_js_program_for_output_owned(
         cross_module_inline,
         lam_locs,
     );
-    let program = compiler.compile_deps_program_in_arena(
-        lowered_lambda.arena,
-        lowered_lambda.root,
-        possible_required_modules,
-    );
+    let program = compile_with_lower_check(
+        &mut compiler, lowered_lambda.arena, lowered_lambda.root,
+        possible_required_modules, options, jsx_preserve,
+        options.source_filename.as_deref().unwrap_or("_none_"),
+    )?;
     finish_js_backend(compiler, program, options)
 }
 

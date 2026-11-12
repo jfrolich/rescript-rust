@@ -18,13 +18,14 @@ RATCHET = ROOT / "compiler-rust/tests/backend_coverage.txt"
 
 
 STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits", "lambda-alias",
-          "js-bridge")
+          "js-bridge", "lower")
 
 
 def summarize(directory, stage, prefix=None):
     reasons = collections.Counter()
     identical = 0
     units = {}
+    shared_catch_only = set()
     for path in sorted(directory.rglob("*.json")):
         report = json.loads(path.read_text())
         if prefix and not Path(report["unit"]).resolve().is_relative_to(prefix):
@@ -33,6 +34,8 @@ def summarize(directory, stage, prefix=None):
             raise RuntimeError(f"unexpected report stage: {report['stage']}")
         if report["stage"] != stage:
             continue
+        if report.get("shared_catch_only", False):
+            shared_catch_only.add(report["unit"])
         if report["unsupported"] is None:
             if not report["identical"]:
                 raise RuntimeError("unclassified shadow result")
@@ -46,8 +49,11 @@ def summarize(directory, stage, prefix=None):
             reasons[min(outcomes)] += 1
         else:
             identical += 1
-    return {"units": identical + sum(reasons.values()), "identical": identical,
-            "unsupported": dict(sorted(reasons.items()))}
+    result = {"units": identical + sum(reasons.values()), "identical": identical,
+              "unsupported": dict(sorted(reasons.items()))}
+    if stage == "lower":
+        result["shared_catch_only"] = len(shared_catch_only)
+    return result
 
 
 def rule_counts(directory, prefix=None):
