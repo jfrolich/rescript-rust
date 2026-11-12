@@ -17,6 +17,7 @@ pub(super) struct Build<'a, 'r> {
     pub names: &'r Names,
     pub debug: bool,
     pub jsx_preserve: bool,
+    rest_name: std::cell::RefCell<String>,
     string_tasks: std::cell::RefCell<Vec<(Expr, bool)>>,
     string_values: std::cell::RefCell<Vec<Expression<'a>>>,
     // S1.2: absent on the default, location-free path.
@@ -30,6 +31,7 @@ impl<'a, 'r> Build<'a, 'r> {
             names,
             debug: false,
             jsx_preserve: false,
+            rest_name: Default::default(),
             string_tasks: Default::default(),
             string_values: Default::default(),
             source_map: None,
@@ -168,9 +170,10 @@ impl<'a, 'r> Build<'a, 'r> {
         rest: &str,
         declaration: bool,
     ) -> BindingPattern<'a> {
+        use std::fmt::Write;
         let mut props = self.b.vec();
+        let mut synthetic = self.rest_name.borrow_mut();
         for (i, field) in self.arena.rest(fields).iter().enumerate() {
-            let synthetic;
             let name = if declaration {
                 field
                     .ident
@@ -178,7 +181,8 @@ impl<'a, 'r> Build<'a, 'r> {
                     .map(|id| self.names.get(id))
                     .unwrap_or(&field.label)
             } else {
-                synthetic = format!("__unused{i}");
+                synthetic.clear();
+                write!(synthetic, "__unused{i}").expect("writing a String cannot fail");
                 &synthetic
             };
             let computed = field.label == "__proto__";

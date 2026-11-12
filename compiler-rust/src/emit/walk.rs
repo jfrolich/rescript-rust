@@ -517,7 +517,9 @@ pub(super) fn rest_declaration(
 /// Keep the newly exposed member shape separate from record-rest support.
 pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
     let (name, _) = member_form(name);
-    if name.parse::<i64>().is_ok_and(|n| n.to_string() == name) {
+    let digits = name.strip_prefix('-').unwrap_or(name);
+    let canonical = name == "0" || matches!(digits.as_bytes(), [b'1'..=b'9', ..]);
+    if canonical && name.parse::<i64>().is_ok() {
         Err(Unsupported("numeric static member"))
     } else {
         Ok(())
