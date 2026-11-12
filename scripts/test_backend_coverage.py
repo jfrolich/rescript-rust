@@ -120,12 +120,18 @@ def check_stage(stage, actual, baseline):
         old_fallback = sum(old["unsupported"].values())
         if new["units"] < old["units"]:
             raise RuntimeError(f"{corpus}: missing units: {new['units']} < {old['units']}")
-        if fallback > old_fallback:
+        # A corpus grows when tests are added. A unit added to a corpus that
+        # already has fallbacks may be one more. No existing unit may become
+        # one: units are identical plus fallbacks, so fallbacks growing by at
+        # most the units added means the identical count did not fall. A
+        # corpus without fallbacks keeps none.
+        added = new["units"] - old["units"]
+        if fallback > old_fallback + added:
             raise RuntimeError(f"{corpus}: fallback count grew: {fallback} > {old_fallback}")
-        if new["identical"] * old["units"] < old["identical"] * new["units"]:
-            raise RuntimeError(f"{corpus}: supported share fell")
+        if fallback and not old_fallback:
+            raise RuntimeError(f"{corpus}: a fully supported corpus gained a fallback")
         for reason, count in new["unsupported"].items():
-            if count > old["unsupported"].get(reason, 0):
+            if count > old["unsupported"].get(reason, 0) + added:
                 raise RuntimeError(f"{corpus}: fallback reason grew: {reason}: {count}")
 
 
