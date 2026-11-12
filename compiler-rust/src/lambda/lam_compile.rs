@@ -4190,6 +4190,14 @@ impl LambdaCompiler {
                 let body = self.compile_tail_loop_return_output(a, body, tail_loop);
                 binding.append(body)
             }
+            Node::LetRec { ids, values, body } => {
+                // compiler/core/lam_compile.ml:2046-2057 preserves the outer
+                // continuation after compiling the nested recursive bindings.
+                let bindings = letrec_bindings(a, ids, values);
+                let recursive = self.compile_recursive_bindings_output(a, &bindings);
+                let body = self.compile_tail_loop_return_output(a, body, tail_loop);
+                recursive.append(body)
+            }
             Node::Apply { func, args, info } => {
                 if let Some(block) = self.try_compile_self_tailcall_block(a, func, args, tail_loop)
                 {
@@ -6774,7 +6782,9 @@ fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) ->
         View::Apply { func, .. } => a
             .as_var(func)
             .is_some_and(|id| tail_targets.iter().any(|target| id.same(target))),
-        View::Let(_, _, _, body) => function_has_self_tailcall(a, tail_targets, body),
+        View::Let(_, _, _, body) | View::LetRec(_, _, body) => {
+            function_has_self_tailcall(a, tail_targets, body)
+        }
         View::If(_, then_, else_) => {
             function_has_self_tailcall(a, tail_targets, then_)
                 || function_has_self_tailcall(a, tail_targets, else_)
@@ -6811,7 +6821,6 @@ fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) ->
         | View::GlobalModule(_)
         | View::Const(_)
         | View::Function { .. }
-        | View::LetRec(..)
         | View::StaticRaise(..)
         | View::Break
         | View::Continue
