@@ -3,6 +3,7 @@ mod build;
 mod literal;
 mod naming;
 mod program;
+pub mod sourcemap;
 mod walk;
 
 use crate::js_ir::{ModulePathResolver, arena::JsDepsProgram};
@@ -78,7 +79,16 @@ pub fn emit(
     jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
-    program::emit(program, resolver, directives, debug, jsx_preserve, header)
+    program::emit(program, resolver, directives, debug, jsx_preserve, header, None)
+}
+
+/// Emit with source maps, retaining whole-file fallback on unsupported mappings.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_with_source_map(
+    program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
+    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+) -> Result<(String, Option<String>), Unsupported> {
+    program::emit(program, resolver, directives, debug, jsx_preserve, header, Some(options))
 }
 
 #[cfg(test)]
@@ -163,6 +173,27 @@ mod oracle_tests {
         }
     }
     #[test]
+    fn control_flow_source_oracle() {
+        for source in [
+            "let f = n => { for i in 0 to n { effect(i) } }",
+            "let f = n => { for i in n downto 0 { effect(i) } }",
+            "let f = n => { while condition(n) { effect(n) } }",
+            "type box = {mutable value: int}; let f = n => { let x = {value: n}; x.value = n; effect(x.value) }",
+            "let f = n => switch n { | 0 => effect(0) | 1 => effect(1) | _ => effect(n) }",
+            "external raise: exn => 'a = \"%raise\"; let f = e => raise(e)",
+            "let f = n => { effect(n); effect(n) }",
+        ] {
+            for commonjs in [false, true] {
+                oracle(
+                    &format!(
+                        "@val external effect: int => unit = \"effect\"; @val external condition: int => bool = \"condition\"; {source}"
+                    ),
+                    commonjs,
+                );
+            }
+        }
+    }
+    #[test]
     fn scoped_names_source_oracle() {
         for source in [
             "let x = 1; let x = 2; let y = x",
@@ -203,8 +234,32 @@ mod oracle_tests {
         }
     }
     #[test]
-    fn comment_bearing_raw_snippets_fall_back_without_loss() {
+    fn text_payloads_source_oracle() {
         for source in [
+            "let value = `hello`",
+            "let f = x => `hello ${x}!`",
+            "let f = x => `a\\n${x}\\`end`",
+            "@val external tag: taggedTemplate<string, string> = \"tag\"; let f = x => tag`hello ${x}!`",
+            "@val external consume: (@as(json`{hello: [1, 2]}`) _) => int = \"consume\"; let value = consume()",
+            "let f = @directive(\"'use server'\") x => x",
+            "let f = x => { let g = @directive(\"'use cache'\") y => y; g(x) }",
+            "@module({from: `./data.json`, with: {type_: `json`, \\\"some-key\": `value`}}) external data: int = \"default\"; let value = data",
+            "type t = A | B; let value = A",
+            "exception E",
+            "let value = `café 😀`",
+            "@val external tag: taggedTemplate<string, string> = \"tag\"; let f = x => tag`\\unicode ${x} end`",
+        ] {
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
+        }
+    }
+    #[test]
+    fn verbatim_raw_snippets_fall_back_without_loss() {
+        for source in [
+            "let value = %raw(`({answer:42})`)",
+            "let value = %raw(`function(x){return x}`)",
+            "%%raw(`console.log(  1 )`)\nlet value = 1",
             "%%raw(`// leading comment`)\nlet value = 1",
             "%%raw(`/* block comment */`)\nlet value = 1",
             "let f = () => %raw(`(/* inside function */ doSomething())`)",

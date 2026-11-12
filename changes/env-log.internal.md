@@ -1,0 +1,1 @@
+- Add a test-only environment version log beside the persistent environment tables, with a property test that compares the two.

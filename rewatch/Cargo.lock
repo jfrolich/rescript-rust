@@ -1825,6 +1825,7 @@ dependencies = [
  "rayon",
  "rescript",
  "rescript-compiler",
+ "tempfile",
 ]
 
 [[package]]

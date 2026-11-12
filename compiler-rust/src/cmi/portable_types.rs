@@ -35,6 +35,9 @@ use crate::types::type_expr::{
     TypeArg, TypeDesc, TypeExprRef,
 };
 
+use super::graph_hash::{
+    ArgKind, GraphWalk, Node, Row, RowFieldView, TypeGraph, hash_path_by_name,
+};
 use super::persistent_env::PersStruct;
 
 // ============================================================================
@@ -398,8 +401,17 @@ impl PortablePersStruct {
         }
         encoded.sig.decode()
     }
-    /// The raw signature, decoded after ensuring bytes exist.
+    /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
+        if self.encoded.get().is_none() {
+            let decoded = self.decoded.lock().unwrap();
+            if let Some((_, raw)) = decoded.as_ref() {
+                // GenType may read a dependency's raw signature while publishing
+                // the current unit. Do not encode either signature just to read
+                // this graph; byte production belongs to the storage reader.
+                return raw.clone();
+            }
+        }
         self.encoded()
             .raw
             .as_ref()
@@ -464,6 +476,13 @@ impl std::ops::Deref for HashGraph<'_> {
 /// Public API for computing a fingerprint outside of `serialize_pers_struct`
 /// (e.g., for namespace signatures synthesized directly).
 pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) -> u64 {
+    signature_fingerprint(entries, sig)
+}
+
+/// The fingerprint of `sig`, whose types are nodes of `graph`: one hash of
+/// the whole signature, so types shared between items are hashed once
+/// (`graph_hash`). Linear in the signature and the nodes it reaches.
+pub fn signature_fingerprint<G: TypeGraph>(graph: &G, sig: &Signature) -> u64 {
     // Deterministic within a build (fixed seeds); the fingerprint only lives
     // in the in-memory interface registry.
     use std::hash::BuildHasher;
@@ -471,216 +490,163 @@ pub fn compute_type_graph_fingerprint(entries: &HashGraph<'_>, sig: &Signature) 
         ahash::RandomState::with_seeds(0x5245_5343, 0x5249_5054, 0x4649_4e47, 0x4552_5052)
             .build_hasher();
 
-    // Hash the public signature through its remapped TypeExprRef roots instead
-    // of hashing the portable arena linearly. The same interface can serialize
-    // its internal type graph in a different allocation order depending on
-    // whether it was produced during a cold parallel build or a later watch
-    // rebuild; dependency invalidation needs the interface shape, not arena
-    // ordering.
-    hash_signature(&mut hasher, sig, entries);
+    // Hash the public signature through its type roots instead of hashing
+    // the graph's storage linearly. The same interface can store its nodes
+    // in a different order depending on whether it was produced during a
+    // cold parallel build or a later watch rebuild; dependency invalidation
+    // needs the interface's graph, not the order it is stored in.
+    hash_signature(&mut hasher, sig, &mut GraphWalk::new(graph));
 
     hasher.finish()
 }
 
-/// Hash a Path using only names, not stamps. This makes the fingerprint stable
-/// across recompilations where dependency stamps may shift.
-fn hash_path_by_name(hasher: &mut impl Hasher, path: &Path) {
-    use crate::types::path::PathView as P;
-    match path.view() {
-        P::Pident(ident) => {
-            0u8.hash(hasher);
-            ident.name().hash(hasher);
-        }
-        P::Pdot(base, field, _pos) => {
-            1u8.hash(hasher);
-            hash_path_by_name(hasher, base);
-            field.hash(hasher);
-        }
-        P::Papply(f, x) => {
-            2u8.hash(hasher);
-            hash_path_by_name(hasher, f);
-            hash_path_by_name(hasher, x);
-        }
-    }
-}
+impl super::graph_hash::TypeGraph for HashGraph<'_> {
+    type Ref = usize;
+    type Arg = (ArgLabel, usize);
+    type Row = PortableRowDesc;
+    type RowField = PortableRowField;
+    type Mutability = usize;
+    type Lid = PortableLongident;
 
-fn hash_type_ref(
-    hasher: &mut impl Hasher,
-    idx: usize,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    if idx >= entries.len() {
-        0xfeu8.hash(hasher);
-        idx.hash(hasher);
-        return;
+    fn slots(&self) -> usize {
+        self.entries.len()
     }
 
-    if let Some(pos) = visiting.iter().position(|seen| *seen == idx) {
-        0xffu8.hash(hasher);
-        pos.hash(hasher);
-        return;
+    fn slot(&self, r: usize) -> Option<usize> {
+        (r < self.entries.len()).then_some(r)
     }
 
-    visiting.push(idx);
-    hash_portable_desc(hasher, &entries[idx].desc, entries, visiting);
-    visiting.pop();
-}
-
-fn hash_type_refs(
-    hasher: &mut impl Hasher,
-    refs: &[usize],
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    refs.len().hash(hasher);
-    for idx in refs {
-        hash_type_ref(hasher, *idx, entries, visiting);
+    fn root(&self, r: TypeExprRef) -> usize {
+        r.index()
     }
-}
 
-fn hash_portable_desc(
-    hasher: &mut impl Hasher,
-    desc: &PortableTypeDesc,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    std::mem::discriminant(desc).hash(hasher);
-    match desc {
-        PortableTypeDesc::Tvar(name) => name.hash(hasher),
-        PortableTypeDesc::Tarrow { args, ret } => {
-            args.len().hash(hasher);
-            for (label, arg) in args {
-                // The label's kind and name; not where it was written.
-                std::mem::discriminant(label).hash(hasher);
-                match label {
-                    crate::types::asttypes::ArgLabel::Nolabel => {}
-                    crate::types::asttypes::ArgLabel::Labelled(name)
-                    | crate::types::asttypes::ArgLabel::Optional(name) => name.txt.hash(hasher),
-                }
-                hash_type_ref(hasher, *arg, entries, visiting);
-            }
-            hash_type_ref(hasher, *ret, entries, visiting);
-        }
-        PortableTypeDesc::Ttuple(elems) => hash_type_refs(hasher, elems, entries, visiting),
-        PortableTypeDesc::Tconstr { path, args } => {
-            hash_path_by_name(hasher, path);
-            hash_type_refs(hasher, args, entries, visiting);
-        }
-        PortableTypeDesc::Tobject { fields } => {
-            hash_type_ref(hasher, *fields, entries, visiting);
-        }
-        PortableTypeDesc::Tfield {
-            name,
-            mutability,
-            typ,
-            rest,
-        } => {
-            name.hash(hasher);
-            entries.mutabilities.get(*mutability).hash(hasher);
-            hash_type_ref(hasher, *typ, entries, visiting);
-            hash_type_ref(hasher, *rest, entries, visiting);
-        }
-        PortableTypeDesc::Tnil => {}
-        PortableTypeDesc::Tlink(idx) => hash_type_ref(hasher, *idx, entries, visiting),
-        PortableTypeDesc::Tsubst(idx) => hash_type_ref(hasher, *idx, entries, visiting),
-        PortableTypeDesc::Tvariant(rd) => hash_portable_row_desc(hasher, rd, entries, visiting),
-        PortableTypeDesc::Tunivar(name) => name.hash(hasher),
-        PortableTypeDesc::Tpoly { body, vars } => {
-            hash_type_ref(hasher, *body, entries, visiting);
-            hash_type_refs(hasher, vars, entries, visiting);
-        }
-        PortableTypeDesc::Tpackage { path, lids, args } => {
-            hash_path_by_name(hasher, path);
-            lids.hash(hasher);
-            hash_type_refs(hasher, args, entries, visiting);
+    fn node(&self, slot: usize) -> Node<'_, Self> {
+        match &self.entries[slot].desc {
+            PortableTypeDesc::Tvar(name) => Node::Tvar(*name),
+            PortableTypeDesc::Tarrow { args, ret } => Node::Tarrow { args, ret: *ret },
+            PortableTypeDesc::Ttuple(elems) => Node::Ttuple(elems),
+            PortableTypeDesc::Tconstr { path, args } => Node::Tconstr { path: *path, args },
+            PortableTypeDesc::Tobject { fields } => Node::Tobject { fields: *fields },
+            PortableTypeDesc::Tfield {
+                name,
+                mutability,
+                typ,
+                rest,
+            } => Node::Tfield {
+                name: *name,
+                mutability: *mutability,
+                typ: *typ,
+                rest: *rest,
+            },
+            PortableTypeDesc::Tnil => Node::Tnil,
+            PortableTypeDesc::Tlink(target) => Node::Tlink(*target),
+            PortableTypeDesc::Tsubst(target) => Node::Tsubst(*target),
+            PortableTypeDesc::Tvariant(row) => Node::Tvariant(row),
+            PortableTypeDesc::Tunivar(name) => Node::Tunivar(*name),
+            PortableTypeDesc::Tpoly { body, vars } => Node::Tpoly { body: *body, vars },
+            PortableTypeDesc::Tpackage { path, lids, args } => Node::Tpackage {
+                path: *path,
+                lids,
+                args,
+            },
         }
     }
-}
 
-fn hash_portable_row_desc(
-    hasher: &mut impl Hasher,
-    rd: &PortableRowDesc,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    rd.row_fields.len().hash(hasher);
-    for (label, field) in &rd.row_fields {
-        label.hash(hasher);
-        hash_portable_row_field(hasher, field, entries, visiting);
+    fn arg<'a>(&'a self, arg: &'a (ArgLabel, usize)) -> (ArgKind, Option<&'a str>, usize) {
+        match &arg.0 {
+            ArgLabel::Nolabel => (ArgKind::Nolabel, None, arg.1),
+            ArgLabel::Labelled(name) => (ArgKind::Labelled, Some(&name.txt), arg.1),
+            ArgLabel::Optional(name) => (ArgKind::Optional, Some(&name.txt), arg.1),
+        }
     }
-    hash_type_ref(hasher, rd.row_more, entries, visiting);
-    rd.row_closed.hash(hasher);
-    rd.row_fixed.hash(hasher);
-    if let Some((p, args)) = &rd.row_name {
-        true.hash(hasher);
-        hash_path_by_name(hasher, p);
-        hash_type_refs(hasher, args, entries, visiting);
-    } else {
-        false.hash(hasher);
-    }
-}
 
-fn hash_portable_row_field(
-    hasher: &mut impl Hasher,
-    rf: &PortableRowField,
-    entries: &HashGraph<'_>,
-    visiting: &mut Vec<usize>,
-) {
-    std::mem::discriminant(rf).hash(hasher);
-    match rf {
-        PortableRowField::Rpresent(opt) => {
-            if let Some(idx) = opt {
-                true.hash(hasher);
-                hash_type_ref(hasher, *idx, entries, visiting);
-            } else {
-                false.hash(hasher);
-            }
+    fn row<'a>(&'a self, row: &'a PortableRowDesc) -> Row<'a, Self> {
+        Row {
+            fields: &row.row_fields,
+            more: row.row_more,
+            closed: row.row_closed,
+            fixed: row.row_fixed,
+            name: row
+                .row_name
+                .as_ref()
+                .map(|(path, args)| (*path, args.as_slice())),
         }
-        PortableRowField::Reither {
-            constant,
-            types,
-            matched,
-        } => {
-            constant.hash(hasher);
-            hash_type_refs(hasher, types, entries, visiting);
-            matched.hash(hasher);
+    }
+
+    fn row_field<'a>(&'a self, field: &'a PortableRowField) -> RowFieldView<'a, Self> {
+        match field {
+            PortableRowField::Rpresent(typ) => RowFieldView::Rpresent(*typ),
+            PortableRowField::Reither {
+                constant,
+                types,
+                matched,
+            } => RowFieldView::Reither {
+                constant: *constant,
+                types,
+                matched: *matched,
+            },
+            PortableRowField::Rabsent => RowFieldView::Rabsent,
         }
-        PortableRowField::Rabsent => {}
+    }
+
+    fn mutability(&self, cell: usize) -> Option<crate::types::asttypes::MutableFlag> {
+        self.mutabilities.get(cell).copied()
+    }
+
+    fn package_lids<'a>(
+        &'a self,
+        lids: &'a [PortableLongident],
+    ) -> std::borrow::Cow<'a, [PortableLongident]> {
+        std::borrow::Cow::Borrowed(lids)
+    }
+
+    fn layout(
+        &self,
+        layout: crate::types::VariantLayoutRef,
+    ) -> Option<&crate::types::VariantLayout> {
+        self.layouts.get(layout.0 as usize)
     }
 }
 
 /// Hash the signature structure: item names and kinds.
 /// Uses name-based identity for all paths.
-fn hash_signature(hasher: &mut impl Hasher, sig: &Signature, entries: &HashGraph<'_>) {
+fn hash_signature<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    sig: &Signature,
+    walk: &mut GraphWalk<'_, G>,
+) {
     sig.len().hash(hasher);
     for item in sig {
-        hash_sig_item(hasher, item, entries);
+        hash_sig_item(hasher, item, walk);
     }
 }
 
 /// The fingerprint contribution of one signature item.
-pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &HashGraph<'_>) {
+pub fn hash_sig_item<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    item: &SignatureItem,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(item).hash(hasher);
     match item {
         SignatureItem::SigValue(ident, vd) => {
             ident.name().hash(hasher);
-            hash_value_desc(hasher, vd, entries);
+            hash_value_desc(hasher, vd, walk);
         }
         SignatureItem::SigType(ident, td, rec) => {
             ident.name().hash(hasher);
             std::mem::discriminant(rec).hash(hasher);
-            hash_type_decl(hasher, td, entries);
+            hash_type_decl(hasher, td, walk);
         }
         SignatureItem::SigTypext(ident, ext, es) => {
             ident.name().hash(hasher);
             std::mem::discriminant(es).hash(hasher);
-            hash_extension_constructor(hasher, ext, entries);
+            hash_extension_constructor(hasher, ext, walk);
         }
         SignatureItem::SigModule(ident, md, _rec) => {
             ident.name().hash(hasher);
             hash_attributes(hasher, &md.md_attributes);
-            hash_module_type(hasher, &md.md_type, entries);
+            hash_module_type(hasher, &md.md_type, walk);
             match &md.md_path {
                 Some(path) => {
                     true.hash(hasher);
@@ -691,7 +657,7 @@ pub fn hash_sig_item(hasher: &mut impl Hasher, item: &SignatureItem, entries: &H
         }
         SignatureItem::SigModtype(ident, mtd) => {
             ident.name().hash(hasher);
-            hash_modtype_decl(hasher, mtd, entries);
+            hash_modtype_decl(hasher, mtd, walk);
         }
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
@@ -707,8 +673,12 @@ fn hash_attributes(hasher: &mut impl Hasher, attrs: &[crate::types::decl::Attrib
     }
 }
 
-fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &HashGraph<'_>) {
-    hash_type_ref(hasher, vd.val_type.index(), entries, &mut Vec::new());
+fn hash_value_desc<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    vd: &ValueDescription,
+    walk: &mut GraphWalk<'_, G>,
+) {
+    walk.type_ref(hasher, vd.val_type);
     hash_attributes(hasher, &vd.val_attributes);
     match &vd.val_kind {
         ValueKind::ValReg => {
@@ -731,14 +701,18 @@ fn hash_value_desc(hasher: &mut impl Hasher, vd: &ValueDescription, entries: &Ha
     }
 }
 
-fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &HashGraph<'_>) {
+fn hash_type_decl<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    td: &TypeDeclaration,
+    walk: &mut GraphWalk<'_, G>,
+) {
     td.type_arity.hash(hasher);
     hash_attributes(hasher, &td.type_attributes);
-    hash_type_expr_refs(hasher, &td.type_params, entries);
+    hash_type_expr_refs(hasher, &td.type_params, walk);
     td.type_private.hash(hasher);
     if let Some(manifest) = td.type_manifest {
         true.hash(hasher);
-        hash_type_ref(hasher, manifest.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, manifest);
     } else {
         false.hash(hasher);
     }
@@ -752,33 +726,41 @@ fn hash_type_decl(hasher: &mut impl Hasher, td: &TypeDeclaration, entries: &Hash
     } else {
         false.hash(hasher);
     }
-    hash_type_kind(hasher, &td.type_kind, entries);
+    hash_type_kind(hasher, &td.type_kind, walk);
     td.type_inlined_types.len().hash(hasher);
     for inlined in &td.type_inlined_types {
         match inlined {
             TypeInlinedType::Record { type_name, labels } => {
                 type_name.hash(hasher);
-                hash_label_decls(hasher, labels, entries);
+                hash_label_decls(hasher, labels, walk);
             }
         }
     }
 }
 
-fn hash_type_expr_refs(hasher: &mut impl Hasher, refs: &[TypeExprRef], entries: &HashGraph<'_>) {
+fn hash_type_expr_refs<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    refs: &[TypeExprRef],
+    walk: &mut GraphWalk<'_, G>,
+) {
     refs.len().hash(hasher);
     for r in refs {
-        hash_type_ref(hasher, r.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, *r);
     }
 }
 
-fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph<'_>) {
+fn hash_type_kind<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    kind: &TypeKind,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(kind).hash(hasher);
     match kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
         // The representations decide dependents' JS (`@unboxed`, `@tag`,
         // inlined records).
         TypeKind::TypeRecord(labels, repr) => {
-            hash_label_decls(hasher, labels, entries);
+            hash_label_decls(hasher, labels, walk);
             std::mem::discriminant(repr).hash(hasher);
             match repr {
                 crate::types::decl::RecordRepresentation::RecordUnboxed(flag) => flag.hash(hasher),
@@ -788,27 +770,23 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
                 } => {
                     name.hash(hasher);
                     representation.position.hash(hasher);
-                    format!(
-                        "{:?}",
-                        entries.layouts.get(representation.variant.0 as usize)
-                    )
-                    .hash(hasher);
+                    hash_layout(hasher, walk.graph().layout(representation.variant));
                 }
                 _ => {}
             }
         }
         TypeKind::TypeVariant(ctors, layout) => {
-            format!("{:?}", entries.layouts.get(layout.0 as usize)).hash(hasher);
+            hash_layout(hasher, walk.graph().layout(*layout));
             ctors.len().hash(hasher);
             for ctor in ctors {
                 ctor.cd_id.name().hash(hasher);
                 // The run-time tag (`@as`).
                 format!("{:?}", ctor.cd_runtime_tag).hash(hasher);
                 hash_attributes(hasher, &ctor.cd_attributes);
-                hash_constructor_args(hasher, &ctor.cd_args, entries);
+                hash_constructor_args(hasher, &ctor.cd_args, walk);
                 if let Some(res) = ctor.cd_res {
                     true.hash(hasher);
-                    hash_type_ref(hasher, res.index(), entries, &mut Vec::new());
+                    walk.type_ref(hasher, res);
                 } else {
                     false.hash(hasher);
                 }
@@ -817,10 +795,27 @@ fn hash_type_kind(hasher: &mut impl Hasher, kind: &TypeKind, entries: &HashGraph
     }
 }
 
-fn hash_label_decls(
+/// A variant layout, as its equality compares it. The allocation identities
+/// of its shapes take no part (`variant_runtime::Instance`'s `Hash`): no
+/// dependent reads them, and an import gives them new values, so the layout
+/// of a stored interface and of its shared graph hash alike.
+fn hash_layout(hasher: &mut impl Hasher, layout: Option<&crate::types::VariantLayout>) {
+    let Some(layout) = layout else {
+        false.hash(hasher);
+        return;
+    };
+    true.hash(hasher);
+    layout.unboxed.hash(hasher);
+    layout.constructors.hash(hasher);
+    layout.matching_facts.tag_name.hash(hasher);
+    layout.matching_facts.block_types.hash(hasher);
+    layout.matching_facts.literal_tags.hash(hasher);
+}
+
+fn hash_label_decls<G: TypeGraph>(
     hasher: &mut impl Hasher,
     labels: &[LabelDeclaration],
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     labels.len().hash(hasher);
     for label in labels {
@@ -830,34 +825,34 @@ fn hash_label_decls(
         hash_attributes(hasher, &label.ld_attributes);
         label.ld_mutable.hash(hasher);
         label.ld_optional.hash(hasher);
-        hash_type_ref(hasher, label.ld_type.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, label.ld_type);
     }
 }
 
-fn hash_constructor_args(
+fn hash_constructor_args<G: TypeGraph>(
     hasher: &mut impl Hasher,
     args: &ConstructorArguments,
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     std::mem::discriminant(args).hash(hasher);
     match args {
-        ConstructorArguments::CstrTuple(types) => hash_type_expr_refs(hasher, types, entries),
-        ConstructorArguments::CstrRecord(labels) => hash_label_decls(hasher, labels, entries),
+        ConstructorArguments::CstrTuple(types) => hash_type_expr_refs(hasher, types, walk),
+        ConstructorArguments::CstrRecord(labels) => hash_label_decls(hasher, labels, walk),
     }
 }
 
-fn hash_extension_constructor(
+fn hash_extension_constructor<G: TypeGraph>(
     hasher: &mut impl Hasher,
     ext: &ExtensionConstructor,
-    entries: &HashGraph<'_>,
+    walk: &mut GraphWalk<'_, G>,
 ) {
     hash_path_by_name(hasher, &ext.ext_type_path);
     hash_attributes(hasher, &ext.ext_attributes);
-    hash_type_expr_refs(hasher, &ext.ext_type_params, entries);
-    hash_constructor_args(hasher, &ext.ext_args, entries);
+    hash_type_expr_refs(hasher, &ext.ext_type_params, walk);
+    hash_constructor_args(hasher, &ext.ext_args, walk);
     if let Some(ret) = ext.ext_ret_type {
         true.hash(hasher);
-        hash_type_ref(hasher, ret.index(), entries, &mut Vec::new());
+        walk.type_ref(hasher, ret);
     } else {
         false.hash(hasher);
     }
@@ -865,21 +860,29 @@ fn hash_extension_constructor(
     ext.ext_is_exception.hash(hasher);
 }
 
-fn hash_modtype_decl(hasher: &mut impl Hasher, mtd: &ModtypeDeclaration, entries: &HashGraph<'_>) {
+fn hash_modtype_decl<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    mtd: &ModtypeDeclaration,
+    walk: &mut GraphWalk<'_, G>,
+) {
     hash_attributes(hasher, &mtd.mtd_attributes);
     if let Some(mty) = &mtd.mtd_type {
         true.hash(hasher);
-        hash_module_type(hasher, mty, entries);
+        hash_module_type(hasher, mty, walk);
     } else {
         false.hash(hasher);
     }
 }
 
-fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &HashGraph<'_>) {
+fn hash_module_type<G: TypeGraph>(
+    hasher: &mut impl Hasher,
+    mty: &ModuleType,
+    walk: &mut GraphWalk<'_, G>,
+) {
     std::mem::discriminant(mty).hash(hasher);
     match mty {
         ModuleType::MtyIdent(path) => hash_path_by_name(hasher, path),
-        ModuleType::MtySignature(sig) => hash_signature(hasher, sig, entries),
+        ModuleType::MtySignature(sig) => hash_signature(hasher, sig, walk),
         ModuleType::MtyFunctor {
             param,
             param_type,
@@ -887,9 +890,9 @@ fn hash_module_type(hasher: &mut impl Hasher, mty: &ModuleType, entries: &HashGr
         } => {
             param.name().hash(hasher);
             if let Some(pt) = param_type {
-                hash_module_type(hasher, pt, entries);
+                hash_module_type(hasher, pt, walk);
             }
-            hash_module_type(hasher, result, entries);
+            hash_module_type(hasher, result, walk);
         }
         ModuleType::MtyAlias(_presence, path) => hash_path_by_name(hasher, path),
     }
@@ -1719,29 +1722,144 @@ pub fn publish_pers_struct(
     pps
 }
 
+/// [`publish_pers_struct`] in signature check mode
+/// (`RESCRIPT_SIGNATURE_CHECK`): also compare what the frozen shared graph
+/// says of the signature with what its portable form says
+/// (`docs/CHECKER_REDESIGN.md`, H.1.7 invariant 5): the fingerprint, every
+/// item digest, and the encoded bytes.
+///
+/// Every unit is compared against a shared graph. A shareable signature is
+/// published whatever `mode` says, so a unit without a dependent in this
+/// build is covered; a signature that is not shareable is internalized into
+/// a graph of the pool that no reader is given. Only a full pool leaves a
+/// unit without a comparison.
+pub fn publish_pers_struct_checked(
+    mut pps: PortablePersStruct,
+    ctx: &TypeContext,
+    mode: SignaturePublicationMode,
+) -> (Arc<PortablePersStruct>, super::signature_check::Comparison) {
+    use super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    use super::signature_check::{Comparison, Outcome};
+    pps.published_generation = Some(crate::types::thread_store::build_generation());
+    let pps = Arc::new(pps);
+    let store = ctx.thread_store();
+    let pool = store.shared_pool();
+    let decoded = pps.decoded.lock().unwrap();
+    let portable = &decoded.as_ref().expect("new publication").0;
+    let mut carried = Carried {
+        file_names: portable.cmi_longident_names.clone(),
+        ..Default::default()
+    };
+    let (shared_graph, shared) = if pps.shareable {
+        let mut base = None;
+        let ps = pool.pers_struct(&pps, || {
+            let (ps, at) = shared_pers_struct_at(&pps, portable, pool, Some(&mut carried))?;
+            base = Some(at);
+            Some(ps)
+        });
+        if let Some(ps) = &ps {
+            store.insert_pers_struct(pps.clone(), ps.clone());
+        }
+        let shared_graph = match mode {
+            SignaturePublicationMode::Eager => "published",
+            SignaturePublicationMode::OnDemand => "forced: no dependent in this build",
+        };
+        (
+            shared_graph,
+            ps.zip(base).map(|(ps, base)| (ps.ps_sig.clone(), base)),
+        )
+    } else {
+        let intern = |name: &str| pool.intern_longident_name(name);
+        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
+        let shared = internalize_signature_into_shared(
+            &portable.ps_sig,
+            &portable.type_graph,
+            &portable.locations,
+            &files,
+            pool,
+            Some(&pps.ps_filename),
+            Some(&mut carried),
+        );
+        (
+            "forced: not shareable",
+            shared.map(|(sig, base)| (Arc::new(sig), base)),
+        )
+    };
+    let comparison = match shared {
+        None => Comparison::not_applicable(shared_graph, "the shared pool is full"),
+        Some((sig, base)) => {
+            let pages = pool.pages();
+            let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+            let items = |hashes: Vec<(super::item_deps::Kind, crate::name::Name, u64)>| {
+                hashes
+                    .into_iter()
+                    .map(|(kind, name, hash)| ((kind, name), hash))
+                    .collect::<Vec<_>>()
+            };
+            let encode = |sig: &PortableSignature| {
+                crate::binser::to_vec(sig).expect("encoding to memory cannot fail")
+            };
+            Comparison {
+                shared_graph,
+                carried: carried.needed(),
+                outcomes: [
+                    Outcome::fingerprint(pps.fingerprint, signature_fingerprint(&frozen, &sig)),
+                    Outcome::item_hashes(
+                        &items(super::item_deps::item_declaration_hashes(
+                            &HashGraph::of(&portable.type_graph),
+                            &portable.ps_sig,
+                        )),
+                        &items(super::item_deps::item_declaration_hashes(&frozen, &sig)),
+                    ),
+                    Outcome::bytes(
+                        &encode(portable),
+                        &encode(&portable_signature(&frozen, &sig, &carried)),
+                    ),
+                ],
+            }
+        }
+    };
+    drop(decoded);
+    (pps, comparison)
+}
+
 fn shared_pers_struct(
     pps: &PortablePersStruct,
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
 ) -> Option<Arc<PersStruct>> {
+    Some(shared_pers_struct_at(pps, portable, pool, None)?.0)
+}
+
+/// [`shared_pers_struct`], with the base index of the graph it published.
+/// `carried` receives what the published graph does not hold of `portable`
+/// (the signature equality check, `signature_check.rs`).
+fn shared_pers_struct_at(
+    pps: &PortablePersStruct,
+    portable: &PortableSignature,
+    pool: &crate::types::shared_store::SharedTypePool,
+    carried: Option<&mut super::shared_reader::Carried>,
+) -> Option<(Arc<PersStruct>, u32)> {
     let intern = |name: &str| pool.intern_longident_name(name);
     let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-    let sig = internalize_signature_into_shared(
+    let (sig, base) = internalize_signature_into_shared(
         &portable.ps_sig,
         &portable.type_graph,
         &portable.locations,
         &files,
         pool,
         Some(&pps.ps_filename),
+        carried,
     )?;
-    Some(Arc::new(PersStruct {
+    let ps = PersStruct {
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
         ps_alias_rewrites: Default::default(),
-    }))
+    };
+    Some((Arc::new(ps), base))
 }
 
 /// Load a PortablePersStruct for the current compilation.
@@ -1848,7 +1966,13 @@ fn internalize_signature_into_store(
         })
         .collect();
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
     sig
@@ -1962,7 +2086,8 @@ fn internalize_signature_into_shared(
     files: &FileRemap<'_>,
     pool: &crate::types::shared_store::SharedTypePool,
     unit: Option<&str>,
-) -> Option<Signature> {
+    carried: Option<&mut super::shared_reader::Carried>,
+) -> Option<(Signature, u32)> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
     let mut scopes = crate::fast_hash::AHashMap::default();
@@ -2018,6 +2143,9 @@ fn internalize_signature_into_shared(
             })
             .collect();
         shapes.signature(&mut sig);
+        if let Some(carried) = carried {
+            carried.record_import(graph, &scopes, shapes);
+        }
         crate::types::shared_store::SharedGraphParts {
             nodes,
             payloads: sink.payloads.into_inner(),
@@ -2028,9 +2156,15 @@ fn internalize_signature_into_shared(
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
         .collect();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, &shared_decl_locs(base, &map));
-    Some(sig)
+    Some((sig, base))
 }
 
 /// The handles of a graph published to the shared pool at `base`: portable
@@ -2168,7 +2302,13 @@ fn internalize_signature(
 
     // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
     sig
@@ -2305,61 +2445,73 @@ fn internalize_row_field<S: TypeNodeSink>(
 // Signature ref remapping (portable index -> real TypeExprRef)
 // ============================================================================
 
-fn remap_signature_refs(
-    sig: &mut Signature,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
-    for item in sig.iter_mut() {
-        remap_sig_item_refs(item, remap, layout_remap);
+/// How the type and variant layout references of a signature are renamed.
+pub(crate) trait SignatureRefMap {
+    /// The new name of a type reference.
+    fn ty(&self, r: TypeExprRef) -> TypeExprRef;
+    /// The new name of a variant layout reference.
+    fn layout(&self, r: crate::types::VariantLayoutRef) -> crate::types::VariantLayoutRef;
+}
+
+/// Portable index `i` becomes entry `i` of each table.
+struct IndexedRefs<'a> {
+    types: &'a [TypeExprRef],
+    layouts: &'a [crate::types::VariantLayoutRef],
+}
+
+impl SignatureRefMap for IndexedRefs<'_> {
+    #[inline]
+    fn ty(&self, r: TypeExprRef) -> TypeExprRef {
+        self.types[r.index()]
+    }
+
+    #[inline]
+    fn layout(&self, r: crate::types::VariantLayoutRef) -> crate::types::VariantLayoutRef {
+        self.layouts[r.0 as usize]
     }
 }
 
-fn remap_sig_item_refs(
-    item: &mut SignatureItem,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+pub(crate) fn remap_signature_refs(sig: &mut Signature, map: &impl SignatureRefMap) {
+    for item in sig.iter_mut() {
+        remap_sig_item_refs(item, map);
+    }
+}
+
+fn remap_sig_item_refs(item: &mut SignatureItem, map: &impl SignatureRefMap) {
     match item {
-        SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => {
-            remap_type_decl_refs(std::sync::Arc::make_mut(td), remap, layout_remap)
-        }
-        SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
-        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
-        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),
+        SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, map),
+        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(std::sync::Arc::make_mut(td), map),
+        SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, map),
+        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, map),
+        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, map),
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
 }
 
-fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
-    vd.val_type = remap[vd.val_type.index()];
+fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
+    vd.val_type = map.ty(vd.val_type);
 }
 
-fn remap_type_decl_refs(
-    td: &mut TypeDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
     if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
-        *layout_ref = layout_remap[layout_ref.0 as usize];
+        *layout_ref = map.layout(*layout_ref);
     }
     for p in td.type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = map.ty(*p);
     }
     if let Some(ref mut m) = td.type_manifest {
-        *m = remap[m.index()];
+        *m = map.ty(*m);
     }
     match &mut td.type_kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
         TypeKind::TypeRecord(labels, _) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
         TypeKind::TypeVariant(ctors, _) => {
             for ctor in ctors.iter_mut() {
-                remap_ctor_decl_refs(ctor, remap);
+                remap_ctor_decl_refs(ctor, map);
             }
         }
     }
@@ -2367,90 +2519,78 @@ fn remap_type_decl_refs(
         match inlined {
             crate::types::decl::TypeInlinedType::Record { labels, .. } => {
                 for label in labels.iter_mut() {
-                    remap_label_decl_refs(label, remap);
+                    remap_label_decl_refs(label, map);
                 }
             }
         }
     }
 }
 
-fn remap_label_decl_refs(ld: &mut LabelDeclaration, remap: &[TypeExprRef]) {
-    ld.ld_type = remap[ld.ld_type.index()];
+fn remap_label_decl_refs(ld: &mut LabelDeclaration, map: &impl SignatureRefMap) {
+    ld.ld_type = map.ty(ld.ld_type);
 }
 
-fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) {
+fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, map: &impl SignatureRefMap) {
     match &mut cd.cd_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = map.ty(*t);
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
     }
     if let Some(ref mut res) = cd.cd_res {
-        *res = remap[res.index()];
+        *res = map.ty(*res);
     }
 }
 
-fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
+fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, map: &impl SignatureRefMap) {
     for p in ec.ext_type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = map.ty(*p);
     }
     match &mut ec.ext_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = map.ty(*t);
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
     }
     if let Some(ref mut ret) = ec.ext_ret_type {
-        *ret = remap[ret.index()];
+        *ret = map.ty(*ret);
     }
 }
 
-fn remap_module_decl_refs(
-    md: &mut ModuleDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
-    remap_module_type_refs(&mut md.md_type, remap, layout_remap);
+fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
+    remap_module_type_refs(&mut md.md_type, map);
 }
 
-fn remap_modtype_decl_refs(
-    mtd: &mut ModtypeDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, map: &impl SignatureRefMap) {
     if let Some(ref mut mt) = mtd.mtd_type {
-        remap_module_type_refs(mt, remap, layout_remap);
+        remap_module_type_refs(mt, map);
     }
 }
 
-fn remap_module_type_refs(
-    mt: &mut ModuleType,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_module_type_refs(mt: &mut ModuleType, map: &impl SignatureRefMap) {
     match mt {
         ModuleType::MtySignature(sig) => {
-            remap_signature_refs(crate::types::decl::signature_mut(sig), remap, layout_remap)
+            remap_signature_refs(crate::types::decl::signature_mut(sig), map)
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(pt) = param_type.as_mut() {
-                remap_module_type_refs(pt, remap, layout_remap);
+                remap_module_type_refs(pt, map);
             }
-            remap_module_type_refs(result, remap, layout_remap);
+            remap_module_type_refs(result, map);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
     }
@@ -2516,6 +2656,49 @@ mod identity_tests {
             panic!("ordinary binder requested store stamps")
         });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
+    }
+
+    #[test]
+    fn dependency_raw_read_does_not_encode_during_publication() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let portable = serialize_pers_struct(
+            &PersStruct {
+                ps_name: "Provider".into(),
+                ps_sig: Arc::new(vec![]),
+                ps_filename: "Provider.res".into(),
+                ps_deprecated: None,
+                ps_crcs: vec![],
+                ps_alias_rewrites: Default::default(),
+            },
+            &ctx,
+            None,
+        );
+        {
+            let mut decoded = portable.decoded.lock().unwrap();
+            let (sig, raw) = decoded.as_mut().unwrap();
+            *raw = Some(PortableRawSignature {
+                raw_ps_sig: sig.ps_sig.clone(),
+                cmi_longident_names: sig.cmi_longident_names.clone(),
+                raw_type_graph: sig.type_graph.clone(),
+                raw_locations: sig.locations.clone(),
+            });
+        }
+        assert!(portable.has_raw_signature());
+        assert!(portable.encoded.get().is_none());
+        // The provider has been released but no storage reader has encoded it.
+        // A dependent's GenType alias lookup is its first raw-signature reader.
+        let before = {
+            let _dependent = crate::perf_counters::SignaturePublication::begin();
+            crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
+        };
+        assert!(portable.encoded.get().is_none());
+        assert!(portable.summary.get().is_none());
+        portable.prepare_for_storage();
+        let after = {
+            let _dependent = crate::perf_counters::SignaturePublication::begin();
+            crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
+        };
+        assert_eq!(before, after);
     }
 
     #[test]
@@ -2608,6 +2791,71 @@ mod identity_tests {
         assert_ne!(first, other);
         assert_ne!(first, allocate("Unit.resi"));
         assert_eq!(first, allocate("Unit.res"));
+    }
+
+    #[test]
+    fn a_frozen_graph_reads_back_with_what_it_does_not_hold() {
+        use super::super::shared_reader::{Carried, FrozenGraph, portable_signature};
+        use crate::types::asttypes::MutableFlag;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let pool = ctx.thread_store().shared_pool();
+        let entry = |desc, level| PortableTypeEntry { desc, level };
+        let field = |name: &str, mutability, rest| PortableTypeDesc::Tfield {
+            name: name.into(),
+            mutability,
+            typ: 1,
+            rest,
+        };
+        // A link below the generic level, and three object fields of which
+        // the first and the last share a mutability cell.
+        let portable = PortableSignature {
+            ps_sig: vec![],
+            cmi_longident_names: vec![],
+            type_graph: PortableTypeGraph {
+                entries: vec![
+                    entry(PortableTypeDesc::Tlink(1), 3),
+                    entry(PortableTypeDesc::Tvar(Some("a".into())), GENERIC_LEVEL),
+                    entry(field("x", 0, 3), GENERIC_LEVEL),
+                    entry(field("y", 1, 4), GENERIC_LEVEL),
+                    entry(field("z", 0, 5), GENERIC_LEVEL),
+                    entry(PortableTypeDesc::Tnil, GENERIC_LEVEL),
+                ],
+                variant_layouts: vec![],
+                mutabilities: vec![MutableFlag::Mutable, MutableFlag::Immutable],
+            },
+            locations: Default::default(),
+        };
+        let intern = |name: &str| pool.intern_longident_name(name);
+        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
+        let mut carried = Carried::default();
+        let (sig, base) = internalize_signature_into_shared(
+            &portable.ps_sig,
+            &portable.type_graph,
+            &portable.locations,
+            &files,
+            pool,
+            Some("Unit.res"),
+            Some(&mut carried),
+        )
+        .unwrap();
+        let pages = pool.pages();
+        let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+        let bytes = |sig: &PortableSignature| crate::binser::to_vec(sig).unwrap();
+        assert_eq!(carried.needed(), ["link levels"]);
+        assert_eq!(
+            bytes(&portable_signature(&frozen, &sig, &carried)),
+            bytes(&portable)
+        );
+        // The pages alone hold the link at the generic level.
+        assert_ne!(
+            bytes(&portable_signature(&frozen, &sig, &Carried::default())),
+            bytes(&portable)
+        );
+        // Both forms hash alike.
+        assert_eq!(
+            signature_fingerprint(&frozen, &sig),
+            signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig)
+        );
     }
 
     #[test]
@@ -2744,8 +2992,10 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             None,
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let shared_scope = verify(&target, &shared);
         assert_ne!(shared_scope, warm_scope);
         let roundtrip = load(&save(&target, &shared));
@@ -2772,8 +3022,10 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             Some(unit),
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(verify(&target, &stored), verify(&target, &shared));
         assert_eq!(
             crate::binser::to_vec(&save(&target, &stored)).unwrap(),

@@ -72,11 +72,11 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
     if f.is_method {
         return Err(Unsupported("method function"));
     }
-    if f.directive.is_some() {
-        return Err(Unsupported("function directive"));
-    }
     if top {
         return Ok(FunctionForm::Declaration);
+    }
+    if f.directive.is_some() {
+        return Ok(FunctionForm::ArrowBlock);
     }
     if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
@@ -229,4 +229,193 @@ pub(super) fn block_elements<'a>(
         (!matches!(tag, TagInfo::PolyVar(_)) || i < 2)
             && !optional_fields.is_some_and(|fields| fields[i].1 && undefined(a, e))
     })
+}
+
+/// Expression decorations precede the expression and introduce no identifiers.
+/// S0 drops block comments directly before numeric literals (also through
+/// parentheses); other comments must survive and remain a whole-file fallback.
+pub(super) fn expression_comment(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    if a.expr_comment(e).is_some() && !numeric_decoration(a, e) && !pure_call(a, e) {
+        return Err(Unsupported("non-decoration expression comment"));
+    }
+    Ok(())
+}
+
+/// Templates print the tag first, then substitutions from left to right. Raw
+/// quasi spelling is preserved; oxc supplies backticks, `${}`, and parentheses.
+/// A malformed segment/value count cannot be represented by a template AST.
+pub(super) fn template_supported(segments: usize, values: usize) -> Result<(), Unsupported> {
+    if segments != values + 1 {
+        return Err(Unsupported("template segment count"));
+    }
+    Ok(())
+}
+
+/// The exception-creation annotation is semantic, not a numeric decoration.
+/// It prints immediately before the call; callee and arguments retain their
+/// ordinary left-to-right naming order. Codegen owns its spelling and spacing.
+pub(super) fn pure_call(a: &JsArena, e: Expr) -> bool {
+    a.expr_comment(e) == Some("@__PURE__") && matches!(a.ek(e), ExprKind::Call(..))
+}
+
+fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
+    // A minus, Infinity, NaN, or bigint suffix is not the numeric-literal
+    // adjacency S0 removes. Be conservative rather than discarding a comment.
+    matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
+}
+
+/// Legacy raw expressions carry programmer text, with classification-dependent
+/// grouping; raw statements have surrounding newlines and a statement-level
+/// semicolon except for comment-only snippets. Neither introduces IR identifiers.
+/// The classifier discards its parsed AST today. Until verbatim assembly can
+/// satisfy the unchanged fixed-point oracle, retain the whole-file legacy path:
+/// reparsing and formatting here would not preserve the programmer's text.
+pub(super) fn raw_supported<T>() -> Result<T, Unsupported> {
+    Err(Unsupported("verbatim raw JavaScript"))
+}
+
+/// `print_exp_statement_of`: only unit tails discard numbers/undefined and
+/// simplify sequences with a trivial side. Naming visits only the surviving
+/// expression; the builder supplies statement parentheses and semicolons.
+pub(super) fn tail_effect(a: &JsArena, e: Expr) -> Option<Expr> {
+    let trivial = |e| matches!(a.ek(e), ExprKind::Number(_) | ExprKind::Undefined { .. });
+    match a.ek(e) {
+        ExprKind::Seq(l, r) if trivial(l) => tail_effect(a, r),
+        ExprKind::Seq(l, r) if trivial(r) => tail_effect(a, l),
+        _ if trivial(e) || omitted_expression(a, e) => None,
+        _ => Some(e),
+    }
+}
+
+/// Range loops name their binder, then a synthetic finish binder, then visit
+/// start, finish and body. Only numbers and variable references avoid caching.
+pub(super) fn finish_binding(a: &JsArena, e: Expr) -> bool {
+    !matches!(
+        a.ek(e),
+        ExprKind::Number(_) | ExprKind::Var(_) | ExprKind::Qualified(_)
+    )
+}
+
+/// Assignment meets the target before the value. Only identifiers and member
+/// accesses are valid targets; codegen owns precedence and the final semicolon.
+pub(super) fn assignment_target(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    match a.ek(e) {
+        ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::StaticIndex(..)
+        | ExprKind::ArrayIndex(..)
+        | ExprKind::Length(..)
+        | ExprKind::CamlBlockTag(..) => Ok(()),
+        _ => Err(Unsupported("assignment target")),
+    }
+}
+
+pub(super) enum StatementChild {
+    Binder(crate::ident::Ident),
+    Finish(Stmt),
+    Expression(Expr),
+    Block(crate::js_ir::arena::StmtList),
+}
+
+/// Print-order traversal of control statements (printer::print_statement).
+/// Loops share the function scope. Catch binders precede the handler, after the
+/// try body. Switch tests precede cases, then default; `should_break` alone
+/// controls inserted breaks, including empty cases. While has a trailing empty
+/// statement; other loops do not. Throw visits exception fields in their stored
+/// order and appends `Error: new Error()` only for literal extension blocks.
+/// Braces, labels, parentheses and semicolons are represented by AST nodes.
+pub(super) fn statement_children(
+    a: &JsArena,
+    s: Stmt,
+    mut visit: impl FnMut(StatementChild) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    use StatementChild::*;
+    match a.sk(s) {
+        StmtKind::While(_, e, b) => {
+            visit(Expression(e))?;
+            visit(Block(b))?;
+        }
+        StmtKind::ForRange(id) => {
+            let f = a.for_range(id);
+            range_supported(a, f)?;
+            visit(Binder(a.ident(f.ident)))?;
+            if finish_binding(a, f.end) {
+                visit(Finish(s))?;
+            }
+            if let Some(e) = f.init {
+                visit(Expression(e))?;
+            }
+            visit(Expression(f.end))?;
+            visit(Block(f.body))?;
+        }
+        StmtKind::ForOf(id) | StmtKind::ForAwaitOf(id) => {
+            let f = a.for_of(id);
+            visit(Binder(a.ident(f.ident)))?;
+            visit(Expression(f.iterable))?;
+            visit(Block(f.body))?;
+        }
+        StmtKind::Try(id) => {
+            let t = a.try_info(id);
+            visit(Block(t.body))?;
+            if let Some((id, b)) = t.catch {
+                visit(Binder(a.ident(id)))?;
+                visit(Block(b))?;
+            }
+            if let Some(b) = t.finally {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::IntSwitch(e, id) => {
+            visit(Expression(e))?;
+            let t = a.int_switch(id);
+            for (_, c) in &t.clauses {
+                visit(Block(c.body))?;
+            }
+            if let Some(b) = t.default {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::StringSwitch(e, id) => {
+            visit(Expression(e))?;
+            let t = a.string_switch(id);
+            for c in &t.clauses {
+                switch_tag_supported(&c.tag_type)?;
+                visit(Block(c.clause.body))?;
+            }
+            if let Some(b) = t.default {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::Throw(e) => visit(Expression(e))?,
+        StmtKind::Break(_) | StmtKind::Continue(_) => {}
+        _ => unreachable!("ordinary statements have their own traversal"),
+    }
+    Ok(())
+}
+
+/// Decimal bigint case keys borrow their digits. Other spellings stay on the
+/// legacy path until radix normalization has reusable scratch storage.
+pub(super) fn switch_tag_supported(tag: &crate::lambda::SwitchCaseTag) -> Result<(), Unsupported> {
+    if let crate::lambda::SwitchCaseTag::BigInt(s) = tag {
+        let digits = s.trim_start_matches(['-', '+']);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Unsupported("switch bigint radix"));
+        }
+    }
+    Ok(())
+}
+
+/// The legacy uncached header prints its initializer at precedence zero. A
+/// sequence there parses as additional declarators, not a sequence initializer.
+/// Keep that exceptional shape on the legacy path rather than changing tokens.
+pub(super) fn range_supported(
+    a: &JsArena,
+    f: crate::js_ir::arena::ForRangeInfo,
+) -> Result<(), Unsupported> {
+    if !finish_binding(a, f.end) && f.init.is_some_and(|e| matches!(a.ek(e), ExprKind::Seq(..))) {
+        return Err(Unsupported(
+            "range initializer sequence without cached bound",
+        ));
+    }
+    Ok(())
 }

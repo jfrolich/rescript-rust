@@ -5,7 +5,7 @@ use crate::js_ir::op::{BinOp, Kind, Number};
 use crate::js_ir::printer::{js_export_name, normalize_float_literal_for_js};
 use oxc_allocator::{Allocator, GetAllocator, Vec as ArenaVec};
 use oxc_ast::{ast::*, builder::AstBuilder};
-use oxc_span::SPAN;
+use oxc_span::{SPAN, GetSpanMut};
 use oxc_syntax::{
     number::{BigintBase, NumberBase},
     operator::{BinaryOperator as B, LogicalOperator as L, UnaryOperator as U},
@@ -16,6 +16,8 @@ pub(super) struct Build<'a, 'r> {
     pub arena: &'r JsArena,
     pub names: &'r Names,
     pub debug: bool,
+    // S1.2: absent on the default, location-free path.
+    pub source_map: Option<&'r super::sourcemap::Spans>,
 }
 impl<'a, 'r> Build<'a, 'r> {
     pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
@@ -24,6 +26,7 @@ impl<'a, 'r> Build<'a, 'r> {
             arena,
             names,
             debug: false,
+            source_map: None,
         }
     }
     pub fn text(&self, s: &str) -> &'a str {
@@ -200,7 +203,16 @@ impl<'a, 'r> Build<'a, 'r> {
             return Ok(expr);
         }
         let operator = match op {
-            BinOp::Eq => return Err(Unsupported("assignment")),
+            BinOp::Eq => {
+                walk::assignment_target(self.arena, l)?;
+                return Ok(Expression::new_assignment_expression(
+                    SPAN,
+                    oxc_syntax::operator::AssignmentOperator::Assign,
+                    self.target(self.expr(l)?)?,
+                    self.expr(r)?,
+                    &self.b,
+                ));
+            }
             BinOp::Bnot => return Err(Unsupported("binary bitwise-not")),
             BinOp::EqEqEq => B::StrictEquality,
             BinOp::NotEqEq => B::StrictInequality,
@@ -442,10 +454,24 @@ impl<'a, 'r> Build<'a, 'r> {
         })
     }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
-        let a = self.arena;
-        if a.expr_comment(e).is_some() {
-            return Err(Unsupported("expression comment"));
+        let mut expression = self.expr_unmapped(e)?;
+        // S1.2: only kinds with a codegen start-token mapping are supported.
+        if let Some(maps) = self.source_map {
+            if maps.is_located(self.arena.expr_loc(e)) {
+                match &expression {
+                    Expression::Identifier(_) | Expression::NumericLiteral(_)
+                    | Expression::StringLiteral(_) | Expression::BooleanLiteral(_)
+                    | Expression::NullLiteral(_) | Expression::BigIntLiteral(_) => {}
+                    _ => return Err(Unsupported("source map: located compound expression")),
+                }
+                *expression.span_mut() = maps.span(self.arena.expr_loc(e))?;
+            }
         }
+        Ok(expression)
+    }
+    fn expr_unmapped(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let a = self.arena;
+        walk::expression_comment(a, e)?;
         Ok(match a.ek(e) {
             ExprKind::Var(id) => self.id(self.names.get(&a.ident(id))),
             ExprKind::Qualified(q) => {
@@ -494,14 +520,18 @@ impl<'a, 'r> Build<'a, 'r> {
                 self.sequence(e, &mut expressions)?;
                 Expression::new_sequence_expression(SPAN, expressions, &self.b)
             }
-            ExprKind::Call(f, args, _) => Expression::new_call_expression(
-                SPAN,
-                self.expr(f)?,
-                None,
-                self.args(walk::arguments(a, a.exprs(args)))?,
-                false,
-                &self.b,
-            ),
+            ExprKind::Call(f, args, _) => {
+                let mut call = CallExpression::new(
+                    SPAN,
+                    self.expr(f)?,
+                    None,
+                    self.args(walk::arguments(a, a.exprs(args)))?,
+                    false,
+                    &self.b,
+                );
+                call.pure = walk::pure_call(a, e);
+                Expression::CallExpression(self.b.alloc(call))
+            }
             ExprKind::New(f, args) => Expression::new_new_expression(
                 SPAN,
                 self.expr(f)?,
@@ -579,17 +609,70 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
             ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
-            ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
+            ExprKind::RawJsCode(_) => return walk::raw_supported(),
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
-            ExprKind::TemplateLiteral(_)
-            | ExprKind::InterpolatedTemplate(..)
-            | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
-            ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
+            ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
+                self.b
+                    .alloc(self.template(std::iter::once(a.template(segment).source()), &[])?),
+            ),
+            ExprKind::InterpolatedTemplate(segments, values) => {
+                Expression::TemplateLiteral(self.b.alloc(self.template(
+                    a.segments(segments).iter().map(|s| s.source()),
+                    a.exprs(values),
+                )?))
+            }
+            ExprKind::TaggedTemplate(tag, strings, values) => {
+                let tag = self.expr(tag)?;
+                let quasi = self.template(
+                    a.tagged(strings).iter().map(|s| s.as_str()),
+                    a.exprs(values),
+                )?;
+                Expression::new_tagged_template_expression(SPAN, tag, None, quasi, &self.b)
+            }
+            ExprKind::JsonLiteral(source) => self.json(a.text(source))?,
             ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
             ExprKind::Spread(_) => return Err(Unsupported("standalone spread")),
             ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         })
     }
+    /// JSON is already validated source, not a string value. It meets no
+    /// identifiers; parsing reproduces property-key forms and precedence, while
+    /// the surrounding oxc node supplies parentheses and statement semicolons.
+    fn json(&self, source: &str) -> Result<Expression<'a>, Unsupported> {
+        let source = literal::arena_string(source, self.b.allocator());
+        oxc_parser::Parser::new(self.b.allocator(), source, oxc_span::SourceType::mjs())
+            .parse_expression()
+            .map_err(|_| Unsupported("invalid JSON or directive"))
+    }
+
+    /// See `walk::template_supported`: source spelling, not the cooked value,
+    /// determines printed quasis. Codegen never reads cooked values here; tagged
+    /// templates may have invalid escapes and therefore no cooked value at all.
+    fn template(
+        &self,
+        segments: impl ExactSizeIterator<Item = &'r str>,
+        values: &[Expr],
+    ) -> Result<TemplateLiteral<'a>, Unsupported> {
+        walk::template_supported(segments.len(), values.len())?;
+        let mut quasis = self.b.vec();
+        for (i, source) in segments.enumerate() {
+            quasis.push(TemplateElement::new(
+                SPAN,
+                TemplateElementValue {
+                    raw: literal::arena_string(source, self.b.allocator()).into(),
+                    cooked: None,
+                },
+                i == values.len(),
+                &self.b,
+            ));
+        }
+        let mut expressions = self.b.vec();
+        for e in values {
+            expressions.push(self.expr(*e)?);
+        }
+        Ok(TemplateLiteral::new(SPAN, quasis, expressions, &self.b))
+    }
+
     fn params(&self, f: FunId) -> oxc_allocator::Box<'a, FormalParameters<'a>> {
         let mut items = self.b.vec();
         for id in self.arena.ident_slice(self.arena.fun(f).params) {
@@ -631,11 +714,28 @@ impl<'a, 'r> Build<'a, 'r> {
                 &mut statements,
             )?;
         }
+        let mut directives = self.b.vec();
+        if let Some(directive) = info.directive {
+            // The legacy directive includes its quotes. It precedes every body
+            // statement and meets no identifiers; codegen supplies the semicolon.
+            let Expression::StringLiteral(value) = self.json(self.arena.text(directive))? else {
+                return Err(Unsupported("non-string function directive"));
+            };
+            directives.push(Directive::new(
+                SPAN,
+                value.unbox(),
+                self.text(self.arena.text(directive).trim_matches(['\'', '"'])),
+                &self.b,
+            ));
+        }
         Ok(self
             .b
-            .alloc(FunctionBody::new(SPAN, self.b.vec(), statements, &self.b)))
+            .alloc(FunctionBody::new(SPAN, directives, statements, &self.b)))
     }
     fn function_expr(&self, f: FunId) -> Result<Expression<'a>, Unsupported> {
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: transformed function body"));
+        }
         let body = match walk::function_form(self.arena, f, false)? {
             walk::FunctionForm::Eta(e) => return self.expr(e),
             walk::FunctionForm::ArrowExpression(e) => ArrowFunctionBody::from(self.expr(e)?),
@@ -675,7 +775,247 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(())
     }
+    fn brace(
+        &self,
+        b: crate::js_ir::arena::StmtList,
+    ) -> Result<oxc_allocator::Box<'a, BlockStatement<'a>>, Unsupported> {
+        Ok(self.b.alloc(BlockStatement::new(
+            SPAN,
+            self.block(self.arena.stmts(b), false)?,
+            &self.b,
+        )))
+    }
+    fn label(
+        &self,
+        label: Option<crate::js_ir::arena::StrId>,
+        body: Statement<'a>,
+    ) -> Statement<'a> {
+        match label {
+            Some(l) => Statement::new_labeled_statement(
+                SPAN,
+                LabelIdentifier::new(SPAN, self.text(self.arena.text(l)), &self.b),
+                body,
+                &self.b,
+            ),
+            None => body,
+        }
+    }
+    fn declarator(&self, name: &str, init: Option<Expression<'a>>) -> VariableDeclarator<'a> {
+        VariableDeclarator::new(
+            SPAN,
+            BindingPattern::BindingIdentifier(self.b.alloc(self.binding(name))),
+            None,
+            init,
+            false,
+            &self.b,
+        )
+    }
+    /// Legacy range header: cache a non-simple end once, before the test; use
+    /// prefix ++/-- and <=/>=/ < according to direction. See walk::finish_binding.
+    fn range(
+        &self,
+        s: Stmt,
+        id: crate::js_ir::arena::ForRangeId,
+    ) -> Result<Statement<'a>, Unsupported> {
+        use crate::js_ir::ForDirection;
+        let a = self.arena;
+        let f = a.for_range(id);
+        walk::range_supported(a, f)?;
+        let name = self.names.get(&a.ident(f.ident));
+        let finish = walk::finish_binding(a, f.end).then(|| self.names.finish(s));
+        let mut declarations = self.b.vec();
+        if let Some(e) = f.init {
+            declarations.push(self.declarator(name, Some(self.expr(e)?)));
+        }
+        if let Some(name) = finish {
+            declarations.push(self.declarator(name, Some(self.expr(f.end)?)));
+        }
+        let init = if declarations.is_empty() {
+            None
+        } else {
+            Some(ForStatementInit::VariableDeclaration(self.b.alloc(
+                VariableDeclaration::new(
+                    SPAN,
+                    VariableDeclarationKind::Let,
+                    declarations,
+                    false,
+                    &self.b,
+                ),
+            )))
+        };
+        let test = self.binary(
+            match f.direction {
+                ForDirection::Upto => B::LessEqualThan,
+                ForDirection::Downto => B::GreaterEqualThan,
+                ForDirection::Up => B::LessThan,
+            },
+            self.id(name),
+            match finish {
+                Some(n) => self.id(n),
+                None => self.expr(f.end)?,
+            },
+        );
+        let update = Expression::new_update_expression(
+            SPAN,
+            if f.direction == ForDirection::Downto {
+                oxc_syntax::operator::UpdateOperator::Decrement
+            } else {
+                oxc_syntax::operator::UpdateOperator::Increment
+            },
+            true,
+            SimpleAssignmentTarget::AssignmentTargetIdentifier(
+                self.b
+                    .alloc(IdentifierReference::new(SPAN, self.text(name), &self.b)),
+            ),
+            &self.b,
+        );
+        Ok(self.label(
+            f.label,
+            Statement::new_for_statement(
+                SPAN,
+                init,
+                Some(test),
+                Some(update),
+                Statement::BlockStatement(self.brace(f.body)?),
+                &self.b,
+            ),
+        ))
+    }
+    /// `print_case_body` appends break exactly when should_break is set, even
+    /// after an abrupt body; empty fallthrough cases remain empty, default last.
+    fn case(
+        &self,
+        test: Expression<'a>,
+        c: &crate::js_ir::arena::Clause,
+    ) -> Result<SwitchCase<'a>, Unsupported> {
+        let mut body = self.block(self.arena.stmts(c.body), false)?;
+        if c.should_break {
+            body.push(Statement::new_break_statement(SPAN, None, &self.b));
+        }
+        Ok(SwitchCase::new(SPAN, Some(test), body, &self.b))
+    }
+    fn switch_tag(
+        &self,
+        tag: &crate::lambda::SwitchCaseTag,
+    ) -> Result<Expression<'a>, Unsupported> {
+        use crate::lambda::SwitchCaseTag as T;
+        Ok(match tag {
+            T::String(s) => self.string_expr(s),
+            T::Int(i) => {
+                let e = Expression::new_numeric_literal(
+                    SPAN,
+                    (*i as f64).abs(),
+                    None,
+                    NumberBase::Decimal,
+                    &self.b,
+                );
+                if *i < 0 {
+                    self.unary(U::UnaryNegation, e)
+                } else {
+                    e
+                }
+            }
+            T::Bool(b) => Expression::new_boolean_literal(SPAN, *b, &self.b),
+            T::Null => Expression::new_null_literal(SPAN, &self.b),
+            T::Undefined => self.id("undefined"),
+            T::Float(s) => {
+                let value = walk::block_float_tag(s)?;
+                let e = Expression::new_numeric_literal(
+                    SPAN,
+                    value.abs(),
+                    None,
+                    NumberBase::Decimal,
+                    &self.b,
+                );
+                if value.is_sign_negative() {
+                    self.unary(U::UnaryNegation, e)
+                } else {
+                    e
+                }
+            }
+            T::BigInt(s) => {
+                walk::switch_tag_supported(tag)?;
+                let digits = s.trim_start_matches(['-', '+']).trim_start_matches('0');
+                let digits = if digits.is_empty() { "0" } else { digits };
+                let e = Expression::new_big_int_literal(
+                    SPAN,
+                    self.text(digits),
+                    None,
+                    BigintBase::Decimal,
+                    &self.b,
+                );
+                if s.starts_with('-') {
+                    self.unary(U::UnaryNegation, e)
+                } else {
+                    e
+                }
+            }
+        })
+    }
+    /// Throwing a literal Extension/RecordExt appends an Error field, not an
+    /// Error wrapper call. Ordinary throws retain their expression unchanged.
+    fn throw_value(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
+        let mut value = self.expr(e)?;
+        if let ExprKind::CamlBlock(_, _, tag) = self.arena.ek(e)
+            && matches!(
+                self.arena.tag(tag),
+                crate::lambda::TagInfo::Extension | crate::lambda::TagInfo::RecordExt { .. }
+            )
+        {
+            let Expression::ObjectExpression(ref mut object) = value else {
+                unreachable!()
+            };
+            let error = Expression::new_new_expression(
+                SPAN,
+                self.id("Error"),
+                None,
+                self.b.vec::<Argument<'a>>(),
+                &self.b,
+            );
+            object.properties.push(self.block_property("Error", error));
+        }
+        Ok(value)
+    }
     fn stmt(
+        &self,
+        s: Stmt,
+        top: bool,
+        tail: Option<bool>,
+        out: &mut ArenaVec<'a, Statement<'a>>,
+    ) -> Result<(), Unsupported> {
+        // S1.2: switch clauses have independent mapping points, not just the
+        // statement/expression locations covered by the hooks below.
+        if self.source_map.is_some()
+            && matches!(self.arena.sk(s), StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..))
+        {
+            return Err(Unsupported("source map: switch clause markers"));
+        }
+        let start = out.len();
+        self.stmt_unmapped(s, top, tail, out)?;
+        // S1.2: block/expression wrappers do not reliably emit a start token.
+        if let Some(maps) = self.source_map {
+            let loc = self.arena.stmt_loc(s);
+            if maps.is_located(loc) {
+                if out.len() != start + 1 {
+                    return Err(Unsupported("source map: expanded or omitted statement"));
+                }
+                match &mut out[start] {
+                    Statement::VariableDeclaration(_) | Statement::ReturnStatement(_)
+                    | Statement::IfStatement(_) | Statement::DebuggerStatement(_) => {
+                        *out[start].span_mut() = maps.span(loc)?;
+                    }
+                    Statement::FunctionDeclaration(f) => {
+                        // The statement's mark precedes the function expression's
+                        // mark at the same token; the legacy builder keeps the first.
+                        f.span = maps.span(loc)?;
+                    }
+                    _ => return Err(Unsupported("source map: statement without start token")),
+                }
+            }
+        }
+        Ok(())
+    }
+    fn stmt_unmapped(
         &self,
         s: Stmt,
         top: bool,
@@ -702,7 +1042,8 @@ impl<'a, 'r> Build<'a, 'r> {
                     match walk::function_form(a, f, top)? {
                         walk::FunctionForm::Declaration => {
                             out.push(Statement::new_function_declaration(
-                                SPAN,
+                                // S1.2: initializer maps to the `function` token.
+                                self.source_map.map_or(Ok(SPAN), |m| m.span(a.expr_loc(e)))?,
                                 FunctionType::FunctionDeclaration,
                                 Some(self.binding(name)),
                                 false,
@@ -718,6 +1059,9 @@ impl<'a, 'r> Build<'a, 'r> {
                             return Ok(());
                         }
                         walk::FunctionForm::Eta(e) => {
+                            if self.source_map.is_some() {
+                                return Err(Unsupported("source map: eta-reduced declaration"));
+                            }
                             out.push(self.variable(name, Some(self.expr(e)?)));
                             return Ok(());
                         }
@@ -733,8 +1077,10 @@ impl<'a, 'r> Build<'a, 'r> {
             }
             StmtKind::Exp(e) => self.effect(e, out)?,
             StmtKind::Return(e) if tail.is_some() && walk::undefined(a, e) => {}
-            StmtKind::Return(_) if tail == Some(true) => {
-                return Err(Unsupported("unit function tail effect"));
+            StmtKind::Return(e) if tail == Some(true) => {
+                if let Some(e) = walk::tail_effect(a, e) {
+                    self.effect(e, out)?;
+                }
             }
             StmtKind::Return(e) => out.push(Statement::new_return_statement(
                 SPAN,
@@ -771,17 +1117,118 @@ impl<'a, 'r> Build<'a, 'r> {
                 ));
             }
             StmtKind::Debugger => out.push(Statement::new_debugger_statement(SPAN, &self.b)),
-            StmtKind::While(..)
-            | StmtKind::ForRange(_)
-            | StmtKind::ForOf(_)
-            | StmtKind::ForAwaitOf(_) => return Err(Unsupported("loop")),
-            StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..) => {
-                return Err(Unsupported("switch"));
+            StmtKind::While(label, cond, body) => {
+                out.push(self.label(
+                    label,
+                    Statement::new_while_statement(
+                        SPAN,
+                        self.expr(cond)?,
+                        Statement::BlockStatement(self.brace(body)?),
+                        &self.b,
+                    ),
+                ));
+                out.push(Statement::new_empty_statement(SPAN, &self.b));
             }
-            StmtKind::Try(_) => return Err(Unsupported("try")),
-            StmtKind::Throw(_) => return Err(Unsupported("throw")),
-            StmtKind::Break(_) | StmtKind::Continue(_) => {
-                return Err(Unsupported("break/continue"));
+            StmtKind::ForRange(id) => out.push(self.range(s, id)?),
+            StmtKind::ForOf(id) | StmtKind::ForAwaitOf(id) => {
+                let f = a.for_of(id);
+                let decl = VariableDeclaration::new(
+                    SPAN,
+                    VariableDeclarationKind::Let,
+                    self.b
+                        .vec1(self.declarator(self.names.get(&a.ident(f.ident)), None)),
+                    false,
+                    &self.b,
+                );
+                out.push(self.label(
+                    f.label,
+                    Statement::new_for_of_statement(
+                        SPAN,
+                        matches!(a.sk(s), StmtKind::ForAwaitOf(_)),
+                        ForStatementLeft::VariableDeclaration(self.b.alloc(decl)),
+                        self.expr(f.iterable)?,
+                        Statement::BlockStatement(self.brace(f.body)?),
+                        &self.b,
+                    ),
+                ));
+            }
+            StmtKind::IntSwitch(e, id) => {
+                let info = a.int_switch(id);
+                let mut cases = self.b.vec();
+                for (value, c) in &info.clauses {
+                    cases.push(self.case(self.number(&Number::int(*value))?, c)?);
+                }
+                if let Some(b) = info.default {
+                    cases.push(SwitchCase::new(
+                        SPAN,
+                        None,
+                        self.block(a.stmts(b), false)?,
+                        &self.b,
+                    ));
+                }
+                out.push(Statement::new_switch_statement(
+                    SPAN,
+                    self.expr(e)?,
+                    cases,
+                    &self.b,
+                ));
+            }
+            StmtKind::StringSwitch(e, id) => {
+                let info = a.string_switch(id);
+                let mut cases = self.b.vec();
+                for c in &info.clauses {
+                    cases.push(self.case(self.switch_tag(&c.tag_type)?, &c.clause)?);
+                }
+                if let Some(b) = info.default {
+                    cases.push(SwitchCase::new(
+                        SPAN,
+                        None,
+                        self.block(a.stmts(b), false)?,
+                        &self.b,
+                    ));
+                }
+                out.push(Statement::new_switch_statement(
+                    SPAN,
+                    self.expr(e)?,
+                    cases,
+                    &self.b,
+                ));
+            }
+            StmtKind::Try(id) => {
+                let t = a.try_info(id);
+                let handler = if let Some((id, body)) = t.catch {
+                    let pattern = BindingPattern::BindingIdentifier(
+                        self.b.alloc(self.binding(self.names.get(&a.ident(id)))),
+                    );
+                    Some(self.b.alloc(CatchClause::new(
+                        SPAN,
+                        Some(CatchParameter::new(SPAN, pattern, None, &self.b)),
+                        self.brace(body)?,
+                        &self.b,
+                    )))
+                } else {
+                    None
+                };
+                out.push(Statement::new_try_statement(
+                    SPAN,
+                    self.brace(t.body)?,
+                    handler,
+                    t.finally.map(|b| self.brace(b)).transpose()?,
+                    &self.b,
+                ));
+            }
+            StmtKind::Throw(e) => out.push(Statement::new_throw_statement(
+                SPAN,
+                self.throw_value(e)?,
+                &self.b,
+            )),
+            StmtKind::Break(l) | StmtKind::Continue(l) => {
+                let label = l.map(|l| LabelIdentifier::new(SPAN, self.text(a.text(l)), &self.b));
+                out.push(if matches!(a.sk(s), StmtKind::Break(_)) {
+                    Statement::new_break_statement(SPAN, label, &self.b)
+                } else {
+                    Statement::new_continue_statement(SPAN, label, &self.b)
+                });
             }
         }
         Ok(())
@@ -988,6 +1435,222 @@ mod block_tests {
     fn mismatched_metadata_uses_array() {
         for tag in [TagInfo::ref_tag(), inline(true), TagInfo::Module(vec![])] {
             oracle(tag, &[false, true, false]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod statement_tests {
+    use super::*;
+    use crate::ident::{Ident, IdentFlags};
+    use crate::js_ir::arena::*;
+    use crate::js_ir::op::MutableFlag;
+    use crate::js_ir::{ForDirection, ModulePathResolver};
+    use crate::lambda::{SwitchCaseTag, TagInfo};
+    use js_reformat::{ReformatOptions, reformat};
+
+    fn id(a: &mut JsArena, name: &str, stamp: i32) -> IdentId {
+        a.ident_id(Ident::new(name, stamp, IdentFlags::NONE))
+    }
+    fn number(a: &mut JsArena, n: i32) -> Expr {
+        let n = a.number_id(Number::int(n));
+        a.expr(ExprKind::Number(n))
+    }
+    fn oracle(a: JsArena, block: Vec<Stmt>) {
+        let p = JsDepsProgram {
+            program: JsProgram::new_in(block, vec![], a),
+            modules: vec![],
+            side_effect: None,
+        };
+        let resolver =
+            ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
+        let legacy = crate::js_ir::program_printer::print_deps_program_with_directives_and_options(
+            &p,
+            Some(&resolver),
+            &[],
+            false,
+            false,
+            true,
+        );
+        let actual = crate::emit::emit(&p, &resolver, &[], false, false, true)
+            .unwrap()
+            .0;
+        let mode = ReformatOptions {
+            split_file: true,
+            drop_decoration_comments: true,
+            ..Default::default()
+        };
+        assert_eq!(reformat(&legacy, mode).unwrap(), actual, "{legacy}");
+        assert_eq!(reformat(&actual, mode).unwrap(), actual);
+    }
+
+    #[test]
+    fn ranges_labels_and_finish_collisions() {
+        for direction in [ForDirection::Upto, ForDirection::Downto, ForDirection::Up] {
+            for cached in [false, true] {
+                for initialized in [false, true] {
+                    let mut a = JsArena::new();
+                    let i = id(&mut a, "i", 1);
+                    let reserved = id(&mut a, "i_finish", 2);
+                    let reserved = a.expr(ExprKind::Var(reserved));
+                    let start = number(&mut a, 0);
+                    let one = number(&mut a, 1);
+                    let end = if cached {
+                        a.expr(ExprKind::Bin(BinOp::Plus, reserved, one))
+                    } else {
+                        one
+                    };
+                    let label = a.str("outer");
+                    let cont = a.stmt(StmtKind::Continue(Some(label)));
+                    let body = a.stmt_list(&[cont]);
+                    let f = a.for_range_id(ForRangeInfo {
+                        label: Some(label),
+                        init: initialized.then_some(start),
+                        end,
+                        ident: i,
+                        direction,
+                        body,
+                    });
+                    let first = a.stmt(StmtKind::ForRange(f));
+                    let second = a.stmt(StmtKind::ForRange(f));
+                    oracle(a, vec![first, second]);
+                }
+            }
+        }
+    }
+    #[test]
+    fn while_and_iteration() {
+        for await_ in [false, true] {
+            let mut a = JsArena::new();
+            let i = id(&mut a, "item", 1);
+            let iterable = a.expr(ExprKind::Array(ExprList::EMPTY, MutableFlag::Immutable));
+            let label = a.str("outer");
+            let br = a.stmt(StmtKind::Break(Some(label)));
+            let body = a.stmt_list(&[br]);
+            let yes = a.expr(ExprKind::Bool(true));
+            let w = a.stmt(StmtKind::While(None, yes, body));
+            let body = a.stmt_list(&[w]);
+            let f = a.for_of_id(ForOfInfo {
+                label: Some(label),
+                ident: i,
+                iterable,
+                body,
+            });
+            let s = a.stmt(if await_ {
+                StmtKind::ForAwaitOf(f)
+            } else {
+                StmtKind::ForOf(f)
+            });
+            oracle(a, vec![s]);
+        }
+    }
+    #[test]
+    fn switch_fallthrough_and_breaks() {
+        let mut a = JsArena::new();
+        let value = number(&mut a, 3);
+        let throw = a.stmt(StmtKind::Throw(value));
+        let body = a.stmt_list(&[throw]);
+        let empty = Clause {
+            body: StmtList::EMPTY,
+            should_break: false,
+            comment: None,
+            source_loc: None,
+        };
+        let break_ = Clause {
+            should_break: true,
+            ..empty
+        };
+        let full = Clause { body, ..break_ };
+        let info = a.int_switch_id(IntSwitchInfo {
+            clauses: vec![(-1, empty), (0, break_), (1, full)],
+            default: Some(body),
+        });
+        let ints = a.stmt(StmtKind::IntSwitch(value, info));
+        let clauses = [
+            SwitchCaseTag::String("key".into()),
+            SwitchCaseTag::Int(4_294_967_296),
+            SwitchCaseTag::Float("-2.5".into()),
+            SwitchCaseTag::BigInt("123".into()),
+            SwitchCaseTag::BigInt("-000123".into()),
+            SwitchCaseTag::BigInt("+000".into()),
+            SwitchCaseTag::Bool(false),
+            SwitchCaseTag::Null,
+            SwitchCaseTag::Undefined,
+        ]
+        .into_iter()
+        .map(|tag_type| StringClauseInfo {
+            tag_type,
+            clause: full,
+        })
+        .collect();
+        let info = a.string_switch_id(StringSwitchInfo {
+            clauses,
+            default: Some(StmtList::EMPTY),
+        });
+        let strings = a.stmt(StmtKind::StringSwitch(value, info));
+        oracle(a, vec![ints, strings]);
+    }
+    #[test]
+    fn throw_exception_fields_and_try() {
+        for record in [false, true] {
+            let mut a = JsArena::new();
+            let exn = id(&mut a, "exn", 1);
+            let payload = id(&mut a, "exn", 2);
+            let value = a.expr(ExprKind::Var(payload));
+            let items = a.expr_list(&[value, value]);
+            let tag = a.tag_id(if record {
+                TagInfo::RecordExt {
+                    fields: vec!["message".into()],
+                    mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+                }
+            } else {
+                TagInfo::Extension
+            });
+            let value = a.expr(ExprKind::CamlBlock(items, MutableFlag::Immutable, tag));
+            let throw = a.stmt(StmtKind::Throw(value));
+            let body = a.stmt_list(&[throw]);
+            let value = a.expr(ExprKind::Var(exn));
+            let throw = a.stmt(StmtKind::Throw(value));
+            let catch = a.stmt_list(&[throw]);
+            let info = a.try_id(TryInfo {
+                body,
+                catch: Some((exn, catch)),
+                finally: Some(StmtList::EMPTY),
+            });
+            let s = a.stmt(StmtKind::Try(info));
+            oracle(a, vec![s]);
+        }
+    }
+    #[test]
+    fn assignment_and_unit_tail() {
+        for trivial in [false, true] {
+            let mut a = JsArena::new();
+            let x = id(&mut a, "x", 1);
+            let x = a.expr(ExprKind::Var(x));
+            let one = number(&mut a, 1);
+            let assign = a.expr(ExprKind::Bin(BinOp::Eq, x, one));
+            let seq = a.expr(ExprKind::Seq(one, assign));
+            let ret = a.stmt(StmtKind::Return(if trivial { one } else { seq }));
+            let debug = a.stmt(StmtKind::Debugger);
+            let body = a.stmt_list(&[debug, ret]);
+            let params = a.ident_list(&[]);
+            let f = a.fun_id(FunInfo {
+                is_method: false,
+                params,
+                body,
+                return_unit: true,
+                async_: false,
+                directive: None,
+            });
+            let f = a.expr(ExprKind::Fun(f));
+            let v = a.var_id(VarDecl {
+                ident: Ident::new("effect", 3, IdentFlags::NONE),
+                value: Some(f),
+                property: crate::js_ir::op::Property::Strict,
+                ident_info: Default::default(),
+            });
+            let s = a.stmt(StmtKind::Variable(v));
+            oracle(a, vec![s]);
         }
     }
 }

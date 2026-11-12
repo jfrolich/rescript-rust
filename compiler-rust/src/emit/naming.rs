@@ -68,6 +68,7 @@ struct Scope {
 #[derive(Default)]
 pub(super) struct Names {
     printed: HashMap<Ident, Name>,
+    finishes: HashMap<Stmt, Name>,
     visible: HashMap<Ident, Name>,
     visible_groups: HashMap<Name, usize>,
     scopes: Vec<Scope>,
@@ -88,6 +89,10 @@ impl Names {
     }
     pub(super) fn get(&self, id: &Ident) -> &str {
         &self.printed[id]
+    }
+
+    pub(super) fn finish(&self, s: Stmt) -> &str {
+        &self.finishes[&s]
     }
 
     fn base(&mut self, id: Ident) -> Name {
@@ -316,6 +321,7 @@ impl Names {
         used: &mut HashSet<Ident>,
     ) -> Result<(), Unsupported> {
         self.charge(1)?;
+        walk::expression_comment(a, e)?;
         match a.ek(e) {
             ExprKind::Var(id) => {
                 let id = a.ident(id);
@@ -377,7 +383,21 @@ impl Names {
                     self.analyze_block(a, a.stmts(f), defined, used)?;
                 }
                 StmtKind::Debugger => {}
-                other => return Err(unsupported_statement(other)),
+                _ => walk::statement_children(a, *s, |child| {
+                    match child {
+                        walk::StatementChild::Binder(id) => {
+                            defined.insert(id);
+                        }
+                        walk::StatementChild::Finish(_) => {}
+                        walk::StatementChild::Expression(e) => {
+                            self.analyze_expr(a, e, defined, used)?
+                        }
+                        walk::StatementChild::Block(b) => {
+                            self.analyze_block(a, a.stmts(b), defined, used)?
+                        }
+                    }
+                    Ok(())
+                })?,
             }
         }
         Ok(())
@@ -429,6 +449,7 @@ impl Names {
     }
     fn expr(&mut self, a: &JsArena, e: Expr) -> Result<(), Unsupported> {
         self.charge(1)?;
+        walk::expression_comment(a, e)?;
         match a.ek(e) {
             ExprKind::Var(id) => self.add(a.ident(id), false),
             ExprKind::Qualified(q) => self.add(a.qual(q).0.id, true),
@@ -488,6 +509,11 @@ impl Names {
                     self.expr(a, e)?;
                 }
             }
+            StmtKind::Return(e) if tail == Some(true) => {
+                if let Some(e) = walk::tail_effect(a, e) {
+                    self.expr(a, e)?;
+                }
+            }
             StmtKind::Return(e) => {
                 if !walk::undefined(a, e) {
                     self.expr(a, e)?;
@@ -508,24 +534,30 @@ impl Names {
                 }
             }
             StmtKind::Debugger => {}
-            other => return Err(unsupported_statement(other)),
+            _ => walk::statement_children(a, s, |child| {
+                match child {
+                    walk::StatementChild::Binder(id) => self.add(id, false)?,
+                    walk::StatementChild::Finish(s) => {
+                        let StmtKind::ForRange(id) = a.sk(s) else {
+                            unreachable!()
+                        };
+                        let base = self.base(a.ident(a.for_range(id).ident));
+                        let stamp = -1 - self.finishes.len() as i32;
+                        let name = self.assign(Name::new(&format!("{base}_finish")), stamp)?;
+                        if self.finishes.insert(s, name).is_some_and(|old| old != name) {
+                            return Err(Unsupported(
+                                "range finish spelling differs between occurrences",
+                            ));
+                        }
+                    }
+                    walk::StatementChild::Expression(e) => self.expr(a, e)?,
+                    walk::StatementChild::Block(b) => self.block(a, a.stmts(b), false, None)?,
+                }
+                Ok(())
+            })?,
         }
         Ok(())
     }
-}
-
-fn unsupported_statement(s: StmtKind) -> Unsupported {
-    Unsupported(match s {
-        StmtKind::While(..)
-        | StmtKind::ForRange(_)
-        | StmtKind::ForOf(_)
-        | StmtKind::ForAwaitOf(_) => "loop",
-        StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..) => "switch",
-        StmtKind::Try(_) => "try",
-        StmtKind::Throw(_) => "throw",
-        StmtKind::Break(_) | StmtKind::Continue(_) => "break/continue",
-        _ => unreachable!("supported statement"),
-    })
 }
 
 // Child order is the legacy printer's order. Shape decisions remain in walk;
@@ -554,6 +586,11 @@ fn children(
         | ExprKind::CamlBlockTag(e, _)
         | ExprKind::Await(e)
         | ExprKind::Spread(e) => visit(e)?,
+        ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
+            walk::assignment_target(a, l)?;
+            visit(l)?;
+            visit(r)?;
+        }
         ExprKind::Bin(_, l, r)
         | ExprKind::In(l, r)
         | ExprKind::Seq(l, r)
@@ -597,12 +634,22 @@ fn children(
                 visit(e)?;
             }
         }
-        ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
+        ExprKind::RawJsCode(_) => return walk::raw_supported(),
         ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
-        ExprKind::TemplateLiteral(_)
-        | ExprKind::InterpolatedTemplate(..)
-        | ExprKind::TaggedTemplate(..) => return Err(Unsupported("template literal")),
-        ExprKind::JsonLiteral(_) => return Err(Unsupported("JSON literal")),
+        ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
+        ExprKind::InterpolatedTemplate(segments, values) => {
+            walk::template_supported(a.segments(segments).len(), a.exprs(values).len())?;
+            for e in a.exprs(values) {
+                visit(*e)?;
+            }
+        }
+        ExprKind::TaggedTemplate(tag, strings, values) => {
+            walk::template_supported(a.tagged(strings).len(), a.exprs(values).len())?;
+            visit(tag)?;
+            for e in a.exprs(values) {
+                visit(*e)?;
+            }
+        }
         ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
         ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         ExprKind::StringAppend(..) => return Err(Unsupported("string concatenation association")),

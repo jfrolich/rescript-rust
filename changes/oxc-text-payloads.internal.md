@@ -1,0 +1,1 @@
+- Extend the opt-in oxc printer to templates, JSON literals, function directives, import attributes, and expression decorations while retaining lossless legacy fallback for raw JavaScript.
