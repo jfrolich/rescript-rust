@@ -6,6 +6,118 @@ use crate::lambda::lam_primitive::{DeclKind, ExternalModuleName, JsCall, ModuleB
 use smallvec::SmallVec;
 
 impl State {
+    /// P:84 compile_js_object_get. O(receiver field spine), holding only
+    /// receivers with a prelude that cannot be safely read in place.
+    pub(super) fn hold_external_receiver(&mut self, _cx: Cx, mut arg: Out) -> Out {
+        if !self.statements.has_statements(arg.stmts) { return arg; }
+        let value = arg.value.expect("receiver value");
+        let mut root = value;
+        let duplicable = loop {
+            match self.arena.view(root) {
+                View::JDot { object, .. } => root = object,
+                View::Var { .. } | View::JQualified { .. } | View::JBool | View::JStr { .. }
+                | View::JTemplate { .. } | View::JNumber { .. } => break true,
+                _ => break false,
+            }
+        };
+        if !duplicable {
+            let var = self.fresh_variable("tmp");
+            let statement = crate::bir::j::declare(&mut self.arena, LetKind::Strict, var, value);
+            self.statements.fill_held(arg.stmts.start + arg.stmts.len - 1, &[statement]);
+            arg.value = Some(self.pure_expression(View::Var { var }, 0));
+        }
+        arg
+    }
+
+    /// X:762 lower_object_external_arg_value_and_effect. O(conversion work).
+    fn lower_object_external_arg_value_and_effect(&mut self, cx: Cx, arg: NodeId, label: crate::lambda::lam_primitive::LabelNoname, attr: &crate::lambda::lam_primitive::Attr) -> (NodeId, Option<NodeId>) {
+        let (values, effect) = self.lower_external_arg_values_and_effect(cx, arg, label, attr);
+        assert_eq!(values.len(), 1, "object argument must produce exactly one value");
+        (values[0], effect)
+    }
+
+    /// X:972 compile_js_object_create. O(specs + argument conversion work).
+    /// Pending fields retain only their spec index and owned value handle.
+    pub(super) fn compile_js_object_create(&mut self, cx: Cx, specs: &[crate::lambda::lam_primitive::ObjParam], args: SmallVec<[NodeId; 4]>) -> NodeId {
+        use crate::lambda::lam_primitive::{Attr, Label, LabelNoname};
+        let mut args = args.into_iter();
+        let mut keys = Vec::new();
+        let mut values = Vec::new();
+        let mut effects: SmallVec<[NodeId; 4]> = SmallVec::new();
+        let mut pending: Vec<(u32, NodeId)> = Vec::new();
+        for (i, spec) in specs.iter().enumerate() {
+            self.primitive_steps += 1;
+            match &spec.obj_arg_label {
+                Label::ObjEmpty => {
+                    if !matches!(spec.obj_arg_type, Attr::ArgCst(_)) {
+                        let arg = args.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                        effects.extend(self.external_arg_effect(cx, arg));
+                    }
+                }
+                Label::ObjLabel { name } => {
+                    let value = if let Attr::ArgCst(cst) = &spec.obj_arg_type {
+                        self.compile_external_arg_const(cx, cst)
+                    } else {
+                        let arg = args.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                        let (value, effect) = self.lower_object_external_arg_value_and_effect(cx, arg, LabelNoname::ArgLabel, &spec.obj_arg_type);
+                        effects.extend(effect);
+                        value
+                    };
+                    keys.push(crate::bir::PropertyKey::Literal(self.arena.intern_text(name)));
+                    values.push(value);
+                }
+                Label::ObjOptional { name, .. } => {
+                    let arg = args.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                    match self.arena.view(arg) {
+                        View::JUndefined => self.arena.release(arg),
+                        View::JOptional { value } => {
+                            self.arena.detach(value); self.arena.release(arg);
+                            let (value, effect) = self.lower_object_external_arg_value_and_effect(cx, value, LabelNoname::ArgLabel, &spec.obj_arg_type);
+                            effects.extend(effect);
+                            keys.push(crate::bir::PropertyKey::Literal(self.arena.intern_text(name)));
+                            values.push(value);
+                        }
+                        _ => pending.push((u32::try_from(i).expect("object spec capacity"), arg)),
+                    }
+                }
+            }
+        }
+        debug_assert!(args.next().is_none());
+        let effect = self.fuse_external_effects(cx, effects);
+        let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+        let object = plain::node(&mut self.arena, View::JObject { values: &values, info }, 0);
+        let object = self.add_external_effect(cx, effect, object);
+        if pending.is_empty() { return object; }
+        let obj = self.fresh_variable("tmp");
+        let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Variable, obj, object);
+        self.statements.push(declaration);
+        for (i, mut arg) in pending {
+            self.primitive_steps += 1;
+            let spec = &specs[i as usize];
+            let Label::ObjOptional { name, for_sure_no_nested_option } = &spec.obj_arg_label else { unreachable!() };
+            if !self.optional_duplicable(cx, arg) {
+                let tmp = self.fresh_variable("tmp");
+                let declaration = crate::bir::j::declare(&mut self.arena, LetKind::Strict, tmp, arg);
+                self.statements.push(declaration);
+                arg = self.pure_expression(View::Var { var: tmp }, 0);
+            }
+            let test_arg = self.arena.copy_subtree(arg, &[]);
+            let value_arg = if *for_sure_no_nested_option { arg }
+                else { self.primitive_runtime("Primitive_option", "valFromOption", &[arg]) };
+            let (value, effect) = self.lower_object_external_arg_value_and_effect(cx, value_arg, LabelNoname::ArgEmpty, &spec.obj_arg_type);
+            let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
+            let test = crate::bir::j::norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::NotEqEq, test_arg, undefined);
+            let receiver = self.pure_expression(View::Var { var: obj }, 0);
+            let target = self.static_member(receiver, name);
+            let value = self.add_external_effect(cx, effect, value);
+            let assign = plain::bin(&mut self.arena, crate::js_ir::BinOp::Eq, target, value);
+            let statement = crate::bir::j::norm::js1_exp(&mut self.arena, assign);
+            let branch = crate::bir::j::norm::js3_simplify_if(&mut self.arena, test, vec![statement], vec![]);
+            self.statements.push(branch);
+        }
+        self.pure_expression(View::Var { var: obj }, 0)
+    }
+
     /// X:581 external_module_id. O(1) for a previously seen primitive; the
     /// first reference interns its bundle and constructs import metadata.
     pub(super) fn external_module_cached(&mut self, _cx: Cx, primitive: PrimId, external: &ExternalModuleName, default: bool, dynamic: bool) -> ImportId {
@@ -139,6 +251,41 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{arena::LamArena, lam_constant::Constant, lam_primitive::{Primitive, ExternalDecl, Param}, LamLoc};
+
+    #[test]
+    fn objects_and_methods_match_legacy_in_all_continuations() {
+        use crate::lambda::lam_primitive::{Attr, Label, ObjParam};
+        assert_eq!(std::mem::size_of::<(u32, NodeId)>(), 8);
+        for shape in 0..4 {
+            for nested in [false, true] {
+                let mut a = LamArena::new();
+                let arg = match shape {
+                    0 => a.const_(Constant::JsUndefined { is_unit: false }),
+                    1 => {
+                        let value = a.const_(Constant::Int { i: 42, comment: None });
+                        a.prim_raw(Primitive::Psome, &[value], LamLoc::NONE)
+                    }
+                    2 => a.var(Ident::new("opt", 10, crate::ident::IdentFlags::NONE)),
+                    _ => a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE),
+                };
+                let later = a.prim_raw(Primitive::PinitMod, &[], LamLoc::NONE);
+                let root = a.prim_raw(Primitive::PjsObjectCreate(vec![
+                    ObjParam { obj_arg_type: Attr::Nothing, obj_arg_label: Label::ObjOptional { name: "optional".into(), for_sure_no_nested_option: nested } },
+                    ObjParam { obj_arg_type: Attr::Nothing, obj_arg_label: Label::ObjLabel { name: "required".into() } },
+                ]), &[arg, later], LamLoc::NONE);
+                oracle_tests::compare(a, root);
+            }
+        }
+        for primitive in [Primitive::PjsObjectGet("field".into()), Primitive::PjsObjectSet("field".into()), Primitive::PjsFnMethod] {
+            let mut a = LamArena::new();
+            let receiver = a.var(Ident::new("obj", 10, crate::ident::IdentFlags::NONE));
+            let args = if matches!(primitive, Primitive::PjsObjectSet(_)) {
+                vec![receiver, a.const_(Constant::Int { i: 1, comment: None })]
+            } else { vec![receiver] };
+            let root = a.prim_raw(primitive, &args, LamLoc::NONE);
+            oracle_tests::compare(a, root);
+        }
+    }
 
     #[test]
     fn variadic_arguments_match_legacy() {

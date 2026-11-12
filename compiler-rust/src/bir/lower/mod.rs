@@ -569,19 +569,9 @@ impl ProbeRules for State {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
-                let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => {
-                        unreachable!("short circuits are lowered above")
-                    }
-                    Primitive::PjsObjectCreate(_)
-                    | Primitive::PjsObjectGet(_)
-                    | Primitive::PjsObjectSet(_)
-                    | Primitive::PjsFnMethod => "external",
-                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        primitive, operands: self.source.node(node).primitive_arguments(),
-                    }))),
-                };
-                return Err(Unsupported(reason));
+                return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                    primitive, operands: self.source.node(node).primitive_arguments(),
+                })));
             }
             View::If { condition, then_, else_ } => {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;

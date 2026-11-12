@@ -189,7 +189,7 @@ impl State {
     }
 
     /// A:69 is_okay_to_duplicate(false), used by X:181. O(field spine).
-    fn optional_duplicable(&self, _cx: Cx, mut node: NodeId) -> bool {
+    pub(super) fn optional_duplicable(&self, _cx: Cx, mut node: NodeId) -> bool {
         loop {
             match self.arena.view(node) {
                 View::Var { var } => return !self.arena.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL)
@@ -319,7 +319,7 @@ impl State {
     }
 
     /// C:6120 compile_external_arg_const. O(literal spelling bytes).
-    fn compile_external_arg_const(&mut self, _cx: Cx, cst: &crate::types::external_ffi_types::Cst) -> NodeId {
+    pub(super) fn compile_external_arg_const(&mut self, _cx: Cx, cst: &crate::types::external_ffi_types::Cst) -> NodeId {
         use crate::types::external_ffi_types::Cst;
         match cst {
             Cst::ArgIntLit(value) => plain::int(&mut self.arena, *value as i32),
