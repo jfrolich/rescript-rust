@@ -509,3 +509,35 @@ await. The probes were removed after measurement. Additional expansions
 caused by changed brace locations or pattern handles are not attributed by
 these probes; the end-state exact-delta gate needs those accounted for,
 not silently included in the 358.
+
+#### T7 row D: unresolved location-ownership blocker
+
+Rows A–C now type directly. Row D is **not implemented**; neither promise
+mapper helper has been deleted, and no direct-typing fallback was added.
+Small reproducer:
+
+```rescript
+let f = async p => await p
+```
+
+`transform_await` builds an identifier and application at a ghost copy of
+`p`'s location. `Typedtree::Expression::exp_loc` is a `LocIdx`, not a location
+plus an override flag. With full locations enabled, `ParseArena::get_location`
+returns a stored `&InternedLocation`; merely setting the location-free ghost
+bit is not a valid handle in this mode. The checker holds `&ParseArena`.
+Its existing `push_typecheck_ghost_loc` creates a `Box<InternedLocation>` and
+pushes it into `elsa::sync::FrozenVec`, whose `push` takes a write lock.
+Using that API per await would violate the T7 allocation and lock constraints.
+Using the source location instead would not preserve the existing typed tree.
+
+This is an unresolved implementation constraint, not evidence that a new
+typed-tree node kind is necessary. A location representation that can expose
+an immutable ghost view without allocating or locking would remove it, but
+has not been implemented or measured here. Preallocating ghost copies per
+source node would instead violate the no-per-node-storage rule. The existing
+`type_await` stub is not a viable alternative: it types the operand against
+the result type and emits a zero-argument application of the operand.
+
+New fixtures cover an await outside an async function, a non-promise await
+inside an async function, and an async body type error. They preserve the
+baseline diagnostics while this row remains blocked.

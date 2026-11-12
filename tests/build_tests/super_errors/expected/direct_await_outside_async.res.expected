@@ -1,0 +1,8 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/direct_await_outside_async.res[0m:[2m1:15-38[0m
+
+  [1;31m1[0m [2m│[0m let f = () => [1;31mawait Promise.resolve(1)[0m
+  2 [2m│[0m 
+
+  Await on expression not in an async context
