@@ -7,7 +7,7 @@ use crate::parser::ast::{StructureItem, StructureItemDesc};
 use crate::binary_ast::ast_iter::{self, AstIter};
 
 /// Exact item attribution or an explicitly labelled whole-module estimate.
-#[derive(Clone, Debug, Default, Serialize)]
+#[derive(Clone, Copy, Debug, Default, Serialize)]
 pub struct Pair {
     /// Nanoseconds charged to derived items.
     pub derived: u64,
@@ -37,8 +37,10 @@ impl Pair {
 pub struct Census {
     /// Stable schema version.
     pub version: u32,
-    /// Source file, as supplied to the compiler.
+    /// Module basename only, never an absolute source path.
     pub module: String,
+    /// Implementation or interface; the same module may compile both.
+    pub source_kind: &'static str,
     /// Derived and other top-level bindings, including nested structures.
     pub bindings: [u64; 2],
     /// Derived and other syntax nodes (expression/pattern/type/module/item occurrences).
@@ -95,7 +97,10 @@ pub struct Census {
 impl Census {
     /// O(filename + path length): allocate one record per compilation, never per node.
     pub fn new(path: &std::path::Path, module: &str) -> Self {
-        Self { version: 1, module: module.into(), output: path.into(), bindings: [0; 2],
+        Self { version: 1,
+            module: std::path::Path::new(module).file_stem().unwrap_or_default().to_string_lossy().into_owned(),
+            source_kind: if std::path::Path::new(module).extension().is_some_and(|s| s == "resi") { "interface" } else { "implementation" },
+            output: path.into(), bindings: [0; 2],
             syntax_nodes: [0; 2], parse_other: Pair::default(), generation: Pair::default(), frontend: Pair::default(),
             typecheck: Pair::default(), conversion: Pair::default(), lambda_lowering: Pair::default(),
             lambda_passes: Pair::default(), lowering: Pair::default(), printing: Pair::default(),
@@ -171,6 +176,17 @@ impl Census {
         ast_iter::walk_structure(&mut Counts { totals: &mut totals, side: 1 }, arena, items);
         self.syntax_nodes = totals.nodes;
         self.bindings = totals.bindings;
+    }
+    /// O(1): copy the three parse buckets before a location retry discards its AST.
+    pub fn parse_work(&self) -> [Pair; 3] { [self.parse_other, self.generation, self.frontend] }
+    /// O(1): account actual work of a discarded parse without duplicating its
+    /// bindings, nodes or templates in the surviving module record.
+    pub fn add_parse_work(&mut self, prior: [Pair; 3]) {
+        for (target, source) in [&mut self.parse_other, &mut self.generation, &mut self.frontend].into_iter().zip(prior) {
+            target.derived += source.derived;
+            target.other += source.other;
+            target.estimated |= source.estimated;
+        }
     }
     /// O(1): retain the parse phase total after subtracting its frontend children.
     pub fn account_parse(&mut self, total: u64) {

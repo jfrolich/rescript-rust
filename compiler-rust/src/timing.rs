@@ -121,7 +121,7 @@ impl PhaseTimingSnapshot {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-static ENABLED: OnceLock<bool> = OnceLock::new();
+static ENABLED: OnceLock<std::sync::atomic::AtomicBool> = OnceLock::new();
 /// Aggregate nanoseconds per phase, indexed by `Phase as usize`.
 static PHASE_NS: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
 static PHASE_COUNT: [AtomicU64; Phase::COUNT] = [const { AtomicU64::new(0) }; Phase::COUNT];
@@ -221,7 +221,7 @@ mod clock {
 /// O(1), once at option creation; no added test in the disabled hot path.
 pub fn enable_for_census() {
     #[cfg(not(target_arch = "wasm32"))]
-    { let _ = ENABLED.set(true); }
+    { ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(true)).store(true, Ordering::Relaxed); }
 }
 
 /// Returns whether aggregate phase timing is enabled.
@@ -233,11 +233,11 @@ pub fn enabled() -> bool {
     }
     #[cfg(not(target_arch = "wasm32"))]
     {
-        *ENABLED.get_or_init(|| {
+        ENABLED.get_or_init(|| std::sync::atomic::AtomicBool::new(
             std::env::var_os("RESCRIPT_PHASE_TIMINGS").is_some()
                 || std::env::var_os("RESCRIPT_MODULE_TIMINGS").is_some()
                 || std::env::var_os("RESCRIPT_RUNTIME_TIMINGS").is_some()
-        })
+        )).load(Ordering::Relaxed)
     }
 }
 

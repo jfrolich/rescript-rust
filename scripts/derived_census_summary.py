@@ -5,6 +5,7 @@ import json
 import sys
 import collections
 import math
+from pathlib import Path
 
 PHASES = (
     "parse_other", "generation", "frontend", "environment", "typecheck",
@@ -20,6 +21,7 @@ def summarize(rows):
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0)
     shapes = collections.defaultdict(list)
     templates = []
+    template_sizes = []
     for row in rows:
         if row.get("version") != 1:
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
@@ -48,6 +50,7 @@ def summarize(rows):
             if rec:
                 shapes["recursive group (overlap)"].append(size)
         templates.extend(None if key is None else bytes(key) for key in keys)
+        template_sizes.extend(sizes)
         if row["checker_counters"] is not None:
             result["counter_modules"] += 1
             for side in range(2):
@@ -61,9 +64,22 @@ def summarize(rows):
                                        p90=quantile(.9), p99=quantile(.99), max=sizes[-1])
     result["template_bindings"] = len(templates)
     result["unsupported_templates"] = templates.count(None)
-    # Compare complete structural byte strings, not a lossy hash fingerprint.
-    result["distinct_templates"] = None if None in templates else len(set(templates))
-    result["duplicate_bindings"] = (None if None in templates else len(templates) - len(set(templates)))
+    supported = collections.Counter(key for key in templates if key is not None)
+    unique_sizes = {}
+    for key, size in zip(templates, template_sizes):
+        if key is not None:
+            if key in unique_sizes and unique_sizes[key] != size:
+                raise ValueError("Identical template keys have different body sizes")
+            unique_sizes[key] = size
+    result["supported_templates"] = len(templates) - templates.count(None)
+    result["distinct_templates"] = len(supported)
+    result["duplicate_bindings"] = result["supported_templates"] - len(supported)
+    result["singleton_templates"] = sum(count == 1 for count in supported.values())
+    result["most_frequent_templates"] = sorted(supported.values(), reverse=True)[:6]
+    result["template_body_nodes"] = sum(template_sizes)
+    result["distinct_template_nodes"] = sum(unique_sizes.values())
+    result["unsupported_template_nodes"] = sum(size for key, size in zip(templates, template_sizes) if key is None)
+    result["distinct_template_node_share"] = (sum(unique_sizes.values()) / sum(template_sizes) if sum(template_sizes) else 0)
     return result
 
 
@@ -90,14 +106,17 @@ def markdown(summary):
                   "|---|---:|---:|---:|---:|---:|---:|"]
         for shape, stats in summary["shapes"].items():
             lines.append("| " + shape + " | " + " | ".join(str(stats[k]) for k in ("count", "min", "p50", "p90", "p99", "max")) + " |")
-        lines += ["", f"Distinct templates: {summary['distinct_templates']}; duplicate bindings: {summary['duplicate_bindings']}; unsupported templates: {summary['unsupported_templates']}."]
+        lines += ["", f"Distinct templates: {summary['distinct_templates']} among {summary['supported_templates']} supported bindings; duplicate bindings: {summary['duplicate_bindings']}; unsupported templates: {summary['unsupported_templates']}.",
+                  f"Distinct-template body nodes: {summary['distinct_template_nodes']} / {summary['template_body_nodes']} ({summary['distinct_template_node_share']:.1%}); unsupported body nodes: {summary['unsupported_template_nodes']}.",
+                  f"Singleton templates: {summary['singleton_templates']}; highest frequencies: {summary['most_frequent_templates']}."]
     return "\n".join(lines)
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("census")
-    parser.add_argument("--module-contains", help="Filter source paths, e.g. tests/ppx_spice/")
+    parser.add_argument("--module-contains", help="Filter module names by substring")
+    parser.add_argument("--modules-from", type=Path, help="Select module basenames present in this fixture source directory")
     parser.add_argument("--json", action="store_true", help="Emit machine-readable totals")
     args = parser.parse_args()
     try:
@@ -105,6 +124,9 @@ def main():
             rows = (json.loads(line) for line in source if line.strip())
             if args.module_contains:
                 rows = (row for row in rows if args.module_contains in row["module"])
+            if args.modules_from:
+                selected = {p.stem for p in args.modules_from.rglob("*.res")} | {p.stem for p in args.modules_from.rglob("*.resi")}
+                rows = (row for row in rows if Path(row["module"]).stem in selected)
             summary = summarize(rows)
         print(json.dumps(summary, indent=2) if args.json else markdown(summary))
     except (OSError, ValueError, KeyError, TypeError) as error:

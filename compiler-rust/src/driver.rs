@@ -11257,6 +11257,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     }
     if let (Some(census), Some(timing)) = (&mut tctx.derived_census, &census_timing) {
         census.account_pre_js(timing.snapshot());
+        if let Some(warnings) = located_warnings.as_ref().and_then(|a| a.derived_census.as_ref()) {
+            census.add_parse_work(warnings.parse_work());
+        }
     }
     Ok(InProcessPreJsCompileResult {
         derived_census: tctx.derived_census.take(),
@@ -11833,6 +11836,9 @@ pub fn typecheck_preprocessed_signature_in_process(
 
     if let (Some(mut census), Some(timing)) = (arena.derived_census.clone(), &census_timing) {
         census.account_pre_js(timing.snapshot());
+        if let Some(warnings) = located_warnings.as_ref().and_then(|a| a.derived_census.as_ref()) {
+            census.add_parse_work(warnings.parse_work());
+        }
         census.finish(std::iter::empty::<&str>())?;
     }
     Ok(InProcessInterfaceResult {

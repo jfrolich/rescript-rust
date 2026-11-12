@@ -29,16 +29,21 @@ class DerivedCensusSummaryTest(unittest.TestCase):
 
     def test_shape_columns_and_exact_template_identity(self):
         item = row()
-        item.update(shape_classes=["record"] * 3, shape_nodes=[10, 20, 100],
+        item.update(shape_classes=["record"] * 3, shape_nodes=[10, 10, 100],
                     shape_parameterised=[False, True, False], shape_recursive=[False] * 3,
                     templates=[[1, 2], [1, 2], [1, 3]])
         result = summarize([item])
         self.assertEqual(result["distinct_templates"], 2)
         self.assertEqual(result["duplicate_bindings"], 1)
-        self.assertEqual(result["shapes"]["record"]["p50"], 20)
+        self.assertEqual(result["shapes"]["record"]["p50"], 10)
         self.assertEqual(result["shapes"]["parameterised (overlap)"]["count"], 1)
         item["templates"][0] = None
-        self.assertIsNone(summarize([item])["distinct_templates"])
+        partial = summarize([item])
+        self.assertEqual(partial["distinct_templates"], 2)
+        self.assertEqual(partial["unsupported_templates"], 1)
+        self.assertEqual(partial["distinct_template_nodes"], 110)
+        self.assertEqual(partial["template_body_nodes"], 120)
+        self.assertEqual(partial["unsupported_template_nodes"], 10)
         item["shape_nodes"].pop()
         with self.assertRaises(ValueError):
             summarize([item])

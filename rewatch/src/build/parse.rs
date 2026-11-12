@@ -432,7 +432,11 @@ fn generate_ast(
         })
     {
         log::debug!("Parsing {} with source locations", source.file_path.display());
+        let prior = result.as_ref().ok().and_then(|(_, ast, _)| ast.arena().derived_census.as_ref()).map(|c| c.parse_work());
         result = parse_saved_source(&source, true);
+        if let (Some(prior), Ok((_, ast, _))) = (prior, &mut result) {
+            if let Some(census) = census_mut(ast) { census.add_parse_work(prior); }
+        }
     }
     let (stderr, mut stored_ast, deps) = result.map_err(|err| anyhow!("{err}"))?;
     if !stored_ast.arena().stores_locations() {
@@ -476,8 +480,20 @@ pub(crate) fn reparse_with_locations(ast: &StoredAst) -> anyhow::Result<StoredAs
     let source = ast
         .retry_source()
         .ok_or_else(|| anyhow!("missing source for location retry"))?;
-    let (_, ast, _) = parse_saved_source(source, true)?;
-    Ok(ast)
+    let (_, mut located, _) = parse_saved_source(source, true)?;
+    if let (Some(prior), Some(census)) = (ast.arena().derived_census.as_ref(), census_mut(&mut located)) {
+        census.add_parse_work(prior.parse_work());
+    }
+    Ok(located)
+}
+
+/// O(1): borrow the record of a newly parsed, uniquely owned AST. No lock or clone.
+fn census_mut(ast: &mut StoredAst) -> Option<&mut rescript_compiler::derived_census::Census> {
+    let arena = match ast {
+        StoredAst::Structure(ast) => &mut Arc::get_mut(ast)?.arena,
+        StoredAst::Signature(ast) => &mut Arc::get_mut(ast)?.arena,
+    };
+    arena.derived_census.as_deref_mut()
 }
 
 /// The located arena of a fresh parse of `source`, for placing the warnings
