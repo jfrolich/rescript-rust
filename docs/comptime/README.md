@@ -658,6 +658,47 @@ greet(~name="Alice", ~count="3")
   This is reported by the macro `I18n.t`.
 ```
 
+### Types from a schema
+
+A macro that reads a file can give types to something outside the program.
+Here `schema.sql` holds the `create table` statements of a database.
+`%Sql.tables()` is a module per table with the type of its rows, and
+`%Sql.query` checks a query against the schema: `row` is a record of the
+selected columns, and `run` takes a labelled argument per `:parameter`, with
+the type of the column it is compared with.
+
+<!-- example: sql -->
+
+```rescript
+module Db = %Sql.tables()
+module InCity = %Sql.query("select name, vip from customers where city = :city")
+
+InCity.run(db, ~city="Utrecht")   // array<InCity.row>, {name: string, vip: bool}
+Db.Customers.byId(db, 1)          // option<Db.Customers.t>
+```
+
+<!-- /example -->
+
+A column that can be null is a `Null.t`, and `customer_id` is the field
+`customerId`. A column that is not in the schema does not compile:
+
+```
+  We've found a bug for you!
+  Main.res:9:17-57
+
+  8 │ // A column that is not in the schema does not compile:
+  9 │ module Emails = %Sql.query("select email from customers")
+
+  The table "customers" has no column "email". It has: id, name, city, vip
+
+  This is reported by the macro `Sql.query`.
+```
+
+The schema is a file because a macro has no network: a dump of the database
+is checked in, or written by a step of the build. The query is a string
+because a macro sees the code of an argument as text, not as a tree it can
+take apart.
+
 ### Errors
 
 An error is reported in the code the person wrote, and says what the macro
@@ -967,6 +1008,11 @@ implemented:
 - **Splice holes in patterns and types.** `${...items}` stands in lists of
   expressions. The fields of a record type are built with `Type.record`,
   and the arguments of a constructor pattern with `Pat.constructor`.
+- **Type declarations in a quote.** A hole is written in parentheses, so
+  `type t = ${row}` is not a record type declaration, and a type of the
+  macro's own file is not resolved in that file the way a value is. The
+  `sql` example writes its row types with `Code.raw` and names `Sql.db` in
+  full.
 - **Attribute payloads beyond one string.** `@Json.key("user_age")` reaches
   the macro; `@Json.codec({strict: true})` does not yet pass its argument.
 - **Parametric types.** `Type.info` of `result<a, b>` or a record with type
