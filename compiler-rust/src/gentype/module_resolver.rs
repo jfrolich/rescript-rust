@@ -9,32 +9,100 @@ use crate::gentype::paths::concat;
 
 type ModuleNameMap = BTreeMap<crate::gentype::module_name::T, String>;
 
-/// The directories below `root`, relative to it, deepest first.
-pub fn read_bs_dependencies_dirs(root: &str) -> Vec<String> {
-    // Mirrors compiler/gentype/ModuleResolver.ml:6-20.
-    let mut dirs = Vec::new();
-
-    fn find_sub_dirs(root: &str, dir: &str, dirs: &mut Vec<String>) {
-        let abs_dir = match dir.is_empty() {
-            true => root.to_string(),
-            false => concat(root, dir),
-        };
-        if Path::new(&abs_dir).exists() && Path::new(&abs_dir).is_dir() {
-            dirs.push(dir.to_string());
-            if let Ok(entries) = fs::read_dir(&abs_dir) {
-                for entry in entries.flatten() {
-                    let name = entry.file_name().to_string_lossy().to_string();
-                    find_sub_dirs(root, &concat(dir, &name), dirs);
-                }
-            }
+/// The source path in the header of the AST at `path`, read from its first
+/// bytes (a header is a few hundred bytes), or `None` when the file is not an
+/// AST. Mirrors compiler/gentype/module_resolver.ml `ast_source`.
+fn ast_source(path: &Path) -> Option<Vec<u8>> {
+    use std::io::Read;
+    const PREFIX: u64 = 4096;
+    let mut file = fs::File::open(path).ok()?;
+    let mut contents = Vec::new();
+    file.by_ref().take(PREFIX).read_to_end(&mut contents).ok()?;
+    let read = |contents: &[u8]| {
+        crate::binary_ast::header::read_header(contents)
+            .map(|header| crate::binary_ast::header::header_source(contents, &header).to_vec())
+    };
+    match read(&contents) {
+        Some(source) => Some(source),
+        None if contents.len() as u64 == PREFIX => {
+            file.read_to_end(&mut contents).ok()?;
+            read(&contents)
         }
+        None => None,
     }
+}
 
-    find_sub_dirs(root, "", &mut dirs);
-    // OCaml conses each directory onto the result, so it lists them in
-    // reverse visit order.
-    dirs.reverse();
-    dirs
+/// The directories of a dependency's sources, relative to its `root`, by the
+/// name of their ASTs (`X` for `X.ast`): each AST records its source.
+/// Mirrors compiler/gentype/module_resolver.ml `read_source_dirs`.
+fn read_source_dirs(root: &str, artifact_dir: &str, names: &[String]) -> BTreeMap<String, String> {
+    let prefix = format!("{root}{}", std::path::MAIN_SEPARATOR);
+    let mut source_dirs = BTreeMap::new();
+    for name in names {
+        let Some(stem) = name.strip_suffix(".ast") else {
+            continue;
+        };
+        let Some(source) = ast_source(Path::new(&concat(artifact_dir, name))) else {
+            continue;
+        };
+        let source = String::from_utf8_lossy(&source);
+        let Some(relative) = source.strip_prefix(&prefix) else {
+            continue;
+        };
+        let dir = match Path::new(relative).parent() {
+            Some(dir) => dir.to_string_lossy().to_string(),
+            None => String::new(),
+        };
+        source_dirs.insert(stem.to_string(), dir);
+    }
+    source_dirs
+}
+
+/// The `.cmt`/`.cmti` files of a dependency at `root`, each with the
+/// directory of its module's source relative to `root`. The artifacts are
+/// flat in `lib/rescript`, so a module's `X.cmt` or `X-Ns.cmt` lies in the
+/// directory of the source that `X.ast` names. Mirrors
+/// compiler/gentype/module_resolver.ml `dependency_module_dirs`; the resolver
+/// builds its maps once per build, so the AST headers are read once per build
+/// as there.
+pub fn dependency_module_dirs(root: &str) -> Vec<(String, String)> {
+    let artifact_dir = ["lib", "rescript"]
+        .iter()
+        .fold(root.to_string(), |acc, segment| concat(&acc, segment));
+    let Ok(entries) = fs::read_dir(&artifact_dir) else {
+        return Vec::new();
+    };
+    let mut names: Vec<String> = entries
+        .flatten()
+        .map(|entry| entry.file_name().to_string_lossy().to_string())
+        .collect();
+    names.sort();
+    let source_dirs = read_source_dirs(root, &artifact_dir, &names);
+    // A namespaced module's compiled files append "-" and the namespace,
+    // which has no "-" of its own, to the source file name. The namespace
+    // itself has a map instead of a source, and belongs to the package root.
+    let source_dir = |compiled: &str| -> Option<String> {
+        if let Some(dir) = source_dirs.get(compiled) {
+            return Some(dir.clone());
+        }
+        if names
+            .iter()
+            .any(|name| name.strip_suffix(".mlmap") == Some(compiled))
+        {
+            return Some(String::new());
+        }
+        let index = compiled.rfind('-')?;
+        source_dirs.get(&compiled[..index]).cloned()
+    };
+    names
+        .iter()
+        .filter_map(|name| {
+            let stem = name
+                .strip_suffix(".cmt")
+                .or_else(|| name.strip_suffix(".cmti"))?;
+            source_dir(stem).map(|dir| (name.clone(), dir))
+        })
+        .collect()
 }
 
 /// The module maps of the project's source directories and of its
@@ -45,7 +113,7 @@ pub fn sourcedirs_to_map(
     extensions: &[String],
     exclude_file: &impl Fn(&str) -> bool,
 ) -> (ModuleNameMap, ModuleNameMap) {
-    // Mirrors compiler/gentype/ModuleResolver.ml:22-69.
+    // Mirrors compiler/gentype/module_resolver.ml `sourcedirs_to_map`.
     fn chop_extensions(fname: &str) -> String {
         let mut current = fname.to_string();
         while let Some(idx) = current.rfind('.') {
@@ -92,19 +160,10 @@ pub fn sourcedirs_to_map(
 
     for package_name in &config.bs_dependencies {
         if let Some(path) = config.dep_paths.get(package_name) {
-            let root = ["lib", "bs"]
-                .iter()
-                .fold(path.clone(), |acc, segment| concat(&acc, segment));
-            let filter =
-                |file_name: &str| file_name.ends_with(".cmt") || file_name.ends_with(".cmti");
-            for dir in read_bs_dependencies_dirs(&root) {
-                let dir_on_disk = concat(&root, &dir);
-                let dir_emitted = concat(package_name, &dir);
-                add_dir(
-                    &dir_on_disk,
-                    &dir_emitted,
-                    &filter,
-                    &mut bs_dependencies_file_map,
+            for (fname, dir) in dependency_module_dirs(path) {
+                bs_dependencies_file_map.insert(
+                    crate::gentype::module_name::from_string_unsafe(&chop_extensions(&fname)),
+                    concat(package_name, &dir),
                 );
             }
         }
@@ -379,5 +438,77 @@ fn path_to_list(path: &str) -> Vec<String> {
         let mut out = vec![base];
         out.extend(path_to_list(&parent));
         out
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// An AST whose header records `source`, followed by bytes that stand in
+    /// for the marshalled tree.
+    fn ast_with_source(source: &str) -> Vec<u8> {
+        let block = b"\nDep\n";
+        let mut contents = (block.len() as i32).to_be_bytes().to_vec();
+        contents.extend_from_slice(block);
+        contents.extend_from_slice(source.as_bytes());
+        contents.push(b'\n');
+        contents.extend_from_slice(&[0u8; 64]);
+        contents
+    }
+
+    #[test]
+    fn dependency_modules_lie_in_the_directories_their_asts_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("dep");
+        let artifacts = root.join("lib").join("rescript");
+        fs::create_dir_all(&artifacts).unwrap();
+        let root = root.to_string_lossy().to_string();
+        let source = |relative: &str| {
+            Path::new(&root)
+                .join(relative)
+                .to_string_lossy()
+                .to_string()
+        };
+        fs::write(
+            artifacts.join("A.ast"),
+            ast_with_source(&source("src/nested/A.res")),
+        )
+        .unwrap();
+        fs::write(artifacts.join("B.ast"), ast_with_source(&source("B.res"))).unwrap();
+        fs::write(
+            artifacts.join("Other.ast"),
+            ast_with_source("/elsewhere/Other.res"),
+        )
+        .unwrap();
+        for name in [
+            "A-Ns.cmt",
+            "A-Ns.cmti",
+            "B-Ns.cmt",
+            "Ns.cmt",
+            "Ns.mlmap",
+            "Other.cmt",
+            "Lost.cmt",
+        ] {
+            fs::write(artifacts.join(name), b"").unwrap();
+        }
+
+        let dirs = dependency_module_dirs(&root);
+
+        assert_eq!(
+            dirs,
+            vec![
+                ("A-Ns.cmt".to_string(), "src/nested".to_string()),
+                ("A-Ns.cmti".to_string(), "src/nested".to_string()),
+                ("B-Ns.cmt".to_string(), String::new()),
+                ("Ns.cmt".to_string(), String::new()),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_dependency_without_an_artifact_directory_has_no_modules() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(dependency_module_dirs(&dir.path().to_string_lossy()).is_empty());
     }
 }

@@ -254,7 +254,7 @@ if [[ $ROUNDTRIP_TEST = 1 ]]; then
     while IFS= read -r file; do
       files+=("$file")
     done < <(find "$TELLA_DIR" \
-      -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+      -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/rescript" -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
       -o -type f \( -name "*.res" -o -name "*.resi" \) -print)
   fi
   roundtripFileCount=${#files[@]}

@@ -260,9 +260,9 @@ impl ShapeBlocks {
     }
 }
 
-/// One heap block of a shape. Each allocation is a distinct value within
-/// the process; an import of a stored interface gives its allocations new
-/// values, as unmarshalling allocates new blocks.
+/// One block of a shape, identified within its source unit or import. Copies
+/// retain identity; importing a stored interface gives its allocations a new
+/// namespace. A persistent dependency has the same namespace on every worker.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct ShapeAllocation(u64);
 
@@ -286,6 +286,12 @@ impl ShapeAllocation {
                 Err(current) => next = current,
             }
         }
+    }
+
+    /// A block allocated by a named compilation or persistent import. Static
+    /// blocks keep their small IDs; dynamic blocks stay outside that range.
+    pub(crate) fn in_namespace(namespace: u64, identity: u64) -> Self {
+        Self(identity_in_namespace(namespace, identity) | Self::FIRST_FRESH)
     }
 
     /// A block of `Predef.common_initial_env`, which builds each builtin
@@ -335,7 +341,7 @@ impl ShapeString {
                 scope: identity.scope,
                 location: identity.location,
             },
-            None => ShapeString::Allocation(ShapeAllocation::fresh()),
+            None => ShapeString::Allocation(ctx.fresh_shape_allocation()),
         }
     }
 }
@@ -348,6 +354,7 @@ pub(crate) struct ShapeImport<'a> {
     scopes: &'a crate::fast_hash::AHashMap<u64, u64>,
     other_scopes: crate::fast_hash::AHashMap<u64, u64>,
     allocations: crate::fast_hash::AHashMap<ShapeAllocation, ShapeAllocation>,
+    namespace: Option<u64>,
 }
 
 impl<'a> ShapeImport<'a> {
@@ -356,6 +363,17 @@ impl<'a> ShapeImport<'a> {
             scopes,
             other_scopes: Default::default(),
             allocations: Default::default(),
+            namespace: None,
+        }
+    }
+
+    pub(crate) fn with_namespace(
+        scopes: &'a crate::fast_hash::AHashMap<u64, u64>,
+        namespace: Option<u64>,
+    ) -> Self {
+        Self {
+            namespace,
+            ..Self::new(scopes)
         }
     }
 
@@ -366,7 +384,10 @@ impl<'a> ShapeImport<'a> {
         *self
             .allocations
             .entry(allocation)
-            .or_insert_with(ShapeAllocation::fresh)
+            .or_insert_with(|| match self.namespace {
+                Some(namespace) => ShapeAllocation::in_namespace(namespace, allocation.0),
+                None => ShapeAllocation::fresh(),
+            })
     }
 
     fn string(&mut self, string: ShapeString) -> ShapeString {
@@ -379,7 +400,10 @@ impl<'a> ShapeImport<'a> {
                     None => *self
                         .other_scopes
                         .entry(scope)
-                        .or_insert_with(|| (super::decl_loc::next_table_owner() as u64) << 32),
+                        .or_insert_with(|| match self.namespace {
+                            Some(namespace) => identity_in_namespace(namespace, scope),
+                            None => (super::decl_loc::next_table_owner() as u64) << 32,
+                        }),
                 };
                 ShapeString::Attribute { scope, location }
             }
@@ -1023,5 +1047,33 @@ mod shape_import_tests {
         assert_ne!(b1.ancestors[0].0, cell);
         assert_ne!(b1.name, b.name);
         assert_eq!(string.blocks.block, ShapeAllocation::predef(5));
+
+        let named_import = |namespace| {
+            // An attribute's declaration need not be present in the signature.
+            let scopes = Default::default();
+            let mut import = ShapeImport::with_namespace(&scopes, Some(namespace));
+            let mut shapes = original.clone();
+            for shape in &mut shapes {
+                import.value_shape(shape);
+            }
+            let a = class_blocks(&recognized(&shapes[0]).block_type).clone();
+            let b = class_blocks(&recognized(&shapes[2]).block_type).clone();
+            assert_eq!(a.name, b.ancestors[0].1);
+            assert_eq!(
+                recognized(&shapes[3]).blocks.block,
+                ShapeAllocation::predef(5),
+            );
+            crate::binser::to_vec(&shapes).unwrap()
+        };
+        assert_eq!(named_import(23), named_import(23));
+        assert_ne!(named_import(23), named_import(24));
     }
+}
+
+/// A stable identity within an explicitly selected allocation namespace.
+pub(crate) fn identity_in_namespace(namespace: u64, identity: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    (namespace, identity).hash(&mut hash);
+    hash.finish()
 }

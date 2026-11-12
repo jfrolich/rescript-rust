@@ -65,7 +65,7 @@ fn is_in_build_path(path_buf: &Path) -> bool {
         let comp_os = component.as_os_str();
         if let Some(prev) = prev_component
             && prev == "lib"
-            && (comp_os == "bs" || comp_os == "ocaml")
+            && (comp_os == "rescript" || comp_os == "bs" || comp_os == "ocaml")
         {
             return true;
         }
@@ -160,10 +160,11 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
         }
     }
 
-    // Watch the lib/ directory for the watcher lockfile (watch.lock lives in lib/)
-    let lib_dir = root.join("lib");
-    if lib_dir.exists() {
-        insert(lib_dir, RecursiveMode::NonRecursive);
+    // Watch the artifact directory for the watcher lockfile (watch.lock lives
+    // in lib/rescript/).
+    let lock_dir = crate::lock::lock_dir(root);
+    if lock_dir.exists() {
+        insert(lock_dir, RecursiveMode::NonRecursive);
     }
 
     watch_paths.into_iter().collect()
@@ -388,7 +389,7 @@ fn cleanup_before_watch_exit(
     });
 }
 
-// Removing lib/watch.lock asks the watcher to quit.
+// Removing lib/rescript/watch.lock asks the watcher to quit.
 fn exit_after_lockfile_removed(path: &Path, build_state: &BuildCommandState, show_progress: bool) {
     cleanup_before_watch_exit(
         path,
@@ -735,7 +736,10 @@ fn watch_loop(
 
                 // The removal event of watch.lock can be lost while watches are re-registered
                 // (some backends restart their event stream), so check the file itself.
-                if !path.join("lib").join(LockKind::Watch.file_name()).exists() {
+                if !crate::lock::lock_dir(path)
+                    .join(LockKind::Watch.file_name())
+                    .exists()
+                {
                     exit_after_lockfile_removed(path, &build_state, show_progress);
                     return Ok(());
                 }
@@ -987,6 +991,24 @@ mod tests {
             compile_dirty: false,
             deps_dirty: false,
             is_type_dev: false,
+        }
+    }
+
+    #[test]
+    fn artifact_directories_are_build_paths() {
+        for path in [
+            "/project/lib/rescript/A.res",
+            "/project/lib/bs/src/A.res",
+            "/project/lib/ocaml/A.res",
+        ] {
+            assert!(is_in_build_path(Path::new(path)), "{path} is in a build path");
+        }
+        for path in [
+            "/project/src/A.res",
+            "/project/lib/es6/src/A.res",
+            "/project/rescript/A.res",
+        ] {
+            assert!(!is_in_build_path(Path::new(path)), "{path} is a source path");
         }
     }
 
