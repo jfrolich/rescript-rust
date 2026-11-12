@@ -77,8 +77,7 @@ covers it).
 
 | `shared_graph` | When | Graph compared |
 |---|---|---|
-| `published` | the unit has a dependent in this build, or is an interface | the one dependents read |
-| `forced: no dependent in this build` | `SignaturePublicationMode::OnDemand` | check mode publishes it at once; a normal build builds the same graph from the decoded bytes when a later reader asks |
+| `published` | every shareable unit, including units without dependents | the one dependents read; publication computes its fingerprint and item digests here |
 | `forced: not shareable` | the graph holds a `Tsubst` | a graph of the pool that no reader is given |
 
 Only a full pool leaves a unit without a comparison (`not_applicable`, "the
@@ -141,3 +140,19 @@ None of these fields enlarges a type node. Their lifetime is the graph's,
 so inverse serialization needs neither the producer's context nor its
 portable signature. Capture and reconstruction are linear in graph size
 and metadata size, with maps per graph, not per node.
+
+## P3b slice 2: publication hashes
+
+`prepare_publication` builds the shared graph before creating the registry
+Arc, computes its fingerprint and item hashes through `FrozenGraph`, then
+registers that same Arc in the pool. The item hashes are retained until the
+summary uses them; reference collection still reads the portable signature
+in this slice. Stored units and the non-shareable/full-pool fallback retain
+the portable hash. Check mode computes the portable oracle independently
+and compares it against the actual published fingerprint and item hashes.
+
+Leaf publications now also build a shared graph, rather than waiting for a
+later reader. This is necessary for shared-only hashes; storage still runs
+after release, and dependency scheduling is unchanged. The existing leaf
+regression checks that storage discards the portable graph and later lookup
+reuses the graph built for hashing, without decoding it again.

@@ -1658,7 +1658,7 @@ impl PersistentEnv {
             .and_then(|opt| opt)
             .map(|ps| {
                 portable_types::publish_pers_struct(
-                    portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena),
+                    portable_types::serialize_for_publication(ps.as_ref(), ctx, arena),
                     ctx,
                     publication,
                 )
@@ -1679,7 +1679,7 @@ impl PersistentEnv {
             .and_then(|opt| opt)
             .map(|ps| {
                 portable_types::publish_pers_struct_checked(
-                    portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena),
+                    portable_types::serialize_for_publication(ps.as_ref(), ctx, arena),
                     ctx,
                     publication,
                 )

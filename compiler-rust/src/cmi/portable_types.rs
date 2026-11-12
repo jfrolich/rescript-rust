@@ -193,6 +193,8 @@ pub struct PortablePersStruct {
     /// Stamp-independent structural fingerprint.
     pub fingerprint: u64,
     summary: std::sync::OnceLock<Arc<super::item_deps::SignatureSummary>>,
+    /// Publication hashes from the shared graph; absent on stored/fallback units.
+    shared_item_hashes: Option<Vec<(super::item_deps::Kind, crate::name::Name, u64)>>,
     decoded: std::sync::Mutex<Option<(PortableSignature, Option<PortableRawSignature>)>>,
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
@@ -247,6 +249,7 @@ impl<'de> serde::Deserialize<'de> for PortablePersStruct {
             fingerprint: s.fingerprint,
             published_generation: None,
             summary: Default::default(),
+            shared_item_hashes: None,
             decoded: Default::default(),
             encoded: std::sync::OnceLock::from(EncodedSignatures {
                 sig: s.sig,
@@ -268,6 +271,7 @@ impl Clone for PortablePersStruct {
             fingerprint: self.fingerprint,
             published_generation: self.published_generation,
             summary: self.summary.clone(),
+            shared_item_hashes: None,
             decoded: Default::default(),
             encoded: std::sync::OnceLock::from(encoded.clone()),
         }
@@ -335,6 +339,7 @@ impl PortablePersStruct {
             fingerprint,
             published_generation: None,
             summary: Default::default(),
+            shared_item_hashes: None,
             encoded: Default::default(),
             decoded: std::sync::Mutex::new(Some((sig, raw))),
         }
@@ -354,7 +359,9 @@ impl PortablePersStruct {
                 .expect("unencoded publication has signatures");
             // Compute the summary while the decoded form is still available.
             self.summary.get_or_init(|| {
-                Arc::new(super::item_deps::SignatureSummary::of(&self.ps_name, sig))
+                Arc::new(super::item_deps::SignatureSummary::with_item_hashes(
+                    &self.ps_name, sig, self.shared_item_hashes.as_deref(),
+                ))
             });
             let encoded = EncodedSignatures {
                 sig: crate::binser::Encoded::encode(sig),
@@ -375,7 +382,9 @@ impl PortablePersStruct {
         let decoded = self.decoded.lock().unwrap();
         if let Some((sig, _)) = decoded.as_ref() {
             return self.summary.get_or_init(|| {
-                Arc::new(super::item_deps::SignatureSummary::of(&self.ps_name, sig))
+                Arc::new(super::item_deps::SignatureSummary::with_item_hashes(
+                    &self.ps_name, sig, self.shared_item_hashes.as_deref(),
+                ))
             });
         }
         drop(decoded);
@@ -910,6 +919,24 @@ pub fn serialize_pers_struct(
     ctx: &TypeContext,
     arena: Option<&ParseArena>,
 ) -> PortablePersStruct {
+    serialize_pers_struct_inner(ps, ctx, arena, true)
+}
+
+/// Publication computes hashes after the shared graph is built, not here.
+pub(crate) fn serialize_for_publication(
+    ps: &PersStruct,
+    ctx: &TypeContext,
+    arena: Option<&ParseArena>,
+) -> PortablePersStruct {
+    serialize_pers_struct_inner(ps, ctx, arena, false)
+}
+
+fn serialize_pers_struct_inner(
+    ps: &PersStruct,
+    ctx: &TypeContext,
+    arena: Option<&ParseArena>,
+    hash_portable: bool,
+) -> PortablePersStruct {
     // The file names of the signatures' locations travel with them, keyed
     // in order of first use (see `PortableFileNames`).
     let mut file_names = PortableFileNames::default();
@@ -947,7 +974,12 @@ pub fn serialize_pers_struct(
             remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved_stamp);
         }
     }
-    let fingerprint = compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig);
+    let fingerprint = if hash_portable {
+        compute_type_graph_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig)
+    } else {
+        // Filled before the Arc is registered or exposed to any reader.
+        0
+    };
     PortablePersStruct::new(
         ps.ps_name.clone(),
         ps.ps_filename.clone(),
@@ -1698,28 +1730,64 @@ fn graph_is_shareable(graph: &PortableTypeGraph) -> bool {
 pub enum SignaturePublicationMode {
     /// A dependent in this build (including an interface's implementation).
     Eager,
-    /// No dependent in this build; a later reader can fill the pool slot.
+    /// No dependent in this build; storage may run as soon as lowering finishes.
+    /// Publication still builds shared nodes for hashing.
     OnDemand,
 }
 
-/// Prepare the address-keyed pool and worker map when dependents need them.
-pub fn publish_pers_struct(
+/// Build the shared graph before publishing its address-keyed registry entry.
+/// Leaf units also need a graph: their fingerprint may not use the portable
+/// form. Only a non-shareable signature or a full pool takes the old path.
+fn prepare_publication(
     mut pps: PortablePersStruct,
     ctx: &TypeContext,
-    mode: SignaturePublicationMode,
-) -> Arc<PortablePersStruct> {
+    check: bool,
+) -> (Arc<PortablePersStruct>, Option<(Arc<PersStruct>, u32)>) {
+    use super::shared_reader::FrozenGraph;
     pps.published_generation = Some(crate::types::thread_store::build_generation());
-    let pps = Arc::new(pps);
-    if mode == SignaturePublicationMode::Eager && pps.shareable {
-        let store = ctx.thread_store();
-        let pool = store.shared_pool();
+    let store = ctx.thread_store();
+    let pool = store.shared_pool();
+    let (shared, fingerprint, hashes) = {
         let decoded = pps.decoded.lock().unwrap();
         let sig = &decoded.as_ref().expect("new publication").0;
-        if let Some(ps) = pool.pers_struct(&pps, || shared_pers_struct(&pps, sig, pool)) {
-            store.insert_pers_struct(pps.clone(), ps);
-        }
+        let shared = if pps.shareable || check {
+            shared_pers_struct_at(&pps, sig, pool)
+        } else {
+            None
+        };
+        let (fingerprint, hashes) = match &shared {
+            Some((ps, base)) => {
+                let pages = pool.pages();
+                let frozen = FrozenGraph::new(
+                    pool, crate::types::shared_store::graph_at(&pages, *base),
+                );
+                (
+                    signature_fingerprint(&frozen, &ps.ps_sig),
+                    Some(super::item_deps::item_declaration_hashes(&frozen, &ps.ps_sig)),
+                )
+            }
+            None => (signature_fingerprint(&HashGraph::of(&sig.type_graph), &sig.ps_sig), None),
+        };
+        (shared, fingerprint, hashes)
+    };
+    pps.fingerprint = fingerprint;
+    pps.shared_item_hashes = hashes;
+    let pps = Arc::new(pps);
+    if pps.shareable && let Some((ps, _)) = &shared {
+        let cached = pool.pers_struct(&pps, || Some(ps.clone()))
+            .expect("a prepared shared graph is registered once");
+        store.insert_pers_struct(pps.clone(), cached);
     }
-    pps
+    (pps, shared)
+}
+
+/// Prepare the address-keyed pool and worker map before signature release.
+pub fn publish_pers_struct(
+    pps: PortablePersStruct,
+    ctx: &TypeContext,
+    _mode: SignaturePublicationMode,
+) -> Arc<PortablePersStruct> {
+    prepare_publication(pps, ctx, false).0
 }
 
 /// [`publish_pers_struct`] in signature check mode
@@ -1734,52 +1802,19 @@ pub fn publish_pers_struct(
 /// a graph of the pool that no reader is given. Only a full pool leaves a
 /// unit without a comparison.
 pub fn publish_pers_struct_checked(
-    mut pps: PortablePersStruct,
+    pps: PortablePersStruct,
     ctx: &TypeContext,
-    mode: SignaturePublicationMode,
+    _mode: SignaturePublicationMode,
 ) -> (Arc<PortablePersStruct>, super::signature_check::Comparison) {
     use super::shared_reader::{FrozenGraph, portable_signature};
     use super::signature_check::{Comparison, Outcome};
-    pps.published_generation = Some(crate::types::thread_store::build_generation());
-    let pps = Arc::new(pps);
+    let (pps, shared) = prepare_publication(pps, ctx, true);
     let store = ctx.thread_store();
     let pool = store.shared_pool();
     let decoded = pps.decoded.lock().unwrap();
     let portable = &decoded.as_ref().expect("new publication").0;
-    let (shared_graph, shared) = if pps.shareable {
-        let mut base = None;
-        let ps = pool.pers_struct(&pps, || {
-            let (ps, at) = shared_pers_struct_at(&pps, portable, pool)?;
-            base = Some(at);
-            Some(ps)
-        });
-        if let Some(ps) = &ps {
-            store.insert_pers_struct(pps.clone(), ps.clone());
-        }
-        let shared_graph = match mode {
-            SignaturePublicationMode::Eager => "published",
-            SignaturePublicationMode::OnDemand => "forced: no dependent in this build",
-        };
-        (
-            shared_graph,
-            ps.zip(base).map(|(ps, base)| (ps.ps_sig.clone(), base)),
-        )
-    } else {
-        let intern = |name: &str| pool.intern_longident_name(name);
-        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-        let shared = internalize_signature_into_shared(
-            &portable.ps_sig,
-            &portable.type_graph,
-            &portable.locations,
-            &files,
-            pool,
-            Some(&pps.ps_filename),
-        );
-        (
-            "forced: not shareable",
-            shared.map(|(sig, base)| (Arc::new(sig), base)),
-        )
-    };
+    let shared_graph = if pps.shareable { "published" } else { "forced: not shareable" };
+    let shared = shared.map(|(ps, base)| (ps.ps_sig.clone(), base));
     let comparison = match shared {
         None => Comparison::not_applicable(shared_graph, "the shared pool is full"),
         Some((sig, base)) => {
@@ -1798,13 +1833,16 @@ pub fn publish_pers_struct_checked(
                 shared_graph,
                 carried: crate::types::shared_store::graph_at(&pages, base).carried.needed(),
                 outcomes: [
-                    Outcome::fingerprint(pps.fingerprint, signature_fingerprint(&frozen, &sig)),
+                    Outcome::fingerprint(
+                        signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig),
+                        pps.fingerprint,
+                    ),
                     Outcome::item_hashes(
                         &items(super::item_deps::item_declaration_hashes(
                             &HashGraph::of(&portable.type_graph),
                             &portable.ps_sig,
                         )),
-                        &items(super::item_deps::item_declaration_hashes(&frozen, &sig)),
+                        &items(pps.shared_item_hashes.as_ref().expect("shared publication hashes").clone()),
                     ),
                     Outcome::bytes(
                         &encode(portable),
@@ -2699,7 +2737,7 @@ mod identity_tests {
     #[test]
     fn publication_fills_the_pool_under_the_registry_arc() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        let portable = serialize_pers_struct(
+        let mut portable = serialize_pers_struct(
             &PersStruct {
                 ps_name: "Published".into(),
                 ps_sig: Arc::new(vec![]),
@@ -2711,10 +2749,14 @@ mod identity_tests {
             &ctx,
             None,
         );
+        let expected_fingerprint = portable.fingerprint;
+        portable.fingerprint = expected_fingerprint.wrapping_add(1);
         let published = {
             let _guard = crate::perf_counters::SignaturePublication::begin();
             publish_pers_struct(portable, &ctx, SignaturePublicationMode::Eager)
         };
+        assert_eq!(published.fingerprint, expected_fingerprint);
+        assert!(published.shared_item_hashes.is_some());
         assert!(published.has_decoded_signatures());
         let pool = ctx.thread_store().shared_pool();
         let shared = pool
@@ -2730,7 +2772,7 @@ mod identity_tests {
     }
 
     #[test]
-    fn leaf_publication_encodes_then_internalizes_on_demand() {
+    fn leaf_publication_hashes_shared_nodes_and_encodes_later() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let portable = serialize_pers_struct(
             &PersStruct {
@@ -2749,7 +2791,7 @@ mod identity_tests {
             publish_pers_struct(portable, &ctx, SignaturePublicationMode::OnDemand)
         };
         assert!(published.has_decoded_signatures());
-        assert!(ctx.thread_store().pers_struct(&published).is_none());
+        assert!(ctx.thread_store().pers_struct(&published).is_some());
         published.prepare_for_storage();
         assert!(!published.has_decoded_signatures());
 
@@ -2761,7 +2803,7 @@ mod identity_tests {
                 shared_pers_struct(&published, &published.signature(), pool)
             })
             .unwrap();
-        assert!(built.get(), "leaf allocated a pool slot eagerly");
+        assert!(!built.get(), "leaf rebuilt the graph used for hashing");
         let loaded = internalize_pers_struct(published.clone(), &ctx);
         assert!(Arc::ptr_eq(&shared, &loaded));
         assert!(Arc::ptr_eq(

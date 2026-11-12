@@ -485,10 +485,25 @@ pub struct SignatureSummary {
 impl SignatureSummary {
     /// The summary of `sig`, the published signature of `unit`.
     pub fn of(unit: &str, sig: &super::portable_types::PortableSignature) -> Self {
+        Self::with_item_hashes(unit, sig, None)
+    }
+
+    /// Reuse declaration hashes computed from the shared publication graph.
+    /// Stored units have no live graph and compute them from decoded bytes.
+    pub(crate) fn with_item_hashes(
+        unit: &str,
+        sig: &super::portable_types::PortableSignature,
+        shared_hashes: Option<&[(Kind, Name, u64)]>,
+    ) -> Self {
         crate::perf_counters::assert_signature_released();
         let unit = Name::new(unit);
-        let graph = super::portable_types::HashGraph::of(&sig.type_graph);
-        let item_hashes = item_declaration_hashes(&graph, &sig.ps_sig);
+        let item_hashes = match shared_hashes {
+            Some(hashes) => hashes.to_vec(),
+            None => item_declaration_hashes(
+                &super::portable_types::HashGraph::of(&sig.type_graph),
+                &sig.ps_sig,
+            ),
+        };
         SignatureSummary {
             unit,
             item_hashes,

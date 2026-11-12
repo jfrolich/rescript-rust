@@ -1,0 +1,1 @@
+- Compute published signature fingerprints and item digests from the shared graph, retaining portable hashing for stored and fallback units.
