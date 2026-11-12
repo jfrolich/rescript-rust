@@ -547,6 +547,9 @@ pub struct ParseArena {
     /// Derived structure-value groups, indexed by their binding-list start.
     /// Only group starts have a bit; no source-location or identifier keys.
     derived_value_groups: Vec<u64>,
+    /// Plans of derived items: `StructureItemDesc::Pstr_derived` handles
+    /// index these pools.
+    plans: crate::binary_ast::derive::plan::Plans,
     /// Pools behind record field lists and match/try case lists.
     expr_field_lists: ListPool<ExpressionRecordField>,
     pat_field_lists: ListPool<PatternRecordField>,
@@ -1065,6 +1068,7 @@ impl Default for ParseArena {
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
             derived_value_groups: Vec::new(),
+            plans: Default::default(),
             derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
@@ -2975,6 +2979,18 @@ impl ParseArena {
             self.derived_value_groups.len().max(index / 64 + 1), 0,
         );
         self.derived_value_groups[index / 64] |= 1 << (index % 64);
+    }
+
+    /// The plan pools of derived items. Cost: O(1).
+    #[inline]
+    pub fn plans(&self) -> &crate::binary_ast::derive::plan::Plans {
+        &self.plans
+    }
+
+    /// The plan pools, for the seam that builds plans. Cost: O(1).
+    #[inline]
+    pub(crate) fn plans_mut(&mut self) -> &mut crate::binary_ast::derive::plan::Plans {
+        &mut self.plans
     }
 
     /// Provenance of a structure value group, independent of names and locations.

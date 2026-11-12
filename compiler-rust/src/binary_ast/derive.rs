@@ -3,6 +3,8 @@
 
 /// Optional derived-code measurement, owned by one compilation.
 pub mod census;
+/// The plan of a derived item, stored in the `ParseArena`.
+pub mod plan;
 mod shape;
 pub(super) use shape::record as record_shapes;
 
