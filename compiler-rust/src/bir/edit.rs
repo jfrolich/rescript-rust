@@ -434,6 +434,12 @@ impl Bir {
         )
     }
     fn register_kind(&mut self, node: Node, add: bool) {
+        if node.op() == Op::Var {
+            if let Some(scope) = &mut self.js_scope {
+                let View::Var { var } = node.view(&self.lists) else { unreachable!() };
+                scope.occurrence(var, add);
+            }
+        }
         if self.is_weighted_switch(node) {
             if add {
                 self.weighted_switches += 1;

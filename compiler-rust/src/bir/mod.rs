@@ -44,6 +44,7 @@ pub struct Bir {
     pools: Pools,
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
+    js_scope: Option<lower::scope::Scope>,
     death_candidates: Vec<NodeId>,
     deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
@@ -134,6 +135,7 @@ impl Bir {
         self.vars.binder.push(None);
         self.vars.fact.push(Fact::Unknown);
         self.vars.printed.push(None);
+        if let Some(scope) = &mut self.js_scope { scope.push(); }
         id
     }
     /// Allocate a contiguous run of fresh parameters/binders.

@@ -16,7 +16,7 @@ pub struct Imported {
     pub arena: Bir,
     /// Synthetic top-level statement list.
     pub root: NodeId,
-    idents: Vec<Ident>,
+    pub(super) idents: Vec<Ident>,
     modules: Vec<js::ModuleId>,
     exports: Vec<Ident>,
     export_set: ahash::AHashSet<Ident>,

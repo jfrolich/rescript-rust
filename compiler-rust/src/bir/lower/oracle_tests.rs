@@ -48,6 +48,15 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
                 .validate(Some(lowered.program.root))
                 .unwrap();
             let actual = bridge_j::export_js(&lowered.program).unwrap();
+            let mut counts = crate::lambda::js_pass_tailcall_inline::UseCounts::default();
+            crate::js_ir::walk::walk_block(&mut counts, &actual.program.arena, &actual.program.block);
+            let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+            for (index, row) in scope.uses.iter().enumerate() {
+                let ident = lowered.program.idents[index];
+                assert_eq!(row.built as usize, counts.counts.get(&ident).copied().unwrap_or(0),
+                    "built occurrences for {ident:?}, context {cx:?}");
+                assert_eq!(row.remaining, row.built);
+            }
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
             compiler.check_div_by_zero = checks;
