@@ -1558,7 +1558,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_in_signature();
         }
 
-        let result = (|| self.data.flags.in_signature)();
+        let result = self.data.flags.in_signature;
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.is_in_signature();
@@ -1575,7 +1575,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_implicit_coercion();
         }
 
-        let result = (|| self.data.flags.implicit_coercion)();
+        let result = self.data.flags.implicit_coercion;
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.is_implicit_coercion();
@@ -1674,8 +1674,7 @@ impl Env {
                 .find_all_constructors_marking(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .constrs
                 .find_all_marking(name)
                 .into_iter()
@@ -1685,8 +1684,7 @@ impl Env {
                         mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
                     )
                 })
-                .collect()
-        })();
+                .collect();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_all_constructors_marking(name);
@@ -1711,8 +1709,7 @@ impl Env {
                 .find_all_labels_marking(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .labels
                 .find_all_marking(name)
                 .into_iter()
@@ -1722,8 +1719,7 @@ impl Env {
                         mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
                     )
                 })
-                .collect()
-        })();
+                .collect();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_all_labels_marking(name);
@@ -1940,13 +1936,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_value(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .values
                 .find_by_name(name)
                 .map(|v| v.as_ref())
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_value(name);
@@ -1971,13 +1965,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_value_with_id(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .values
                 .find_by_name_with_id(name)
                 .map(|(id, v)| (id, v.as_ref()))
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_value_with_id(name);
@@ -2007,12 +1999,10 @@ impl Env {
                 .find_value_arc_with_path(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .values
                 .find_by_name_with_path(name)
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_value_arc_with_path(name);
@@ -2032,7 +2022,7 @@ impl Env {
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let mut tables: Vec<_> =
-                    (|| self.data.values.iter().map(|(id, v)| (id, v.as_ref())))().collect();
+                    self.data.values.iter().map(|(id, v)| (id, v.as_ref())).collect();
                 let mut other: Vec<_> = log.iter_values().collect();
                 tables.sort_by_key(|(id, _)| (id.stamp(), id.name()));
                 other.sort_by_key(|(id, _)| (id.stamp(), id.name()));
@@ -2080,7 +2070,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_value(path);
         }
 
-        let result = (|| match path.view() {
+        let result = match path.view() {
             PathView::Pident(id) => self
                 .data
                 .values
@@ -2089,7 +2079,7 @@ impl Env {
                 .ok_or_else(|| EnvError::ValueNotFound(id.name().into())),
             PathView::Pdot(_, name, _) => self.find_value(name),
             PathView::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
-        })();
+        };
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.lookup_value(path);
@@ -2167,7 +2157,6 @@ impl Env {
         id: Ident,
         variance: Vec<super::variance::Variance>,
     ) -> Option<Arc<TypeDeclaration>> {
-        let log_variance = self.data.shadow.as_ref().map(|_| variance.clone());
         let result = (|| {
             let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
             decl.type_variance = variance;
@@ -2179,7 +2168,9 @@ impl Env {
         if self.data.shadow.is_some() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                let other = log.update_type_variance(id, log_variance.unwrap());
+                let variance = result.as_ref()
+                    .map(|decl| decl.type_variance.clone()).unwrap_or_default();
+                let other = log.update_type_variance(id, variance);
                 shadow::compare("update_type_variance", id.name(), &result, &other);
             });
         }
@@ -2193,13 +2184,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .types
                 .find_by_name(name)
                 .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_type(name);
@@ -2227,13 +2216,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type_with_path(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .types
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_type_with_path(name);
@@ -2263,12 +2250,10 @@ impl Env {
                 .find_type_arc_with_path(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .types
                 .find_by_name_with_path(name)
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_type_arc_with_path(name);
@@ -2306,7 +2291,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().fold_modtype_names();
         }
 
-        let result = (|| fold_names_list(self.data.modtypes.fold_name_order()))();
+        let result = fold_names_list(self.data.modtypes.fold_name_order());
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.fold_modtype_names();
@@ -2332,16 +2317,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type_by_ident(id);
         }
 
-        let result = (|| {
-            // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
-            // `IdTbl.find_same`, so same-name bindings must not be treated as an
-            // exact hit when expanding a constructor path by identifier.
-            self.data
+        let result = self.data
                 .types
                 .find_by_ident(id)
                 .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
-        })();
+                .ok_or_else(|| EnvError::TypeNotFound(id.name().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_type_by_ident(id);
@@ -2368,7 +2348,7 @@ impl Env {
                 .find_type_arc_by_ident(id);
         }
 
-        let result = (|| self.data.types.find_by_ident(id))();
+        let result = self.data.types.find_by_ident(id);
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_type_arc_by_ident(id);
@@ -2395,12 +2375,10 @@ impl Env {
                 .lookup_type_arc_by_ident(id);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .types
                 .find_by_ident(id)
-                .or_else(|| self.data.types.find_by_name(id.name_atom()))
-        })();
+                .or_else(|| self.data.types.find_by_name(id.name_atom()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.lookup_type_arc_by_ident(id);
@@ -2548,13 +2526,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_constructor(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .constrs
                 .find_by_name(name)
                 .map(|c| c.as_ref())
-                .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_constructor(name);
@@ -2584,14 +2560,12 @@ impl Env {
                 .find_all_constructors(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .constrs
                 .find_all(name)
                 .into_iter()
                 .map(|c| c.as_ref())
-                .collect()
-        })();
+                .collect();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_all_constructors(name);
@@ -2641,7 +2615,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().type_label_family(id);
         }
 
-        let result = (|| self.data.type_label_families.get(id).copied())();
+        let result = self.data.type_label_families.get(id).copied();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.type_label_family(id);
@@ -2658,13 +2632,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_label(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .labels
                 .find_by_name(name)
                 .map(|l| l.as_ref())
-                .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::LabelNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_label(name);
@@ -2686,14 +2658,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_all_labels(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .labels
                 .find_all(name)
                 .into_iter()
                 .map(|l| l.as_ref())
-                .collect()
-        })();
+                .collect();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_all_labels(name);
@@ -2779,11 +2749,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_functor_arg_path(path);
         }
 
-        let result = (|| match path.view() {
+        let result = match path.view() {
             PathView::Pident(id) => self.data.functor_args.contains(id),
             PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             PathView::Papply(_, _) => true,
-        })();
+        };
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.is_functor_arg_path(path);
@@ -2845,13 +2815,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .modules
                 .find_by_name(name)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_module(name);
@@ -2876,13 +2844,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module_with_id(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .modules
                 .find_by_name_with_id(name)
                 .map(|(id, m)| (id, m.as_ref()))
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_module_with_id(name);
@@ -2915,13 +2881,11 @@ impl Env {
                 .find_module_with_path(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .modules
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_module_with_path(name);
@@ -3036,7 +3000,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().has_module_ident(id);
         }
 
-        let result = (|| self.data.modules.find_by_ident(id).is_some())();
+        let result = self.data.modules.find_by_ident(id).is_some();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.has_module_ident(id);
@@ -3057,17 +3021,11 @@ impl Env {
                 .lookup_module_ident_exact(id);
         }
 
-        let result = (|| {
-            // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
-            // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
-            // own name fallback in env.ml:1000-1007; exact paths must not resolve to
-            // a local/opened same-name module.
-            self.data
+        let result = self.data
                 .modules
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
-        })();
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.lookup_module_ident_exact(id);
@@ -3088,18 +3046,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module_same(id);
         }
 
-        let result = (|| {
-            // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
-            // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
-            // skips opened components. This keeps alias scraping from resolving a
-            // persistent alias target through an unrelated opened component with
-            // the same name.
-            self.data
+        let result = self.data
                 .modules
                 .find_local_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
-        })();
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_module_same(id);
@@ -3251,7 +3202,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_module(path);
         }
 
-        let result = (|| {
+        let result = {
             fn lookup_submodule_in_module_type<'a>(
                 env: &'a Env,
                 mty: &'a ModuleType,
@@ -3307,7 +3258,7 @@ impl Env {
 
             let mut visiting = smallvec::SmallVec::new();
             lookup_module_inner(self, path, &mut visiting)
-        })();
+        };
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.lookup_module(path);
@@ -3332,7 +3283,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().normalize_path(ctx, path);
         }
 
-        let result = (|| *self.normalize_shared_path(ctx, &Arc::new(*path), 0))();
+        let result = *self.normalize_shared_path(ctx, &Arc::new(*path), 0);
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.normalize_path(ctx, path);
@@ -3356,13 +3307,13 @@ impl Env {
                 .normalize_path_prefix(ctx, path);
         }
 
-        let result = (|| match path.view() {
+        let result = match path.view() {
             PathView::Pdot(..) => {
                 ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
             }
             PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
-        })();
+        };
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.normalize_path_prefix(ctx, path);
@@ -3428,13 +3379,11 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_modtype(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .modtypes
                 .find_by_name(name)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_modtype(name);
@@ -3467,13 +3416,11 @@ impl Env {
                 .find_modtype_with_path(name);
         }
 
-        let result = (|| {
-            self.data
+        let result = self.data
                 .modtypes
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
-        })();
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()));
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.find_modtype_with_path(name);
@@ -3553,7 +3500,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().has_local_constraints();
         }
 
-        let result = (|| !self.data.local_constraints.is_empty())();
+        let result = !self.data.local_constraints.is_empty();
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
                 let other = log.has_local_constraints();
@@ -3616,12 +3563,10 @@ impl Env {
     pub fn iter_local_constraints(&self) -> impl Iterator<Item = (&Path, &TypeDeclaration)> {
         if let Some(log) = &self.data.shadow {
             shadow::cold(|| {
-                let mut tables: Vec<_> = (|| {
-                    self.data
+                let mut tables: Vec<_> = self.data
                         .local_constraints
                         .iter()
                         .map(|(p, d)| (p, d.as_ref()))
-                })()
                 .collect();
                 let mut other: Vec<_> = log.iter_local_constraints().collect();
                 tables.sort_by_key(|(path, _)| (path.name(), path.head().stamp()));
