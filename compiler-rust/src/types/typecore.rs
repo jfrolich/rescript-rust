@@ -9999,7 +9999,7 @@ fn type_application(
         },
     }
 
-    #[derive(Clone)]
+    #[derive(Clone, Copy)]
     /// An omitted parameter: OCaml keeps its `lbl` (typecore.ml:4191-4200).
     struct OmittedArrow {
         param: TypeArg,
@@ -10216,9 +10216,9 @@ fn type_application(
             if matches!(&desc.val_kind, crate::types::ValueKind::ValPrim(prim) if prim.prim_name == "%ignore")
     );
     let mut remaining_args: smallvec::SmallVec<[usize; 8]> = (0..args.len()).collect();
-    let mut argument_thunks: Vec<ApplyArgThunk<'_>> = Vec::with_capacity(function_arity);
-    let mut omitted: Vec<OmittedArrow> = Vec::new();
-    let mut ignored: Vec<OmittedArrow> = Vec::new();
+    let mut argument_thunks: smallvec::SmallVec<[ApplyArgThunk<'_>; 6]> = smallvec::SmallVec::new();
+    let mut omitted: smallvec::SmallVec<[OmittedArrow; 2]> = smallvec::SmallVec::new();
+    let mut ignored: smallvec::SmallVec<[OmittedArrow; 2]> = smallvec::SmallVec::new();
 
     for (param, inst_param) in ctx
         .type_args(declared_params)
@@ -10364,7 +10364,7 @@ fn type_application(
     let provided = ignored.len() + args.len();
     let fully_applied = provided >= function_arity;
     let current_ty0 = inst_ret;
-    let mut typed_args = Vec::with_capacity(argument_thunks.len());
+    let mut typed_args: smallvec::SmallVec<[ApplyArg; 6]> = smallvec::SmallVec::new();
     for pending_arg in argument_thunks.into_iter() {
         match pending_arg {
             ApplyArgThunk::Provided {
@@ -10518,8 +10518,12 @@ fn type_application(
             result_ty,
             tctx.type_ctx.store_typed_env(env),
         );
-        tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
+        if attributes.is_empty() {
+            typed_node
+        } else {
+            tctx.typed
+                .with_exp_attributes(typed_node, attributes.to_vec().into())
+        }
     })
 }
 
