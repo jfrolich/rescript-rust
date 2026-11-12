@@ -2131,7 +2131,7 @@ fn build_local_module_components(
     // signature. Every child `comp_components` thunk should capture that
     // evolving environment, independent of typedtree output mode; env.ml:1579
     // stores the raw child module only after creating the thunk.
-    let mut working_env = Some(env.clone_preserve_id());
+    let mut working_env = Some(env.clone());
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
     let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();

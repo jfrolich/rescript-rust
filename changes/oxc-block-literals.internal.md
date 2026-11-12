@@ -1,0 +1,1 @@
+- Emit block literals through the opt-in oxc JavaScript printer, preserving record fields, variant tags, exception payloads, and debug constructor names.

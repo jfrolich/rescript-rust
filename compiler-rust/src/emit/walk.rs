@@ -175,3 +175,58 @@ pub(super) fn member_form(name: &str) -> (&str, bool) {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     (name, dot)
 }
+
+/// Validate block shapes before either assigning names or building AST nodes.
+/// Keep shape-specific fallbacks here so naming cannot accept a block the
+/// builder rejects (or reject a block the builder can emit).
+pub(super) fn block_supported(
+    elements: &[Expr],
+    tag: &crate::lambda::TagInfo,
+) -> Result<(), Unsupported> {
+    use crate::lambda::TagInfo;
+    let runtime = match tag {
+        TagInfo::Constructor(c) if c.name != "::" => Some(&*c.runtime),
+        TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => match &*r.runtime {
+            crate::types::VariantBlock::Tagged(t) => Some(t),
+            crate::types::VariantBlock::Untagged { .. } => None,
+        },
+        TagInfo::PolyVar(_) if elements.is_empty() => {
+            return Err(Unsupported("block literal: empty polymorphic variant"));
+        }
+        _ => None,
+    };
+    if let Some(t) = runtime
+        && let crate::types::VariantLiteralTag::Float(s) = &t.tag.literal
+    {
+        block_float_tag(s)?;
+    }
+    Ok(())
+}
+
+pub(super) fn block_float_tag(s: &str) -> Result<f64, Unsupported> {
+    s.parse::<f64>()
+        .map_err(|_| Unsupported("block literal: float tag"))
+}
+
+/// Children in legacy print order, with their original field indices.
+/// `print_caml_block` skips only literal Undefined optional fields: such a
+/// node cannot contain any identifiers. The legacy free-variable scan visits
+/// it, but that has no naming effect. PolyVar prints at most NAME and VAL.
+/// The analysis pass separately retains the legacy scan of extra polyvar
+/// elements, which can affect function-environment reservations in malformed IR.
+pub(super) fn block_elements<'a>(
+    a: &'a JsArena,
+    elements: &'a [Expr],
+    tag: &'a crate::lambda::TagInfo,
+) -> impl Iterator<Item = (usize, Expr)> + 'a {
+    use crate::lambda::TagInfo;
+    let optional_fields = match tag {
+        TagInfo::Record(r) if !r.array && r.fields.len() == elements.len() => Some(&r.fields),
+        TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => Some(&r.fields),
+        _ => None,
+    };
+    elements.iter().copied().enumerate().filter(move |&(i, e)| {
+        (!matches!(tag, TagInfo::PolyVar(_)) || i < 2)
+            && !optional_fields.is_some_and(|fields| fields[i].1 && undefined(a, e))
+    })
+}

@@ -130,7 +130,7 @@ mod oracle_tests {
         let legacy = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
         options.js_printer = PrinterMode::Oxc(stats.clone());
         let actual = compile_source_to_js_with_options(source, "Emitter.res", &options).unwrap();
-        assert_eq!(stats.snapshot().supported, 1, "{:?}", stats.snapshot());
+        assert_eq!(stats.snapshot().supported, 1, "{source}: {:?}", stats.snapshot());
         let mode = ReformatOptions {
             split_file: true,
             drop_decoration_comments: true,
@@ -174,6 +174,25 @@ mod oracle_tests {
             "let default = 1; let default = add(default, 1)",
             "let f = x => add(x, 1); let g = x => add(x, 2)",
             "@val external x: int = \"x\"; let f = x => add(x, 1); let g = y => add(x, y)",
+        ] {
+            for commonjs in [false, true] {
+                oracle(
+                    &format!("external add: (int, int) => int = \"%addint\"; {source}"),
+                    commonjs,
+                );
+            }
+        }
+    }
+    #[test]
+    fn block_payloads_keep_scoped_names() {
+        for source in [
+            "type t = {left: int, right: int, missing?: int}; let f = x => { let y = x; let x = add(x, 1); {left: y, right: x} }",
+            "type t = A(int, int) | B; let f = x => { let y = x; let x = add(x, 1); A(y, x) }",
+            "type t = A({left: int, right: int, missing?: int}) | B; let f = x => { let y = x; let x = add(x, 1); A({left: y, right: x}) }",
+            "let f = x => { let y = x; let x = add(x, 1); (y, x) }",
+            "let f = (x, tail) => { let y = x; let x = add(x, 1); list{y, x, ...tail} }",
+            "let f = x => { let x = add(x, 1); #Value(x) }",
+            "let f = x => { module M = { let x = add(x, 1) }; M.x }",
         ] {
             for commonjs in [false, true] {
                 oracle(
