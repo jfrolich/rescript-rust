@@ -4190,6 +4190,14 @@ impl LambdaCompiler {
                 let body = self.compile_tail_loop_return_output(a, body, tail_loop);
                 binding.append(body)
             }
+            Node::LetRec { ids, values, body } => {
+                // compiler/core/lam_compile.ml:2046-2057 preserves the outer
+                // continuation after compiling the nested recursive bindings.
+                let bindings = letrec_bindings(a, ids, values);
+                let recursive = self.compile_recursive_bindings_output(a, &bindings);
+                let body = self.compile_tail_loop_return_output(a, body, tail_loop);
+                recursive.append(body)
+            }
             Node::Apply { func, args, info } => {
                 if let Some(block) = self.try_compile_self_tailcall_block(a, func, args, tail_loop)
                 {
@@ -4390,6 +4398,9 @@ impl LambdaCompiler {
                 sw,
                 &plan,
             );
+        }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_tail_loop_switch_return_block_inner(a, scrut, sw, tail_loop);
         }
         self.with_switch_depth(|this| {
             this.compile_tail_loop_switch_return_block_inner(a, scrut, sw, tail_loop)
@@ -5149,8 +5160,9 @@ impl LambdaCompiler {
         else_: Lam,
     ) -> BlockOutput {
         let cond_compiled = self.compile_expr(a, cond);
-        let then_block_raw = self.compile_return_block(a, then_);
-        let else_block_raw = self.compile_return_block(a, else_);
+        let labels_before = self.loop_label_counter;
+        let mut then_block_raw = self.compile_return_block(a, then_);
+        let mut else_block_raw = self.compile_return_block(a, else_);
 
         // OCaml's preliminary `NeedValue should_return` pass is the reference
         // shape (compiler/core/lam_compile.ml:1495-1524). Rust's
@@ -5182,8 +5194,21 @@ impl LambdaCompiler {
         // reconstructing a value from later return blocks: switches and other
         // statement-producing forms must keep their prelude, which makes OCaml
         // fall through to `S.if_` below.
+        // compiler/core/lam_compile.ml:1636-1644 probes values before
+        // lowering return branches. Only label allocation makes that order
+        // observable here (lam_compile_context.ml:92-102). The counter already
+        // records that event: do not probe every foldable conditional or scan
+        // its Lambda body looking for a possible label.
+        let allocated_labels = self.loop_label_counter != labels_before;
+        if allocated_labels {
+            self.loop_label_counter = labels_before;
+        }
         let then_value = self.compile_expr(a, then_);
         let else_value = self.compile_expr(a, else_);
+        if allocated_labels {
+            then_block_raw = self.compile_return_block(a, then_);
+            else_block_raw = self.compile_return_block(a, else_);
+        }
         if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
             let expr = JE::cond(
@@ -5501,6 +5526,9 @@ impl LambdaCompiler {
                 &plan,
             );
         }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_assignment_block_inner(a, result, scrut, sw);
+        }
         self.with_switch_depth(|this| {
             this.compile_switch_assignment_block_inner(a, result, scrut, sw)
         })
@@ -5660,6 +5688,9 @@ impl LambdaCompiler {
                 &plan,
             );
         }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_return_block_inner(a, scrut, sw);
+        }
         self.with_switch_depth(|this| this.compile_switch_return_block_inner(a, scrut, sw))
     }
 
@@ -5807,6 +5838,9 @@ impl LambdaCompiler {
                 sw,
                 &plan,
             );
+        }
+        if self.uses_named_variant_switch(a, sw) {
+            return self.compile_switch_effect_block_inner(a, scrut, sw);
         }
         self.with_switch_depth(|this| this.compile_switch_effect_block_inner(a, scrut, sw))
     }
@@ -6774,7 +6808,9 @@ fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) ->
         View::Apply { func, .. } => a
             .as_var(func)
             .is_some_and(|id| tail_targets.iter().any(|target| id.same(target))),
-        View::Let(_, _, _, body) => function_has_self_tailcall(a, tail_targets, body),
+        View::Let(_, _, _, body) | View::LetRec(_, _, body) => {
+            function_has_self_tailcall(a, tail_targets, body)
+        }
         View::If(_, then_, else_) => {
             function_has_self_tailcall(a, tail_targets, then_)
                 || function_has_self_tailcall(a, tail_targets, else_)
@@ -6811,7 +6847,6 @@ fn function_has_self_tailcall(a: &LamArena, tail_targets: &[Ident], lam: Lam) ->
         | View::GlobalModule(_)
         | View::Const(_)
         | View::Function { .. }
-        | View::LetRec(..)
         | View::StaticRaise(..)
         | View::Break
         | View::Continue

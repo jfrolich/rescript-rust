@@ -1,0 +1,1 @@
+- Match reference JavaScript loop labels under conditional returns and preserve self-tail calls after nested recursive bindings.
