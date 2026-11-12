@@ -221,3 +221,25 @@ node-kind structural/text round trips, rare optional metadata cases, variable
 facts, and 10,000-element step-count tests. Instruction count is checked by the
 pull request's unchanged default-mode CI gate. No emitter view trait or J
 optimization round is implemented here.
+
+
+## Direct J emission (S3.1b)
+
+`RESCRIPT_JS_PRINTER=oxc-bir` imports the final JS program and reads the J tree
+through `bir::emit_view::EmitterView`. It does not call `export_js`. Unsupported
+imports use the JS-IR oxc emitter and record `bridge_unsupported` independently
+of printer support. The default printer and the shadow bridge modes are unchanged.
+
+Module, import, export and reservation identities are now associated with VarIds
+through the importer's existing identity table. These associations are legacy
+bridge metadata, not new capture/order fields in the Bir schema. Unbound identities
+keep JS_GLOBAL. The emitter's name table addresses these slots directly, including
+qualified references; it does not construct an identifier map at use sites.
+
+The exact same-printer gate covers JavaScript and supported source-map JSON.
+The public oracle has 941 emitted outputs and four existing fallbacks; the
+3,735-module application has 3,980 byte-identical generated files and no import
+fallback. Naming computes exact function environments and print-order requests in
+one traversal; the missing maintained relations and edit costs are described in
+BACKEND_REDESIGN.md E.3. PRINTER_INSTRUCTIONS.md records the measurement
+procedure; final measured costs are still pending.
