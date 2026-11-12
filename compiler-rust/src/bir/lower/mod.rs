@@ -433,9 +433,6 @@ impl ProbeRules for State {
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, args } => {
-                if Self::supported_primitive(&self.arena.primitive(primitive).primitive) {
-                    return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim { source: node, primitive, operands: args.to_vec() })));
-                }
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
                     Primitive::Psequand | Primitive::Psequor => "if",
@@ -450,7 +447,9 @@ impl ProbeRules for State {
                     Primitive::Pawait => "await",
                     Primitive::Pduprecord => "record copy",
                     Primitive::PrecordRest(_) => "record rest",
-                    _ => "prim",
+                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                        source: node, primitive, operands: args.to_vec(),
+                    }))),
                 };
                 return Err(Unsupported(reason));
             }

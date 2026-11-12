@@ -13,18 +13,6 @@ pub(super) struct Prim {
 }
 
 impl State {
-    pub(super) fn supported_primitive(primitive: &Primitive) -> bool {
-        matches!(primitive, Primitive::Pstringlength | Primitive::Parraylength | Primitive::PfnArity
-            | Primitive::Pstringadd | Primitive::Pnot | Primitive::Pidentity | Primitive::Pfloatofint
-            | Primitive::Pignore | Primitive::Ptypeof | Primitive::PrawJsCode(_)
-            | Primitive::PcreateExtension(_) | Primitive::PinitMod | Primitive::PupdateMod
-            | Primitive::Praise | Primitive::Pdebugger
-            | Primitive::Pmakeblock(_, _) | Primitive::Pmakelist | Primitive::Pmakearray | Primitive::Pfield(_, _) | Primitive::Psetfield(_, _) | Primitive::Pobjtag | Primitive::Pobjsize | Primitive::PisPolyVarBlock | Primitive::Pstringrefs | Primitive::Pstringrefu | Primitive::Parrayrefu | Primitive::Parrayrefs | Primitive::Parraysetu | Primitive::Ptemplate(_) | Primitive::PtaggedTemplate(_)
-            | Primitive::Psome | Primitive::PsomeNotNest | Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest | Primitive::PisNotNone | Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt | Primitive::PisNull | Primitive::PisUndefined | Primitive::PisNullUndefined
-            | Primitive::Pintcomp(_) | Primitive::Pboolcomp(_) | Primitive::Pstringcomp(_) | Primitive::Pbigintcomp(_) | Primitive::Pobjcomp(_) | Primitive::Pfloatcomp(_) | Primitive::Pjscomp(_) | Primitive::Pobjorder | Primitive::Pobjmin | Primitive::Pobjmax | Primitive::Pboolorder | Primitive::Pboolmin | Primitive::Pboolmax | Primitive::Pintorder | Primitive::Pintmin | Primitive::Pintmax | Primitive::Pfloatorder | Primitive::Pfloatmin | Primitive::Pfloatmax | Primitive::Pbigintorder | Primitive::Pbigintmin | Primitive::Pbigintmax | Primitive::Pstringorder | Primitive::Pstringmin | Primitive::Pstringmax
-            | Primitive::Paddint | Primitive::Psubint | Primitive::Pmulint | Primitive::Pdivint | Primitive::Pmodint | Primitive::Ppowint | Primitive::Pandint | Primitive::Porint | Primitive::Pxorint | Primitive::Plslint | Primitive::Paddfloat | Primitive::Psubfloat | Primitive::Pmulfloat | Primitive::Pdivfloat | Primitive::Pmodfloat | Primitive::Ppowfloat | Primitive::Paddbigint | Primitive::Psubbigint | Primitive::Pmulbigint | Primitive::Ppowbigint | Primitive::Pandbigint | Primitive::Porbigint | Primitive::Pxorbigint | Primitive::Plslbigint | Primitive::Pasrbigint | Primitive::Pasrint | Primitive::Pnotint | Primitive::Pnotbigint | Primitive::Pintoffloat | Primitive::Pnegint | Primitive::Pnegfloat | Primitive::Pnegbigint | Primitive::Plsrint | Primitive::Pdivbigint | Primitive::Pmodbigint)
-    }
-
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
             match self.arena.constant(value) {
@@ -95,6 +83,61 @@ impl State {
             }
         }
         let value = match primitive {
+            // P: compile_primitive_js, dictionaries: extract only literal-key
+            // tuple entries, exactly as the legacy filter_map does.
+            Primitive::Pmakedict => {
+                let entries = if let [array] = values.as_slice() {
+                    if let View::JArray { values: items } = self.arena.view(*array) {
+                        Some(items.iter().filter_map(|&item| {
+                            if let View::JBlockLit { values: [key, value], .. } = self.arena.view(item) {
+                                if let View::JStr { text } = self.arena.view(*key) { return Some((crate::bir::PropertyKey::Literal(text), *value)); }
+                            }
+                            None
+                        }).collect::<Vec<_>>())
+                    } else { None }
+                } else { None };
+                let result = if let Some(entries) = entries {
+                    let (keys, kept): (Vec<_>, Vec<_>) = entries.into_iter().unzip();
+                    for &value in &kept { self.arena.detach(value); }
+                    let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+                    plain::node(&mut self.arena, View::JObject { values: &kept, info }, 0)
+                } else { plain::node(&mut self.arena, View::JUndefined, 0) };
+                for value in values { self.arena.release(value); }
+                result
+            }
+            Primitive::PdictSpread => {
+                let mut keys = Vec::new();
+                let mut kept = Vec::new();
+                for arg in values {
+                    let entries = if let View::JObject { info, values } = self.arena.view(arg) {
+                        let crate::bir::JsPayload::Object(props) = self.arena.javascript(info) else { unreachable!() };
+                        props.iter().all(|p| matches!(p, crate::bir::PropertyKey::Literal(_) | crate::bir::PropertyKey::Symbol))
+                            .then(|| (props.clone(), values.to_vec()))
+                    } else { None };
+                    if let Some((props, values)) = entries {
+                        for &value in &values { self.arena.detach(value); }
+                        self.arena.release(arg);
+                        keys.extend(props); kept.extend(values);
+                    } else { keys.push(crate::bir::PropertyKey::Spread); kept.push(arg); }
+                }
+                let info = self.arena.js_info(crate::bir::JsPayload::Object(keys));
+                plain::node(&mut self.arena, View::JObject { values: &kept, info }, 0)
+            }
+            Primitive::PdictHas => {
+                if let [object, property] = values.as_slice() {
+                    plain::node(&mut self.arena, View::JIn { left: *property, right: *object }, 0)
+                } else {
+                    for value in values { self.arena.release(value); }
+                    plain::node(&mut self.arena, View::JUndefined, 0)
+                }
+            }
+            Primitive::ParraySpread => self.primitive_runtime("Primitive_array", "spread", &values),
+            Primitive::PlistSpread => self.primitive_runtime("Primitive_list", "spread", &values),
+            // P: compile_primitive_js, hashing runtime entry points.
+            Primitive::Phash => self.primitive_runtime("Primitive_hash", "hash", &values),
+            Primitive::PhashMixint => self.primitive_runtime("Primitive_hash", "hash_mix_int", &values),
+            Primitive::PhashMixstring => self.primitive_runtime("Primitive_hash", "hash_mix_string", &values),
+            Primitive::PhashFinalmix => self.primitive_runtime("Primitive_hash", "hash_final_mix", &values),
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
                 let info = self.arena.js_info(crate::bir::JsPayload::Block(tag));
@@ -316,7 +359,11 @@ impl State {
             }
             Primitive::Pstringlength => norm::je2_length(&mut self.arena, values[0], LengthObject::String),
             Primitive::Parraylength => norm::je2_length(&mut self.arena, values[0], LengthObject::Array),
-            _ => unreachable!("primitive admitted by dispatch"),
+            Primitive::Psequand | Primitive::Psequor | Primitive::PjsCall(_)
+            | Primitive::PjsApply | Primitive::PjsObjectCreate(_) | Primitive::PjsObjectGet(_)
+            | Primitive::PjsObjectSet(_) | Primitive::PjsFnMethod | Primitive::Pjsx(_)
+            | Primitive::Pimport(_) | Primitive::Pawait | Primitive::Pduprecord | Primitive::PrecordRest(_) => unreachable!("unsupported primitive rejected by dispatch"),
+            Primitive::PextensionSlotEq => unreachable!("PextensionSlotEq is lowered in raw_lambda::lower"),
         };
         Ok(self.primitive_result(cx, self.statements.since(Span { start: statements.start, len: 0 }), value))
     }

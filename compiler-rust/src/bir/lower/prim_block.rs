@@ -173,3 +173,38 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod dict_tests {
+    use super::*;
+    use crate::lambda::{arena::LamArena, lam_constant::Constant as C, lam_primitive::{Primitive as P, Mutable}, LamLoc, TagInfo};
+
+    #[test]
+    fn dict_spread_and_hash_arms_match_legacy() {
+        for (primitive, arity) in [(P::Pmakedict, 1), (P::PdictHas, 2), (P::PdictSpread, 3), (P::ParraySpread, 2), (P::PlistSpread, 2),
+            (P::Phash, 4), (P::PhashMixint, 2), (P::PhashMixstring, 2), (P::PhashFinalmix, 1)] {
+            for literal in [false, true] {
+                let mut a = LamArena::new();
+                let args: Vec<_> = (0..arity).map(|i| if literal { a.const_(C::String("key".into())) }
+                    else { a.var(Ident::new(&format!("arg{i}"), 10 + i, crate::ident::IdentFlags::NONE)) }).collect();
+                let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
+                super::super::oracle_tests::compare(a, root);
+            }
+        }
+        for spread in [false, true] {
+            for valid_key in [false, true] {
+                let mut a = LamArena::new();
+                let key = a.const_(if valid_key { C::String("key".into()) } else { C::JsNull });
+                let value = a.var(Ident::new("value", 10, crate::ident::IdentFlags::NONE));
+                let tuple = a.prim_raw(P::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[key, value], LamLoc::NONE);
+                let array = a.prim_raw(P::Pmakearray, &[tuple], LamLoc::NONE);
+                let dict = a.prim_raw(P::Pmakedict, &[array], LamLoc::NONE);
+                let root = if spread {
+                    let other = a.var(Ident::new("other", 11, crate::ident::IdentFlags::NONE));
+                    a.prim_raw(P::PdictSpread, &[dict, other], LamLoc::NONE)
+                } else { dict };
+                super::super::oracle_tests::compare(a, root);
+            }
+        }
+    }
+}
