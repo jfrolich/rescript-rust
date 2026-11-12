@@ -1557,7 +1557,7 @@ mod tests {
     }
     fn roundtrip(p: &j::JsDepsProgram) {
         let imported = import_js(p).unwrap();
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let q = export_js(&imported).unwrap();
         assert_eq!(
             js::dump::block(&p.program.arena, &p.program.block),

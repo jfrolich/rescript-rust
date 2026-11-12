@@ -1455,7 +1455,7 @@ mod tests {
         for &(fresh, source) in &renames.1 {
             imported.register_label(fresh, source);
         }
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let actual = export_lambda(&imported).unwrap();
         assert_eq!(dump(&actual.arena, actual.root), dump(&a, expected));
         assert_eq!(

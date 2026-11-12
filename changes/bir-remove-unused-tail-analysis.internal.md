@@ -1,0 +1,1 @@
+- Remove unused Bir tail-position analysis and its validation mode.

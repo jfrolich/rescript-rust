@@ -612,7 +612,7 @@ mod tests {
         let steps = imported.arena.steps.get();
         println!("import 100000 nodes: {steps} steps");
         assert!(steps < 40 * 100_000, "{steps}");
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
     }
 
     #[test]
@@ -675,7 +675,7 @@ mod tests {
         let imported = import_lambda(&a, root).unwrap();
         assert_eq!(imported.arena.nodes.len(), 20_001);
         assert!(imported.arena.steps.get() < 40 * 20_001);
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
     }
 
     #[test]
@@ -1055,7 +1055,7 @@ mod roundtrip_tests {
 
     fn identity(a: &LamArena, root: Lam) {
         let imported = import_lambda(a, root).unwrap();
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let exported = export_lambda(&imported).unwrap();
         let mut before = Vec::new();
         let mut after = Vec::new();

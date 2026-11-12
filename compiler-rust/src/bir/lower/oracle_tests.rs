@@ -45,7 +45,7 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
             lowered
                 .program
                 .arena
-                .validate(Some(lowered.program.root), false)
+                .validate(Some(lowered.program.root))
                 .unwrap();
             let actual = bridge_j::export_js(&lowered.program).unwrap();
             let mut compiler = LambdaCompiler::new();
@@ -359,7 +359,7 @@ fn ten_thousand_deep_supported_nodes_use_linear_work() {
         lowered
             .program
             .arena
-            .validate(Some(lowered.program.root), false)
+            .validate(Some(lowered.program.root))
             .unwrap();
     }
 }
@@ -512,7 +512,7 @@ fn application_width_and_na_spines_have_linear_step_counts() {
         assert_eq!(state.source_steps, nodes);
         assert_eq!(state.sequence_steps, if shape == 1 { 20_001 } else { 10_001 });
         let lowered = state.complete(Cx::value(), probed);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 }
 
