@@ -1591,7 +1591,13 @@ impl Env {
         thread_local! {
             static EMPTY_ENV: Env = Env::build_empty();
         }
-        let mut env = EMPTY_ENV.with(Env::clone);
+        // The cached root never has a shadow. Copy it directly instead of
+        // taking Clone's shadow branch before testing the compilation mode.
+        let mut env = EMPTY_ENV.with(|empty| Env {
+            id: empty.id,
+            scope_id: empty.scope_id,
+            data: empty.data.clone(),
+        });
         if shadow::enabled() {
             env.data_mut().shadow = Some(env_log::LogEnv::empty());
         }
@@ -4666,7 +4672,6 @@ pub(crate) mod shadow {
 
     #[derive(Default)]
     struct State {
-        enabled: bool,
         unit: String,
         counts: BTreeMap<&'static str, u64>,
         difference: Option<String>,
@@ -4677,37 +4682,37 @@ pub(crate) mod shadow {
     }
 
     thread_local! {
+        static ENABLED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
         static STATE: RefCell<State> = RefCell::new(State::default());
     }
 
     pub(crate) fn enabled() -> bool {
-        STATE.with(|state| state.borrow().enabled)
+        ENABLED.get()
     }
 
     pub(crate) fn begin(enabled: bool, unit: &str) {
-        STATE.with(|state| {
-            let mut state = state.borrow_mut();
-            state.enabled = enabled;
-            if enabled {
+        ENABLED.set(enabled);
+        if enabled {
+            STATE.with(|state| {
+                let mut state = state.borrow_mut();
                 state.unit = unit.to_owned();
                 state.counts.clear();
                 state.difference = None;
-            }
-        });
+            });
+        }
     }
 
     pub(crate) fn finish<T>(result: anyhow::Result<T>) -> anyhow::Result<T> {
+        if !ENABLED.replace(false) {
+            return result;
+        }
         STATE.with(|state| {
             let mut state = state.borrow_mut();
-            if !state.enabled {
-                return result;
-            }
             let report = serde_json::json!({
                 "stage": "env-shadow", "unit": state.unit,
                 "counts": state.counts, "difference": state.difference,
             });
             eprintln!("RESCRIPT_ENV_SHADOW {report}");
-            state.enabled = false;
             match state.difference.take() {
                 Some(message) => Err(anyhow::anyhow!(message)),
                 None => result,
