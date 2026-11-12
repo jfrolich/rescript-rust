@@ -9,7 +9,7 @@ use super::js_exp_make::{
     runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
-use super::lam_compile_arguments::HeldArgs;
+use super::lam_compile_arguments::{HeldArgs, is_okay_to_duplicate};
 use crate::ident::Ident;
 use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
@@ -171,15 +171,14 @@ impl LambdaCompiler {
         match self.j.ek(arg) {
             ExprKind::Undefined { .. } => JE::undefined(false, &mut self.j),
             ExprKind::OptionalBlock(inner, _) => inner,
-            _ if expression_has_no_side_effects(&self.j, arg) => {
+            _ if is_okay_to_duplicate(&self.j, arg) => {
                 let test = self.is_not_none_expr(arg);
                 let value = self.val_from_option_expr(arg);
                 let undefined = JE::undefined(false, &mut self.j);
                 JE::cond(test, value, undefined, &mut self.j)
             }
-            // `Js_of_lam_option.get_default_undefined_from_optional`: a
-            // non-duplicable option is already represented so that the
-            // ordinary option unboxer yields `undefined` for `None`.
+            // `Js_of_lam_option.get_default_undefined_from_optional`:
+            // `valFromOption` returns `undefined` for `None` as well.
             _ => self.runtime_call_expr("Primitive_option", "valFromOption", vec![arg]),
         }
     }
