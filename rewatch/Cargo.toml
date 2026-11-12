@@ -37,7 +37,7 @@ serde_json = { version = "1.0.93" }
 serde_ignored = "0.1.11"
 serde_path_to_error = "0.1.16"
 tempfile = "3.10.1"
-rusqlite = { version = "0.32", features = ["bundled", "serialize"] }
+rusqlite = { version = "0.32", features = ["bundled", "serialize", "backup"] }
 rescript-compiler = { path = "../compiler-rust" }
 
 # OpenTelemetry for tracing

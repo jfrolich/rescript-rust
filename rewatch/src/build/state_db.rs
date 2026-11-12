@@ -791,6 +791,18 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     {
         return;
     }
+    if !partial {
+        let write = || -> anyhow::Result<()> {
+            let record = MemoryRecord::from_previous(package, previous)?;
+            apply_record_rows(&record.conn, previous, new, "")?;
+            record.publish(package)
+        };
+        if let Err(err) = write() {
+            // An unpublished image cannot damage the old complete record.
+            log::warn!("Could not replace the build state of {}: {err}", package.name);
+        }
+        return;
+    }
     let db = path(package);
     let pending = pending_path(&db);
     // Two roots can share a dependency database. A pending marker is stale
@@ -852,7 +864,11 @@ impl MemoryRecord {
     pub(super) fn new(seed: &PackageState, runtime: &[(String, Vec<u8>)]) -> anyhow::Result<Self> {
         let conn = timing::measure(Phase::RecordSqlOpen, || -> rusqlite::Result<Connection> {
             ensure_sqlite_initialized();
-            let conn = Connection::open_in_memory()?;
+            // A private memdb VFS keeps its image contiguous. serialize() can
+            // borrow it (SQLITE_SERIALIZE_NOCOPY) instead of allocating a
+            // second database-sized buffer. No leading slash: not shared.
+            let conn = Connection::open_with_flags("file:rescript?vfs=memdb",
+                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_URI)?;
             conn.set_prepared_statement_cache_capacity(32);
             conn.pragma_update(None, "page_size", 16384)?;
             conn.pragma_update(None, "synchronous", "OFF")?;
@@ -867,6 +883,27 @@ impl MemoryRecord {
             }
         }
         Ok(Self { conn })
+    }
+
+    fn from_previous(package: &Package, previous: &PackageState) -> anyhow::Result<Self> {
+        if !previous.modules.is_empty() {
+            if let Some(old) = open_existing(&path(package)) {
+                // Whole-record fallback can keep unchanged interfaces that
+                // are intentionally absent from interface_updates. Copy their
+                // pages into memory, never update the live database in place.
+                let mut record = Self::new(&PackageState::default(), &[])?;
+                record.conn.execute_batch("ROLLBACK")?;
+                let backup = rusqlite::backup::Backup::new(&old, &mut record.conn)?;
+                anyhow::ensure!(backup.step(-1)? == rusqlite::backup::StepResult::Done, "database snapshot busy");
+                drop(backup);
+                record.conn.execute_batch("BEGIN")?;
+                return Ok(record);
+            }
+        }
+        let meta = read_meta(package).unwrap_or_default();
+        let runtime = meta.get(META_RUNTIME_KEY)
+            .and_then(|key| read_runtime_interfaces(&path(package), key)).unwrap_or_default();
+        Self::new(&PackageState { meta, ..PackageState::default() }, &runtime)
     }
 
     pub(super) fn insert(&self, rows: &PackageState) -> anyhow::Result<()> {
