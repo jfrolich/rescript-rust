@@ -1,0 +1,1 @@
+- Keep stored genType declarations independent of concurrent signature storage by distinguishing absent raw signatures from encoded ones.

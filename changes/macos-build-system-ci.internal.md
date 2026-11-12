@@ -1,0 +1,1 @@
+- Run the build-system tests on macOS in CI as well: file locking and rename behave differently there, and every other job runs on Linux.
