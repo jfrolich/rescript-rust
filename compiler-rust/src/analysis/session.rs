@@ -4,7 +4,10 @@
 use super::process_cmt::{self, Annots, Ctx};
 use super::process_extra;
 use super::resolve_path::Session;
-use super::shared_types::{Extra, File, ModuleId};
+use super::shared_types::{
+    Declared, ExportedKind, Extra, File, Loc, Located, Module, ModuleId, ModuleItem,
+    ModuleItemKind, ModulePath,
+};
 use crate::driver::{ToolingTyped, ToolingTypedModule};
 use crate::parse_arena::ParseArena;
 use std::cell::OnceCell;
@@ -51,6 +54,11 @@ pub trait Project {
     fn project_files(&self) -> Vec<String>;
     /// `package.namespace`.
     fn namespace(&self) -> Option<String>;
+    /// The `(alias, module)` pairs of a namespace module. A build generates
+    /// the namespace's aliases (`module Foo = Foo-MyNamespace`) instead of
+    /// compiling a source; OCaml reads the `.cmt` its `.mlmap` compiles to
+    /// (packages.ml:104-109).
+    fn namespace_aliases(&self, module_name: &str) -> Option<Vec<(String, String)>>;
     /// Type-check a module's interface or implementation from its current
     /// source.
     fn typecheck(&self, module_name: &str, interface: bool) -> Option<TypedSource>;
@@ -92,6 +100,9 @@ pub struct ProjectSession<'p> {
     ids: HashMap<String, usize>,
     /// Two slots per module: implementation, then interface.
     slots: Vec<OnceCell<Option<Loaded>>>,
+    /// One slot per module: the file of a namespace module, which has no
+    /// source to load. It takes the module's implementation id.
+    namespaces: Vec<OnceCell<Option<File>>>,
     /// The first error an attribute reader raised loading a module, which
     /// ends the command (OCaml's raise is not caught).
     failure: std::cell::RefCell<Option<String>>,
@@ -107,10 +118,12 @@ impl<'p> ProjectSession<'p> {
             .map(|(i, name)| (name.clone(), i))
             .collect();
         let slots = (0..names.len() * 2).map(|_| OnceCell::new()).collect();
+        let namespaces = (0..names.len()).map(|_| OnceCell::new()).collect();
         ProjectSession {
             project,
             ids,
             slots,
+            namespaces,
             failure: std::cell::RefCell::new(None),
         }
     }
@@ -181,6 +194,18 @@ impl<'p> ProjectSession<'p> {
             fulls.extend(self.load(module_name, true));
         }
         fulls
+    }
+
+    /// The file of a namespace module: its aliases, as `Process_cmt` reads
+    /// them from the namespace's `.cmt`.
+    fn namespace_file(&self, module_name: &str) -> Option<&File> {
+        let index = *self.ids.get(module_name)?;
+        self.namespaces[index]
+            .get_or_init(|| {
+                let aliases = self.project.namespace_aliases(module_name)?;
+                Some(namespace_file(module_name, index * 2, &aliases))
+            })
+            .as_ref()
     }
 
     /// `Cmt.full_from_path`: the module whose source is at `path`, loaded
@@ -259,13 +284,92 @@ fn load_source(source: TypedSource, module_name: &str, id: ModuleId) -> Result<L
     })
 }
 
+/// The file of namespace module `module_name`, which exports each alias as
+/// a module standing for its target.
+fn namespace_file(module_name: &str, id: ModuleId, aliases: &[(String, String)]) -> File {
+    let mut file = File::create(module_name, String::new(), id);
+    let mut structure = (*file.structure).clone();
+    let mut exported = (*structure.exported).clone();
+    for (stamp, (alias, target)) in (1..).zip(aliases) {
+        let item = Module::Ident(crate::types::Path::pident(
+            crate::ident::Ident::create_persistent(target.as_str()),
+        ));
+        file.stamps.add_module(
+            stamp,
+            Declared {
+                name: Located {
+                    txt: alias.clone(),
+                    loc: Loc::none(),
+                },
+                extent_loc: Loc::none(),
+                stamp,
+                module_path: ModulePath::File {
+                    uri: file.uri.clone(),
+                    module_name: module_name.to_string(),
+                },
+                is_exported: true,
+                deprecated: None,
+                docstring: Vec::new(),
+                item: item.clone(),
+            },
+        );
+        exported.add(ExportedKind::Module, alias, stamp);
+        structure.items.push(ModuleItem {
+            kind: ModuleItemKind::Module {
+                type_: item,
+                is_module_type: false,
+            },
+            name: alias.clone(),
+            loc: Loc::none(),
+            docstring: Vec::new(),
+            deprecated: None,
+        });
+    }
+    structure.exported = Arc::new(exported);
+    file.structure = Arc::new(structure);
+    file
+}
+
 impl Session for ProjectSession<'_> {
     fn file(&self, id: ModuleId) -> &File {
-        &self.loaded(id).file
+        match self.slots[id].get().and_then(Option::as_ref) {
+            Some(loaded) => &loaded.file,
+            None => self.namespaces[id / 2]
+                .get()
+                .and_then(Option::as_ref)
+                .expect("a file's module id names a loaded module"),
+        }
     }
 
     fn file_for_module(&self, module_name: &str) -> Option<&File> {
-        self.full_from_module(module_name)
-            .map(|loaded| &loaded.file)
+        match self.full_from_module(module_name) {
+            Some(loaded) => Some(&loaded.file),
+            None => self.namespace_file(module_name),
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_namespace_file_exports_its_aliases() {
+        let aliases = [("Foo".to_string(), "Foo-MyNamespace".to_string())];
+        let file = namespace_file("MyNamespace", 4, &aliases);
+        let stamp = file
+            .structure
+            .exported
+            .find(ExportedKind::Module, "Foo")
+            .unwrap();
+        let declared = file.stamps.find_module(stamp).unwrap();
+        let Module::Ident(path) = &declared.item else {
+            panic!("an alias is a module path");
+        };
+        assert_eq!(
+            super::super::shared::path_ident_to_string(path),
+            "Foo-MyNamespace"
+        );
+        assert_eq!(file.module, 4);
     }
 }
