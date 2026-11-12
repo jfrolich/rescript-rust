@@ -4,3 +4,6 @@ pub mod norm;
 pub mod flatten;
 
 pub mod exits;
+
+pub mod alias;
+pub mod arity;

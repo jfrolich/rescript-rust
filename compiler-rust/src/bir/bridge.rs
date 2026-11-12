@@ -29,6 +29,8 @@ pub struct Imported {
     pub root: NodeId,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    /// The legacy name of each static label a round created.
+    labels: std::collections::BTreeMap<u32, u32>,
     #[cfg(test)]
     identifier_lookups: usize,
 }
@@ -76,6 +78,7 @@ impl Importer {
             root,
             idents: self.idents,
             globals: self.globals,
+            labels: Default::default(),
             #[cfg(test)]
             identifier_lookups: self.identifier_lookups,
         }
@@ -451,9 +454,67 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
         root,
         idents: importer.idents,
         globals: importer.globals,
+        labels: Default::default(),
         #[cfg(test)]
         identifier_lookups: importer.identifier_lookups,
     })
+}
+
+/// Import a Lambda fragment (a function inlined from another module) into an
+/// arena that already holds a unit. Its identifiers get fresh variables,
+/// appended to `foreign` in allocation order; `globals` is the unit's module
+/// table, extended in step with the arena's imports. The fragment is a
+/// detached tree. Cost: one visit and one allocation per source node.
+pub(super) fn import_fragment(
+    bir: &mut Bir,
+    globals: &mut Vec<Ident>,
+    foreign: &mut Vec<Ident>,
+    arena: &LamArena,
+    root: Lam,
+) -> Result<NodeId, Unsupported> {
+    enum Work {
+        Enter(Lam),
+        Finish(L, usize),
+    }
+    let mut importer = Importer {
+        bir: std::mem::take(bir),
+        globals: std::mem::take(globals),
+        ..Importer::default()
+    };
+    let mut work = vec![Work::Enter(root)];
+    let mut values = Vec::new();
+    let mut result = Ok(());
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Enter(id) => {
+                let node = arena.node(id);
+                if let Err(reason) = importer.binders(arena, node) {
+                    result = Err(reason);
+                    break;
+                }
+                let children = children(arena, node);
+                work.push(Work::Finish(node, children.len()));
+                work.extend(children.into_iter().rev().map(Work::Enter));
+            }
+            Work::Finish(node, count) => {
+                let start = values.len() - count;
+                match importer.node(arena, node, &values[start..]) {
+                    Ok(built) => {
+                        values.truncate(start);
+                        values.push(built);
+                    }
+                    Err(reason) => {
+                        result = Err(reason);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    *bir = importer.bir;
+    *globals = importer.globals;
+    foreign.extend(importer.idents);
+    result.map(|()| values[0])
 }
 
 #[cfg(test)]
@@ -621,7 +682,45 @@ impl Imported {
         Ok(())
     }
 
-    fn ident(&self, var: VarId) -> Result<Ident, Unsupported> {
+    /// Register a variable the host imported with a fragment, in creation
+    /// order, under the identity it has in the module it came from.
+    pub(super) fn register_foreign(&mut self, var: VarId, ident: Ident) -> Result<(), Unsupported> {
+        if var.index() != self.idents.len() {
+            return Err(Unsupported("fresh identities registered out of order"));
+        }
+        self.idents.push(ident);
+        Ok(())
+    }
+
+    /// Register a static label a round created as a copy of `source`: the
+    /// legacy passes keep the label of a handler they copy, so the export
+    /// prints the copy under the label of its origin.
+    pub fn register_label(&mut self, fresh: u32, source: u32) {
+        let legacy = self.labels.get(&source).copied().unwrap_or(source);
+        self.labels.insert(fresh, legacy);
+    }
+
+    fn label(&self, label: u32) -> i32 {
+        self.labels.get(&label).copied().unwrap_or(label) as i32
+    }
+
+    /// The unit's module table, for a host that imports fragments.
+    pub(super) fn globals(&self) -> &[Ident] {
+        &self.globals
+    }
+
+    /// Replace the module table by the one a host extended.
+    pub(super) fn set_globals(&mut self, globals: Vec<Ident>) {
+        debug_assert!(globals.starts_with(&self.globals));
+        self.globals = globals;
+    }
+
+    /// The legacy identity of every variable, by variable.
+    pub(super) fn idents(&self) -> &[Ident] {
+        &self.idents
+    }
+
+    pub(super) fn ident(&self, var: VarId) -> Result<Ident, Unsupported> {
         self.idents
             .get(var.index())
             .copied()
@@ -721,7 +820,7 @@ impl Imported {
                 let actions = a.add_list(&c[1..]);
                 a.string_switch_raw(c[0], actions, info)
             }
-            View::Exit { label, .. } => a.static_raise(label as i32, c),
+            View::Exit { label, .. } => a.static_raise(self.label(label), c),
             View::Catch { header, .. } => {
                 let h = b.catch(header);
                 let params: Vec<_> = h
@@ -729,7 +828,7 @@ impl Imported {
                     .iter()
                     .map(|v| self.ident(v))
                     .collect::<Result<_, _>>()?;
-                a.static_catch(c[0], h.label as i32, &params, c[1])
+                a.static_catch(c[0], self.label(h.label), &params, c[1])
             }
             View::Try { exception, .. } => a.try_(c[0], self.ident(exception)?, c[1]),
             View::TryFinally { .. } => a.try_finally(c[0], c[1]),

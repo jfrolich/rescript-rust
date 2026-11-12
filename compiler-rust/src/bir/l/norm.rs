@@ -72,7 +72,7 @@ pub(crate) fn step(e: &mut Engine<'_>, node: NodeId) -> Changed {
     }
 }
 
-fn const_of(b: &Bir, node: NodeId) -> Option<&Constant> {
+pub(crate) fn const_of(b: &Bir, node: NodeId) -> Option<&Constant> {
     match b.view(node) {
         View::Const { value } => Some(b.constant(value)),
         _ => None,
@@ -274,7 +274,7 @@ fn prim(e: &mut Engine<'_>, node: NodeId) -> Changed {
 }
 
 /// `Constant::eval_as_bool` of the legacy arena.
-fn eval_as_bool<'a>(b: &'a Bir, mut c: &'a Constant) -> bool {
+pub(crate) fn eval_as_bool<'a>(b: &'a Bir, mut c: &'a Constant) -> bool {
     use crate::types::VariantLiteralTag as L;
     loop {
         return match c {
@@ -695,7 +695,6 @@ fn decide_switch(
     node: NodeId,
     compared: &std::cell::Cell<u64>,
 ) -> Option<(NodeId, usize)> {
-    use crate::types::{VariantBlock, VariantConstructorCase as Case, VariantLiteralTag};
     let b = e.bir();
     let View::Switch {
         scrutinee,
@@ -706,6 +705,19 @@ fn decide_switch(
         unreachable!()
     };
     let cst = const_of(b, scrutinee)?;
+    decide_switch_on(b, cst, actions, header, compared)
+}
+
+/// [`decide_switch`] for a scrutinee constant that is not in the tree
+/// (`Lam_analysis.destruct_pattern` asks for a parameter's argument).
+pub(crate) fn decide_switch_on(
+    b: &Bir,
+    cst: &Constant,
+    actions: &[NodeId],
+    header: SwitchId,
+    compared: &std::cell::Cell<u64>,
+) -> Option<(NodeId, usize)> {
+    use crate::types::{VariantBlock, VariantConstructorCase as Case, VariantLiteralTag};
     let h = b.switch(header);
     let n_consts = h.constants as usize;
     let keys: SmallVec<[&SwitchKey; 8]> = h

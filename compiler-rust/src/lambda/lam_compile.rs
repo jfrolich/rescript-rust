@@ -430,6 +430,10 @@ pub struct LambdaCompiler {
     /// `loop_label_counter`.
     pub(crate) loop_label_counter: i32,
     diagnostic: Option<LambdaDiagnostic>,
+    /// The unit to run the shadow rounds for before the Lambda passes
+    /// (`RESCRIPT_BACKEND=check` only), and what they reported.
+    shadow_unit: Option<String>,
+    shadow_error: Option<anyhow::Error>,
 }
 
 impl Default for LambdaCompiler {
@@ -526,6 +530,8 @@ impl LambdaCompiler {
             loop_stack: Vec::new(),
             loop_label_counter: 0,
             diagnostic: None,
+            shadow_unit: None,
+            shadow_error: None,
         }
     }
 
@@ -691,6 +697,41 @@ impl LambdaCompiler {
                     String,
                     Option<Arc<AHashMap<String, CmjExportArity>>>,
                 > = AHashMap::new();
+                let mut external_arity = |module_id: &Ident, field_name: &str| {
+                    cached_cmj_table(&mut cmj_arity_cache, module_id.name(), || {
+                        module_path_resolver.as_ref().and_then(|resolver| {
+                            resolver.module_cmj_export_arities(module_id.name())
+                        })
+                    })?
+                    .get(field_name)
+                    .cloned()
+                    .map(cmj_export_arity_to_external)
+                };
+                if let Some(unit) = &self.shadow_unit {
+                    // The same resolvers the passes below get. Inlined
+                    // bodies bring locations: the shadow run keeps its own.
+                    let mut shadow_locs = lam_locs.clone();
+                    let mut shadow_inline = |module_id: &Ident, field_name: &str| {
+                        if !cross_module_inline {
+                            return None;
+                        }
+                        cached_cmj_table(&mut cmj_lambda_cache, module_id.name(), || {
+                            module_path_resolver.as_ref().and_then(|resolver| {
+                                resolver.module_cmj_export_lambdas(module_id.name())
+                            })
+                        })?
+                        .import(field_name, &mut shadow_locs)
+                    };
+                    self.shadow_error = crate::bir::shadow::check_alias(
+                        &arena,
+                        lam,
+                        unit,
+                        jsx_preserve,
+                        &mut shadow_inline,
+                        &mut external_arity,
+                    )
+                    .err();
+                }
                 let mut external_inline = |module_id: &Ident, field_name: &str| {
                     if !cross_module_inline {
                         return None;
@@ -701,16 +742,6 @@ impl LambdaCompiler {
                         })
                     })?
                     .import(field_name, lam_locs)
-                };
-                let mut external_arity = |module_id: &Ident, field_name: &str| {
-                    cached_cmj_table(&mut cmj_arity_cache, module_id.name(), || {
-                        module_path_resolver.as_ref().and_then(|resolver| {
-                            resolver.module_cmj_export_arities(module_id.name())
-                        })
-                    })?
-                    .get(field_name)
-                    .cloned()
-                    .map(cmj_export_arity_to_external)
                 };
                 crate::lambda::lam_compile_main::simplify_in_arena(
                     arena,
@@ -969,6 +1000,17 @@ impl LambdaCompiler {
 
     pub(crate) fn take_module_path_resolver(&mut self) -> Option<ModulePathResolver> {
         self.module_path_resolver.take()
+    }
+
+    /// Run the shadow rounds that need this compiler's resolvers for `unit`
+    /// (`bir::shadow::check_alias`). Never set in the default mode.
+    pub(crate) fn set_shadow_unit(&mut self, unit: &str) {
+        self.shadow_unit = Some(unit.to_string());
+    }
+
+    /// A difference the shadow rounds found: an error of the compilation.
+    pub(crate) fn take_shadow_error(&mut self) -> Option<anyhow::Error> {
+        self.shadow_error.take()
     }
 
     pub(crate) fn take_diagnostic(&mut self) -> Option<LambdaDiagnostic> {

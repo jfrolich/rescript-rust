@@ -16,6 +16,23 @@
       "unsupported": {}
     }
   },
+  "lambda-alias": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
+    }
+  },
   "lambda-bridge": {
     "fixtures": {
       "identical": 480,

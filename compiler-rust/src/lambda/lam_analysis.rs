@@ -305,7 +305,7 @@ pub fn delay_safe(a: &LamArena, assignable: &ahash::AHashSet<Ident>, lam: Lam) -
 /// Whether a primitive other than a division is a value or builds a fresh
 /// block from its operands (lam_analysis.ml:157-193), rather than reading
 /// the heap or having side effects.
-fn primitive_is_delay_safe(primitive: &Primitive) -> bool {
+pub(crate) fn primitive_is_delay_safe(primitive: &Primitive) -> bool {
     match primitive {
         Primitive::Pfield(_, field) => match field {
             FieldDbgInfo::Module { .. }
