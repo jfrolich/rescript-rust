@@ -348,7 +348,7 @@ fn constructor_info(
     }
 }
 
-/// The shape `%comptime` needs to write a value of type `ty` as a literal
+/// The shape `%Macro.eval` needs to write a value of type `ty` as a literal
 /// (read by `reify` in host.js).
 pub fn value_shape(ctx: &TypeContext, env: &Env, ty: TypeExprRef, depth: usize) -> Value {
     let unsupported = |ctx: &TypeContext, ty| json!({ "k": "other", "name": print_type(ctx, ty) });

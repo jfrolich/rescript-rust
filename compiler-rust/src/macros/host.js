@@ -136,7 +136,7 @@
       case "int":
         return String(value | 0);
       case "float":
-        if (!isFinite(value)) throw { __macro_error: "%comptime: the value is not a finite number." };
+        if (!isFinite(value)) throw { __macro_error: "%Macro.eval: the value is not a finite number." };
         return /[.e]/.test(String(value)) ? String(value) : String(value) + ".";
       case "string":
         return JSON.stringify(String(value));
@@ -151,7 +151,7 @@
       case "option":
         if (value === undefined) return "None";
         if (value !== null && typeof value === "object" && value.BS_PRIVATE_NESTED_SOME_NONE !== undefined) {
-          throw { __macro_error: "%comptime: a nested option cannot be written as a literal." };
+          throw { __macro_error: "%Macro.eval: a nested option cannot be written as a literal." };
         }
         return "Some(" + reify(value, shape.of) + ")";
       case "dict":
@@ -165,7 +165,7 @@
           return field.name + ": " + reify(item, field.of);
         }).filter(function (item) { return item !== null; }).join(", ") + "}";
       default:
-        throw { __macro_error: "%comptime: a value of type " + shape.name + " cannot be written as a literal." };
+        throw { __macro_error: "%Macro.eval: a value of type " + shape.name + " cannot be written as a literal." };
     }
   }
 
@@ -209,7 +209,7 @@
         return JSON.stringify({ ok: "" });
       }
       if (request.kind === "eval") {
-        // %comptime: `source` is a compiled module that exports `value`.
+        // %Macro.eval: `source` is a compiled module that exports `value`.
         var module = { exports: {} };
         run(request.source, module);
         return JSON.stringify({ ok: reify(module.exports.value, request.shape) });

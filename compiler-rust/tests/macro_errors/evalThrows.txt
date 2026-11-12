@@ -1,0 +1,12 @@
+let x = %Macro.eval(Option.getOrThrow((None: option<int>)))
+----
+
+  We've found a bug for you!
+  EvalThrows.res:1:9-59
+
+  1 │ let x = %Macro.eval(Option.getOrThrow((None: option<int>)))
+  2 │
+
+  The expression of %Macro.eval raised an exception:
+  Panic! Option.getOrThrow called for None value
+

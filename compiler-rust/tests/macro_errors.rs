@@ -189,28 +189,35 @@ fn an_error_of_a_macro_is_reported_at_its_use() {
 }
 
 #[test]
-fn comptime_errors() {
+fn eval_errors() {
     on_a_big_stack(|| {
         let mut project = Project::new();
         check(
             &mut project,
-            "comptimeLocal",
-            "let n = 3\nlet x = %comptime(n + 1)\n",
+            "evalLocal",
+            "let n = 3\nlet x = %Macro.eval(n + 1)\n",
         );
         check(
             &mut project,
-            "comptimeThrows",
-            "let x = %comptime(Option.getOrThrow((None: option<int>)))\n",
+            "evalThrows",
+            "let x = %Macro.eval(Option.getOrThrow((None: option<int>)))\n",
         );
         check(
             &mut project,
-            "comptimeType",
-            "let x = %comptime(1 + \"a\")\n",
+            "evalType",
+            "let x = %Macro.eval(1 + \"a\")\n",
         );
         check(
             &mut project,
-            "comptimeFunction",
-            "let x = %comptime((a: int) => a)\n",
+            "evalFunction",
+            "let x = %Macro.eval((a: int) => a)\n",
+        );
+        // It is an expression, with one argument.
+        check(&mut project, "evalWithoutExpression", "let x = %Macro.eval()\n");
+        check(
+            &mut project,
+            "evalAsAPattern",
+            "let f = x =>\n  switch x {\n  | %Macro.eval(1) => true\n  | _ => false\n  }\n",
         );
     });
 }

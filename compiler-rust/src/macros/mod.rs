@@ -79,3 +79,8 @@ impl std::error::Error for MacroExpansionRequired {}
 pub fn is_macro_name(name: &str) -> bool {
     name.starts_with(|c: char| c.is_ascii_uppercase())
 }
+
+/// The macro the compiler has built in: `%Macro.eval(expr)` is the value of
+/// `expr`, computed while compiling. It is known by this name, not looked
+/// up in the module `Macro`.
+pub const EVAL_MACRO: &str = "Macro.eval";

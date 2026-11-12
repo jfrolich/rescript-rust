@@ -37,7 +37,7 @@ use crate::types::typedtree::{Expression, ExpressionDesc as TypedExpressionDesc}
 
 use super::edit::{Code, Edit, Segment, SourceText, Span, SpanSource};
 use super::reflect::{self, TypeTable};
-use super::{MacroHost, is_macro_name, quote};
+use super::{EVAL_MACRO, MacroHost, is_macro_name, quote};
 
 /// Whether the type checker expands macros.
 pub enum MacroMode {
@@ -66,10 +66,10 @@ pub struct MacroDiagnostic {
     pub message: String,
 }
 
-/// A `%comptime(expr)` found by a pass: evaluated between passes, when no
+/// A `%Macro.eval(expr)` found by a pass: evaluated between passes, when no
 /// type checker is running.
 #[derive(Debug, Clone)]
-pub struct ComptimeSite {
+pub struct EvalSite {
     pub start: u32,
     pub end: u32,
     /// The expression's source text.
@@ -466,7 +466,7 @@ pub struct Discovery {
     /// counts as being, for the order of what is reported.
     pub failed_items: Vec<u32>,
     pub instances: InstanceTable,
-    pub comptime: Vec<ComptimeSite>,
+    pub evals: Vec<EvalSite>,
     pending: Vec<PendingGeneric>,
     /// Nesting of `type_structure`: 1 while typing a top-level item.
     depth: u32,
@@ -494,7 +494,7 @@ pub struct PassResult {
     pub errors: Vec<MacroDiagnostic>,
     pub failed_items: Vec<u32>,
     pub instances: InstanceTable,
-    pub comptime: Vec<ComptimeSite>,
+    pub evals: Vec<EvalSite>,
 }
 
 impl Discovery {
@@ -512,7 +512,7 @@ impl Discovery {
             errors: Vec::new(),
             failed_items: Vec::new(),
             instances,
-            comptime: Vec::new(),
+            evals: Vec::new(),
             pending: Vec::new(),
             depth: 0,
             item_start: 0,
@@ -620,7 +620,7 @@ impl Discovery {
             errors: self.errors,
             failed_items: self.failed_items,
             instances: self.instances,
-            comptime: self.comptime,
+            evals: self.evals,
         }
     }
 
@@ -1096,6 +1096,15 @@ fn find_macro(
     loc: LocIdx,
     name: &str,
 ) -> Result<Arc<ValueDescription>, TypeCoreError> {
+    // Only `expression_extension` evaluates it.
+    if name == EVAL_MACRO {
+        return Err(error_at(
+            loc,
+            format!(
+                "`%{EVAL_MACRO}(expr)` is the value of an expression: it is written where an expression is."
+            ),
+        ));
+    }
     let Some((_, desc)) = lookup_value(tctx, env, name) else {
         let own_module = tctx
             .persistent_env
@@ -1194,8 +1203,8 @@ pub(crate) fn expression_extension(
             )
         }));
     }
-    if name == "comptime" {
-        return Some(comptime(tctx, env, loc, extension, expected_ty));
+    if name == EVAL_MACRO {
+        return Some(eval(tctx, env, loc, extension, expected_ty));
     }
     if !is_macro_name(&name) {
         return None;
@@ -1254,9 +1263,9 @@ pub(crate) fn expression_extension(
     )))
 }
 
-/// `%comptime(expr)`: `expr` is typed as usual; its value replaces it
+/// `%Macro.eval(expr)`: `expr` is typed as usual; its value replaces it
 /// between passes.
-fn comptime(
+fn eval(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     loc: LocIdx,
@@ -1272,7 +1281,7 @@ fn comptime(
             return Err(fail(
                 tctx,
                 loc,
-                "%comptime takes one expression: `%comptime(expr)`.",
+                format!("%{EVAL_MACRO} takes one expression: `%{EVAL_MACRO}(expr)`."),
             ));
         }
     };
@@ -1284,7 +1293,7 @@ fn comptime(
     let shape = reflect::value_shape(ctx, env, typed.exp_type, 0);
     with_discovery(tctx, |_, discovery| {
         let expression = discovery.text.slice(inner.0, inner.1).to_string();
-        discovery.comptime.push(ComptimeSite {
+        discovery.evals.push(EvalSite {
             start: at.0,
             end: at.1,
             expression,

@@ -1,10 +1,10 @@
-let x = %comptime(1 + "a")
+let x = %Macro.eval(1 + "a")
 ----
 
   We've found a bug for you!
-  ComptimeType.res:1:23-25
+  EvalType.res:1:25-27
 
-  1 │ let x = %comptime(1 + "a")
+  1 │ let x = %Macro.eval(1 + "a")
   2 │
 
   This has type: string

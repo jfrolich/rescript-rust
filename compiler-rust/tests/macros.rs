@@ -285,7 +285,7 @@ let double = x => x * 2
 }
 
 #[test]
-fn comptime_evaluates_now() {
+fn eval_computes_now() {
     let mut project = Project::new();
     compile_ok(
         &mut project,
@@ -295,7 +295,7 @@ fn comptime_evaluates_now() {
     let js = compile_ok(
         &mut project,
         "UseTable.res",
-        "let table = %comptime(Table.squares(5))\nlet label = %comptime(String.toUpperCase(\"abc\") ++ \"!\")\n",
+        "let table = %Macro.eval(Table.squares(5))\nlet label = %Macro.eval(String.toUpperCase(\"abc\") ++ \"!\")\n",
     );
     assert!(js.contains("16"), "{js}");
     assert!(js.contains("\"ABC!\""), "{js}");

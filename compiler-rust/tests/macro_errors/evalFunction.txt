@@ -1,0 +1,11 @@
+let x = %Macro.eval((a: int) => a)
+----
+
+  We've found a bug for you!
+  EvalFunction.res:1:9-34
+
+  1 │ let x = %Macro.eval((a: int) => a)
+  2 │
+
+  %Macro.eval: a value of type int => int cannot be written as a literal. Supported: int, float, string, bool, unit, arrays, tuples, options, dicts and records of those.
+

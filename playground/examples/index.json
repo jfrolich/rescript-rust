@@ -55,9 +55,9 @@
     ]
   },
   {
-    "id": "comptime",
-    "title": "%comptime: compute now",
-    "summary": "%comptime(expr) runs an expression while compiling and leaves its value in the output.",
+    "id": "eval",
+    "title": "%Macro.eval: compute now",
+    "summary": "%Macro.eval(expr) runs an expression while compiling and leaves its value in the output.",
     "files": [
       "Sieve.res",
       "Main.res"

@@ -26,7 +26,7 @@ use crate::parser::{Parser, code_frame, module};
 use crate::types::typemod::type_structure;
 
 use super::MacroHost;
-use super::discover::{ComptimeSite, Discovery, InstanceTable, MacroDiagnostic, MacroMode};
+use super::discover::{Discovery, EvalSite, InstanceTable, MacroDiagnostic, MacroMode};
 use super::edit::{Edit, LineTable, SourceText};
 use super::quote;
 
@@ -224,8 +224,8 @@ pub fn expand_source(
         let mut edits = pass.edits;
         let mut errors = pass.errors;
 
-        for site in &pass.comptime {
-            match evaluate_comptime(
+        for site in &pass.evals {
+            match evaluate(
                 site,
                 &opens,
                 filename,
@@ -380,7 +380,7 @@ fn generated_syntax_error(
 }
 
 /// The `open` statements at the top level of the file, as source text:
-/// `%comptime` expressions are compiled in their scope.
+/// `%Macro.eval` expressions are compiled in their scope.
 fn top_level_opens(
     parser: &Parser<'_>,
     structure: &[crate::parser::ast::StructureItem],
@@ -400,10 +400,10 @@ fn top_level_opens(
         .collect()
 }
 
-/// `%comptime(expr)`: compile `let value = expr` as a module of its own,
+/// `%Macro.eval(expr)`: compile `let value = expr` as a module of its own,
 /// run it, and write the value back as a literal.
-fn evaluate_comptime(
-    site: &ComptimeSite,
+fn evaluate(
+    site: &EvalSite,
     opens: &[String],
     filename: &str,
     module_name: &str,
@@ -413,7 +413,7 @@ fn evaluate_comptime(
 ) -> Result<String, String> {
     if site.shape.get("k") == Some(&json!("other")) {
         return Err(format!(
-            "%comptime: a value of type {} cannot be written as a literal. Supported: int, float, string, bool, unit, arrays, tuples, options, dicts and records of those.",
+            "%Macro.eval: a value of type {} cannot be written as a literal. Supported: int, float, string, bool, unit, arrays, tuples, options, dicts and records of those.",
             site.shape
                 .get("name")
                 .and_then(Value::as_str)
@@ -421,22 +421,22 @@ fn evaluate_comptime(
         ));
     }
     let source = format!("{}\nlet value = {}\n", opens.join("\n"), site.expression);
-    let comptime_module = format!("{module_name}__comptime");
-    let comptime_file = std::path::Path::new(filename)
-        .with_file_name(format!("{comptime_module}.res"))
+    let eval_module = format!("{module_name}__eval");
+    let eval_file = std::path::Path::new(filename)
+        .with_file_name(format!("{eval_module}.res"))
         .to_string_lossy()
         .into_owned();
-    let mut comptime_options = options.clone();
-    comptime_options.source_filename = Some(comptime_file.clone());
-    comptime_options.module_name = Some(comptime_module.clone());
-    comptime_options.capture_intermediates = false;
-    comptime_options.skip_js_render = false;
-    comptime_options.js_output_targets = Vec::new();
+    let mut eval_options = options.clone();
+    eval_options.source_filename = Some(eval_file.clone());
+    eval_options.module_name = Some(eval_module.clone());
+    eval_options.capture_intermediates = false;
+    eval_options.skip_js_render = false;
+    eval_options.js_output_targets = Vec::new();
     let compiled = driver::compile_source_in_process(
         &source,
-        &comptime_file,
-        &comptime_module,
-        &comptime_options,
+        &eval_file,
+        &eval_module,
+        &eval_options,
         registry,
         false,
     )
@@ -445,7 +445,7 @@ fn evaluate_comptime(
         // its header: the expression is in this file, not in one of its own.
         let report = format!("{error:#}");
         let said = report
-            .find(&comptime_file)
+            .find(&eval_file)
             .and_then(|at| report[at..].find("\n\n").map(|blank| &report[at + blank..]))
             .unwrap_or(&report);
         let said: Vec<&str> = said.trim_matches('\n').lines().map(str::trim_end).collect();
@@ -457,7 +457,7 @@ fn evaluate_comptime(
             .unwrap_or(0);
         let said: Vec<&str> = said.iter().map(|line| line.get(indent..).unwrap_or("")).collect();
         format!(
-            "{}\n\n%comptime compiles its expression on its own, before the rest of this file: it can use other modules, not what this file defines.",
+            "{}\n\n%Macro.eval compiles its expression on its own, before the rest of this file: it can use other modules, not what this file defines.",
             said.join("\n")
         )
     })?;
@@ -475,9 +475,9 @@ fn evaluate_comptime(
             "answers": answers,
         });
         let response = super::call_host(&**host, &request.to_string())
-            .map_err(|message| format!("%comptime: the macro engine failed: {message}"))?;
+            .map_err(|message| format!("%Macro.eval: the macro engine failed: {message}"))?;
         let response: Value = serde_json::from_str(&response).map_err(|error| {
-            format!("%comptime: the macro engine returned invalid JSON: {error}")
+            format!("%Macro.eval: the macro engine returned invalid JSON: {error}")
         })?;
         if let Some(literal) = response.get("ok").and_then(Value::as_str) {
             return Ok(literal.to_string());
@@ -485,19 +485,19 @@ fn evaluate_comptime(
         if let Some(message) = response.get("error").and_then(Value::as_str) {
             return Err(
                 if response.get("exception").and_then(Value::as_bool) == Some(true) {
-                    format!("The expression of %comptime raised an exception:\n{message}")
+                    format!("The expression of %Macro.eval raised an exception:\n{message}")
                 } else {
-                    format!("%comptime: {message}")
+                    format!("%Macro.eval: {message}")
                 },
             );
         }
         let Some(question) = response.get("need").and_then(Value::as_str) else {
-            return Err("%comptime: the macro engine returned an unknown response.".into());
+            return Err("%Macro.eval: the macro engine returned an unknown response.".into());
         };
         let answer = super::discover::answer_input(&base_dir, question).unwrap_or_else(
-            || json!({ "__error": format!("`{question}` cannot be answered in %comptime.") }),
+            || json!({ "__error": format!("`{question}` cannot be answered in %Macro.eval.") }),
         );
         answers.insert(question.to_string(), answer);
     }
-    Err("%comptime: the expression asked more than 1024 questions.".into())
+    Err("%Macro.eval: the expression asked more than 1024 questions.".into())
 }
