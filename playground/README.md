@@ -21,7 +21,9 @@ The crate targets wasm, not native platforms. A quick API compatibility check is
 RUSTFLAGS='--cfg getrandom_backend="wasm_js"' cargo check --locked --manifest-path crate/Cargo.toml --target wasm32-unknown-unknown
 ```
 
-Known runtime blocker: repeated compilation with the standard library can panic
-in `TypeContext::resolve_table_loc` with `declaration location of another
-compilation`. The smoke test intentionally fails until that compiler lifetime
-problem is fixed; a successful wasm build alone does not establish runtime health.
+Each compile request starts a new compiler build generation, like a rewatch
+rebuild: portable registry signatures survive, but worker component views from
+the previous type context do not. User modules are registered as a virtual
+CommonJS package, so dependency imports resolve without generated files on disk.
+The smoke test also executes the generated JavaScript and checks the dependent
+module's exported value before and after the edit.

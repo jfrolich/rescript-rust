@@ -1,1 +1,2 @@
 - Update the Rust wasm playground to the compiler's public module registry API and add a two-module recompilation smoke test.
+- Start a fresh compiler build generation for each playground request and resolve user imports within a virtual package, fixing repeated and cross-module compilation.

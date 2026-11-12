@@ -1,8 +1,13 @@
+//! Browser-only compiler entry points. Build for `wasm32-unknown-unknown`;
+//! `npm run test:wasm` runs the web bundle in Node.
+
 use wasm_bindgen::prelude::*;
 
 use std::cell::RefCell;
 
-use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+use rescript_compiler::cmi::persistent_env::{
+    CmjPackageInfo, CmjPackageModuleSystem, InMemoryModuleInfo, ModuleRegistry,
+};
 use rescript_compiler::driver::{self, CompilerOptions};
 use rescript_compiler::parser::{module, Parser};
 use rescript_compiler::wasm_vfs;
@@ -95,6 +100,11 @@ pub fn parse_to_sexp(source: &str, filename: &str) -> String {
 /// or { type: "error", stage, errors, ...partial results }
 #[wasm_bindgen]
 pub fn compile_all(source: &str, filename: &str) -> String {
+    // Each editor request is a new build, just as in rewatch's compile pass.
+    // Keep portable registry signatures, but discard worker views from the
+    // previous request (source-fallback declarations belong to its context).
+    rescript_compiler::types::thread_store::begin_build();
+
     // Capture parse tree for display (separate parser since we don't want to
     // mutate the one compile_source_in_process uses).
     let mut parse_parser = Parser::new(filename, source);
@@ -129,6 +139,10 @@ pub fn compile_all(source: &str, filename: &str) -> String {
         source_filename: Some(filename.to_string()),
         module_name: Some(module_name.clone()),
         capture_intermediates: true,
+        // User modules form one virtual package; script mode would probe disk
+        // for each dependency's generated JavaScript.
+        package_name: Some("playground".into()),
+        output_module_format: Some(rescript_compiler::js_ir::ModuleFormat::CommonJs),
         ..Default::default()
     };
 
@@ -154,6 +168,16 @@ pub fn compile_all(source: &str, filename: &str) -> String {
                         compiled.cmj_export_constants,
                         false,
                     )
+                    .with_package("playground".into(), "/".into(), Some(".js".into()))
+                    .with_package_outputs(vec![CmjPackageInfo {
+                        module_system: CmjPackageModuleSystem::CommonJs,
+                        path: std::path::Path::new(filename)
+                            .parent()
+                            .unwrap_or_else(|| std::path::Path::new(""))
+                            .to_string_lossy()
+                            .into_owned(),
+                        suffix: ".js".into(),
+                    }])
                     .with_cmj_export_arities(compiled.cmj_export_arities)
                     .with_cmj_export_lambdas(compiled.cmj_export_lambdas);
                     reg.register_module(&module_name, ps, info);
