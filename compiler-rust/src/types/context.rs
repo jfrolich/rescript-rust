@@ -297,12 +297,73 @@ impl ActiveTypeSnapshot {
 /// are kept in the Rust copiers' caches instead of on the source nodes.)
 #[derive(Default)]
 struct CopySession {
-    saved_mutabilities: Vec<(MutabilityRef, FieldMutability)>,
+    saved_mutabilities: Vec<(MutabilityRef, Option<FieldMutability>)>,
     new_mutabilities: Vec<MutabilityRef>,
     copy_policy_memo: crate::fast_hash::AHashMap<TypeExprRef, bool>,
 }
 
+/// A cell in the immutable graph whose value this compilation replaced.
+#[derive(Clone, Copy)]
+enum FrozenCell {
+    Desc(TypeExprRef),
+    Level(TypeExprRef),
+    Memo(AbbrevMemoRef),
+    RowField(RowFieldRef),
+    Mutability(MutabilityRef),
+}
+
+#[derive(Default)]
+struct FrozenWrites {
+    any: Cell<bool>,
+    descs: RefCell<crate::fast_hash::AHashMap<TypeExprRef, TypeDesc>>,
+    levels: RefCell<crate::fast_hash::AHashMap<TypeExprRef, i32>>,
+    memos: RefCell<crate::fast_hash::AHashMap<AbbrevMemoRef, AbbrevMemo>>,
+    row_fields: RefCell<crate::fast_hash::AHashMap<RowFieldRef, Option<RowField>>>,
+    mutabilities: RefCell<crate::fast_hash::AHashMap<MutabilityRef, FieldMutability>>,
+    #[cfg(test)]
+    probes: Cell<usize>,
+}
+
+impl FrozenWrites {
+    #[inline]
+    fn probe(&self) {
+        #[cfg(test)]
+        self.probes.set(self.probes.get() + 1);
+    }
+
+    fn contains(&self, cell: FrozenCell) -> bool {
+        if !self.any.get() {
+            return false;
+        }
+        match cell {
+            FrozenCell::Desc(r) => self.descs.borrow().contains_key(&r),
+            FrozenCell::Level(r) => self.levels.borrow().contains_key(&r),
+            FrozenCell::Memo(r) => self.memos.borrow().contains_key(&r),
+            FrozenCell::RowField(r) => self.row_fields.borrow().contains_key(&r),
+            FrozenCell::Mutability(r) => self.mutabilities.borrow().contains_key(&r),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.descs.borrow().is_empty() && self.levels.borrow().is_empty()
+            && self.memos.borrow().is_empty() && self.row_fields.borrow().is_empty()
+            && self.mutabilities.borrow().is_empty()
+    }
+
+    fn remove(&self, cell: FrozenCell) {
+        match cell {
+            FrozenCell::Desc(r) => { self.descs.borrow_mut().remove(&r); }
+            FrozenCell::Level(r) => { self.levels.borrow_mut().remove(&r); }
+            FrozenCell::Memo(r) => { self.memos.borrow_mut().remove(&r); }
+            FrozenCell::RowField(r) => { self.row_fields.borrow_mut().remove(&r); }
+            FrozenCell::Mutability(r) => { self.mutabilities.borrow_mut().remove(&r); }
+        }
+        self.any.set(!self.is_empty());
+    }
+}
+
 enum TypeMutation {
+    FrozenAbsent(FrozenCell),
     TypeDesc(TypeExprRef, TypeDesc),
     /// btype.ml `Ccompress (ty, old_desc, Tlink target)`: path compression by
     /// `repr`, logged whatever the node's age.
@@ -589,27 +650,9 @@ pub struct TypeContext {
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
     store: super::thread_store::StoreLease,
-    /// Descriptor writes preserve the stored handle's physical identity, but
-    /// live only for this compilation. The append-only arena keeps descriptor
-    /// borrows valid while another stored node is written.
-    store_descs: TypeNodes,
     /// Type lists (`TypeRefList`) allocated by this compilation.
     type_lists: super::type_expr::TypePayloadPool,
-    store_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
-    /// Level marking and lowering are also compilation-local, including on
-    /// diagnostic exits that do not finish a mark/unmark traversal.
-    store_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
-    /// This compilation's writes to abbreviation memo cells of store nodes;
-    /// unset cells read the store's initial `Mnil`, matching a fresh process
-    /// (`compiler/ml/subst.ml:173-177`).
-    store_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
-    /// This compilation's writes to row field cells of store rows.
-    store_row_field_overlay: RefCell<super::thread_store::PagedOverlay<Option<RowField>>>,
-    /// The same overlays for nodes of the process-wide shared pool, keyed by
-    /// shared index (descriptor overlays point into `store_descs`).
-    shared_desc_overlay: RefCell<super::thread_store::PagedOverlay<usize>>,
-    shared_level_overlay: RefCell<super::thread_store::PagedOverlay<i32>>,
-    shared_abbrev_overlay: RefCell<super::thread_store::PagedOverlay<AbbrevMemo>>,
+    frozen_writes: FrozenWrites,
     /// Direct handle to the shared pool's page table for node reads. Never
     /// borrowed mutably: the `RefCell` only lets shared descriptor borrows be
     /// `Ref`s like local ones (`Ref::map`), so callers see one borrow type.
@@ -698,8 +741,6 @@ pub struct TypeContext {
 
     /// Object-field mutability cells of this compilation's graph.
     mutabilities: RefCell<Vec<Cell<FieldMutability>>>,
-    /// This compilation's writes to persistent (dependency) mutability cells.
-    mutability_overlay: RefCell<crate::fast_hash::AHashMap<MutabilityRef, FieldMutability>>,
     /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
@@ -1114,16 +1155,9 @@ impl TypeContext {
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
             types: OwnTypeNodes(TypeNodes::new()),
+            frozen_writes: FrozenWrites::default(),
             store,
-            store_descs: TypeNodes::new(),
             type_lists: Default::default(),
-            store_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            store_row_field_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_desc_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_level_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
-            shared_abbrev_overlay: RefCell::new(super::thread_store::PagedOverlay::new()),
             shared_pages,
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
@@ -1157,7 +1191,6 @@ impl TypeContext {
             variant_layouts: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
             mutabilities: RefCell::new(Vec::new()),
-            mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
             counted_copy_nodes: Cell::new(0),
             counted_call_reentered: Cell::new(false),
@@ -2542,7 +2575,7 @@ impl TypeContext {
     // ========================================================================
 
     /// The descriptor of a stored (worker-store or shared) node: this
-    /// compilation's overlay copy if it wrote one, else the immutable
+    /// compilation's exception table copy if it wrote one, else the immutable
     /// published descriptor.
     #[inline(never)]
     fn store_desc(&self, r: TypeExprRef) -> TypeDesc {
@@ -2553,15 +2586,14 @@ impl TypeContext {
                 crate::perf_counters::frozen::Kind::DescReadWorker
             });
         }
-        if r.is_shared() {
-            let idx = r.shared_index();
-            if let Some(index) = self.shared_desc_overlay.borrow().get(idx as usize) {
-                return self.store_descs.desc(*index);
+        if self.frozen_writes.any.get() {
+            self.frozen_writes.probe();
+            if let Some(desc) = self.frozen_writes.descs.borrow().get(&r) {
+                return *desc;
             }
-            return super::shared_store::page_node(&self.shared_pages, idx).desc;
         }
-        if let Some(index) = self.store_desc_overlay.borrow().get(r.store_index()) {
-            return self.store_descs.desc(*index);
+        if r.is_shared() {
+            return super::shared_store::page_node(&self.shared_pages, r.shared_index()).desc;
         }
         self.store.desc(r)
     }
@@ -2617,27 +2649,37 @@ impl TypeContext {
                 crate::perf_counters::frozen::Kind::LevelReadWorker
             });
         }
-        if r.is_shared() {
-            let idx = r.shared_index();
-            return self
-                .shared_level_overlay
-                .borrow()
-                .get(idx as usize)
-                .copied()
-                .unwrap_or_else(|| {
-                    super::shared_store::page_node(&self.shared_pages, idx).level
-                });
+        if self.frozen_writes.any.get() {
+            self.frozen_writes.probe();
+            if let Some(level) = self.frozen_writes.levels.borrow().get(&r) {
+                return *level;
+            }
         }
-        self.store_level_overlay
-            .borrow()
-            .get(r.store_index())
-            .copied()
-            .unwrap_or_else(|| self.store.level(r))
+        if r.is_shared() {
+            return super::shared_store::page_node(&self.shared_pages, r.shared_index()).level;
+        }
+        self.store.level(r)
     }
 
     /// Number of allocated type expressions.
     pub fn type_expr_count(&self) -> usize {
         self.types.len()
+    }
+
+    /// Preserve absence, not a copy of the published value, on the trail.
+    fn frozen_mutation(&self, mutation: TypeMutation) -> TypeMutation {
+        let cell = match &mutation {
+            TypeMutation::TypeDesc(r, _) if r.is_store() => FrozenCell::Desc(*r),
+            TypeMutation::TypeLevel(r, _) if r.is_store() => FrozenCell::Level(*r),
+            TypeMutation::RowField(r, _) if r.is_store() => FrozenCell::RowField(*r),
+            TypeMutation::Mutability(r, _) if r.is_persistent() => FrozenCell::Mutability(*r),
+            _ => return mutation,
+        };
+        if self.frozen_writes.contains(cell) {
+            mutation
+        } else {
+            TypeMutation::FrozenAbsent(cell)
+        }
     }
 
     #[inline]
@@ -2652,7 +2694,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_type(ty) {
-            journal.entries.push(mutation());
+            journal.entries.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(kind);
             }
@@ -2668,7 +2710,7 @@ impl TypeContext {
         if !self.mutation_logging.full() {
             return;
         }
-        self.mutation_journal.borrow_mut().entries.push(mutation());
+        self.mutation_journal.borrow_mut().entries.push(self.frozen_mutation(mutation()));
         if self.compiler_counters_enabled {
             crate::perf_counters::record_type_mutation(kind);
         }
@@ -2681,7 +2723,7 @@ impl TypeContext {
         }
         let mut journal = self.mutation_journal.borrow_mut();
         if journal.records_row_field(row) {
-            journal.entries.push(mutation());
+            journal.entries.push(self.frozen_mutation(mutation()));
             if self.compiler_counters_enabled {
                 crate::perf_counters::record_type_mutation(
                     crate::perf_counters::TypeMutationKind::Row,
@@ -2692,7 +2734,7 @@ impl TypeContext {
 
     /// Set the level of a type. Stored nodes are never written in place
     /// unless the current store build is still creating them: the write goes
-    /// to this compilation's overlay.
+    /// to this compilation's exception table.
     #[inline]
     pub fn set_level(&self, r: TypeExprRef, level: i32) {
         self.record_type_mutation(
@@ -2738,9 +2780,8 @@ impl TypeContext {
                         crate::perf_counters::frozen::Kind::LevelWriteShared,
                     );
                 }
-                self.shared_level_overlay
-                    .borrow_mut()
-                    .set(r.shared_index() as usize, level);
+                self.frozen_writes.levels.borrow_mut().insert(r, level);
+                self.frozen_writes.any.set(true);
                 return;
             }
             if self.store_build_owns(r) {
@@ -2752,9 +2793,8 @@ impl TypeContext {
                     crate::perf_counters::frozen::Kind::LevelWriteWorker,
                 );
             }
-            self.store_level_overlay
-                .borrow_mut()
-                .set(r.store_index(), level);
+            self.frozen_writes.levels.borrow_mut().insert(r, level);
+            self.frozen_writes.any.set(true);
         } else {
             self.poison_store_build();
             self.types.set_level(r.index(), level);
@@ -2784,7 +2824,8 @@ impl TypeContext {
                         crate::perf_counters::frozen::Kind::DescWriteShared
                     });
                 }
-                self.set_shared_desc(r, desc);
+                self.frozen_writes.descs.borrow_mut().insert(r, desc);
+                self.frozen_writes.any.set(true);
                 return;
             }
             if self.store_build_owns(r) {
@@ -2796,45 +2837,11 @@ impl TypeContext {
             if self.compiler_counters_enabled && matches!(desc, TypeDesc::Tlink(_)) {
                 crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::LinkWorker);
             }
-            let index = self
-                .store_desc_overlay
-                .borrow()
-                .get(r.store_index())
-                .copied();
-            if let Some(index) = index {
-                self.store_descs.set_desc(index, desc);
-            } else {
-                let index = self
-                    .store_descs
-                    .push(desc, self.store.level(r), self.store.id(r));
-                self.store_desc_overlay
-                    .borrow_mut()
-                    .set(r.store_index(), index);
-            }
+            self.frozen_writes.descs.borrow_mut().insert(r, desc);
+            self.frozen_writes.any.set(true);
         } else {
             self.poison_store_build();
             self.types.set_desc(r.index(), desc);
-        }
-    }
-
-    /// Descriptor write to a shared dependency node: copy-on-write into this
-    /// compilation's overlay; the published node is never mutated.
-    #[inline(never)]
-    fn set_shared_desc(&self, r: TypeExprRef, desc: TypeDesc) {
-        let idx = r.shared_index();
-        let index = self.shared_desc_overlay.borrow().get(idx as usize).copied();
-        if let Some(index) = index {
-            self.store_descs.set_desc(index, desc);
-        } else {
-            let (level, id) = {
-                let pages = &self.shared_pages;
-                let original = super::shared_store::page_node(pages, idx);
-                (original.level, original.id)
-            };
-            let index = self.store_descs.push(desc, level, id);
-            self.shared_desc_overlay
-                .borrow_mut()
-                .set(idx as usize, index);
         }
     }
 
@@ -3107,7 +3114,8 @@ impl TypeContext {
         let has_changes = mutations.iter().any(|mutation| {
             matches!(
                 mutation,
-                TypeMutation::TypeDesc(..)
+                TypeMutation::FrozenAbsent(..)
+                    | TypeMutation::TypeDesc(..)
                     | TypeMutation::Compress(..)
                     | TypeMutation::TypeLevel(..)
                     | TypeMutation::RowField(..)
@@ -3123,6 +3131,10 @@ impl TypeContext {
         let mut restored = 0;
         for mutation in mutations.into_iter().rev() {
             match mutation {
+                TypeMutation::FrozenAbsent(cell) => {
+                    self.frozen_writes.remove(cell);
+                    restored += 1;
+                }
                 TypeMutation::TypeDesc(ty, desc) | TypeMutation::Compress(ty, desc, _) => {
                     self.write_desc_raw(ty, desc);
                     restored += 1;
@@ -3297,22 +3309,17 @@ impl TypeContext {
         self.memoized_abbrev_refs.borrow_mut().clear();
     }
 
-    /// Current value of a memo cell: this compilation's overlay for store
+    /// Current value of a memo cell: this compilation's exception table for store
     /// cells, the local table otherwise. Missing cells read as `Mnil`.
     fn read_abbrev(&self, memo: AbbrevMemoRef) -> AbbrevMemo {
-        if memo.is_shared() {
-            return self
-                .shared_abbrev_overlay
-                .borrow()
-                .get(memo.shared_index())
-                .cloned()
-                .unwrap_or(AbbrevMemo::Mnil);
-        }
         if memo.is_store() {
-            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
-                return value.clone();
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.memos.borrow().get(&memo) {
+                    return value.clone();
+                }
             }
-            return self.store.abbrev(memo);
+            return if memo.is_shared() { AbbrevMemo::Mnil } else { self.store.abbrev(memo) };
         }
         let abbrevs = self.abbrevs.borrow();
         abbrevs
@@ -3324,17 +3331,14 @@ impl TypeContext {
     /// Apply `f` to a memo cell without copying it (the chain scans below
     /// only compare paths and follow `next`).
     fn with_abbrev<R>(&self, memo: AbbrevMemoRef, f: impl FnOnce(&AbbrevMemo) -> R) -> R {
-        if memo.is_shared() {
-            return match self.shared_abbrev_overlay.borrow().get(memo.shared_index()) {
-                Some(value) => f(value),
-                None => f(&AbbrevMemo::Mnil),
-            };
-        }
         if memo.is_store() {
-            if let Some(value) = self.store_abbrev_overlay.borrow().get(memo.store_index()) {
-                return f(value);
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.memos.borrow().get(&memo) {
+                    return f(value);
+                }
             }
-            return self.store.with_abbrev(memo, f);
+            return if memo.is_shared() { f(&AbbrevMemo::Mnil) } else { self.store.with_abbrev(memo, f) };
         }
         let abbrevs = self.abbrevs.borrow();
         match abbrevs.get(memo.index()) {
@@ -3354,16 +3358,30 @@ impl TypeContext {
         {
             crate::perf_counters::frozen::record(crate::perf_counters::frozen::Kind::MemoWrite);
         }
-        if memo.is_shared() {
-            self.shared_abbrev_overlay
-                .borrow_mut()
-                .set(memo.shared_index(), value);
-            return;
-        }
         if memo.is_store() {
-            self.store_abbrev_overlay
-                .borrow_mut()
-                .set(memo.store_index(), value);
+            if !memo.is_shared() && self.in_store_build()
+                && memo.store_index() >= self.store_build_abbrev_start.get()
+            {
+                match &value {
+                    AbbrevMemo::Mcons { abbrev, expansion, next, .. } => {
+                        self.check_store_ref(*abbrev);
+                        self.check_store_ref(*expansion);
+                        self.check_store_memo(*next);
+                    }
+                    AbbrevMemo::Mlink(next) => self.check_store_memo(*next),
+                    AbbrevMemo::Mnil => {}
+                }
+                self.store.set_abbrev_backing(memo, value);
+                return;
+            }
+            // Memos are caches, not semantic trail entries (btype.ml:692-700).
+            // Shared memos are published empty, so clearing one removes its exception.
+            if memo.is_shared() && matches!(value, AbbrevMemo::Mnil) {
+                self.frozen_writes.remove(FrozenCell::Memo(memo));
+            } else {
+                self.frozen_writes.memos.borrow_mut().insert(memo, value);
+                self.frozen_writes.any.set(true);
+            }
             return;
         }
         let abbrevs = self.abbrevs.borrow();
@@ -3582,8 +3600,11 @@ impl TypeContext {
             return None;
         }
         if rf.is_store() {
-            if let Some(value) = self.store_row_field_overlay.borrow().get(rf.store_index()) {
-                return value.clone();
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.row_fields.borrow().get(&rf) {
+                    return value.clone();
+                }
             }
             return self.store.row_field(rf);
         }
@@ -3613,7 +3634,7 @@ impl TypeContext {
 
     /// Row field write without journaling (also used to undo). Store rows
     /// still being built are written in place; other store rows go to this
-    /// compilation's overlay.
+    /// compilation's exception table.
     fn write_row_field_raw(&self, rf: RowFieldRef, value: Option<RowField>) {
         if rf.is_null() {
             return;
@@ -3631,9 +3652,8 @@ impl TypeContext {
                     crate::perf_counters::frozen::Kind::RowFieldWrite,
                 );
             }
-            self.store_row_field_overlay
-                .borrow_mut()
-                .set(rf.store_index(), value);
+            self.frozen_writes.row_fields.borrow_mut().insert(rf, value);
+            self.frozen_writes.any.set(true);
             return;
         }
         let row_fields = self.row_fields.borrow();
@@ -3664,8 +3684,11 @@ impl TypeContext {
     /// The contents of a mutability cell (OCaml `!r`).
     pub fn get_mutability(&self, r: MutabilityRef) -> FieldMutability {
         if r.is_persistent() {
-            if let Some(value) = self.mutability_overlay.borrow().get(&r) {
-                return *value;
+            if self.frozen_writes.any.get() {
+                self.frozen_writes.probe();
+                if let Some(value) = self.frozen_writes.mutabilities.borrow().get(&r) {
+                    return *value;
+                }
             }
             return FieldMutability::Value(r.persistent_value());
         }
@@ -3705,7 +3728,7 @@ impl TypeContext {
             self.mutation_journal
                 .borrow_mut()
                 .entries
-                .push(TypeMutation::Mutability(r, old));
+                .push(self.frozen_mutation(TypeMutation::Mutability(r, old)));
         }
         self.write_mutability_raw(r, value);
     }
@@ -3718,7 +3741,8 @@ impl TypeContext {
                     crate::perf_counters::frozen::Kind::MutabilityWrite,
                 );
             }
-            self.mutability_overlay.borrow_mut().insert(r, value);
+            self.frozen_writes.mutabilities.borrow_mut().insert(r, value);
+            self.frozen_writes.any.set(true);
             return;
         }
         self.mutabilities.borrow()[r.index()].set(value);
@@ -3802,8 +3826,11 @@ impl TypeContext {
             .borrow_mut()
             .pop()
             .expect("copy session stack underflow");
-        for (r, value) in session.saved_mutabilities {
-            self.write_mutability_raw(r, value);
+        for (r, value) in session.saved_mutabilities.into_iter().rev() {
+            match value {
+                Some(value) => self.write_mutability_raw(r, value),
+                None => self.frozen_writes.remove(FrozenCell::Mutability(r)),
+            }
         }
     }
 
@@ -3835,7 +3862,14 @@ impl TypeContext {
                 .last_mut()
                 .expect("dup_mutability outside a copy session");
             session.new_mutabilities.push(r2);
-            session.saved_mutabilities.push((r, old));
+            let saved = if r.is_persistent()
+                && !self.frozen_writes.contains(FrozenCell::Mutability(r))
+            {
+                None
+            } else {
+                Some(old)
+            };
+            session.saved_mutabilities.push((r, saved));
         }
         self.write_mutability_raw(r, FieldMutability::Link(r2));
         r2
@@ -5131,9 +5165,11 @@ impl TypeContext {
         }
 
         // Path compression: relink all traversed nodes to the representative
-        // (OCaml `Btype.repr_link`). Stored handles use compilation-local
-        // descriptor overlays, just like ordinary unification writes.
+        // (OCaml `Btype.repr_link`). Frozen nodes are followed, never compressed.
         for &node in &chain[..chain_len] {
+            if node.is_store() && !self.store_build_owns(node) {
+                continue;
+            }
             if node != current {
                 // A direct link already points at the representative. OCaml
                 // btype.ml:107-115 does not log/write it (`compress = false`);
@@ -5482,7 +5518,7 @@ mod tests {
         assert!(matches!(ctx.store.row_field(row), Some(RowField::Rabsent)));
         ctx.restore_type_state(snapshot);
         // Memo contents are not part of the trail (btype.ml:692-700); store
-        // memos stay in this compilation's overlay.
+        // memos stay in this compilation's exception table.
         assert!(matches!(ctx.get_abbrev_memo(memo), AbbrevMemo::Mlink(_)));
         assert!(matches!(ctx.store.abbrev(memo), AbbrevMemo::Mnil));
         assert!(matches!(ctx.get_row_field(row), Some(RowField::Rabsent)));
@@ -5567,9 +5603,9 @@ mod tests {
         ctx.set_level(shared, 1);
         ctx.restore_type_state(snapshot);
         assert_eq!(count(Kind::LinkShared), links + 1);
-        // Restoration goes through the raw writer too: count both directions.
-        assert_eq!(count(Kind::DescWriteShared), descriptors + 1);
-        assert_eq!(count(Kind::LevelWriteShared), levels + 2);
+        // Restoring absence removes the exception without writing a value.
+        assert_eq!(count(Kind::DescWriteShared), descriptors);
+        assert_eq!(count(Kind::LevelWriteShared), levels + 1);
     }
 
     #[test]
@@ -5685,14 +5721,14 @@ mod tests {
     }
 
     #[test]
-    fn store_links_compress_without_mutating_dependencies() {
+    fn store_links_are_followed_without_compressing_dependencies() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let target = ctx.new_var(None);
         let middle = ctx.new_link(target);
         let stored = ctx.store.alloc_type(TypeDesc::Tnil, GENERIC_LEVEL);
         super::super::ctype::link_type(&ctx, stored, middle);
         assert_eq!(ctx.repr(stored), target);
-        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == target));
+        assert!(matches!(*ctx.borrow_desc(stored), TypeDesc::Tlink(t) if t == middle));
         assert!(matches!(ctx.store.desc(stored), TypeDesc::Tnil));
     }
 

@@ -461,6 +461,11 @@ impl ThreadTypeStore {
         self.row_fields.borrow_mut()[rf.store_index()] = field;
     }
 
+    /// Write a memo cell owned by the active store build.
+    pub(crate) fn set_abbrev_backing(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        self.abbrevs.borrow_mut()[memo.store_index()] = value;
+    }
+
     /// Apply `f` to a store memo cell without copying it.
     pub(crate) fn with_abbrev<R>(
         &self,
