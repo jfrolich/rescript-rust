@@ -1961,8 +1961,17 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    (`compile_deps_program_in_arena` (C:663)), imported into a fresh `Bir`
    (`bridge::import_lambda`, S2.2). Until S4 switches on, this is the only source of
    level L for the lowering, so both sides start from the same tree.
+
+   Integration blocker found by S3.3a: `bridge::import_lambda` currently
+   rejects every repeated Lambda handle (`bridge.rs`, `import_lambda`),
+   including a shared leaf. The simplified input at this cut is not always
+   a tree, unlike the earlier `lambda-bridge` cut. Importing
+   `seq_raw(c, c)` for one constant handle `c` reproduces the rejection.
+   The `lower` gate must report this as an input error, not introduce an
+   unlisted fallback. The bridge's sharing policy must be resolved before
+   recording this stage's baseline or enabling supported construct lowering.
 2. **New side.** Lower to J; export the J program, not flattened, to a
-   `JsArena` with plain constructors (`bridge::export_js`, new in S3.3: no
+   `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy
    pass 1 of the shared tail until S3.2 replaces it. Variables the lowering created get
    identifiers whose stamps follow their `order`, above every stamp of the

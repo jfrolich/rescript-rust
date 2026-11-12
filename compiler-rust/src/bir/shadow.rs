@@ -280,3 +280,170 @@ mod tests {
         }
     }
 }
+
+/// Failure classification is preserved through the compiler's infallible IR API.
+/// Only Unsupported becomes a fallback; export/validation failures remain errors.
+pub(crate) enum LowerFailure {
+    Unsupported(super::bridge::Unsupported),
+    Error(anyhow::Error),
+}
+
+/// Captures the same program points on both sides of the shared legacy tail.
+pub(crate) enum LowerCheck {
+    Failed(LowerFailure),
+    Supported {
+        before: [crate::js_ir::arena::JsDepsProgram; 2],
+        after: [crate::js_ir::arena::JsDepsProgram; 2],
+    },
+}
+
+/// Import exactly the simplified root about to enter legacy compile_expr.
+pub(crate) fn prepare_lower(
+    arena: &LamArena,
+    root: Lam,
+) -> Result<
+    (
+        crate::js_ir::arena::JsArena,
+        crate::lambda::lam_compile::Compiled,
+    ),
+    LowerFailure,
+> {
+    let input = import_lambda(arena, root)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower input import: {error}")))?;
+    let lowered = super::lower::lower(input).map_err(LowerFailure::Unsupported)?;
+    lowered
+        .program
+        .arena
+        .validate(Some(lowered.program.root), false)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
+    // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
+    // smart constructor and no normalize. The last SExp transports Out::value.
+    let mut exported = super::bridge_j::export_js(&lowered.program)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
+    let value =
+        exported.program.block.pop().ok_or_else(|| {
+            LowerFailure::Error(anyhow::anyhow!("lower export lacks output value"))
+        })?;
+    let crate::js_ir::arena::StmtKind::Exp(expr) = exported.program.arena.sk(value) else {
+        return Err(LowerFailure::Error(anyhow::anyhow!(
+            "lower export value is not SExp"
+        )));
+    };
+    use crate::lambda::lam_compile::OutputFinished;
+    let finished = match lowered.finished {
+        super::lower::Finished::True => OutputFinished::True,
+        super::lower::Finished::False => OutputFinished::False,
+        super::lower::Finished::Dummy => OutputFinished::Dummy,
+    };
+    Ok((
+        exported.program.arena,
+        crate::lambda::lam_compile::Compiled {
+            prelude: exported.program.block,
+            expr,
+            finished,
+        },
+    ))
+}
+
+/// Two independent texts, both through the legacy ES module printer without
+/// source maps. A mismatch cannot enter the Unsupported reporting path.
+pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> anyhow::Result<()> {
+    match check {
+        LowerCheck::Failed(LowerFailure::Unsupported(reason)) => {
+            report(unit, "lower", Some(reason.0), None)
+        }
+        LowerCheck::Failed(LowerFailure::Error(error)) => {
+            Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
+        }
+        LowerCheck::Supported { before, after } => {
+            for (text, pair) in [("lower", before), ("lower+passes", after)] {
+                let print = |p| {
+                    crate::js_ir::print_deps_program_with_directives_and_options(
+                        p,
+                        None,
+                        &[],
+                        false,
+                        jsx_preserve,
+                        false,
+                    )
+                };
+                compare_lower_text(unit, text, &print(&pair[0]), &print(&pair[1]))?;
+            }
+            report(unit, "lower", None, None)
+        }
+    }
+}
+
+fn compare_lower_text(unit: &str, text: &str, expected: &str, actual: &str) -> anyhow::Result<()> {
+    if expected != actual {
+        let line = expected
+            .split_inclusive('\n')
+            .zip(actual.split_inclusive('\n'))
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| expected.lines().count().min(actual.lines().count()))
+            + 1;
+        anyhow::bail!(
+            "{unit}: {text} mismatch at line {line}: expected {:?}, got {:?}",
+            expected.split_inclusive('\n').nth(line - 1),
+            actual.split_inclusive('\n').nth(line - 1)
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod lower_tests {
+    use super::*;
+    #[test]
+    fn both_text_mismatches_are_errors_with_first_line() {
+        for text in ["lower", "lower+passes"] {
+            let error = compare_lower_text("Example.res", text, "same\nold\n", "same\nnew\n")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(&format!("Example.res: {text} mismatch at line 2")));
+        }
+        assert!(compare_lower_text("Example.res", "lower", "same\n", "same").is_err());
+    }
+    #[test]
+    fn supported_gate_checks_both_program_points() {
+        use crate::js_ir::arena::{JsArena, JsDepsProgram, JsProgram, StmtKind};
+        let empty = JsDepsProgram {
+            program: JsProgram::new_in(vec![], vec![], JsArena::new()),
+            modules: vec![], side_effect: None,
+        };
+        let mut changed = empty.clone();
+        let statement = changed.program.arena.stmt(StmtKind::Debugger);
+        changed.program.block.push(statement);
+        for after_changed in [false, true] {
+            let same = [empty.clone(), empty.clone()];
+            let different = [empty.clone(), changed.clone()];
+            let check = if after_changed {
+                LowerCheck::Supported { before: same, after: different }
+            } else {
+                LowerCheck::Supported { before: different, after: same }
+            };
+            let text = if after_changed { "lower+passes" } else { "lower" };
+            let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();
+            assert!(error.contains(&format!("Gate.res: {text} mismatch at line")));
+        }
+    }
+    #[test]
+    fn simplified_shared_input_is_an_error_not_a_new_fallback() {
+        let mut arena = LamArena::new();
+        let constant = arena.const_(crate::lambda::lam_constant::Constant::JsNull);
+        let root = arena.seq_raw(constant, constant);
+        let result = prepare_lower(&arena, root);
+        match result {
+            Err(LowerFailure::Error(error)) => {
+                assert_eq!(error.to_string(), "lower input import: shared Lambda node")
+            }
+            Err(LowerFailure::Unsupported(reason)) => panic!("unlisted fallback: {reason}"),
+            Ok(_) => panic!("update this regression when the bridge supports shared input"),
+        }
+    }
+    #[test]
+    fn export_errors_are_not_fallbacks() {
+        let check = LowerCheck::Failed(LowerFailure::Error(anyhow::anyhow!("bad exported tree")));
+        assert!(check_lower(check, "Example.res", false).is_err());
+    }
+}

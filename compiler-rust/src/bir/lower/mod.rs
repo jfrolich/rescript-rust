@@ -141,3 +141,18 @@ mod tests {
         }
     }
 }
+
+/// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
+/// SExp carrying Out::value for the migration exporter, not an emitted effect.
+pub(crate) struct Lowered {
+    pub program: super::bridge_j::Imported,
+    pub finished: Finished,
+}
+
+/// N1: C:663 compile_deps_program_in_arena. Initial harness cut: no source
+/// construct is supported until the subsequent construct commits.
+pub(crate) fn lower(
+    _input: super::bridge::Imported,
+) -> Result<Lowered, super::bridge::Unsupported> {
+    Err(super::bridge::Unsupported("lowering not implemented"))
+}
