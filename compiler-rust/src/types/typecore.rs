@@ -7699,6 +7699,7 @@ pub(crate) fn type_exp<'a>(
             | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
             | crate::parser::ast::ExpressionDesc::Pexp_field(..)
             | crate::parser::ast::ExpressionDesc::Pexp_apply(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_await(_)
     ) {
         return type_expect_full(
             tctx,
@@ -8072,10 +8073,15 @@ fn type_expect_full<'a>(
 ) -> TypeCoreResult<Expression> {
     let expected_ty = expected_ty.into();
     let arena = tctx.arena;
+    let no_attributes = Attributes::new();
     let mut typed = crate::types::typemod::with_warning_scope(
         tctx,
         arena,
-        &expr.pexp_attributes,
+        if matches!(expr.pexp_desc, crate::parser::ast::ExpressionDesc::Pexp_await(_)) {
+            &no_attributes
+        } else {
+            &expr.pexp_attributes
+        },
         true,
         |tctx| {
             type_expect_with_recarg_unscoped(
@@ -8155,93 +8161,8 @@ fn type_expect_with_recarg_unscoped<'a>(
         return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
     }
     if let ED::Pexp_ident(lid) = &expr.pexp_desc {
-        let longident = tctx.arena.get_longident(lid.txt);
-
-        // Normal identifier expression. typetexp.ml `find_value`:
-        // `Env.check_value_name (Longident.last lid) loc` before lookup.
-        {
-            let last = tctx.arena.get_string(longident.last_idx());
-            if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
-                .is_err()
-            {
-                return Err(TypeCoreError::IllegalValueName {
-                    loc: lid.loc,
-                    name: last.to_string(),
-                });
-            }
-        }
-        mark_open_lid_use(
-            ctx,
-            env,
-            tctx.arena,
-            longident,
-            crate::types::env::OpenLookupKind::Value,
-            Some(lid.loc),
-        );
-        let (path, desc) = match env.lookup_value_by_lid(
-            longident,
-            tctx.arena,
-            &mut tctx.persistent_env,
-            tctx.type_ctx,
-        ) {
-            Some(result) => result,
-            None => {
-                if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
-                    return Err(err);
-                }
-                // typecore.ml Pexp_ident: `<Button />` refers to
-                // `Button.make`. The module exists (otherwise the lookup
-                // reports it as unbound), but it defines no component.
-                if let Longident::Ldot(module_lid, last) = longident
-                    && matches!(context, Some(ClashSite::JsxComponent))
-                    && tctx.arena.get_string(*last) == "make"
-                {
-                    let module_lid = tctx.longident_to_string(module_lid);
-                    let alternatives = unbound_value_alternatives(tctx, env, longident);
-                    return Err(TypeCoreError::JsxComponentWithoutMake {
-                        loc: lid.loc,
-                        module_lid,
-                        alternatives,
-                    });
-                }
-                return Err(unbound_value_error(tctx, env, lid.loc, longident));
-            }
-        };
-        // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-        let used_name = tctx.arena.name(longident.last_idx());
-        tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
-        // typetexp.ml:117-123 via typecore.ml:2381-2388.
-        let deprecated_context = if deprecated_function_call {
-            crate::types::context::DeprecatedContext::FunctionCall
-        } else {
-            crate::types::context::DeprecatedContext::Reference
-        };
-        record_deprecated_used(
-            tctx,
-            lid.loc,
-            &desc.val_attributes,
-            Some(deprecated_context),
-        )?;
-        if let Some(warning) = deprecated_warning_for_value(&path, &desc)
-            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-        {
-            tctx.report_warning(lid.loc, warning);
-        }
-        check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
-
-        let ty = crate::types::instance(ctx, desc.val_type);
-        finish_expected(tctx, expr, ty, &mut expected_ty, context)?;
-
-        return Ok({
-            let typed_node = Expression::new(
-                ExpressionDesc::Texp_ident(path, *lid, desc),
-                loc,
-                ty,
-                tctx.type_ctx.store_typed_env(env),
-            );
-            tctx.typed
-                .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-        });
+        return type_identifier(tctx, env, expr, loc, lid, &expr.pexp_attributes,
+            &mut expected_ty, context, recarg, deprecated_function_call);
     }
     if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
         let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
@@ -8264,6 +8185,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         // request must be materialised by the first check or a lowered apply.
         finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
         return Ok(typed_apply);
+    }
+    if let ED::Pexp_await(operand) = &expr.pexp_desc {
+        let arena = tctx.arena;
+        let primitive = Located {
+            txt: arena.promise_await_lident(),
+            loc: arena.ghost_location(arena.get_expr(*operand).pexp_loc),
+        };
+        return type_promise_application(tctx, env, expr, *operand, primitive, &mut expected_ty, context);
     }
     let expected_ty = materialize_expected(tctx, expr, &mut expected_ty);
 
@@ -9039,19 +8968,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             )
         }
 
-        ED::Pexp_await(inner_expr_idx) => {
-            // Await expression: await E
-            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
-            type_await(
-                tctx,
-                env,
-                loc,
-                inner_expr,
-                expected_ty,
-                context,
-                &expr.pexp_attributes,
-            )
-        }
+        ED::Pexp_await(_) => unreachable!("await was typed above"),
 
         ED::Pexp_object_get(inner) => {
             let (ref obj_expr_idx, ref method) = **inner;
@@ -9168,6 +9085,106 @@ fn type_expect_with_recarg_unscoped<'a>(
     }
 }
 
+/// Type a value identifier without requiring a parsed expression node.
+/// Cost: the existing value lookup, instantiation and unification, then one
+/// typed identifier; no additional lookup or parsed-node allocation.
+#[allow(clippy::too_many_arguments)]
+fn type_identifier(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, expr: &ParsedExpression,
+    loc: LocIdx, lid: &Located<LidentIdx>, attributes: &[crate::parser::ast::Attribute],
+    expected_ty: &mut Expected, context: Option<ClashSite>, recarg: RecArg,
+    deprecated_function_call: bool,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let longident = tctx.arena.get_longident(lid.txt);
+
+    // Normal identifier expression. typetexp.ml `find_value`:
+    // `Env.check_value_name (Longident.last lid) loc` before lookup.
+    {
+        let last = tctx.arena.get_string(longident.last_idx());
+        if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
+            .is_err()
+        {
+            return Err(TypeCoreError::IllegalValueName {
+                loc: lid.loc,
+                name: last.to_string(),
+            });
+        }
+    }
+    mark_open_lid_use(
+        ctx,
+        env,
+        tctx.arena,
+        longident,
+        crate::types::env::OpenLookupKind::Value,
+        Some(lid.loc),
+    );
+    let (path, desc) = match env.lookup_value_by_lid(
+        longident,
+        tctx.arena,
+        &mut tctx.persistent_env,
+        tctx.type_ctx,
+    ) {
+        Some(result) => result,
+        None => {
+            if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
+                return Err(err);
+            }
+            // typecore.ml Pexp_ident: `<Button />` refers to
+            // `Button.make`. The module exists (otherwise the lookup
+            // reports it as unbound), but it defines no component.
+            if let Longident::Ldot(module_lid, last) = longident
+                && matches!(context, Some(ClashSite::JsxComponent))
+                && tctx.arena.get_string(*last) == "make"
+            {
+                let module_lid = tctx.longident_to_string(module_lid);
+                let alternatives = unbound_value_alternatives(tctx, env, longident);
+                return Err(TypeCoreError::JsxComponentWithoutMake {
+                    loc: lid.loc,
+                    module_lid,
+                    alternatives,
+                });
+            }
+            return Err(unbound_value_error(tctx, env, lid.loc, longident));
+        }
+    };
+    // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
+    let used_name = tctx.arena.name(longident.last_idx());
+    tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
+    // typetexp.ml:117-123 via typecore.ml:2381-2388.
+    let deprecated_context = if deprecated_function_call {
+        crate::types::context::DeprecatedContext::FunctionCall
+    } else {
+        crate::types::context::DeprecatedContext::Reference
+    };
+    record_deprecated_used(
+        tctx,
+        lid.loc,
+        &desc.val_attributes,
+        Some(deprecated_context),
+    )?;
+    if let Some(warning) = deprecated_warning_for_value(&path, &desc)
+        .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+    {
+        tctx.report_warning(lid.loc, warning);
+    }
+    check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
+
+    let ty = crate::types::instance(ctx, desc.val_type);
+    finish_expected_at(tctx, expr, loc, ty, expected_ty, context)?;
+
+    Ok({
+        let typed_node = Expression::new(
+            ExpressionDesc::Texp_ident(path, *lid, desc),
+            loc,
+            ty,
+            tctx.type_ctx.store_typed_env(env),
+        );
+        tctx.typed
+            .with_exp_attributes(typed_node, attributes.to_vec().into())
+    })
+}
+
 /// Finish a case-1 expression. Materialise when unification would do more
 /// than link the unobservable expected variable, retaining the original
 /// representative choice, level updates and error traces in those cases.
@@ -9178,13 +9195,23 @@ fn finish_expected(
     expected: &mut Expected,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<()> {
+    finish_expected_at(tctx, expr, expr.pexp_loc, ty, expected, context)
+}
+
+/// Finish an expected type at the construct's semantic location.
+/// Cost: the existing expected-variable check and, when needed, unification;
+/// no location allocation, traversal or additional type lookup.
+fn finish_expected_at(
+    tctx: &mut TypeCheckContext<'_>, expr: &ParsedExpression, loc: LocIdx,
+    ty: TypeExprRef, expected: &mut Expected, context: Option<ClashSite>,
+) -> TypeCoreResult<()> {
     if let Expected::Infer { level, .. } = *expected
         && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
     {
         return Ok(());
     }
     let expected = materialize_expected(tctx, expr, expected);
-    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
+    rue_unify(tctx, loc, ty, expected, context)
 }
 
 fn materialize_expected(
@@ -9413,19 +9440,19 @@ fn unified_expected_type(env: &Env, ctx: &TypeContext, type_name: &str) -> TypeE
 /// Crucially, this does NOT unify the operator's polymorphic type with the
 /// concrete arg/result types, so the operator expression keeps its
 /// polymorphic instance type (with shared Tvars and cycles in sexp output).
+#[allow(clippy::too_many_arguments)]
 fn translate_unified_ops(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     sexp: &ParsedExpression,
-    apply: &PexpApply,
+    loc: LocIdx,
+    attributes: &[crate::parser::ast::Attribute],
+    args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    transformed_jsx: bool,
     typed_funct: &Expression,
     expected_ty: &mut Expected,
     context: Option<ClashSite>,
 ) -> Option<TypeCoreResult<Expression>> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
-    let args = tctx.arena.apply_args(apply.args);
-    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // Check if the function is a unified op (`Pervasives.<op>`).
@@ -9900,28 +9927,44 @@ fn filter_arrow_for_lowered_apply(
     }
 }
 
+/// The existing application rule, supplied with the parsed operands.
+/// Cost: the existing operand/list reads followed by application typing.
 fn type_application(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    sexp: &ParsedExpression,
-    apply: &PexpApply,
-    expected_ty: &mut Expected,
+    tctx: &mut TypeCheckContext<'_>, env: &Env, sexp: &ParsedExpression,
+    apply: &PexpApply, expected_ty: &mut Expected, context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    let arena = tctx.arena;
+    type_application_parts(tctx, env, sexp, sexp.pexp_loc, &sexp.pexp_attributes,
+        ApplicationCallee::Source(arena.get_expanded_expr(apply.funct)),
+        arena.apply_args(apply.args), apply.partial, apply.transformed_jsx, expected_ty, context)
+}
+
+/// Borrowed source callee or a compilation-local primitive handle. Never stored.
+#[derive(Clone, Copy)]
+enum ApplicationCallee<'a> {
+    Source(&'a ParsedExpression),
+    Promise(Located<LidentIdx>),
+}
+
+/// Apply the ordinary typing rule to borrowed operands.
+/// Cost: the same callee check, argument checks and typed-node writes as an
+/// explicit application; no parsed node, argument list or per-node state.
+#[allow(clippy::too_many_arguments)]
+fn type_application_parts(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, sexp: &ParsedExpression,
+    loc: LocIdx, attributes: &[crate::parser::ast::Attribute],
+    callee: ApplicationCallee<'_>, args: &[(ArgLabel, crate::parse_arena::ExprIdx)],
+    partial: bool, transformed_jsx: bool, expected_ty: &mut Expected,
     context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
-    let arena = tctx.arena;
-    let funct = arena.get_expanded_expr(apply.funct);
-    let args = arena.apply_args(apply.args);
-    let partial = apply.partial;
-    let transformed_jsx = apply.transformed_jsx;
     use crate::types::typedtree::ApplyArg;
 
     // compiler/frontend/ast_exp_apply.ml:47-50 validates all arguments to
     // special infix applications before rewriting them. Keep that boundary
     // ahead of function lookup so a malformed pipe reports the label itself,
     // rather than an unbound synthetic `->` value.
-    if let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc
+    if let ApplicationCallee::Source(funct) = callee
+        && let crate::parser::ast::ExpressionDesc::Pexp_ident(lid) = &funct.pexp_desc
         && tctx.arena.is_lident(lid.txt, "->")
         && let Some((_, arg_idx)) = args
             .iter()
@@ -10031,19 +10074,21 @@ fn type_application(
             case: 1,
         });
     }
-    tctx.deprecated_function_call = true;
-    let typed_funct = type_expect_full(
-        tctx,
-        env,
-        funct,
-        Expected::Infer {
-            level: ctx.current_level(),
-            site: InferenceSite::ApplicationFunction,
-        },
-        None,
-        RecArg::Rejected,
-        None,
-    )?;
+    let inferred = Expected::Infer {
+        level: ctx.current_level(), site: InferenceSite::ApplicationFunction,
+    };
+    let typed_funct = match callee {
+        ApplicationCallee::Source(funct) => {
+            tctx.deprecated_function_call = true;
+            type_expect_full(tctx, env, funct, inferred, None, RecArg::Rejected, None)?
+        }
+        ApplicationCallee::Promise(lid) => {
+            tctx.set_unify_env(env);
+            type_identifier(tctx, env, sexp, lid.loc, &lid, &[], &mut { inferred },
+                None, RecArg::Rejected, true)?
+        }
+    };
+    let funct_loc = typed_funct.exp_loc;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(*path),
         _ => None,
@@ -10082,7 +10127,10 @@ fn type_application(
         tctx,
         env,
         sexp,
-        apply,
+        loc,
+        attributes,
+        args,
+        transformed_jsx,
         &typed_funct,
         expected_ty,
         context,
@@ -10154,7 +10202,7 @@ fn type_application(
         let arity_suggestion =
             find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
-            loc: funct.pexp_loc,
+            loc: funct_loc,
             function_type: typed_funct.exp_type,
             expected_arity: function_arity,
             provided_arity: args.len(),
@@ -10424,7 +10472,7 @@ fn type_application(
         let arity_suggestion =
             find_arity_suggestion_for_expression(tctx, env, &typed_funct, args.len())?;
         return Err(TypeCoreError::UncurriedArityMismatch {
-            loc: funct.pexp_loc,
+            loc: funct_loc,
             function_type: typed_funct.exp_type,
             expected_arity: args.len() + function_arity - provided,
             provided_arity: args.len(),
@@ -10458,7 +10506,7 @@ fn type_application(
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
-    finish_expected(tctx, sexp, result_ty, expected_ty, context)?;
+    finish_expected_at(tctx, sexp, loc, result_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -13597,13 +13645,19 @@ fn type_function_nary(
     } else {
         result_type
     };
-    let typed_body = type_expect_with_module_unpacks(
-        tctx,
-        &body_env,
-        tctx.arena.get_expanded_expr(body),
-        body_result_type,
-        &unpacks,
-        None,
+    let async_body = if is_async {
+        let pattern = tctx.arena.get_pat(params[0].p_pat);
+        let loc = match &pattern.ppat_desc {
+            crate::parser::ast::PatternDesc::Ppat_var(name) => name.loc,
+            _ => pattern.ppat_loc,
+        };
+        Some((body, loc))
+    } else {
+        None
+    };
+    let typed_body = type_body_with_module_unpacks(
+        tctx, &body_env, tctx.arena.get_expanded_expr(body),
+        body_result_type, &unpacks, None, async_body,
     )?;
     let mut typed_body = Expression {
         exp_type: crate::types::instance(ctx, body_result_type),
@@ -17185,40 +17239,20 @@ fn type_newtype(
 
 /// Type check await expression.
 #[allow(clippy::too_many_arguments)]
-fn type_await(
-    tctx: &mut TypeCheckContext<'_>,
-    env: &Env,
-    loc: LocIdx,
-    inner_expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
-    _context: Option<ClashSite>,
-    attributes: &[crate::parser::ast::Attribute],
+/// Type a promise primitive using the ordinary application rule.
+/// Cost: one existing primitive lookup and one operand check; the one-argument
+/// slice is stack borrowed, with no parsed node, list or location allocation.
+fn type_promise_application(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, source: &ParsedExpression,
+    operand: crate::parse_arena::ExprIdx, primitive: Located<LidentIdx>,
+    expected: &mut Expected, context: Option<ClashSite>,
 ) -> TypeCoreResult<Expression> {
-    // For await, the inner expression should be a Promise<T>
-    // and the result type is T
-    // For simplicity, we just type check the inner expression with expected type
-    // Full implementation would handle Promise type constructor
-
-    // Type check the inner expression
-    let typed_inner = type_expect(tctx, env, inner_expr, expected_ty, None)?;
-
-    // Return the expression - await just unwraps the promise
-    // In JavaScript, this is a runtime operation
-    Ok({
-        let typed_node = Expression::new(
-            ExpressionDesc::Texp_apply {
-                funct: tctx.push_expr(typed_inner),
-                args: crate::types::typedtree::TArgList::EMPTY, // Await is a special form, not a regular application
-                partial: false,
-                transformed_jsx: false,
-            },
-            loc,
-            expected_ty,
-            tctx.type_ctx.store_typed_env(env),
-        );
-        tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
-    })
+    tctx.set_unify_env(env);
+    let result = type_application_parts(tctx, env, source, primitive.loc, &[],
+        ApplicationCallee::Promise(primitive), &[(ArgLabel::Nolabel, operand)],
+        false, false, expected, context)?;
+    finish_expected_at(tctx, source, primitive.loc, result.exp_type, expected, context)?;
+    Ok(result)
 }
 
 /// typecore.ml `object_valid_fields`.
@@ -18991,13 +19025,26 @@ fn module_type_from_package_binding(
     .unwrap_or(crate::types::decl::ModuleType::MtyIdent(path)))
 }
 
+/// Type an ordinary body under unpacked parameter modules.
+/// Cost: the existing unpack recursion and body check; no additional walk.
 fn type_expect_with_module_unpacks(
+    tctx: &mut TypeCheckContext<'_>, env: &Env, body: &ParsedExpression,
+    expected_ty: TypeExprRef, unpacks: &[PatternVariable], context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    type_body_with_module_unpacks(tctx, env, body, expected_ty, unpacks, context, None)
+}
+
+/// Type a function body, optionally adding its promise result, under unpacks.
+/// Cost: one existing module-unpack scope per parameter unpack, then one body
+/// check. The promise wrapper adds no traversal or parsed nodes.
+fn type_body_with_module_unpacks(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
     body: &ParsedExpression,
     expected_ty: TypeExprRef,
     unpacks: &[PatternVariable],
     context: Option<ClashSite>,
+    async_body: Option<(crate::parse_arena::ExprIdx, LocIdx)>,
 ) -> TypeCoreResult<Expression> {
     fn ensure_string_idx(arena: &ParseArena, s: &str) -> StrIdx {
         if let Some(idx) = arena.find_string_idx(s) {
@@ -19009,7 +19056,13 @@ fn type_expect_with_module_unpacks(
     // `wrap_unpacks` (typecore.ml:2097-2108) folds left over the unpacks, so
     // the last one is the outermost `let module`.
     let Some((unpack, rest)) = unpacks.split_last() else {
-        return type_expect(tctx, env, body, expected_ty, context);
+        return if let Some((operand, loc)) = async_body {
+            let primitive = Located { txt: tctx.arena.promise_async_lident(), loc };
+            type_promise_application(tctx, env, body, operand, primitive,
+                &mut Expected::Known(expected_ty), context)
+        } else {
+            type_expect(tctx, env, body, expected_ty, context)
+        };
     };
 
     let decl_mty = module_type_from_package_binding(tctx, env, unpack.ty, unpack.loc_idx)?;
@@ -19049,7 +19102,7 @@ fn type_expect_with_module_unpacks(
     );
     ctx.init_def(ctx.current_stamp());
     let typed_body =
-        type_expect_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context);
+        type_body_with_module_unpacks(tctx, &body_env, body, expected_ty, rest, context, async_body);
     ctx.end_def();
     let typed_body = typed_body?;
     apply_letmodule_local_path_cleanup(
@@ -19133,7 +19186,7 @@ fn type_expect_with_module_unpacks(
                 tctx.typed.push_module_expr(unpack_module),
                 tctx.push_expr(typed_body),
             ),
-            body.pexp_loc,
+            async_body.map_or(body.pexp_loc, |(_, loc)| loc),
             wrapped_ty,
             tctx.type_ctx.store_typed_env(env),
         );
@@ -29928,6 +29981,12 @@ fn parmatch_check_unused(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn direct_application_view_sizes() {
+        assert_eq!(std::mem::size_of::<ApplicationCallee<'_>>(), 16);
+        assert_eq!(std::mem::size_of::<Option<(crate::parse_arena::ExprIdx, LocIdx)>>(), 12);
+    }
+
     use super::*;
     use crate::context::IdGenerator;
 

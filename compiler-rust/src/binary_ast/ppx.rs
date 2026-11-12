@@ -1397,6 +1397,7 @@ macro_rules! validation_methods {
                         self.attributes(arena, expr.pexp_attributes.as_slice());
                     }
                 }
+                ExpressionDesc::Pexp_await(operand) => self.expr(arena, *operand),
                 ExpressionDesc::Pexp_let((flag, bindings, body)) => {
                     if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *flag, *bindings) {
                         self.attributes(arena, expr.pexp_attributes.as_slice());
@@ -5804,43 +5805,6 @@ fn transform_await(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expre
     }
 }
 
-/// Wrap expression with `Primitive_promise.unsafe_async(expr)`
-/// OCaml: ast_async.ml add_promise_type
-///
-/// OCaml uses the loc directly (not ghosted): `Ast_helper.Exp.ident ~loc` and
-/// `Ast_helper.Exp.apply ~loc`. All three uses of loc (pexp_ident.loc, ident.pexp_loc,
-/// apply.pexp_loc) share the same ppat_loc object for pointer-identity-based sharing.
-fn wrap_with_unsafe_async(inner: ExprIdx, loc: LocIdx, arena: &mut ParseArena) -> Expression {
-    // Create Primitive_promise.unsafe_async identifier
-    let promise_str = arena.intern_string("Primitive_promise");
-    let promise_lident = arena.push_lident_from_idx(promise_str);
-    let unsafe_async_lid = arena.push_ldot_static(promise_lident, "unsafe_async");
-
-    // OCaml uses the same loc object for all three positions
-    let func_ident = Expression {
-        pexp_desc: ExpressionDesc::Pexp_ident(Located {
-            txt: unsafe_async_lid,
-            loc,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    };
-
-    Expression {
-        pexp_desc: ExpressionDesc::Pexp_apply(PexpApply {
-            funct: arena.push_expr(func_ident),
-            args: {
-                let items = [(ArgLabel::Nolabel, inner)];
-                arena.push_apply_args(&items)
-            },
-            partial: false,
-            transformed_jsx: false,
-        }),
-        pexp_loc: loc,
-        pexp_attributes: Attributes::new(),
-    }
-}
-
 // ========== Module-Level Await Transformation ==========
 
 /// `Ast_await.remove_awaits`: `m` without its outer awaits, e.g.
@@ -7075,16 +7039,6 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     }
 }
 
-/// OCaml async rewriting uses the mapped lhs pattern location, and for
-/// `Ppat_var` that location is pointer-identical to `name.loc`. Keep the same
-/// identity when arena indices differ but location contents are equal.
-fn async_lhs_loc(lhs: &Pattern, _arena: &ParseArena) -> LocIdx {
-    if let PatternDesc::Ppat_var(name) = &lhs.ppat_desc {
-        return name.loc;
-    }
-    lhs.ppat_loc
-}
-
 fn split_this_attrs(attrs: &[Attribute], arena: &ParseArena) -> (bool, Vec<Attribute>) {
     let mut has_this = false;
     let mut remaining = Vec::new();
@@ -7147,15 +7101,7 @@ fn rewrite_method_callback_expression(
         arena.set_nary_fun_newtypes(first.p_pat, newtypes);
     }
 
-    // Ast_async.make_function_async, with the location of the mapped first
-    // pattern.
-    let rhs = if is_async {
-        let async_loc = async_lhs_loc(arena.get_pat(first.p_pat), arena);
-        let wrapped = wrap_with_unsafe_async(body, async_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     let method_body = Expression {
         pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
             arg_label: first.p_lbl,
@@ -7743,16 +7689,10 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             None
         }
 
-        // `await e` is `Primitive_promise.unsafe_await(e)`. OCaml's
-        // `create_await_expression` takes the ghost location from the
-        // operand as written, and makes a new expression without the
-        // attributes of the `Pexp_await` node.
         ExpressionDesc::Pexp_await(e) => {
-            let e = *e;
-            let e_loc = arena.get_expr(e).pexp_loc;
-            rewrite_expr(e, arena);
-            let expanded = transform_await(e, e_loc, arena);
-            return expand(arena, idx, expanded);
+            rewrite_expr(*e, arena);
+            // The old expansion discarded this node's attributes entirely.
+            return;
         }
 
         // The default mapper maps the packed module with `sub.module_expr`
@@ -8070,12 +8010,6 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
             changed.push((i, new_pat));
         }
     }
-    let first_pat = match changed.first() {
-        Some((0, pat)) => *pat,
-        _ => params[0].1,
-    };
-    // OCaml takes the location from the mapped lhs pattern.
-    let pattern_loc = async_lhs_loc(arena.get_pat(first_pat), arena);
     rewrite_expr(body, arena);
     let newtypes_have_attributes = arena
         .nary_fun_newtypes(&fun)
@@ -8107,14 +8041,7 @@ fn rewrite_fun(idx: ExprIdx, arena: &mut ParseArena) {
     }
     let attrs = arena.get_expr(idx).pexp_attributes.clone();
     let new_attrs = rewritten_attributes(&attrs, arena);
-    // Ast_async.make_function_async: the body of an `async` function is
-    // `Primitive_promise.unsafe_async(body)`.
-    let rhs = if fun.is_async {
-        let wrapped = wrap_with_unsafe_async(body, pattern_loc, arena);
-        arena.push_expr(wrapped)
-    } else {
-        body
-    };
+    let rhs = body;
     if rhs != fun.rhs || shape.2 != fun.lhs || new_attrs.is_some() {
         let expanded = Expression {
             pexp_desc: ExpressionDesc::Pexp_fun(Box::new(PexpFun {
@@ -11684,7 +11611,7 @@ let e = () =>
         assert_eq!(arena.get_expr(root), &root_before);
         for (idx, before) in items.iter().zip(&before) {
             assert_eq!(arena.get_expr(*idx), before, "the node as parsed is kept");
-            if *idx == items[4] || *idx == items[6] {
+            if items[4..].contains(idx) {
                 assert_eq!(arena.expanded(*idx), *idx, "direct construct stays as written");
             } else {
                 assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
@@ -11708,7 +11635,7 @@ let e = () =>
             expanded(4),
             ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l')))
         ));
-        assert!(matches!(expanded(5), ExpressionDesc::Pexp_apply(_)));
+        assert!(matches!(expanded(5), ExpressionDesc::Pexp_await(_)));
         assert!(matches!(expanded(6), ExpressionDesc::Pexp_match(_)));
         assert!(matches!(expanded(7), ExpressionDesc::Pexp_fun(_)));
     }
@@ -11743,6 +11670,15 @@ let e = () =>
         assert_eq!(arena.expanded(root), root);
         assert_eq!(arena.expanded(items[1]), items[1]);
         assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_async_await_functions_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"async p => await p, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, then each function, parameter pattern and await.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
     }
 
     #[test]
