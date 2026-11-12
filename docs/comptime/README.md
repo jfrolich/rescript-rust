@@ -610,6 +610,10 @@ let marathon = (miles: float) => Length.milesToMeters(miles) /. 1000.0
 
 <!-- /example -->
 
+The name of a module in a quote can be a hole, which takes a string:
+`%code(module ${name} = { let version = 1 })`. A string that cannot be the
+name of a module is an error at the macro use.
+
 ### Computing now
 
 `%Macro.eval(expr)` evaluates an expression while compiling and puts the
@@ -799,7 +803,7 @@ it is in the expanded source. So is generated code that does not parse:
 | `%code(...)` | expression | A quoted expression, or quoted declarations when the content is `let`, `type` or `module` items. |
 | `%type(...)` | expression | A quoted type. |
 | `%pat(...)` | expression | A quoted pattern. |
-| `${...}` | inside a quote | A hole: an expression of type `code`, `typ` or `pat`, by its position. |
+| `${...}` | inside a quote | A hole: an expression of type `code`, `typ` or `pat`, by its position. Where the name of a module is written, `module ${name} = ...`, a string. |
 | `${...items}` | in a list of a quote | A splice hole: an array of the items of the list. The three dots are written. |
 
 Everything else is the module `Macro` of the standard library
@@ -858,7 +862,6 @@ compile-time parameter has to be called directly.
 | `Code.print(code)` | The source text of a piece of code. |
 | `Code.raw(text)` | Code from source text. Nothing checks it until the macro's result is compiled. |
 | `Code.decls(items)` | Several declarations in a row. |
-| `Code.module_(name, items)` | `module Name = { items }`, for a module whose name is computed. |
 | `Pat.var(name)`, `Pat.any`, `Pat.string`, `Pat.int` | Patterns. |
 | `Pat.constructor(c)` | The pattern that matches a constructor and binds its arguments, and the code of each bound argument with its type. |
 | `Attr.find`, `has`, `string` | Look up an attribute of a field, constructor or declaration. |
@@ -1015,9 +1018,9 @@ implemented:
 - **Types of the macro's file in a quote.** A value of the macro's own file
   is resolved in that file, and a type is not: the `sql` example names
   `Sql.db` in full.
-- **Holes for the name of a type or a module.** A hole stands for the name
-  of a `let`, as `Pat.var`. The name of a type or a module in a quote is
-  written out; `Code.module_` is for a module whose name is computed.
+- **A hole for the name of a type.** A hole stands for the name of a `let`,
+  as `Pat.var`, and for the name of a module, as a string. The name of a
+  type in a quote is written out.
 - **Attribute payloads beyond one string.** `@Json.key("user_age")` reaches
   the macro; `@Json.codec({strict: true})` does not yet pass its argument.
 - **Parametric types.** `Type.info` of `result<a, b>` or a record with type

@@ -154,6 +154,13 @@ declarations lowers to `__quoteDecls`. At run time a quote is string
 concatenation, with parentheses around each filled hole except those two:
 a record or a variant type cannot be written in parentheses.
 
+The name of a module is a string in the parse tree, so the hole of
+`module ${name} = ...` has no node to be. The parser names such a module
+`$hole`, which cannot be written, and keeps the hole as the attribute
+`res.hole` of the module. The scan of a quote lowers it to
+`__holeModuleName`, which takes a string and checks that it can be the name
+of a module. Outside a quote the type checker reports the module as a hole.
+
 A splice hole is lowered by the list it is an item of, which the scan of a
 quote records for each one (`SplicePlace`):
 
