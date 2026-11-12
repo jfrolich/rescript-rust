@@ -26989,37 +26989,71 @@ fn adopt_persistent_root_view(
     adopt_unit_view(&ps, key.clone(), ctx)
 }
 
-/// The world's view of child `ordinal` of `parent`, a child declared with a
-/// signature (`ModuleView::structure_child`), adopted by this compilation;
-/// `None` when the pool had no room for it. One load of the child's cell
-/// and one probe of the compilation's component cache when the view is
-/// built and adopted already.
+/// The world's view of child `ordinal` of `parent`, a child whose path is a
+/// view key (`ModuleView::world_child_kind`), adopted by this compilation;
+/// `None` when the pool had no room for it, and for an alias of a unit
+/// this compilation cannot load or the world does not own.
+///
+/// Adopting the view of an alias of a unit loads the unit and takes its
+/// signature's rename, as building the alias's tables did
+/// (env.ml:1440-1442 `scrape_alias` reaches `find_module`, env.ml:872-875).
+///
+/// Cost, when the view is built and adopted already: one load of the
+/// child's cell and one probe of the compilation's component cache.
 pub(crate) fn adopt_child_view(
     parent: &std::sync::Arc<crate::types::module_view::ModuleView>,
     ordinal: u32,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
 ) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
-    use crate::types::module_view::{ViewKey, verify_view, world_verify_enabled};
-    let world = ctx.world();
-    let view_key = ViewKey::Child(parent, ordinal);
-    let view = world.views().get_or_build(world, &view_key)?;
-    if world_verify_enabled() {
-        verify_view(world, &view_key, &view);
+    use crate::types::module_view::{AliasKey, ViewKey, WorldChild, verify_view, world_verify_enabled};
+    let key_of = |view: &crate::types::module_view::ModuleView| {
+        crate::types::context::QualifiedModuleComponentsCacheKey::new(*view.access_path(), None)
+    };
+    if let Some(view) = parent.built_child(ordinal)
+        && ctx.holds_view(&key_of(view), view)
+    {
+        return Some(view.clone());
     }
-    ctx.adopt_view(
-        crate::types::context::QualifiedModuleComponentsCacheKey::new(*view.access_path(), None),
-        view.clone(),
-    );
+    let world = ctx.world();
+    let adopt = |view_key: ViewKey<'_>| {
+        let view = world.views().get_or_build(world, &view_key)?;
+        if world_verify_enabled() {
+            verify_view(world, &view_key, &view);
+        }
+        Some(view)
+    };
+    let view = match parent.world_child_kind(ordinal)? {
+        WorldChild::Structure => adopt(ViewKey::Child(parent, ordinal))?,
+        WorldChild::UnitAlias(name) => {
+            let unit = pers_env.as_mut()?.find_pers_struct(name, ctx)?;
+            unit.ps_view.get()?;
+            ctx.trigger_module_sig_rename(name);
+            let view = adopt(ViewKey::Alias(&AliasKey {
+                parent,
+                ordinal,
+                unit: &unit,
+            }))?;
+            // The cell holds the view of the unit the first compilation
+            // loaded under this name; one that loads another builds its own
+            // tables.
+            if !view.is_alias_of(&unit) {
+                return None;
+            }
+            view
+        }
+    };
+    ctx.adopt_view(key_of(&view), view.clone());
     Some(view)
 }
 
 /// The world's view of `module_path` when it is a child path whose parent
-/// has a world view and declares the child with a signature. Resolves the
-/// parent as any lookup of the child does.
+/// has a world view and the child's path is a view key. Resolves the parent
+/// as any lookup of the child does.
 ///
 /// Cost: the lookup of the parent's components, one probe of the parent's
 /// name index, and [`adopt_child_view`].
-fn adopt_structure_child_view(
+fn adopt_world_child_view(
     module_path: &Path,
     key: &crate::types::context::QualifiedModuleComponentsCacheKey,
     env: &Env,
@@ -27041,12 +27075,12 @@ fn adopt_structure_child_view(
         cache_mode,
         |components| match components {
             crate::types::env_lazy::Components::World(view) => view
-                .structure_child(name.as_str())
-                .map(|ordinal| (view.clone(), ordinal)),
+                .world_child(name.as_str())
+                .map(|(ordinal, _)| (view.clone(), ordinal)),
             crate::types::env_lazy::Components::Local(_) => None,
         },
     )??;
-    adopt_child_view(&parent, ordinal, ctx)
+    adopt_child_view(&parent, ordinal, pers_env, ctx)
 }
 
 /// The components of a unit only this compilation holds (the world owns no
@@ -27154,10 +27188,11 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     }
 
     // So is the view of a child that a world view declares with a
-    // signature (env.ml:1573-1578): it is the parent's, built once.
+    // signature (env.ml:1573-1578) or as an alias of a unit
+    // (env.ml:1516-1518): it is the parent's, built once.
     if let Some(module_key) = module_key.as_ref()
         && let Some(view) =
-            adopt_structure_child_view(module_path, module_key, env, pers_env, ctx, cache_mode)
+            adopt_world_child_view(module_path, module_key, env, pers_env, ctx, cache_mode)
     {
         return Some((f
             .take()

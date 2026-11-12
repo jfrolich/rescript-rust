@@ -1798,6 +1798,19 @@ impl TypeContext {
             .insert(key, super::env_lazy::HeldComponents::World(view));
     }
 
+    /// Whether this compilation has adopted `view` under `key`. One probe
+    /// of the component cache.
+    pub(crate) fn holds_view(
+        &self,
+        key: &QualifiedModuleComponentsCacheKey,
+        view: &Arc<super::module_view::ModuleView>,
+    ) -> bool {
+        matches!(
+            self.qualified_module_components_cache.borrow().get(key),
+            Some(super::env_lazy::HeldComponents::World(held)) if Arc::ptr_eq(held, view)
+        )
+    }
+
     /// The forced declaration of child `name` (signature item `item`) of
     /// `view` was read: register it with this compilation the first time,
     /// where the tables of an alias path to the same module look for it

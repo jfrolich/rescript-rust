@@ -933,7 +933,7 @@ fn scan_child_component_from_signature(
                     ));
                 }
                 if let (Some(view), Some((_, stored))) = (view, &stored)
-                    && matches!(md.md_type, ModuleType::MtySignature(_))
+                    && view.world_child_kind(cursor.modules).is_some()
                 {
                     let _ = stored.world_child.set((view.clone(), cursor.modules));
                 }
@@ -2484,7 +2484,7 @@ impl StoredModuleComponents {
         f: impl FnOnce(Components<'_>) -> R,
     ) -> Option<R> {
         if let Some((parent, ordinal)) = self.world_child.get()
-            && let Some(view) = super::typecore::adopt_child_view(parent, *ordinal, ctx)
+            && let Some(view) = super::typecore::adopt_child_view(parent, *ordinal, pers_env, ctx)
         {
             return Some(f(Components::World(&view)));
         }
@@ -2704,7 +2704,7 @@ impl ViewTables {
                 if cursor.next_index == 0 && cursor.working_env.is_none()
         );
         if unseeded
-            && let Some((parent, own_name)) = view.parent()
+            && let Some((parent, own_name)) = view.seed_parent()
             && let Some((_, stored)) = ctx
                 .thread_store()
                 .view_tables(&parent)
@@ -2718,7 +2718,7 @@ impl ViewTables {
         let ((found, _scanned), _) = ctx.build_in_store(|| {
             scan_child_component_from_signature(
                 &self.access_path,
-                None,
+                view.value_source(),
                 view.signature_ref(),
                 view.raw_signature(),
                 Some(view),
@@ -2749,11 +2749,15 @@ impl ViewTables {
                         let stored = if module.direct_persistent_alias {
                             // env.ml:1516-1518: the components of an alias
                             // of a persistent unit are that unit's.
-                            Some(Rc::new(StoredModuleComponents::new(
+                            let stored = StoredModuleComponents::new(
                                 super::env::Env::empty(),
                                 module.decl.md_path.expect("an opened module has its path"),
                                 module.decl.as_ref().clone(),
-                            )))
+                            );
+                            if let Some((ordinal, _)) = view.world_child(module.id.name()) {
+                                let _ = stored.world_child.set((view.clone(), ordinal));
+                            }
+                            Some(Rc::new(stored))
                         } else {
                             self.child_components(view, module.id.name(), ctx)
                                 .map(|(_, stored)| stored)
@@ -2821,7 +2825,7 @@ impl<'a> Components<'a> {
     #[inline]
     pub(crate) fn rerooted_value_source(self) -> Option<&'a Path> {
         match self {
-            Components::World(_) => None,
+            Components::World(view) => view.value_source().map(|source| source.as_ref()),
             Components::Local(components) => components.rerooted_value_source(),
         }
     }
