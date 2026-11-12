@@ -164,6 +164,9 @@ pub(in crate::binary_ast) fn classify(
 ) -> Classification {
     use GeneralReason::*;
     let general = Classification::General;
+    if !arena.derived_plans_enabled() {
+        return general(Switch);
+    }
     if scope == Scope::Nested {
         return general(Nested);
     }
@@ -623,6 +626,32 @@ mod tests {
         assert!(derived("type a = {x: int} @spice and b = array<int>", Scope::TopLevel));
         assert!(!derived("@spice type a = {x: int} @spice and b = array<a>", Scope::TopLevel));
         assert!(!derived("@spice type a = string", Scope::Nested));
+    }
+
+    /// With plans switched off (`RESCRIPT_DERIVED_PATH=general`) the
+    /// classifier keeps every declaration on the general path, and the
+    /// seam emits the value group it emitted before plans.
+    #[test]
+    fn the_switch_keeps_every_declaration_general() {
+        let source = "@spice type a = string @spice and b = array<a>";
+        let mut parser = crate::parser::Parser::new("Test.res", source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        let mut arena = parser.into_arena();
+        arena.set_derived_plans(false);
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else {
+            panic!("a type declaration")
+        };
+        for decl in &inner.1 {
+            assert_eq!(
+                classify(&arena, decl, inner.0, false, Scope::TopLevel),
+                Classification::General(GeneralReason::Switch)
+            );
+        }
+        let expanded =
+            derive::expand_structure_item_with_mapper(&items[0], &mut arena, true, Scope::TopLevel)
+                .unwrap();
+        assert!(matches!(expanded.last().unwrap().pstr_desc, StructureItemDesc::Pstr_value(..)));
+        assert_eq!(arena.plans().item_count(), 0);
     }
 
     fn longident_text(arena: &ParseArena, lid: &Longident) -> String {

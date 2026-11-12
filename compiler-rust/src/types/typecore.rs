@@ -1442,6 +1442,10 @@ struct DelayedOpenCheck {
 pub struct TypeCheckContext<'a> {
     /// Optional item accounting; absent in ordinary compilation.
     pub derived_census: Option<Box<crate::derived_census::Census>>,
+    /// Whether a derived item is checked from its plan. The reference
+    /// compile of `RESCRIPT_DERIVED_PATH=check` types every item's general
+    /// form instead.
+    pub derived_plans: bool,
     /// Type context for allocation.
     pub type_ctx: &'a TypeContext,
     /// Parse arena for location conversion and longident allocation.
@@ -1659,6 +1663,7 @@ impl<'a> TypeCheckContext<'a> {
         type_ctx.register_arena_longident_names(arena);
         TypeCheckContext {
             derived_census: None,
+            derived_plans: true,
             type_ctx,
             arena,
             typed: TypedArena::new(),

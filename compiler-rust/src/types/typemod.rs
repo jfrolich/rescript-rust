@@ -16749,6 +16749,10 @@ fn type_structure_item<'a>(
 
         // A derived item: discharge the obligations of its plan, or, when one
         // fails, type the value group it stands for.
+        ParsedStructureItemDesc::Pstr_derived(idx) if !tctx.derived_plans => {
+            let general = crate::binary_ast::derive::general_item(arena, loc, *idx);
+            type_structure_item(tctx, env, arena, &general)
+        }
         ParsedStructureItemDesc::Pstr_derived(idx) => {
             match crate::types::derived::discharge(tctx, env, *idx) {
                 Ok(discharged) => {

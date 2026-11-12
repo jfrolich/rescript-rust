@@ -49,6 +49,9 @@ pub enum GeneralReason {
     /// and constructor applications that need more than names and
     /// applications.
     NotYetPlanned,
+    /// The switch `RESCRIPT_DERIVED_PATH=general` keeps every declaration on
+    /// the general path.
+    Switch,
 }
 
 /// The path a derived declaration takes.
@@ -83,6 +86,8 @@ pub struct PathCounts {
     pub nested: u64,
     /// See [`GeneralReason::NotYetPlanned`].
     pub not_yet_planned: u64,
+    /// See [`GeneralReason::Switch`].
+    pub switch: u64,
     /// Bindings of plans whose obligations failed in the checker, which then
     /// typed the general form. They are counted under `plan` as well.
     pub fallback: u64,
@@ -101,6 +106,7 @@ impl PathCounts {
         self.unboxed += other.unboxed;
         self.nested += other.nested;
         self.not_yet_planned += other.not_yet_planned;
+        self.switch += other.switch;
         self.fallback += other.fallback;
     }
 
@@ -118,6 +124,7 @@ impl PathCounts {
                 GeneralReason::Unboxed => &mut self.unboxed,
                 GeneralReason::Nested => &mut self.nested,
                 GeneralReason::NotYetPlanned => &mut self.not_yet_planned,
+                GeneralReason::Switch => &mut self.switch,
             },
         };
         *counter += bindings;

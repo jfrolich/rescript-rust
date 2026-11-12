@@ -593,6 +593,8 @@ pub struct ParseArena {
     /// Whether the builtin spice mapper stands in for a configured external
     /// spice derive (see `binary_ast::derive`).
     builtin_spice_disabled: bool,
+    /// The derive seam plans no item (`RESCRIPT_DERIVED_PATH=general`).
+    derived_plans_disabled: bool,
     /// `Experimental_features.is_enabled LetUnwrap` for the builtin PPX run on
     /// this arena, which decides the error a `let?` binding raises
     /// (bs_builtin_ppx.ml:273, 366, 565). Set by the rewrite entry points.
@@ -1085,6 +1087,7 @@ impl Default for ParseArena {
             value_constraint_varify_errors: HashMap::new(),
             ppx_deferred_error: None,
             builtin_spice_disabled: false,
+            derived_plans_disabled: false,
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
             has_gentype_annotations: false,
@@ -3344,6 +3347,18 @@ impl ParseArena {
     /// Enable or disable the builtin spice mapper for this compilation.
     pub fn set_builtin_spice(&mut self, enabled: bool) {
         self.builtin_spice_disabled = !enabled;
+    }
+
+    /// Let the derive seam plan items, or keep every item on the general
+    /// path.
+    pub fn set_derived_plans(&mut self, enabled: bool) {
+        self.derived_plans_disabled = !enabled;
+    }
+
+    /// Whether the derive seam plans items. Cost: O(1).
+    #[inline]
+    pub fn derived_plans_enabled(&self) -> bool {
+        !self.derived_plans_disabled
     }
 
     /// Whether built-in Spice deriving is enabled for this parse.
