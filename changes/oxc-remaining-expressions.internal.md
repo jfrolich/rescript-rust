@@ -1,0 +1,1 @@
+- Extend the opt-in oxc JavaScript emitter with string concatenations, option helpers, runtime JSX, nested arrows, nullish comparisons, record rest, methods and flat calls, retaining whole-file fallbacks for unsupported shapes.
