@@ -20,6 +20,49 @@ pub(crate) use checker::{
 #[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
+static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
+
+/// A main-signature decode on loading a unit published in this build.
+pub fn record_published_signature_decode() {
+    if enabled() {
+        PUBLISHED_SIGNATURE_DECODES.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+#[cfg(debug_assertions)]
+thread_local! {
+    static SIGNATURE_PUBLICATION: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Debug-only guard for the interval before a signature is released.
+pub struct SignaturePublication;
+impl SignaturePublication {
+    /// Begin the checking worker's pre-release interval.
+    pub fn begin() -> Self {
+        #[cfg(debug_assertions)]
+        SIGNATURE_PUBLICATION.with(|active| assert!(!active.replace(true)));
+        Self
+    }
+}
+impl Drop for SignaturePublication {
+    fn drop(&mut self) {
+        #[cfg(debug_assertions)]
+        SIGNATURE_PUBLICATION.with(|active| active.set(false));
+    }
+}
+
+/// Encoding and summary construction must stay off the release path.
+#[inline]
+pub fn assert_signature_released() {
+    #[cfg(debug_assertions)]
+    SIGNATURE_PUBLICATION.with(|active| {
+        assert!(
+            !active.get(),
+            "encoding or summary before signature release"
+        )
+    });
+}
+
 static VALUE_HITS: AtomicU64 = AtomicU64::new(0);
 static VALUE_MISSES: AtomicU64 = AtomicU64::new(0);
 static VALUE_SCANS: AtomicU64 = AtomicU64::new(0);
@@ -617,6 +660,10 @@ pub fn print_report() {
         return;
     }
 
+    eprintln!(
+        "[compiler-counter] published_signature_decodes={}",
+        PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
+    );
     for kind in [
         LazyLookupKind::Value,
         LazyLookupKind::Type,

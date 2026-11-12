@@ -180,7 +180,7 @@ pub fn compile_all(source: &str, filename: &str) -> String {
                     }])
                     .with_cmj_export_arities(compiled.cmj_export_arities)
                     .with_cmj_export_lambdas(compiled.cmj_export_lambdas);
-                    reg.register_module(&module_name, ps, info);
+                    reg.register_module_arc(&module_name, ps, info);
                 }
             });
             serde_json::json!({

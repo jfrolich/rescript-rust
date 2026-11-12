@@ -494,6 +494,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         .and_then(|spec| parse_package_output(spec));
 
     let compiler_opts = CompilerOptions {
+        js_printer: crate::emit::PrinterMode::from_env(),
         check_only: false,
         dump_lambda: opts.dump_lambda,
         dump_typed_sexp: opts.dump_typed_sexp,
@@ -673,7 +674,7 @@ fn compile_in_process(
         if let Some(pers_struct) = interface.pers_struct {
             registry.register_module_arc(
                 &module_name,
-                std::sync::Arc::new(pers_struct),
+                pers_struct,
                 crate::cmi::persistent_env::InMemoryModuleInfo::new(
                     source_path.to_path_buf(),
                     true,

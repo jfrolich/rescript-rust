@@ -485,6 +485,7 @@ pub struct SignatureSummary {
 impl SignatureSummary {
     /// The summary of `sig`, the published signature of `unit`.
     pub fn of(unit: &str, sig: &super::portable_types::PortableSignature) -> Self {
+        crate::perf_counters::assert_signature_released();
         let unit = Name::new(unit);
         let graph = super::portable_types::HashGraph::of(&sig.type_graph);
         let item_hashes = sig
@@ -827,42 +828,65 @@ mod tests {
     }
 
     #[test]
-    fn the_first_dependent_gets_the_signature_as_published() {
+    fn publication_defers_encoding_until_a_byte_reader() {
         let published = published_unit();
+        assert!(published.has_decoded_signatures());
+        published.summary();
+        assert!(published.has_decoded_signatures());
         let decoded = encoded(&published.signature());
-        assert!(published.has_signature_for_dependent());
-        // The signature set aside is what decoding gives, handed out once.
-        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
-        assert!(!published.has_signature_for_dependent());
-        // Later dependents decode.
-        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+        assert!(!published.has_decoded_signatures());
+        assert_eq!(encoded(&published.signature()), decoded);
     }
 
     #[test]
-    fn a_unit_without_dependents_gives_up_its_signature_for_them() {
+    fn storing_a_unit_without_dependents_releases_its_decoded_signatures() {
         let published = published_unit();
-        let decoded = encoded(&published.signature());
-        published.release_signature_for_dependent();
-        assert!(!published.has_signature_for_dependent());
-        // A dependent that shows up anyway decodes.
-        assert_eq!(encoded(&published.signature_for_dependent()), decoded);
+        assert!(published.has_decoded_signatures());
+        let bytes = crate::binser::to_vec(&published).unwrap();
+        assert!(!published.has_decoded_signatures());
+        let stored: PortablePersStruct = crate::binser::from_slice(&bytes).unwrap();
+        assert_eq!(
+            encoded(&stored.signature()),
+            encoded(&published.signature())
+        );
     }
 
     #[test]
-    fn stored_and_copied_structs_set_no_signature_aside() {
+    fn stored_and_copied_structs_retain_the_same_signature() {
         let published = published_unit();
         let copy = published.clone();
         let stored: PortablePersStruct =
             crate::binser::from_slice(&crate::binser::to_vec(&published).unwrap()).unwrap();
         for other in [&copy, &stored] {
-            assert!(!other.has_signature_for_dependent());
-            assert_eq!(
-                encoded(&other.signature_for_dependent()),
-                encoded(&published.signature())
-            );
+            assert!(!other.has_decoded_signatures());
+            assert_eq!(encoded(&other.signature()), encoded(&published.signature()));
         }
-        // Copying and storing took nothing from the original.
-        assert!(published.has_signature_for_dependent());
+    }
+
+    #[test]
+    fn summary_and_encoding_can_race() {
+        let published = Arc::new(published_unit());
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        std::thread::scope(|scope| {
+            for i in 0..8 {
+                let published = published.clone();
+                let barrier = barrier.clone();
+                scope.spawn(move || {
+                    barrier.wait();
+                    if i % 2 == 0 {
+                        assert_eq!(published.summary().unit, Name::new("Unit"));
+                    } else {
+                        let bytes = crate::binser::to_vec(published.as_ref()).unwrap();
+                        let stored: PortablePersStruct = crate::binser::from_slice(&bytes).unwrap();
+                        assert_eq!(
+                            stored.summary().item_hashes,
+                            published.summary().item_hashes
+                        );
+                    }
+                });
+            }
+        });
+        assert!(!published.has_decoded_signatures());
     }
 
     #[test]

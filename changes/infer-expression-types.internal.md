@@ -1,0 +1,1 @@
+- Infer constant, identifier, field and application expression types where checking only links a fresh expected variable, retaining ordinary unification for representative changes, level lowering and escape checks.
