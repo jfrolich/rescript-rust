@@ -318,6 +318,11 @@ impl StatementStack {
     /// one dead range, so that what follows it is not moved. Never flattens
     /// SBlock here.
     pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
+        if span.len == 0 {
+            // An empty run holds no slot. Its start is above the top when
+            // the run before it was the top and has been taken.
+            return bir.lists.push_iter(0, std::iter::empty());
+        }
         assert!(span.end() <= self.slots.len());
         let count = self.statements(span).count();
         let id = bir.lists.push_iter(count, self.statements(span));
