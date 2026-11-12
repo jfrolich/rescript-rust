@@ -34,8 +34,8 @@ pub struct Imported {
 }
 
 #[derive(Default)]
-struct Importer {
-    bir: Bir,
+pub(super) struct Importer {
+    pub(super) bir: Bir,
     vars: AHashMap<Ident, VarId>,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
@@ -69,7 +69,18 @@ impl Importer {
             len: index(ids.len()),
         })
     }
-    fn binders(&mut self, arena: &LamArena, node: L) -> Result<(), Unsupported> {
+    /// The imported program once `root` is complete.
+    pub(super) fn finish(self, root: NodeId) -> Imported {
+        Imported {
+            arena: self.bir,
+            root,
+            idents: self.idents,
+            globals: self.globals,
+            #[cfg(test)]
+            identifier_lookups: self.identifier_lookups,
+        }
+    }
+    pub(super) fn binders(&mut self, arena: &LamArena, node: L) -> Result<(), Unsupported> {
         match node {
             L::Function { info, .. } => {
                 self.span(arena.params(info))?;
@@ -169,7 +180,12 @@ impl Importer {
         }
         Ok(values[0])
     }
-    fn node(&mut self, a: &LamArena, node: L, c: &[NodeId]) -> Result<NodeId, Unsupported> {
+    pub(super) fn node(
+        &mut self,
+        a: &LamArena,
+        node: L,
+        c: &[NodeId],
+    ) -> Result<NodeId, Unsupported> {
         let mut aux = 0;
         let view = match node {
             L::Var(id) => View::Var {
@@ -362,7 +378,7 @@ impl Importer {
     }
 }
 
-fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
+pub(super) fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
     match node {
         L::Var(_) | L::GlobalModule(_) | L::Const(_) | L::Break | L::Continue => SmallVec::new(),
         L::Apply { func, args, .. } => std::iter::once(func)
@@ -504,7 +520,7 @@ mod tests {
     }
 }
 
-fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
+pub(super) fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
     enum Work {
         Enter(ConstId),
         Finish(ConstId, usize),
