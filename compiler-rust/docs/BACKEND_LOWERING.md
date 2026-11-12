@@ -1998,8 +1998,9 @@ of steps. Each slice adds the tests of its constructs on a 10,000-deep and a
 
 ### 8.1 The gate
 
-Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
-`New` modes (G.1) for every unit:
+Stage name `lower` in `bir::shadow` (C.7 step 7), run in `Check` mode
+(G.1) for every unit. `New` retains the legacy lowering until the complete
+backend can replace it; this slice does not activate application lowering there:
 
 1. **Input.** The simplified Lambda the legacy lowering receives: after
    `simplify_in_arena`, `add_flat_make_aliases` and
