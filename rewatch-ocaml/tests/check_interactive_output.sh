@@ -259,10 +259,10 @@ capture_quiet_build() {
       "CLICOLOR_FORCE=0" \
       "RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE" \
       "RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME" \
-      "$executable" -q build "$work/$implementation" >/dev/null
+      "$executable" build -q "$work/$implementation" >/dev/null
   else
     script -qefc \
-      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME $command_executable -q build $command_project" \
+      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME $command_executable build -q $command_project" \
       "$transcript" >/dev/null
   fi
   if tr '\r' '\n' <"$transcript" \
@@ -341,10 +341,10 @@ capture_quiet_clean() {
       "TERM=xterm" \
       "CLICOLOR=1" \
       "CLICOLOR_FORCE=0" \
-      "$executable" -q clean "$work/$implementation" >/dev/null
+      "$executable" clean -q "$work/$implementation" >/dev/null
   else
     script -qefc \
-      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 $command_executable -q clean $command_project" \
+      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 $command_executable clean -q $command_project" \
       "$transcript" >/dev/null
   fi
   if tr '\r' '\n' <"$transcript" | grep -E '(Cleaning|Cleaned)' >/dev/null; then

@@ -43,7 +43,7 @@ capture() {
   project="$work/$implementation"
   (
     cd "$project"
-    "$executable" "$level" build >"$work/$implementation.stdout" \
+    "$executable" build "$level" >"$work/$implementation.stdout" \
       2>"$work/$implementation.stderr"
   )
   if [ -s "$work/$implementation.stderr" ]; then
@@ -89,7 +89,7 @@ capture_incremental() {
   printf 'let value = 2\n' >"$project/src/A.res"
   (
     cd "$project"
-    "$executable" -vv build >"$work/$implementation-incremental.stdout" \
+    "$executable" build -vv >"$work/$implementation-incremental.stdout" \
       2>"$work/$implementation-incremental.stderr"
   )
   if [ -s "$work/$implementation-incremental.stderr" ]; then

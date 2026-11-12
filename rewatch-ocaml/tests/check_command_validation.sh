@@ -517,6 +517,19 @@ require_same_output() {
   fi
 }
 
+# require_error_contains_in IMPLEMENTATION NAME FRAGMENT: the last run of
+# IMPLEMENTATION (rust or ocaml) wrote FRAGMENT to stderr.
+require_error_contains_in() {
+  local implementation=$1
+  local name=$2
+  local fragment=$3
+  if ! grep -F -- "$fragment" "$work/$implementation.err" >/dev/null; then
+    printf '%s: expected the %s error to contain %s\n' \
+      "$name" "$implementation" "$fragment" >&2
+    dump_both
+    exit 1
+  fi
+}
 require_both_errors_contain() {
   local name=$1
   local fragment=$2
@@ -560,7 +573,7 @@ run_build_output_case() {
   cp -R "$fixture" "$rust_project"
   cp -R "$fixture" "$ocaml_project"
   if [ "$mode" = quiet ]; then
-    run_both -q build "$work/$name-{impl}"
+    run_both build -q "$work/$name-{impl}"
   elif [ "$mode" = forced-color ]; then
     CLICOLOR_FORCE=1 run_both build "$work/$name-{impl}"
   else
@@ -709,12 +722,22 @@ run_build_output_case quiet-warning 0 \
   "$root/rewatch-ocaml/tests/warning-replay" quiet
 
 run_case build-subcommand-version exit2 accept build --version
-run_case clustered-global-version accept accept -vV build
-run_case clustered-global-verbosity accept accept -vvvvv build "$project"
-run_case clustered-global-version-before-help accept accept -Vh build
-run_case clustered-global-help-before-version accept accept -hV build
-run_case clustered-subcommand-help-before-version accept accept build -hV
-run_case clustered-subcommand-version-before-help exit2 accept build -Vh
+run_case short-help accept accept -h
+run_case short-version accept accept -V
+run_case clustered-verbosity accept accept build -vvvvv "$project"
+# rescript-ocaml takes options only after the command (upstream #9266); the
+# Rust CLI's verbosity flags are global, and a first word that names no
+# command is the folder to build.
+run_case --cwd "$project" options-before-command accept exit2 -v build
+if ! grep -F 'options go after the command: rescript build' \
+    "$work/ocaml.err" >/dev/null; then
+  echo "options-before-command: OCaml did not explain the argument order" >&2
+  dump_both
+  exit 1
+fi
+run_case --cwd "$project" folder-named-like-command reject reject -v ./build
+require_both_errors_contain folder-named-like-command \
+  "Project folder './build' does not exist."
 "$ocaml" build --help=groff >"$work/ocaml-help-groff.out"
 if ! grep -F '.\" Pipe this output to groff' \
   "$work/ocaml-help-groff.out" >/dev/null; then
@@ -724,11 +747,24 @@ if ! grep -F '.\" Pipe this output to groff' \
 fi
 checked=$((checked + 1))
 run_case implicit-conflicting-verbosity exit2 exit2 -v -q
-require_both_errors_contain implicit-conflicting-verbosity 'Usage: rescript'
+require_both_errors_contain implicit-conflicting-verbosity 'cannot be used'
 run_case build-conflicting-verbosity exit2 exit2 build --verbose --quiet
-run_case unknown-command reject reject bogus-command
-require_both_errors_contain unknown-command \
-  "Project folder 'bogus-command' does not exist. Run 'rescript --help' for the available commands."
+# rescript-ocaml rejects an unknown command, also with --help or -V; the
+# Rust CLI builds a folder of that name, which does not exist, and shows
+# its help or version for --help and -V.
+for display in "" --help -V; do
+  name=unknown-command${display:+-$display}
+  if [ -z "$display" ]; then rust_expected=reject; else rust_expected=accept; fi
+  run_case "$name" "$rust_expected" exit2 bogus-command ${display:+"$display"}
+  if [ -z "$display" ]; then
+    require_error_contains_in rust "$name" \
+      "Project folder 'bogus-command' does not exist. Run 'rescript --help' for the available commands."
+  fi
+  # Cmdliner quotes the command name when colors are off and styles it
+  # otherwise, so the name is checked apart from the message.
+  require_error_contains_in ocaml "$name" 'unknown command'
+  require_error_contains_in ocaml "$name" 'bogus-command'
+done
 run_case filter-perl-quoting exit2 exit2 build --filter '\QFoo.res\E' "$project"
 run_case filter-comment-group exit2 exit2 build --filter '(?#note)Foo' "$project"
 run_case filter-octal-escape exit2 exit2 build --filter '\123' "$project"
@@ -1218,7 +1254,7 @@ if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
   exit 1
 fi
 checked=$((checked + 1))
-run_both -q clean "$project"
+run_both clean -q "$project"
 if [ "$rust_status" -ne 0 ] || [ "$ocaml_status" -ne 0 ] || \
   [ -s "$work/rust.out" ] || [ -s "$work/rust.err" ] || \
   [ -s "$work/ocaml.out" ] || [ -s "$work/ocaml.err" ]; then
@@ -1383,7 +1419,7 @@ wait_for_file "$work/watch-dependency-recovery/src/A.js"
 terminate_and_wait "$dependency_recovery_pid" "dependency-recovery watcher"
 checked=$((checked + 1))
 
-"$ocaml" -v watch "$work/watch-dependency-install" \
+"$ocaml" watch -v "$work/watch-dependency-install" \
   >"$work/watch-dependency-install.out" \
   2>"$work/watch-dependency-install.err" &
 dependency_install_pid=$!
@@ -1411,7 +1447,7 @@ checked=$((checked + 1))
 
 directory_link "$work/watch-dependency-fallback/packages/dep" \
   "$work/node_modules/dep"
-"$ocaml" -v watch "$work/watch-dependency-fallback" \
+"$ocaml" watch -v "$work/watch-dependency-fallback" \
   >"$work/watch-dependency-fallback.out" \
   2>"$work/watch-dependency-fallback.err" &
 dependency_fallback_pid=$!
@@ -1550,7 +1586,7 @@ for implementation in rust ocaml; do
   quiet_watch_project="$work/quiet-watch-$implementation"
   quiet_watch_marker="$quiet_watch_project/after-build.log"
   REWATCH_WATCH_FILTER_MARKER="$quiet_watch_marker" \
-    "$executable" -q watch \
+    "$executable" watch -q \
       --after-build "node $command_work/watch-filter-marker.js" \
       "$quiet_watch_project" \
       >"$work/quiet-watch-$implementation.out" \
