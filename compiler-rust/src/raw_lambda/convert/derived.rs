@@ -230,7 +230,8 @@ mod tests {
     use crate::parser::{Parser, module};
     use crate::raw_lambda::RawArena;
     use crate::raw_lambda::print::RawLambdaPrinter;
-    use crate::types::derived::tests::{DECLARATIONS, derive_source, type_context};
+    use crate::binary_ast::derive::fixtures::{DECLARATIONS, derive_source};
+    use crate::types::derived::tests::type_context;
     use crate::types::typecore::TypeCheckContext;
     use crate::types::typedtree::StructureItemDesc;
     use crate::types::{initial_env, typemod};

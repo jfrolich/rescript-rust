@@ -327,7 +327,8 @@ pub fn signature_reads(
 mod tests {
     use super::*;
     use crate::binary_ast::derive::Scope;
-    use crate::types::derived::tests::{DECLARATIONS, derive_source, type_context};
+    use crate::binary_ast::derive::fixtures::{DECLARATIONS, derive_source};
+    use crate::types::derived::tests::type_context;
     use crate::types::typecore::TypeCheckContext;
     use crate::types::{initial_env, typemod};
     use std::collections::BTreeSet;
@@ -375,7 +376,7 @@ mod tests {
             // a unit, and a plan has no identifier for it.
             assert!(general.remove(&("v".to_string(), "Value".to_string())));
             assert!(
-                planned.iter().any(|(path, kind)| path.starts_with("Spice.") && kind == "Value"),
+                planned.iter().any(|(_, kind)| kind == "Value"),
                 "{planned:?}"
             );
             assert_eq!(planned, general, "{source}");

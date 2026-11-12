@@ -3,6 +3,8 @@
 
 /// Optional derived-code measurement, owned by one compilation.
 pub mod census;
+#[cfg(test)]
+pub(crate) mod fixtures;
 /// The plan of a derived item, stored in the `ParseArena`.
 pub mod plan;
 mod shape;
