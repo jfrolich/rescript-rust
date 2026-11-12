@@ -184,8 +184,8 @@ keyword `type` as a record field name", and recovers by building a field named
 
 `Res_token.keyword_table` has 28 word-shaped keywords today. Ten of them
 become contextual keywords (Part 2) and are plain identifiers in every
-position of Part 1. "Reserved word" means the
-other 18, `true` and `false` included:
+position of Part 1. "Reserved word" means the other 18, `true` and `false`
+included:
 
 ```
 and assert await break continue else false for if in include let module
@@ -685,7 +685,7 @@ Out of scope:
    of type `mutable`) parse as well. Accept that, or reject the ten words as
    type names in the parser? Rejecting them removes the `private` case in
    consequence 1 of Part 2 and the name reading of `type rec = int`, but makes
-   `type \"private" = int`, which parses today, an error.
+   `type \"open" = int`, which compiles today, an error.
 
 ## Implementation plan
 
