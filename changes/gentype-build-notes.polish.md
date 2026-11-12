@@ -1,0 +1,1 @@
+- `rescript build` and `rescript watch` no longer show genType's informational notes (such as "Annotation is ignored as there's a .resi file") for modules that compile, as `rescript-ocaml` does not; `bsc` still prints them.

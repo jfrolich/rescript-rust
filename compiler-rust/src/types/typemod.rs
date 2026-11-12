@@ -4687,6 +4687,41 @@ fn check_unboxed_type_attributes(
     }
 }
 
+/// The representation of a declaration with `has_unboxed` (`@unboxed`), as
+/// OCaml `compiler/ml/typedecl.ml:451-461` decides it. Only a record with one
+/// immutable field, or a variant whose single constructor has a non-empty
+/// tuple or a one-field immutable inline record, is unboxed: `@unboxed type t =
+/// C({a: string, b: int})` is an untagged variant whose value is the record
+/// object. A variant spread always counts as more than one constructor, since
+/// OCaml keeps the `...t` marker next to the constructors it expands to
+/// (variant_type_spread.ml:66).
+fn unboxed_type_representation(
+    arena: &ParseArena,
+    decl: &crate::parser::ast::TypeDeclaration,
+    has_unboxed: bool,
+) -> crate::types::TypeRepresentation {
+    use crate::parser::ast::{ConstructorArguments, LabelDeclaration, MutableFlag, TypeKind};
+    let one_immutable_field = |labels: &[LabelDeclaration]| {
+        matches!(labels, [label] if matches!(label.pld_mutable, MutableFlag::Immutable))
+    };
+    let unboxable = match &decl.ptype_kind {
+        TypeKind::Ptype_variant(cstrs) => match cstrs.as_slice() {
+            [cstr] if arena.get_string(cstr.pcd_name.txt) != "..." => match &cstr.pcd_args {
+                ConstructorArguments::Pcstr_tuple(args) => !args.is_empty(),
+                ConstructorArguments::Pcstr_record(labels) => one_immutable_field(labels),
+            },
+            _ => false,
+        },
+        TypeKind::Ptype_record(labels) => one_immutable_field(labels),
+        TypeKind::Ptype_abstract | TypeKind::Ptype_open => false,
+    };
+    if has_unboxed && unboxable {
+        crate::types::TypeRepresentation::Unboxed
+    } else {
+        crate::types::TypeRepresentation::Boxed
+    }
+}
+
 /// OCaml `Variant_type_spread.expand_variant_spreads`
 /// (variant_type_spread.ml:31-117): look up and validate each `...t` spread of
 /// a variant declaration. Returns, per constructor, the spread source's
@@ -11782,18 +11817,8 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                                 typed_type_decls.and_then(|typed_decls| typed_decls.get(decl_idx));
                             let type_representation = typed_type_decl_hint
                                 .map(|typed_decl| typed_decl.typ_type.type_representation)
-                                .unwrap_or_else(|| match &type_kind {
-                                    crate::types::TypeKind::TypeVariant(cstrs, _)
-                                        if decl_has_unboxed_attr && cstrs.len() <= 1 =>
-                                    {
-                                        crate::types::TypeRepresentation::Unboxed
-                                    }
-                                    crate::types::TypeKind::TypeRecord(labels, _)
-                                        if decl_has_unboxed_attr && labels.len() == 1 =>
-                                    {
-                                        crate::types::TypeRepresentation::Unboxed
-                                    }
-                                    _ => crate::types::TypeRepresentation::Boxed,
+                                .unwrap_or_else(|| {
+                                    unboxed_type_representation(arena, decl, decl_has_unboxed_attr)
                                 });
                             // Keep module-type declaration conversion aligned with
                             // OCaml `compiler/ml/typedecl.ml:2005`; this path
@@ -17187,36 +17212,13 @@ fn type_structure_item<'a>(
                         let mut internal_cstrs = Vec::new();
                         let mut typed_tree_cstrs = Vec::new();
                         let mut cstr_descs = Vec::new();
-                        // Count consts/nonconsts including expanded spreads
-                        // Spread markers are NOT counted - only expanded constructors
-                        let (num_consts, num_nonconsts) = {
-                            let mut nc = 0i32;
-                            let mut nnc = 0i32;
-                            for (idx, cstr) in cstrs.iter().enumerate() {
-                                if let Some((ref source_cstrs, _)) = spread_sources[idx] {
-                                    // Count only the expanded source constructors (not the spread marker)
-                                    for sc in source_cstrs {
-                                        match &sc.cd_args {
-                                            crate::types::ConstructorArguments::CstrTuple(args)
-                                                if args.is_empty() =>
-                                            {
-                                                nc += 1
-                                            }
-                                            _ => nnc += 1,
-                                        }
-                                    }
-                                } else {
-                                    let is_const = matches!(cstr.pcd_args, crate::parser::ast::ConstructorArguments::Pcstr_tuple(ref args) if args.is_empty());
-                                    if is_const { nc += 1 } else { nnc += 1 }
-                                }
-                            }
-                            (nc, nnc)
-                        };
-
                         // @unboxed is only the single-constructor OCaml-style unboxed
-                        // when there's exactly one constructor. Multi-constructor
-                        // @unboxed is ReScript's "untagged variants" which uses different handling.
-                        let has_unboxed = decl_has_unboxed_attr && num_consts + num_nonconsts == 1;
+                        // when there's exactly one constructor with an unboxable payload.
+                        // Otherwise @unboxed is ReScript's "untagged variants" which uses
+                        // different handling.
+                        let has_unboxed =
+                            unboxed_type_representation(arena, decl, decl_has_unboxed_attr)
+                                == crate::types::TypeRepresentation::Unboxed;
 
                         for (cstr_idx, cstr) in cstrs.iter().enumerate() {
                             // typedecl.ml:589-591: each constructor is made in
@@ -18062,11 +18064,8 @@ fn type_structure_item<'a>(
 
                 let type_attributes =
                     parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
-                let type_representation = if decl_has_unboxed_attr && constructors.len() <= 1 {
-                    crate::types::TypeRepresentation::Unboxed
-                } else {
-                    crate::types::TypeRepresentation::Boxed
-                };
+                let type_representation =
+                    unboxed_type_representation(arena, decl, decl_has_unboxed_attr);
                 let type_immediate = compute_type_immediacy(
                     ctx,
                     &temp_env,
@@ -20376,19 +20375,8 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
 
             let type_attributes =
                 parser_attrs_to_decl_attrs(arena, tctx.type_ctx, &decl.ptype_attributes);
-            let type_representation = match &internal_type_kind {
-                crate::types::TypeKind::TypeVariant(cstrs, _)
-                    if decl_has_unboxed_attr && cstrs.len() <= 1 =>
-                {
-                    crate::types::TypeRepresentation::Unboxed
-                }
-                crate::types::TypeKind::TypeRecord(labels, _)
-                    if decl_has_unboxed_attr && labels.len() == 1 =>
-                {
-                    crate::types::TypeRepresentation::Unboxed
-                }
-                _ => crate::types::TypeRepresentation::Boxed,
-            };
+            let type_representation =
+                unboxed_type_representation(arena, decl, decl_has_unboxed_attr);
             // OCaml computes signature declaration immediacy after translating
             // the declaration body (`compiler/ml/typedecl.ml:2005`), using the
             // same `compute_immediacy` helper as implementation declarations.

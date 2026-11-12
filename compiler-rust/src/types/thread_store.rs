@@ -2,9 +2,10 @@
 //!
 //! OCaml's `persistent_structures` table (`compiler/ml/env.ml:669-678`)
 //! shares loaded signatures within a compilation, but `Res_compmisc.init_path`
-//! resets it between units (`compiler/core/res_compmisc.ml:35`). The Rust
-//! in-process build avoids re-internalizing immutable raw dependency storage
-//! for every unit on a worker. Each compilation isolates descriptor, level,
+//! resets it between units (`compiler/core/res_compmisc.ml:35`). The units
+//! themselves are internalized once per build into the world
+//! (`types/world.rs`); this store keeps what one worker builds from them
+//! (component views and their nodes). Each compilation isolates descriptor, level,
 //! memo and row writes in `TypeContext` overlays; forced component binders and
 //! substitution state remain unit-local, matching `initial_env`'s identifier
 //! reset (`compiler/core/res_compmisc.ml:49`).
@@ -18,12 +19,9 @@
 //! Design: `projects/in-process-performance/THREAD_TYPE_STORE.md`.
 
 use super::context::TypeNodes;
-use super::decl::Signature;
 use super::type_expr::{AbbrevMemo, AbbrevMemoRef, RowField, RowFieldRef, TypeDesc, TypeExprRef};
 use super::variant_runtime::{Layout, LayoutRef};
-use crate::cmi::persistent_env::PersStruct;
-use crate::cmi::portable_types::PortablePersStruct;
-use crate::fast_hash::{AHashMap as HashMap, AHashSet as HashSet};
+use crate::fast_hash::AHashMap as HashMap;
 use crate::intern::StrIdx;
 use std::cell::{Cell, RefCell};
 use std::ops::Deref;
@@ -68,14 +66,6 @@ pub(crate) fn next_store_stamp() -> i32 {
     STORE_STAMP.fetch_add(1, Ordering::Relaxed) + 1
 }
 
-/// Dependency signature internalized once into the store.
-struct PersEntry {
-    /// Keeps the portable struct alive so its address cannot be reused as a
-    /// key for a different graph.
-    _owner: Arc<PortablePersStruct>,
-    ps: Arc<PersStruct>,
-}
-
 /// A persistent-rooted component view and the replay record of building it.
 type SharedComponents = (
     Rc<crate::types::env_lazy::QualifiedModuleComponents>,
@@ -93,16 +83,6 @@ pub(crate) struct ThreadTypeStore {
     type_lists: super::type_expr::TypePayloadPool,
     variant_layouts: RefCell<Vec<Layout>>,
     next_type_id: Cell<i32>,
-    /// Internalized dependency signatures keyed by the identity of the
-    /// portable struct they were built from (`compiler/ml/env.ml:669-678`:
-    /// one `persistent_structures` entry per read unit).
-    pers: RefCell<HashMap<usize, PersEntry>>,
-    /// Signatures retained by `pers`; their items keep one address for the
-    /// life of the store.
-    shared_signatures: RefCell<HashSet<usize>>,
-    /// Component-table name indexes of store-owned signatures, keyed by the
-    /// signature's address (kept alive by `pers`).
-    signature_indexes: RefCell<HashMap<usize, Arc<crate::types::env_lazy::SignatureIndex>>>,
     /// Component views of persistent-rooted module paths built as store
     /// builds, with the replay record of building them (OCaml builds such a
     /// view once per process, from `Env.empty`: compiler/ml/env.ml:669-678).
@@ -111,18 +91,10 @@ pub(crate) struct ThreadTypeStore {
     >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
-    /// The predefined environment built as a store build, with its replay
-    /// record (see `env::initial_env`).
-    initial_env: RefCell<
-        Option<(
-            crate::types::env::Env,
-            Rc<crate::types::context::StorePiece>,
-        )>,
-    >,
     generation: u64,
-    /// The build's process-wide pool of immutable dependency graphs; holding
-    /// it keeps every shared node this store's signatures refer to alive.
-    shared: Arc<super::shared_store::SharedTypePool>,
+    /// The build's world; holding it keeps every frozen node this store's
+    /// data refers to alive.
+    world: Arc<super::world::World>,
     /// Locations of store-owned declarations and type labels
     /// (`DeclLocKind::Store` handles; see `types::decl_loc`).
     decl_locs: super::decl_loc::OwnedDeclLocs,
@@ -143,14 +115,10 @@ impl ThreadTypeStore {
             ),
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
-            pers: RefCell::new(HashMap::new()),
-            shared_signatures: RefCell::new(HashSet::new()),
-            signature_indexes: RefCell::new(HashMap::new()),
             shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
-            initial_env: RefCell::new(None),
             generation,
-            shared: super::shared_store::pool_for(generation),
+            world: super::world::World::current(),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
         }
@@ -235,53 +203,16 @@ impl ThreadTypeStore {
         self.decl_locs.get(loc.index())
     }
 
-    /// The process-wide pool of this store's build.
+    /// The world of this store's build.
+    #[inline]
+    pub(crate) fn world(&self) -> &Arc<super::world::World> {
+        &self.world
+    }
+
+    /// The frozen pool of this store's build.
     #[inline]
     pub(crate) fn shared_pool(&self) -> &super::shared_store::SharedTypePool {
-        &self.shared
-    }
-
-    /// The shared internalization of `pps`, if this thread already built one.
-    pub(crate) fn pers_struct(&self, pps: &Arc<PortablePersStruct>) -> Option<Arc<PersStruct>> {
-        self.pers
-            .borrow()
-            .get(&(Arc::as_ptr(pps) as usize))
-            .map(|entry| entry.ps.clone())
-    }
-
-    /// Record the shared internalization of `pps`.
-    pub(crate) fn insert_pers_struct(&self, pps: Arc<PortablePersStruct>, ps: Arc<PersStruct>) {
-        self.shared_signatures
-            .borrow_mut()
-            .insert(Arc::as_ptr(&ps.ps_sig) as usize);
-        self.pers
-            .borrow_mut()
-            .insert(Arc::as_ptr(&pps) as usize, PersEntry { _owner: pps, ps });
-    }
-
-    /// Whether `sig` is retained by this store, so references into its items
-    /// stay valid for the store's lifetime.
-    pub(crate) fn owns_signature(&self, sig: &Arc<Signature>) -> bool {
-        self.shared_signatures
-            .borrow()
-            .contains(&(Arc::as_ptr(sig) as usize))
-    }
-
-    /// Name index of a store-owned signature (`owns_signature` must hold),
-    /// built once per store.
-    pub(crate) fn signature_index(
-        &self,
-        sig: &Arc<Signature>,
-    ) -> Arc<crate::types::env_lazy::SignatureIndex> {
-        let key = Arc::as_ptr(sig) as usize;
-        if let Some(found) = self.signature_indexes.borrow().get(&key) {
-            return found.clone();
-        }
-        let built = Arc::new(crate::types::env_lazy::SignatureIndex::build(sig));
-        self.signature_indexes
-            .borrow_mut()
-            .insert(key, built.clone());
-        built
+        self.world.pool()
     }
 
     pub(crate) fn shared_components(
@@ -326,23 +257,6 @@ impl ThreadTypeStore {
 
     pub(crate) fn label_family_count(&self) -> usize {
         self.label_families.borrow().len()
-    }
-
-    pub(crate) fn cached_initial_env(
-        &self,
-    ) -> Option<(
-        crate::types::env::Env,
-        Rc<crate::types::context::StorePiece>,
-    )> {
-        self.initial_env.borrow().clone()
-    }
-
-    pub(crate) fn publish_initial_env(
-        &self,
-        env: crate::types::env::Env,
-        piece: Rc<crate::types::context::StorePiece>,
-    ) {
-        self.initial_env.borrow_mut().get_or_insert((env, piece));
     }
 
     /// Intern a longident component name for a store node. Names live in
