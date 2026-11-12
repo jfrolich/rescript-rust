@@ -1451,18 +1451,27 @@ Comments today's output contains (counted over `tests/tests/src`):
 | Header, trailer, empty-output | every file | file assembly (E.4.1) |
 | `/* @__PURE__ */` before exception creation calls | 74 | `CallExpression::pure`; oxc prints the annotation itself |
 | Comment-only raw JS statements written by the user (`// ...`, `/* ... */`) | 2 | statement-level oxc comments, text in the synthetic source |
-| Constructor names on integer constants, `/* [] */0` | 372 | dropped |
-| Character comments on numbers, `/* 'a' */97` | 108 | dropped |
+| Constructor names on integer constants, `/* [] */0` | 372 | retain if measured cheap; currently dropped |
+| Character comments on numbers, `/* 'a' */97` | 108 | retain if measured cheap; currently dropped |
 
 The last two are decorations from `pointer_info_comment_text` and
 `format_char_comment`. oxc cannot print a comment at an arbitrary expression
 position: reformatting the reference keeps `tl: /* [] */ 0` in a property
 value and drops `return /* [] */0` (1,230 comments in, 1,108 out over the
 test outputs). Reproducing oxc's partial behaviour would tie the output to an
-accident. Decision: decoration comments are not part of the output contract
-and are not emitted; the gate removes them from the reference (S0). This is
-the one visible change to the emitted text besides layout, and it needs the
-project owner's confirmation (section I).
+accident. Decision: prefer retaining these decorations if it costs no more
+than about 0.1% of an oxc-mode build. They remain outside the equivalence
+contract: the gate removes them on both sides. The opt-in emitter currently
+drops them until retention has a measured implementation within that budget.
+
+The existing raw-JavaScript placeholder/substitution path is a candidate,
+not NumericLiteral.raw (ignored outside TypeScript). Native oxc comments
+cannot retain them at every expression position, as the experiment above
+shows. A placeholder needs correct numeric precedence/member-target wrapping
+and fixed-point coverage, not just textual replacement. Files already having
+raw pieces can share their scan; raw-free files currently only copy the
+codegen buffer, so adding decorations introduces a scan plus per-hole work.
+Measure those costs separately before retaining comments by default.
 
 **E.4.3 Raw JS.** `%raw` expressions and statements are printed verbatim
 today. oxc has no verbatim node, so raw JS is parsed with `oxc_parser` into
@@ -1570,10 +1579,12 @@ The inlining rule that protects JSX tags in preserve mode
 
 ### E.8 Printing, source maps, allocator
 
-Printing: `Codegen::new().with_options(options).build(&program)`, default
-options (tabs, double quotes), as the reformat tool. Layout options are not
-exposed; if two-space indentation is wanted it is one option
-(`indent_char`, `indent_width`) set identically in the compiler and the tool.
+Printing: `Codegen::new().with_options(options).build(&program)`, with
+`indent_char = IndentChar::Space` and `indent_width = 2`, in both the opt-in
+emitter and the reformat tool. Two spaces, not tabs, is the chosen layout;
+double quotes and the remaining codegen options keep their defaults. The
+fixed-point gate uses these identical options. This does not switch the
+default printer.
 
 Source maps. What today's contract needs (`js_ir/source_map.rs`): Source Map
 v3 with `file`, `sourceRoot`, `sources` relative to the output, optional

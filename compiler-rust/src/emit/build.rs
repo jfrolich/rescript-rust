@@ -1877,7 +1877,10 @@ mod block_tests {
                     build.b.vec1(stmt),
                     &build.b,
                 );
-                let actual = oxc_codegen::Codegen::new().build(&program).code;
+                let actual = oxc_codegen::Codegen::new()
+                    .with_options(crate::emit::program::codegen_options())
+                    .build(&program)
+                    .code;
                 let mode = ReformatOptions {
                     drop_decoration_comments: true,
                     ..Default::default()
@@ -2259,7 +2262,10 @@ mod remaining_expression_tests {
             build.b.vec1(stmt),
             &build.b,
         );
-        let actual = oxc_codegen::Codegen::new().build(&program).code;
+        let actual = oxc_codegen::Codegen::new()
+            .with_options(crate::emit::program::codegen_options())
+            .build(&program)
+            .code;
         let mode = ReformatOptions {
             drop_decoration_comments: true,
             ..Default::default()

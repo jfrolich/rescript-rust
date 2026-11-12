@@ -1,1 +1,2 @@
 Expand the opt-in oxc emitter with preserve-mode JSX and exact child whitespace, canonical numeric member indices, and semicolon-bearing function directives. Preserve nested nullish rewrites and grouping of option-wrapped arrows. Keep legacy output and strict reformat comparisons unchanged.
+Use two-space indentation in the opt-in emitter and its matching reformat tool. Decoration comments remain dropped pending a measured retention path within the documented 0.1% instruction budget.
