@@ -1440,6 +1440,8 @@ pub struct Env {
 
 #[derive(Debug, Clone)]
 struct EnvData {
+    #[cfg(test)]
+    log_answers: bool,
     shadow: Option<env_log::LogEnv>,
     /// Value bindings.
     values: IdTbl<Arc<ValueDescription>>,
@@ -1518,6 +1520,15 @@ pub struct EnvFlags {
 }
 
 impl Env {
+    #[cfg(test)]
+    fn from_log_for_components(log: env_log::LogEnv) -> Self {
+        let mut env = Self::build_empty();
+        let data = env.data_mut();
+        data.shadow = Some(log);
+        data.log_answers = true;
+        env
+    }
+
     /// Bindings for mutation, copying them first when another Env shares them.
     #[inline]
     fn data_mut(&mut self) -> &mut EnvData {
@@ -1538,6 +1549,11 @@ impl Env {
 
     /// `Env.is_in_signature` (env.ml:505).
     pub fn is_in_signature(&self) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().is_in_signature();
+        }
+
         let result = (|| self.data.flags.in_signature)();
         if let Some(log) = &self.data.shadow {
             let other = log.is_in_signature();
@@ -1548,6 +1564,11 @@ impl Env {
 
     /// `Env.is_implicit_coercion` (env.ml:506).
     pub fn is_implicit_coercion(&self) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().is_implicit_coercion();
+        }
+
         let result = (|| self.data.flags.implicit_coercion)();
         if let Some(log) = &self.data.shadow {
             let other = log.is_implicit_coercion();
@@ -1575,6 +1596,8 @@ impl Env {
             id,
             scope_id: id,
             data: std::rc::Rc::new(EnvData {
+                #[cfg(test)]
+                log_answers: false,
                 shadow: None,
                 values: IdTbl::new(),
                 types: IdTbl::new(),
@@ -1600,6 +1623,11 @@ impl Env {
         kind: OpenLookupKind,
         name: impl crate::name::NameKey,
     ) -> Option<OpenSlotUse> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().open_slot_use(kind, name);
+        }
+
         let result = (|| {
             let name = name.name_key()?;
             match kind {
@@ -1626,6 +1654,16 @@ impl Env {
         &ConstructorDescription,
         OpenSlotMark<'_, ConstructorDescription>,
     )> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_all_constructors_marking(name);
+        }
+
         let result = (|| {
             self.data
                 .constrs
@@ -1651,6 +1689,16 @@ impl Env {
         &self,
         name: &str,
     ) -> Vec<(&LabelDescription, OpenSlotMark<'_, LabelDescription>)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_all_labels_marking(name);
+        }
+
         let result = (|| {
             self.data
                 .labels
@@ -1734,6 +1782,16 @@ impl Env {
         &self,
         f: impl FnOnce(&[(Ident, Path)]) -> R,
     ) -> R {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .with_current_local_module_aliases(f);
+        }
+
         if self
             .data
             .scope_caches
@@ -1779,6 +1837,16 @@ impl Env {
     }
 
     pub(crate) fn module_path_requires_env_scoped_cache(&self, module_path: &Path) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .module_path_requires_env_scoped_cache(module_path);
+        }
+
         let result = (|| {
             if module_path.head().is_persistent() {
                 return false;
@@ -1843,6 +1911,11 @@ impl Env {
 
     /// Find a value by name.
     pub fn find_value(&self, name: impl crate::name::NameKey) -> EnvResult<&ValueDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_value(name);
+        }
+
         let result = (|| {
             self.data
                 .values
@@ -1867,6 +1940,11 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(&Ident, &ValueDescription)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_value_with_id(name);
+        }
+
         let result = (|| {
             self.data
                 .values
@@ -1891,6 +1969,16 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<ValueDescription>)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_value_arc_with_path(name);
+        }
+
         let result = (|| {
             self.data
                 .values
@@ -1953,6 +2041,11 @@ impl Env {
 
     /// Find a value by path.
     pub fn lookup_value(&self, path: &Path) -> EnvResult<&ValueDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().lookup_value(path);
+        }
+
         let result = (|| match path.view() {
             PathView::Pident(id) => self
                 .data
@@ -2055,6 +2148,11 @@ impl Env {
 
     /// Find a type by name.
     pub fn find_type(&self, name: impl crate::name::NameKey) -> EnvResult<&TypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_type(name);
+        }
+
         let result = (|| {
             self.data
                 .types
@@ -2082,6 +2180,11 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &TypeDeclaration)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_type_with_path(name);
+        }
+
         let result = (|| {
             self.data
                 .types
@@ -2106,6 +2209,16 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &Arc<TypeDeclaration>)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_type_arc_with_path(name);
+        }
+
         let result = (|| {
             self.data
                 .types
@@ -2142,6 +2255,11 @@ impl Env {
 
     /// `Env.fold_modtypes` with no module prefix (compiler/ml/env.ml:2003).
     pub fn fold_modtype_names(&self) -> Vec<String> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().fold_modtype_names();
+        }
+
         let result = (|| fold_names_list(self.data.modtypes.fold_name_order()))();
         if let Some(log) = &self.data.shadow {
             let other = log.fold_modtype_names();
@@ -2161,6 +2279,11 @@ impl Env {
     }
 
     pub(crate) fn find_type_by_ident(&self, id: &Ident) -> EnvResult<&TypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_type_by_ident(id);
+        }
+
         let result = (|| {
             // OCaml compiler/ml/env.ml:800-813 dispatches Pident type lookup to
             // `IdTbl.find_same`, so same-name bindings must not be treated as an
@@ -2185,6 +2308,16 @@ impl Env {
 
     /// Shared-declaration form of [`Env::find_type_by_ident`].
     pub(crate) fn find_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_type_arc_by_ident(id);
+        }
+
         let result = (|| self.data.types.find_by_ident(id))();
         if let Some(log) = &self.data.shadow {
             let other = log.find_type_arc_by_ident(id);
@@ -2200,6 +2333,16 @@ impl Env {
 
     /// Shared-declaration form of [`Env::lookup_type`] for `Pident` paths.
     pub(crate) fn lookup_type_arc_by_ident(&self, id: &Ident) -> Option<&Arc<TypeDeclaration>> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .lookup_type_arc_by_ident(id);
+        }
+
         let result = (|| {
             self.data
                 .types
@@ -2220,6 +2363,11 @@ impl Env {
 
     /// Find a type by path.
     pub fn lookup_type(&self, path: &Path) -> EnvResult<&TypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().lookup_type(path);
+        }
+
         let result = (|| {
             match path.view() {
                 PathView::Pident(id) => self
@@ -2337,6 +2485,11 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<&ConstructorDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_constructor(name);
+        }
+
         let result = (|| {
             self.data
                 .constrs
@@ -2361,6 +2514,16 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> Vec<&ConstructorDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_all_constructors(name);
+        }
+
         let result = (|| {
             self.data
                 .constrs
@@ -2407,6 +2570,11 @@ impl Env {
     /// `snd (find_type_descrs (Pident id))` of a record type: the array its
     /// labels were installed with.
     pub fn type_label_family(&self, id: &Ident) -> Option<super::decl::LabelArrayRef> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().type_label_family(id);
+        }
+
         let result = (|| self.data.type_label_families.get(id).copied())();
         if let Some(log) = &self.data.shadow {
             let other = log.type_label_family(id);
@@ -2417,6 +2585,11 @@ impl Env {
 
     /// Find a label by name.
     pub fn find_label(&self, name: impl crate::name::NameKey) -> EnvResult<&LabelDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_label(name);
+        }
+
         let result = (|| {
             self.data
                 .labels
@@ -2438,6 +2611,11 @@ impl Env {
 
     /// Find all labels with a given name.
     pub fn find_all_labels(&self, name: impl crate::name::NameKey) -> Vec<&LabelDescription> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_all_labels(name);
+        }
+
         let result = (|| {
             self.data
                 .labels
@@ -2520,6 +2698,11 @@ impl Env {
 
     /// Check whether a module path is rooted in a functor parameter.
     pub fn is_functor_arg_path(&self, path: &Path) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().is_functor_arg_path(path);
+        }
+
         let result = (|| match path.view() {
             PathView::Pident(id) => self.data.functor_args.contains(id),
             PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
@@ -2577,6 +2760,11 @@ impl Env {
 
     /// Find a module by name.
     pub fn find_module(&self, name: impl crate::name::NameKey) -> EnvResult<&ModuleDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_module(name);
+        }
+
         let result = (|| {
             self.data
                 .modules
@@ -2601,6 +2789,11 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(&Ident, &ModuleDeclaration)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_module_with_id(name);
+        }
+
         let result = (|| {
             self.data
                 .modules
@@ -2628,6 +2821,16 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &ModuleDeclaration)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_module_with_path(name);
+        }
+
         let result = (|| {
             self.data
                 .modules
@@ -2658,6 +2861,16 @@ impl Env {
     }
 
     pub(crate) fn path_starts_with_opened_component(&self, path: &Path) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .path_starts_with_opened_component(path);
+        }
+
         let result = (|| {
             // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
             // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
@@ -2694,6 +2907,16 @@ impl Env {
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .path_starts_with_implicit_opened_component(path);
+        }
+
         let result = (|| {
             let Some(component_path) = Self::first_dotted_component_path(path) else {
                 return false;
@@ -2716,6 +2939,11 @@ impl Env {
     }
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().has_module_ident(id);
+        }
+
         let result = (|| self.data.modules.find_by_ident(id).is_some())();
         if let Some(log) = &self.data.shadow {
             let other = log.has_module_ident(id);
@@ -2725,6 +2953,16 @@ impl Env {
     }
 
     pub(crate) fn lookup_module_ident_exact(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .lookup_module_ident_exact(id);
+        }
+
         let result = (|| {
             // OCaml compiler/ml/env.ml:781-788 uses `IdTbl.find_same` for
             // path-based `Pident` lookup. Source `Longident.Lident` lookup has its
@@ -2749,6 +2987,11 @@ impl Env {
     }
 
     pub(crate) fn find_module_same(&self, id: &Ident) -> EnvResult<&ModuleDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_module_same(id);
+        }
+
         let result = (|| {
             // OCaml compiler/ml/env.ml:865-875 uses `IdTbl.find_same` for
             // `Path.Pident` module lookup, and IdTbl.find_same at env.ml:285-290
@@ -2778,6 +3021,23 @@ impl Env {
         path: &Path,
         f: impl FnOnce(&super::env_lazy::StoredModuleComponents) -> R,
     ) -> Option<R> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            let handle = self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .local_module_components_shared(path)?;
+            let stored = super::env_lazy::StoredModuleComponents::new_with_parent_context(
+                Self::from_log_for_components(handle.seed.env()?),
+                handle.access_path,
+                handle.module_decl.clone(),
+                handle.parent_context.clone(),
+            );
+            return Some(f(&stored));
+        }
+
         if let Some(log) = &self.data.shadow {
             let tables = path
                 .as_pident()
@@ -2822,6 +3082,23 @@ impl Env {
         &self,
         path: &Path,
     ) -> Option<Rc<super::env_lazy::StoredModuleComponents>> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            let handle = self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .local_module_components_shared(path)?;
+            let stored = super::env_lazy::StoredModuleComponents::new_with_parent_context(
+                Self::from_log_for_components(handle.seed.env()?),
+                handle.access_path,
+                handle.module_decl.clone(),
+                handle.parent_context.clone(),
+            );
+            return Some(Rc::new(stored));
+        }
+
         if let Some(log) = &self.data.shadow {
             let tables = path
                 .as_pident()
@@ -2867,6 +3144,11 @@ impl Env {
 
     /// Find a module by path.
     pub fn lookup_module(&self, path: &Path) -> EnvResult<&ModuleDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().lookup_module(path);
+        }
+
         let result = (|| {
             fn lookup_submodule_in_module_type<'a>(
                 env: &'a Env,
@@ -2941,6 +3223,11 @@ impl Env {
     /// `Pdot` is rebuilt with a fresh block around its normalized prefix and
     /// keeps its suffix string; an unchanged `Pident` is returned itself.
     pub fn normalize_path(&self, ctx: &TypeContext, path: &Path) -> Path {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().normalize_path(ctx, path);
+        }
+
         let result = (|| *self.normalize_shared_path(ctx, &Arc::new(*path), 0))();
         if let Some(log) = &self.data.shadow {
             let other = log.normalize_path(ctx, path);
@@ -2953,6 +3240,16 @@ impl Env {
     /// Equivalent to OCaml's `Env.normalize_path_prefix` (env.ml:898-902),
     /// which always builds a fresh `Pdot`.
     pub fn normalize_path_prefix(&self, ctx: &TypeContext, path: &Path) -> Path {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .normalize_path_prefix(ctx, path);
+        }
+
         let result = (|| match path.view() {
             PathView::Pdot(..) => {
                 ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
@@ -3016,6 +3313,11 @@ impl Env {
 
     /// Find a module type by name.
     pub fn find_modtype(&self, name: impl crate::name::NameKey) -> EnvResult<&ModtypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().find_modtype(name);
+        }
+
         let result = (|| {
             self.data
                 .modtypes
@@ -3043,6 +3345,16 @@ impl Env {
         &self,
         name: impl crate::name::NameKey,
     ) -> EnvResult<(Path, &ModtypeDeclaration)> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_modtype_with_path(name);
+        }
+
         let result = (|| {
             self.data
                 .modtypes
@@ -3064,6 +3376,11 @@ impl Env {
 
     /// Find a module type by path.
     pub fn lookup_modtype(&self, path: &Path) -> EnvResult<&ModtypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().lookup_modtype(path);
+        }
+
         let result = (|| {
             match path.view() {
                 PathView::Pident(id) => self
@@ -3115,6 +3432,11 @@ impl Env {
 
     /// Check if the environment has local constraints.
     pub fn has_local_constraints(&self) -> bool {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self.data.shadow.as_ref().unwrap().has_local_constraints();
+        }
+
         let result = (|| !self.data.local_constraints.is_empty())();
         if let Some(log) = &self.data.shadow {
             let other = log.has_local_constraints();
@@ -3138,6 +3460,16 @@ impl Env {
 
     /// Find a local constraint.
     pub fn find_local_constraint(&self, path: &Path) -> Option<&TypeDeclaration> {
+        #[cfg(test)]
+        if self.data.log_answers {
+            return self
+                .data
+                .shadow
+                .as_ref()
+                .unwrap()
+                .find_local_constraint(path);
+        }
+
         let result = (|| {
             // Local constraints only exist under GADT pattern refinement; skip
             // hashing the path in the common empty case.

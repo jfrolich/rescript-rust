@@ -2105,3 +2105,45 @@ fn env_log_timed_comparison_with_the_tables() {
         time(&|| drive_lookups(&work, log_env)),
     );
 }
+
+#[test]
+fn force_an_exported_log_thunk_after_its_compilation_is_dropped() {
+    let target = local("Target", 1);
+    let alias = local("Alias", 2);
+    let target_decl = module_of(signature(0));
+    let alias_decl = module_of(ModuleType::MtyAlias(
+        AliasPresence::MtaPresent, Arc::new(Path::pident(target)),
+    ));
+    let mut tables = Env::empty();
+    tables.add_module(target, target_decl.clone());
+    tables.add_module(alias, alias_decl.clone());
+    let expected = tables.local_module_components_shared(&Path::pident(alias)).unwrap();
+
+    // Produce a log thunk in one compilation, then discard every producer
+    // environment. Only its exported handle crosses into the later context.
+    let mut log = LogEnv::empty();
+    log.add_module(target, target_decl);
+    log.add_module(alias, alias_decl);
+    let handle = log.local_module_components_shared(&Path::pident(alias)).unwrap();
+    drop(log);
+    let actual = StoredModuleComponents::new_with_parent_context(
+        Env::from_log_for_components(handle.seed.env().expect("exported seed survives")),
+        handle.access_path, handle.module_decl.clone(), handle.parent_context.clone(),
+    );
+    let force = |thunk: &StoredModuleComponents| {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        thunk.with_components(
+            &mut None, &ctx, super::super::super::typecore::ComponentLookupApi::FindModule,
+            |components| {
+                assert!(components.lookup_type("a").is_some());
+                assert!(components.lookup_module("B").is_some());
+                assert!(components.lookup_modtype("C", &ctx).is_some());
+                super::super::super::canonical_sig::canonical_signature(
+                    &ctx, "Forced", components.signature(), None, None,
+                )
+            },
+        ).expect("components force successfully")
+    };
+    // Compare the forced tables' signature, not merely the thunk's seed.
+    assert_eq!(force(&expected), force(&actual));
+}
