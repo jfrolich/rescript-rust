@@ -15,6 +15,7 @@ pub(super) struct Build<'a, 'r> {
     pub b: AstBuilder<'a>,
     pub arena: &'r JsArena,
     pub names: &'r Names,
+    pub debug: bool,
 }
 impl<'a, 'r> Build<'a, 'r> {
     pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
@@ -22,6 +23,7 @@ impl<'a, 'r> Build<'a, 'r> {
             b: AstBuilder::new(alloc),
             arena,
             names,
+            debug: false,
         }
     }
     pub fn text(&self, s: &str) -> &'a str {
@@ -33,7 +35,7 @@ impl<'a, 'r> Build<'a, 'r> {
     pub fn string(&self, value: &str) -> StringLiteral<'a> {
         StringLiteral::new(
             SPAN,
-            self.text(&literal::string_value(value)),
+            literal::arena_string(value, self.b.allocator()),
             None,
             &self.b,
         )
@@ -222,6 +224,229 @@ impl<'a, 'r> Build<'a, 'r> {
         };
         Ok(self.binary(operator, self.expr(l)?, self.expr(r)?))
     }
+    /// Shapes from `js_ir::printer::print_caml_block` (OCaml js_dump.ml:859-947).
+    ///
+    /// | Tag info | JavaScript shape |
+    /// | --- | --- |
+    /// | Record, array=true | array, including undefined elements |
+    /// | Record, matching field count | named object |
+    /// | RecordInlined, matching count | named object; tagged runtime prepends tag |
+    /// | Module, matching count | object with identifier-mangled field names |
+    /// | Constructor `::` | hd, tl, then _2, _3, ...; no tag |
+    /// | Other Constructor | tag (custom name or TAG), _0, _1, ...; debug symbol last |
+    /// | PolyVar | NAME from first element, VAL from second if present |
+    /// | Extension | RE_EXN_ID, _1, _2, ... |
+    /// | RecordExt | RE_EXN_ID, named fields, positional fallback for missing names |
+    /// | Tuple, Some, SomeNotNested, ModuleExport, mismatched record/module | array |
+    ///
+    /// Mutable flags never affect printing. Only optional record/inlined-record
+    /// fields whose expression is literally Undefined are omitted; required and
+    /// extension fields retain undefined. Untagged inline records omit the tag;
+    /// scalar unboxed and lazy forms are already lowered before this IR. Exception
+    /// literals here have no Error stack field (that belongs to throw printing).
+    /// Keys follow literal-property spelling, not member-access spelling: numeric
+    /// names remain strings and __proto__ is computed. No property is shorthand.
+    fn caml_block(
+        &self,
+        elements: &[Expr],
+        tag: &crate::lambda::TagInfo,
+    ) -> Result<Expression<'a>, Unsupported> {
+        use crate::lambda::TagInfo;
+        let mut properties = self.b.vec();
+        let mut indexed = String::with_capacity(21); // One scratch buffer per block, not per field.
+        let mut field = |name: &str, value: Expr| -> Result<(), Unsupported> {
+            properties.push(self.block_property(name, self.expr(value)?));
+            Ok(())
+        };
+        match tag {
+            TagInfo::Record(r) if !r.array && r.fields.len() == elements.len() => {
+                for ((name, optional), &value) in r.fields.iter().zip(elements) {
+                    if !(*optional && walk::undefined(self.arena, value)) {
+                        field(name, value)?;
+                    }
+                }
+            }
+            TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => {
+                if let crate::types::VariantBlock::Tagged(t) = &*r.runtime {
+                    properties.push(self.block_property(
+                        t.tag_name.as_deref().unwrap_or("TAG"),
+                        self.block_tag(&t.tag.literal)?,
+                    ));
+                }
+                for ((name, optional), &value) in r.fields.iter().zip(elements) {
+                    if !(*optional && walk::undefined(self.arena, value)) {
+                        properties.push(self.block_property(name, self.expr(value)?));
+                    }
+                }
+            }
+            TagInfo::Module(names) if names.len() == elements.len() => {
+                // Longest replacement is $question (9 bytes); reserve once.
+                let mut scratch = String::with_capacity(2 + names.iter().map(|s| s.len()).max().unwrap_or(0) * 9);
+                for (name, &value) in names.iter().zip(elements) {
+                    field(literal::module_field(name, &mut scratch), value)?;
+                }
+            }
+            TagInfo::Constructor(c) => {
+                if c.name != "::" {
+                    properties.push(self.block_property(
+                        c.runtime.tag_name.as_deref().unwrap_or("TAG"),
+                        self.block_tag(&c.runtime.tag.literal)?,
+                    ));
+                }
+                for (i, &value) in elements.iter().enumerate() {
+                    let name = if c.name == "::" && i < 2 {
+                        if i == 0 { "hd" } else { "tl" }
+                    } else {
+                        use std::fmt::Write;
+                        indexed.clear();
+                        write!(indexed, "_{i}").expect("write to String");
+                        &indexed
+                    };
+                    properties.push(self.block_property(name, self.expr(value)?));
+                }
+                if self.debug && c.name != "::" {
+                    let key = Expression::new_call_expression(
+                        SPAN,
+                        self.member(self.id("Symbol"), "for"),
+                        None,
+                        self.b.vec1(Argument::from(self.string_expr("name"))),
+                        false,
+                        &self.b,
+                    );
+                    properties.push(ObjectPropertyKind::ObjectProperty(self.b.alloc(
+                        ObjectProperty::new(
+                            SPAN,
+                            PropertyKind::Init,
+                            PropertyKey::from(key),
+                            self.string_expr(&c.name),
+                            false,
+                            false,
+                            true,
+                            &self.b,
+                        ),
+                    )));
+                }
+            }
+            TagInfo::PolyVar(_) => {
+                let Some(&name) = elements.first() else {
+                    return Err(Unsupported("block literal: empty polymorphic variant"));
+                };
+                field("NAME", name)?;
+                if let Some(&value) = elements.get(1) {
+                    field("VAL", value)?;
+                }
+            }
+            TagInfo::Extension | TagInfo::RecordExt { .. } => {
+                for (i, &value) in elements.iter().enumerate() {
+                    let name = if i == 0 {
+                        "RE_EXN_ID"
+                    } else if let TagInfo::RecordExt { fields, .. } = tag
+                        && let Some(name) = fields.get(i - 1)
+                    {
+                        name
+                    } else {
+                        use std::fmt::Write;
+                        indexed.clear();
+                        write!(indexed, "_{i}").expect("write to String");
+                        &indexed
+                    };
+                    field(name, value)?;
+                }
+            }
+            TagInfo::Record(_)
+            | TagInfo::RecordInlined(_)
+            | TagInfo::Module(_)
+            | TagInfo::Tuple
+            | TagInfo::Some
+            | TagInfo::SomeNotNested
+            | TagInfo::ModuleExport(_) => {
+                let mut values = self.b.vec();
+                for &value in elements {
+                    values.push(if let ExprKind::Spread(inner) = self.arena.ek(value) {
+                        ArrayExpressionElement::SpreadElement(self.b.alloc(SpreadElement::new(
+                            SPAN,
+                            self.expr(inner)?,
+                            &self.b,
+                        )))
+                    } else {
+                        ArrayExpressionElement::from(self.expr(value)?)
+                    });
+                }
+                return Ok(Expression::new_array_expression(SPAN, values, &self.b));
+            }
+        }
+        Ok(Expression::new_object_expression(SPAN, properties, &self.b))
+    }
+
+    fn block_property(&self, name: &str, value: Expression<'a>) -> ObjectPropertyKind<'a> {
+        let computed = name == "__proto__";
+        let (name, bare) = walk::member_form(name);
+        let key = if bare && !computed {
+            PropertyKey::StaticIdentifier(self.b.alloc(IdentifierName::new(
+                SPAN,
+                self.text(name),
+                &self.b,
+            )))
+        } else {
+            PropertyKey::from(self.string_expr(name))
+        };
+        ObjectPropertyKind::ObjectProperty(self.b.alloc(ObjectProperty::new(
+            SPAN,
+            PropertyKind::Init,
+            key,
+            value,
+            false,
+            false,
+            computed,
+            &self.b,
+        )))
+    }
+
+    fn block_tag(
+        &self,
+        tag: &crate::types::VariantLiteralTag,
+    ) -> Result<Expression<'a>, Unsupported> {
+        use crate::types::VariantLiteralTag as T;
+        Ok(match tag {
+            T::String(s) => self.string_expr(s),
+            T::Int(i) => self.number(&Number::int(*i as i32))?,
+            T::Float(s) => {
+                let value = s
+                    .parse::<f64>()
+                    .map_err(|_| Unsupported("block literal: float tag"))?;
+                let literal = Expression::new_numeric_literal(
+                    SPAN,
+                    value.abs(),
+                    None,
+                    NumberBase::Decimal,
+                    &self.b,
+                );
+                if value.is_sign_negative() {
+                    self.unary(U::UnaryNegation, literal)
+                } else {
+                    literal
+                }
+            }
+            T::BigInt(s) => {
+                let (positive, digits) = crate::types::typecore::parse_bigint_literal(s);
+                let literal = Expression::new_big_int_literal(
+                    SPAN,
+                    self.text(&digits),
+                    None,
+                    BigintBase::Decimal,
+                    &self.b,
+                );
+                if positive {
+                    literal
+                } else {
+                    self.unary(U::UnaryNegation, literal)
+                }
+            }
+            T::Bool(b) => Expression::new_boolean_literal(SPAN, *b, &self.b),
+            T::Null => Expression::new_null_literal(SPAN, &self.b),
+            T::Undefined => self.id("undefined"),
+        })
+    }
     pub fn expr(&self, e: Expr) -> Result<Expression<'a>, Unsupported> {
         let a = self.arena;
         if a.expr_comment(e).is_some() {
@@ -359,7 +584,7 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::Await(e) => Expression::new_await_expression(SPAN, self.expr(e)?, &self.b),
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
             ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
-            ExprKind::CamlBlock(..) => return Err(Unsupported("block literal shape")),
+            ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
             ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
             ExprKind::TemplateLiteral(_)
@@ -584,3 +809,191 @@ pub(super) trait Allocate<'a>: GetAllocator<'a> {
     }
 }
 impl<'a> Allocate<'a> for AstBuilder<'a> {}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+    use crate::js_ir::build::exp as E;
+    use crate::js_ir::op::MutableFlag;
+    use crate::lambda::{TagInfo, lam_tag_info::RecordInlinedTag};
+    use crate::types::{VariantBlock, VariantLiteralTag as T};
+    use js_reformat::{ReformatOptions, reformat};
+
+    fn oracle(tag: TagInfo, undefined: &[bool]) {
+        for mutable in [MutableFlag::Immutable, MutableFlag::Mutable] {
+            for debug in [false, true] {
+                let mut arena = JsArena::new();
+                let values: Vec<_> = undefined
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &u)| {
+                        if u {
+                            E::new(ExprKind::Undefined { is_unit: false }, &mut arena)
+                        } else {
+                            E::number(Number::int(i as i32), &mut arena)
+                        }
+                    })
+                    .collect();
+                let items = E::list(&values, &mut arena);
+                let info = arena.tag_id(tag.clone());
+                let expr = E::new(ExprKind::CamlBlock(items, mutable, info), &mut arena);
+                let legacy =
+                    crate::js_ir::printer::print_expr_with_options(&arena, expr, 1, debug, false);
+                let alloc = Allocator::default();
+                let names = Names::default();
+                let mut build = Build::new(&alloc, &arena, &names);
+                build.debug = debug;
+                let stmt = build.variable("value", Some(build.expr(expr).unwrap()));
+                let program = Program::new(
+                    SPAN,
+                    oxc_span::SourceType::mjs(),
+                    "",
+                    build.b.vec(),
+                    None,
+                    build.b.vec(),
+                    build.b.vec1(stmt),
+                    &build.b,
+                );
+                let actual = oxc_codegen::Codegen::new().build(&program).code;
+                let mode = ReformatOptions {
+                    drop_decoration_comments: true,
+                    ..Default::default()
+                };
+                assert_eq!(
+                    reformat(&format!("let value = {legacy};"), mode).unwrap(),
+                    actual,
+                    "{tag:?}"
+                );
+                assert_eq!(reformat(&actual, mode).unwrap(), actual);
+            }
+        }
+    }
+
+    #[test]
+    fn tuple_and_lowered_option_arrays() {
+        for tag in [
+            TagInfo::Tuple,
+            TagInfo::Some,
+            TagInfo::SomeNotNested,
+            TagInfo::ModuleExport(vec![]),
+        ] {
+            oracle(tag, &[false, true]);
+        }
+    }
+    #[test]
+    fn record_array() {
+        let TagInfo::Record(mut r) = TagInfo::ref_tag() else {
+            unreachable!()
+        };
+        r.array = true;
+        oracle(TagInfo::Record(r), &[false, true]);
+    }
+    #[test]
+    fn record_keys_and_optional_fields() {
+        oracle(
+            TagInfo::record(
+                vec![
+                    ("optional".into(), true),
+                    ("required".into(), false),
+                    ("__proto__".into(), false),
+                    ("123".into(), false),
+                    ("a-b".into(), false),
+                    ("default".into(), false),
+                    ("present".into(), true),
+                ],
+                crate::parser::ast::MutableFlag::Immutable,
+            ),
+            &[true, true, false, false, false, false, false],
+        );
+        oracle(
+            TagInfo::record(vec![], crate::parser::ast::MutableFlag::Immutable),
+            &[],
+        );
+    }
+    fn inline(tagged: bool) -> TagInfo {
+        let TagInfo::Constructor(c) = TagInfo::constructor("Inline", 1) else {
+            unreachable!()
+        };
+        let runtime = if tagged {
+            VariantBlock::Tagged(*c.runtime)
+        } else {
+            VariantBlock::Untagged {
+                tag: c.runtime.tag,
+                block_type: crate::types::VariantBlockType::Object,
+            }
+        };
+        TagInfo::RecordInlined(Box::new(RecordInlinedTag {
+            name: "Inline".into(),
+            num_nonconst: 1,
+            fields: vec![("gone".into(), true), ("kept".into(), false)],
+            logical_field_count: None,
+            mutable_flag: crate::parser::ast::MutableFlag::Immutable,
+            runtime: Box::new(runtime),
+        }))
+    }
+    #[test]
+    fn tagged_inline_record() {
+        oracle(inline(true), &[true, true]);
+    }
+    #[test]
+    fn untagged_inline_record() {
+        oracle(inline(false), &[true, true]);
+    }
+    #[test]
+    fn module_fields() {
+        oracle(
+            TagInfo::Module(vec!["default".into(), "a-b".into(), "value".into()]),
+            &[false, false, true],
+        );
+    }
+    #[test]
+    fn constructor_and_tag_literals() {
+        for literal in [
+            T::String("A".into()),
+            T::Int(-42),
+            T::Float("-1.5".into()),
+            T::BigInt("-12345678901234567890".into()),
+            T::Bool(true),
+            T::Null,
+            T::Undefined,
+        ] {
+            let TagInfo::Constructor(mut c) = TagInfo::constructor("A", 1) else {
+                unreachable!()
+            };
+            c.runtime.tag.literal = literal;
+            c.runtime.tag_name = Some("custom-tag".into());
+            oracle(TagInfo::Constructor(c), &[false, true]);
+        }
+    }
+    #[test]
+    fn list_cells() {
+        for values in [&[][..], &[false, false][..], &[false, true, false][..]] {
+            oracle(TagInfo::constructor("::", 1), values);
+        }
+    }
+    #[test]
+    fn polymorphic_variant() {
+        oracle(TagInfo::poly_var("ignored"), &[false, true]);
+        oracle(TagInfo::poly_var("ignored"), &[false]);
+    }
+    #[test]
+    fn extension() {
+        oracle(TagInfo::Extension, &[false, true, false]);
+    }
+    #[test]
+    fn record_extension() {
+        oracle(
+            TagInfo::RecordExt {
+                fields: vec!["__proto__".into(), "123".into()],
+                mutable_flag: crate::parser::ast::MutableFlag::Mutable,
+            },
+            &[false, true, false, true],
+        );
+    }
+    #[test]
+    fn mismatched_metadata_uses_array() {
+        for tag in [TagInfo::ref_tag(), inline(true), TagInfo::Module(vec![])] {
+            oracle(tag, &[false, true, false]);
+        }
+    }
+}
