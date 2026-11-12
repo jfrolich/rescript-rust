@@ -3,18 +3,20 @@ import { EditorState } from "@codemirror/state";
 import { EditorView, keymap, drawSelection, highlightSpecialChars } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap, indentWithTab } from "@codemirror/commands";
 import { bracketMatching, indentOnInput, indentUnit, syntaxHighlighting } from "@codemirror/language";
-import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import { acceptCompletion, closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { classHighlighter } from "@lezer/highlight";
 import { codemirrorLanguage } from "./highlight.jsx";
+import { completion } from "./completion.js";
 
 /**
  * An editor for one file. The document is created from `value` once: the
- * parent gives the editor a new `key` to replace it.
+ * parent gives the editor a new `key` to replace it. With `complete`, the
+ * editor offers completions.
  */
-export function CodeEditor({ value, language, onChange, onCursor, onFocus, viewRef }) {
+export function CodeEditor({ value, language, onChange, onCursor, onFocus, complete, viewRef }) {
   const host = useRef(null);
-  const handlers = useRef({ onChange, onCursor, onFocus });
-  handlers.current = { onChange, onCursor, onFocus };
+  const handlers = useRef({ onChange, onCursor, onFocus, complete });
+  handlers.current = { onChange, onCursor, onFocus, complete };
 
   useEffect(() => {
     const languageExtension = codemirrorLanguage(language);
@@ -33,7 +35,17 @@ export function CodeEditor({ value, language, onChange, onCursor, onFocus, viewR
           EditorState.tabSize.of(2),
           syntaxHighlighting(classHighlighter),
           languageExtension ? [languageExtension] : [],
-          keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, indentWithTab]),
+          // The compiler completes ReScript: `complete(source, offset, explicit)`.
+          language === "rescript" && complete
+            ? completion((...request) => handlers.current.complete?.(...request) ?? Promise.resolve(null))
+            : [],
+          keymap.of([
+            { key: "Tab", run: acceptCompletion },
+            ...closeBracketsKeymap,
+            ...defaultKeymap,
+            ...historyKeymap,
+            indentWithTab,
+          ]),
           EditorView.updateListener.of((update) => {
             if (update.docChanged) handlers.current.onChange?.(update.state.doc.toString());
             if (update.selectionSet || update.docChanged) {

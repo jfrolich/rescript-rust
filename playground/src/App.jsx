@@ -8,11 +8,52 @@ import { isSourceFile } from "./engine.js";
 import { examples } from "./examples.js";
 import { decodeProject, encodeProject } from "./share.js";
 
+// What the page answers a completion request with: set by the App, which
+// has the project and the compiler. `(name, offset, explicit, source)`.
+let completeAt = null;
+
+const COMPLETION_KINDS = {
+  function: "Function",
+  variable: "Variable",
+  type: "Struct",
+  namespace: "Module",
+  interface: "Interface",
+  class: "Class",
+  property: "Field",
+  keyword: "Keyword",
+  text: "Text",
+};
+
 // Register ReScript language with Monaco before any editor mounts
 let monacoInstance = null;
 loader.init().then((monaco) => {
   monacoInstance = monaco;
   registerRescriptLanguage(monaco);
+  // Completions come from the compiler (src/complete.js).
+  monaco.languages.registerCompletionItemProvider(languageId, {
+    triggerCharacters: [".", ">", "%", "@"],
+    async provideCompletionItems(model, position, context) {
+      if (!completeAt) return { suggestions: [] };
+      // The model's path is `<generation>/<file name>`.
+      const name = model.uri.path.split("/").pop();
+      const explicit = context.triggerKind === monaco.languages.CompletionTriggerKind.Invoke;
+      const result = await completeAt(name, model.getOffsetAt(position), explicit, model.getValue());
+      if (!result) return { suggestions: [] };
+      const start = model.getPositionAt(result.from);
+      const range = new monaco.Range(start.lineNumber, start.column, position.lineNumber, position.column);
+      return {
+        suggestions: result.options.map((option, index) => ({
+          label: option.label,
+          kind: monaco.languages.CompletionItemKind[COMPLETION_KINDS[option.type] ?? "Text"],
+          detail: option.detail,
+          insertText: option.label,
+          // More local names first, then the order the compiler gave.
+          sortText: `${String(9 - Math.min(9, (option.boost ?? 0) + 3))}${String(index).padStart(5, "0")}`,
+          range,
+        })),
+      };
+    },
+  });
 });
 
 const TABS = [
@@ -34,6 +75,8 @@ const EDITOR_OPTIONS = {
   automaticLayout: true,
   padding: { top: 12 },
   renderLineHighlight: "gutter",
+  // The compiler completes; words of the file would be listed twice.
+  wordBasedSuggestions: "off",
 };
 
 const READONLY_OPTIONS = {
@@ -112,7 +155,17 @@ export default function App() {
     });
     compilerRef.current = compiler;
     compiler.build(filesRef.current);
-    return () => compiler.dispose();
+    completeAt = (name, offset, explicit, source) =>
+      compiler.complete(
+        filesRef.current.map((file) => (file.name === name ? { ...file, source } : file)),
+        name,
+        offset,
+        explicit,
+      );
+    return () => {
+      completeAt = null;
+      compiler.dispose();
+    };
   }, []);
 
   const requestBuild = useCallback((nextFiles, delay) => {

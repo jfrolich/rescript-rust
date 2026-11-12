@@ -3,7 +3,16 @@ import { EditorState, Prec } from "@codemirror/state";
 import { EditorView, drawSelection, highlightSpecialChars, keymap, placeholder } from "@codemirror/view";
 import { defaultKeymap, history, historyKeymap } from "@codemirror/commands";
 import { bracketMatching, indentUnit, syntaxHighlighting } from "@codemirror/language";
+import {
+  acceptCompletion,
+  closeCompletion,
+  completionStatus,
+  moveCompletionSelection,
+  selectedCompletion,
+  startCompletion,
+} from "@codemirror/autocomplete";
 import { classHighlighter } from "@lezer/highlight";
+import { completion } from "./completion.js";
 import { codemirrorLanguage, highlight } from "./highlight.jsx";
 import { createSession } from "./repl-session.js";
 
@@ -62,10 +71,10 @@ function Source({ code }) {
 }
 
 /** The input line: an editor where Enter evaluates and the arrows walk the history. */
-function Prompt({ onSubmit, past, viewRef, onFocus }) {
+function Prompt({ onSubmit, past, viewRef, onFocus, complete }) {
   const host = useRef(null);
-  const state = useRef({ onSubmit, past, onFocus });
-  state.current = { onSubmit, past, onFocus };
+  const state = useRef({ onSubmit, past, onFocus, complete });
+  state.current = { onSubmit, past, onFocus, complete };
   // Where in the history the arrows are, and what was typed before them.
   const walk = useRef({ at: null, draft: "" });
 
@@ -90,7 +99,20 @@ function Prompt({ onSubmit, past, viewRef, onFocus }) {
       });
       return true;
     };
+    // With the list of completions open, Enter takes the chosen one; when
+    // that is what is written already, Enter is for the input.
+    const choose = (view) => {
+      if (completionStatus(view.state) !== "active") return false;
+      const chosen = selectedCompletion(view.state);
+      const head = view.state.selection.main.head;
+      const written = /[A-Za-z0-9_'.]*$/.exec(view.state.sliceDoc(view.state.doc.lineAt(head).from, head))[0];
+      if (chosen && written !== chosen.label && !written.endsWith(`.${chosen.label}`)) return acceptCompletion(view);
+      closeCompletion(view);
+      return false;
+    };
     const submit = (view, always) => {
+      if (!always && choose(view)) return true;
+      closeCompletion(view);
       const text = view.state.doc.toString();
       if (text.trim() === "") return true;
       if (!always && !isComplete(text)) return newline(view);
@@ -115,6 +137,7 @@ function Prompt({ onSubmit, past, viewRef, onFocus }) {
       return true;
     });
     const older = (view) => {
+      if (completionStatus(view.state) === "active") return moveCompletionSelection(false)(view);
       const { past } = state.current;
       const head = view.state.selection.main.head;
       if (view.state.doc.lineAt(head).number !== 1 || past.length === 0) return false;
@@ -126,6 +149,7 @@ function Prompt({ onSubmit, past, viewRef, onFocus }) {
       return true;
     };
     const newer = (view) => {
+      if (completionStatus(view.state) === "active") return moveCompletionSelection(true)(view);
       const { past } = state.current;
       const head = view.state.selection.main.head;
       if (walk.current.at === null || view.state.doc.lineAt(head).number !== view.state.doc.lines) return false;
@@ -149,10 +173,15 @@ function Prompt({ onSubmit, past, viewRef, onFocus }) {
           syntaxHighlighting(classHighlighter),
           codemirrorLanguage("rescript"),
           placeholder("Type ReScript and press Enter"),
+          // Enter and the arrows are the loop's: they choose from the list when it is open.
+          completion((...request) => state.current.complete(...request), { keys: false }),
           Prec.highest(
             keymap.of([
               { key: "Enter", run: (target) => submit(target, false), shift: newline },
               { key: "Mod-Enter", run: (target) => submit(target, true) },
+              { key: "Tab", run: acceptCompletion },
+              { key: "Escape", run: closeCompletion },
+              { key: "Ctrl-Space", run: startCompletion },
               { key: "ArrowUp", run: older },
               { key: "ArrowDown", run: newer },
             ]),
@@ -365,7 +394,13 @@ export function Repl({ libraries, intro, tries }) {
           <span className="repl-mark" aria-hidden="true">
             ›
           </span>
-          <Prompt onSubmit={evaluate} past={past} viewRef={prompt} onFocus={warmUp} />
+          <Prompt
+            onSubmit={evaluate}
+            past={past}
+            viewRef={prompt}
+            onFocus={warmUp}
+            complete={(source, offset, explicit) => session.current.complete(source, offset, explicit)}
+          />
           <button type="button" className="repl-run" onClick={() => prompt.current?.submit()} aria-label="Run the input">
             Run ↵
           </button>
@@ -398,7 +433,8 @@ export function Repl({ libraries, intro, tries }) {
         <span className={busy || status === "loading" ? "pulse on" : status === "ready" ? "pulse live" : status === "failed" ? "pulse failed" : "pulse"} />
         {foot}
         <span className="repl-keys">
-          <kbd>Enter</kbd> runs, or continues an open bracket · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>↑</kbd> earlier inputs
+          <kbd>Enter</kbd> runs, or continues an open bracket · <kbd>Shift</kbd>+<kbd>Enter</kbd> new line · <kbd>Tab</kbd> completes ·{" "}
+          <kbd>↑</kbd> earlier inputs
         </span>
       </div>
     </figure>

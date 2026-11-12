@@ -6,6 +6,7 @@
  */
 
 const TIME_LIMIT = 20_000;
+const COMPLETION_LIMIT = 3_000;
 
 /**
  * @param libraries  `[{name, source}]`: the modules the session starts with
@@ -53,6 +54,13 @@ export function createSession({ libraries, replay, onLog, onStatus }) {
           } else {
             settle(message.id, "resolve", { ...message.result, ms: message.ms });
           }
+        } else if (message.type === "completed") {
+          if (message.result?.crashed) {
+            onLog({ kind: "problem", text: `${message.result.crashed}\nThe session starts again: what it had defined is gone.` });
+            stop(message.result.crashed);
+          } else {
+            settle(message.id, "resolve", message.result);
+          }
         } else if (message.type === "repl-log") {
           onLog(message.line);
         } else if (message.type === "failed") {
@@ -93,6 +101,24 @@ export function createSession({ libraries, replay, onLog, onStatus }) {
         }, TIME_LIMIT);
         pending.set(id, { resolve, reject, timer });
         worker.postMessage({ type: "repl-eval", id, source });
+      });
+    },
+    /**
+     * What can be written at `offset` of the input `source`: resolves with
+     * `{from, options, validFor}` or null.
+     */
+    async complete(source, offset, explicit) {
+      try {
+        await start();
+      } catch {
+        return null;
+      }
+      return new Promise((resolve) => {
+        const id = nextId++;
+        // An input that is still running keeps the compiler busy.
+        const timer = setTimeout(() => settle(id, "resolve", null), COMPLETION_LIMIT);
+        pending.set(id, { resolve, reject: () => resolve(null), timer });
+        worker.postMessage({ type: "complete", id, request: { mode: "repl", source, offset, explicit } });
       });
     },
     /** Forget everything the session has defined. */

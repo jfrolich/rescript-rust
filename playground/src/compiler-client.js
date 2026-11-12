@@ -12,6 +12,8 @@ export function createCompiler({ onReady, onResult, onFailure }) {
   let running = null; // {id, timer}
   let waiting = null; // files
   let nextId = 1;
+  const completions = new Map(); // id -> resolve
+  const whenReady = []; // what is sent once the compiler has loaded
 
   function start() {
     ready = false;
@@ -21,6 +23,7 @@ export function createCompiler({ onReady, onResult, onFailure }) {
       if (message.type === "ready") {
         ready = true;
         onReady();
+        for (const send of whenReady.splice(0)) send();
         next();
       } else if (message.type === "built") {
         if (!running || running.id !== message.id) return;
@@ -34,6 +37,11 @@ export function createCompiler({ onReady, onResult, onFailure }) {
           onResult(message.result, message.ms);
         }
         next();
+      } else if (message.type === "completed") {
+        const resolve = completions.get(message.id);
+        completions.delete(message.id);
+        if (message.result?.crashed) restart();
+        resolve?.(message.result?.crashed ? null : message.result);
       } else if (message.type === "failed") {
         if (running) clearTimeout(running.timer);
         running = null;
@@ -51,6 +59,8 @@ export function createCompiler({ onReady, onResult, onFailure }) {
 
   function restart() {
     worker.terminate();
+    for (const resolve of completions.values()) resolve(null);
+    completions.clear();
     start();
   }
 
@@ -76,6 +86,27 @@ export function createCompiler({ onReady, onResult, onFailure }) {
     build(files) {
       waiting = files;
       next();
+    },
+    /**
+     * What can be written at `offset` of the file `name` of the project
+     * `files`. Resolves with `{from, options, validFor}` or null.
+     */
+    complete(files, name, offset, explicit) {
+      return new Promise((resolve) => {
+        const id = nextId++;
+        const timer = setTimeout(() => {
+          completions.delete(id);
+          resolve(null);
+        }, 3000);
+        completions.set(id, (result) => {
+          clearTimeout(timer);
+          resolve(result);
+        });
+        const send = () =>
+          worker.postMessage({ type: "complete", id, request: { mode: "project", files, name, offset, explicit } });
+        if (ready) send();
+        else whenReady.push(send);
+      });
     },
     dispose() {
       if (running) clearTimeout(running.timer);

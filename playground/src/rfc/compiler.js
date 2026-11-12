@@ -12,6 +12,8 @@ let ready = false;
 let running = null; // {id, key, resolve, reject, timer}
 const waiting = new Map(); // key -> {files, resolve, reject}
 let nextId = 1;
+const completions = new Map(); // id -> resolve
+const whenReady = []; // what is sent once the compiler has loaded
 const listeners = new Set();
 let status = "idle"; // idle | loading | ready | failed
 
@@ -38,6 +40,7 @@ function start() {
     if (message.type === "ready") {
       ready = true;
       setStatus("ready");
+      for (const send of whenReady.splice(0)) send();
       next();
     } else if (message.type === "built") {
       if (!running || running.id !== message.id) return;
@@ -51,6 +54,11 @@ function start() {
         done.resolve({ result: message.result, ms: message.ms });
       }
       next();
+    } else if (message.type === "completed") {
+      const resolve = completions.get(message.id);
+      completions.delete(message.id);
+      if (message.result?.crashed) restart();
+      resolve?.(message.result?.crashed ? null : message.result);
     } else if (message.type === "failed") {
       fail(`The compiler failed: ${message.message}`);
     }
@@ -71,6 +79,8 @@ function fail(message) {
 
 function restart() {
   if (worker) worker.terminate();
+  for (const resolve of completions.values()) resolve(null);
+  completions.clear();
   start();
 }
 
@@ -102,5 +112,27 @@ export function build(key, files) {
     if (replaced) replaced.resolve(null);
     waiting.set(key, { files, resolve, reject });
     next();
+  });
+}
+
+/**
+ * What can be written at `offset` of the file `name` of the project
+ * `files`. Resolves with `{from, options, validFor}` or null.
+ */
+export function complete(files, name, offset, explicit) {
+  warmUp();
+  return new Promise((resolve) => {
+    const id = nextId++;
+    const timer = setTimeout(() => {
+      completions.delete(id);
+      resolve(null);
+    }, 3000);
+    completions.set(id, (result) => {
+      clearTimeout(timer);
+      resolve(result);
+    });
+    const send = () => worker.postMessage({ type: "complete", id, request: { mode: "project", files, name, offset, explicit } });
+    if (ready) send();
+    else whenReady.push(send);
   });
 }
