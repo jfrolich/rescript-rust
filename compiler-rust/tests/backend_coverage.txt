@@ -103,55 +103,57 @@
   },
   "lower": {
     "fixtures": {
-      "identical": 0,
+      "identical": 40,
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
-        "external": 72,
-        "if": 48,
-        "loop": 8,
-        "prim": 328,
-        "record copy": 8,
-        "switch": 16
+        "external": 208,
+        "flat make": 8,
+        "if": 87,
+        "jsx": 16,
+        "let rec": 8,
+        "loop": 9,
+        "record copy": 32,
+        "static catch": 8,
+        "switch": 48,
+        "try": 16
       }
     },
     "runtime": {
-      "identical": 0,
+      "identical": 61,
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
-        "await": 1,
-        "external": 5,
-        "if": 14,
-        "let rec": 1,
-        "loop": 1,
-        "prim": 80,
-        "short circuit": 1,
-        "switch": 1,
-        "try": 9
+        "await": 2,
+        "external": 13,
+        "if": 20,
+        "let rec": 2,
+        "loop": 2,
+        "switch": 3,
+        "try": 10
       }
     },
     "tests/tests": {
-      "identical": 0,
+      "identical": 157,
       "shared_catch_only": 1,
       "units": 719,
       "unsupported": {
-        "assign": 7,
-        "await": 9,
-        "external": 170,
-        "if": 49,
+        "assign": 9,
+        "await": 13,
+        "external": 288,
+        "flat make": 3,
+        "if": 85,
         "import": 3,
-        "jsx": 2,
-        "let rec": 41,
-        "loop": 9,
-        "prim": 362,
-        "record copy": 2,
+        "jsx": 4,
+        "let rec": 50,
+        "loop": 15,
+        "record copy": 3,
+        "record rest": 2,
         "shared Lambda subtree with binder": 1,
-        "short circuit": 4,
-        "static catch": 6,
+        "static catch": 11,
         "string switch": 7,
-        "switch": 43,
-        "try": 4
+        "switch": 57,
+        "try": 11
       }
     }
   }
