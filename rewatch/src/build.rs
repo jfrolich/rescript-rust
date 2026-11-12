@@ -3,7 +3,7 @@ pub mod clean;
 pub mod compile;
 pub mod compiler_info;
 pub mod deps;
-pub mod embedded_runtime;
+pub mod snapshot;
 pub mod incremental;
 pub mod logs;
 pub mod namespaces;
@@ -598,6 +598,9 @@ pub fn incremental_build_without_lock(
     // A fresh in-process build has nothing compiled in memory, so every
     // module compiles (in-process builds keep no artifacts on disk).
     let fresh_in_process = build_state.module_registry.lock().unwrap().is_empty();
+    snapshot::prepare_belt(build_state).map_err(|err| IncrementalBuildError {
+        kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())), plain_output,
+    })?;
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
@@ -666,6 +669,7 @@ pub fn incremental_build_without_lock(
         mark_modules_dirty(build_state);
     }
 
+    snapshot::suppress_prebuilt_parses(build_state);
     let num_dirty_modules = build_state.modules.values().filter(|m| is_dirty(m)).count() as u64;
     let pb = if !plain_output && show_progress {
         ProgressBar::new(num_dirty_modules)

@@ -61,6 +61,8 @@ type SourceWalk = (
 
 #[derive(Debug, Clone)]
 pub struct Package {
+    /// Verified against the executable snapshot for this build only.
+    pub prebuilt: bool,
     pub check_only: bool,
     pub name: String,
     pub config: config::Config,
@@ -633,6 +635,7 @@ This inconsistency will cause issues with package resolution.\n",
     }
 
     Ok(Package {
+        prebuilt: false,
         check_only: false,
         name: package_name,
         config: config.to_owned(),
@@ -1458,6 +1461,7 @@ mod test {
 
     fn create_package(args: CreatePackageArgs) -> Package {
         Package {
+            prebuilt: false,
             check_only: false,
             name: args.name.clone(),
             config: config::tests::create_config(config::tests::CreateConfigArgs {
@@ -1745,6 +1749,7 @@ mod test {
         config.sources = Some(config::OneOrMore::Multiple(sources));
         config.features = features_map;
         super::Package {
+            prebuilt: false,
             check_only: false,
             name: "root".to_string(),
             config,
@@ -1830,6 +1835,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                prebuilt: false,
                 check_only: false,
                 name: "root".to_string(),
                 config: root_config,
@@ -1884,6 +1890,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                prebuilt: false,
                 check_only: false,
                 name: "root".to_string(),
                 config: root_config,
@@ -1956,6 +1963,7 @@ mod test {
         packages.insert(
             "root".to_string(),
             super::Package {
+                prebuilt: false,
                 check_only: false,
                 name: "root".to_string(),
                 config: root_config,

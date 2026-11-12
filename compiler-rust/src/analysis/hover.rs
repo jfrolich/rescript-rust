@@ -55,11 +55,13 @@ struct ExtractedType {
     loc: Loc,
 }
 
-/// `Res_parsetree_viewer.has_inline_record_definition_attribute`.
-fn has_inline_record_definition_attribute(attrs: &[decl::Attribute]) -> bool {
-    attrs
+/// `is_inline_record_definition`: whether `path` names one of the inline
+/// records of `decl`'s declaration group.
+fn is_inline_record_definition(decl: &TypeDeclaration, path: &Path) -> bool {
+    let name = path.last();
+    decl.type_inlined_types
         .iter()
-        .any(|attr| attr.attr_name.txt == "res.inlineRecordDefinition")
+        .any(|decl::TypeInlinedType::Record { type_name, .. }| type_name == name)
 }
 
 impl Hover<'_, '_> {
@@ -243,7 +245,7 @@ impl Hover<'_, '_> {
     fn expand_types(&self, file: &File, typ: TypeExprRef) -> (Vec<String>, bool) {
         let all = self.find_relevant_types_from_type(file, typ);
         if let Some(first) = all.first()
-            && has_inline_record_definition_attribute(&first.decl.type_attributes)
+            && is_inline_record_definition(&first.decl, &first.path)
         {
             // Inline record types print just with their definition, not the
             // constructor pointing to them.
@@ -268,7 +270,7 @@ impl Hover<'_, '_> {
             .map(|t| {
                 let file = self.session.file(t.env.file);
                 let link = if self.supports_markdown_links
-                    && !has_inline_record_definition_attribute(&t.decl.type_attributes)
+                    && !is_inline_record_definition(&t.decl, &t.path)
                 {
                     go_to_definition_text(self.style, &file.uri, t.loc.start)
                 } else {
