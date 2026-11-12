@@ -91,3 +91,63 @@ pub(crate) fn write_stats(stats: Stats) -> std::io::Result<()> {
         Err(e) => Err(e),
     }
 }
+
+/// A:90/E:15: a member read is strict-pure when its object is, but is not
+/// delay-safe: it can observe a later write. Sequencing uses runs_no_code.
+pub(crate) fn member(bir: &mut Bir, object: NodeId, property: super::StrId, position: crate::js_ir::arena::FieldPos, aux: u16) -> NodeId {
+    plain::node(bir, View::JDot { object, property, position }, aux)
+}
+#[cfg(test)]
+mod sequencing_tests {
+    use super::*;
+    use crate::js_ir::arena::FieldPos;
+
+    #[test]
+    fn runs_no_code_distinguishes_properties_and_record_fields() {
+        for assigned in [false, true] {
+            for global in [false, true] {
+                for name in ["local", "global.member"] {
+                    let mut bir = Bir::default();
+                    let var = bir.new_var_id(crate::name::Name::new(name), 1);
+                    if assigned { bir.vars.flags[var.index()].0 |= VarFlags::ASSIGNED; }
+                    if global { bir.vars.flags[var.index()].0 |= VarFlags::JS_GLOBAL; }
+                    let value = pure_expression(&mut bir, View::Var { var }, 0);
+                    let flags = bir.node(value).flags();
+                    assert_eq!(flags.contains(NodeFlags::DELAY_SAFE), !assigned && !global);
+                    let runs = !global || !name.contains('.');
+                    assert_eq!(facts::runs_no_code(&bir, value), runs);
+                    assert!(flags.contains(NodeFlags::J_SUBEXPR));
+                    let property = bir.intern_text("field");
+                    let field = member(&mut bir, value, property, FieldPos::new(Some(0)), 0);
+                    assert_eq!(facts::runs_no_code(&bir, field), runs);
+                    assert!(!bir.node(field).flags().contains(NodeFlags::J_SUBEXPR));
+                    assert!(!bir.node(field).flags().contains(NodeFlags::DELAY_SAFE));
+                    let getter = member(&mut bir, field, property, FieldPos::NONE, 0);
+                    assert!(!facts::runs_no_code(&bir, getter));
+                    bir.validate(Some(getter), false).unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod sequencing_depth_tests {
+    use super::*;
+    #[test]
+    fn ten_thousand_record_fields_have_linear_sequencing_inspection() {
+        let mut b = Bir::default();
+        b.begin_bulk();
+        let var = b.new_var_id(crate::name::Name::new("record"), 1);
+        let mut root = pure_expression(&mut b, View::Var { var }, 0);
+        let property = b.intern_text("field");
+        for _ in 0..10_000 {
+            root = member(&mut b, root, property, crate::js_ir::arena::FieldPos::new(Some(0)), 0);
+        }
+        b.steps.set(0);
+        assert!(facts::runs_no_code(&b, root));
+        assert!(b.steps.get() <= 30_003);
+        b.finish_bulk(root);
+        b.validate(Some(root), false).unwrap();
+    }
+}

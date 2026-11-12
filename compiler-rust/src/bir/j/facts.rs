@@ -128,3 +128,19 @@ pub(crate) fn subexpression(b: &Bir, id: NodeId, child: impl Fn(NodeId) -> bool)
         _ => false,
     }
 }
+
+/// A:90 runs_no_code for the application lowering producers. This differs
+/// from E:146's removable-subexpression predicate (notably for fields and
+/// dotted globals), so it must not share its cached bit. Each argument owns
+/// its field spine; inspect that spine iteratively, stopping at its base.
+pub(crate) fn runs_no_code(b: &Bir, mut id: NodeId) -> bool {
+    loop {
+        match b.view(id) {
+            View::Var { var } => return !b.vars.flags(var).contains(crate::bir::VarFlags::JS_GLOBAL)
+                || !b.vars.name(var).as_str().contains('.'),
+            View::JQualified { .. } | View::JBool | View::JStr { .. } | View::JNumber { .. } => return true,
+            View::JDot { object, position, .. } if position.get().is_some() => id = object,
+            _ => return false,
+        }
+    }
+}

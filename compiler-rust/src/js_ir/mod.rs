@@ -183,6 +183,25 @@ impl ModulePathResolver {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_bir_test_export(
+        &self,
+        module: &str,
+        field: &str,
+        arity: CmjExportArity,
+        lambda: Option<crate::lambda::Lambda>,
+    ) {
+        self.cmj_export_arities_cache.borrow_mut().insert(
+            module.to_owned(),
+            Some(Arc::new(AHashMap::from_iter([(field.to_owned(), arity)]))),
+        );
+        let lambdas = lambda.into_iter().map(|lambda| (field.to_owned(), lambda)).collect();
+        self.cmj_export_lambdas_cache.borrow_mut().insert(
+            module.to_owned(),
+            Some(Arc::new(crate::lambda::CmjExportLambdas::without_locations(lambdas))),
+        );
+    }
+
     /// The package specs imports are resolved with (see [`JsPackageSpec`]).
     pub fn set_package_specs(&mut self, specs: &[JsPackageSpec]) {
         self.package_specs = specs.to_vec();
