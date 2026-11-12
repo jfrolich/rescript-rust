@@ -21,6 +21,7 @@ struct GeneratedAst {
     stderr: Option<helpers::StdErr>,
     stored_ast: Option<super::build_types::StoredAst>,
     deps: Option<Dependencies>,
+    gentype_annotations: Option<bool>,
 }
 
 /// Whether parsing appends a source's warnings to its package log.
@@ -81,6 +82,7 @@ pub fn generate_asts(
                             stderr: None,
                             stored_ast: None,
                             deps: None,
+                            gentype_annotations: None,
                         }),
                         Ok(None),
                         false,
@@ -130,11 +132,13 @@ pub fn generate_asts(
                                     stderr: None,
                                     stored_ast: None,
                                     deps: None,
+                                    gentype_annotations: None,
                                 }),
                                 Ok(source_file.interface.as_ref().map(|_| GeneratedAst {
                                     stderr: None,
                                     stored_ast: None,
                                     deps: None,
+                                    gentype_annotations: None,
                                 })),
                                 false,
                             )
@@ -181,6 +185,11 @@ pub fn generate_asts(
                     parse_warnings: &build_state.parse_warnings,
                     warning_log,
                 };
+                if let Ok(generated) = &ast_result
+                    && let Some(flag) = generated.gentype_annotations
+                {
+                    source_file.gentype_annotations[0] = Some(flag);
+                }
                 let (parse_state, parse_dirty) = sinks.apply(
                     package,
                     format!("{module_name}:impl"),
@@ -193,6 +202,11 @@ pub fn generate_asts(
 
                 // `None` when the file has no interface file associated.
                 if let Some(iast_result) = iast_result.transpose() {
+                    if let Ok(generated) = &iast_result
+                        && let Some(flag) = generated.gentype_annotations
+                    {
+                        source_file.gentype_annotations[1] = Some(flag);
+                    }
                     let (parse_state, parse_dirty) = sinks.apply(
                         package,
                         format!("{module_name}:intf"),
@@ -427,11 +441,20 @@ fn generate_ast(
             StoredAst::Signature(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
         }
     }
+    let gentype_annotations = Some(parsed_gentype_annotations(&stored_ast));
     Ok(GeneratedAst {
+        gentype_annotations,
         stderr,
         stored_ast: Some(stored_ast),
         deps: Some(deps),
     })
+}
+
+/// The frontend's derived genType accessors inherit an existing annotation
+/// (binary_ast/ppx.rs::gentype_attrs_for_derived_accessors). It does not invent
+/// annotations in previously unannotated source, so the parser flag suffices.
+fn parsed_gentype_annotations(ast: &StoredAst) -> bool {
+    ast.arena().has_gentype_annotations()
 }
 
 fn parse_saved_source(
@@ -714,9 +737,59 @@ fn record_parse_warnings(parse_warnings: &ParseWarnings, key: String, package_na
 #[cfg(test)]
 mod tests {
     use super::{
+        Arc, Parser, StoredAst, StoredSignatureAst, StoredStructureAst, module,
+        parsed_gentype_annotations,
+    };
+    use super::{
         filter_ppx_flags, open_dependencies_from_bsc_flags, rust_parser_let_unwrap_enabled, should_run_ppx,
     };
     use crate::config::Config;
+
+    #[test]
+    fn parsed_gentype_flags_cover_all_names_and_nested_attributes() {
+        for prefix in ["genType", "gentype"] {
+            for suffix in ["", ".as", ".import", ".opaque", ".ignoreInterface", ".future"] {
+                for source in [
+                    format!("@{prefix}{suffix} type t = int"),
+                    format!("@@{prefix}{suffix}\ntype t = int"),
+                    format!("module M = {{type t = {{@{prefix}{suffix} field: int}}}}"),
+                ] {
+                    let mut parser = Parser::new("Flags.res", &source);
+                    let structure = module::parse_structure(&mut parser);
+                    assert!(!parser.has_errors(), "{source}");
+                    let ast = StoredAst::Structure(Arc::new(StoredStructureAst {
+                        arena: parser.into_arena(),
+                        structure,
+                        source_len: source.len(),
+                        retry_source: None,
+                    }));
+                    assert!(parsed_gentype_annotations(&ast), "{source}");
+                }
+                let source = format!("@{prefix}{suffix} type t = int");
+                let mut parser = Parser::new("Flags.resi", &source);
+                let signature = module::parse_signature(&mut parser);
+                assert!(!parser.has_errors());
+                assert!(parsed_gentype_annotations(&StoredAst::Signature(Arc::new(
+                    StoredSignatureAst {
+                        arena: parser.into_arena(),
+                        signature,
+                        source_len: source.len(),
+                        retry_source: None,
+                    }
+                ))));
+            }
+        }
+        let mut parser = Parser::new("Plain.res", "type t = int\nlet x = `genType` // @gentype");
+        let structure = module::parse_structure(&mut parser);
+        assert!(!parsed_gentype_annotations(&StoredAst::Structure(
+            Arc::new(StoredStructureAst {
+                arena: parser.into_arena(),
+                structure,
+                source_len: 0,
+                retry_source: None,
+            })
+        )));
+    }
 
     #[test]
     fn location_free_frontend_keeps_ast_and_dependencies_for_compilation() {

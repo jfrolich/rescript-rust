@@ -51,6 +51,35 @@ pub(super) fn arena_string<'a>(s: &str, alloc: &'a oxc_allocator::Allocator) -> 
     out.into_str()
 }
 
+/// Raw payloads use the legacy all-or-nothing UTF-8 decoding rule: if any
+/// byte sequence is invalid, retain the original internal string in its entirety.
+/// Validate with a four-byte stack window, then decode into arena storage. This
+/// avoids the temporary byte Vec used by the legacy raw printer.
+pub(super) fn arena_raw<'a>(s: &str, alloc: &'a oxc_allocator::Allocator) -> &'a str {
+    if s.is_ascii() || s.chars().any(|c| c as u32 > 0xff) {
+        return alloc.alloc_str(s);
+    }
+    let mut bytes = s.chars().map(|c| c as u8);
+    let mut window = [0; 4];
+    let mut len = 0;
+    loop {
+        while len < 4 {
+            let Some(b) = bytes.next() else { break };
+            window[len] = b;
+            len += 1;
+        }
+        if len == 0 {
+            return arena_string(s, alloc);
+        }
+        let (valid, _, width) = crate::string_literal::get_utf_8_uchar(&window[..len], 0);
+        if !valid {
+            return alloc.alloc_str(s);
+        }
+        window.copy_within(width..len, 0);
+        len -= width;
+    }
+}
+
 /// `printer::convert_ident_cow`, written into reusable block-local scratch.
 pub(super) fn module_field<'a>(s: &str, out: &'a mut String) -> &'a str {
     out.clear();

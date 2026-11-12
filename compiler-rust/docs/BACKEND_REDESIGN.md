@@ -69,8 +69,9 @@ section H):
    lowering L to J rewrites the tree in the same arena.
 3. Today's passes become rules in two classes. Normalising rules are today's
    smart constructors (`LamArena::prim`, `if_`, `seq`, `switch`, `apply`,
-   `let_`, and `js_exp_make`); they run when a node is created or a child is
-   replaced. Pass rules are the bodies of today's passes; they run in rounds,
+   and `js_exp_make`; `let_` builds its node as given); they run when a node
+   is created and when a round's sweep returns to an ancestor of a rewrite
+   (C.1, C.6). Pass rules are the bodies of today's passes; they run in rounds,
    one ordered sweep per round, in the order of today's pipeline. A sweep
    visits only subtrees that can contain a candidate and edits in place. The
    fixed order of rounds is kept wherever section C cannot show independence.
@@ -175,7 +176,7 @@ entry points `for_function`, `for_let`, `for_trywith`, `for_multiple_match`,
 | --- | --- |
 | Column and row order, splitting into or-groups, variable and constructor groups | `split_precompile`, `Split`, `simplify_cases`, `simplify_or` |
 | Which test is made at each step and how cases are divided | `divide`, `divide_line`, `do_compile_matching` |
-| Sharing of equal actions and creation of exits (`staticcatch` labels) | `StoreExp`, `make_key` (keys are strings built by `key_encode.rs`), `make_catch`, `make_exit`, `comp_exit`, `comp_match_handlers` |
+| Sharing of equal actions and creation of exits (`staticcatch` labels) | `StoreExp`, `make_key` (keys are bytes built by `MakeKeyWriter` and `key_encode.rs`, compared by hash first; D.1), `make_catch`, `make_exit`, `comp_exit`, `comp_match_handlers` |
 | Whether a failure branch exists, from the checker's `partial` flag and from contexts and jump summaries | `check_partial_list`, `Ctx`, `Jumps`, `jumps_union` |
 | Dense switch or tree of comparisons for integers, and its thresholds | `raw_lambda/switch.rs` |
 | Constructor, constant, variant and array dispatch forms | `combine_constructor`, `combine_constant`, `combine_variant`, `combine_array` |
@@ -235,10 +236,13 @@ About 25 whole-term walks, five of which only refill `ident_tbl`. OCaml's
 second `alpha_conversion` is not run (it rewrote nothing in 3,355 modules, as
 the comment in `simplify_in_arena` records).
 
-Smart constructors (`LamArena::prim`, `if_`, `seq`, `switch`, `string_switch`,
-`apply`, `let_`) fold at construction. A pass that rebuilds a node through
-`shallow_map` rebuilds it through its smart constructor, so folding cascades
-up exactly along rebuilt spines.
+Smart constructors (`LamArena::prim`, `if_`, `seq`, `switch_with`,
+`string_switch_with`, `apply`) fold at construction; `let_` and the others
+build their node as given (C.5 lists every rewrite). A pass that rebuilds a
+node through `shallow_map` rebuilds applications, primitives and both
+switches through their smart constructor and every other node plainly, so
+folding cascades up along rebuilt spines at those four kinds of node; a
+pass that wants `if_` or `seq` on a rebuilt node calls it itself.
 
 **P1 `deep_flatten`** (`lam_pass_deep_flatten.rs`: `flatten`, `aux`,
 `regroups_binding`, `eliminate_tuple`, `lambda_of_groups`). Flattens nested
@@ -682,8 +686,13 @@ Invariants, checked by `Bir::validate` in debug builds and in the harness:
 5. A `Let` with the `DEAD` bit has `uses == 0` and a pure value; every
    reader treats it as its body.
 
-How they are maintained. All edits go through four functions in
-`bir/edit.rs`; node fields are not otherwise writable:
+How they are maintained. All edits go through the functions of
+`bir/edit.rs`; node fields are not otherwise writable. As built (S2.1, S4.1)
+the constructors run no rules (`Engine::build` does, C.6), `replace` has a
+variant `replace_local` for rewrites that move no use under a function or
+loop, `detach` and `new_node_in` let a rewrite build a new node around
+attached children without recounting them, and marking bindings dead is
+deferred while an engine exists (C.2 row 5). The original description:
 
 - `new_*` constructors: count the `Var` nodes they receive (a new `Var` node
   increments `uses`), compute `PURE` and `NO_ALLOC` from the children's flags
@@ -729,15 +738,33 @@ arena instead of three and rewrites do not append.
 
 ### C.1 Two classes of rules
 
-**Normalising rules** are today's smart constructors: `LamArena::prim` (and
-`fold_constants`), `if_`, `seq`, `switch`/`decide_switch`, `string_switch`,
-`apply`, `let_`; at level J the constructors of `js_ir/build.rs` and
-`js_exp_make.rs`. A normalising rule looks at one node and its children. It
-runs when the node is created and again when one of its children is replaced.
-Because today's passes rebuild every changed spine through the same
-constructors, "re-normalise the parent when a child changes, and continue
-upward while something changes" produces exactly today's cascades. The engine
-does this on the way back up its sweep, so no parent pointers are stored.
+**Normalising rules** are today's smart constructors: `LamArena::prim`,
+`if_`, `seq`, `switch_with`/`decide_switch`, `string_switch_with`, `apply`
+(C.5 is the inventory; `let_` has no rule); at level J the constructors of
+`js_ir/build.rs` and `js_exp_make.rs`. A normalising rule looks at one node
+and a bounded number of levels below it (up to four, C.5). It runs when the
+node is built through `Engine::build`, and during a round when the sweep
+returns to an ancestor of a rewrite.
+
+Amended in S4.1. The first version of this section said "re-normalise the
+parent when a child changes, and continue upward while something changes".
+That is not what today's passes do, in two ways. A pass rebuilds the whole
+spine above a change, so a constructor two or more levels up runs even when
+the nodes between did not change, and it can match because its pattern is
+deeper than one level (an application whose callee's body became a
+primitive on its parameters). And `shallow_map` rebuilds only applications,
+primitives and the two switches through their smart constructor;
+conditionals and sequences are rebuilt plainly unless the pass calls `if_`
+or `seq` itself. So the engine re-normalises, on the way back up its sweep,
+every ancestor of a rewrite whose opcode is in the round's `renorm` mask
+(`OpMask::SHALLOW_MAP` for a pass built on `shallow_map`), whether or not
+the nodes between changed. The arena stores parent links (S2.1), but the
+sweep does not need them for this.
+
+`fold_constants`, `collapse_module_alias` and `make_apply` in
+`raw_lambda/lower.rs` are lowering's own code, not constructors: they move
+into the `Bir` builder in S5.2. `make_apply` is a copy of `LamArena::apply`;
+the S4.1 comparison replays it as rows N13 and N14.
 
 **Pass rules** are the case arms of today's passes. A pass rule may read
 facts, use counts and a bounded part of the tree, and may create
@@ -746,10 +773,13 @@ the tree in a fixed traversal order, during which each candidate node is
 offered to the round's rules once.
 
 ```rust
-pub struct Round {
+pub struct Round {                // bir/engine.rs, as built in S4.1
     name: &'static str,
-    mask: OpMask,                 // opcodes that can match a rule of this round
-    order: Order,                 // PreOrder, PostOrder, or the pass's own recursion
+    mask: OpMask,                 // opcode classes that can match the rule
+    order: Order,                 // Pre or Post
+    renorm: OpMask,               // classes re-normalised above a rewrite
+    facts: Facts,                 // Current, or Frozen at the round's start
+    guard: Option<fn(&Engine, NodeId) -> bool>,  // what to snapshot (C.2 row 1)
     rule: fn(&mut Engine, NodeId) -> Changed,
 }
 ```
@@ -757,20 +787,22 @@ pub struct Round {
 Worklist discipline:
 
 1. A round sweeps from the root. For each node it descends into a child only
-   if the child's subtree summary intersects the round's mask. The summary is
-   a 16-bit set of opcode classes per function body and per `Let` or `Seq`
-   spine segment (`FuncHeader::summary` and a side table keyed by spine
-   head), computed at construction and widened, never narrowed, when a
-   rewrite inserts nodes. A stale summary costs a visit, never a missed
-   rewrite.
+   if the child's subtree summary intersects the round's mask. As built, the
+   summary is a 16-bit set of opcode classes per node (a side array of the
+   engine, two bytes a node), set when the engine creates a node and
+   recomputed for the nodes on the way back up a sweep; one walk recomputes
+   all of them when an edit was made outside a sweep. A summary is always a
+   superset: a stale one costs a visit, never a missed rewrite.
 2. A rule that changes a node returns `Changed`; the engine re-normalises
-   ancestors on the way up.
-3. Consequences that are not on the path to the root (a use count reaching
-   zero, a binder becoming an alias) are pushed on the engine's worklist of
-   `(VarId, Event)` and drained at the end of the rule: mark the binder
-   `DEAD`, release its value. Removing a `DEAD` `Let` from its parent happens
-   when a sweep next passes it. This is the only work done out of sweep
-   order, and it does not create identifiers.
+   the ancestors in the round's `renorm` mask on the way up.
+3. As built, the engine's worklist holds nodes waiting for their normalising
+   rule, nothing else (C.6). A use count reaching zero is not an event: no
+   normalising rule reads a count, and marking a binding `DEAD` is deferred
+   to the round that ports `simplify_lets` (C.2 row 5), where
+   `Engine::resume_deaths` marks every unused pure binding in one scan of
+   the variable table and the arena keeps doing so as edits remove last
+   uses. Removing a `DEAD` `Let` from its parent happens when a sweep next
+   passes it.
 4. A rule that inlines a body sweeps the inlined copy with the same round
    before returning, as `simpl(reduced)` does today, with the same depth
    limit.
@@ -790,11 +822,11 @@ later).
 
 | # | Dependence | Answer |
 | ---: | --- | --- |
-| 1 | `simplify_alias` reads `ident_tbl` as of the preceding `collect_info`. In particular the body it inlines for `f` is `f`'s body before the current sweep rewrote it, and the size tests of `ok_to_inline_fun_when_app` see that body. | R. A round that inlines takes a snapshot of each inlinable function's body the first time the sweep is about to rewrite inside it (copy on first write, into a per-round side map `FuncId -> NodeId`). Only functions that pass `lfunction_can_be_inlined` and a size bound are copied, so the cost is bounded by the inline size limit per function. |
+| 1 | `simplify_alias` reads `ident_tbl` as of the preceding `collect_info`. In particular the body it inlines for `f` is `f`'s body before the current sweep rewrote it, and the size tests of `ok_to_inline_fun_when_app` see that body. | R. A round that inlines takes a snapshot of each inlinable function's body the first time the sweep is about to rewrite inside it (copy on first write, into a per-round side map `FuncId -> NodeId`). Only functions that pass `lfunction_can_be_inlined` and a size bound are copied, so the cost is bounded by the inline size limit per function. As built (S4.1, C.6): the round names what to protect with `Round::guard`; the engine copies a guarded node before the first edit at or below it and `Engine::as_of_round_start` returns the copy. The map is keyed by node, not by function, because the same holds for every fact that names a node (a block's fields, the content of `Some`): `simplify_alias` reads them as collected before the sweep too. A snapshot is an ordinary detached copy (`copy_subtree`), so until the round ends its variable uses are counted; a round that takes snapshots must not decide on a use count (today's inlining does not: it reads `free_variables_with_stats` of the body). |
 | 2 | Three `simplify_alias` sweeps with `collect_info` between them; each sweep nests inlining at most four deep. | R. Three rounds (2, 3, 5 in C.3). Facts are current at the start of each round by construction. |
-| 3 | `collect_info` records facts only for bindings it visits; a fact from an earlier sweep stays in `ident_tbl` after its binding was rewritten or removed (OCaml's table is never cleared between sweeps). | S. `Fact` is updated when a binder's value is replaced, which can differ from a stale entry. Start by keeping the stale behaviour where the harness shows a difference (the fact table gets a per-round "frozen" bit for such binders); expected to be empty, since a stale fact describes a binding that no longer exists and can only be queried through a variable that no longer occurs. Unknown until the harness runs. |
+| 3 | `collect_info` records facts only for bindings it visits; a fact from an earlier sweep stays in `ident_tbl` after its binding was rewritten or removed (OCaml's table is never cleared between sweeps). | S. `Fact` is updated when a binder's value is replaced, which can differ from a stale entry. Start by keeping the stale behaviour where the harness shows a difference (the fact table gets a per-round "frozen" bit for such binders); expected to be empty, since a stale fact describes a binding that no longer exists and can only be queried through a variable that no longer occurs. Unknown until the harness runs. As built (S4.1): a round with `Facts::Frozen` reads a copy of the fact column taken at its start (`Engine::fact`), which is what a `collect_info` before the pass gives; facts for bindings the round creates are added with `Engine::set_fact`. Facts that survive in `ident_tbl` from an earlier sweep after their binding changed kind are not reproduced; S4.4's diagnostic comparison is the judge. |
 | 4 | `simplify_exits` runs at three fixed points and counts raises at the start of each. A handler that shrank, or lost a raise, between two runs is inlined by the later run. | R. Three rounds (1, 5, 7). The maintained count equals a fresh count at the start of a round (invariant 2 with weights). |
-| 5 | `simplify_lets` decides on a count taken once, with its own rules (B.4, invariant 2 and 3; uses inside dead bindings do not count). | R for the position (one round, 6). P for the count: the maintained count after dead bindings were released equals `collect_occurs`'s, because `release` cascades exactly along `count`'s rule "the value is counted only if the binding is used or strict". The applied-function case (`no_names_beta_reduce` inside `count`) is handled by reducing those applications at the start of round 6, before any decision reads a count. The harness checks the equality directly: in checking builds `collect_occurs` is run on an exported copy and compared with `uses`. |
+| 5 | `simplify_lets` decides on a count taken once, with its own rules (B.4, invariant 2 and 3; uses inside dead bindings do not count). | R for the position (one round, 6). P for the count: the maintained count after dead bindings were released equals `collect_occurs`'s, because `release` cascades exactly along `count`'s rule "the value is counted only if the binding is used or strict". The applied-function case (`no_names_beta_reduce` inside `count`) is handled by reducing those applications at the start of round 6, before any decision reads a count. The harness checks the equality directly: in checking builds `collect_occurs` is run on an exported copy and compared with `uses`. Amended in S4.1: marking a binding dead the moment its last use disappears is wrong before round 6. An unused pure binding still has its size (`size_upto` in the inlining tests), its place in a `let` spine (`deep_flatten`) and its node in the Lambda the diagnostic comparison prints after each round. So deaths are deferred while an engine exists (`Bir::defer_deaths`) and `Engine::resume_deaths` at the start of round 6 marks every unused pure binding, cascading, in one scan of the variable table. Open for S4.7: the arena's test is "unused and `PURE`" for every `let` kind, while `simplify_lets` drops an unused `Alias` or `StrictOpt` binding whatever its value and keeps an unused `Strict` one unless `no_side_effects`; `PURE` implies `no_side_effects` but is not equal to it. |
 | 6 | `deep_flatten` runs three times, between the inlining sweeps. | R. Rounds 1, 3, 4 include its rules. |
 | 7 | `alpha_conversion` runs once, after the second inlining sweep, with arities as known then. | R. Round 4. |
 | 8 | `sroa` after `simplify_lets`, `guard_raises` last, `handle_exports` after everything. | R. Rounds 6 and 7. |
@@ -839,9 +871,11 @@ Level J rounds replace the JS passes:
 
 | Today | Rule in `Bir` | Class |
 | --- | --- | --- |
-| `LamArena::prim` folding, `fold_constants` | `norm_prim` | normalising, L |
-| `LamArena::if_`, `seq`, `switch`, `string_switch`, `apply`, `let_` | `norm_if`, `norm_seq`, `norm_switch`, `norm_apply`, `norm_let` | normalising, L |
-| `refine_let` | `norm_let` plus `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
+| `LamArena::prim` folding (`fold_prim`, `fold_makeblock_module_alias`) | rows N1 to N3 of C.5 | normalising, L |
+| `fold_constants`, `collapse_module_alias`, `make_apply` in `raw_lambda/lower.rs` | lowering's own code; into the `Bir` builder in S5.2 | |
+| `LamArena::if_`, `seq`, `switch_with`, `string_switch_with`, `apply` | rows N4 to N14 of C.5 (`bir/l/norm.rs`) | normalising, L |
+| `LamArena::let_` | none: it builds the node as given | |
+| `refine_let` | `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
 | `deep_flatten` (`flatten`, `eliminate_tuple`) | `flatten_let` | pass, rounds 1, 3, 4 |
 | `simplify_exits` | `inline_exit`, `drop_catch` | pass, rounds 1, 5, 7 |
 | `simplify_alias` field, option, boolean cases | `fold_field`, `fold_is_some`, `fold_if_var`, `fold_str_switch`, `unwrap_some` | pass, rounds 2, 3, 5 |
@@ -865,6 +899,172 @@ order. The port changes how the result is written (in place) and where facts
 come from (the tables), nothing else. A reviewer checks a rule against the
 function it cites.
 
+### C.5 The L-level normalising rules (S4.1)
+
+The inventory of every rewrite `LamArena`'s constructors perform when a node
+is built, in `compiler-rust/src/lambda/arena.rs`. This table is the
+specification of `bir/l/norm.rs`; each rule there cites its row.
+
+| Row | Constructor (function) | Trigger shape | Result | Fires again on its result? |
+| --- | --- | --- | --- | --- |
+| N1 | `prim`, `prim_with` (`fold_prim`) | one constant argument: `Pnegint` on an integer, `Pintoffloat` on a float, `Pstringlength` on a string, `Pnot` on a boolean | the constant | no: a constant has no rule |
+| N2 | `prim`, `prim_with` (`fold_prim`) | two constant arguments: integer comparison and arithmetic (not division or modulo by zero), float comparison, `==`/`!=` on pointers, `&&`/`||` on booleans, string concatenation, string index | the constant | no |
+| N3 | `prim` (`fold_makeblock_module_alias`) | `Pmakeblock(Module fields)` whose arguments are, in order, field `i` named `fields[i]` of one variable or module | that variable or module | no |
+| N4 | `if_` | constant condition (`eval_as_bool`) | the branch taken | no: the branch was normalised when built |
+| N5 | `if_` (`is_assertfalse`) | the else branch, or else the then branch, is `assert false` | `seq(condition, other branch)` | as a sequence: N8, N9 |
+| N6 | `if_` (`has_boolean_type`) | `if c then true else false`, `c` a boolean-valued primitive | `c` | no |
+| N7 | `if_` (`lambda_not`) | `if c then false else true`, `c` a boolean-valued primitive | `a == b` when `c` is `a != b` (built plainly); otherwise `Pnot(c)` | no: `Pnot` folds constants only |
+| N8 | `seq` | first is `Pmakeblock` with at least one argument | `seq(...seq(seq(a0, a1), a2)..., second)` | only the innermost, `seq(a0, a1)` (or `seq(a0, second)` for one argument): N8, N9 on `a0`. A sequence built by `seq` is always a sequence node, so the outer ones cannot match |
+| N9 | `seq` | first is `PnullToOpt` or `PnullUndefinedToOpt` with one argument | `seq(argument, second)` | N8, N9 on the argument |
+| N10 | `switch_with` (`decide_switch`) | constant scrutinee: a constructor, an integer or a block | the action of the matching key, else the default; no rewrite when neither exists | no |
+| N11 | `switch_with` (`decide_switch`, `untagged_plan_with`) | constant scrutinee, dispatch on an untagged variant with payload types | the action the generated dispatch reaches for the constant's JavaScript value | no |
+| N12 | `string_switch_with` | constant string scrutinee | the action of the equal key, else the default | no |
+| N13 | `apply`, `apply_with` (`eta_reduce_function_apply`, `eta_conversion_args`, `evaluates_args_as_call`) | callee is a function that may be inlined (`lfunction_can_be_inlined`: not async, no directive) whose body is `p(params)`, `w(p(params))` for a null check, null conversion or `typeof` `w`, or `p(params); constant`; the parameters in order; as many arguments; for `&&`/`||` every argument after the first a constant or variable | `p(args)`, `w(p(args))`, `p(args); constant` | each new primitive: N1 to N3; the sequence: N8, N9 |
+| N14 | `apply`, `apply_with` | callee is `let x = v in f`, `f` a function | `let x = v in apply(f, args)` | the inner application: N13 |
+
+No rule: `let_`, `let_with`, `letrec`, `function_`, `static_raise`,
+`static_catch`, `try_`, `try_finally`, `while_`, `for_`, `for_of`,
+`for_await_of`, `assign`, and every `*_raw` constructor. `switch` and
+`string_switch` are `switch_with` and `string_switch_with` from owned keys.
+
+Three things the port keeps exactly. `fold_prim` parses a float's spelling
+with Rust's `str::parse::<f64>` and converts with `as i32`, not with the
+OCaml-compatible parser the `Bir` constant pool caches; a spelling Rust does
+not parse (hexadecimal, underscores) is not folded. N3 compares a variable
+with a variable and a module with a module; `fold_makeblock_module_alias`
+would also accept a variable and a module reference of one identifier, which
+lowered Lambda does not contain. N11 is the one rule whose attempt is not
+bounded by the pattern: the dispatch plan compares actions with `eq_approx`,
+a structural walk that stops at the first difference and at any node outside
+its ten shapes. It is attempted only on a constant scrutinee of an untagged
+variant, and the engine counts the node pairs compared (`Stats::compared`;
+zero on the three in-repository corpora).
+
+Termination. Let Φ = 3·(conditionals + switches + string switches) +
+2·(applications + functions) + primitives, counted in the subtree of the
+node being normalised. N1 to N13 each lower Φ (N7 removes a conditional and
+adds one primitive; N8 and N9 remove a primitive and add only sequences; N13
+removes an application and a function and replaces the body's primitives by
+as many). N14 leaves Φ and lowers the number of applications whose callee
+is a `let`. Nothing raises either, so a normalisation stops after at most Φ
+plus that number of rewrites: linear in the nodes it started from.
+
+### C.6 The engine's contract and costs (S4.1)
+
+`bir/engine.rs`. A step is one node read, one node allocation or one
+worklist push; the tests named below count them.
+
+**When a normalising rule sees a node.** (a) When the node is built through
+`Engine::build`: the node is created plainly and then offered. (b) When a
+rule pushes it: the node it rewrote, or a node it created, exactly where the
+constructor would have called another constructor. (c) During a round, when
+the sweep returns to an ancestor of a rewrite and the ancestor's opcode is
+in the round's `renorm` mask. Never on a use-count change: no normalising
+rule reads a count.
+
+**The worklist** is a stack of nodes waiting for their rule. Rules never
+call each other; a rule edits, pushes and returns, and the engine pops until
+the stack is empty. That removes recursion (a block nested 10,000 deep in
+first position is a loop) and fixes the order: entries pop in reverse push
+order, pushes happen in rule code order, nothing iterates a hash table and
+no other thread takes part, so the result is a function of the tree. A rule
+pushes only the node it was given or nodes it created below it, parent
+before child; an entry is therefore live when it is popped.
+
+**A round** is one sweep with one rule (C.1), pre- or post-order, with an
+explicit stack. A round whose mask misses the root's summary does nothing.
+
+**Edits.** Rules edit through the engine: `promote(target, descendant)`,
+`put(target, new node)`, `fill`, `detach`, `node`, and `replace` for a
+rewrite that moves a use under a function or loop. A rule may edit the node
+it was offered and what is below it, nothing else; summaries and snapshots
+rely on that.
+
+**A snapshot** (C.2 rows 1 and 3) lets a rule read a subtree as it was when
+the round started. It costs one copy of the subtree, taken before the first
+edit at or below a node the round's `guard` selected, and nothing for a
+guarded node that is not edited. Snapshots are released when the round ends.
+
+| Operation | Cost | Test |
+| --- | --- | --- |
+| `Engine::push` | 1 step | `pushing_is_one_step_and_an_attempt_on_a_leaf_is_one_read`: 10,000 pushes, 10,000 steps; draining them, 10,000 more |
+| a rule attempt | the pattern of its row: the node and up to four levels below, plus the arguments for N3 and N8 and the keys for N10 to N12; N11 as said in C.5 | `an_attempt_reads_the_pattern_not_the_subtrees`: 8 steps on a conditional over two 40,000-node branches |
+| `promote`, `put`, `fill` | the nodes removed; plus a recount of the kept content only when it changes use weight, that is when it enters or leaves a switch default that the counts visit twice (B.4, invariant 2) | `replacing_a_node_by_its_child_costs_the_removed_nodes`: 44 steps to replace a conditional by its 40,000-node branch; `an_edit_keeps_counts_in_a_doubled_default_without_a_walk`: 71 steps |
+| a round | the nodes entered plus the rewrites | `a_round_is_linear_in_a_deep_chain_and_in_a_wide_node`: 70,003 nodes, 20,000 rewrites, 1,080,024 steps; `a_round_enters_only_subtrees_that_can_hold_a_candidate`: 1,002 of 12,001 nodes entered |
+| a normalising pass over a unit (`normalise_tree`) | linear in the nodes plus the rewrites | `a_normalising_pass_is_linear_in_a_deep_chain` (10,000 nested sequences, conditionals, lets: 15 to 24 steps a node), `..._in_a_wide_node` (a 10,000-element block in a sequence, a 10,000-field module alias, 10,000 folds below one block: 12 to 27), `..._inside_a_doubled_switch_default` (26); each test asserts at most 32 |
+| a snapshot | the size of the subtree, once a round, only if edited | `a_guarded_function_is_copied_before_the_first_edit_inside_it_only` |
+| freezing facts | one copy of the fact column (a vector copy, no tree walk) | `a_frozen_round_reads_facts_as_they_were_at_its_start` |
+| `resume_deaths` | one scan of the variable table, plus the bindings it releases | `an_unused_binding_stays_until_deaths_resume` |
+
+No rule recomputes a whole-tree fact. Purity is the `PURE` flag; a rule
+that needs free variables or a size walks the candidate body it is about to
+copy, bounded by the limit that makes it a candidate (B.4, last table).
+
+What S4.1 changed in the arena to make these costs hold (`bir/edit.rs`):
+`replace` no longer recounts and rechecks content that keeps its weight,
+and no longer rescans the parent's children when the replaced child's two
+effect bits are unchanged; `detach` and `new_node_in` build a new node
+around attached children, a detached root keeping the use weight of the
+slot it came from; `replace`, `detach` and `release` work during bulk
+construction, so a unit can be built through the rules and finished in one
+pass.
+
+### C.7 How to add a round (S4.2 to S4.8)
+
+1. One file per pass in `bir/l/`, one function per case arm of the pass,
+   citing it. The rule has the signature `fn(&mut Engine, NodeId) -> Changed`
+   and edits only the node it is offered and below it.
+2. Declare the round:
+
+   ```rust
+   pub static FLATTEN: Round = Round {
+       name: "deep_flatten",
+       mask: OpMask::LET.or(OpMask::LETREC).or(OpMask::SEQ),  // what the rule matches
+       order: Order::Post,          // Pre when the pass decides before descending
+       renorm: OpMask::NONE,        // SHALLOW_MAP if the pass rebuilds through shallow_map
+       facts: Facts::Current,       // Frozen if it reads ident_tbl
+       guard: None,                 // which nodes to snapshot (inlining rounds)
+       rule: flatten_let,
+   };
+   ```
+
+   `renorm` is decided by reading how the pass rebuilds a node whose child
+   changed: `shallow_map` gives `SHALLOW_MAP`; a pass that also calls `if_`
+   or `seq` on its own rebuilt nodes calls `engine.normalise(node)` in the
+   rule for those; a pass that rebuilds with `*_raw` constructors gives
+   `NONE`.
+3. Where the pass calls a smart constructor on a node it builds, build the
+   node with `engine.node` and `engine.push` it (or `engine.build` for a
+   detached node); where it calls a `*_raw` constructor, do not push.
+4. A pass with its own recursion order (`simpl`, `aux`) that neither `Pre`
+   nor `Post` gives: use `Pre`, do in the rule what the pass does before it
+   recurses, and what it does after in a second round; if the pass threads
+   state down the recursion that a sweep cannot carry, say so in the stage's
+   pull request and extend `Round` there. This is the one part of the round
+   interface S4.1 could not test against a real pass.
+5. Fresh identifiers: `Bir::new_var_id` in the order the pass creates them
+   (C.2 row 9). A rule that copies a body uses `copy_subtree` and
+   `engine.replace`, not `put`, because the copy may move uses under a
+   function.
+6. A round that reads `ident_tbl` uses `Facts::Frozen` and `engine.fact`. If
+   it reads a node through a fact (a function body, a block's fields), give
+   the round a `guard` selecting those nodes and read them through
+   `engine.as_of_round_start`. A rule that replaces a binding's value from
+   the binding (not from inside the value) calls `engine.preserve(value)`
+   first.
+7. Run the rounds from `bir/shadow.rs` in check mode after the import, in
+   the order of C.3, and compare the export with the legacy pipeline cut at
+   the same point (G.3): add a stage name, report through `report`, and add
+   the stage to `STAGES` in `scripts/test_backend_coverage.py` and to
+   `compiler-rust/tests/backend_coverage.txt` with `--record`. A shape the
+   round does not handle yet returns `Unsupported(reason)`.
+8. Give every rule a test in the form of `bir/l/norm.rs`'s: the same input
+   to the legacy function and to the rule, dumps compared. Add a step-count
+   test on a 10,000-deep chain and a 10,000-wide node for the round.
+9. Deaths stay deferred until the round that ports `simplify_lets`, which
+   starts with `engine.resume_deaths()`. Before that, an export never meets
+   a released `let` value.
+
 ## D. Match compilation into the IR
 
 ### D.1 What stays and what changes
@@ -878,13 +1078,27 @@ is visible (A.2). Three things change.
    `RawArena`, then `lower`, then `LamArena`; the constant and primitive
    lowering of `lower.rs` becomes part of the constructors (`norm_prim`,
    `lower_constant`), so a decision tree is written once.
-2. **Action sharing.** `StoreExp` decides that two actions are the same by
-   comparing strings built by `MakeKeyWriter` and `key_encode.rs`
-   (`Lambda.make_key`). In `Bir` the key is a 64-bit structural hash of the
-   normalised action computed bottom-up by the same normalisation
-   (`make_key` renames bound variables to positions and drops locations),
-   confirmed by a structural comparison on hash equality. The equivalence
-   classes are the same by construction; the harness compares exit structure.
+2. **Action sharing.** Done in S5.3, on today's pipeline. `StoreExp` used
+   to decide that two actions are the same by comparing strings built by
+   `MakeKeyWriter` and `key_encode.rs` (`Lambda.make_key`). The key is now a
+   byte string written by the same walk with the same normalisation
+   (`make_key` replaces aliases, renames kept bound variables to positions
+   and drops locations): a tag byte per node, then its fields, each
+   self-delimiting. Its 64-bit hash is computed once; two keys are compared
+   by hash and, on equal hashes, by their bytes, so a collision costs a
+   comparison and changes no answer. The equivalence classes are those of
+   the strings (the walk is the same, only what a step writes changed).
+   The confirmation compares the two byte strings and does not walk the two
+   terms side by side: an alias is replaced by its definition's key, so two
+   terms of different shape can have the same key, and a side-by-side walk
+   would be a second normalisation to keep in step with the first. The
+   writer reads terms through `RawLambdaRead`, so it needs no change for
+   `Bir`; `key_encode.rs` (the payload encoding) stays with it.
+   Four decisions read keys: `StoreExp` (which actions of a switch share an
+   exit), `all_actions_same_tagged` (a constructor or variant switch whose
+   actions are all equal becomes that action), `convert_polyvar_list` (which
+   polymorphic variant cases share a test) and `up_ok_action` (whether a
+   clause may move above another when splitting or-patterns).
 3. **Pattern storage.** Rows are slices of pattern indices into `PatArena`;
    specialisation writes new rows into a row pool instead of cloning
    `Pattern` values (`normalize_pat_owned`, `alloc_cow`, `with_desc` today).
@@ -899,9 +1113,13 @@ guards, no or-patterns and variable or wildcard sub-patterns. It emits the
 `Switch` directly.
 
 Saving: match compilation is about 3.5% of the build (measured, half of
-7.1%). How that divides between key strings, pattern copying and context
-operations is unknown; S5 starts with a profile of `matching.rs` on the
-application and the three changes are ordered by it. Estimated result: 1.2%.
+7.1%). The profile of S5.3 on the application divides it (inclusive,
+measured): key strings 1.09% of the build (125,615 keys of about 5,800
+instructions each, plus 48,655 keys compared while written), `as_matrix`
+(the pairwise `le_pats` of `get_mins`) 0.67%, `le_pat` from all callers
+0.47%; `Split::split_or`, which contains most of `as_matrix`, 1.33%. S5.3
+took the keys to 0.5% of the build (measured, by function); the row pool
+and the lazy contexts remain. Estimated result of all three: 1.2%.
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1521,13 +1739,13 @@ model with this document as its specification.
 | S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,expr,prim,call,export}.rs` | `Check`; coverage reported | 4,000 | S3.2 | partly: needs a table mapping each context function of `lam_compile.rs` (A.5) to a continuation case, written by whoever starts the stage |
 | S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,500 to 3,000 each | S3.3 | partly, as S3.3; static catch is the hardest and should go to the strongest reviewer |
 | S3.10 | Default `New` for level J; then delete `lam_compile*.rs`, `js_pass_*.rs`, `js_shake.rs`, `js_exp_make.rs`, `js_ir/` except what emit's tests need | | fallback zero; instruction count falls by about 6.3% | −45,000 with tests | S3.9 | yes |
-| S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules | `bir/engine.rs`, `bir/l/norm.rs` | building through the rules equals `LamArena`'s constructors on all corpora | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
+| S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
 | S4.2 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing; row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | `Check`; each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
-| S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges, `key_encode.rs` | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
 

@@ -113,6 +113,18 @@ impl Names {
         &self.finishes[&s]
     }
 
+    /// A hole prefix longer than every printed name starting with the reserved
+    /// stem cannot collide with any local, global, import, or loop-finish name.
+    pub(super) fn raw_prefix_len(&self) -> usize {
+        self.printed
+            .values()
+            .chain(self.finishes.values())
+            .filter(|n| n.starts_with(super::raw::PREFIX))
+            .map(|n| n.len() + 1)
+            .max()
+            .unwrap_or(super::raw::PREFIX.len())
+    }
+
     fn base(&mut self, id: Ident) -> Name {
         *self
             .converted
@@ -677,6 +689,7 @@ fn children(
             visit(f)?;
         }
         ExprKind::Call(f, args, _) => {
+            walk::call_supported(a, f)?;
             visit(f)?;
             for e in a.exprs(args) {
                 visit(*e)?;
@@ -707,7 +720,7 @@ fn children(
                 visit(e)?;
             }
         }
-        ExprKind::RawJsCode(_) => return walk::raw_supported(),
+        ExprKind::RawJsCode(_) => {}
         ExprKind::Jsx(id) => {
             let jsx = walk::jsx_runtime(a, id, false)?;
             visit(jsx.callee)?;

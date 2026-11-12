@@ -4029,6 +4029,7 @@ pub(super) fn parse_attributes(p: &mut Parser<'_>) -> Attributes {
 fn parse_attribute_body(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Attribute {
     // OCaml `parse_attribute_id` (compiler/syntax/src/res_core.ml:7531-7556).
     let attr_name = parse_extension_id(p, start_pos_idx);
+    p.arena_mut().observe_gentype_attribute(attr_name.txt);
 
     let payload = parse_payload_region(p);
 
