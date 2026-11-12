@@ -1,6 +1,4 @@
-Error in super-errors-multi-fixture:
-
-  Syntax error!
+Syntax error!
   /.../fixtures/Iface_not_compiled/Foo.resi:1:12
 
   1 │ let v: int =

@@ -673,7 +673,7 @@ fn compile_in_process(
         if let Some(pers_struct) = interface.pers_struct {
             registry.register_module_arc(
                 &module_name,
-                std::sync::Arc::new(pers_struct),
+                pers_struct,
                 crate::cmi::persistent_env::InMemoryModuleInfo::new(
                     source_path.to_path_buf(),
                     true,

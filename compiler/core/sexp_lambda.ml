@@ -276,7 +276,6 @@ let primitive (prim : Lambda.primitive) =
   | Psome_not_nest -> Sexp.atom "Psome_not_nest"
   | Pval_from_option -> Sexp.atom "Pval_from_option"
   | Pval_from_option_not_nest -> Sexp.atom "Pval_from_option_not_nest"
-  | Pis_undefined -> Sexp.atom "Pis_undefined"
   | Pis_null_undefined -> Sexp.atom "Pis_null_undefined"
   | Pimport src ->
     Sexp.list [Sexp.atom "Pimport"; string (Ffi_debug.import_source src)]
