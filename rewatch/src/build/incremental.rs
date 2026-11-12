@@ -1029,7 +1029,8 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
     warnings.push_str(&second_round?);
     // Parsing marks what it parsed for compilation; the plan decides.
     for (module_name, module) in build_state.build_state.modules.iter_mut() {
-        module.compile_dirty = stale.contains(module_name);
+        module.compile_dirty = stale.contains(module_name)
+            && !build_state.build_state.packages[&module.package_name].prebuilt;
     }
     warnings.push_str(&restore_unparsed_parse_warnings(build_state));
     Ok(warnings)
@@ -1392,6 +1393,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
                         .iter()
                         .any(|(import, _)| !build_state.modules.contains_key(import))
                 });
+            if build_state.get_module(module_name).is_some_and(|module|
+                build_state.packages[&module.package_name].prebuilt) { continue; }
             if own_stale || unknown_imports || references_new_module || import_removed {
                 stale.insert(module_name.clone());
                 continue;
@@ -1470,7 +1473,8 @@ pub fn plan(build_state: &mut BuildCommandState) {
         times.len()
     );
     for (module_name, module) in build_state.build_state.modules.iter_mut() {
-        module.compile_dirty = stale.contains(module_name);
+        module.compile_dirty = stale.contains(module_name)
+            && !build_state.build_state.packages[&module.package_name].prebuilt;
     }
     restore_warnings(build_state, &|module_name| !stale.contains(module_name));
     carry_js_confirmed_at(build_state, &times, &|module_name| !stale.contains(module_name));
@@ -1662,6 +1666,7 @@ fn dependency_closure(
             if build_state.get_module(dep).is_some()
                 && !universe.contains(dep)
                 && !exclude(dep)
+                && !build_state.get_module(dep).is_some_and(|module| build_state.packages[&module.package_name].prebuilt)
                 && support.insert(dep.clone())
             {
                 frontier.push(dep);
