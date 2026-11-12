@@ -56,3 +56,24 @@ let stringReturn = (c, xs: array<string>) => if c {
   }
   1
 } else { 2 }
+
+// Both frames allocate labels; the discarded probe must advance both IDs.
+let stringNested = (c, xs: array<string>) => if c {
+  for outer in 0 to Array.length(xs) - 1 {
+    for inner in 0 to Array.length(xs) - 1 {
+      switch Array.getUnsafe(xs, inner) {
+      | "stop" => break
+      | "one" => log(1)
+      | "two" => log(2)
+      | _ => log(3)
+      }
+    }
+    switch Array.getUnsafe(xs, outer) {
+    | "stop" => break
+    | "one" => log(1)
+    | "two" => log(2)
+    | _ => log(3)
+    }
+  }
+  1
+} else { 2 }

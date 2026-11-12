@@ -5160,12 +5160,9 @@ impl LambdaCompiler {
         else_: Lam,
     ) -> BlockOutput {
         let cond_compiled = self.compile_expr(a, cond);
-        // compiler/core/lam_compile.ml:1636-1644 probes values before
-        // lowering return branches; discarded loop labels still consume IDs.
-        let then_value = self.compile_expr(a, then_);
-        let else_value = self.compile_expr(a, else_);
-        let then_block_raw = self.compile_return_block(a, then_);
-        let else_block_raw = self.compile_return_block(a, else_);
+        let labels_before = self.loop_label_counter;
+        let mut then_block_raw = self.compile_return_block(a, then_);
+        let mut else_block_raw = self.compile_return_block(a, else_);
 
         // OCaml's preliminary `NeedValue should_return` pass is the reference
         // shape (compiler/core/lam_compile.ml:1495-1524). Rust's
@@ -5197,6 +5194,21 @@ impl LambdaCompiler {
         // reconstructing a value from later return blocks: switches and other
         // statement-producing forms must keep their prelude, which makes OCaml
         // fall through to `S.if_` below.
+        // compiler/core/lam_compile.ml:1636-1644 probes values before
+        // lowering return branches. Only label allocation makes that order
+        // observable here (lam_compile_context.ml:92-102). The counter already
+        // records that event: do not probe every foldable conditional or scan
+        // its Lambda body looking for a possible label.
+        let allocated_labels = self.loop_label_counter != labels_before;
+        if allocated_labels {
+            self.loop_label_counter = labels_before;
+        }
+        let then_value = self.compile_expr(a, then_);
+        let else_value = self.compile_expr(a, else_);
+        if allocated_labels {
+            then_block_raw = self.compile_return_block(a, then_);
+            else_block_raw = self.compile_return_block(a, else_);
+        }
         if then_value.prelude.is_empty() && else_value.prelude.is_empty() {
             let mut block = cond_compiled.prelude;
             let expr = JE::cond(

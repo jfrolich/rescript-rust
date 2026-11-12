@@ -1332,7 +1332,12 @@ branches with `NeedValue should_return`
 (`compiler/core/lam_compile.ml:1636-1644`); the discarded probe allocates
 `loop_0`, and the retained return lowering allocates `loop_1`. The legacy
 Rust return lowering previously retained the first pass and printed
-`loop_0`; it now probes values before lowering the return branches. Labels
+`loop_0`. It now saves the existing label counter before lowering return
+branches. If that lowering allocated labels, it resets the counter to the
+saved value, performs the value probe, and lowers the retained return
+branches with the resulting counter. The decision uses the counter already
+maintained by label allocation, not another traversal of the Lambda body.
+Ordinary foldable conditionals require no additional value probe. Labels
 are allocated lazily, not on entering a loop
 (`compiler/core/lam_compile_context.ml:92-102`).
 

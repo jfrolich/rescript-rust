@@ -169,3 +169,47 @@ export {
 }
 /* No side effect */
 ```
+
+## Cost isolation and counter-driven label scheduling
+
+Release builds (fat LTO, one codegen unit) of the original base and each
+fix alone were measured on the same original `tests/tests` sources,
+sequentially with one worker. Five alternating Cachegrind runs per binary:
+
+| Binary | Minimum instructions | Change from base |
+| --- | ---: | ---: |
+| Base | 4,276,595,254 | — |
+| Q5 only | 4,277,607,076 | +0.0237% |
+| Original Q2 only | 4,279,622,435 | +0.0708% |
+
+The total-count spread is appreciable (base 4,276,595,254–4,279,934,275),
+so totals alone do not attribute that entire difference to either fix.
+A separate Callgrind run of each binary gives the inclusive instruction
+cost of the relevant functions (non-recursive entry; recursive entries
+are reported separately by Callgrind and are not added to these totals):
+
+| Function | Base | Q5 only | Original Q2 only | Counter-driven Q2 + Q5 |
+| --- | ---: | ---: | ---: | ---: |
+| `compile_if_return_output` | 42,483,230 | 42,486,839 | 45,760,974 | 42,572,062 |
+| `function_has_self_tailcall` | 302,008 | 302,084 | 302,008 | 302,084 |
+
+Q2 added unconditional value lowering for each return-position conditional,
+including the common case whose return blocks already fold to a conditional
+expression. This is compile-time work per conditional, not work per invocation
+of the generated function. Q5 extends the existing tail-call traversal into
+`LetRec` bodies; it does not add a separate per-function traversal.
+
+The corrected implementation saves the existing loop-label counter before
+lowering return branches. Foldable conditionals return without the added value
+probe. For non-foldable branches, a changed counter identifies actual label
+allocation without scanning their Lambda bodies. Only that case resets the
+counter and re-lowers return branches after the value probe, retaining the
+reference numbering. The nested-string-loop fixture checks two allocated
+labels (`loop_2` and `loop_3`) after the discarded probe.
+
+Ten alternating Cachegrind runs of base and the corrected combined candidate
+on the same original sources gave minima 4,276,670,034 and 4,276,542,649
+instructions respectively: **-0.0030%**. This is within measurement spread,
+not evidence of a speedup. Hyperfine (10 runs, 2 warmups, clean before each
+build, one worker) measured base 549.7 ± 9.5 ms (532.2–567.5 ms) and candidate
+548.9 ± 13.8 ms (531.8–574.5 ms). No application performance claim is made here.

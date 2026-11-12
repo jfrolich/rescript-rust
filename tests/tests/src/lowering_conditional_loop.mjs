@@ -91,10 +91,48 @@ function stringReturn(c, xs) {
   return 1;
 }
 
+function stringNested(c, xs) {
+  if (!c) {
+    return 2;
+  }
+  loop_3: for (let outer = 0, outer_finish = xs.length; outer < outer_finish; ++outer) {
+    loop_2: for (let inner = 0, inner_finish = xs.length; inner < inner_finish; ++inner) {
+      let match = xs[inner];
+      switch (match) {
+        case "one" :
+          log(1);
+          break;
+        case "stop" :
+          break loop_2;
+        case "two" :
+          log(2);
+          break;
+        default:
+          log(3);
+      }
+    }
+    let match$1 = xs[outer];
+    switch (match$1) {
+      case "one" :
+        log(1);
+        break;
+      case "stop" :
+        break loop_3;
+      case "two" :
+        log(2);
+        break;
+      default:
+        log(3);
+    }
+  }
+  return 1;
+}
+
 export {
   h,
   nonReturn,
   nested,
   stringReturn,
+  stringNested,
 }
 /* No side effect */
