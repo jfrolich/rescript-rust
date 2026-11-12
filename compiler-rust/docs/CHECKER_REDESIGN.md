@@ -5361,6 +5361,8 @@ allocation, copying and hashing: the walk's and the environment's kinds.
 
 ### K.3 The core prototype
 
+[Core measurement prototype](prototypes/core-prototype.patch): measurement prototype, not reviewed code.
+
 **Method chosen: the proposed layout behind today's handle API, on real
 builds** (the second of the two the task allowed). A replayed trace would
 need the argument graphs of every operation, and expansion and unification
@@ -5444,6 +5446,8 @@ cost are what a further change of representation could still reach: 2.5 G,
 3.4% of the build, not measured as a saving.
 
 ### K.4 Calibration on the walk: the application path
+
+[Walk measurement prototype](prototypes/walk-prototype.patch): measurement prototype, not reviewed code.
 
 The hottest family of the walk is application: `type_application` with what
 it calls of the walk's own (`unify_expression_types`, `finish_expected`, the
