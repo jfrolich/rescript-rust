@@ -342,6 +342,8 @@ struct State {
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
     external_references: Vec<Option<crate::bir::ImportId>>,
+    inline_globals: Vec<Ident>,
+    inline_scratch: crate::bir::l::beta::Scratch,
     external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
@@ -397,6 +399,8 @@ impl State {
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
             external_references: Vec::new(),
+            inline_globals: Vec::new(),
+            inline_scratch: Default::default(),
             external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
@@ -512,7 +516,7 @@ impl ProbeRules for State {
                     return Err(Unsupported("let rec"));
                 }
                 let args = args.to_vec();
-                let call = self.application(callee, &args, info)?;
+                let call = self.application(cx, callee, &args, info)?;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
