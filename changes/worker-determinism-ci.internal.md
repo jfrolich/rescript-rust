@@ -1,0 +1,1 @@
+- Run the worker-count determinism gate in CI: four clean builds of the test project (one worker, eight, and eight under two page-shuffle seeds) must give the same generated files, diagnostics, signatures and stored interfaces.
