@@ -1034,6 +1034,14 @@ impl KeyEncode for crate::types::variant_runtime::MatchingFacts {
         self.block_types.encode(out);
         self.literal_tags.encode(out);
         self.object_cases.encode(out);
+        self.shared_tags.encode(out);
+    }
+}
+
+impl KeyEncode for crate::types::variant_runtime::SharedTag {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        self.literal.encode(out);
+        self.cases.encode(out);
     }
 }
 

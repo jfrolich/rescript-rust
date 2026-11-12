@@ -1006,6 +1006,103 @@ fn simplify_clauses<K, A: Clone>(
 
 /// untagged_dispatch.ml `plan`; `same` tells two bodies that are one body
 /// apart.
+/// A match on a tagged variant where some cases share a tag.
+pub(crate) struct SharedTagInput<'f, A> {
+    pub facts: &'f MatchingFacts,
+    /// The arms of the literal cases, in the order of the match.
+    pub literal_arms: Vec<(LiteralTag, A)>,
+    /// The arms of the cases with a payload: the case's tag and name.
+    pub block_arms: Vec<(LiteralTag, crate::name::Name, A)>,
+    pub literals_complete: bool,
+    pub blocks_complete: bool,
+    pub fallback: Option<A>,
+}
+
+/// The dispatch of a tagged variant whose cases share tags: `switch (x.tag)`
+/// with a `case` per tag, and in the arm of a shared tag the tests of its
+/// cases on their other fields, in the stored order, the last untested
+/// ([`object_region`]). Literal cases are told apart first, as for any
+/// tagged variant: what is not an object is a literal.
+pub(crate) fn shared_tag_plan<A: Clone>(
+    same: impl Fn(&A, &A) -> bool,
+    input: SharedTagInput<'_, A>,
+) -> Plan<A> {
+    let SharedTagInput {
+        facts,
+        literal_arms,
+        block_arms,
+        literals_complete,
+        blocks_complete,
+        fallback,
+    } = input;
+    let same = &same;
+    let mut p = Plan::new();
+    let default = |p: &mut Plan<A>, complete: bool| {
+        p.add_tree(if !complete && fallback.is_some() {
+            Tree::Fallback
+        } else {
+            Tree::Skip
+        })
+    };
+    let blocks_default = !blocks_complete && fallback.is_some();
+    // The tags in the order of their first arm.
+    let mut tags: Vec<&LiteralTag> = Vec::new();
+    for (literal, _, _) in &block_arms {
+        if !tags.iter().any(|known| same_literal_value(known, literal)) {
+            tags.push(literal);
+        }
+    }
+    let mut arms: Vec<(LiteralTag, TreeId)> = Vec::with_capacity(tags.len());
+    for literal in tags {
+        let of_tag = block_arms
+            .iter()
+            .filter(|(other, _, _)| same_literal_value(other, literal));
+        let tree = match facts.shared_tag(literal) {
+            Some(shared) => {
+                let case_arms: Vec<(usize, A)> = of_tag
+                    .filter_map(|(_, name, action)| {
+                        let position = shared.cases.iter().position(|case| case.name == *name)?;
+                        Some((position, action.clone()))
+                    })
+                    .collect();
+                object_region(&mut p, same, &shared.cases, &case_arms, blocks_default)
+                    .expect("a shared tag with an arm")
+            }
+            None => {
+                let (_, _, action) = of_tag.last().expect("a tag with an arm");
+                p.add_tree(Tree::Run(action.clone()))
+            }
+        };
+        arms.push((literal.clone(), tree));
+    }
+    let clauses = field_clauses(&p, same, arms);
+    let blocks_default = default(&mut p, blocks_complete);
+    let tag_name = facts.tag_name.clone().unwrap_or_else(|| "TAG".to_string());
+    let payload = p.switch_field(tag_name, clauses, blocks_default);
+    p.root = if facts.literal_tags.is_empty() {
+        payload
+    } else {
+        let literal_clauses: Vec<(LiteralTag, Clause<A>)> = literal_arms
+            .iter()
+            .map(|(literal, action)| (literal.clone(), Clause::Body(p.add_tree(Tree::Run(action.clone())))))
+            .collect();
+        let literals_default = default(&mut p, literals_complete);
+        let literals = p.switch_value(literal_clauses, literals_default);
+        // `typeof null` is "object".
+        let typeof_object = p.add_test(Test::Typeof(BlockType::Object));
+        let is_object = if facts.literal_tags.contains(&LiteralTag::Null) {
+            let not_null = p.add_test(Test::NotNull);
+            p.and(typeof_object, not_null)
+        } else {
+            typeof_object
+        };
+        p.add_tree(Tree::If(is_object, payload, literals))
+    };
+    let root = p.root;
+    p.root = simplify(&mut p, same, root);
+    p
+}
+
 pub(crate) fn plan<A: Clone>(same: impl Fn(&A, &A) -> bool, input: Input<'_, A>) -> Plan<A> {
     let mut p = Plan::new();
     p.root = plan_tree(&mut p, &same, input);
@@ -1282,6 +1379,7 @@ mod tests {
             block_types: kinds.clone(),
             literal_tags: literals.clone(),
             object_cases: Vec::new(),
+            shared_tags: Vec::new(),
         };
         plan(
             |a: &&str, b: &&str| a == b,

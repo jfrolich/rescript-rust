@@ -23,7 +23,7 @@ use crate::types::type_expr::{TypeDesc, TypeExprRef};
 use crate::types::typemod::{AstUntaggedVariantError, TypeModError, TypeModResult};
 use crate::types::variant_runtime::{
     Block, BlockType, ClassBlocks, Configuration, ConstructorCase, FieldCheck, Instance, Layout,
-    LiteralTag, ObjectCase, ShapeAllocation, ShapeBlocks, ShapeString, Tag, TaggedBlock,
+    LiteralTag, ObjectCase, ShapeAllocation, ShapeBlocks, SharedTag, ShapeString, Tag, TaggedBlock,
     ValueShape, same_literal_value,
 };
 
@@ -677,6 +677,7 @@ fn check_invariant(
     consts: &[(crate::types::DeclLoc, &Tag)],
     blocks: &[(crate::types::DeclLoc, &Block)],
     objects_ordered: bool,
+    shared_tags: &[SharedTag],
 ) -> TypeModResult<()> {
     use std::collections::{HashMap, HashSet};
     let mut string_literals_consts: HashSet<String> = HashSet::new();
@@ -761,8 +762,20 @@ fn check_invariant(
         }
         kind => kind.clone(),
     };
+    // The shared tags seen: a later case with one is not a duplicate.
+    let mut shared_seen: Vec<&LiteralTag> = Vec::new();
     for (loc, block) in blocks {
         match block {
+            Block::Tagged(TaggedBlock { tag, .. })
+                if shared_tags
+                    .iter()
+                    .any(|shared| shared.cases.iter().any(|case| case.name == tag.name)) =>
+            {
+                if !shared_seen.iter().any(|seen| same_literal_value(seen, &tag.literal)) {
+                    shared_seen.push(&tag.literal);
+                    check_literal(false, *loc, tag)?;
+                }
+            }
             Block::Tagged(TaggedBlock { tag, .. }) => check_literal(false, *loc, tag)?,
             Block::Untagged {
                 tag,
@@ -850,7 +863,7 @@ pub(crate) fn layout_from_type_variant(
             located.push((cstr.cd_loc, ConstructorCase::Block(block)));
         }
     }
-    let object_cases = {
+    let (object_cases, shared_tags) = {
         let consts: Vec<_> = located
             .iter()
             .filter_map(|(loc, case)| match case {
@@ -878,8 +891,15 @@ pub(crate) fn layout_from_type_variant(
         } else {
             None
         };
-        check_invariant(ctx, &consts, &blocks, object_cases.is_some())?;
-        object_cases.unwrap_or_default()
+        // Cases of a tagged variant that share a tag are told apart by their
+        // other fields, when an order exists.
+        let shared_tags = if configuration.unboxed {
+            Vec::new()
+        } else {
+            shared_tag_orders(ctx, env, cstrs, &blocks)
+        };
+        check_invariant(ctx, &consts, &blocks, object_cases.is_some(), &shared_tags)?;
+        (object_cases.unwrap_or_default(), shared_tags)
     };
     // The order is stored with the layout, so that a match in any module,
     // through an interface, a functor or an `include`, tests what the
@@ -889,6 +909,7 @@ pub(crate) fn layout_from_type_variant(
         located.into_iter().map(|(_, case)| case).collect(),
     );
     layout.matching_facts.object_cases = object_cases;
+    layout.matching_facts.shared_tags = shared_tags;
     Ok(layout)
 }
 
@@ -1532,6 +1553,59 @@ fn required_literals(shape: &ObjectShape) -> Vec<(String, Vec<LiteralTag>)> {
 
 /// The object cases of an `@unboxed` variant with several, in the order they
 /// are tested, with their tests; `None` when they cannot be told apart.
+/// The tags several cases of a tagged variant share, each with the order its
+/// cases are tested in. A tag is shared only by cases with an inline record,
+/// told apart by their other fields; a tag that cannot be is left out, and
+/// [`check_invariant`] reports it as a duplicate, as before.
+fn shared_tag_orders(
+    ctx: &TypeContext,
+    env: &Env,
+    cstrs: &[ConstructorDeclaration],
+    blocks: &[(crate::types::DeclLoc, &Block)],
+) -> Vec<SharedTag> {
+    let with_payload: Vec<&ConstructorDeclaration> = cstrs
+        .iter()
+        .filter(|cstr| !matches!(&cstr.cd_args, ConstructorArguments::CstrTuple(args) if args.is_empty()))
+        .collect();
+    let mut shared: Vec<SharedTag> = Vec::new();
+    for (index, (_, block)) in blocks.iter().enumerate() {
+        let Block::Tagged(TaggedBlock { tag, tag_name }) = block else {
+            continue;
+        };
+        let same_tag = |other: &Block| match other {
+            Block::Tagged(other) => {
+                other.tag_name == *tag_name && same_literal_value(&other.tag.literal, &tag.literal)
+            }
+            Block::Untagged { .. } => false,
+        };
+        // Each tag once, from its first case.
+        if blocks[..index].iter().any(|(_, other)| same_tag(other)) {
+            continue;
+        }
+        let group: Vec<usize> = (index..blocks.len())
+            .filter(|&other| same_tag(blocks[other].1))
+            .collect();
+        if group.len() < 2 {
+            continue;
+        }
+        let records = group
+            .iter()
+            .map(|&at| {
+                let cstr = with_payload[at];
+                matches!(cstr.cd_args, ConstructorArguments::CstrRecord(_))
+                    .then(|| (cstr.cd_id.name_atom(), object_shape(ctx, env, cstr)))
+            })
+            .collect::<Option<Vec<_>>>();
+        if let Some(cases) = records.and_then(order_object_cases) {
+            shared.push(SharedTag {
+                literal: tag.literal.clone(),
+                cases,
+            });
+        }
+    }
+    shared
+}
+
 fn object_case_order(
     ctx: &TypeContext,
     env: &Env,

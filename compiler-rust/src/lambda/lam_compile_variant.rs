@@ -82,6 +82,9 @@ fn untagged_switch<'k>(
     let SwitchDispatch::Variant(facts) = dispatch else {
         return false;
     };
+    if crate::lambda::shares_a_tag(dispatch, block_keys.by_ref()) {
+        return true;
+    }
     !facts.block_types.is_empty()
         && ((consts_full && const_keys.len() == 0) || !(blocks_full && block_keys.len() == 0))
         && const_keys.all(|key| {

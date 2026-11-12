@@ -703,6 +703,30 @@ pub struct MatchingFacts {
     /// tested in. Empty otherwise, and in a declaration's layout: the match
     /// derives it from the declaration (`variant_layout::object_case_order`).
     pub object_cases: Vec<ObjectCase>,
+    /// For a tagged variant, the tags that several cases share, each with
+    /// the order its cases are tested in on their other fields. Empty when
+    /// no tag is shared.
+    pub shared_tags: Vec<SharedTag>,
+}
+
+/// A tag several cases of a tagged variant share: the cases, each an inline
+/// record, in the order they are tested in by their fields other than the
+/// tag (as [`ObjectCase`]s), the last untested.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SharedTag {
+    /// The tag's value.
+    pub literal: LiteralTag,
+    /// The cases with this tag, in the order they are tested in.
+    pub cases: Vec<ObjectCase>,
+}
+
+impl MatchingFacts {
+    /// The cases that share the tag `literal`, if several do.
+    pub fn shared_tag(&self, literal: &LiteralTag) -> Option<&SharedTag> {
+        self.shared_tags
+            .iter()
+            .find(|shared| same_literal_value(&shared.literal, literal))
+    }
 }
 
 /// OCaml `Variant_runtime.layout`: the completed runtime representation of
@@ -829,6 +853,7 @@ impl Layout {
                 block_types,
                 literal_tags,
                 object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             },
         }
     }
@@ -1073,6 +1098,7 @@ mod shape_import_tests {
                 block_types: vec![class("A", a.clone())],
                 literal_tags: Vec::new(),
                 object_cases: Vec::new(),
+                shared_tags: Vec::new(),
             },
         };
         let original = shapes.clone();
