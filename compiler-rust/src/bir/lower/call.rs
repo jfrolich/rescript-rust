@@ -201,7 +201,7 @@ impl State {
     }
 
     /// C:1144 compile_apply_call_inner: the call constructor performs no rewrite.
-    fn call_node(
+    pub(super) fn call_node(
         &mut self,
         callee: NodeId,
         args: &[NodeId],

@@ -1444,6 +1444,12 @@ mod checker {
         }
     }
 
+    pub(super) fn derived_snapshot() -> [u64; 3] {
+        [FRESH_VARS.load(Ordering::Relaxed),
+         UNIFY.iter().map(|c| c.load(Ordering::Relaxed)).sum(),
+         COPY_NODES[CopyCause::Instance as usize].load(Ordering::Relaxed)]
+    }
+
     pub(super) fn reset() {
         let walks = [&INSTANCE, &GENERALIZE, &UPDATE_LEVEL];
         for counter in COPY_SESSIONS
@@ -2238,4 +2244,17 @@ mod publication_guard_tests {
         let _guard = SignaturePublication::begin();
         crate::cmi::item_deps::SignatureSummary::of("Guarded", &signature());
     }
+}
+
+/// Read existing process-global counters, without locks or mutation. O(1):
+/// twenty-four atomic reads. Item deltas require a single compiler worker;
+/// callers must not interpret concurrent process deltas as item attribution.
+pub fn derived_snapshot() -> [u64; 4] {
+    let [fresh, unify, copies] = checker::derived_snapshot();
+    let lookups = [&VALUE_HITS, &VALUE_MISSES, &TYPE_HITS, &TYPE_MISSES,
+        &MODULE_HITS, &MODULE_MISSES, &CONSTRUCTOR_HITS, &CONSTRUCTOR_MISSES,
+        &LABEL_HITS, &LABEL_MISSES, &CHILD_COMPONENT_HITS, &CHILD_COMPONENT_MISSES,
+        &QUALIFIED_COMPONENT_HITS, &QUALIFIED_COMPONENT_MISSES]
+        .iter().map(|c| c.load(Ordering::Relaxed)).sum();
+    [fresh, unify, copies, lookups]
 }

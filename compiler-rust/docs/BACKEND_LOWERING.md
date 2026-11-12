@@ -608,7 +608,7 @@ by `LetRec` goes through 5.1 instead.
 
 **`Let(kind, id, value, body)`** in continuation k:
 
-1. the record-copy form is tried: `value` is `Pduprecord(init)` and `body` is
+1. except in **D**, the record-copy form is tried: `value` is `Pduprecord(init)` and `body` is
    a sequence of `Psetfield`s of `id` that ends in `id`
    (`try_compile_record_spread` (C:1450)). Then `init` and each written value are
    lowered in **V**, left to right, statements concatenated (not sequenced),
@@ -616,6 +616,11 @@ by `LetRec` goes through 5.1 instead.
    fields **in reverse source order**; conv to k. Incidental: the reversal
    comes from a fold that prepends (C:1487); it stays in the lowering;
 2. otherwise `D(kind, id)(value)`, then `k(body)`, appended.
+
+S3.9 oracle correction: `compile_let_binding_output` does not try the
+record-copy collapse in its `Let` arm. For `let copy = Pduprecord(source) in
+copy`, **D** emits `let copy = {...source}; let result = copy;`, unlike the
+other continuations. The lowering preserves that declaration boundary.
 
 Finished-binding detail (`compile_expr`'s `Let` arm, versus
 `compile_effect_output`): in **V**, a finished binding discards the body's
@@ -2186,7 +2191,7 @@ positions.
 | row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
 | `S.if_` rules that need a rewrite (7 to 10, and 0 to 6 outside **R**) | `norm::js3_simplify_if` on two vectors: the statements of both branches, and two allocations | linear; taken only when `plain_if` says a rule applies. Open: porting J-S3 to list handles removes the vectors |
 
-S3.3c primitive costs: the resume is three `u32` handles (12 bytes), retaining
+S3.9 primitive costs: the resume is two `u32` handles (8 bytes), retaining
 an existing source-list handle rather than allocating an operand vector. Up to
 four sequenced outputs and values are inline. Literal min/max duplication copies
 only leaf handles and decoration, never a generic subtree/hash-map copier.
@@ -2218,7 +2223,45 @@ of steps. Each slice adds the tests of its constructs on a 10,000-deep and a
 | S3.6 | a recursive function with 10,000 self calls in 10,000 switch cases; one whose only self call is not in tail position (lowered once, not twice) |
 | S3.7 | 10,000 nested loops with a labelled `break` in the innermost; the label property test of 4.5; a `LetRec` of 10,000 members |
 | S3.8 | an external call with 10,000 arguments |
-| S3.9 | a JSX element with 10,000 children |
+| S3.9 | 10,000 JSX children and props; 10,000 scoped callee/key members; 10,000 await shells, record overrides/rest exclusions, flat-make segments (success and failure), and import path segments |
+
+### S3.9 measured costs and policy boundaries
+
+The tests count source dispatch visits, argument-sequencing steps and immediate
+primitive/path steps separately. Each fixture below has 10,000 elements.
+
+| Shape | Source visits | Sequencing steps | Primitive/path steps |
+| --- | ---: | ---: | ---: |
+| JSX children, statement-producing last child | 20,003 | 30,000 | 40,001 |
+| JSX props, half absent optional props | 10,002 | 10,001 | 20,002 |
+| JSX scoped callee | 2 | 1 | 10,001 |
+| JSX key record-member chain | 10,003 | 10,002 | 30,004 |
+| Await shells | 10,001 | 10,000 | 20,000 |
+| Record-copy overrides | 10,002 | 0 | 40,002 |
+| Record-rest excluded labels | 2 | 1 | 10,002 |
+| Successful flat-make path | 1 | 0 | 10,001 |
+| Failed flat-make path | 10,001 | 10,000 | 40,000 |
+| External import value path | 1 | 0 | 10,001 |
+
+Flat-make paths are recognized before argument lowering. Successful paths
+consume their source spine without constructing intermediate member expressions;
+failed paths are memoized in a dense source-node table, preventing quadratic
+rescans of nested `make` fields over a non-module base. The record-copy resume
+is 12 bytes; the primitive resume is now 8 bytes because it no longer needs a
+source handle after dispatch.
+
+Awaited-unit membership is recorded at each `Let` on the existing source walk
+in a `VarId`-indexed table, rather than by a separate unit traversal. The
+candidate transports its own dynamic dependency list to the shared tail; the
+check no longer borrows the legacy lowering's list. Invalid import diagnostics
+remain owned by the legacy side of check mode, while both expressions are
+undefined. External module identity uses the first bundle/default binding.
+
+`jsx_preserve` affects the shared passes and printer, not `compile_jsx` or
+`jsx_callee`. The rule oracle prints both settings; JSX metadata retains
+fragment, multi-child, optional-prop, spread and key policy. The declaration
+exception for record copies is documented in section 3.4. These are opt-in
+lowering changes; they claim no default-path performance improvement.
 
 ## 8. The gate and the slices
 
