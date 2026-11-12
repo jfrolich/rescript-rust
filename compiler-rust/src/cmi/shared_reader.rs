@@ -114,6 +114,9 @@ impl TypeGraph for FrozenGraph<'_> {
         r
     }
 
+    // Fuse the TypeDesc -> Node adapter with its caller's match rather than
+    // materializing the borrowed Node enum on every hashed/reference-read node.
+    #[inline(always)]
     fn node(&self, slot: usize) -> Node<'_, Self> {
         let graph = self.graph;
         match &graph.nodes()[slot].desc {
