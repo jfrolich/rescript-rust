@@ -11709,6 +11709,12 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
     if ctx.counts_this_call() {
         return counted_instance(ctx, [ty], || instance(ctx, ty));
     }
+    let ty = ctx.repr(ty);
+    // OCaml compiler/ml/ctype.ml:762: a non-generic root needs no copy session.
+    // Partial copies must still use instance_partial's forgetting rules.
+    if ctx.get_level(ty) != GENERIC_LEVEL {
+        return ty;
+    }
     let mut cache = CopyCache::new(ctx);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -15420,6 +15426,34 @@ mod tests {
         // Create an instance
         let a_instance = instance(&ctx, a);
         assert_ne!(a, a_instance);
+    }
+
+    #[test]
+    fn instance_returns_the_non_generic_representative() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let child = ctx.new_var(None);
+        ctx.set_level(child, GENERIC_LEVEL);
+        let root = ctx.new_tuple(vec![child, child]);
+        let link = ctx.new_var(None);
+        ctx.set_desc(link, TypeDesc::Tlink(root));
+
+        // The root's level decides: do not copy even a generic child.
+        assert_eq!(instance(&ctx, link), root);
+        assert_eq!(instance(&ctx, root), root);
+        // Partial copying still forgets a non-generic root without free univars.
+        let partial = instance_partial(&ctx, link, false);
+        assert_ne!(partial, root);
+        assert!(matches!(&*ctx.borrow_desc(partial), TypeDesc::Tvar(_)));
+
+        // Conversely, a generic root reached through a link must be copied.
+        ctx.set_level(root, GENERIC_LEVEL);
+        let copied = instance(&ctx, link);
+        assert_ne!(copied, root);
+        let TypeDesc::Ttuple(items) = &*ctx.borrow_desc(copied) else {
+            panic!("expected an instantiated tuple");
+        };
+        assert_eq!(ctx.type_list_at(*items, 0), ctx.type_list_at(*items, 1));
+        assert_ne!(ctx.type_list_at(*items, 0), child);
     }
 
     #[test]
