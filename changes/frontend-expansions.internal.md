@@ -1,1 +1,1 @@
-- Store built-in frontend expression expansions separately from source syntax.
+- The built-in rewrites record a rewritten construct as an expansion and no longer rebuild the expressions around it.

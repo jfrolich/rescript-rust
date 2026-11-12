@@ -385,3 +385,41 @@ acceptance check.
 CI Instruction count (five runs, minimum of each side): **4,508,872,410 →
 4,464,721,357**, a reduction of **44,151,053 instructions (0.979%)** across
 711 modules. [Comparison run](https://github.com/jfrolich/rescript-rust/actions/runs/43125250180).
+
+### Expansions instead of rebuilt ancestors
+
+Baseline `2979e7f97`, Linux x86-64, fat-LTO release with one codegen unit,
+single-thread clean `tests/tests` build (727 modules), the runtime built
+first. Callgrind for the breakdown, cachegrind for the totals (the smallest of
+three and of five runs).
+
+Before the change, one profile of 4,070.1 M instructions:
+
+| Instructions (Ir) | | Share of build |
+|---|---:|---:|
+| Builtin structure + signature entry paths, inclusive | 183.0 M | 4.50% |
+| Self cost of the expression mapper's functions (visit, clone, push and drop, inlined) | 109.0 M | 2.68% |
+| Their callees outside the expression mapper (patterns, types, attributes, allocator, the visited-location set) | 52.9 M | 1.30% |
+
+The profile cannot separate the rebuild from the visit: both are inlined into
+the same functions. The change does: the same entry paths cost 154.3 M after
+it, so **rebuilding was 28.7 M (0.70% of the build)**, and visiting, the three
+other mappers, the checks and the structure items are the remaining 3.8%.
+
+On the 720 implementation files of `tests/tests` that the mapper accepts
+without the JSX transform: 83,113 expressions, 15,489 without a certificate
+(each was cloned and pushed again), **2,053 with an expansion** after the
+change, for which 3,895 expression nodes are appended. So about 13,400
+expressions were rebuilt whose own construct no rewrite applies to.
+
+| Instructions (Ir) | Before | After | Change |
+|---|---:|---:|---:|
+| Clean build of `tests/tests`, local, 727 modules | 4,073,542,665 | 4,034,320,027 | -0.963% |
+| The same, CI instruction count, 735 modules | 4,078,163,440 | 4,038,720,685 | -0.967% |
+| of which the visited-location set as a bit vector instead of a hash set | | | -0.17% |
+| Clean build of a 3,735-module application, one run each | 69,574,364,296 | 69,092,936,764 | -0.692% |
+
+The saving is below the 1% that THREE_TREES section 11 expected of this
+slice: the rebuilt spine was 0.70% of the build, not the 4.13% of the two
+entry paths. What is left in those paths is not rebuilding.
+
