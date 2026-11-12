@@ -30,6 +30,15 @@ impl NodeFlags {
     pub const J_SUBEXPR: u8 = Self::DEAD;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
     pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
+    /// L-only: the subtree holds an `Exit` that is not under a `Fun`
+    /// (`Lam_exit_code.has_exit`, lam_exit_code.ml:35). Reuses the bit that
+    /// only a `JNumber` reads as `JS_CHAR_PRESENT`.
+    pub const HAS_EXIT: u8 = Self::JS_CHAR_PRESENT;
+    /// L-only, never on a `Var`: the subtree holds, outside a `Fun`, a
+    /// construct that is lowered to statements in every continuation (C:5139
+    /// lambda_contains_statement_value_form). Reuses the bit level J reads as
+    /// `JS_LOC_PRESENT`.
+    pub const HAS_STATEMENT: u8 = Self::JS_LOC_PRESENT;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -358,6 +367,12 @@ impl Node {
     pub(crate) fn primitive_arguments(self) -> ListId {
         assert_eq!(self.op, Op::Prim);
         ListId(self.words[0])
+    }
+    /// O(1): the argument-list handle of an exit, for a traversal resume
+    /// record that does not copy the arguments.
+    pub(crate) fn exit_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Exit);
+        ListId(self.words[1])
     }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
