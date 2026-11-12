@@ -162,7 +162,7 @@ impl<S: Steps> Lowering<'_, S> {
                     ExprLoc::OfName => name_loc,
                     ExprLoc::Dummy => conv.arena.dummy_loc(),
                 };
-                let path = self.table.resolved(obligation).path;
+                let path = self.table.resolved(obligation).path();
                 let lam = conv.translate_value_path_raw_in_env(self.env, &path, SrcLoc::from(loc));
                 (lam, None)
             }
@@ -180,7 +180,7 @@ impl<S: Steps> Lowering<'_, S> {
                     let arity = match self.plans.body(funct) {
                         BodyNode::Free(obligation) => conv.get_function_arity_from_type(
                             self.env,
-                            self.table.resolved(obligation).instance,
+                            self.table.resolved(obligation).instance(),
                         ),
                         BodyNode::Apply { .. } => remaining,
                         // A plan applies no parameter and no function

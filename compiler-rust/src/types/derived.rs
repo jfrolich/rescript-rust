@@ -36,12 +36,43 @@ pub(crate) const TOP_LEVEL_ONLY: &str =
 
 /// What a discharged obligation resolved to.
 #[derive(Debug, Clone, Copy)]
-pub struct Resolved {
-    /// The path the name resolved to.
-    pub path: Path,
-    /// For a value, the instance its skeleton was unified with; for a type,
-    /// the null reference.
-    pub instance: TypeExprRef,
+pub enum Resolved {
+    /// A value: the path its name resolved to, and the instance of its type
+    /// that its skeleton was unified with.
+    Value {
+        /// The value's path.
+        path: Path,
+        /// The instance of the value's type.
+        instance: TypeExprRef,
+    },
+    /// A type constructor: the path its name resolved to.
+    Type(Path),
+}
+
+impl Resolved {
+    /// The path the name resolved to. Cost: O(1).
+    #[inline]
+    pub fn path(self) -> Path {
+        match self {
+            Resolved::Value { path, .. } | Resolved::Type(path) => path,
+        }
+    }
+
+    /// The instance of a value's type. Cost: O(1).
+    #[inline]
+    pub fn instance(self) -> TypeExprRef {
+        match self {
+            Resolved::Value { instance, .. } => instance,
+            Resolved::Type(_) => unreachable!("a body and a type source name value obligations"),
+        }
+    }
+}
+
+/// The slots of a discharged item in the tables.
+#[derive(Debug, Clone, Copy)]
+struct Slots {
+    bindings: Span,
+    obligations: Span,
 }
 
 /// A binding of a discharged item, as entered in the environment.
@@ -60,9 +91,9 @@ pub struct Bound {
 pub struct DerivedTable {
     resolved: Vec<Option<Resolved>>,
     bound: Vec<Option<Bound>>,
-    /// The binding slots of each item, so a reader of the typed tree needs
-    /// no parse arena to find them.
-    items: Vec<Span>,
+    /// The slots of each item, so a reader of the typed tree needs no parse
+    /// arena to find them.
+    items: Vec<Slots>,
     /// The types of the bindings of the item being discharged, before they
     /// are generalised and entered.
     pending: Vec<TypeExprRef>,
@@ -84,7 +115,14 @@ impl DerivedTable {
             self.bound.resize(plans.binding_count(), None);
         }
         if self.items.len() != plans.item_count() {
-            self.items.resize(plans.item_count(), Span { start: 0, len: 0 });
+            let empty = Span { start: 0, len: 0 };
+            self.items.resize(
+                plans.item_count(),
+                Slots {
+                    bindings: empty,
+                    obligations: empty,
+                },
+            );
         }
         if self.pending.len() != plans.binding_count() {
             self.pending.resize(plans.binding_count(), TypeExprRef::null());
@@ -115,36 +153,32 @@ impl DerivedTable {
         self.resolved[idx.index()].expect("the obligations of a typed derived item are discharged")
     }
 
-    /// Record the binding slots of a discharged item. Cost: O(1).
+    /// Record the slots of a discharged item: its bindings, and their
+    /// obligations, which are consecutive. Cost: O(1).
     #[inline]
-    pub fn set_item(&mut self, idx: DerivedIdx, bindings: Span) {
-        self.items[idx.index()] = bindings;
+    fn set_item(&mut self, idx: DerivedIdx, bindings: Span, obligations: Span) {
+        self.items[idx.index()] = Slots {
+            bindings,
+            obligations,
+        };
     }
 
     /// The bindings of a discharged item, in declaration order.
     /// Cost: O(1) to obtain; one slot read per binding yielded.
     pub fn bound(&self, idx: DerivedIdx) -> impl Iterator<Item = Bound> + '_ {
-        self.bound[self.items[idx.index()].range()]
+        self.bound[self.items[idx.index()].bindings.range()]
             .iter()
             .map(|bound| bound.expect("the bindings of a typed derived item are entered"))
     }
 
     /// The results of the obligations of a discharged item, in typing order.
     /// Cost: O(1) to obtain; one slot read per obligation yielded.
-    pub fn resolved_of<'a>(
-        &'a self,
-        plans: &'a Plans,
-        item: DerivedIdx,
-    ) -> impl Iterator<Item = Resolved> + 'a {
-        let item = plans.item(item);
-        plans.bindings(item).iter().flat_map(move |binding| {
-            self.resolved[binding.obligations.range()].iter().map(|resolved| {
-                resolved.expect("the obligations of a typed derived item are discharged")
-            })
-        })
+    pub fn resolved_of(&self, idx: DerivedIdx) -> impl Iterator<Item = Resolved> + '_ {
+        self.resolved[self.items[idx.index()].obligations.range()]
+            .iter()
+            .map(|resolved| resolved.expect("the obligations of a typed derived item are discharged"))
     }
 }
-
 
 /// The item cannot be established from its plan: the checker types its
 /// general form instead. Nothing the failed discharge did remains: the type
@@ -282,7 +316,14 @@ pub fn discharge_counting(
             },
         );
     }
-    tctx.typed.derived.set_item(idx, item.bindings);
+    let obligations = match (bindings.first(), bindings.last()) {
+        (Some(first), Some(last)) => Span {
+            start: first.obligations.start,
+            len: last.obligations.start + last.obligations.len - first.obligations.start,
+        },
+        _ => Span { start: 0, len: 0 },
+    };
+    tctx.typed.derived.set_item(idx, item.bindings, obligations);
     Ok(Discharged { env: new_env })
 }
 
@@ -344,7 +385,7 @@ fn discharge_binding(
                 steps.unification();
                 crate::types::ctype::unify(ctx, &mut tctx.unify_state, instance, expected)
                     .map_err(|_| Fallback)?;
-                Resolved { path, instance }
+                Resolved::Value { path, instance }
             }
             Obligation::Type {
                 name,
@@ -371,10 +412,7 @@ fn discharge_binding(
                 if !plain_params {
                     return Err(Fallback);
                 }
-                Resolved {
-                    path,
-                    instance: TypeExprRef::null(),
-                }
+                Resolved::Type(path)
             }
         };
         tctx.typed.derived.set_resolved(obligation, resolved);
@@ -384,7 +422,7 @@ fn discharge_binding(
     // obligation resolved, the one parameter that remains after `applied`
     // were supplied, and its result (typecore.ml `type_application`, total
     // application of a partial application's result).
-    let head = tctx.typed.derived.resolved(binding.result_of).instance;
+    let head = tctx.typed.derived.resolved(binding.result_of).instance();
     let head = crate::types::ctype::expand_head(ctx, env, head);
     let (param, result) = match &*ctx.borrow_desc(ctx.repr(head)) {
         TypeDesc::Tarrow { args, ret } => {
@@ -445,7 +483,7 @@ fn instantiate(
                 types.push(arg);
                 used += span;
             }
-            (ctx.new_constr(table.resolved(ty).path, types.into_vec()), used)
+            (ctx.new_constr(table.resolved(ty).path(), types.into_vec()), used)
         }
     }
 }
@@ -897,7 +935,7 @@ module A = {
                     crate::types::printtyp::Printtyp::new(&type_ctx).type_expr(bound[0].ty),
                     "int => box<int>"
                 );
-                assert_eq!(tctx.typed.derived.resolved(ty).path.name(), "box");
+                assert_eq!(tctx.typed.derived.resolved(ty).path().name(), "box");
             }
         }
     }
