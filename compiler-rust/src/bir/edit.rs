@@ -704,18 +704,6 @@ impl Bir {
             }
         }
     }
-    pub(super) fn is_captured(&self, id: NodeId, var: VarId) -> bool {
-        let mut child = id;
-        while let Some(parent) = self.parents[child.index()] {
-            if self.capture_boundary(parent, child)
-                && !self.vars.binder[var.index()].is_some_and(|b| self.is_descendant(b, parent))
-            {
-                return true;
-            }
-            child = parent;
-        }
-        false
-    }
     fn next_capture_epoch(&mut self) -> u64 {
         self.capture_epoch = self
             .capture_epoch
