@@ -18,10 +18,11 @@ impl State {
             | Primitive::Pignore | Primitive::Ptypeof | Primitive::PrawJsCode(_)
             | Primitive::PcreateExtension(_) | Primitive::PinitMod | Primitive::PupdateMod
             | Primitive::Praise | Primitive::Pdebugger
+            | Primitive::Pintcomp(_) | Primitive::Pboolcomp(_) | Primitive::Pstringcomp(_) | Primitive::Pbigintcomp(_) | Primitive::Pobjcomp(_) | Primitive::Pfloatcomp(_) | Primitive::Pjscomp(_) | Primitive::Pobjorder | Primitive::Pobjmin | Primitive::Pobjmax | Primitive::Pboolorder | Primitive::Pboolmin | Primitive::Pboolmax | Primitive::Pintorder | Primitive::Pintmin | Primitive::Pintmax | Primitive::Pfloatorder | Primitive::Pfloatmin | Primitive::Pfloatmax | Primitive::Pbigintorder | Primitive::Pbigintmin | Primitive::Pbigintmax | Primitive::Pstringorder | Primitive::Pstringmin | Primitive::Pstringmax
             | Primitive::Paddint | Primitive::Psubint | Primitive::Pmulint | Primitive::Pdivint | Primitive::Pmodint | Primitive::Ppowint | Primitive::Pandint | Primitive::Porint | Primitive::Pxorint | Primitive::Plslint | Primitive::Paddfloat | Primitive::Psubfloat | Primitive::Pmulfloat | Primitive::Pdivfloat | Primitive::Pmodfloat | Primitive::Ppowfloat | Primitive::Paddbigint | Primitive::Psubbigint | Primitive::Pmulbigint | Primitive::Ppowbigint | Primitive::Pandbigint | Primitive::Porbigint | Primitive::Pxorbigint | Primitive::Plslbigint | Primitive::Pasrbigint | Primitive::Pasrint | Primitive::Pnotint | Primitive::Pnotbigint | Primitive::Pintoffloat | Primitive::Pnegint | Primitive::Pnegfloat | Primitive::Pnegbigint | Primitive::Plsrint | Primitive::Pdivbigint | Primitive::Pmodbigint)
     }
 
-    fn primitive_int(&self, node: NodeId) -> Option<i32> {
+    pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
             match self.arena.constant(value) {
                 crate::bir::Constant::Int(n) => Some(*n as i32),
@@ -33,7 +34,7 @@ impl State {
 
     /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
     /// encounter order; purity annotations are comments, not purity facts.
-    fn primitive_runtime(&mut self, name: &str, member: &str, args: &[NodeId]) -> NodeId {
+    pub(super) fn primitive_runtime(&mut self, name: &str, member: &str, args: &[NodeId]) -> NodeId {
         let module = match self.arena.pools.j_modules.iter().position(|m|
             m.id.name() == name && matches!(m.kind, crate::js_ir::Kind::Runtime)) {
             Some(i) => crate::bir::ImportId(i as u32),
@@ -82,6 +83,34 @@ impl State {
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
         let value = match primitive {
+            // P: compile_primitive_js, comparison arms.
+            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(cmp, values[0], values[1]),
+            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(cmp, values[0], values[1]),
+            Primitive::Pstringcomp(cmp) => self.primitive_literal_comparison(cmp, values[0], values[1], false),
+            Primitive::Pbigintcomp(cmp) => self.primitive_literal_comparison(cmp, values[0], values[1], true),
+            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(cmp, values[0], values[1]),
+            Primitive::Pfloatcomp(cmp @ (crate::lambda::lam_compat::Comparison::Eq | crate::lambda::lam_compat::Comparison::Neq)) => self.primitive_int_comparison(cmp, values[0], values[1]),
+            Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => norm::je4_bin(&mut self.arena, super::prim_cmp::comparison_op(cmp, true), values[0], values[1]),
+            Primitive::Pobjorder => self.primitive_runtime("Primitive_object", "compare", &values),
+            Primitive::Pobjmin => self.primitive_min_max("object", false, values[0], values[1]),
+            Primitive::Pobjmax => self.primitive_min_max("object", true, values[0], values[1]),
+            Primitive::Pboolorder => if let (Some(l), Some(r)) = (self.primitive_bool(values[0]), self.primitive_bool(values[1])) {
+                self.arena.release(values[0]); self.arena.release(values[1]); plain::int(&mut self.arena, l.cmp(&r) as i32)
+            } else { self.primitive_runtime("Primitive_bool", "compare", &values) },
+            Primitive::Pboolmin => self.primitive_min_max("bool", false, values[0], values[1]),
+            Primitive::Pboolmax => self.primitive_min_max("bool", true, values[0], values[1]),
+            Primitive::Pintorder => self.primitive_runtime("Primitive_int", "compare", &values),
+            Primitive::Pintmin => self.primitive_min_max("int", false, values[0], values[1]),
+            Primitive::Pintmax => self.primitive_min_max("int", true, values[0], values[1]),
+            Primitive::Pfloatorder => self.primitive_runtime("Primitive_float", "compare", &values),
+            Primitive::Pfloatmin => self.primitive_min_max("float", false, values[0], values[1]),
+            Primitive::Pfloatmax => self.primitive_min_max("float", true, values[0], values[1]),
+            Primitive::Pbigintorder => self.primitive_runtime("Primitive_bigint", "compare", &values),
+            Primitive::Pbigintmin => self.primitive_min_max("bigint", false, values[0], values[1]),
+            Primitive::Pbigintmax => self.primitive_min_max("bigint", true, values[0], values[1]),
+            Primitive::Pstringorder => self.primitive_runtime("Primitive_string", "compare", &values),
+            Primitive::Pstringmin => self.primitive_min_max("string", false, values[0], values[1]),
+            Primitive::Pstringmax => self.primitive_min_max("string", true, values[0], values[1]),
             // P: compile_primitive_js, arithmetic arms; J-M3–M13 own the folds.
             Primitive::Paddint => norm::jm4_int32_add_sub(&mut self.arena, false, values[0], values[1]),
             Primitive::Psubint => norm::jm4_int32_add_sub(&mut self.arena, true, values[0], values[1]),

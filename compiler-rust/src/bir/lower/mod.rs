@@ -5,6 +5,7 @@ mod call;
 mod expr;
 mod konst;
 mod prim;
+mod prim_cmp;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
