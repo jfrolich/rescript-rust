@@ -104,9 +104,11 @@ shadow comparison must supply the same inputs to both printers.
 
 The bridge does not run optimizations or change the emitter. No J-level
 coverage is implied by the existing Lambda-stage ratchet. Representation limits
-are explicit `Unsupported` values: shared non-leaf nodes, repeated binders,
-non-contiguous parameter runs, explicit empty location handles, inconsistent
-integer/character decorations, and a try without either handler or finaliser.
+are explicit `Unsupported` values: shared unbounded non-leaf nodes, repeated
+binders, non-contiguous parameter runs, invalid float spelling or template
+segment counts, and a try without either handler or finaliser. Shared leaves
+and at most four-child shapes whose children are leaves are copied per edge;
+this bounds expansion rather than unfolding a potentially exponential DAG.
 These are never silently changed into another shape. Full module metadata is
 stored in the J import pool; the remaining printer metadata fits the existing
 J payloads and auxiliary words (BACKEND_REDESIGN.md B.3/B.5).
@@ -147,3 +149,41 @@ representations are reported by reason; a mismatch or invalid Bir is a compiler
 error naming the source unit. Default mode does not import or print a second
 program. The coverage harness ratchets `js-bridge` separately; Lambda stage
 counts are unchanged. The emitter and its view trait are not part of this slice.
+
+## J bridge costs and variable facts
+
+Import and export are iterative postorder traversals. Work/result stacks and
+export list buffers are reused; metadata is stored in the existing side pools.
+The importer allocates encounter bitmaps once, indexed by legacy node slots.
+A repeated non-leaf is supported only when its expansion is constant-size
+(at most four leaf children). Thus costs are linear in input nodes and list
+entries even for sharing: arbitrary DAGs do not expand exponentially. The
+10,000-statement and 10,000-term concatenation/comma/logical-chain tests bound
+import visits and export arena accesses, without recursing through the printer.
+The bridge uses the existing Bir bulk constructors; those constructors still
+use SmallVec scratch for child/binder lists and debug-only duplicate checks.
+
+Bulk finalization establishes Var-node use counts, binder links, parameter
+facts/flags, export flags, captured flags and assignment flags. SDecl gets the
+existing constant, alias, function, block/mutable-block and optional facts;
+unknown values stay Unknown. No J normalization or stronger constant/purity
+analysis is claimed. For-of/await-of and catch bindings keep Unknown facts,
+matching the current editing API. Unbound legacy identities are marked JS_GLOBAL
+so they remain representable, including undeclared exports after a throw.
+
+`SForRangeExisting` represents a range that reuses an already declared variable
+(`init: None`), rather than binding that VarId twice. Its explicit Var child
+counts the header use; the target is ASSIGNED, and variables encountered in
+this loop are conservatively CAPTURED (including locals). This is deliberately
+conservative until J rounds refine the capture boundary rules. `SRest` with aux
+bit 15 retains the legacy RecordRest value descriptor, including its own cold
+metadata, while exposing all destructured binders through SRest's existing
+binder schema. Its field/rest facts remain Unknown. This is distinct from a
+future SRest built directly from the source object.
+
+An explicit `Some(LamLoc::NONE)` is retained, not confused with no location:
+J nodes use JS_LOC_PRESENT; clause locations use Option<LamLoc> (still four
+bytes). Character decoration, which need not equal the integer value, is kept
+in a spare JNumber word with JS_CHAR_PRESENT; the constant fact remains the
+actual integer. Negative static field positions are retained by using the
+same i32::MIN sentinel as JsArena.

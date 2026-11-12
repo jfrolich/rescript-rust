@@ -224,8 +224,8 @@ pub struct ClauseMeta {
     pub should_break: bool,
     /// Case-label comment.
     pub comment: Option<StrId>,
-    /// Case-label source location.
-    pub loc: LamLoc,
+    /// Case-label source location, retaining an explicit NONE handle too.
+    pub loc: Option<LamLoc>,
 }
 /// Switch keys in their action order. Default, if present, is the final action.
 #[derive(Debug, Clone)]

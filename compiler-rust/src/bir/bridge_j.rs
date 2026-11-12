@@ -186,6 +186,8 @@ struct Importer {
     ids: Vec<Ident>,
     modules: AHashMap<js::ModuleId, ImportId>,
     params: AHashMap<j::FunId, VarSpan>,
+    existing_loop_depth: usize,
+    rest_binders: crate::fast_hash::AHashSet<VarId>,
 }
 impl Importer {
     fn var(&mut self, id: Ident) -> VarId {
@@ -239,9 +241,6 @@ impl Importer {
         id
     }
     fn cold(&mut self, a: &j::JsArena, c: j::Cold) -> Result<Option<Cold>, Unsupported> {
-        if c.source_loc == Some(LamLoc::NONE) {
-            return Err(Unsupported("explicit empty JS source location"));
-        }
         Ok(if c.comment.is_some() || c.source_loc.is_some() {
             Some(Cold {
                 loc: c.source_loc.unwrap_or(LamLoc::NONE),
@@ -252,24 +251,15 @@ impl Importer {
         })
     }
     fn clause(&mut self, a: &j::JsArena, c: j::Clause) -> Result<ClauseMeta, Unsupported> {
-        if c.source_loc == Some(LamLoc::NONE) {
-            return Err(Unsupported("explicit empty JS clause location"));
-        }
         Ok(ClauseMeta {
             should_break: c.should_break,
             comment: self.label(a, c.comment),
-            loc: c.source_loc.unwrap_or(LamLoc::NONE),
+            loc: c.source_loc,
         })
     }
     fn number(&mut self, n: &Number) -> Result<ConstId, Unsupported> {
         Ok(match n {
-            Number::Int { i, c: None } => self.b.intern_const(Constant::Int(i64::from(*i))),
-            Number::Int { i, c: Some(c) } => {
-                if i != c {
-                    return Err(Unsupported("inconsistent JS character decoration"));
-                }
-                self.b.intern_const(Constant::Char(*c as u32))
-            }
+            Number::Int { i, c: _ } => self.b.intern_const(Constant::Int(i64::from(*i))),
             Number::Float(f) => self.b.intern_float(&f.f)?,
             Number::BigInt(n) => {
                 let text = self.b.intern_text(&format!(
@@ -282,6 +272,13 @@ impl Importer {
         })
     }
     fn enter(&mut self, a: &j::JsArena, s: Source<'_>) -> Result<(), Unsupported> {
+        if let Source::Stmt(stmt) = s {
+            if let j::StmtKind::ForRange(id) = a.sk(stmt) {
+                if a.for_range(id).init.is_none() {
+                    self.existing_loop_depth += 1;
+                }
+            }
+        }
         if let Source::Expr(e) = s {
             if let j::ExprKind::Fun(f) = a.ek(e) {
                 let ids = a.ident_slice(a.fun(f).params);
@@ -390,9 +387,13 @@ impl Importer {
                         args: &c[1..],
                     }
                 }
-                E::Var(id) => View::Var {
-                    var: self.var(a.ident(id)),
-                },
+                E::Var(id) => {
+                    let var = self.var(a.ident(id));
+                    if self.existing_loop_depth != 0 {
+                        self.b.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
+                    }
+                    View::Var { var }
+                }
                 E::Qualified(id) => {
                     let (m, member) = a.qual(id);
                     let module = self.module(m);
@@ -433,11 +434,17 @@ impl Importer {
                     View::JTemplate { values: c, info }
                 }
                 E::InterpolatedTemplate(id, _) => {
+                    if a.segments(id).len() != c.len() + 1 {
+                        return Err(Unsupported("JS template segment count"));
+                    }
                     let parts = a.segments(id).iter().map(|s| self.segment(s)).collect();
                     let info = self.b.js_info(JsPayload::Template(parts));
                     View::JTemplate { values: c, info }
                 }
                 E::TaggedTemplate(_, id, _) => {
+                    if a.tagged(id).len() != c.len() {
+                        return Err(Unsupported("JS tagged template segment count"));
+                    }
                     let parts = a
                         .tagged(id)
                         .iter()
@@ -541,9 +548,22 @@ impl Importer {
                 S::Variable(id) => {
                     let h = a.var(id);
                     aux = (h.property as u16) | ((h.ident_info.used_stats as u16) << 2);
-                    View::SDecl {
-                        var: self.var(h.ident),
-                        value: c.first().copied(),
+                    let var = self.var(h.ident);
+                    if let Some(&value) = c.first() {
+                        if let View::JRecordRest { info, .. } = self.b.view(value) {
+                            // Retain the descriptor node (and its cold data).
+                            // Bit 15 distinguishes this imported descriptor
+                            // from an SRest whose value is the source object.
+                            aux |= 1 << 15;
+                            View::SRest { var, value, info }
+                        } else {
+                            View::SDecl {
+                                var,
+                                value: Some(value),
+                            }
+                        }
+                    } else {
+                        View::SDecl { var, value: None }
                     }
                 }
                 S::Exp(_) => View::SExp { value: c[0] },
@@ -562,10 +582,23 @@ impl Importer {
                 S::ForRange(id) => {
                     let h = a.for_range(id);
                     aux = h.direction as u16;
-                    View::SForRange {
-                        var: self.var(a.ident(h.ident)),
-                        parts: c,
-                        label: self.label(a, h.label),
+                    let var = self.var(a.ident(h.ident));
+                    let label = self.label(a, h.label);
+                    if h.init.is_some() {
+                        View::SForRange {
+                            var,
+                            parts: c,
+                            label,
+                        }
+                    } else {
+                        self.existing_loop_depth -= 1;
+                        self.b.vars.flags[var.index()].0 |= VarFlags::ASSIGNED | VarFlags::CAPTURED;
+                        let variable = self.b.new_node(View::Var { var }, 0);
+                        View::SForRangeExisting {
+                            variable,
+                            parts: c,
+                            label,
+                        }
                     }
                 }
                 S::ForOf(id) => {
@@ -660,6 +693,7 @@ impl Importer {
         };
         let binder = match view {
             View::SDecl { var, .. }
+            | View::SRest { var, .. }
             | View::SForRange { var, .. }
             | View::SForOf { var, .. }
             | View::SForAwaitOf { var, .. } => Some(var),
@@ -669,14 +703,38 @@ impl Importer {
         if binder.is_some_and(|v| self.b.vars.binder(v).is_some()) {
             return Err(Unsupported("multiply bound JS identifier"));
         }
+        if let View::SRest { var, info, .. } = view {
+            let JsPayload::Rest(fields) = self.b.javascript(info) else {
+                unreachable!()
+            };
+            self.rest_binders.clear();
+            self.rest_binders.insert(var);
+            for v in fields.iter().filter_map(|f| f.binding) {
+                if self.b.vars.binder(v).is_some() || !self.rest_binders.insert(v) {
+                    return Err(Unsupported("multiply bound JS record-rest field"));
+                }
+            }
+        }
         let node = self.b.new_node(view, aux);
         let cold = match s {
             Source::Expr(e) => a.expr_cold(e),
             Source::Stmt(s) => a.stmt_cold(s),
             Source::Block(_) => j::Cold::default(),
         };
-        if let Some(cold) = self.cold(a, cold)? {
-            self.b.set_cold(node, cold);
+        if let Some(data) = self.cold(a, cold)? {
+            self.b.set_cold(node, data);
+            if cold.source_loc.is_some() {
+                let mut flags = self.b.nodes[node.index()].flags();
+                flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                self.b.nodes[node.index()].set_flags(flags);
+            }
+        }
+        if let Source::Expr(expr) = s {
+            if let E::Number(id) = a.ek(expr) {
+                if let Number::Int { c: Some(code), .. } = a.number(id) {
+                    self.b.nodes[node.index()].set_js_char(*code);
+                }
+            }
         }
         Ok(node)
     }
@@ -723,7 +781,14 @@ pub fn import_js(p: &j::JsDepsProgram) -> Result<Imported, Unsupported> {
                     };
                     if let Some(seen) = seen {
                         if *seen {
-                            return Err(Unsupported("shared non-leaf JS node"));
+                            // A bounded-size shape can be copied per incoming
+                            // edge without a DAG expansion. Limit both arity
+                            // and depth: never multiply two unbounded lists.
+                            let mut shallow = n <= 4;
+                            children(a, s, |child| children(a, child, |_| shallow = false));
+                            if !shallow {
+                                return Err(Unsupported("shared non-leaf JS node"));
+                            }
                         }
                         *seen = true;
                     }
@@ -959,7 +1024,7 @@ impl Exporter<'_> {
             body,
             should_break: c.should_break,
             comment: self.label(c.comment),
-            source_loc: (c.loc != LamLoc::NONE).then_some(c.loc),
+            source_loc: c.loc,
         }
     }
     fn number(&self, id: ConstId) -> Result<Number, Unsupported> {
@@ -1003,7 +1068,11 @@ impl Exporter<'_> {
         let cold = if let Some(c) = b.cold(id) {
             j::Cold {
                 comment: self.label(c.comment),
-                source_loc: (c.loc != LamLoc::NONE).then_some(c.loc),
+                source_loc: b
+                    .node(id)
+                    .flags()
+                    .contains(NodeFlags::JS_LOC_PRESENT)
+                    .then_some(c.loc),
             }
         } else {
             j::Cold::default()
@@ -1123,7 +1192,16 @@ impl Exporter<'_> {
                 let tag = self.a.tag_id(tag.clone());
                 E::CamlBlock(self.exprs(c)?, mutability(aux)?, tag)
             }
-            View::JNumber { value } => E::Number(self.a.number_id(self.number(value)?)),
+            View::JNumber { value } => {
+                let mut number = self.number(value)?;
+                if let Some(code) = b.node(id).js_char() {
+                    let Number::Int { c, .. } = &mut number else {
+                        return Err(Unsupported("character decoration on non-integer J number"));
+                    };
+                    *c = Some(code);
+                }
+                E::Number(self.a.number_id(number))
+            }
             View::JObject { info, .. } => {
                 let JsPayload::Object(keys) = b.javascript(info) else {
                     return Err(Unsupported("missing J object metadata"));
@@ -1191,6 +1269,21 @@ impl Exporter<'_> {
                     Output::Stmt(self.a.stmt_with(S::Block(block), cold))
                 });
             }
+            View::SRest { var, .. } => {
+                if aux & (1 << 15) == 0 {
+                    return Err(Unsupported("SRest without imported descriptor"));
+                }
+                let value = c[0].expr()?;
+                let info = self.a.var_id(j::VarDecl {
+                    ident: self.ident(var)?,
+                    value: Some(value),
+                    property: property(aux & 3)?,
+                    ident_info: js::IdentInfo {
+                        used_stats: used((aux & 0x7fff) >> 2)?,
+                    },
+                });
+                return Ok(Output::Stmt(self.a.stmt_with(S::Variable(info), cold)));
+            }
             View::SDecl { var, .. } => {
                 let info = j::VarDecl {
                     ident: self.ident(var)?,
@@ -1234,6 +1327,21 @@ impl Exporter<'_> {
                     self.a
                         .stmt_with(S::While(label, c[0].expr()?, c[1].block()?), cold),
                 ));
+            }
+            View::SForRangeExisting { label, .. } => {
+                let E::Var(ident) = self.a.ek(c[0].expr()?) else {
+                    return Err(Unsupported("non-variable existing range target"));
+                };
+                let label = self.label(label);
+                let info = self.a.for_range_id(j::ForRangeInfo {
+                    label,
+                    ident,
+                    init: None,
+                    end: c[1].expr()?,
+                    body: c[2].block()?,
+                    direction: direction(aux)?,
+                });
+                return Ok(Output::Stmt(self.a.stmt_with(S::ForRange(info), cold)));
             }
             View::SForRange { var, label, .. } => {
                 let ident = self.a.ident_id(self.ident(var)?);
@@ -1354,8 +1462,7 @@ impl Exporter<'_> {
             | View::ForAwaitOf { .. }
             | View::Assign { .. }
             | View::Break
-            | View::Continue
-            | View::SRest { .. } => return Err(Unsupported("node not produced by J import")),
+            | View::Continue => return Err(Unsupported("node not produced by J import")),
         };
         Ok(Output::Expr(self.a.expr_with(expr, cold)))
     }
@@ -1455,6 +1562,20 @@ mod tests {
         assert_eq!(p.side_effect, q.side_effect);
         let again = import_js(&q).unwrap();
         assert_eq!(imported.arena.dump(), again.arena.dump());
+        assert_eq!(
+            imported
+                .arena
+                .nodes
+                .iter()
+                .map(|n| n.js_char())
+                .collect::<Vec<_>>(),
+            again
+                .arena
+                .nodes
+                .iter()
+                .map(|n| n.js_char())
+                .collect::<Vec<_>>()
+        );
         assert_eq!(imported.arena.pools.j_modules, again.arena.pools.j_modules);
     }
     fn expression(build: impl FnOnce(&mut j::JsArena, j::Expr, j::Expr) -> E) {
@@ -1775,10 +1896,273 @@ mod tests {
     });
 
     #[test]
+    fn long_statement_list_is_linear() {
+        let mut a = j::JsArena::new();
+        let x = a.expr(E::Bool(true));
+        let block = (0..10_000).map(|_| a.stmt(S::Exp(x))).collect();
+        let p = program(a, block);
+        let i = import_js(&p).unwrap();
+        assert_eq!(i.steps, 20_001);
+        i.arena.steps.set(0);
+        let q = export_js(&i).unwrap();
+        assert_eq!(q.program.block.len(), 10_000);
+        assert!(i.arena.steps.get() < 150_000);
+    }
+    #[test]
+    fn long_chains_are_iterative_and_linear() {
+        for op in 0..3 {
+            let mut a = j::JsArena::new();
+            let s = a.str("x");
+            let x = a.expr(E::Str(s));
+            let mut e = x;
+            for _ in 0..10_000 {
+                e = a.expr(match op {
+                    0 => E::StringAppend(e, x),
+                    1 => E::Seq(e, x),
+                    _ => E::Bin(BinOp::Or, e, x),
+                });
+            }
+            let stmt = a.stmt(S::Exp(e));
+            let p = program(a, vec![stmt]);
+            let i = import_js(&p).unwrap();
+            assert_eq!(i.steps, 20_003);
+            i.arena.steps.set(0);
+            let q = export_js(&i).unwrap();
+            assert_eq!(q.program.arena.node_counts().0, 20_001);
+            assert!(i.arena.steps.get() < 150_000);
+        }
+    }
+    #[test]
+    fn variable_facts_and_uses() {
+        let mut a = j::JsArena::new();
+        let id = ident(1);
+        let n = a.number_id(Number::int(7));
+        let value = a.expr(E::Number(n));
+        let var = a.var_id(j::VarDecl {
+            ident: id,
+            value: Some(value),
+            property: js::Property::Strict,
+            ident_info: js::IdentInfo::default(),
+        });
+        let decl = a.stmt(S::Variable(var));
+        let iid = a.ident_id(id);
+        let x = a.expr(E::Var(iid));
+        let use_ = a.stmt(S::Return(x));
+        let mut p = program(a, vec![decl, use_]);
+        p.program.exports.push(id);
+        p.program.export_set.insert(id);
+        p.program.name_reservations.push(ident(9));
+        roundtrip(&p);
+        let i = import_js(&p).unwrap();
+        let v = VarId(0);
+        assert_eq!(i.arena.vars.uses(v), 1);
+        assert!(matches!(i.arena.vars.fact(v), Fact::Const(_)));
+        assert!(i.arena.vars.flags(v).contains(VarFlags::EXPORTED));
+        assert!(i.arena.vars.binder(v).is_some());
+    }
+    #[test]
+    fn existing_range_uses_and_assigns_the_declared_variable() {
+        let mut a = j::JsArena::new();
+        let ident = a.ident_id(ident(1));
+        let number = a.number_id(Number::int(0));
+        let value = a.expr(E::Number(number));
+        let decl = a.var_id(j::VarDecl {
+            ident: a.ident(ident),
+            value: Some(value),
+            property: js::Property::Variable,
+            ident_info: js::IdentInfo::default(),
+        });
+        let decl = a.stmt(S::Variable(decl));
+        let info = a.for_range_id(j::ForRangeInfo {
+            label: None,
+            ident,
+            init: None,
+            end: value,
+            body: j::StmtList::EMPTY,
+            direction: js::ForDirection::Upto,
+        });
+        let loop_ = a.stmt(S::ForRange(info));
+        let p = program(a, vec![decl, loop_]);
+        roundtrip(&p);
+        let i = import_js(&p).unwrap();
+        let v = VarId(0);
+        assert_eq!(i.arena.vars.uses(v), 1);
+        assert!(i.arena.vars.flags(v).contains(VarFlags::ASSIGNED));
+        assert!(i.arena.vars.flags(v).contains(VarFlags::CAPTURED));
+        assert_eq!(
+            i.arena.node(i.arena.vars.binder(v).unwrap()).op(),
+            Op::SDecl
+        );
+    }
+    #[test]
+    fn destructuring_establishes_every_binder_and_retains_expression_cold() {
+        let mut a = j::JsArena::new();
+        let obj = a.expr(E::Null);
+        let fields = a.rest_id(vec![js::RecordRestField {
+            label: "field".into(),
+            ident: Some(ident(2)),
+        }]);
+        let comment = a.str("rest descriptor");
+        let value = a.expr_with(
+            E::RecordRest(fields, obj),
+            j::Cold {
+                comment: Some(comment),
+                source_loc: Some(LamLoc::for_test(4)),
+            },
+        );
+        let decl = a.var_id(j::VarDecl {
+            ident: ident(3),
+            value: Some(value),
+            property: js::Property::Strict,
+            ident_info: js::IdentInfo::default(),
+        });
+        let decl = a.stmt(S::Variable(decl));
+        let field = a.ident_id(ident(2));
+        let field = a.expr(E::Var(field));
+        let ret = a.stmt(S::Return(field));
+        let p = program(a, vec![decl, ret]);
+        roundtrip(&p);
+        let i = import_js(&p).unwrap();
+        let field = VarId(0);
+        let rest = VarId(1);
+        assert_eq!(i.arena.vars.uses(field), 1);
+        assert_eq!(i.arena.vars.binder(field), i.arena.vars.binder(rest));
+        assert!(!i.arena.vars.flags(field).contains(VarFlags::JS_GLOBAL));
+        assert_eq!(i.arena.vars.fact(field), Fact::Unknown);
+    }
+    #[test]
+    fn captures_parameters_aliases_mutability_and_assignments() {
+        let mut a = j::JsArena::new();
+        let external = a.ident_id(ident(90));
+        let external = a.expr(E::Var(external));
+        let param = a.ident_id(ident(1));
+        let arg = a.expr(E::Var(param));
+        let assign = a.expr(E::Bin(BinOp::Eq, arg, external));
+        let ret = a.stmt(S::Return(assign));
+        let body = a.stmt_list(&[ret]);
+        let params = a.ident_list(&[ident(1)]);
+        let info = a.fun_id(j::FunInfo {
+            params,
+            body,
+            is_method: false,
+            return_unit: false,
+            async_: false,
+            directive: None,
+        });
+        let function = a.expr(E::Fun(info));
+        let decl = a.var_id(j::VarDecl {
+            ident: ident(2),
+            value: Some(function),
+            property: js::Property::Strict,
+            ident_info: js::IdentInfo::default(),
+        });
+        let decl = a.stmt(S::Variable(decl));
+        let p = program(a, vec![decl]);
+        roundtrip(&p);
+        let i = import_js(&p).unwrap();
+        let param = VarId(0);
+        let external = VarId(1);
+        let fun = VarId(2);
+        assert_eq!(i.arena.vars.fact(param), Fact::Param);
+        assert_eq!(i.arena.vars.uses(param), 1);
+        assert!(
+            i.arena
+                .vars
+                .flags(param)
+                .contains(VarFlags::PARAM | VarFlags::ASSIGNED)
+        );
+        assert!(
+            i.arena
+                .vars
+                .flags(external)
+                .contains(VarFlags::CAPTURED | VarFlags::JS_GLOBAL)
+        );
+        assert!(matches!(
+            i.arena.vars.fact(fun),
+            Fact::Function {
+                rec: RecFlag::No,
+                ..
+            }
+        ));
+    }
+    #[test]
+    fn shared_bounded_reads_expand_but_unbounded_dags_do_not() {
+        let mut a = j::JsArena::new();
+        let id = a.ident_id(ident(1));
+        let value = a.expr(E::Var(id));
+        let field = a.str("field");
+        let read = a.expr(E::StaticIndex(value, field, j::FieldPos::NONE));
+        let values = a.expr_list(&[read, read]);
+        let pair = a.expr(E::Array(values, MutableFlag::Immutable));
+        let stmt = a.stmt(S::Exp(pair));
+        let p = program(a, vec![stmt]);
+        roundtrip(&p);
+        let i = import_js(&p).unwrap();
+        assert_eq!(i.arena.vars.uses(VarId(0)), 2);
+        let mut a = j::JsArena::new();
+        let mut e = a.expr(E::Bool(true));
+        for _ in 0..30 {
+            e = a.expr(E::Seq(e, e));
+        }
+        let stmt = a.stmt(S::Exp(e));
+        assert_eq!(
+            import_js(&program(a, vec![stmt])).err().unwrap(),
+            Unsupported("shared non-leaf JS node")
+        );
+    }
+    expr_case!(different_character_code, |a, _x, _y| E::Number(
+        a.number_id(Number::Int { i: 12, c: Some(65) })
+    ));
+    expr_case!(negative_static_position, |a, x, _y| E::StaticIndex(
+        x,
+        a.str("field"),
+        j::FieldPos::new(Some(-1))
+    ));
+    #[test]
+    fn explicit_empty_location_is_not_absent() {
+        let mut a = j::JsArena::new();
+        let value = a.expr_with(
+            E::Null,
+            j::Cold {
+                comment: None,
+                source_loc: Some(LamLoc::NONE),
+            },
+        );
+        let body = a.stmt(S::Return(value));
+        let body = a.stmt_list(&[body]);
+        let sw = a.int_switch_id(j::IntSwitchInfo {
+            clauses: vec![(
+                1,
+                j::Clause {
+                    body,
+                    should_break: true,
+                    comment: None,
+                    source_loc: Some(LamLoc::NONE),
+                },
+            )],
+            default: None,
+        });
+        let s = a.stmt_with(
+            S::IntSwitch(value, sw),
+            j::Cold {
+                comment: None,
+                source_loc: Some(LamLoc::NONE),
+            },
+        );
+        let p = program(a, vec![s]);
+        roundtrip(&p);
+        let q = export_js(&import_js(&p).unwrap()).unwrap();
+        assert_eq!(
+            q.program.arena.stmt_cold(q.program.block[0]).source_loc,
+            Some(LamLoc::NONE)
+        );
+    }
+    #[test]
     fn packed_sizes_unchanged() {
         assert_eq!(std::mem::size_of::<Node>(), 16);
         assert_eq!(std::mem::size_of::<FuncHeader>(), 20);
         assert_eq!(std::mem::size_of::<TemplatePart>(), 12);
         assert_eq!(std::mem::size_of::<js::ModuleId>(), 80);
+        assert_eq!(std::mem::size_of::<ClauseMeta>(), 16);
     }
 }
