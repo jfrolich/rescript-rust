@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/alias_name_follows_unification.res[0m:[2m23:17-19[0m
+
+  21 [2m│[0m let y: int = x
+  22 [2m│[0m let all = (g, h, y)
+  [1;31m23[0m [2m│[0m let _: string = [1;31mall[0m
+  24 [2m│[0m 
+
+  This has type: [1;31m(myint => myint, option<myint> => myint, int)[0m
+  But it's expected to have type: [1;33mstring[0m

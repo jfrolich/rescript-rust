@@ -1,0 +1,1 @@
+- Lower type levels during unification without a snapshot or declaration lookups when the type names no type of the module being compiled, the part of stage P1 of the type checker redesign that keeps inferred types unchanged.
