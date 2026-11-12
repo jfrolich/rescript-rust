@@ -5152,6 +5152,19 @@ pub(crate) fn freshen_component_module_declaration_bound_idents(
     // EnvLazy thunks. Forcing them through env.ml:475 runs
     // `Subst.modtype sub md.md_type`, with `sub` built by env.ml:1530.
     // Subst.modtype freshens signature binders at compiler/ml/subst.ml:352-364.
+    //
+    // An alias to a persistent module, such as each item of a namespace's
+    // module (`module Price = Price-Shop`), has no binder and names no item
+    // of `parent_sig`, so the substitution leaves it as it is. Building that
+    // substitution walks all of `parent_sig`, which for a namespace is every
+    // module of the package, so every module of the package would do work
+    // proportional to its size (compiler/ml/env.ml `alias_map_components`).
+    if let ModuleType::MtyAlias(_, target) = &md.md_type
+        && let PathView::Pident(target) = target.view()
+        && target.is_persistent()
+    {
+        return;
+    }
     md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
     let maps = build_subst_maps(parent_sig, parent_module_path, ctx);
     freshen_module_type_bound_idents_with_maps(&mut md.md_type, &maps, ctx);
