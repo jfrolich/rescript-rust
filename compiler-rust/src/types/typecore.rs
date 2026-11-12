@@ -7564,6 +7564,7 @@ pub(crate) fn type_exp<'a>(
         crate::parser::ast::ExpressionDesc::Pexp_constant(_)
             | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
             | crate::parser::ast::ExpressionDesc::Pexp_field(..)
+            | crate::parser::ast::ExpressionDesc::Pexp_apply(_)
     ) {
         return type_expect_full(
             tctx,
@@ -7966,7 +7967,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    expected_ty: Expected,
+    mut expected_ty: Expected,
     context: Option<TypeClashContext>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
@@ -8092,7 +8093,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
 
         let ty = crate::types::instance(ctx, desc.val_type);
-        finish_expected(tctx, expr, ty, expected_ty, context)?;
+        finish_expected(tctx, expr, ty, &mut expected_ty, context)?;
 
         return Ok({
             let typed_node = Expression::new(
@@ -8116,17 +8117,18 @@ fn type_expect_with_recarg_unscoped<'a>(
             &expr.pexp_attributes,
         )?;
         // OCaml: rue { ... exp_type = ty_arg; ... }
-        finish_expected(tctx, expr, typed_field.exp_type, expected_ty, context)?;
+        finish_expected(tctx, expr, typed_field.exp_type, &mut expected_ty, context)?;
         return Ok(typed_field);
     }
-    let expected_ty = match expected_ty {
-        Expected::Known(ty) => ty,
-        Expected::Infer { level } => {
-            let ty = ctx.new_var(None);
-            ctx.set_level(ty, level);
-            ty
-        }
-    };
+    if let ED::Pexp_apply(inner) = &expr.pexp_desc {
+        let typed_apply =
+            type_application(tctx, env, expr, inner, &mut expected_ty, context.clone())?;
+        // The two rue checks share one expected type, including when an Infer
+        // request must be materialised by the first check or a lowered apply.
+        finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
+        return Ok(typed_apply);
+    }
+    let expected_ty = materialize_expected(tctx, expr, &mut expected_ty);
 
     match &expr.pexp_desc {
         ED::Pexp_braces(braces) => {
@@ -8740,15 +8742,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             })
         }
 
-        ED::Pexp_apply(inner) => {
-            // Function application
-            let typed_apply =
-                type_application(tctx, env, expr, inner, expected_ty, context.clone())?;
-            // Match OCaml Pexp_apply: mk_apply applies rue once, then the
-            // caller applies rue again on the resulting expression.
-            rue_unify(tctx, loc, typed_apply.exp_type, expected_ty, context)?;
-            Ok(typed_apply)
-        }
+        ED::Pexp_apply(_) => unreachable!("applications were typed above"),
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
@@ -9094,24 +9088,35 @@ fn finish_expected(
     tctx: &mut TypeCheckContext<'_>,
     expr: &ParsedExpression,
     ty: TypeExprRef,
-    expected: Expected,
+    expected: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<()> {
-    let expected = match expected {
-        Expected::Known(expected) => expected,
+    if let Expected::Infer { level } = *expected
+        && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
+    {
+        return Ok(());
+    }
+    let expected = materialize_expected(tctx, expr, expected);
+    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
+}
+
+fn materialize_expected(
+    tctx: &TypeCheckContext<'_>,
+    expr: &ParsedExpression,
+    expected: &mut Expected,
+) -> TypeExprRef {
+    match *expected {
+        Expected::Known(ty) => ty,
         Expected::Infer { level } => {
-            if crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level) {
-                return Ok(());
-            }
             if tctx.type_ctx.compiler_counters_enabled() {
                 crate::perf_counters::record_expected_var(expected_var_use(expr));
             }
-            let expected = tctx.type_ctx.new_var(None);
-            tctx.type_ctx.set_level(expected, level);
-            expected
+            let ty = tctx.type_ctx.new_var(None);
+            tctx.type_ctx.set_level(ty, level);
+            *expected = Expected::Known(ty);
+            ty
         }
-    };
-    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
+    }
 }
 
 /// Unify expression types, raising ExprTypeClash on error.
@@ -9320,7 +9325,7 @@ fn translate_unified_ops(
     sexp: &ParsedExpression,
     apply: &PexpApply,
     typed_funct: &Expression,
-    expected_ty: TypeExprRef,
+    expected_ty: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> Option<TypeCoreResult<Expression>> {
     let loc = sexp.pexp_loc;
@@ -9409,7 +9414,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -9465,7 +9470,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -9809,7 +9814,7 @@ fn type_application(
     env: &Env,
     sexp: &ParsedExpression,
     apply: &PexpApply,
-    expected_ty: TypeExprRef,
+    expected_ty: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
@@ -9955,7 +9960,8 @@ fn type_application(
         if let Some((_arg_ty, ty_res)) =
             filter_arrow_for_lowered_apply(tctx, env, typed_funct.exp_type, args.len())
         {
-            let expected_inst = crate::types::instance(ctx, expected_ty);
+            let expected = materialize_expected(tctx, sexp, expected_ty);
+            let expected_inst = crate::types::instance(ctx, expected);
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
     }
@@ -10358,7 +10364,7 @@ fn type_application(
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
-    rue_unify(tctx, loc, result_ty, expected_ty, context)?;
+    finish_expected(tctx, sexp, result_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -29958,6 +29964,35 @@ mod tests {
             crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
         let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
+    }
+
+    #[test]
+    fn inferred_variable_result_materializes_once_for_repeated_rue() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+        let literal = arena.intern_string("42");
+        let expr = ParsedExpression {
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(
+                crate::parser::ast::Constant::Integer(literal, None),
+            ),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Default::default(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        tctx.set_unify_env(&env);
+        ctx.set_current_level(11);
+        let result = ctx.new_var(None);
+        let mut expected = Expected::Infer { level: 10 };
+        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        let Expected::Known(materialized) = expected else {
+            panic!("variable roots retain ordinary unification");
+        };
+        assert_eq!(ctx.repr(result), materialized);
+        assert_eq!(ctx.get_level(materialized), 10);
+        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        assert!(matches!(expected, Expected::Known(ty) if ty == materialized));
+        assert_eq!(ctx.repr(result), materialized);
     }
 
     #[test]
