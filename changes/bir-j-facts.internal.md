@@ -1,1 +1,1 @@
-- Maintain JavaScript purity facts and iterative structural equality for the opt-in backend.
+- Implement the Bir JavaScript normalising constructor rules, cached purity facts, iterative structural equality, and legacy-printer oracle proofs for the opt-in backend.

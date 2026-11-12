@@ -4,7 +4,7 @@ use crate::bir::{Bir, NodeFlags, NodeId};
 /// J-M14, O:339 push_effect_expression: discard a strictly pure effect value.
 /// All expression producers supported by S3.3a are strictly pure. Their
 /// structural preludes remain on the statement stack; only the value is dropped.
-/// Later slices add comma splitting and effectful values when they can occur.
+/// The complete sequence/effect cases are handled by jm14_push_effect_expression.
 pub(crate) fn discard_pure_effect(bir: &mut Bir, value: NodeId) {
     assert!(bir.node(value).flags().contains(NodeFlags::STRICT));
     bir.release(value);
