@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/checker_identity_05_weak.res[0m:[2m10:17-24[0m
+
+   8 [2m│[0m takesMyInt(y)
+   9 [2m│[0m let observed = (r, x, y)
+  [1;31m10[0m [2m│[0m let _: string = [1;31mobserved[0m
+  11 [2m│[0m 
+
+  This has type: [1;31m(ref<option<myint>>, int, myint)[0m
+  But it's expected to have type: [1;33mstring[0m
