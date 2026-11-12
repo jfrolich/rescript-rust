@@ -653,6 +653,8 @@ fn publish_signature(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Optional derived-code census output, read once when options are created.
+    pub derived_census: Option<PathBuf>,
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
     /// Dormant publication equality oracle; configured once, not per unit.
@@ -902,9 +904,20 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+impl CompilerOptions {
+    /// Read the census switch at option creation. O(path length), once per options
+    /// instance, never at an item or node lookup.
+    pub fn derived_census_from_env() -> Option<PathBuf> {
+        let path = std::env::var_os("RESCRIPT_DERIVED_CENSUS").map(PathBuf::from);
+        if path.is_some() { crate::timing::enable_for_census(); }
+        path
+    }
+}
+
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            derived_census: Self::derived_census_from_env(),
             backend: crate::bir::shadow::BackendMode::from_env(),
             signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
@@ -6433,6 +6446,10 @@ pub fn run_implementation_frontend(
     options: &CompilerOptions,
     out: &mut String,
 ) -> Result<ImplementationFrontend> {
+    let census_start = crate::derived_census::start(options.derived_census.is_some());
+    if let Some(path) = &options.derived_census {
+        parser.arena_mut().derived_census = Some(Box::new(crate::derived_census::Census::new(path, filename)));
+    }
     let parser_warnings_have_errors =
         format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
@@ -6569,6 +6586,14 @@ pub fn run_implementation_frontend(
     // applied once to the top-level structure after the frontend.
     let structure =
         crate::binary_ast::writer::apply_no_export_config(parser.arena_mut(), structure);
+    if let Some(start) = census_start {
+        let elapsed = crate::derived_census::nanos(start.elapsed());
+        if let Some(mut census) = parser.arena_mut().derived_census.take() {
+            census.observe(parser.arena(), &structure);
+            census.account_frontend(elapsed);
+            parser.arena_mut().derived_census = Some(census);
+        }
+    }
     Ok(ImplementationFrontend {
         structure,
         warnings_fatal: ppx_warnings_have_errors,
@@ -7714,6 +7739,10 @@ pub fn run_interface_frontend(
     options: &CompilerOptions,
     out: &mut String,
 ) -> Result<InterfaceFrontend> {
+    let census_start = crate::derived_census::start(options.derived_census.is_some());
+    if let Some(path) = &options.derived_census {
+        parser.arena_mut().derived_census = Some(Box::new(crate::derived_census::Census::new(path, filename)));
+    }
     let parser_warnings_have_errors =
         format_parser_warnings(parser, source, filename, options, out);
     if parser.has_errors() {
@@ -7811,6 +7840,14 @@ pub fn run_interface_frontend(
             std::slice::from_ref(warning),
             out,
         );
+    }
+    if let Some(start) = census_start {
+        let elapsed = crate::derived_census::nanos(start.elapsed());
+        if let Some(mut census) = parser.arena_mut().derived_census.take() {
+            census.observe_signature(parser.arena(), &signature);
+            census.account_frontend(elapsed);
+            parser.arena_mut().derived_census = Some(census);
+        }
     }
     Ok(InterfaceFrontend {
         signature,
@@ -9433,6 +9470,8 @@ pub struct InProcessCompileResult {
 /// before JS backend metadata from dependencies is required.
 #[derive(Default)]
 pub struct InProcessPreJsCompileResult {
+    /// Optional accounting carried across the worker handoff without thread-local state.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// The unit's Lambda program, or None when compilation stopped after typing.
     pub lowered_lambda: Option<crate::lambda::arena::LamProgram>,
     /// The modules the program references, whose `.cmj` metadata the JS
@@ -10459,6 +10498,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         js_targets = options.js_output_targets.len()
     )
     .entered();
+    let census_timing = options.derived_census.as_ref().map(|_| crate::timing::ThreadTimingGuard::start());
     let (file_directives, debug, jsx_preserve) = {
         let _phase = info_span!("compiler.directives").entered();
         (
@@ -10491,6 +10531,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         &file_config,
         &frontend_warning_specs,
     );
+    tctx.derived_census = arena.derived_census.clone();
     drop(env_setup_span);
     if let Some(start) = env_setup_start {
         crate::timing::record(crate::timing::Phase::EnvSetup, start.elapsed());
@@ -10986,6 +11027,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                 unit_name,
                 &raw_arena,
             );
+        raw_converter.derived_census = tctx.derived_census.take();
         raw_converter.set_preserve_expanded_sparse_records(
             options.capture_intermediates || options.dumps.iter().any(|kind| kind.is_lambda()),
         );
@@ -11029,6 +11071,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         let possible_required_modules = raw_converter.take_possible_required_modules();
         let flat_make_paths = raw_converter.take_flat_make_paths();
         let lam_locs = raw_converter.take_lam_locs();
+        tctx.derived_census = raw_converter.derived_census.take();
         drop(raw_converter);
         Ok((
             (raw_arena.into_inner(), raw_lambda),
@@ -11212,7 +11255,11 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             pers_struct: pers_struct.take(),
         })?;
     }
+    if let (Some(census), Some(timing)) = (&mut tctx.derived_census, &census_timing) {
+        census.account_pre_js(timing.snapshot());
+    }
     Ok(InProcessPreJsCompileResult {
+        derived_census: tctx.derived_census.take(),
         lowered_lambda: Some(lowered_lambda),
         possible_required_modules,
         flat_make_paths,
@@ -11275,6 +11322,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         js_targets = options.js_output_targets.len()
     )
     .entered();
+    let census_timing = pre_js.derived_census.as_ref().map(|_| crate::timing::ThreadTimingGuard::start());
     let mut persistent_env_for_js = PersistentEnv::from_registry(registry);
     let (load_path, load_path_display) = shared_load_path_with_display(options);
     persistent_env_for_js.set_load_path_shared(load_path, load_path_display);
@@ -11417,6 +11465,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             )?;
         }
     }
+    let census_print_start = crate::derived_census::start(pre_js.derived_census.is_some());
     let (js, js_outputs) = crate::timing::measure(crate::timing::Phase::Codegen, || {
         let _phase = info_span!(
             "compiler.js_print",
@@ -11473,6 +11522,12 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             (js, js_outputs)
         }
     });
+    if let (Some(census), Some(timing), Some(print_start)) =
+        (&mut pre_js.derived_census, &census_timing, census_print_start)
+    {
+        census.account_js(timing.snapshot(), crate::derived_census::nanos(print_start.elapsed()));
+        census.finish(std::iter::once(js.as_str()).chain(js_outputs.iter().map(|out| out.code.as_str())))?;
+    }
     Ok(InProcessCompileResult {
         js_output: js,
         js_outputs,
@@ -11507,6 +11562,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         file = %filename
     )
     .entered();
+    let census_timing = options.derived_census.as_ref().map(|_| crate::timing::ThreadTimingGuard::start());
     let file_config = extract_file_config_from_signature(signature, arena);
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
@@ -11775,6 +11831,10 @@ pub fn typecheck_preprocessed_signature_in_process(
         SignaturePublicationMode::Eager,
     )?;
 
+    if let (Some(mut census), Some(timing)) = (arena.derived_census.clone(), &census_timing) {
+        census.account_pre_js(timing.snapshot());
+        census.finish(std::iter::empty::<&str>())?;
+    }
     Ok(InProcessInterfaceResult {
         signature: published_signature,
         pers_struct,

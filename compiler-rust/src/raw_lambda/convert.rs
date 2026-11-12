@@ -433,6 +433,8 @@ pub struct RawLambdaDiagnostic {
 
 /// Converter from typedtree to raw lambda.
 pub struct RawLambdaConverter<'a, B: RawLambdaBuilder> {
+    /// Optional binding accounting, owned by this conversion.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     arena: &'a ParseArena,
     /// Node storage of the typed tree being lowered.
     ta: &'a TypedArena,
@@ -469,6 +471,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -501,6 +504,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -534,6 +538,7 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         b: &'a B,
     ) -> Self {
         Self {
+            derived_census: None,
             arena,
             ta,
             type_ctx,
@@ -4795,7 +4800,15 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
                         }
                     }
                 }
-                self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body)
+                let census_start = crate::derived_census::start(self.derived_census.is_some());
+                let census_before = self.derived_census.as_ref().map_or(0, |c| c.conversion.total());
+                let result = self.convert_let_with_body_raw(*rec_flag, self.ta.value_bindings(*bindings), body);
+                if let (Some(census), Some(start)) = (&mut self.derived_census, census_start) {
+                    let children = census.conversion.total() - census_before;
+                    census.conversion.add(census.typed_group(bindings.start()),
+                        crate::derived_census::nanos(start.elapsed()).saturating_sub(children));
+                }
+                result
             }
             StructureItemDesc::Tstr_module(binding) => {
                 let old_len = fields.len();

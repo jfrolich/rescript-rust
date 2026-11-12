@@ -547,7 +547,8 @@ fn parse_source(
     super::build_types::StoredAst,
     Dependencies,
 )> {
-    rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
+    let census_start = rescript_compiler::derived_census::start(options.derived_census.is_some());
+    let mut result = rescript_compiler::timing::measure(rescript_compiler::timing::Phase::Parse, || {
         let source = source_bytes_to_latin1(bytes);
         let mut parser = Parser::with_locations(source_path_for_ast.to_string(), &source, locations);
         // Frontend warning reports, in the order `bsc -bs-ast` prints them.
@@ -635,7 +636,17 @@ fn parse_source(
                 deps,
             ))
         }
-    })
+    });
+    if let (Some(start), Ok((_, stored, _))) = (census_start, &mut result) {
+        let arena = match stored {
+            super::build_types::StoredAst::Structure(ast) => Arc::get_mut(ast).map(|ast| &mut ast.arena),
+            super::build_types::StoredAst::Signature(ast) => Arc::get_mut(ast).map(|ast| &mut ast.arena),
+        };
+        if let Some(arena) = arena && let Some(census) = &mut arena.derived_census {
+            census.account_parse(rescript_compiler::derived_census::nanos(start.elapsed()));
+        }
+    }
+    result
 }
 
 fn filter_ppx_flags(

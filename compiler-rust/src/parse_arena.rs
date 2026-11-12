@@ -483,6 +483,8 @@ struct ExprOverrides {
 /// indices.
 #[derive(Debug)]
 pub struct ParseArena {
+    /// Optional module-owned census, absent on the default compilation path.
+    pub derived_census: Option<Box<crate::derived_census::Census>>,
     /// Location-free builds retain node identity and generated/source provenance,
     /// but allocate no position or location records. Full locations are populated
     /// only by a fresh diagnostic compilation.
@@ -1047,6 +1049,7 @@ impl Default for ParseArena {
             type_lists: ListPool::default(),
             vb_lists: ListPool::default(),
             derived_value_groups: Vec::new(),
+            derived_census: None,
             expr_field_lists: ListPool::default(),
             pat_field_lists: ListPool::default(),
             case_lists: ListPool::default(),

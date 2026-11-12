@@ -1,6 +1,9 @@
 //! The single seam for built-in derives. Deleting `spice_ppx` means deleting
 //! the bodies here, returning unchanged items and `false` for mapper detection.
 
+/// Optional derived-code measurement, owned by one compilation.
+pub mod census;
+
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{SignatureItem, StructureItem};
 
@@ -20,7 +23,12 @@ pub fn expand_structure_item_with_mapper(
     arena: &mut ParseArena,
     active: bool,
 ) -> Result<Vec<StructureItem>, String> {
-    super::spice_ppx::expand_structure_item_with_mapper(item, arena, active)
+    let start = census::start(arena.derived_census.is_some());
+    let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
+    if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
+        census.generation.add(active, census::nanos(start.elapsed()));
+    }
+    result
 }
 
 /// Expand built-in derives on a signature item.

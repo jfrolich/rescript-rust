@@ -16092,6 +16092,9 @@ fn type_structure_unscoped<'a>(
     let mut names = Names::default();
 
     for item in items {
+        let census_start = crate::derived_census::start(tctx.derived_census.is_some());
+        let census_before = tctx.derived_census.as_ref().map_or(0, |c| c.typecheck.total());
+        let counter_before = tctx.derived_census.as_ref().and_then(|c| c.counter_snapshot());
         check_structure_item_names(&mut names, arena, item)?;
         let ctx = tctx.type_ctx;
         ctx.init_def(ctx.current_stamp());
@@ -16103,6 +16106,18 @@ fn type_structure_unscoped<'a>(
         }
         if !rescript_hide_structure_item(&typed_item.str_desc, arena) {
             sig_items.extend(item_sig);
+        }
+        if let (Some(census), Some(start)) = (&mut tctx.derived_census, census_start) {
+            let derived = match item.pstr_desc {
+                ParsedStructureItemDesc::Pstr_value((_, group)) => arena.is_derived_value_group(group),
+                _ => false,
+            };
+            census.account_counters(derived, counter_before);
+            let children = census.typecheck.total() - census_before;
+            census.typecheck.add(derived, crate::derived_census::nanos(start.elapsed()).saturating_sub(children));
+            if derived && let StructureItemDesc::Tstr_value(_, group) = typed_item.str_desc {
+                census.mark_typed_group(group.start());
+            }
         }
         typed_items.push(typed_item);
         current_env = new_env;
