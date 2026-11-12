@@ -4,9 +4,10 @@
 use super::*;
 use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
-use crate::lambda::SwitchDispatch;
-use crate::lambda::arena::{Lam, LamArena, Node as L};
+use crate::lambda::arena::{Lam, LamArena, LamProgram, Node as L};
+use crate::lambda::lam_compat::LetKind;
 use crate::lambda::lam_constant::Constant as C;
+use crate::lambda::{DirectionFlag, SwitchDispatch};
 use smallvec::{SmallVec, smallvec};
 
 /// An ordinary migration fallback, never a compiler error.
@@ -468,5 +469,349 @@ mod tests {
             import_lambda(&a, root),
             Err(Unsupported("float constant spelling"))
         ));
+    }
+}
+
+fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
+    enum Work {
+        Enter(ConstId),
+        Finish(ConstId, usize),
+    }
+    let mut work = vec![Work::Enter(root)];
+    let mut values = Vec::new();
+    while let Some(task) = work.pop() {
+        let (id, count) = match task {
+            Work::Enter(id) => {
+                let children = match b.constant(id) {
+                    Constant::Block { fields, .. } => b.constant_fields(*fields),
+                    Constant::Some(inner) => std::slice::from_ref(inner),
+                    _ => &[],
+                };
+                work.push(Work::Finish(id, children.len()));
+                work.extend(children.iter().rev().copied().map(Work::Enter));
+                continue;
+            }
+            Work::Finish(id, count) => (id, count),
+        };
+        let start = values.len() - count;
+        let c = match b.constant(id) {
+            Constant::Null => C::JsNull,
+            Constant::Undefined(is_unit) => C::JsUndefined { is_unit: *is_unit },
+            Constant::Bool(true) => C::JsTrue,
+            Constant::Bool(false) => C::JsFalse,
+            Constant::Int(i) => C::Int {
+                i: i32::try_from(*i).map_err(|_| Unsupported("integer outside i32"))?,
+                comment: None,
+            },
+            Constant::NativeInt(i) => C::NativeInt {
+                i: *i,
+                comment: None,
+            },
+            Constant::DecoratedInt {
+                value,
+                native,
+                comment,
+            } => {
+                let comment = Some(Box::new(comment.clone()));
+                if *native {
+                    C::NativeInt { i: *value, comment }
+                } else {
+                    C::Int {
+                        i: i32::try_from(*value).map_err(|_| Unsupported("integer outside i32"))?,
+                        comment,
+                    }
+                }
+            }
+            Constant::Constructor(tag) => C::Constructor(tag.clone()),
+            Constant::Char(c) => C::Char(*c as i32),
+            Constant::String(s) => C::String(b.text(*s).to_owned()),
+            Constant::ImmString(s) => C::ImmString(b.text(*s).to_owned()),
+            Constant::Pointer(s) => C::Pointer(b.text(*s).to_owned()),
+            Constant::Float(_) => return Err(Unsupported("float constant spelling")),
+            Constant::BigInt(s) => {
+                let s = b.text(*s);
+                let (sign, value) = s.split_at_checked(1).ok_or(Unsupported("bigint sign"))?;
+                if !matches!(sign, "+" | "-") {
+                    return Err(Unsupported("bigint sign"));
+                }
+                C::BigInt {
+                    negative: sign == "-",
+                    value: value.to_owned(),
+                }
+            }
+            Constant::Block { tag, .. } => C::Block {
+                tag_info: Box::new(tag.clone()),
+                elements: values.drain(start..).collect(),
+            },
+            Constant::Some(_) => C::Some(Box::new(values.pop().unwrap())),
+            Constant::ModuleAlias => C::ModuleAlias,
+        };
+        values.truncate(start);
+        values.push(c);
+    }
+    Ok(values.pop().unwrap())
+}
+
+impl Imported {
+    fn ident(&self, var: VarId) -> Result<Ident, Unsupported> {
+        self.idents
+            .get(var.index())
+            .copied()
+            .ok_or(Unsupported("variable without legacy identity"))
+    }
+    fn export_node(
+        &self,
+        a: &mut LamArena,
+        view: View<'_>,
+        aux: u16,
+        c: &[Lam],
+    ) -> Result<Lam, Unsupported> {
+        let b = &self.arena;
+        Ok(match view {
+            View::Var { var } => a.var(self.ident(var)?),
+            View::Global { module } => a.global_module(
+                *self
+                    .globals
+                    .get(module.index())
+                    .ok_or(Unsupported("module without legacy identity"))?,
+            ),
+            View::Const { value } => a.const_(export_constant(b, value)?),
+            View::Apply { info, .. } => a.apply_raw(c[0], &c[1..], b.application(info).clone()),
+            View::Fun { header, .. } => {
+                let h = b.function(header);
+                let params: Vec<_> = h
+                    .params
+                    .iter()
+                    .map(|v| self.ident(v))
+                    .collect::<Result<_, _>>()?;
+                let params = a.add_idents(&params);
+                let info = a.add_func(
+                    i32::from(aux),
+                    params,
+                    b.function_attributes(header).clone(),
+                    h.loc,
+                );
+                a.function_with(info, c[0])
+            }
+            View::Let { var, value, .. } => {
+                if value.is_none() {
+                    return Err(Unsupported("released let value"));
+                }
+                let kind = match aux {
+                    0 => LetKind::Strict,
+                    1 => LetKind::Alias,
+                    2 => LetKind::StrictOpt,
+                    3 => LetKind::Variable,
+                    _ => return Err(Unsupported("unknown let kind")),
+                };
+                a.let_(kind, self.ident(var)?, c[0], c[1])
+            }
+            View::LetRec { first, values, .. } => {
+                let pairs: Vec<_> = c[..values.len()]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, &value)| self.ident(VarId(first.0 + index(i))).map(|id| (id, value)))
+                    .collect::<Result<_, _>>()?;
+                a.letrec(&pairs, c[values.len()])
+            }
+            View::Prim { primitive, .. } => {
+                let p = b.primitive(primitive);
+                a.prim_raw(p.primitive.clone(), c, p.loc)
+            }
+            View::Switch { header, .. } => {
+                let h = b.switch(header);
+                let keys: Vec<_> = h
+                    .keys
+                    .iter()
+                    .map(|key| match key {
+                        CaseKey::Lambda(key) => Ok(key.clone()),
+                        _ => Err(Unsupported("non-Lambda switch key")),
+                    })
+                    .collect::<Result<_, _>>()?;
+                let info = a.add_switch(
+                    h.consts_full,
+                    keys[..h.constants as usize].iter().cloned(),
+                    h.blocks_full,
+                    keys[h.constants as usize..].iter().cloned(),
+                    h.has_default,
+                    h.dispatch.clone(),
+                );
+                let actions = a.add_list(&c[1..]);
+                a.switch_raw(c[0], actions, info)
+            }
+            View::StrSwitch { header, .. } => {
+                let h = b.switch(header);
+                let keys: Vec<_> = h
+                    .keys
+                    .iter()
+                    .map(|key| match key {
+                        CaseKey::String(key) => Ok(b.text(*key)),
+                        _ => Err(Unsupported("non-string switch key")),
+                    })
+                    .collect::<Result<_, _>>()?;
+                let info = a.add_str_switch(keys, h.has_default);
+                let actions = a.add_list(&c[1..]);
+                a.string_switch_raw(c[0], actions, info)
+            }
+            View::Exit { label, .. } => a.static_raise(label as i32, c),
+            View::Catch { header, .. } => {
+                let h = b.catch(header);
+                let params: Vec<_> = h
+                    .params
+                    .iter()
+                    .map(|v| self.ident(v))
+                    .collect::<Result<_, _>>()?;
+                a.static_catch(c[0], h.label as i32, &params, c[1])
+            }
+            View::Try { exception, .. } => a.try_(c[0], self.ident(exception)?, c[1]),
+            View::TryFinally { .. } => a.try_finally(c[0], c[1]),
+            View::If { .. } => a.if_raw(c[0], c[1], c[2]),
+            View::Seq { .. } => a.seq_raw(c[0], c[1]),
+            View::While { .. } => a.while_(c[0], c[1]),
+            View::For { var, .. } => a.for_(
+                self.ident(var)?,
+                c[0],
+                c[1],
+                match aux {
+                    0 => DirectionFlag::Upto,
+                    1 => DirectionFlag::Downto,
+                    _ => return Err(Unsupported("unknown for direction")),
+                },
+                c[2],
+            ),
+            View::ForOf { var, .. } => a.for_of(self.ident(var)?, c[0], c[1]),
+            View::ForAwaitOf { var, .. } => a.for_await_of(self.ident(var)?, c[0], c[1]),
+            View::Assign { var, .. } => a.assign(self.ident(var)?, c[0]),
+            View::Break => a.break_(),
+            View::Continue => a.continue_(),
+            _ => return Err(Unsupported("JS-level node in Lambda export")),
+        })
+    }
+}
+
+/// Export without running Lambda smart-constructor rewrites or changing the
+/// legacy identifier counter. Each Bir node is decoded once.
+pub fn export_lambda(program: &Imported) -> Result<LamProgram, Unsupported> {
+    enum Work<'a> {
+        Enter(NodeId),
+        Finish(View<'a>, u16, usize),
+    }
+    let b = &program.arena;
+    let mut a = LamArena::new();
+    let mut work = vec![Work::Enter(program.root)];
+    let mut values = Vec::new();
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Enter(id) => {
+                let node = b.node(id);
+                let view = node.view(&b.lists);
+                let children = view.children();
+                work.push(Work::Finish(view, node.aux(), children.len()));
+                work.extend(children.into_iter().rev().map(Work::Enter));
+            }
+            Work::Finish(view, aux, count) => {
+                let start = values.len() - count;
+                let result = program.export_node(&mut a, view, aux, &values[start..])?;
+                values.truncate(start);
+                values.push(result);
+            }
+        }
+    }
+    Ok(LamProgram {
+        arena: a,
+        root: values[0],
+    })
+}
+
+#[cfg(test)]
+mod roundtrip_tests {
+    use super::*;
+
+    fn identity(a: &LamArena, root: Lam) {
+        let imported = import_lambda(a, root).unwrap();
+        imported.arena.validate(Some(imported.root), false).unwrap();
+        let exported = export_lambda(&imported).unwrap();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        crate::lambda::sexp_lambda::print_lambda(&a.export(root), &mut before).unwrap();
+        crate::lambda::sexp_lambda::print_lambda(&exported.to_tree(), &mut after).unwrap();
+        assert_eq!(
+            String::from_utf8(before).unwrap(),
+            String::from_utf8(after).unwrap()
+        );
+    }
+
+    #[test]
+    fn identity_retains_constants_and_binder_metadata() {
+        for value in [
+            C::JsNull,
+            C::JsUndefined { is_unit: true },
+            C::JsTrue,
+            C::JsFalse,
+            C::Int {
+                i: -3,
+                comment: Some(Box::new(
+                    crate::lambda::lam_constant::PointerInfo::ShapeNone,
+                )),
+            },
+            C::NativeInt {
+                i: i64::MIN,
+                comment: None,
+            },
+            C::Char(97),
+            C::String("a\0b".into()),
+            C::ImmString("immutable".into()),
+            C::BigInt {
+                negative: true,
+                value: "000".into(),
+            },
+            C::Some(Box::new(C::JsNull)),
+            C::Pointer("tag".into()),
+            C::ModuleAlias,
+        ] {
+            let mut a = LamArena::new();
+            let root = a.const_(value);
+            identity(&a, root);
+        }
+        let mut a = LamArena::new();
+        let p = Ident::create_local("param");
+        let f = Ident::create_local("f");
+        let body = a.var(p);
+        let params = a.add_idents(&[p]);
+        let h = a.add_func(
+            1,
+            params,
+            crate::lambda::FunctionAttribute::default(),
+            crate::lambda::LamLoc::NONE,
+        );
+        let fun = a.function_with(h, body);
+        let body = a.var(f);
+        let root = a.letrec(&[(f, fun)], body);
+        identity(&a, root);
+    }
+
+    #[test]
+    fn identity_retains_static_catches_loops_and_switches() {
+        let mut a = LamArena::new();
+        let p = Ident::create_local("caught");
+        let arg = a.const_(C::int(42));
+        let body = a.static_raise(7, &[arg]);
+        let handler = a.var(p);
+        let caught = a.static_catch(body, 7, &[p], handler);
+        let scrutinee = a.const_(C::int(0));
+        let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+        let actions = a.add_list(&[caught]);
+        let switch = a.switch_raw(scrutinee, actions, info);
+        let cond = a.const_(C::JsFalse);
+        let root = a.while_(cond, switch);
+        identity(&a, root);
+
+        let mut a = LamArena::new();
+        let i = Ident::create_local("i");
+        let start = a.const_(C::int(10));
+        let end = a.const_(C::int(0));
+        let body = a.var(i);
+        let root = a.for_(i, start, end, DirectionFlag::Downto, body);
+        identity(&a, root);
     }
 }
