@@ -1333,6 +1333,10 @@ macro_rules! validation_methods {
         }
 
         /// O(attribute-name bytes): attributes are metadata, not executable nodes.
+        // Keep warning construction out of the recursive expression/type frames.
+        // Additional census instantiations otherwise change LLVM's inlining
+        // decision here and spill the ordinary visitor's hot state.
+        #[inline(never)]
         fn attribute(&mut self, arena: &ParseArena, attr: &Attribute) {
             if !$validate {
                 return;
@@ -1569,6 +1573,8 @@ pub fn collect_unused_attribute_warnings_structure(
     }
     // O(visited syntax occurrences), one existing validation walk. With validation
     // disabled this is the first syntax walk, and only runs for an enabled census.
+    #[cold]
+    #[inline(never)]
     fn walk<const VALIDATE: bool>(
         items: &[StructureItem],
         arena: &ParseArena,
@@ -1676,6 +1682,8 @@ pub fn collect_unused_attribute_warnings_signature(
     }
     // O(visited syntax occurrences), one existing validation walk. With validation
     // disabled this is the first syntax walk, and only runs for an enabled census.
+    #[cold]
+    #[inline(never)]
     fn walk<const VALIDATE: bool>(
         items: &[SignatureItem],
         arena: &ParseArena,
