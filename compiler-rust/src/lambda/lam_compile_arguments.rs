@@ -61,18 +61,43 @@ pub(crate) fn delay_safe(j: &JsArena, assignable: &AHashSet<Ident>, e: Expr) -> 
     }
 }
 
-/// js_analyzer.ml `is_okay_to_duplicate`.
-pub(crate) fn is_okay_to_duplicate(j: &JsArena, e: Expr) -> bool {
+/// js_analyzer.ml `is_okay_to_duplicate`: a simple expression, with no
+/// computation involved, so that it is okay to duplicate. Without
+/// `property_reads`, reading it twice also gives the same value twice: it
+/// reads no JS property, which may run a getter each time, as one from a
+/// `@get` external or a `@val` name with a dot does. Fields of records count.
+pub(crate) fn is_okay_to_duplicate(j: &JsArena, e: Expr, property_reads: bool) -> bool {
     match j.ek(e) {
+        ExprKind::Var(id) if !property_reads => {
+            let id = j.ident(id);
+            !(is_js_global(&id) && id.name().contains('.'))
+        }
         ExprKind::Var(_)
         | ExprKind::Qualified(_)
         | ExprKind::Bool(_)
         | ExprKind::Str(_)
         | ExprKind::TemplateLiteral(_)
         | ExprKind::Number(_) => true,
-        ExprKind::StaticIndex(e, _, _) => is_okay_to_duplicate(j, e),
+        ExprKind::StaticIndex(e, _, pos) => {
+            (property_reads || pos.get().is_some()) && is_okay_to_duplicate(j, e, property_reads)
+        }
         _ => false,
     }
+}
+
+/// lam_compile.ml `runs_no_code`: evaluating `e` has no side effects and
+/// reads no JS property, which may run a getter. A record field counts.
+fn runs_no_code(j: &JsArena, e: Expr) -> bool {
+    is_okay_to_duplicate(j, e, false)
+}
+
+/// lam_compile.ml `defines_pure_values`: `block` only defines variables as
+/// values that run no code, as a temporary bound to a record field does.
+fn defines_pure_values(j: &JsArena, block: &[Stmt]) -> bool {
+    block.iter().all(|s| match j.sk(*s) {
+        StmtKind::Variable(decl) => j.var(decl).value.is_none_or(|e| runs_no_code(j, e)),
+        _ => false,
+    })
 }
 
 /// `define_variable ~kind:Strict`: undefined becomes a bare declaration.
@@ -100,6 +125,16 @@ impl LambdaCompiler {
                     rest.insert(0, self.j.stmt(StmtKind::Exp(a)));
                 }
                 (rest, b)
+            }
+            // An `OptionalBlock` keeps an optional argument known to be
+            // present.
+            ExprKind::OptionalBlock(inner, identity) => {
+                let (held, inner) = self.evaluate_now(inner);
+                (
+                    held,
+                    self.j
+                        .expr_with(ExprKind::OptionalBlock(inner, identity), cold),
+                )
             }
             ExprKind::Array(xs, mutable) => {
                 let xs = self.j.expr_vec(xs);
@@ -169,9 +204,16 @@ impl LambdaCompiler {
         }
         let mut chunks: Vec<Block> = Vec::with_capacity(args.len() * 2);
         let mut has_code = false;
+        // Whether the statements after the current argument only define
+        // variables as values that run no code.
+        let mut later_defines_pure = true;
         let mut values = ArgValues::with_capacity(args.len());
         for (i, (block, value)) in args.into_iter().enumerate().rev() {
-            let (held, value) = if !has_code {
+            // An argument that runs no code stays in place when the
+            // statements after it only define values that run none either,
+            // since then neither can change the other.
+            let (held, value) = if !has_code || (later_defines_pure && runs_no_code(&self.j, value))
+            {
                 (Vec::new(), value)
             } else {
                 match self.j.ek(value) {
@@ -188,6 +230,8 @@ impl LambdaCompiler {
                 }
             };
             has_code |= !block.is_empty() || !held.is_empty();
+            later_defines_pure &=
+                defines_pure_values(&self.j, &held) && defines_pure_values(&self.j, &block);
             chunks.push(held);
             chunks.push(block);
             values.push(value);
