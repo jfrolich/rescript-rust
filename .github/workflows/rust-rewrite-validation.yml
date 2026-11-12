@@ -204,6 +204,9 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           cargo test --release --locked --manifest-path rewatch/Cargo.toml
 
+      - name: Check signature publication and stored interface determinism
+        run: python3 scripts/test_signature_publication.py
+
       # This job saves the release cache rather than the build job, which
       # the parity jobs wait for: saving a gigabyte takes a while.
       - uses: actions/cache/save@v5
@@ -243,6 +246,9 @@ jobs:
             echo "::endgroup::"
           done
           exit $status
+
+      - name: Test build comparison layouts
+        run: python3 scripts/test_build_comparison_layouts.py
 
   compiler-tests:
     runs-on: ubuntu-24.04-arm

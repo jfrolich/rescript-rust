@@ -2032,6 +2032,22 @@ fn surely_univar_free(ctx: &TypeContext, ty: TypeExprRef, budget: &mut u32) -> b
     }
 }
 
+/// Whether checking `ty` against a fresh expected variable at `level`
+/// would only link the expected variable to `ty`.
+///
+/// Unlike a ground-type shortcut this permits variables below a structure,
+/// but never skips a level update: `update_level_checked` itself returns at
+/// this root level. Keep variable roots (unify_types links the *left* variable
+/// to the expected one), possible universal escapes, and higher levels on the
+/// ordinary path. The bounded walk also conservatively excludes large/cyclic
+/// types, without forcing any declaration or abbreviation.
+pub(crate) fn fresh_expected_only_links(ctx: &TypeContext, ty: TypeExprRef, level: i32) -> bool {
+    let ty = ctx.repr(ty);
+    !matches!(&*ctx.borrow_desc(ty), TypeDesc::Tvar(_))
+        && ctx.get_level(ty) <= level
+        && surely_univar_free(ctx, ty, &mut 256)
+}
+
 /// OCaml `occur` / `occur_rec` (compiler/ml/ctype.ml:1347-1395).
 ///
 /// Fails when `ty0` occurs in `ty`. An occurrence found below a type
@@ -15211,6 +15227,29 @@ mod tests {
         assert!(!deep_occur(&ctx, needle, cycle));
         let mut budget = 256;
         assert!(!surely_univar_free(&ctx, cycle, &mut budget));
+    }
+
+    #[test]
+    fn fresh_expected_only_links_preserves_structure_and_rejects_observable_work() {
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let env = crate::types::initial_env(&ctx);
+        ctx.set_current_level(10);
+        let child = ctx.new_var(None);
+        let structure = ctx.new_tuple(vec![child, child]);
+        assert!(fresh_expected_only_links(&ctx, structure, 10));
+        assert!(!fresh_expected_only_links(&ctx, structure, 9));
+        assert!(!fresh_expected_only_links(&ctx, child, 10));
+        let universal = ctx.new_univar(None);
+        let with_universal = ctx.new_tuple(vec![universal, child]);
+        assert!(!fresh_expected_only_links(&ctx, with_universal, 10));
+        let expected = ctx.new_var(None);
+        let mut state = UnifyState::new();
+        state.set_env(&env);
+        unify(&ctx, &mut state, structure, expected).unwrap();
+        assert_eq!(ctx.repr(expected), structure);
+        assert_eq!(ctx.repr(structure), structure);
+        assert_eq!(ctx.get_level(structure), 10);
+        assert_eq!(ctx.get_level(child), 10);
     }
 
     #[test]

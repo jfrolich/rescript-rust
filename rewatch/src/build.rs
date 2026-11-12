@@ -97,10 +97,41 @@ fn has_config_warnings(build_state: &BuildCommandState) -> bool {
     })
 }
 
+/// "1 module", "2 modules" (rewatch-ocaml's `Output.count_of`).
+pub fn count_of(count: u64, noun: &str) -> String {
+    format!("{count} {noun}{}", if count == 1 { "" } else { "s" })
+}
+
+/// Compiler diagnostics as printed: the compiler colors them (and
+/// `.compiler.log` keeps the colors for editors), so they lose the colors
+/// when stderr shows none, such as when it is redirected or `NO_COLOR` is set
+/// (rewatch-ocaml's `Output.compiler_output`).
+pub fn compiler_output(text: &str) -> std::borrow::Cow<'_, str> {
+    if console::colors_enabled_stderr() {
+        std::borrow::Cow::Borrowed(text)
+    } else {
+        console::strip_ansi_codes(text)
+    }
+}
+
+/// " in 1.23s", or nothing when `duration` is `None` (under --no-timing;
+/// rewatch-ocaml's `Output.duration`).
+pub fn duration_suffix(duration: Option<Duration>) -> String {
+    match duration {
+        Some(duration) => format!(" in {:.2}s", duration.as_secs_f64()),
+        None => String::new(),
+    }
+}
+
+/// `elapsed`, unless --no-timing leaves the durations out.
+fn timed(no_timing: bool, elapsed: Duration) -> Option<Duration> {
+    if no_timing { None } else { Some(elapsed) }
+}
+
 pub fn format_finished_compilation_message(
     compilation_kind: Option<&str>,
     outcome: CompilationOutcome,
-    duration: Duration,
+    duration: Option<Duration>,
 ) -> String {
     let compilation_kind = compilation_kind
         .map(|kind| format!("{kind} "))
@@ -111,8 +142,8 @@ pub fn format_finished_compilation_message(
     };
 
     format!(
-        "{LINE_CLEAR}{status}Finished {compilation_kind}compilation{warning_suffix} in {:.2}s",
-        duration.as_secs_f64()
+        "{LINE_CLEAR}{status}Finished {compilation_kind}compilation{warning_suffix}{}",
+        duration_suffix(duration)
     )
 }
 
@@ -229,6 +260,34 @@ fn executable_hash(path: &Path) -> Option<blake3::Hash> {
     Some(hash)
 }
 
+// Printer selection changes generated text, including the runtime cache. Keep
+// the legacy identity byte-for-byte unchanged, but never reuse oxc outputs when
+// switching back to legacy (or vice versa).
+fn printer_compiler_hash(hash: blake3::Hash, printer: Option<&str>) -> blake3::Hash {
+    if printer == Some("oxc") {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(hash.as_bytes());
+        hasher.update(b"RESCRIPT_JS_PRINTER=oxc");
+        hasher.finalize()
+    } else {
+        hash
+    }
+}
+
+#[cfg(test)]
+mod printer_identity_tests {
+    use super::printer_compiler_hash;
+
+    #[test]
+    fn legacy_identity_is_unchanged_and_oxc_is_distinct() {
+        let hash = blake3::hash(b"compiler");
+        for value in [None, Some("legacy"), Some("unknown")] {
+            assert_eq!(printer_compiler_hash(hash, value), hash);
+        }
+        assert_ne!(printer_compiler_hash(hash, Some("oxc")), hash);
+    }
+}
+
 pub fn get_compiler_info(project_context: &ProjectContext) -> Result<CompilerInfo> {
     get_compiler_info_with_mode(project_context, false)
 }
@@ -251,6 +310,10 @@ fn get_compiler_info_with_mode(
         "Failed to compute bsc hash for {}",
         bsc_path.to_string_lossy()
     ))?;
+    let bsc_hash = printer_compiler_hash(
+        bsc_hash,
+        std::env::var("RESCRIPT_JS_PRINTER").ok().as_deref(),
+    );
     let runtime_path = compile::get_runtime_path(&project_context.current_config, project_context)?;
     Ok(CompilerInfo {
         bsc_path,
@@ -262,7 +325,7 @@ fn get_compiler_info_with_mode(
 #[allow(clippy::too_many_arguments)]
 #[instrument(name = "build.initialize", skip_all)]
 pub fn initialize_build(
-    default_timing: Option<Duration>,
+    no_timing: bool,
     filter: &Option<regex::Regex>,
     show_progress: bool,
     path: &Path,
@@ -273,7 +336,7 @@ pub fn initialize_build(
     source_map_command: SourceMapCommand,
 ) -> Result<BuildCommandState> {
     initialize_build_with_mode(
-        default_timing,
+        no_timing,
         filter,
         show_progress,
         path,
@@ -287,7 +350,7 @@ pub fn initialize_build(
 }
 
 fn initialize_build_with_mode(
-    default_timing: Option<Duration>,
+    no_timing: bool,
     filter: &Option<regex::Regex>,
     show_progress: bool,
     path: &Path,
@@ -363,8 +426,8 @@ fn initialize_build_with_mode(
     packages::parse_packages(&mut build_state)?;
     phase_mark("init:parse-packages");
 
-    let (diff_cleanup, total_cleanup) = if check_only {
-        (0, 0)
+    let cleaned = if check_only {
+        0
     } else {
         clean::cleanup_previous_in_process_build(&mut build_state)
     };
@@ -378,7 +441,7 @@ fn initialize_build_with_mode(
                 // Snapshot-friendly output (no progress prefixes or emojis)
                 println!("Cleaned previous build due to compiler update");
             }
-            println!("Cleaned {diff_cleanup}/{total_cleanup}")
+            println!("Cleaned {}", count_of(cleaned as u64, "stale module"))
         } else {
             if let Some(CompilerCheckResult::CleanedPackagesDueToCompiler) = compiler_check {
                 println!(
@@ -389,13 +452,12 @@ fn initialize_build_with_mode(
                 );
             }
             println!(
-                "{}{} {}Cleaned {}/{} in {:.2}s",
+                "{}{} {}Cleaned {}{}",
                 LINE_CLEAR,
                 style("[1/3]").bold().dim(),
                 SWEEP,
-                diff_cleanup,
-                total_cleanup,
-                default_timing.unwrap_or(timing_clean_total).as_secs_f64()
+                count_of(cleaned as u64, "stale module"),
+                duration_suffix(timed(no_timing, timing_clean_total))
             );
         }
     }
@@ -421,27 +483,19 @@ pub struct IncrementalBuildError {
 
 impl fmt::Display for IncrementalBuildError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        // A terminal gets the cross; redirected output no escape sequences.
+        let cross = if self.plain_output {
+            String::new()
+        } else {
+            CROSS.to_string()
+        };
         match &self.kind {
             IncrementalBuildErrorKind::SourceFileParseError => {
-                if self.plain_output {
-                    write!(f, "{LINE_CLEAR}  Could not parse Source Files",)
-                } else {
-                    write!(f, "{LINE_CLEAR}  {CROSS}Could not parse Source Files",)
-                }
+                write!(f, "{cross}Build failed: could not parse the source files above.")
             }
-            IncrementalBuildErrorKind::CompileError(Some(e)) => {
-                if self.plain_output {
-                    write!(f, "{LINE_CLEAR}  Failed to Compile. Error: {e}",)
-                } else {
-                    write!(f, "{LINE_CLEAR}  {CROSS}Failed to Compile. Error: {e}",)
-                }
-            }
+            IncrementalBuildErrorKind::CompileError(Some(e)) => write!(f, "{cross}Build failed: {e}"),
             IncrementalBuildErrorKind::CompileError(None) => {
-                if self.plain_output {
-                    write!(f, "{LINE_CLEAR}  Failed to Compile. See Errors Above",)
-                } else {
-                    write!(f, "{LINE_CLEAR}  {CROSS}Failed to Compile. See Errors Above",)
-                }
+                write!(f, "{cross}Build failed: see the errors above.")
             }
         }
     }
@@ -464,7 +518,7 @@ pub fn with_build_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
 #[instrument(name = "build.incremental", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build(
     build_state: &mut BuildCommandState,
-    default_timing: Option<Duration>,
+    no_timing: bool,
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
@@ -474,7 +528,7 @@ pub fn incremental_build(
     with_build_lock(&build_folder, || {
         incremental_build_without_lock(
             build_state,
-            default_timing,
+            no_timing,
             initial_build,
             show_progress,
             only_incremental,
@@ -511,7 +565,7 @@ pub fn phase_mark(label: &str) {
 #[instrument(name = "build.incremental.unlocked", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build_without_lock(
     build_state: &mut BuildCommandState,
-    default_timing: Option<Duration>,
+    no_timing: bool,
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
@@ -557,7 +611,7 @@ pub fn incremental_build_without_lock(
         logs::finalize(&build_state.packages);
         if show_progress {
             if plain_output {
-                println!("Compiled 0 modules")
+                println!("Compiled {}", count_of(0, "module"))
             } else {
                 println!(
                     "{}{} {}Compiled 0 modules, everything is up to date",
@@ -569,11 +623,11 @@ pub fn incremental_build_without_lock(
         }
         let has_parse_warnings = has_output(&parse_warnings);
         if has_parse_warnings {
-            eprintln!("{}", &parse_warnings);
+            eprintln!("{}", compiler_output(&parse_warnings));
         }
         let has_compile_warnings = has_output(&compile_warnings);
         if has_compile_warnings {
-            eprintln!("{}", &compile_warnings);
+            eprintln!("{}", compiler_output(&compile_warnings));
         }
         if initial_build {
             log_config_warnings(build_state);
@@ -683,16 +737,16 @@ pub fn incremental_build_without_lock(
 
             if !plain_output && show_progress {
                 eprintln!(
-                    "{}{} {}Error parsing source files in {:.2}s",
+                    "{}{} {}Error parsing source files{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     CROSS,
-                    default_timing.unwrap_or(timing_ast_elapsed).as_secs_f64()
+                    duration_suffix(timed(no_timing, timing_ast_elapsed))
                 );
                 pb.finish();
             }
 
-            eprintln!("{}", &err);
+            eprintln!("{}", compiler_output(&err.to_string()));
             print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
 
             return Err(IncrementalBuildError {
@@ -721,15 +775,15 @@ pub fn incremental_build_without_lock(
 
     if show_progress {
         if plain_output {
-            println!("Parsed {num_dirty_modules} source files")
+            println!("Parsed {}", count_of(num_dirty_modules, "source file"))
         } else {
             println!(
-                "{}{} {}Parsed {} source files in {:.2}s",
+                "{}{} {}Parsed {}{}",
                 LINE_CLEAR,
                 format_step(current_step, total_steps),
                 PARSE,
-                num_dirty_modules,
-                default_timing.unwrap_or(timing_parse_total).as_secs_f64()
+                count_of(num_dirty_modules, "source file"),
+                duration_suffix(timed(no_timing, timing_parse_total))
             );
         }
     }
@@ -742,7 +796,7 @@ pub fn incremental_build_without_lock(
     if log_enabled!(log::Level::Trace) {
         for (module_name, module) in build_state.modules.iter() {
             if module.compile_dirty {
-                println!("compile dirty: {module_name}");
+                log::trace!("compile dirty: {module_name}");
             }
         }
     };
@@ -805,7 +859,7 @@ pub fn incremental_build_without_lock(
         mark_modules_dirty(build_state);
         let result = incremental_build_without_lock(
             build_state,
-            default_timing,
+            no_timing,
             initial_build,
             show_progress,
             only_incremental,
@@ -817,7 +871,7 @@ pub fn incremental_build_without_lock(
     }
 
     if has_parse_warnings {
-        eprintln!("{}", &parse_warnings);
+        eprintln!("{}", compiler_output(&parse_warnings));
     }
     let compile_duration = start_compiling.elapsed();
     phase_mark("compile-end");
@@ -828,27 +882,27 @@ pub fn incremental_build_without_lock(
         let _error_span = info_span!("build.compile_error").entered();
         if show_progress {
             if plain_output {
-                eprintln!("Compiled {num_compiled_modules} modules")
+                eprintln!("Compiled {}", count_of(num_compiled_modules as u64, "module"))
             } else {
                 eprintln!(
-                    "{}{} {}Compiled {} modules in {:.2}s",
+                    "{}{} {}Compiled {}{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     CROSS,
-                    num_compiled_modules,
-                    default_timing.unwrap_or(compile_duration).as_secs_f64()
+                    count_of(num_compiled_modules as u64, "module"),
+                    duration_suffix(timed(no_timing, compile_duration))
                 );
             }
         }
         if has_output(&compile_warnings) {
             let _warning_span = info_span!("build.compile_warning").entered();
-            eprintln!("{}", &compile_warnings);
+            eprintln!("{}", compiler_output(&compile_warnings));
         }
         if initial_build {
             log_config_warnings(build_state);
         }
         if has_output(&compile_errors) {
-            eprintln!("{}", &compile_errors);
+            eprintln!("{}", compiler_output(&compile_errors));
         }
 
         print_compiler_reports(phase_timing_enabled, compiler_counters_enabled);
@@ -867,21 +921,21 @@ pub fn incremental_build_without_lock(
 
         if show_progress {
             if plain_output {
-                println!("Compiled {num_compiled_modules} modules")
+                println!("Compiled {}", count_of(num_compiled_modules as u64, "module"))
             } else {
                 println!(
-                    "{}{} {}Compiled {} modules in {:.2}s",
+                    "{}{} {}Compiled {}{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     SWORDS,
-                    num_compiled_modules,
-                    default_timing.unwrap_or(compile_duration).as_secs_f64()
+                    count_of(num_compiled_modules as u64, "module"),
+                    duration_suffix(timed(no_timing, compile_duration))
                 );
             }
         }
 
         if has_compile_warnings {
-            eprintln!("{}", &compile_warnings);
+            eprintln!("{}", compiler_output(&compile_warnings));
         }
         if initial_build {
             log_config_warnings(build_state);
@@ -908,7 +962,10 @@ fn print_compiler_reports(phase_timing_enabled: bool, compiler_counters_enabled:
     }
 }
 
+/// Print the configuration diagnostics, sorted and one blank line apart
+/// (rewatch-ocaml's `Build_report.prepare`).
 fn log_config_warnings(build_state: &BuildCommandState) {
+    let mut diagnostics = Vec::new();
     let mut packages: Vec<_> = build_state.packages.values().collect();
     packages.sort_by(|a, b| a.name.cmp(&b.name));
     packages.iter().for_each(|package| {
@@ -921,30 +978,43 @@ fn log_config_warnings(build_state: &BuildCommandState) {
             } else {
                 crate::build::packages::read_issue_tracker_url(&package.path)
             };
-            log_deprecations(&package.name, deprecations, issue_tracker_url.as_deref());
+            diagnostics.push(deprecations_diagnostic(
+                &package.name,
+                deprecations,
+                issue_tracker_url.as_deref(),
+            ));
         }
 
         if package.is_local_dep {
-            package
-                .config
-                .get_unsupported_fields()
-                .iter()
-                .for_each(|field| log_unsupported_config_field(&package.name, field));
+            package.config.get_unsupported_fields().iter().for_each(|field| {
+                diagnostics.push(unsupported_config_field_diagnostic(&package.name, field))
+            });
 
             package
                 .config
                 .get_unknown_fields()
                 .iter()
-                .for_each(|field| log_unknown_config_field(&package.name, field));
+                .for_each(|field| diagnostics.push(unknown_config_field_diagnostic(&package.name, field)));
         }
     });
+    if diagnostics.is_empty() {
+        return;
+    }
+    diagnostics.sort();
+    diagnostics.dedup();
+    let diagnostics = diagnostics
+        .iter()
+        .map(|diagnostic| style(diagnostic.trim()).yellow().for_stderr().to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n");
+    eprintln!("{diagnostics}");
 }
 
-fn log_deprecations(
+fn deprecations_diagnostic(
     package_name: &str,
     deprecations: &[crate::config::DeprecationWarning],
     issue_tracker_url: Option<&str>,
-) {
+) -> String {
     let mut message = format!(
         "Package '{package_name}' uses deprecated config (support will be removed in a future version):"
     );
@@ -975,21 +1045,19 @@ fn log_deprecations(
     if let Some(url) = issue_tracker_url {
         message.push_str(&format!("\nPlease report this to the package maintainer: {url}"));
     }
-    eprintln!("\n{}", style(message).yellow());
+    message
 }
 
-fn log_unsupported_config_field(package_name: &str, field_name: &str) {
-    let warning = format!(
-        "The field '{field_name}' found in the package config of '{package_name}' is not supported by ReScript 12's new build system."
-    );
-    eprintln!("\n{}", style(warning).yellow());
+fn unsupported_config_field_diagnostic(package_name: &str, field_name: &str) -> String {
+    format!(
+        "The field '{field_name}' found in the package config of '{package_name}' is not supported by the ReScript build system."
+    )
 }
 
-fn log_unknown_config_field(package_name: &str, field_name: &str) {
-    let warning = format!(
+fn unknown_config_field_diagnostic(package_name: &str, field_name: &str) -> String {
+    format!(
         "Unknown field '{field_name}' found in the package config of '{package_name}'. This option will be ignored."
-    );
-    eprintln!("\n{}", style(warning).yellow());
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1012,16 +1080,11 @@ pub fn build(
         prod
     )
     .entered();
-    let default_timing: Option<std::time::Duration> = if no_timing {
-        Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
-    } else {
-        None
-    };
     let timing_total = Instant::now();
     phase_mark("build-start");
     let run = || {
         let mut build_state = initialize_build_with_mode(
-            default_timing,
+            no_timing,
             filter,
             show_progress,
             path,
@@ -1037,7 +1100,7 @@ pub fn build(
 
         match incremental_build_without_lock(
             &mut build_state,
-            default_timing,
+            no_timing,
             true,
             show_progress,
             false,
@@ -1045,16 +1108,21 @@ pub fn build(
             CompilerInfoWrite::WithRecord,
         ) {
             Ok(result) => {
-                if !plain_output && show_progress {
-                    let timing_total_elapsed = timing_total.elapsed();
-                    println!(
-                        "\n{}",
-                        format_finished_compilation_message(
-                            None,
-                            result,
-                            default_timing.unwrap_or(timing_total_elapsed),
-                        )
-                    );
+                if show_progress {
+                    if plain_output {
+                        // As watch mode ends its builds.
+                        println!("Finished compilation");
+                    } else {
+                        let timing_total_elapsed = timing_total.elapsed();
+                        println!(
+                            "\n{}",
+                            format_finished_compilation_message(
+                                None,
+                                result,
+                                timed(no_timing, timing_total_elapsed),
+                            )
+                        );
+                    }
                 }
                 if !check_only {
                     clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
@@ -1066,7 +1134,7 @@ pub fn build(
                 if !check_only {
                     clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 }
-                Err(anyhow!("Incremental build failed. Error: {e}"))
+                Err(anyhow!("{e}"))
             }
         }
     };
@@ -1193,7 +1261,11 @@ mod tests {
     #[test]
     fn formats_successful_completion_message() {
         assert_eq!(
-            format_finished_compilation_message(None, CompilationOutcome::Clean, Duration::from_millis(1500),),
+            format_finished_compilation_message(
+                None,
+                CompilationOutcome::Clean,
+                Some(Duration::from_millis(1500)),
+            ),
             format!("{LINE_CLEAR}{}Finished compilation in 1.50s", CHECKMARK)
         );
     }
@@ -1204,12 +1276,28 @@ mod tests {
             format_finished_compilation_message(
                 Some("incremental"),
                 CompilationOutcome::Warnings,
-                Duration::from_millis(1500),
+                Some(Duration::from_millis(1500)),
             ),
             format!(
                 "{LINE_CLEAR}{}Finished incremental compilation with warnings in 1.50s",
                 WARNING
             )
+        );
+    }
+
+    #[test]
+    fn leaves_the_duration_out_under_no_timing() {
+        assert_eq!(
+            format_finished_compilation_message(
+                None,
+                CompilationOutcome::Clean,
+                timed(true, Duration::from_millis(1500))
+            ),
+            format!("{LINE_CLEAR}{}Finished compilation", CHECKMARK)
+        );
+        assert_eq!(
+            duration_suffix(timed(false, Duration::from_millis(1500))),
+            " in 1.50s"
         );
     }
 }

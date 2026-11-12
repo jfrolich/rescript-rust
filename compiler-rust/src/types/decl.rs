@@ -467,8 +467,6 @@ pub struct LabelDescription {
     pub lbl_private: PrivateFlag,
     /// Source location
     pub lbl_loc: DeclLoc,
-    /// Attributes
-    pub lbl_attributes: Vec<Attribute>,
 }
 
 /// OCaml `lbl_all`: a handle to the array of all labels of a record, shared

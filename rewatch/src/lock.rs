@@ -25,8 +25,9 @@ impl std::fmt::Display for Error {
                 format!("A ReScript build is already running. The process ID (PID) is {pid}")
             }
             Error::WritingLockfile(e) => format!("Could not write lockfile: \n {e}"),
+            // Most often a mistyped command, which reads as a folder.
             Error::ProjectFolderMissing(path) => format!(
-                "Could not write lockfile because the specified project folder does not exist: {}",
+                "Project folder '{}' does not exist. Run 'rescript --help' for the available commands.",
                 path.to_string_lossy()
             ),
         };
@@ -156,12 +157,37 @@ fn get(kind: LockKind, folder: &str) -> Lock {
     }
 }
 
+/// Report `error` and exit; `locked` words the error for a lock another
+/// process holds.
+fn exit_with(error: Error, locked: impl FnOnce(u32) -> String) -> ! {
+    match error {
+        Error::Locked(pid) => eprintln!("{}", locked(pid)),
+        Error::ProjectFolderMissing(_) => eprintln!("{error}"),
+        Error::WritingLockfile(_) => eprintln!("Could not start ReScript build: {error}"),
+    }
+    std::process::exit(1);
+}
+
 pub fn get_lock_or_exit(kind: LockKind, folder: &str) -> LockGuard {
     match get(kind, folder) {
-        Lock::Error(error) => {
-            eprintln!("Could not start Rescript build: {error}");
-            std::process::exit(1);
-        }
+        Lock::Error(error) => exit_with(error, |pid| {
+            format!("Could not start ReScript build: {}", Error::Locked(pid))
+        }),
+        Lock::Acquired(guard) => guard,
+    }
+}
+
+/// The watch lock of `folder` for `rescript clean`, which a watcher holds
+/// while it runs: a watcher of the project would keep reading the artifacts
+/// the clean removes (rewatch-ocaml's `Clean.run`). Drop it with
+/// `drop_lock(LockKind::Watch, folder)`.
+pub fn get_clean_lock_or_exit(folder: &str) -> LockGuard {
+    match get(LockKind::Watch, folder) {
+        Lock::Error(error) => exit_with(error, |pid| {
+            format!(
+                "Could not clean while rescript watch or another clean is running. The process ID (PID) is {pid}"
+            )
+        }),
         Lock::Acquired(guard) => guard,
     }
 }

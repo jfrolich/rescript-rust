@@ -3235,7 +3235,6 @@ mod tests {
                 lbl_repres: crate::types::RecordRepresentation::RecordRegular,
                 lbl_private: PrivateFlag::Public,
                 lbl_loc: crate::types::DeclLoc::none(),
-                lbl_attributes: vec![],
             })
         );
         extends!(env, env.add_module(id, module.clone()));

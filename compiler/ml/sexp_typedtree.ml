@@ -818,7 +818,7 @@ and extension_constructor ~with_locs ec =
   Sexp.list ([
     Sexp.atom "extension_constructor";
     ident ec.ext_id;
-    string ec.ext_name.txt;
+    string (Ident.name ec.ext_id);
   ] @ loc @ [
     kind_sexp;
     attrs_sexp;

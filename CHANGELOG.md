@@ -92,11 +92,11 @@
 - Remove `@res.hoistedFunction`; nested functions other than `make` are no longer exported as top-level `A$B$f` values. https://github.com/rescript-lang/rescript/pull/8904
 - `\"_"` is no longer a valid quoted identifier. https://github.com/rescript-lang/rescript/pull/8795
 - `rescript-ocaml` compiles with its embedded compiler and ignores `RESCRIPT_BSC_EXE`. https://github.com/rescript-lang/rescript/pull/8781
-- `rescript` rejects duplicate keys in `rescript.json`, `namespace-entry` without `namespace` and a value after `--no-timing`. https://github.com/rescript-lang/rescript/pull/8780
-- `rescript --filter` supports only common regular expression syntax. https://github.com/rescript-lang/rescript/pull/8780
+- `rescript-ocaml` rejects duplicate keys in `rescript.json`, `namespace-entry` without `namespace` and a value after `--no-timing`. https://github.com/rescript-lang/rescript/pull/8780
+- `rescript-ocaml --filter` supports only common regular expression syntax. https://github.com/rescript-lang/rescript/pull/8780
 - A failing `--after-build` command fails the build. https://github.com/rescript-lang/rescript/pull/8780
-- `rescript format -v` and `rescript compiler-args -v` write their logs to stderr instead of stdout. https://github.com/rescript-lang/rescript/pull/8780
-- `rescript` does not export OpenTelemetry traces; `rescript-rust` still does. https://github.com/rescript-lang/rescript/pull/8780
+- `rescript-ocaml format -v` and `rescript-ocaml compiler-args -v` write their logs to stderr instead of stdout. https://github.com/rescript-lang/rescript/pull/8780
+- `rescript-ocaml` does not export OpenTelemetry traces; `rescript` still does. https://github.com/rescript-lang/rescript/pull/8780
 - Record syntax no longer creates or matches dicts, e.g. `let d: dict<int> = {foo: 1}`; it's an error pointing to `dict{...}`. https://github.com/rescript-lang/rescript/pull/8751
 - Remove the call-site `@inlined` attribute, which had no effect. https://github.com/rescript-lang/rescript/pull/8734
 - Remove the builtin primitives `%obj_is_int`, `%obj_dup`, `%obj_field`, `%array_safe_set`, `%null_to_opt` and `%nullable_to_opt`. https://github.com/rescript-lang/rescript/pull/8731
@@ -174,7 +174,7 @@
 - Reject `@as` literals of one variant with the same JavaScript value, such as `@as(1)` and `@as(1.0)`. https://github.com/rescript-lang/rescript/pull/8965
 - Reject an implementation that can hold `undefined` for a type its interface declares `@notUndefined`. https://github.com/rescript-lang/rescript/pull/8950
 - Match `File` before `Blob` in untagged variants whatever the case order, and allow `JsError.t`, `Symbol.t` and the `Intl` classes as cases. https://github.com/rescript-lang/rescript/pull/8950
-- Stop `rescript` from recompiling unchanged modules on every build when a source dir is `"."` or `"./src"`. https://github.com/rescript-lang/rescript/pull/8940
+- Stop `rescript-ocaml` from recompiling unchanged modules on every build when a source dir is `"."` or `"./src"`. https://github.com/rescript-lang/rescript/pull/8940
 - Fix builds of a namespaced package failing with "… is an alias for module …, which is missing", or staying stale, when a module refers to a sibling as `Namespace.Module`. https://github.com/rescript-lang/rescript/pull/8939
 - Evaluate the callee and arguments of a partial application `f(a, ...)` once, so that `await` works in them. https://github.com/rescript-lang/rescript/pull/8936
 - Parse a switch guard that calls a function named `async`. https://github.com/rescript-lang/rescript/pull/8935
@@ -200,7 +200,7 @@
 - Fix the formatter printing `await` on a typed first-class module in a form that does not parse. https://github.com/rescript-lang/rescript/pull/8845
 - Fix JSX preserve mode passing a copy of the props instead of the props themselves for `<C {...props} />` compiled to a call. https://github.com/rescript-lang/rescript/pull/8844
 - Fix a crash and wrong code for matches that test an optional field or dict key both for a value and for presence. https://github.com/rescript-lang/rescript/pull/8842
-- `rescript-rust`: keep watching a source folder on Linux when an overlapping source folder is removed. https://github.com/rescript-lang/rescript/pull/8839
+- `rescript`: keep watching a source folder on Linux when an overlapping source folder is removed. https://github.com/rescript-lang/rescript/pull/8839
 - Add the missing keys, such as `allowed-dependents` and `features`, to the `rescript.json` schema. https://github.com/rescript-lang/rescript/pull/8835
 - Derive module names from file names consistently, so that `Button.test.res` can reference `Button`. https://github.com/rescript-lang/rescript/pull/8797
 - Fix the formatter printing escaped identifiers starting with `_` in a form that does not parse. https://github.com/rescript-lang/rescript/pull/8795
@@ -223,7 +223,7 @@
 - Respect `@warning` on the module in `module type of`. https://github.com/rescript-lang/rescript/pull/8738
 - Fix the formatter dropping attributes and `await` on module expressions and printing invalid module constraints. https://github.com/rescript-lang/rescript/pull/8735
 - Fix the sign of `@inline` bigint constants in printed signatures. https://github.com/rescript-lang/rescript/pull/8732
-- `rescript-rust`: fix `watch` sometimes not exiting on macOS when `lib/watch.lock` is removed. https://github.com/rescript-lang/rescript/pull/8730
+- `rescript`: fix `watch` sometimes not exiting on macOS when `lib/watch.lock` is removed. https://github.com/rescript-lang/rescript/pull/8730
 - Keep parentheses around statements that start with a regexp literal when formatting. https://github.com/rescript-lang/rescript/pull/8720
 - Preserve the scope of attributes on ternary conditions when formatting. https://github.com/rescript-lang/rescript/pull/8720
 - Fix compiler crashes on `Some` and optional arguments whose types come from a transitive dependency. https://github.com/rescript-lang/rescript/pull/8719
@@ -233,11 +233,11 @@
 - Fix invalid JavaScript for a module whose toplevel always throws. https://github.com/rescript-lang/rescript/pull/8692
 - Stop a long source path from shortening parts of module inclusion errors to `...`. https://github.com/rescript-lang/rescript/pull/8691
 - Keep comments on labeled parameters with defaults and before `=?` when formatting. https://github.com/rescript-lang/rescript/pull/8690
-- `rescript-rust`: keep compiling independent modules after an unrelated failure. https://github.com/rescript-lang/rescript/pull/8667
+- `rescript`: keep compiling independent modules after an unrelated failure. https://github.com/rescript-lang/rescript/pull/8667
 - Keep watch mode running when a rebuild fails to initialize. https://github.com/rescript-lang/rescript/pull/8641
 - Make `rescript clean` work with an invalid module graph and remove out-of-source outputs too. https://github.com/rescript-lang/rescript/pull/8640
 - Fix genType path resolution for Windows short paths and symlinked projects. https://github.com/rescript-lang/rescript/pull/8639
-- `rescript-rust`: rebuild dependencies when the project's package output settings change. https://github.com/rescript-lang/rescript/pull/8540
+- `rescript`: rebuild dependencies when the project's package output settings change. https://github.com/rescript-lang/rescript/pull/8540
 
 #### :memo: Documentation
 
@@ -280,7 +280,7 @@
 - Speed up type checking of records with many fields. https://github.com/rescript-lang/rescript/pull/8799
 - Generate JavaScript for list literals that grows linearly with their length instead of quadratically. https://github.com/rescript-lang/rescript/pull/8794
 - Emit the imports of a module used both with and without `default` in a stable order. https://github.com/rescript-lang/rescript/pull/8787
-- Speed up `rescript` builds by compiling modules in-process on several CPU cores. https://github.com/rescript-lang/rescript/pull/8781 https://github.com/rescript-lang/rescript/pull/8869 https://github.com/rescript-lang/rescript/pull/9170 https://github.com/rescript-lang/rescript/pull/9187 https://github.com/rescript-lang/rescript/pull/9188
+- Speed up `rescript-ocaml` builds by compiling modules in-process on several CPU cores. https://github.com/rescript-lang/rescript/pull/8781 https://github.com/rescript-lang/rescript/pull/8869 https://github.com/rescript-lang/rescript/pull/9170 https://github.com/rescript-lang/rescript/pull/9187 https://github.com/rescript-lang/rescript/pull/9188
 - Make `.cmt` and `.cmti` files smaller by no longer embedding a copy of the `.cmi`. https://github.com/rescript-lang/rescript/pull/8774
 - Speed up dead code elimination of toplevel bindings in large modules. https://github.com/rescript-lang/rescript/pull/8773
 - Speed up compiling nested functions with local bindings named like JavaScript globals. https://github.com/rescript-lang/rescript/pull/8772
