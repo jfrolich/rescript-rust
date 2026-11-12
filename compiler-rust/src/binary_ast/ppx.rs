@@ -1330,6 +1330,9 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        if arena.expr_needs_no_attribute_sweep(idx) {
+            return;
+        }
         // `Pexp_constant` runs the literal check and then sweeps only its
         // attributes, without `super.expr` (bs_ast_invariant.ml).
         let expr = arena.get_expr(idx);
@@ -10202,6 +10205,12 @@ struct NestedExternals {
 }
 
 impl super::ast_iter::AstIter for NestedExternals {
+    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        if !arena.expr_needs_no_rewrite(idx) {
+            super::ast_iter::walk_expr(self, arena, idx);
+        }
+    }
+
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
         if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
             self.externals.push((**vd).clone());
@@ -11765,4 +11774,39 @@ type envelope = Story(Story.event)
             ["event_encode", "event_encodeJson", "event_decode"]
         );
     }
+
+    #[test]
+    fn validation_skips_preserve_diagnostics_and_order() {
+        for source in [
+            "let x = (2147483648, 4294967296, 1)",
+            "let x = (f(a, b), @string c, d)",
+            "let x = () => (f(a), %todo(\"first\"), await g(b))",
+            "let seed = 0\nmodule M = { @get external bad: int = \"bad\" }",
+            "let x = { module M = { @get external bad: int = \"bad\" }; f(a) }",
+            "let x = (@unknown(%todo(\"payload\")) f(a), %todo(\"last\"))",
+        ] {
+            let run = |disable_skipping| {
+                let (mut arena, items) = parse_structure(source);
+                if disable_skipping {
+                    // Mutable access to the earliest node invalidates every
+                    // allocation-time proof, without changing the tree.
+                    arena.get_expr_mut(ExprIdx(0));
+                }
+                let (result, warnings) = rewrite_structure_with_warnings(&items, &mut arena, true);
+                match result {
+                    Ok(items) => {
+                        if disable_skipping {
+                            arena.get_expr_mut(ExprIdx(0));
+                        }
+                        let (sweep, error) =
+                            collect_unused_attribute_warnings_structure(&items, &arena);
+                        format!("{warnings:?}; {sweep:?}; {error:?}")
+                    }
+                    Err(error) => format!("{warnings:?}; {error:?}"),
+                }
+            };
+            assert_eq!(run(false), run(true), "{source}");
+        }
+    }
+
 }

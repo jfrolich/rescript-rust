@@ -8166,6 +8166,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
@@ -8184,6 +8185,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
@@ -8204,6 +8206,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
             env,
             ctx,
+            None,
         ) {
             // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
             // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
