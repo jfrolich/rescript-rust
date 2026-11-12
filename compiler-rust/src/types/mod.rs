@@ -40,8 +40,6 @@ pub mod decl;
 pub mod decl_loc;
 pub mod dict_pattern;
 pub mod env;
-#[cfg(test)]
-mod env_log;
 pub(crate) mod env_lazy;
 pub mod external_ffi_types;
 pub mod includecore;
