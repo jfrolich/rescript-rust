@@ -1,0 +1,1 @@
+- Keep the dependency units of a build in one world object and freeze the predefined environment once per build instead of once per worker.

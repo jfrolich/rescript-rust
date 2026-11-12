@@ -11780,6 +11780,49 @@ type envelope = Story(Story.event)
         );
     }
 
+    /// ppx_spice 0.10.1 (signature.ml `add_encoder_params`) gives a type
+    /// parameter's encoder argument (`'a => JSON.t`) arity 1, like the
+    /// decoder argument, so the signature a `.resi` gets matches the values
+    /// its implementation gets.
+    #[test]
+    fn spice_signature_codec_arguments_have_arity_one() {
+        let mut parser = Parser::new("test.resi", "@spice\ntype t<'a, 'b> = {a: 'a, b: 'b}\n");
+        let signature = module::parse_signature(&mut parser);
+        assert!(
+            !parser.has_errors(),
+            "parser errors: {:?}",
+            parser.diagnostics()
+        );
+        let mut arena = parser.into_arena();
+        let rewritten =
+            rewrite_signature(&signature, &mut arena, true).expect("rewrite should work");
+        let arrow = |ty: CoreTypeIdx| match &arena.get_core_type(ty).ptyp_desc {
+            CoreTypeDesc::Ptyp_arrow(arrow) => {
+                Some((arrow.0.typ, arrow.1, arena.get_arity(arrow.2)))
+            }
+            _ => None,
+        };
+        let mut codecs = Vec::new();
+        for item in &rewritten {
+            let SignatureItemDesc::Psig_value(value) = &item.psig_desc else {
+                continue;
+            };
+            // The two codec arguments, each a one-argument function, then
+            // the value or the JSON.
+            let mut ty = value.pval_type;
+            for _ in 0..2 {
+                let (argument, result, arity) = arrow(ty).expect("a codec argument");
+                assert_eq!(arity, Some(1));
+                let (_, _, argument_arity) = arrow(argument).expect("a codec");
+                assert_eq!(argument_arity, Some(1));
+                ty = result;
+            }
+            assert_eq!(arrow(ty).map(|(_, _, arity)| arity), Some(Some(1)));
+            codecs.push(arena.get_string(value.pval_name.txt).to_string());
+        }
+        assert_eq!(codecs, ["t_encode", "t_encodeJson", "t_decode"]);
+    }
+
     #[test]
     fn validation_skips_preserve_diagnostics_and_order() {
         for source in [
