@@ -1374,6 +1374,9 @@ impl<T: Clone> Default for TycompTbl<T> {
 static NEXT_ENV_ID_BLOCK: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 const ENV_ID_BLOCK_SHIFT: u32 = 40;
+// Env ids are opaque equality keys. Reserve their top bit for the shadow
+// attachment so the dormant branch reads the handle, not shared EnvData.
+const SHADOW_ENV_BIT: u64 = 1 << 63;
 
 thread_local! {
     /// Next id to hand out on this thread; `0` means no block claimed yet.
@@ -1386,6 +1389,7 @@ fn next_env_id() -> u64 {
         let mut id = next.get();
         if id == 0 {
             let block = NEXT_ENV_ID_BLOCK.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            assert!(block < (SHADOW_ENV_BIT >> ENV_ID_BLOCK_SHIFT), "Env id blocks exhausted");
             id = block << ENV_ID_BLOCK_SHIFT;
         }
         next.set(id + 1);
@@ -1496,10 +1500,13 @@ struct EnvData {
 
 impl Clone for Env {
     fn clone(&self) -> Self {
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 shadow::identity(self.id, log.id());
                 shadow::scope(self.scope_id, log.scope_id());
                 shadow::count("clone");
@@ -1532,10 +1539,18 @@ impl Env {
     #[cfg(test)]
     fn from_log_for_components(log: env_log::LogEnv) -> Self {
         let mut env = Self::build_empty();
+        env.id |= SHADOW_ENV_BIT;
         let data = env.data_mut();
         data.shadow = Some(log);
         data.log_answers = true;
         env
+    }
+
+    /// Check the immutable handle tag, not a mutable thread-local or a pointer
+    /// chase into EnvData. Clones retain it; every mutation preserves it.
+    #[inline(always)]
+    fn comparing(&self) -> bool {
+        self.id & SHADOW_ENV_BIT != 0 && profile::comparisons_enabled()
     }
 
     /// Bindings for mutation, copying them first when another Env shares them.
@@ -1552,10 +1567,13 @@ impl Env {
             env.data_mut().flags.implicit_coercion = true;
             env
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 env.data_mut().shadow = Some(profile::log::<1, _, _>(|| log.implicit_coercion()));
                 shadow::count("implicit_coercion");
             });
@@ -1571,10 +1589,13 @@ impl Env {
         }
 
         let result = profile::tables::<2, _, _>(|| self.data.flags.in_signature);
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<2, _, _>(|| log.is_in_signature());
                 shadow::compare("is_in_signature", "", &result, &other);
             });
@@ -1590,10 +1611,13 @@ impl Env {
         }
 
         let result = profile::tables::<3, _, _>(|| self.data.flags.implicit_coercion);
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<3, _, _>(|| log.is_implicit_coercion());
                 shadow::compare("is_implicit_coercion", "", &result, &other);
             });
@@ -1615,6 +1639,7 @@ impl Env {
             data: empty.data.clone(),
         });
         if shadow::enabled() {
+            env.id |= SHADOW_ENV_BIT;
             env.data_mut().shadow = Some(env_log::LogEnv::empty());
         }
         env
@@ -1668,10 +1693,13 @@ impl Env {
                 OpenLookupKind::Modtype => self.data.modtypes.open_slot_use(name),
             }
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<5, _, _>(|| log.open_slot_use(kind, name));
                 shadow::compare("open_slot_use", name.text(), &result, &other);
             });
@@ -1711,10 +1739,13 @@ impl Env {
                 })
                 .collect()
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<6, _, _>(|| log.find_all_constructors_marking(name));
                 shadow::compare("find_all_constructors_marking", name, &result, &other);
             });
@@ -1750,10 +1781,13 @@ impl Env {
                 })
                 .collect()
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<7, _, _>(|| log.find_all_labels_marking(name));
                 shadow::compare("find_all_labels_marking", name, &result, &other);
             });
@@ -1763,10 +1797,13 @@ impl Env {
 
     /// Identity of this environment version.
     pub fn id(&self) -> EnvId {
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 shadow::identity(self.id, profile::log::<8, _, _>(|| log.id()));
             });
         }
@@ -1775,7 +1812,7 @@ impl Env {
 
     /// Mark this environment as changed.
     fn bump_id(&mut self) {
-        self.id = next_env_id();
+        self.id = next_env_id() | (self.id & SHADOW_ENV_BIT);
     }
 
     /// Mark a change to the bindings that module-path resolution reads.
@@ -1787,10 +1824,13 @@ impl Env {
 
     /// Identity of the module-level bindings (see the `scope_id` field).
     pub fn scope_id(&self) -> ScopeId {
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 shadow::scope(self.scope_id, profile::log::<9, _, _>(|| log.scope_id()));
             });
         }
@@ -1873,10 +1913,13 @@ impl Env {
         }
 
         let cache = self.data.scope_caches.local_module_aliases.borrow();
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 profile::log::<10, _, _>(|| {
                     log.with_current_local_module_aliases(|other| {
                         shadow::compare(
@@ -1937,10 +1980,13 @@ impl Env {
                 .insert(cache_key, requires);
             requires
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<11, _, _>(|| {
                     log.module_path_requires_env_scoped_cache(module_path)
                 });
@@ -1967,7 +2013,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = desc.clone();
@@ -1996,10 +2042,13 @@ impl Env {
                 .map(|v| v.as_ref())
                 .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<13, _, _>(|| log.find_value(name));
                 shadow::compare(
                     "find_value",
@@ -2029,10 +2078,13 @@ impl Env {
                 .map(|(id, v)| (id, v.as_ref()))
                 .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<14, _, _>(|| log.find_value_with_id(name));
                 shadow::compare(
                     "find_value_with_id",
@@ -2066,10 +2118,13 @@ impl Env {
                 .find_by_name_with_path(name)
                 .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<15, _, _>(|| log.find_value_arc_with_path(name));
                 shadow::compare(
                     "find_value_arc_with_path",
@@ -2084,10 +2139,13 @@ impl Env {
 
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let mut tables: Vec<_> = self
                     .data
                     .values
@@ -2124,7 +2182,7 @@ impl Env {
             self.bump_id();
             true
         });
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let other =
@@ -2152,10 +2210,13 @@ impl Env {
             PathView::Pdot(_, name, _) => self.find_value(name),
             PathView::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<18, _, _>(|| log.lookup_value(path));
                 shadow::compare(
                     "lookup_value",
@@ -2185,7 +2246,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = decl.clone();
@@ -2248,7 +2309,7 @@ impl Env {
             self.data_mut().types.add(id, decl.clone());
             Some(decl)
         });
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let variance = result
@@ -2276,10 +2337,13 @@ impl Env {
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<22, _, _>(|| log.find_type(name));
                 shadow::compare(
                     "find_type",
@@ -2312,10 +2376,13 @@ impl Env {
                 .map(|(path, decl)| (path, decl.as_ref()))
                 .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<23, _, _>(|| log.find_type_with_path(name));
                 shadow::compare(
                     "find_type_with_path",
@@ -2349,10 +2416,13 @@ impl Env {
                 .find_by_name_with_path(name)
                 .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<24, _, _>(|| log.find_type_arc_with_path(name));
                 shadow::compare(
                     "find_type_arc_with_path",
@@ -2390,10 +2460,13 @@ impl Env {
 
         let result =
             profile::tables::<28, _, _>(|| fold_names_list(self.data.modtypes.fold_name_order()));
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<28, _, _>(|| log.fold_modtype_names());
                 shadow::compare("fold_modtype_names", "", &result, &other);
             });
@@ -2424,10 +2497,13 @@ impl Env {
                 .map(|t| t.as_ref())
                 .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<31, _, _>(|| log.find_type_by_ident(id));
                 shadow::compare(
                     "find_type_by_ident",
@@ -2453,10 +2529,13 @@ impl Env {
         }
 
         let result = profile::tables::<32, _, _>(|| self.data.types.find_by_ident(id));
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<32, _, _>(|| log.find_type_arc_by_ident(id));
                 shadow::compare(
                     "find_type_arc_by_ident",
@@ -2487,10 +2566,13 @@ impl Env {
                 .find_by_ident(id)
                 .or_else(|| self.data.types.find_by_name(id.name_atom()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<33, _, _>(|| log.lookup_type_arc_by_ident(id));
                 shadow::compare(
                     "lookup_type_arc_by_ident",
@@ -2594,10 +2676,13 @@ impl Env {
                 }
             }
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<34, _, _>(|| log.lookup_type(path));
                 shadow::compare(
                     "lookup_type",
@@ -2622,7 +2707,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = desc.clone();
@@ -2654,10 +2739,13 @@ impl Env {
                 .map(|c| c.as_ref())
                 .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<36, _, _>(|| log.find_constructor(name));
                 shadow::compare(
                     "find_constructor",
@@ -2693,10 +2781,13 @@ impl Env {
                 .map(|c| c.as_ref())
                 .collect()
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<37, _, _>(|| log.find_all_constructors(name));
                 shadow::compare("find_all_constructors", name.text(), &result, &other);
             });
@@ -2716,7 +2807,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = desc.clone();
@@ -2740,7 +2831,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 profile::log::<39, _, _>(|| log.add_type_label_family(id, lbl_all));
@@ -2762,10 +2853,13 @@ impl Env {
         }
 
         let result = profile::tables::<40, _, _>(|| self.data.type_label_families.get(id).copied());
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<40, _, _>(|| log.type_label_family(id));
                 shadow::compare("type_label_family", &format!("{:?}", id), &result, &other);
             });
@@ -2787,10 +2881,13 @@ impl Env {
                 .map(|l| l.as_ref())
                 .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<41, _, _>(|| log.find_label(name));
                 shadow::compare(
                     "find_label",
@@ -2818,10 +2915,13 @@ impl Env {
                 .map(|l| l.as_ref())
                 .collect()
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<42, _, _>(|| log.find_all_labels(name));
                 shadow::compare("find_all_labels", name.text(), &result, &other);
             });
@@ -2857,7 +2957,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_decl = decl.clone();
@@ -2902,7 +3002,7 @@ impl Env {
         self.add_module(id, decl);
         // `add_module` above already started a new scope.
         profile::tables::<46, _, _>(|| self.data_mut().functor_args.insert(id));
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 profile::log::<46, _, _>(|| log.mark_functor_arg(id));
@@ -2923,10 +3023,13 @@ impl Env {
             PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             PathView::Papply(_, _) => true,
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<47, _, _>(|| log.is_functor_arg_path(path));
                 shadow::compare(
                     "is_functor_arg_path",
@@ -2952,7 +3055,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 profile::log::<48, _, _>(|| log.add_prebuilt_open_layers(root, layers, slot));
@@ -3001,10 +3104,13 @@ impl Env {
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<49, _, _>(|| log.find_module(name));
                 shadow::compare(
                     "find_module",
@@ -3034,10 +3140,13 @@ impl Env {
                 .map(|(id, m)| (id, m.as_ref()))
                 .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<50, _, _>(|| log.find_module_with_id(name));
                 shadow::compare(
                     "find_module_with_id",
@@ -3075,10 +3184,13 @@ impl Env {
                 .map(|(path, decl)| (path, decl.as_ref()))
                 .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<51, _, _>(|| log.find_module_with_path(name));
                 shadow::compare(
                     "find_module_with_path",
@@ -3125,10 +3237,13 @@ impl Env {
                 .ok()
                 .is_some_and(|(selected_path, _)| selected_path.same(&component_path))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other =
                     profile::log::<52, _, _>(|| log.path_starts_with_opened_component(path));
                 shadow::compare(
@@ -3149,7 +3264,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 profile::log::<53, _, _>(|| log.mark_implicit_open_root(name));
@@ -3182,10 +3297,13 @@ impl Env {
                 .contains(component_path.head().name())
                 && self.path_starts_with_opened_component(path)
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<54, _, _>(|| {
                     log.path_starts_with_implicit_opened_component(path)
                 });
@@ -3207,10 +3325,13 @@ impl Env {
         }
 
         let result = profile::tables::<55, _, _>(|| self.data.modules.find_by_ident(id).is_some());
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<55, _, _>(|| log.has_module_ident(id));
                 shadow::compare("has_module_ident", &format!("{:?}", id), &result, &other);
             });
@@ -3236,10 +3357,13 @@ impl Env {
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<56, _, _>(|| log.lookup_module_ident_exact(id));
                 shadow::compare(
                     "lookup_module_ident_exact",
@@ -3265,10 +3389,13 @@ impl Env {
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<57, _, _>(|| log.find_module_same(id));
                 shadow::compare(
                     "find_module_same",
@@ -3303,10 +3430,13 @@ impl Env {
             return Some(f(&stored));
         }
 
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let tables = path
                     .as_pident()
                     .and_then(|id| self.data.module_components.find_by_ident(id));
@@ -3371,10 +3501,13 @@ impl Env {
             return Some(Rc::new(stored));
         }
 
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let tables = path
                     .as_pident()
                     .and_then(|id| self.data.module_components.find_by_ident(id));
@@ -3485,10 +3618,13 @@ impl Env {
             let mut visiting = smallvec::SmallVec::new();
             lookup_module_inner(self, path, &mut visiting)
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<60, _, _>(|| log.lookup_module(path));
                 shadow::compare(
                     "lookup_module",
@@ -3513,10 +3649,13 @@ impl Env {
 
         let result =
             profile::tables::<61, _, _>(|| *self.normalize_shared_path(ctx, &Arc::new(*path), 0));
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<61, _, _>(|| log.normalize_path(ctx, path));
                 shadow::compare("normalize_path", &format!("{:?}", path), &result, &other);
             });
@@ -3545,10 +3684,13 @@ impl Env {
             PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<62, _, _>(|| log.normalize_path_prefix(ctx, path));
                 shadow::compare(
                     "normalize_path_prefix",
@@ -3599,7 +3741,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = decl.clone();
@@ -3628,10 +3770,13 @@ impl Env {
                 .map(|m| m.as_ref())
                 .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<64, _, _>(|| log.find_modtype(name));
                 shadow::compare(
                     "find_modtype",
@@ -3669,10 +3814,13 @@ impl Env {
                 .map(|(path, decl)| (path, decl.as_ref()))
                 .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<65, _, _>(|| log.find_modtype_with_path(name));
                 shadow::compare(
                     "find_modtype_with_path",
@@ -3725,10 +3873,13 @@ impl Env {
                 }
             }
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<66, _, _>(|| log.lookup_modtype(path));
                 shadow::compare(
                     "lookup_modtype",
@@ -3753,10 +3904,13 @@ impl Env {
         }
 
         let result = profile::tables::<67, _, _>(|| !self.data.local_constraints.is_empty());
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<67, _, _>(|| log.has_local_constraints());
                 shadow::compare("has_local_constraints", "", &result, &other);
             });
@@ -3772,7 +3926,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 let shadow_input = decl.clone();
@@ -3789,6 +3943,9 @@ impl Env {
     }
 
     /// Find a local constraint.
+    // Keep the usual empty-constraints test in the caller; the cold shadow
+    // arm must not turn that fast path into a stack-bearing function call.
+    #[inline(always)]
     pub fn find_local_constraint(&self, path: &Path) -> Option<&TypeDeclaration> {
         #[cfg(test)]
         if self.data.log_answers {
@@ -3808,10 +3965,13 @@ impl Env {
             }
             self.data.local_constraints.get(path).map(|d| d.as_ref())
         });
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let other = profile::log::<69, _, _>(|| log.find_local_constraint(path));
                 shadow::compare(
                     "find_local_constraint",
@@ -3826,10 +3986,13 @@ impl Env {
 
     /// Iterate over all local constraints.
     pub fn iter_local_constraints(&self) -> impl Iterator<Item = (&Path, &TypeDeclaration)> {
-        if let Some(log) = &self.data.shadow
-            && profile::comparisons_enabled()
-        {
+        if self.comparing() {
             shadow::cold(|| {
+                let log = self
+                    .data
+                    .shadow
+                    .as_ref()
+                    .expect("active shadow environment");
                 let mut tables: Vec<_> = self
                     .data
                     .local_constraints
@@ -3859,7 +4022,7 @@ impl Env {
                 std::hint::black_box(self.data_mut());
             });
         }
-        if self.data.shadow.is_some() && profile::comparisons_enabled() {
+        if self.comparing() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
                 profile::log::<71, _, _>(|| log.add_gadt_instance_level());
@@ -5090,6 +5253,37 @@ mod shadow_tests {
     }
 
     #[test]
+    fn the_shadow_tag_survives_mutations_and_clones() {
+        assert!(!Env::empty().comparing());
+        shadow::begin(true, "ShadowTag.res");
+        let mut env = Env::empty();
+        let retained = env.clone();
+        let scope = env.scope_id();
+        env.add_gadt_instance_level();
+        assert!(env.comparing());
+        assert_ne!(env.id(), retained.id());
+        assert_ne!(env.scope_id(), scope);
+        let coerced = env.implicit_coercion();
+        assert!(coerced.comparing());
+        assert!(coerced.is_implicit_coercion());
+        assert_eq!(coerced.scope_id(), env.scope_id());
+        let id = Ident::create_local("S");
+        env.add_modtype(
+            id,
+            ModtypeDeclaration {
+                mtd_type: None,
+                mtd_attributes: vec![],
+                mtd_loc: super::super::DeclLoc::none(),
+            },
+        );
+        assert!(env.comparing());
+        assert_ne!(env.scope_id(), scope);
+        assert!(env.find_modtype("S").is_ok());
+        shadow::finish(Ok(())).unwrap();
+        assert!(!Env::empty().comparing());
+    }
+
+    #[test]
     fn unchanged_clones_keep_both_identities() {
         shadow::begin(true, "ShadowClone.res");
         let env = Env::empty();
@@ -5103,6 +5297,8 @@ mod shadow_tests {
 /// Measurement-only boundaries. Normal builds inline these wrappers away.
 /// A table entry suppresses nested shadow checks: its inclusive cost is only
 /// table work. The matching log entry is separate from equality/counter work.
+/// Tags are catalogued in tests/env_shadow_profile_operations.json; 128+tag
+/// identifies a COW/seed chunk and 255 is the empty-entry calibration.
 mod profile {
     #[cfg(feature = "env-shadow-profile")]
     thread_local! {
