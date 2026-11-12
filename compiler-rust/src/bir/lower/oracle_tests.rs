@@ -732,6 +732,46 @@ fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument() {
 }
 
 #[test]
+fn a_result_the_lowering_assigns_is_not_held_before_a_statement_argument_of_an_external() {
+    // The same arguments through the external argument holding: a result
+    // temporary the lowering assigned stays delay-safe there as well.
+    use crate::lambda::lam_primitive::{DeclKind, ExternalDecl, JsCall, Param, Primitive as P};
+    use crate::lambda::LamLoc;
+    for (kind, count) in [
+        (DeclKind::DeclVal { name: "f".into() }, 2),
+        (DeclKind::DeclVal { name: "f".into() }, 3),
+        (DeclKind::DeclNew { name: "F".into() }, 2),
+        (DeclKind::DeclSend { name: "f".into() }, 3),
+    ] {
+        let mut a = LamArena::new();
+        let args: Vec<_> = (0..count)
+            .map(|i| {
+                let stamp = 10 * (i + 1);
+                let test = a.var(Ident::new("x", stamp, IdentFlags::NONE));
+                let thrown = a.const_(C::Int { i: stamp, comment: None });
+                let yes = a.prim_raw(P::Praise, &[thrown], LamLoc::NONE);
+                let value = a.const_(C::Int { i: stamp + 1, comment: None });
+                let no = a.prim_raw(P::PinitMod, &[value], LamLoc::NONE);
+                a.if_(test, yes, no)
+            })
+            .collect();
+        let call = JsCall {
+            prim_name: "f".into(),
+            arg_types: vec![Param::dummy(); count as usize],
+            ffi: ExternalDecl {
+                kind,
+                module_: None,
+                scopes: vec![],
+                variadic: false,
+                effective_arity: count as _,
+            },
+        };
+        let root = a.prim_raw(P::PjsCall(Box::new(call)), &args, LamLoc::NONE);
+        compare(a, root);
+    }
+}
+
+#[test]
 fn an_inlined_function_that_holds_a_catch_is_lowered_after_a_catch_of_the_unit() {
     // The inlined body brings a catch header the unit did not have when its
     // first catch sized the jump table.
