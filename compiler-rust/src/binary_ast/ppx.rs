@@ -7076,7 +7076,13 @@ fn rewrite_child(idx: ExprIdx, arena: &mut ParseArena) -> Rewritten {
     }
     let expr = arena.get_expr(idx);
     let expr = expr.clone();
-    Rewritten::New(rewrite_expression(&expr, arena))
+    let rewritten = rewrite_expression(&expr, arena);
+    if matches!(expr.pexp_desc, ExpressionDesc::Pexp_regexp(_)) {
+        let expanded = arena.push_expr(rewritten);
+        arena.set_expansion(idx, expanded);
+        return Rewritten::Same(idx);
+    }
+    Rewritten::New(rewritten)
 }
 
 /// The arena index of a [`rewrite_child`] result.
@@ -11530,6 +11536,26 @@ let e = () =>
             "{message}"
         );
         assert_eq!((line, start, end), (1, 10, 18));
+    }
+
+    #[test]
+    fn regexp_expansion_keeps_the_original_child_handle() {
+        let (mut arena, structure) = parse_structure("let x = (a, /abc/g)\n");
+        let StructureItemDesc::Pstr_value((_, bindings)) = &structure[0].pstr_desc else {
+            panic!("expected binding");
+        };
+        let root = arena.vb_list(*bindings)[0].pvb_expr;
+        let ExpressionDesc::Pexp_tuple(items) = arena.get_expr(root).pexp_desc else {
+            panic!("expected tuple");
+        };
+        let original = arena.expr_list(items)[1];
+        let before = arena.get_expr(original).clone();
+        assert!(matches!(before.pexp_desc, ExpressionDesc::Pexp_regexp(_)));
+        assert!(matches!(rewrite_child(original, &mut arena), Rewritten::Same(idx) if idx == original));
+        assert_eq!(arena.get_expr(original), &before);
+        let expanded = arena.expanded(original);
+        assert_ne!(expanded, original);
+        assert!(matches!(arena.get_expr(expanded).pexp_desc, ExpressionDesc::Pexp_constraint(_)));
     }
 
     #[test]
