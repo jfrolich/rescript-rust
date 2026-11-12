@@ -11,6 +11,8 @@ pub(super) enum Resume {
     Call(super::call::Call),
     Prim(super::prim::Prim),
     Record(super::record::Record),
+    Catch(super::exit::Catch),
+    Exit(super::exit::Exit),
     Let {
         var: VarId,
         kind: LetKind,
@@ -37,6 +39,8 @@ impl State {
     ) {
         if let Resume::Untagged(frame) = resume { self.untagged_children(cx, *frame, into); return; }
         if let Resume::Variant(frame) = resume { self.variant_children(cx, *frame, into); return; }
+        if let Resume::Catch(frame) = resume { self.catch_children(cx, *frame, into); return; }
+        if let Resume::Exit(exit) = resume { self.exit_children(cx, exit, into); return; }
         if let Resume::Switch(frame) = resume {
             self.switch_children(cx, *frame, into);
             return;
@@ -61,7 +65,8 @@ impl State {
             return;
         }
         match *resume {
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_) => unreachable!("control handled above"),
+            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
@@ -113,6 +118,8 @@ impl State {
         if let Resume::Untagged(frame) = resume { return self.untagged_child(cx, *frame, index, child); }
         if let Resume::Variant(frame) = resume { return self.variant_child(cx, *frame, index, child); }
         if let Resume::Switch(frame) = resume { return self.switch_child(cx, *frame, index, child); }
+        if let Resume::Catch(frame) = resume { return self.catch_child(cx, *frame, index, child); }
+        if let Resume::Exit(exit) = resume { return self.exit_child(cx, exit, index, child); }
         if matches!(resume, Resume::Call(_) | Resume::Prim(_) | Resume::Record(_)) {
             let mut out = self.realize(cx, child);
             if let Resume::Prim(prim) = resume {
@@ -136,7 +143,8 @@ impl State {
             }
         }
         let force = match resume {
-            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_) => unreachable!("control handled above"),
+            Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
+            | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
@@ -159,6 +167,8 @@ impl State {
             Resume::Switch(frame) => self.finish_switch(cx, frame),
             Resume::Variant(frame) => self.finish_variant(cx, frame),
             Resume::Untagged(frame) => self.finish_untagged(cx, frame),
+            Resume::Catch(frame) => self.finish_catch(cx, frame),
+            Resume::Exit(exit) => self.finish_exit(cx, exit, children),
             Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Prim(_) | Resume::Record(_) => unreachable!("primitive finished by dispatch"),

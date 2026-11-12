@@ -3,6 +3,7 @@
 mod args;
 mod call;
 mod cond;
+mod exit;
 mod expr;
 mod konst;
 mod prim;
@@ -356,6 +357,16 @@ struct State {
     spine_steps: usize,
     /// Reused by the J rules that push onto a vector.
     scratch: Vec<NodeId>,
+    /// 4.1: the jump table, indexed by catch header; sized at the first catch.
+    jumps: Vec<exit::Jump>,
+    /// The handlers of the catches being lowered, a stack of flattened tables.
+    catch_table: Vec<(NodeId, crate::bir::CatchId)>,
+    catches: Vec<Option<exit::Plan>>,
+    catch_work: Vec<NodeId>,
+    /// `HAS_EXIT` reads that decided a flattening or a form.
+    catch_flag_reads: usize,
+    /// Handler nodes read to find the label of an exit (4.1 step 1).
+    catch_walk_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -364,6 +375,11 @@ impl State {
         let mut arena = Bir::default();
         arena.begin_bulk();
         arena.pools = std::mem::take(&mut input.arena.pools);
+        // The headers keep their labels and parameters; the exits they count
+        // stay in the source. One write per catch of the unit.
+        for header in &mut arena.pools.catches {
+            header.uses = 0;
+        }
         arena.func_owners.resize(arena.pools.funcs.len(), None);
         for i in 0..input.arena.vars.len() {
             let var = VarId(i as u32);
@@ -411,6 +427,12 @@ impl State {
             primitive_steps: 0,
             spine_steps: 0,
             scratch: Vec::new(),
+            jumps: Vec::new(),
+            catch_table: Vec::new(),
+            catches: Vec::new(),
+            catch_work: Vec::new(),
+            catch_flag_reads: 0,
+            catch_walk_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -597,7 +619,13 @@ impl ProbeRules for State {
                 let operands = self.source.node(node).switch_actions();
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
             }
-            View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
+            View::Catch { .. } => {
+                return Ok(ProbePlan::Children(expr::Resume::Catch(self.catch(cx, node)?)));
+            }
+            View::Exit { label, .. } => {
+                let args = self.source.node(node).exit_arguments();
+                return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
+            }
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
             | View::For { .. }

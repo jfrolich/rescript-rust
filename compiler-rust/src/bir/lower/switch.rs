@@ -182,7 +182,7 @@ impl State {
     }
 }
 
-const NONE: usize = usize::MAX;
+pub(super) const NONE: usize = usize::MAX;
 
 /// Cached by source node, shared by enclosing switches. Sixteen bytes per node.
 #[derive(Clone, Copy, Default)]
@@ -197,7 +197,7 @@ impl State {
     /// O(c + reachable nodes + confirmed equal nodes); collision candidates
     /// are confirmed by eq_approx. Dense case-indexed links preserve the head
     /// and last-member order without allocating one list per group.
-    fn group_switch_cases(
+    pub(super) fn group_switch_cases(
         &mut self,
         operands: crate::bir::ListId,
         count: usize,

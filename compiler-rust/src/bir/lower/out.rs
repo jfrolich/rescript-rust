@@ -259,6 +259,35 @@ impl StatementStack {
         self.held.extend_from_slice(statements);
         self.slots[slot as usize] = Some(Slot::Held(span));
     }
+    /// C:3285 compile_static_raise_jump_output: an argument lowered after a
+    /// later one comes before it in the output. Move the top run into the
+    /// slot reserved for it. One step per slot of the run; a statement is
+    /// moved once and still enters its list once.
+    pub(super) fn hold_run(&mut self, slot: u32, run: Span) {
+        assert_eq!(run.end(), self.slots.len());
+        assert!(slot < run.start && self.slots[slot as usize].is_none());
+        let start = self.held.len();
+        let mut at = run.start as usize;
+        while at < run.end() {
+            at += match self.slots[at] {
+                Some(Slot::Statement(node)) => {
+                    self.held.push(node);
+                    1
+                }
+                Some(Slot::Held(span)) => {
+                    self.held.extend_from_within(span.start as usize..span.end());
+                    1
+                }
+                Some(Slot::Dead(len)) => len as usize,
+                None => 1,
+            };
+        }
+        self.slots.truncate(run.start as usize);
+        self.slots[slot as usize] = Some(Slot::Held(Span {
+            start: start as u32,
+            len: (self.held.len() - start) as u32,
+        }));
+    }
     /// K0: C:119 append. Both children have already been lowered, even when
     /// the first finishes. Value combination belongs to K2's expression policy.
     pub fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {

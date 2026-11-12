@@ -368,6 +368,12 @@ impl Node {
         assert_eq!(self.op, Op::Prim);
         ListId(self.words[0])
     }
+    /// O(1): the argument-list handle of an exit, for a traversal resume
+    /// record that does not copy the arguments.
+    pub(crate) fn exit_arguments(self) -> ListId {
+        assert_eq!(self.op, Op::Exit);
+        ListId(self.words[1])
+    }
     /// Original integer character decoration; not necessarily the integer value.
     pub fn js_char(self) -> Option<i32> {
         (self.op == Op::JNumber && self.flags.contains(NodeFlags::JS_CHAR_PRESENT))
