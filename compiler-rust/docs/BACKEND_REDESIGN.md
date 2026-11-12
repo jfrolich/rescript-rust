@@ -1238,8 +1238,22 @@ a slice and removes the vector per row, about half of that; the other half
 is the lists themselves, most of them for the 75% of splits that have one
 row, which a pool does not remove. Its ceiling is therefore 0.15% to 0.2%,
 at the bar set for these stages, and the same cost is better taken by
-splitting a one-row matching without the three work lists of `split_or`
-(ceiling about 0.2%, not built either).
+splitting a one-row matching without the three work lists of `split_or`.
+
+That is done: `split_or` sorts rows into work lists (rows that may move up,
+or-pattern rows, the rest); for one row that does not start with an
+or-pattern the lists decide nothing and end in `split_constr` on that row
+with the same default environment and no next matching, so `split_or` calls
+it directly and the environment moves instead of being copied. Measured:
+-0.15% of the application build, -0.09% of `tests/tests`; under the bar, and
+kept because it is fifteen lines.
+
+After the three changes match compilation is about 2.9% of the application
+build (3.97% before them). What is left, largest first: action keys 0.47%,
+the constructor listing of `mk_failaction_pos` 0.45% (in
+`types/env_lazy.rs`), case lists of splits of several rows about 0.25%,
+stored overlay patterns 0.12%, `lower_bind` 0.13%; the rest is spread over
+the dispatch itself.
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1865,7 +1879,7 @@ model with this document as its specification.
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); row pool and the one-row split (not built, D.1: ceilings of 0.15% to 0.2% each) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); a one-row matching split without work lists (done, D.1: -0.15%); row pool (not built, D.1: ceiling 0.15% to 0.2%) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
