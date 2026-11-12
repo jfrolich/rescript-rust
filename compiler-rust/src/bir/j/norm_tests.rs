@@ -310,6 +310,8 @@ fn je9_ten_thousand_term_chain_has_bounded_attempt_work() {
     let result = n::je9_simplify_and(&mut b, value, right, &mut steps);
     println!("J-E9 10000-term chain: {steps} inspected pairs/planner steps");
     assert!(steps <= 8192, "{steps}");
+    assert_eq!(b.j_stats.and_attempts, 2);
+    assert_eq!(b.j_stats.max_and_steps, steps);
     if result.is_none() {
         b.release(right);
     }
@@ -1880,6 +1882,8 @@ fn je10_ten_thousand_term_chain_uses_iterative_negation() {
     let result = n::je10_simplify_or(&mut b, left, right, &mut steps);
     println!("J-E10 10000-term chain: {steps} inspected pairs/planner steps");
     assert!(steps < 100_000, "{steps}");
+    assert_eq!(b.j_stats.or_attempts, 1);
+    assert_eq!(b.j_stats.max_or_steps, steps);
     let result = result.unwrap_or_else(|| p::bin(&mut b, BinOp::Or, left, right));
     b.finish_bulk(result);
     b.validate(Some(result), false).unwrap();

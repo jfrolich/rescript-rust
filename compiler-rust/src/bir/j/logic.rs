@@ -685,8 +685,16 @@ pub(super) fn simplify(
     } else {
         plan.and(0, lt, rt)
     };
-    *steps += plan.steps;
+    let measured = plan.steps;
+    *steps += measured;
     let recipes = plan.recipes;
+    if or {
+        b.j_stats.or_attempts += 1;
+        b.j_stats.max_or_steps = b.j_stats.max_or_steps.max(measured);
+    } else {
+        b.j_stats.and_attempts += 1;
+        b.j_stats.max_and_steps = b.j_stats.max_and_steps.max(measured);
+    }
     result.map(|result| finish(b, recipes, result, &[l, r]))
 }
 pub(super) fn negate(b: &mut Bir, value: NodeId, steps: &mut usize) -> Option<NodeId> {
@@ -734,7 +742,10 @@ pub(super) fn negated_and(
         plan.negate(t).unwrap_or_else(|| plan.add(Recipe::Not(t)))
     };
     let result = plan.and(0, negated, Term::Source(no));
-    *steps += plan.steps;
+    let measured = plan.steps;
+    *steps += measured;
     let recipes = plan.recipes;
+    b.j_stats.and_attempts += 1;
+    b.j_stats.max_and_steps = b.j_stats.max_and_steps.max(measured);
     result.map(|result| finish(b, recipes, result, &[test, no]))
 }
