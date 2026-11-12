@@ -30,6 +30,10 @@ impl NodeFlags {
     pub const J_SUBEXPR: u8 = Self::DEAD;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
     pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
+    /// L-only: the subtree holds an `Exit` that is not under a `Fun`
+    /// (`Lam_exit_code.has_exit`, lam_exit_code.ml:35). Reuses the bit that
+    /// only a `JNumber` reads as `JS_CHAR_PRESENT`.
+    pub const HAS_EXIT: u8 = Self::JS_CHAR_PRESENT;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0

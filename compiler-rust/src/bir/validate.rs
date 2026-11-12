@@ -175,7 +175,14 @@ impl Bir {
         let mut effects = vec![(false, false); self.nodes.len()];
         let mut strict = vec![false; self.nodes.len()];
         let mut subexpression = vec![false; self.nodes.len()];
+        let mut has_exit = vec![false; self.nodes.len()];
         for &id in order.iter().rev() {
+            has_exit[id.index()] = self.has_exit(self.node(id), |c| has_exit[c.index()]);
+            if self.node(id).op() as u8 <= Op::Continue as u8
+                && self.node(id).flags().contains(NodeFlags::HAS_EXIT) != has_exit[id.index()]
+            {
+                return fail("stale exit flag");
+            }
             let actual = self.effects(id, |c| effects[c.index()]);
             effects[id.index()] = actual;
             if let Some(actual) = j::facts::purity(self, id, true, |c| strict[c.index()]) {

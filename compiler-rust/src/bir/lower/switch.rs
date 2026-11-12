@@ -190,7 +190,6 @@ pub(super) struct Facts {
     hash: u64,
     ready: bool,
     comparable: bool,
-    exit: bool,
 }
 
 impl State {
@@ -298,7 +297,6 @@ impl State {
                 hash: 0,
                 ready: true,
                 comparable,
-                exit: matches!(view, View::Exit { .. }),
             };
             match view {
                 View::Var { var } | View::Assign { var, .. } => var.hash(&mut hash),
@@ -328,7 +326,6 @@ impl State {
                 let child = self.switch_facts[child.index()];
                 child.hash.hash(&mut hash);
                 facts.comparable &= child.comparable;
-                facts.exit |= child.exit;
             });
             facts.hash = hash.finish();
             self.switch_facts[node.index()] = facts;
@@ -390,9 +387,10 @@ impl State {
             && self.switch_equal(a, b)
     }
 
-    /// Exit fact recorded with the body's fingerprint. O(1).
+    /// `return_case_needs_break` (C:6643) asks `lambda_has_exit` of a case
+    /// body: the `HAS_EXIT` flag recorded when the body was built. One read.
     pub(super) fn switch_has_exit(&self, body: NodeId) -> bool {
-        self.switch_facts[body.index()].exit
+        self.source.node(body).flags().contains(crate::bir::NodeFlags::HAS_EXIT)
     }
 
     /// LamArena::eq_approx, confirmed on L nodes after the hash prefilter.
@@ -627,9 +625,7 @@ impl State {
             let should_break = !is_default
                 && out.finished != Finished::True
                 && match cx.cont {
-                    Cont::Effect(Tail::Return(_)) => {
-                        self.switch_facts[plan.bodies[index - 1].index()].exit
-                    }
+                    Cont::Effect(Tail::Return(_)) => self.switch_has_exit(plan.bodies[index - 1]),
                     _ => true,
                 };
             // A emits an explicit break inside the body; E and R carry clause
