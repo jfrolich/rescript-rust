@@ -1,0 +1,1 @@
+- Add an opt-in signature-publication equality report harness that rejects missing comparisons.
