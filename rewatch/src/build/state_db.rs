@@ -31,8 +31,11 @@ pub const DB_FILE: &str = "rescript.sqlite";
 // 19: the database moved from lib/bs to lib/rescript, whose build records
 // name no lib/bs or lib/ocaml artifacts.
 // 20: PortableRawSignature carries its own file names.
-// 21: parsed genType flags and declaration-cache availability survive restart.
-const SCHEMA_VERSION: i64 = 21;
+// 21: interface fingerprints and item digests hash the type graph with its
+// sharing (`cmi/graph_hash.rs`), no longer the tree it unfolds to: digests
+// stored by the earlier algorithm must not be compared with new ones.
+// 22: parsed genType flags and declaration-cache availability survive restart.
+const SCHEMA_VERSION: i64 = 22;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
