@@ -1,6 +1,6 @@
 //! Static-exit simplification, beside the legacy pipeline.
 //! `lam_pass_exits.rs::subst_helper` / compiler/core/lam_pass_exits.ml:153-205.
-use crate::bir::engine::{Changed, Engine, Facts, OpMask, Order, Round};
+use crate::bir::engine::{Changed, Engine, Facts, OpMask, Order, Round, Shell};
 use crate::bir::*;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_primitive::Primitive;
@@ -199,9 +199,9 @@ struct Handler {
 }
 enum Work {
     Enter(NodeId),
-    Finish(NodeId, u64),
+    Finish(NodeId, u64, Shell),
     Handler(NodeId, u32, bool, u64),
-    Raise(NodeId),
+    Raise(NodeId, Option<Shell>),
 }
 
 /// StaticCatch arm, legacy subst_helper:157-183. The decision based on the
@@ -320,16 +320,11 @@ fn raise(
 
 /// Default arm, legacy subst_helper:204: shallow_map order, then smart
 /// constructors only when a descendant changed.
-fn shallow(e: &Engine<'_>, n: NodeId, work: &mut Vec<Work>, revision: u64) {
-    work.push(Work::Finish(n, revision));
-    work.extend(
-        e.bir()
-            .view(n)
-            .children()
-            .into_iter()
-            .rev()
-            .map(Work::Enter),
-    );
+fn shallow(e: &mut Engine<'_>, n: NodeId, work: &mut Vec<Work>, revision: u64) {
+    let children = e.bir().view(n).children();
+    let shell = e.open_shell(n);
+    work.push(Work::Finish(n, revision, shell));
+    work.extend(children.into_iter().rev().map(Work::Enter));
 }
 
 fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
@@ -347,13 +342,16 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                 match e.bir().view(n) {
                     View::Catch { .. } => catch(e, n, &counts, &mut work, &mut revision),
                     View::Exit { args, .. } => {
-                        work.push(Work::Raise(n));
-                        work.extend(args.iter().rev().copied().map(Work::Enter));
+                        let args = args.to_vec();
+                        let shell = (!args.is_empty()).then(|| e.open_shell(n));
+                        work.push(Work::Raise(n, shell));
+                        work.extend(args.into_iter().rev().map(Work::Enter));
                     }
                     _ => shallow(e, n, &mut work, revision),
                 }
             }
-            Work::Finish(n, before) => {
+            Work::Finish(n, before, shell) => {
+                e.close_shell(n, shell);
                 if revision != before && EXITS.renorm.intersects(OpMask::of(e.bir().node(n).op())) {
                     e.normalise(n);
                 }
@@ -398,11 +396,15 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                     work.push(Work::Enter(n));
                 } else {
                     fired(e, "keep-catch");
-                    work.push(Work::Finish(n, before));
+                    let shell = e.open_shell(n);
+                    work.push(Work::Finish(n, before, shell));
                     work.push(Work::Enter(body));
                 }
             }
-            Work::Raise(n) => {
+            Work::Raise(n, shell) => {
+                if let Some(shell) = shell {
+                    e.close_shell(n, shell);
+                }
                 raise(e, n, &table, &mut handlers, &mut revision);
                 e.finish_candidate(n);
             }
@@ -563,6 +565,71 @@ mod tests {
         let mut a = LamArena::new();
         let one = a.const_(C::int(1));
         assert_eq!(compare(a, one).entered, 0);
+    }
+
+    #[test]
+    fn switch_default_is_counted_before_branches_and_twice() {
+        for full in [false, true] {
+            let mut a = LamArena::new();
+            let scrut = a.var(id("scrut", 10));
+            let branch = a.static_raise(1, &[]);
+            let default = a.static_raise(1, &[]);
+            let info = a.add_switch(
+                full,
+                [crate::lambda::SwitchKey::Int(0)],
+                false,
+                [],
+                true,
+                crate::lambda::SwitchDispatch::Direct,
+            );
+            let actions = a.add_list(&[branch, default]);
+            let body = a.switch_raw(scrut, actions, info);
+            let handler = a.const_(C::int(42));
+            let root = a.static_catch(body, 1, &[], handler);
+            assert_eq!(
+                crate::lambda::lam_pass_exits::count_helper(&a, root)[&1],
+                if full { 2 } else { 3 }
+            );
+            compare(a, root);
+        }
+    }
+
+    #[test]
+    fn ten_thousand_deep_catches_and_wide_switch() {
+        for wide in [false, true] {
+            let mut a = LamArena::new();
+            let mut root = a.unit();
+            if wide {
+                let scrut = a.var(id("scrut", 1));
+                let actions: Vec<_> = (0..10_000).map(|_| a.static_raise(1, &[])).collect();
+                let info = a.add_switch(
+                    true,
+                    (0..10_000).map(crate::lambda::SwitchKey::Int),
+                    true,
+                    [],
+                    false,
+                    crate::lambda::SwitchDispatch::Direct,
+                );
+                let actions = a.add_list(&actions);
+                let body = a.switch_raw(scrut, actions, info);
+                root = a.static_catch(body, 1, &[], root);
+            } else {
+                for label in 1..=10_000 {
+                    let handler = a.unit();
+                    root = a.static_catch(root, label, &[], handler);
+                }
+            }
+            let mut imported = crate::bir::engine::testing::import(&a, root);
+            let steps = {
+                let mut e = Engine::new(&mut imported.arena);
+                e.run(&EXITS, imported.root);
+                e.steps()
+            };
+            let nodes = if wide { 10_004 } else { 20_001 };
+            assert!(steps <= 120 * nodes, "wide={wide}, steps={steps}");
+            imported.arena.validate(Some(imported.root), false).unwrap();
+            eprintln!("exits wide={wide}: {steps} steps");
+        }
     }
 
     #[test]
