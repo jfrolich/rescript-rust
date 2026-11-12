@@ -41,6 +41,7 @@ Lambda import preserves all node kinds but can return these static reasons:
 - `non-contiguous binder run`, `multiply bound identifier`,
   `distinct global identities with one name`: incompatible identity layout.
 - `function arity outside u16`, `empty recursive binding group`: packed layout.
+- `use count outside u32`, `use weight outside u32`: weighted count capacity.
 - `reused static catch label`, `unbound static exit label`: catch-table layout.
 
 The exporter also rejects JS-level nodes, released let values, missing legacy
@@ -52,3 +53,10 @@ identifiers, not a hidden copy of the source tree. They never allocate stamps.
 Bulk construction requires a fresh Bir. `finish_bulk` computes captures and
 weighted uses before the tree is validated or edited. Import and export decode
 each reachable source node once; explicit work stacks avoid Rust recursion.
+
+## Unfinished JS bridge
+
+`bridge::import_js` returns `Unsupported("JS arena import not implemented")`
+for the whole JS program. No J-level conversion or J-level coverage is claimed
+by the Lambda ratchet. This is the outstanding part of S2.2, not a completed
+replacement backend or an S3 emitter.
