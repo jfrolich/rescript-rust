@@ -9766,6 +9766,7 @@ mod tests {
         let x = Ident::create_local("x");
         let y = Ident::create_local("y");
         let z = Ident::create_local("z");
+        let w = Ident::create_local("w");
         let int = |i: i32| b.const_(Constant::int(i));
         let add = |l: RawLambda, r: RawLambda| b.prim(Primitive::Paddint, &[l, r], LamLoc::NONE);
 
@@ -9779,6 +9780,22 @@ mod tests {
         let inlined = add(add(b.var(y), int(1)), add(b.var(y), int(1)));
         assert_eq!(key(aliased), key(inlined));
         assert!(key(aliased).is_some());
+        // An alias in scope is replaced inside a later alias's definition
+        // and after an alias nested in one.
+        let chained = b.let_(
+            LetKind::Alias,
+            x,
+            add(b.var(y), int(1)),
+            b.let_(
+                LetKind::Alias,
+                z,
+                b.let_(LetKind::Alias, w, int(2), add(b.var(x), b.var(w))),
+                add(b.var(z), b.var(x)),
+            ),
+        );
+        let chained_inlined = add(add(add(b.var(y), int(1)), int(2)), add(b.var(y), int(1)));
+        assert_eq!(key(chained), key(chained_inlined));
+        assert!(key(chained).is_some());
         // A strict let of its own variable is its definition.
         assert_eq!(
             key(b.let_(LetKind::Strict, x, int(1), b.var(x))),
