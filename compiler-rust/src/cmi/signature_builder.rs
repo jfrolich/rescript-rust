@@ -1,7 +1,7 @@
 //! Direct publication sink. The checker is visited once; dense scratch indices
 //! are relocated while freezing the arrays after their sizes are known.
 use super::*;
-use crate::types::shared_store::{SharedGraphParts, SharedGraphPayloads, SharedGraphSizes};
+use crate::types::shared_store::{SharedGraphParts, SharedGraphPayloads};
 use crate::types::type_expr::{
     PackageLidsRef, RowDescRef, SHARED_REF_BITS, TypeArgList, TypeRefList,
 };
@@ -29,8 +29,10 @@ impl DirectSink {
 
 impl SignatureSink for DirectSink {
     type Desc = TypeDesc;
-    fn reserve(&mut self) {
+    fn reserve(&mut self) -> usize {
+        let index = self.nodes.len();
         self.nodes.push((TypeDesc::Tnil, 0));
+        index
     }
     fn write(&mut self, index: usize, desc: TypeDesc, level: i32) {
         self.nonshareable |= matches!(desc, TypeDesc::Tsubst(_));
@@ -197,8 +199,8 @@ pub(super) fn build(
         return None;
     }
     let mut sink = ser.sink;
-    let mut locations = ser.locations;
-    let mut layouts = ser.variant_layouts;
+    let locations = ser.locations;
+    let layouts = ser.variant_layouts;
     let raw = ctx
         .find_raw_module_sig(&ps.ps_name)
         .map(|sig| serialize_signature(&sig, ctx, arena, &mut files));
@@ -244,36 +246,62 @@ pub(super) fn build(
             remap_saved_stamps(&mut raw.raw_ps_sig, &mut raw.raw_type_graph, &saved);
         }
     }
-    let pool = ctx.thread_store().shared_pool();
-    let sizes = SharedGraphSizes {
-        nodes: sink.nodes.len(),
-        layouts: layouts.len(),
-        list_items: sink.payloads.lists.len(),
-        arg_items: sink.payloads.args.len(),
-        rows: sink.payloads.rows.len(),
-        lids: sink.payloads.lids.len(),
-    };
-    let intern = |name: &str| pool.intern_longident_name(name);
-    let files = FileRemap::new(&files.names, &intern);
-    let map_file = |file| files.map(file);
-    let namespace = interface_namespace(&ps.ps_filename);
-    let scopes = locations.remap_for_import_with(&map_file, |scope| {
-        crate::types::variant_runtime::identity_in_namespace(namespace, scope)
+    let graph = crate::types::shared_store::SharedGraph::detached(SharedGraphParts {
+        nodes: sink.nodes, payloads: sink.payloads, layouts, locations,
+        carried: super::super::shared_reader::Carried {
+            file_names: files.names, ..Default::default()
+        },
     });
-    let mut shapes =
-        crate::types::variant_runtime::ShapeImport::with_namespace(&scopes, Some(namespace));
-    for layout in &mut layouts {
-        shapes.layout(layout);
-    }
-    shapes.signature(&mut sig);
-    let mut carried = super::super::shared_reader::Carried {
-        file_names: files.original.to_vec(),
-        ..Default::default()
-    };
-    carried.record_maps(&scopes, shapes);
-    // Reserve after the one checker walk. Relocation is a flat O(nodes+edges)
-    // pass over owned arrays, with no graph search and no second type traversal.
+    Some((super::super::shared_reader::PublishedGraph {
+        graph: Arc::new(graph), signature: Arc::new(sig),
+        names: ctx.thread_store().shared_pool().names(),
+    }, raw))
+}
+
+/// Called under the pool's per-publication OnceLock, only by an importer.
+/// No checker traversal or portable intermediate is needed here.
+pub(super) fn promote(
+    source: &mut super::super::shared_reader::PublishedGraph,
+    filename: &str,
+    pool: &crate::types::shared_store::SharedTypePool,
+) -> Option<super::super::shared_reader::PublishedGraph> {
+    assert!(source.graph.is_detached());
+    let sizes = source.graph.sizes();
+    let mut sig = Vec::new();
+    // Reserve first: pool exhaustion leaves the detached source intact for
+    // the private fallback. The normal source is owned only by this slot.
     let base = pool.publish(sizes, |base| {
+        let parts = match Arc::get_mut(&mut source.graph) {
+            Some(graph) => graph.take_parts(),
+            None => source.graph.copy_parts(),
+        };
+        let mut sink = DirectSink {
+            nodes: parts.nodes,
+            payloads: parts.payloads,
+            ..Default::default()
+        };
+        let mut locations = parts.locations;
+        let mut layouts = parts.layouts;
+        sig = std::mem::take(Arc::make_mut(&mut source.signature));
+        let intern = |name: &str| pool.intern_longident_name(name);
+        let files = FileRemap::new(&parts.carried.file_names, &intern);
+        let map_file = |file| files.map(file);
+        let namespace = interface_namespace(filename);
+        let scopes = locations.remap_for_import_with(&map_file, |scope| {
+            crate::types::variant_runtime::identity_in_namespace(namespace, scope)
+        });
+        let mut shapes =
+            crate::types::variant_runtime::ShapeImport::with_namespace(&scopes, Some(namespace));
+        for layout in &mut layouts {
+            shapes.layout(layout);
+        }
+        shapes.signature(&mut sig);
+        let mut carried = super::super::shared_reader::Carried {
+            file_names: files.original.to_vec(),
+            ..Default::default()
+        };
+        carried.record_maps(&scopes, shapes);
+        // Relocation is a flat pass over arrays, not another checker walk.
         let ty = |r: &mut TypeExprRef| *r = crate::types::shared_store::shared_ref(base, r.index());
         let list = |xs: &mut TypeRefList| {
             *xs = TypeRefList::from_parts(
@@ -378,15 +406,11 @@ pub(super) fn build(
         crate::perf_counters::record_signature_fallback(true);
         return None;
     };
-    let pages = pool.pages();
-    Some((
-        super::super::shared_reader::PublishedGraph {
-            graph: crate::types::shared_store::graph_at(&pages, base).clone(),
-            signature: Arc::new(sig),
-            names: pool.names(),
-        },
-        raw,
-    ))
+    Some(super::super::shared_reader::PublishedGraph {
+        graph: crate::types::shared_store::graph_at(&pool.pages(), base).clone(),
+        signature: Arc::new(sig),
+        names: pool.names(),
+    })
 }
 
 #[cfg(test)]

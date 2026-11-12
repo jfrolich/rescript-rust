@@ -65,18 +65,25 @@ fn signature_counts_distinguish_imported_publications_and_generations() {
     assert_eq!(counts.imported.len(), 1);
 }
 
+static SIGNATURE_NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+/// Diagnostic identity independent of allocation-address reuse by unread leaves.
+pub(crate) fn signature_publication_id() -> usize {
+    if enabled() { SIGNATURE_NEXT_ID.fetch_add(1, Ordering::Relaxed) } else { 0 }
+}
+
 static SIGNATURE_COUNTS: OnceLock<Mutex<SignatureCounts>> = OnceLock::new();
 static SIGNATURE_NODES_FROZEN: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_NODES_HASHED: AtomicU64 = AtomicU64::new(0);
 static SIGNATURE_HASH_WALKS: AtomicU64 = AtomicU64::new(0);
 
-/// A publication address stays alive in the registry for this generation.
+/// A publication ID distinguishes objects even after an unread leaf is freed.
 /// Import counts exclude stored/embedded interfaces and count a signature
 /// acquisition, not each individual node read or repeated worker lookup.
-pub(crate) fn record_signature_access(address: usize, generation: u64, imported: bool) {
+pub(crate) fn record_signature_access(id: usize, generation: u64, imported: bool) {
     if enabled() {
         let mut counts = SIGNATURE_COUNTS.get_or_init(Default::default).lock().unwrap();
-        counts.record((generation, address), imported);
+        counts.record((generation, id), imported);
     }
 }
 

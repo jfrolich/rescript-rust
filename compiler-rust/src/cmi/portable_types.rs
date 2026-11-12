@@ -176,8 +176,8 @@ pub enum PortableRowField {
     Rabsent,
 }
 
-/// A published signature. The checking worker publishes shared nodes before
-/// handing this value to the registry; encoding is deferred to its first reader.
+/// A published signature. The checking worker freezes owned node arrays;
+/// a first importer installs them in the pool, and storage encodes them later.
 #[derive(Debug)]
 pub struct PortablePersStruct {
     /// The unit name.
@@ -198,6 +198,7 @@ pub struct PortablePersStruct {
     decoded: std::sync::Mutex<Option<(PublishedSignature, Option<PortableRawSignature>)>>,
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
+    publication_counter_id: usize,
 }
 
 #[derive(Debug)]
@@ -271,6 +272,7 @@ impl<'de> serde::Deserialize<'de> for PortablePersStruct {
             shareable: s.shareable,
             fingerprint: s.fingerprint,
             published_generation: None,
+            publication_counter_id: 0,
             summary: Default::default(),
             shared_item_hashes: None,
             decoded: Default::default(),
@@ -293,6 +295,7 @@ impl Clone for PortablePersStruct {
             shareable: self.shareable,
             fingerprint: self.fingerprint,
             published_generation: self.published_generation,
+            publication_counter_id: self.publication_counter_id,
             summary: self.summary.clone(),
             shared_item_hashes: None,
             decoded: Default::default(),
@@ -341,7 +344,9 @@ impl PortablePersStruct {
     fn record_access(&self, imported: bool) {
         if let Some(generation) = self.published_generation {
             crate::perf_counters::record_signature_access(
-                self as *const Self as usize, generation, imported,
+                self.publication_counter_id,
+                generation,
+                imported,
             );
         }
     }
@@ -369,6 +374,7 @@ impl PortablePersStruct {
             shareable: graph_is_shareable(&sig.type_graph),
             fingerprint,
             published_generation: None,
+            publication_counter_id: 0,
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
@@ -393,10 +399,19 @@ impl PortablePersStruct {
                 Arc::new(sig.summary(&self.ps_name, self.shared_item_hashes.as_deref()))
             });
             let encoded = EncodedSignatures {
-                sig: crate::binser::Encoded::encode(sig.portable().as_ref()),
+                sig: match sig {
+                    PublishedSignature::Portable(sig) => crate::binser::Encoded::encode(sig.as_ref()),
+                    PublishedSignature::Shared(graph) => graph.encode(),
+                },
                 raw: raw.as_ref().map(crate::binser::Encoded::encode),
             };
-            *decoded = None;
+            if matches!(sig, PublishedSignature::Portable(_)) {
+                *decoded = None;
+            } else if let Some((_, raw)) = decoded.as_mut() {
+                // Keep the frozen graph for a later importer, not a duplicate
+                // raw signature after its bytes have been produced.
+                *raw = None;
+            }
             encoded
         })
     }
@@ -1181,7 +1196,7 @@ fn serialize_signature(
 /// One traversal, with either portable entries or shared descriptor payloads.
 trait SignatureSink: Default + Sized {
     type Desc;
-    fn reserve(&mut self);
+    fn reserve(&mut self) -> usize;
     fn write(&mut self, index: usize, desc: Self::Desc, level: i32);
     fn describe(ser: &mut TypeGraphSerializer<'_, '_, Self>, desc: &TypeDesc) -> Self::Desc;
 }
@@ -1191,8 +1206,10 @@ struct PortableSink { entries: Vec<PortableTypeEntry> }
 
 impl SignatureSink for PortableSink {
     type Desc = PortableTypeDesc;
-    fn reserve(&mut self) {
+    fn reserve(&mut self) -> usize {
+        let index = self.entries.len();
         self.entries.push(PortableTypeEntry { desc: PortableTypeDesc::Tvar(None), level: 0 });
+        index
     }
     fn write(&mut self, index: usize, desc: Self::Desc, level: i32) {
         self.entries[index] = PortableTypeEntry { desc, level };
@@ -1270,7 +1287,7 @@ struct TypeGraphSerializer<'a, 'f, S: SignatureSink = PortableSink> {
     sink: S,
     #[cfg(test)]
     visits: usize,
-    cache: AHashMap<TypeExprRef, usize>,
+    cache: crate::types::type_marks::Pooled<crate::types::type_marks::TypeNodeTable<TypeExprRef>>,
     variant_layouts: Vec<crate::types::VariantLayout>,
     variant_layout_cache: AHashMap<crate::types::VariantLayoutRef, usize>,
     mutabilities: Vec<crate::types::asttypes::MutableFlag>,
@@ -1350,7 +1367,7 @@ impl<'a, 'f, S: SignatureSink> TypeGraphSerializer<'a, 'f, S> {
             sink: S::default(),
             #[cfg(test)]
             visits: 0,
-            cache: AHashMap::new(),
+            cache: crate::types::type_marks::ref_table(),
             variant_layouts: Vec::new(),
             variant_layout_cache: AHashMap::new(),
             mutabilities: Vec::new(),
@@ -1409,14 +1426,13 @@ impl<'a, 'f, S: SignatureSink> TypeGraphSerializer<'a, 'f, S> {
 
     /// Serialize a TypeExprRef, returning the portable index.
     fn serialize_type(&mut self, r: TypeExprRef) -> usize {
-        if let Some(&idx) = self.cache.get(&r) {
-            return idx;
+        if let Some(mapped) = self.cache.get(r) {
+            return mapped.index();
         }
 
         // Allocate placeholder first to handle recursive types.
-        let idx = self.cache.len();
-        self.cache.insert(r, idx);
-        self.sink.reserve();
+        let idx = self.sink.reserve();
+        self.cache.insert(r, TypeExprRef::from_usize(idx));
 
         #[cfg(test)]
         { self.visits += 1; }
@@ -1783,7 +1799,7 @@ pub enum SignaturePublicationMode {
     /// A dependent in this build (including an interface's implementation).
     Eager,
     /// No dependent in this build; storage may run as soon as lowering finishes.
-    /// Publication still builds shared nodes for hashing.
+    /// Hashing and storage retain a graph without installing it in the pool.
     OnDemand,
 }
 
@@ -1817,14 +1833,9 @@ pub(crate) fn publish_signature(
             outcomes: [
                 Outcome::fingerprint(oracle.fingerprint, fingerprint),
                 Outcome::item_hashes(&items(&oracle_hashes), &items(&hashes)),
-                Outcome::bytes(&crate::binser::to_vec(portable.as_ref()).unwrap(), &crate::binser::to_vec(&graph.portable()).unwrap()),
+                Outcome::bytes(&crate::binser::to_vec(portable.as_ref()).unwrap(), &graph.storage_bytes_for_check()),
             ],
         }
-    });
-    let shared_ps = Arc::new(PersStruct {
-        ps_name: ps.ps_name.clone(), ps_sig: graph.signature.clone(),
-        ps_filename: ps.ps_filename.clone(), ps_deprecated: ps.ps_deprecated.clone(),
-        ps_crcs: ps.ps_crcs.clone(), ps_alias_rewrites: Default::default(),
     });
     let pps = Arc::new(PortablePersStruct {
         ps_name: ps.ps_name.clone(), ps_filename: ps.ps_filename.clone(),
@@ -1832,12 +1843,9 @@ pub(crate) fn publish_signature(
         shareable: true, fingerprint, summary: Default::default(), shared_item_hashes: Some(hashes),
         decoded: std::sync::Mutex::new(Some((PublishedSignature::Shared(graph), raw))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
+        publication_counter_id: crate::perf_counters::signature_publication_id(),
     });
     pps.record_access(false);
-    let store = ctx.thread_store();
-    let cached = store.shared_pool().pers_struct(&pps, || Some(shared_ps))
-        .expect("direct publication graph exists");
-    store.insert_pers_struct(pps.clone(), cached);
     (pps, comparison)
 }
 
@@ -1851,6 +1859,7 @@ fn prepare_publication(
 ) -> (Arc<PortablePersStruct>, Option<(Arc<PersStruct>, u32)>) {
     use super::shared_reader::FrozenGraph;
     pps.published_generation = Some(crate::types::thread_store::build_generation());
+    pps.publication_counter_id = crate::perf_counters::signature_publication_id();
     let store = ctx.thread_store();
     let pool = store.shared_pool();
     let (shared, fingerprint, hashes) = {
@@ -2023,6 +2032,25 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         // keeps the result so later units on this worker skip the pool map.
         let pool = store.shared_pool();
         let shared = pool.pers_struct(&pps, || {
+            let mut decoded = pps.decoded.lock().unwrap();
+            if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_mut() {
+                if !std::ptr::eq(graph.names.as_ref(), pool.names_ref()) {
+                    // A source-built runtime or watch registry can outlive its
+                    // pool generation. Import from its frozen graph, never from
+                    // addresses or name indices owned by the previous pool.
+                    return shared_pers_struct(&pps, &graph.portable(), pool);
+                }
+                if graph.graph.is_detached() {
+                    *graph = signature_builder::promote(graph, &pps.ps_filename, pool)?;
+                }
+                return Some(Arc::new(PersStruct {
+                    ps_name: pps.ps_name.clone(), ps_sig: graph.signature.clone(),
+                    ps_filename: pps.ps_filename.clone(),
+                    ps_deprecated: pps.ps_deprecated.clone(), ps_crcs: pps.ps_crcs.clone(),
+                    ps_alias_rewrites: Default::default(),
+                }));
+            }
+            drop(decoded);
             let portable = pps.signature();
             shared_pers_struct(&pps, &portable, pool)
         });
@@ -2848,6 +2876,68 @@ mod identity_tests {
             crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
         };
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn direct_publication_defers_pool_installation_even_after_storage() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let leaf = ctx.new_var(None);
+        let typ = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[leaf, leaf])));
+        let ps = PersStruct {
+            ps_name: "Deferred".into(),
+            ps_filename: "Deferred.res".into(),
+            ps_sig: Arc::new(vec![SignatureItem::SigValue(
+                crate::ident::Ident::create_persistent("value"),
+                ValueDescription {
+                    val_type: typ,
+                    val_kind: ValueKind::ValReg,
+                    val_loc: crate::types::DeclLoc::none(),
+                    val_attributes: Default::default(),
+                    val_path: None,
+                },
+            )]),
+            ps_deprecated: None,
+            ps_crcs: vec![],
+            ps_alias_rewrites: Default::default(),
+        };
+        let oracle = serialize_pers_struct(&ps, &ctx, None).signature();
+        let published = {
+            let _release = crate::perf_counters::SignaturePublication::begin();
+            publish_signature(&ps, &ctx, None, SignaturePublicationMode::Eager, true).0
+        };
+        assert!(ctx.thread_store().pers_struct(&published).is_none());
+        drop(ps);
+        drop(ctx);
+        published.prepare_for_storage();
+        assert_eq!(
+            crate::binser::to_vec(&published.signature()).unwrap(),
+            crate::binser::to_vec(&oracle).unwrap()
+        );
+        let detached = || {
+            let decoded = published.decoded.lock().unwrap();
+            let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() else {
+                panic!("frozen graph")
+            };
+            graph.graph.is_detached()
+        };
+        assert!(detached());
+        let reader = TypeContext::new(Arc::new(IdGenerator::new()));
+        let first = internalize_pers_struct(published.clone(), &reader);
+        assert!(!detached());
+        assert!(Arc::ptr_eq(
+            &first,
+            &internalize_pers_struct(published.clone(), &reader)
+        ));
+        let decoded = published.decoded.lock().unwrap();
+        let Some((PublishedSignature::Shared(graph), _)) = decoded.as_ref() else {
+            panic!("frozen graph")
+        };
+        // Both the detached and pool-installed borrowed encodings have the
+        // PortableSignature wire format, including repeated references.
+        assert_eq!(
+            crate::binser::to_vec(&graph.encode().decode()).unwrap(),
+            crate::binser::to_vec(&oracle).unwrap()
+        );
     }
 
     #[test]

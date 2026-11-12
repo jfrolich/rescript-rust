@@ -191,3 +191,31 @@ the same runtime compiled from the same paths: copy the runtime package and
 change only whitespace in its configuration to select source compilation
 instead of either embedded image. Compare the runtime entries as well as
 the application's entries; do not normalize or ignore differing bytes.
+
+### Importer demand and storage
+
+Publication now retains a detached frozen graph. Its references and location
+handles are local to those arrays. Fingerprints and item digests read this graph;
+storage needs them for interface comparison and item-level invalidation. Storage
+streams descriptors and payloads through a borrowed serialization view,
+without constructing portable node arrays. Check mode compares this actual wire
+view against the independent portable oracle, including variant/field ordering.
+
+Only the first importer installs a graph in the pool, under the per-publication
+OnceLock. That step assigns pool addresses and imports file names and allocation
+identities. Unique arrays are moved; a shared source is copied. Reserving before
+moving leaves the source intact on pool exhaustion. Storage and promotion share
+the publication's lock, so either order produces the same bytes. A registry that
+outlives its pool generation imports from its retained graph, not stale addresses.
+
+The serializer memoizes source handles with the existing pooled type-node table:
+dense pages for local nodes, a multiplicative-hash table for store handles. First
+visit order is still determined by the signature walk, never table iteration.
+The chain/shared-child step-count tests continue to enforce a linear traversal.
+
+Opt-in counters report publication IDs (not allocator addresses), distinct
+current-build publications acquired by persistent lookup, nodes installed in the
+pool, and hash node visits across fingerprint/item scopes. Stored-runtime imports
+contribute pool nodes but not current-build publication acquisitions. Detached
+arrays needed for storage are not counted as pool installations. No counter run
+used for this diagnosis enables the check-only oracle.
