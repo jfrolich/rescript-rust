@@ -58,3 +58,14 @@ for stage in ("progressive", "before-commit", "after-commit", "after-close",
         build({"RESCRIPT_FULL_BUILD": "1"})
         assert (project / "src/A.mjs").read_bytes() == expected
         print(f"{stage}: complete image; recovery matches full build; unchanged rebuild compiles zero modules")
+        if stage == "after-rename":
+            # No sources change: recovery must remove the abandoned private
+            # file even when the next build takes the zero-module fast path.
+            old = db.read_bytes()
+            build({"RESCRIPT_FULL_BUILD": "1", "RESCRIPT_STORE_BATCH_MODULES": "1",
+                   "RESCRIPT_TEST_ABORT_PUBLICATION": "atomic-store:progressive"}, True)
+            assert db.read_bytes() == old
+            assert list(db.parent.glob(".rescript-record-*.sqlite"))
+            assert "Compiled 0 modules" in build()
+            assert not list(db.parent.glob(".rescript-record-*.sqlite"))
+            print("killed unchanged rebuild: old record intact; zero-module startup removes leftover")

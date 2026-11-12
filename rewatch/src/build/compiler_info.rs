@@ -57,7 +57,10 @@ pub fn read_metas(
 ) -> AHashMap<String, std::collections::BTreeMap<String, String>> {
     packages
         .par_iter()
-        .filter_map(|(name, package)| Some((name.clone(), state_db::read_meta(package)?)))
+        .filter_map(|(name, package)| {
+            state_db::cleanup_private_records(package);
+            Some((name.clone(), state_db::read_meta(package)?))
+        })
         .collect::<Vec<_>>()
         .into_iter()
         .collect()

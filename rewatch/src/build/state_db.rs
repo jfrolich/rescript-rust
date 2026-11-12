@@ -881,28 +881,64 @@ pub(super) struct TemporaryRecord {
 
 const TEMP_RECORD_PREFIX: &str = ".rescript-record-";
 
-fn private_record_file(package: &Package) -> anyhow::Result<tempfile::NamedTempFile> {
-    // Root build locks do not exclude another root sharing this package. Hold
-    // the package guard across discovery/creation, and lock each private file
-    // for its lifetime so startup cannot unlink a live preparation. The short
-    // creation guard is released before schema creation or row insertion.
-    let _guard = lock_writer(&path(package))?;
-    for entry in std::fs::read_dir(package.get_build_path())? {
+fn private_record_paths(package: &Package) -> std::io::Result<Vec<PathBuf>> {
+    let entries = match std::fs::read_dir(package.get_build_path()) {
+        Ok(entries) => entries,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(err) => return Err(err),
+    };
+    let mut paths = Vec::new();
+    for entry in entries {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if !name.starts_with(TEMP_RECORD_PREFIX) || !name.ends_with(".sqlite") { continue; }
-        let file = match std::fs::OpenOptions::new().read(true).write(true).open(entry.path()) {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(err) => return Err(err.into()),
-        };
-        match fs2::FileExt::try_lock_exclusive(&file) {
-            Ok(()) => std::fs::remove_file(entry.path())?,
-            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => (),
-            Err(err) => return Err(err.into()),
+        if name.starts_with(TEMP_RECORD_PREFIX) && name.ends_with(".sqlite") {
+            paths.push(entry.path());
         }
     }
+    Ok(paths)
+}
+
+// Caller holds the package guard, excluding creation and publication. A
+// lifetime lock on the private file distinguishes active preparations from
+// files abandoned by a killed build (including a different root).
+fn discard_private_records(paths: Vec<PathBuf>) -> std::io::Result<()> {
+    for path in paths {
+        let file = match std::fs::OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err),
+        };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => std::fs::remove_file(path)?,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => (),
+            Err(err) => return Err(err),
+        }
+    }
+    Ok(())
+}
+
+/// Also run on no-op builds: a killed forced rebuild may leave an unpublished
+/// file while the old live record still proves that every source is up to date.
+pub(super) fn cleanup_private_records(package: &Package) {
+    let cleanup = || -> anyhow::Result<()> {
+        let paths = private_record_paths(package)?;
+        if paths.is_empty() { return Ok(()); }
+        let _guard = lock_writer(&path(package))?;
+        discard_private_records(paths)?;
+        Ok(())
+    };
+    if let Err(err) = cleanup() {
+        log::warn!("Could not remove abandoned records of {}: {err}", package.name);
+    }
+}
+
+fn private_record_file(package: &Package) -> anyhow::Result<tempfile::NamedTempFile> {
+    // Root build locks do not exclude another root sharing this package. Make
+    // cleanup/creation/lifetime locking atomic, then release the package guard
+    // before schema creation and insertion. Publication reacquires it later.
+    let _guard = lock_writer(&path(package))?;
+    discard_private_records(private_record_paths(package)?)?;
     let temp = tempfile::Builder::new().prefix(TEMP_RECORD_PREFIX).suffix(".sqlite")
         .tempfile_in(package.get_build_path())?;
     fs2::FileExt::lock_exclusive(temp.as_file())?;
