@@ -46,6 +46,8 @@ pub(crate) struct TypeNodes {
     /// Leased for this store's lifetime; only initialized slots below `len`
     /// may be read. Reusing an array does not clear its previous contents.
     first: Rc<[TypeNode; Self::FIRST_LEN]>,
+    /// FIRST_LEN normally, zero while a store build must observe local reads.
+    fast_limit: Cell<u32>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
     len: Cell<usize>,
 }
@@ -93,6 +95,7 @@ impl TypeNodes {
         });
         TypeNodes {
             first,
+            fast_limit: Cell::new(Self::FIRST_LEN as u32),
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
         }
@@ -104,6 +107,21 @@ impl TypeNodes {
         let biased = idx + (1 << Self::FIRST_CHUNK_BITS);
         let bit = (usize::BITS - 1 - biased.leading_zeros()) as usize;
         (bit - Self::FIRST_CHUNK_BITS as usize, biased - (1 << bit))
+    }
+
+    /// One comparison excludes tagged handles, far nodes and active store builds.
+    /// The mask makes the array bound explicit without a second runtime check.
+    #[inline(always)]
+    fn direct(&self, raw: u32) -> Option<&TypeNode> {
+        if raw < self.fast_limit.get() {
+            Some(&self.first[raw as usize & (Self::FIRST_LEN - 1)])
+        } else {
+            None
+        }
+    }
+
+    fn set_direct(&self, on: bool) {
+        self.fast_limit.set(if on { Self::FIRST_LEN as u32 } else { 0 });
     }
 
     /// Node `idx` (a local index or a store index with the tag stripped).
@@ -2646,6 +2664,14 @@ impl TypeContext {
     /// into callers.
     #[inline(always)]
     fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.desc.get();
+        }
+        self.desc_indirect(r)
+    }
+
+    #[inline(never)]
+    fn desc_indirect(&self, r: TypeExprRef) -> TypeDesc {
         if r.is_store() {
             return self.store_desc(r);
         }
@@ -2676,6 +2702,14 @@ impl TypeContext {
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.level.get();
+        }
+        self.level_indirect(r)
+    }
+
+    #[inline(never)]
+    fn level_indirect(&self, r: TypeExprRef) -> i32 {
         if r.is_store() {
             return self.store_level(r);
         }
@@ -2816,6 +2850,15 @@ impl TypeContext {
     /// Level write without journaling (also used to undo).
     #[inline]
     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.level.set(level);
+            return;
+        }
+        self.write_level_indirect(r, level)
+    }
+
+    #[inline(never)]
+    fn write_level_indirect(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
@@ -2858,6 +2901,15 @@ impl TypeContext {
     /// Descriptor write without journaling (also used to undo).
     #[inline]
     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.desc.set(desc);
+            return;
+        }
+        self.write_desc_indirect(r, desc)
+    }
+
+    #[inline(never)]
+    fn write_desc_indirect(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
@@ -4780,9 +4832,11 @@ impl TypeContext {
             }
         }
         self.store_build_depth.set(depth + 1);
+        self.types.set_direct(depth + 1 == 0);
         super::thread_store::set_store_build_depth(depth + 1);
         let result = build();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         if depth == 0 && self.compiler_counters_enabled {
             crate::perf_counters::record_store_build_nodes(
@@ -4944,9 +4998,11 @@ impl TypeContext {
     /// separately.
     pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
         let depth = self.store_build_depth.replace(0);
+        self.types.set_direct(true);
         super::thread_store::set_store_build_depth(0);
         let result = f();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         result
     }
@@ -5438,6 +5494,61 @@ mod tests {
             assert_eq!(reused.types.level(idx), 4);
             assert_eq!(reused.types.id(idx), 5);
         }).join().unwrap();
+    }
+
+    #[test]
+    fn type_nodes_direct_excludes_far_and_tagged_handles() {
+        let nodes = TypeNodes::new();
+        assert!(nodes.direct(0).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32 - 1).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32).is_none());
+        assert!(nodes.direct(1 << 30).is_none());
+        assert!(nodes.direct(1 << 31).is_none());
+        nodes.set_direct(false);
+        assert!(nodes.direct(0).is_none());
+        nodes.set_direct(true);
+        assert!(nodes.direct(0).is_some());
+    }
+
+    #[test]
+    fn local_node_access_poisons_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        for access in 0..4 {
+            let (_, piece) = ctx.build_in_store(|| {
+                assert_eq!(ctx.types.fast_limit.get(), 0);
+                match access {
+                    0 => { ctx.desc(local); }
+                    1 => { ctx.get_level(local); }
+                    2 => ctx.write_desc_raw(local, TypeDesc::Tnil),
+                    3 => ctx.write_level_raw(local, 7),
+                    _ => unreachable!(),
+                }
+            });
+            assert!(piece.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+        }
+    }
+
+    #[test]
+    fn local_node_direct_limit_tracks_nested_and_suspended_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        let (_, piece) = ctx.build_in_store(|| {
+            ctx.suspend_store_build(|| {
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+                assert!(matches!(ctx.desc(local), TypeDesc::Tnil));
+                let (_, nested) = ctx.build_in_store(|| ctx.get_level(local));
+                assert!(nested.is_none());
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+            });
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+            let (_, nested) = ctx.build_in_store(|| ctx.desc(local));
+            assert!(nested.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+        });
+        assert!(piece.is_none());
+        assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
     }
 
     #[test]
