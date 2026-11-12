@@ -67,6 +67,59 @@ cheaper overall. This measurement is not evidence for switching the default.
 Callgrind and Cachegrind totals are reported separately: they are distinct runs
 and differ slightly. No inclusive cost is subtracted from another run's total.
 
+### What the two large emitter buckets contain
+
+Top 12 functions by aggregated self cost in each of the **existing** buckets.
+The original temporary profile was lost on sandbox restart, so this breakdown
+uses a fresh `tests/tests` oxc-bir Cachegrind sample of the **identical binary**:
+4,802,771,357 total instructions, Naming 56,305,015 and Other emitter 64,986,978.
+It is not substituted into the earlier three-way comparison. Function names
+below omit crate prefixes and expand neither long generic bounds nor closures.
+
+The bucket classifier matches symbol substrings, including generic arguments:
+**Naming is not a pure naming-phase total**. In particular, `Build<..., Names>`
+functions land there despite constructing AST nodes. The table makes that
+limitation explicit rather than relabeling these instructions as name choice.
+“Inherent” here describes work required by name/output semantics, not a claim
+that this implementation or its instruction count is optimal. Self attribution
+cannot split an inlined mixed function into exact semantic costs.
+
+| Bucket | Function (abbreviated) | Self instructions | Source of work |
+| --- | --- | ---: | --- |
+| Naming | `Names::collect` | 21,822,993 | Mixed: derive free/order facts in a separate tree pass, then choose scope names. |
+| Naming | `Build<Bir, Names>::expr_at` | 7,698,552 | Emission: expression AST construction; caught by the generic Names argument. |
+| Naming | `Names::assign` | 5,120,397 | Name choice: collision checks and suffix assignment. |
+| Naming | `Build<Bir, Names>::stmt` | 2,819,341 | Emission: statement construction; caught by the generic Names argument. |
+| Naming | `Names::base` | 1,772,561 | Name choice: spelling conversion/cache. |
+| Naming | `Names::add` | 1,739,204 | Name choice: visible-slot lookup and printed-slot assignment. |
+| Naming | `Plan::default` | 1,536,402 | Separate pass: initialize per-function analysis/schedule storage. |
+| Naming | `Build<Bir, Names>::args` | 1,489,654 | Emission: construct arguments; caught by the generic Names argument. |
+| Naming | `RawTable<(Name, Group)>::reserve_rehash` | 1,401,046 | Name-choice bookkeeping: grow scope/base groups; current map representation. |
+| Naming | `Names::block_tasks` | 1,330,725 | Separate pass: schedule statements in print order. |
+| Naming | `Build<Bir, Names>::caml_block` | 1,223,019 | Emission: runtime-block AST construction; generic Names argument. |
+| Naming | `Build<Bir, Names>::id` | 931,281 | Emission: AST identifier construction, not scope name choice. |
+| Naming | Remaining functions | 7,419,840 | Not part of the top 12. |
+| Other emitter | `EmitterView::ek` | 23,344,236 | Adapter: decode a J expression into the shared JS-shaped view. |
+| Other emitter | `emit::emit_bir` | 8,991,319 | Mixed: entry/setup and inlined view validation/assembly; not separable by symbol. |
+| Other emitter | `EmitterView::expr_comment` | 4,184,261 | Adapter: read expression comment metadata. |
+| Other emitter | `EmitterView::exprs` | 3,441,238 | Adapter: materialize converted expression-handle slices. |
+| Other emitter | `walk::expression_comment<Bir>` | 3,417,700 | Emission support check; repeated during naming and construction. |
+| Other emitter | `EmitterView::sk` | 3,370,464 | Adapter: decode a J statement into the shared view. |
+| Other emitter | `EmitterView::name_key` | 3,075,729 | Adapter: convert a source handle to its dense name slot. |
+| Other emitter | `EmitterView::fun` | 2,758,947 | Adapter: decode function metadata into the shared view. |
+| Other emitter | `Vec<Stmt>::from_iter<Map<NodeId, emit_view::stmt>>` | 2,005,060 | Adapter: materialize converted statement-handle slices. |
+| Other emitter | `walk::member_form` | 1,937,137 | Emission: choose computed/static property syntax. |
+| Other emitter | `EmitterView::number` | 1,292,687 | Adapter: decode/copy numeric payload. |
+| Other emitter | `EmitterView::var` | 1,127,296 | Adapter: decode declaration metadata into the shared view. |
+| Other emitter | Remaining functions | 6,040,904 | Not part of the top 12. |
+
+The 297,786,544-instruction inclusive import (about 298 M) is the conversion
+from an already-built JsArena: traversal, identity association, allocation and
+population of another tree, and bridge finalization. Lowering directly into
+J-level Bir would not pay **that duplicate conversion**; it would still pay to
+construct and maintain its one Bir tree, choose names, and emit JavaScript.
+Subtracting 298 M is not a forecast that all construction or adapter costs vanish.
+
 ### Native clean-build timing (seconds)
 
 | Mode | Mean | Standard deviation | Minimum | Maximum |
