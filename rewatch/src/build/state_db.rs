@@ -1378,7 +1378,11 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let package = test_package(dir.path());
         let first = state(17, Some("warning"));
-        write_record(&package, None, &first);
+        // Explicitly select the file-created sparse path: whole records now
+        // use MemoryRecord too, so they are not an independent pragma oracle.
+        let mut file_record = first.clone();
+        file_record.partial = true;
+        write_record(&package, None, &file_record);
         let old_reader = Connection::open(path(&package)).unwrap();
         let pragmas = |conn: &Connection| ["page_size", "user_version", "auto_vacuum", "encoding", "application_id", "journal_mode"]
             .map(|key| conn.query_row(&format!("PRAGMA {key}"), [], |row| Ok(format!("{:?}", row.get_ref(0)?))).unwrap());
