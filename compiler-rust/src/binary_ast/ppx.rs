@@ -11175,7 +11175,7 @@ mod tests {
                 _ => None,
             })
             .map(|body| {
-                let ExpressionDesc::Pexp_apply(apply) = &arena.get_expr(body).pexp_desc else {
+                let ExpressionDesc::Pexp_apply(apply) = &arena.get_expr(arena.expanded(body)).pexp_desc else {
                     panic!("expected the %todo call");
                 };
                 let ExpressionDesc::Pexp_ident(funct) = &arena.get_expr(apply.funct).pexp_desc
