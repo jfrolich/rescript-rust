@@ -1496,19 +1496,26 @@ struct EnvData {
 
 impl Clone for Env {
     fn clone(&self) -> Self {
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
                 shadow::identity(self.id, log.id());
                 shadow::scope(self.scope_id, log.scope_id());
                 shadow::count("clone");
+                #[cfg(feature = "env-shadow-profile")]
+                {
+                    let cloned = profile::log::<0, _, _>(|| log.clone());
+                    std::hint::black_box(&cloned);
+                }
             });
         }
-        Env {
+        profile::tables::<0, _, _>(|| Env {
             // A clone is the same version until either copy is extended.
             id: self.id,
             scope_id: self.scope_id,
             data: self.data.clone(),
-        }
+        })
     }
 }
 
@@ -1539,12 +1546,17 @@ impl Env {
 
     /// `Env.implicit_coercion env` (env.ml:502-503).
     pub fn implicit_coercion(&self) -> Env {
-        let mut env = self.clone();
-        env.bump_id();
-        env.data_mut().flags.implicit_coercion = true;
-        if let Some(log) = &self.data.shadow {
+        let mut env = profile::tables::<1, _, _>(|| {
+            let mut env = self.clone();
+            env.bump_id();
+            env.data_mut().flags.implicit_coercion = true;
+            env
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                env.data_mut().shadow = Some(log.implicit_coercion());
+                env.data_mut().shadow = Some(profile::log::<1, _, _>(|| log.implicit_coercion()));
                 shadow::count("implicit_coercion");
             });
         }
@@ -1558,10 +1570,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_in_signature();
         }
 
-        let result = self.data.flags.in_signature;
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<2, _, _>(|| self.data.flags.in_signature);
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.is_in_signature();
+                let other = profile::log::<2, _, _>(|| log.is_in_signature());
                 shadow::compare("is_in_signature", "", &result, &other);
             });
         }
@@ -1575,10 +1589,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_implicit_coercion();
         }
 
-        let result = self.data.flags.implicit_coercion;
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<3, _, _>(|| self.data.flags.implicit_coercion);
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.is_implicit_coercion();
+                let other = profile::log::<3, _, _>(|| log.is_implicit_coercion());
                 shadow::compare("is_implicit_coercion", "", &result, &other);
             });
         }
@@ -1642,7 +1658,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().open_slot_use(kind, name);
         }
 
-        let result = (|| {
+        let result = profile::tables::<5, _, _>(|| {
             let name = name.name_key()?;
             match kind {
                 OpenLookupKind::Value => self.data.values.open_slot_use(name),
@@ -1651,10 +1667,12 @@ impl Env {
                 OpenLookupKind::Component => self.data.module_components.open_slot_use(name),
                 OpenLookupKind::Modtype => self.data.modtypes.open_slot_use(name),
             }
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.open_slot_use(kind, name);
+                let other = profile::log::<5, _, _>(|| log.open_slot_use(kind, name));
                 shadow::compare("open_slot_use", name.text(), &result, &other);
             });
         }
@@ -1680,7 +1698,8 @@ impl Env {
                 .find_all_constructors_marking(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<6, _, _>(|| {
+            self.data
                 .constrs
                 .find_all_marking(name)
                 .into_iter()
@@ -1690,10 +1709,13 @@ impl Env {
                         mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
                     )
                 })
-                .collect();
-        if let Some(log) = &self.data.shadow {
+                .collect()
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_all_constructors_marking(name);
+                let other = profile::log::<6, _, _>(|| log.find_all_constructors_marking(name));
                 shadow::compare("find_all_constructors_marking", name, &result, &other);
             });
         }
@@ -1715,7 +1737,8 @@ impl Env {
                 .find_all_labels_marking(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<7, _, _>(|| {
+            self.data
                 .labels
                 .find_all_marking(name)
                 .into_iter()
@@ -1725,10 +1748,13 @@ impl Env {
                         mark.map(|(slot, hidden)| (slot, hidden.map(|h| h.as_ref()))),
                     )
                 })
-                .collect();
-        if let Some(log) = &self.data.shadow {
+                .collect()
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_all_labels_marking(name);
+                let other = profile::log::<7, _, _>(|| log.find_all_labels_marking(name));
                 shadow::compare("find_all_labels_marking", name, &result, &other);
             });
         }
@@ -1737,12 +1763,14 @@ impl Env {
 
     /// Identity of this environment version.
     pub fn id(&self) -> EnvId {
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                shadow::identity(self.id, log.id());
+                shadow::identity(self.id, profile::log::<8, _, _>(|| log.id()));
             });
         }
-        EnvId(self.id)
+        profile::tables::<8, _, _>(|| EnvId(self.id))
     }
 
     /// Mark this environment as changed.
@@ -1759,12 +1787,14 @@ impl Env {
 
     /// Identity of the module-level bindings (see the `scope_id` field).
     pub fn scope_id(&self) -> ScopeId {
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                shadow::scope(self.scope_id, log.scope_id());
+                shadow::scope(self.scope_id, profile::log::<9, _, _>(|| log.scope_id()));
             });
         }
-        ScopeId(self.scope_id)
+        profile::tables::<9, _, _>(|| ScopeId(self.scope_id))
     }
 
     fn invalidate_module_alias_caches(&mut self) {
@@ -1843,15 +1873,19 @@ impl Env {
         }
 
         let cache = self.data.scope_caches.local_module_aliases.borrow();
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                log.with_current_local_module_aliases(|other| {
-                    shadow::compare(
-                        "with_current_local_module_aliases",
-                        "",
-                        &cache.as_deref().unwrap_or(&[]),
-                        &other,
-                    );
+                profile::log::<10, _, _>(|| {
+                    log.with_current_local_module_aliases(|other| {
+                        shadow::compare(
+                            "with_current_local_module_aliases",
+                            "",
+                            &cache.as_deref().unwrap_or(&[]),
+                            &other,
+                        );
+                    })
                 });
             });
         }
@@ -1869,7 +1903,7 @@ impl Env {
                 .module_path_requires_env_scoped_cache(module_path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<11, _, _>(|| {
             if module_path.head().is_persistent() {
                 return false;
             }
@@ -1902,10 +1936,14 @@ impl Env {
                 .borrow_mut()
                 .insert(cache_key, requires);
             requires
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.module_path_requires_env_scoped_cache(module_path);
+                let other = profile::log::<11, _, _>(|| {
+                    log.module_path_requires_env_scoped_cache(module_path)
+                });
                 shadow::compare(
                     "module_path_requires_env_scoped_cache",
                     &format!("{:?}", module_path),
@@ -1923,16 +1961,25 @@ impl Env {
 
     /// Add a value binding.
     pub fn add_value(&mut self, id: Ident, desc: ValueDescription) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<140, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_value(id, desc.clone());
+                let shadow_input = desc.clone();
+                profile::log::<12, _, _>(|| log.add_value(id, shadow_input));
                 shadow::count("add_value");
             });
         }
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.data_mut().values.add(id, desc);
+        profile::tables::<12, _, _>(|| {
+            self.bump_id();
+            let desc = Arc::new(desc);
+            self.data_mut().values.add(id, desc);
+        });
     }
 
     /// Find a value by name.
@@ -1942,14 +1989,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_value(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<13, _, _>(|| {
+            self.data
                 .values
                 .find_by_name(name)
                 .map(|v| v.as_ref())
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_value(name);
+                let other = profile::log::<13, _, _>(|| log.find_value(name));
                 shadow::compare(
                     "find_value",
                     name.text(),
@@ -1971,14 +2022,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_value_with_id(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<14, _, _>(|| {
+            self.data
                 .values
                 .find_by_name_with_id(name)
                 .map(|(id, v)| (id, v.as_ref()))
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_value_with_id(name);
+                let other = profile::log::<14, _, _>(|| log.find_value_with_id(name));
                 shadow::compare(
                     "find_value_with_id",
                     name.text(),
@@ -2005,13 +2060,17 @@ impl Env {
                 .find_value_arc_with_path(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<15, _, _>(|| {
+            self.data
                 .values
                 .find_by_name_with_path(name)
-                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_value_arc_with_path(name);
+                let other = profile::log::<15, _, _>(|| log.find_value_arc_with_path(name));
                 shadow::compare(
                     "find_value_arc_with_path",
                     name.text(),
@@ -2025,11 +2084,17 @@ impl Env {
 
     /// Iterate over visible value bindings.
     pub fn iter_values(&self) -> impl Iterator<Item = (&Ident, &ValueDescription)> {
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let mut tables: Vec<_> =
-                    self.data.values.iter().map(|(id, v)| (id, v.as_ref())).collect();
-                let mut other: Vec<_> = log.iter_values().collect();
+                let mut tables: Vec<_> = self
+                    .data
+                    .values
+                    .iter()
+                    .map(|(id, v)| (id, v.as_ref()))
+                    .collect();
+                let mut other: Vec<_> = profile::log::<16, _, _>(|| log.iter_values()).collect();
                 tables.sort_by_key(|(id, _)| (id.stamp(), id.name()));
                 other.sort_by_key(|(id, _)| (id.stamp(), id.name()));
                 shadow::compare("iter_values", "", &tables, &other);
@@ -2041,7 +2106,7 @@ impl Env {
     /// Update the visible value binding for `name` with a replacement type.
     /// This replaces the current binding in-place rather than adding a shadowing entry.
     pub fn update_value_type_by_name(&mut self, name: &str, new_type: TypeExprRef) -> bool {
-        let result = (|| {
+        let result = profile::tables::<17, _, _>(|| {
             let mut update = |desc: &Arc<ValueDescription>| {
                 let mut updated = (**desc).clone();
                 updated.val_type = new_type;
@@ -2058,11 +2123,12 @@ impl Env {
 
             self.bump_id();
             true
-        })();
-        if self.data.shadow.is_some() {
+        });
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                let other = log.update_value_type_by_name(name, new_type);
+                let other =
+                    profile::log::<17, _, _>(|| log.update_value_type_by_name(name, new_type));
                 shadow::compare("update_value_type_by_name", name, &result, &other);
             });
         }
@@ -2076,7 +2142,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_value(path);
         }
 
-        let result = match path.view() {
+        let result = profile::tables::<18, _, _>(|| match path.view() {
             PathView::Pident(id) => self
                 .data
                 .values
@@ -2085,10 +2151,12 @@ impl Env {
                 .ok_or_else(|| EnvError::ValueNotFound(id.name().into())),
             PathView::Pdot(_, name, _) => self.find_value(name),
             PathView::Papply(_, _) => Err(EnvError::ValueNotFound("(functor application)".into())),
-        };
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_value(path);
+                let other = profile::log::<18, _, _>(|| log.lookup_value(path));
                 shadow::compare(
                     "lookup_value",
                     &format!("{:?}", path),
@@ -2111,17 +2179,26 @@ impl Env {
     /// `id` loses its labels' array. Use [`Env::store_type`] for `Env.add_type`.
     pub fn add_type(&mut self, id: Ident, decl: impl Into<Arc<TypeDeclaration>>) {
         let decl = decl.into();
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<147, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_type(id, decl.clone());
+                let shadow_input = decl.clone();
+                profile::log::<19, _, _>(|| log.add_type(id, shadow_input));
                 shadow::count("add_type");
             });
         }
-        self.bump_scope();
-        let data = self.data_mut();
-        data.types.add(id, decl);
-        data.type_label_families.remove(&id);
+        profile::tables::<19, _, _>(|| {
+            self.bump_scope();
+            let data = self.data_mut();
+            data.types.add(id, decl);
+            data.type_label_families.remove(&id);
+        });
     }
 
     /// OCaml `Env.add_type` = `store_type` (env.ml:1561-1569, 1701): the
@@ -2163,20 +2240,22 @@ impl Env {
         id: Ident,
         variance: Vec<super::variance::Variance>,
     ) -> Option<Arc<TypeDeclaration>> {
-        let result = (|| {
+        let result = profile::tables::<21, _, _>(|| {
             let mut decl = self.find_type_arc_by_ident(&id)?.as_ref().clone();
             decl.type_variance = variance;
             let decl = Arc::new(decl);
             self.bump_scope();
             self.data_mut().types.add(id, decl.clone());
             Some(decl)
-        })();
-        if self.data.shadow.is_some() {
+        });
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                let variance = result.as_ref()
-                    .map(|decl| decl.type_variance.clone()).unwrap_or_default();
-                let other = log.update_type_variance(id, variance);
+                let variance = result
+                    .as_ref()
+                    .map(|decl| decl.type_variance.clone())
+                    .unwrap_or_default();
+                let other = profile::log::<21, _, _>(|| log.update_type_variance(id, variance));
                 shadow::compare("update_type_variance", id.name(), &result, &other);
             });
         }
@@ -2190,14 +2269,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<22, _, _>(|| {
+            self.data
                 .types
                 .find_by_name(name)
                 .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_type(name);
+                let other = profile::log::<22, _, _>(|| log.find_type(name));
                 shadow::compare(
                     "find_type",
                     name.text(),
@@ -2222,14 +2305,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type_with_path(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<23, _, _>(|| {
+            self.data
                 .types
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_type_with_path(name);
+                let other = profile::log::<23, _, _>(|| log.find_type_with_path(name));
                 shadow::compare(
                     "find_type_with_path",
                     name.text(),
@@ -2256,13 +2343,17 @@ impl Env {
                 .find_type_arc_with_path(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<24, _, _>(|| {
+            self.data
                 .types
                 .find_by_name_with_path(name)
-                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_type_arc_with_path(name);
+                let other = profile::log::<24, _, _>(|| log.find_type_arc_with_path(name));
                 shadow::compare(
                     "find_type_arc_with_path",
                     name.text(),
@@ -2297,10 +2388,13 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().fold_modtype_names();
         }
 
-        let result = fold_names_list(self.data.modtypes.fold_name_order());
-        if let Some(log) = &self.data.shadow {
+        let result =
+            profile::tables::<28, _, _>(|| fold_names_list(self.data.modtypes.fold_name_order()));
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.fold_modtype_names();
+                let other = profile::log::<28, _, _>(|| log.fold_modtype_names());
                 shadow::compare("fold_modtype_names", "", &result, &other);
             });
         }
@@ -2323,14 +2417,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_type_by_ident(id);
         }
 
-        let result = self.data
+        let result = profile::tables::<31, _, _>(|| {
+            self.data
                 .types
                 .find_by_ident(id)
                 .map(|t| t.as_ref())
-                .ok_or_else(|| EnvError::TypeNotFound(id.name().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::TypeNotFound(id.name().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_type_by_ident(id);
+                let other = profile::log::<31, _, _>(|| log.find_type_by_ident(id));
                 shadow::compare(
                     "find_type_by_ident",
                     &format!("{:?}", id),
@@ -2354,10 +2452,12 @@ impl Env {
                 .find_type_arc_by_ident(id);
         }
 
-        let result = self.data.types.find_by_ident(id);
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<32, _, _>(|| self.data.types.find_by_ident(id));
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_type_arc_by_ident(id);
+                let other = profile::log::<32, _, _>(|| log.find_type_arc_by_ident(id));
                 shadow::compare(
                     "find_type_arc_by_ident",
                     &format!("{:?}", id),
@@ -2381,13 +2481,17 @@ impl Env {
                 .lookup_type_arc_by_ident(id);
         }
 
-        let result = self.data
+        let result = profile::tables::<33, _, _>(|| {
+            self.data
                 .types
                 .find_by_ident(id)
-                .or_else(|| self.data.types.find_by_name(id.name_atom()));
-        if let Some(log) = &self.data.shadow {
+                .or_else(|| self.data.types.find_by_name(id.name_atom()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_type_arc_by_ident(id);
+                let other = profile::log::<33, _, _>(|| log.lookup_type_arc_by_ident(id));
                 shadow::compare(
                     "lookup_type_arc_by_ident",
                     &format!("{:?}", id),
@@ -2406,7 +2510,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_type(path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<34, _, _>(|| {
             match path.view() {
                 PathView::Pident(id) => self
                     .data
@@ -2489,10 +2593,12 @@ impl Env {
                     Err(EnvError::TypeNotFound("(functor application)".into()))
                 }
             }
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_type(path);
+                let other = profile::log::<34, _, _>(|| log.lookup_type(path));
                 shadow::compare(
                     "lookup_type",
                     &format!("{:?}", path),
@@ -2510,16 +2616,25 @@ impl Env {
 
     /// Add a constructor binding.
     pub fn add_constructor(&mut self, id: Ident, desc: ConstructorDescription) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<163, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_constructor(id, desc.clone());
+                let shadow_input = desc.clone();
+                profile::log::<35, _, _>(|| log.add_constructor(id, shadow_input));
                 shadow::count("add_constructor");
             });
         }
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.data_mut().constrs.add(id, desc);
+        profile::tables::<35, _, _>(|| {
+            self.bump_id();
+            let desc = Arc::new(desc);
+            self.data_mut().constrs.add(id, desc);
+        });
     }
 
     /// Find a constructor by name.
@@ -2532,14 +2647,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_constructor(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<36, _, _>(|| {
+            self.data
                 .constrs
                 .find_by_name(name)
                 .map(|c| c.as_ref())
-                .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_constructor(name);
+                let other = profile::log::<36, _, _>(|| log.find_constructor(name));
                 shadow::compare(
                     "find_constructor",
                     name.text(),
@@ -2566,15 +2685,19 @@ impl Env {
                 .find_all_constructors(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<37, _, _>(|| {
+            self.data
                 .constrs
                 .find_all(name)
                 .into_iter()
                 .map(|c| c.as_ref())
-                .collect();
-        if let Some(log) = &self.data.shadow {
+                .collect()
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_all_constructors(name);
+                let other = profile::log::<37, _, _>(|| log.find_all_constructors(name));
                 shadow::compare("find_all_constructors", name.text(), &result, &other);
             });
         }
@@ -2587,30 +2710,47 @@ impl Env {
 
     /// Add a label binding.
     pub fn add_label(&mut self, id: Ident, desc: LabelDescription) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<166, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_label(id, desc.clone());
+                let shadow_input = desc.clone();
+                profile::log::<38, _, _>(|| log.add_label(id, shadow_input));
                 shadow::count("add_label");
             });
         }
-        self.bump_id();
-        let desc = Arc::new(desc);
-        self.data_mut().labels.add(id, desc);
+        profile::tables::<38, _, _>(|| {
+            self.bump_id();
+            let desc = Arc::new(desc);
+            self.data_mut().labels.add(id, desc);
+        });
     }
 
     /// Record that the labels installed for the record type `id` share the
     /// array `lbl_all` (the labels half of `store_type`, env.ml:1561-1569).
     pub fn add_type_label_family(&mut self, id: Ident, lbl_all: super::decl::LabelArrayRef) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<167, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_type_label_family(id, lbl_all);
+                profile::log::<39, _, _>(|| log.add_type_label_family(id, lbl_all));
                 shadow::count("add_type_label_family");
             });
         }
-        self.bump_id();
-        self.data_mut().type_label_families.insert(id, lbl_all);
+        profile::tables::<39, _, _>(|| {
+            self.bump_id();
+            self.data_mut().type_label_families.insert(id, lbl_all);
+        });
     }
 
     /// `snd (find_type_descrs (Pident id))` of a record type: the array its
@@ -2621,10 +2761,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().type_label_family(id);
         }
 
-        let result = self.data.type_label_families.get(id).copied();
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<40, _, _>(|| self.data.type_label_families.get(id).copied());
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.type_label_family(id);
+                let other = profile::log::<40, _, _>(|| log.type_label_family(id));
                 shadow::compare("type_label_family", &format!("{:?}", id), &result, &other);
             });
         }
@@ -2638,14 +2780,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_label(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<41, _, _>(|| {
+            self.data
                 .labels
                 .find_by_name(name)
                 .map(|l| l.as_ref())
-                .ok_or_else(|| EnvError::LabelNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_label(name);
+                let other = profile::log::<41, _, _>(|| log.find_label(name));
                 shadow::compare(
                     "find_label",
                     name.text(),
@@ -2664,15 +2810,19 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_all_labels(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<42, _, _>(|| {
+            self.data
                 .labels
                 .find_all(name)
                 .into_iter()
                 .map(|l| l.as_ref())
-                .collect();
-        if let Some(log) = &self.data.shadow {
+                .collect()
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_all_labels(name);
+                let other = profile::log::<42, _, _>(|| log.find_all_labels(name));
                 shadow::compare("find_all_labels", name.text(), &result, &other);
             });
         }
@@ -2700,33 +2850,46 @@ impl Env {
         component_path: Path,
         parent_context: Option<(Path, Arc<Signature>)>,
     ) {
-        let seed_env = self.clone();
-        if self.data.shadow.is_some() {
+        let seed_env = profile::tables::<172, _, _>(|| self.clone());
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<172, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_module_with_component_context(
-                    id,
-                    decl.clone(),
-                    component_decl.clone(),
-                    component_path,
-                    parent_context.clone(),
-                );
+                let shadow_decl = decl.clone();
+                let shadow_component_decl = component_decl.clone();
+                let shadow_parent_context = parent_context.clone();
+                profile::log::<44, _, _>(|| {
+                    log.add_module_with_component_context(
+                        id,
+                        shadow_decl,
+                        shadow_component_decl,
+                        component_path,
+                        shadow_parent_context,
+                    )
+                });
                 shadow::count("add_module_with_component_context");
             });
         }
-        let stored_components = Rc::new(
-            super::env_lazy::StoredModuleComponents::new_with_parent_context(
-                seed_env,
-                component_path,
-                component_decl,
-                parent_context,
-            ),
-        );
-        self.bump_scope();
-        self.invalidate_module_alias_caches();
-        let decl = Arc::new(decl);
-        self.data_mut().modules.add(id, decl);
-        self.data_mut().module_components.add(id, stored_components);
+        profile::tables::<44, _, _>(|| {
+            let stored_components = Rc::new(
+                super::env_lazy::StoredModuleComponents::new_with_parent_context(
+                    seed_env,
+                    component_path,
+                    component_decl,
+                    parent_context,
+                ),
+            );
+            self.bump_scope();
+            self.invalidate_module_alias_caches();
+            let decl = Arc::new(decl);
+            self.data_mut().modules.add(id, decl);
+            self.data_mut().module_components.add(id, stored_components);
+        });
     }
 
     /// Add a module binding.
@@ -2738,11 +2901,11 @@ impl Env {
     pub fn add_module_arg(&mut self, id: Ident, decl: ModuleDeclaration) {
         self.add_module(id, decl);
         // `add_module` above already started a new scope.
-        self.data_mut().functor_args.insert(id);
-        if self.data.shadow.is_some() {
+        profile::tables::<46, _, _>(|| self.data_mut().functor_args.insert(id));
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.mark_functor_arg(id);
+                profile::log::<46, _, _>(|| log.mark_functor_arg(id));
                 shadow::count("mark_functor_arg");
             });
         }
@@ -2755,14 +2918,16 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().is_functor_arg_path(path);
         }
 
-        let result = match path.view() {
+        let result = profile::tables::<47, _, _>(|| match path.view() {
             PathView::Pident(id) => self.data.functor_args.contains(id),
             PathView::Pdot(parent, _, _) => self.is_functor_arg_path(parent),
             PathView::Papply(_, _) => true,
-        };
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.is_functor_arg_path(path);
+                let other = profile::log::<47, _, _>(|| log.is_functor_arg_path(path));
                 shadow::compare(
                     "is_functor_arg_path",
                     &format!("{:?}", path),
@@ -2781,37 +2946,45 @@ impl Env {
         layers: &OpenedLayers,
         slot: Option<u32>,
     ) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() && !layers.is_empty() {
+            profile::tables::<176, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_prebuilt_open_layers(root, layers, slot);
+                profile::log::<48, _, _>(|| log.add_prebuilt_open_layers(root, layers, slot));
                 shadow::count("add_prebuilt_open_layers");
             });
         }
-        if layers.is_empty() {
-            return;
-        }
-        self.bump_scope();
-        self.invalidate_module_alias_caches();
-        let root = Arc::new(root);
-        let data = self.data_mut();
-        data.values
-            .add_open_layer_table(root.clone(), layers.values.clone(), slot);
-        data.types
-            .add_open_layer_table(root.clone(), layers.types.clone(), slot);
-        data.constrs
-            .add_open_layer_table(layers.constrs.clone(), slot);
-        data.labels
-            .add_open_layer_table(layers.labels.clone(), slot);
-        data.modules
-            .add_open_layer_table(root.clone(), layers.modules.clone(), slot);
-        data.module_components.add_open_layer_table(
-            root.clone(),
-            layers.module_components.clone(),
-            slot,
-        );
-        data.modtypes
-            .add_open_layer_table(root, layers.modtypes.clone(), slot);
+        profile::tables::<48, _, _>(|| {
+            if layers.is_empty() {
+                return;
+            }
+            self.bump_scope();
+            self.invalidate_module_alias_caches();
+            let root = Arc::new(root);
+            let data = self.data_mut();
+            data.values
+                .add_open_layer_table(root.clone(), layers.values.clone(), slot);
+            data.types
+                .add_open_layer_table(root.clone(), layers.types.clone(), slot);
+            data.constrs
+                .add_open_layer_table(layers.constrs.clone(), slot);
+            data.labels
+                .add_open_layer_table(layers.labels.clone(), slot);
+            data.modules
+                .add_open_layer_table(root.clone(), layers.modules.clone(), slot);
+            data.module_components.add_open_layer_table(
+                root.clone(),
+                layers.module_components.clone(),
+                slot,
+            );
+            data.modtypes
+                .add_open_layer_table(root, layers.modtypes.clone(), slot);
+        });
     }
 
     /// Find a module by name.
@@ -2821,14 +2994,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<49, _, _>(|| {
+            self.data
                 .modules
                 .find_by_name(name)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_module(name);
+                let other = profile::log::<49, _, _>(|| log.find_module(name));
                 shadow::compare(
                     "find_module",
                     name.text(),
@@ -2850,14 +3027,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module_with_id(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<50, _, _>(|| {
+            self.data
                 .modules
                 .find_by_name_with_id(name)
                 .map(|(id, m)| (id, m.as_ref()))
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_module_with_id(name);
+                let other = profile::log::<50, _, _>(|| log.find_module_with_id(name));
                 shadow::compare(
                     "find_module_with_id",
                     name.text(),
@@ -2887,14 +3068,18 @@ impl Env {
                 .find_module_with_path(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<51, _, _>(|| {
+            self.data
                 .modules
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModuleNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_module_with_path(name);
+                let other = profile::log::<51, _, _>(|| log.find_module_with_path(name));
                 shadow::compare(
                     "find_module_with_path",
                     name.text(),
@@ -2927,7 +3112,7 @@ impl Env {
                 .path_starts_with_opened_component(path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<52, _, _>(|| {
             // OCaml compiler/core/res_compmisc.ml:56-62 installs implicit opens
             // through Env.open_signature; compiler/ml/env.ml:1874-1877 adds the
             // opened components without a root module binding. Detect those
@@ -2939,10 +3124,13 @@ impl Env {
             self.find_module_with_path(component_path.last())
                 .ok()
                 .is_some_and(|(selected_path, _)| selected_path.same(&component_path))
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.path_starts_with_opened_component(path);
+                let other =
+                    profile::log::<52, _, _>(|| log.path_starts_with_opened_component(path));
                 shadow::compare(
                     "path_starts_with_opened_component",
                     &format!("{:?}", path),
@@ -2955,15 +3143,23 @@ impl Env {
     }
 
     pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<181, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.mark_implicit_open_root(name);
+                profile::log::<53, _, _>(|| log.mark_implicit_open_root(name));
                 shadow::count("mark_implicit_open_root");
             });
         }
-        self.data_mut().implicit_open_roots.insert(name.to_string());
-        self.bump_scope();
+        profile::tables::<53, _, _>(|| {
+            self.data_mut().implicit_open_roots.insert(name.to_string());
+            self.bump_scope();
+        });
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
@@ -2977,7 +3173,7 @@ impl Env {
                 .path_starts_with_implicit_opened_component(path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<54, _, _>(|| {
             let Some(component_path) = Self::first_dotted_component_path(path) else {
                 return false;
             };
@@ -2985,10 +3181,14 @@ impl Env {
                 .implicit_open_roots
                 .contains(component_path.head().name())
                 && self.path_starts_with_opened_component(path)
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.path_starts_with_implicit_opened_component(path);
+                let other = profile::log::<54, _, _>(|| {
+                    log.path_starts_with_implicit_opened_component(path)
+                });
                 shadow::compare(
                     "path_starts_with_implicit_opened_component",
                     &format!("{:?}", path),
@@ -3006,10 +3206,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().has_module_ident(id);
         }
 
-        let result = self.data.modules.find_by_ident(id).is_some();
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<55, _, _>(|| self.data.modules.find_by_ident(id).is_some());
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.has_module_ident(id);
+                let other = profile::log::<55, _, _>(|| log.has_module_ident(id));
                 shadow::compare("has_module_ident", &format!("{:?}", id), &result, &other);
             });
         }
@@ -3027,14 +3229,18 @@ impl Env {
                 .lookup_module_ident_exact(id);
         }
 
-        let result = self.data
+        let result = profile::tables::<56, _, _>(|| {
+            self.data
                 .modules
                 .find_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_module_ident_exact(id);
+                let other = profile::log::<56, _, _>(|| log.lookup_module_ident_exact(id));
                 shadow::compare(
                     "lookup_module_ident_exact",
                     &format!("{:?}", id),
@@ -3052,14 +3258,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_module_same(id);
         }
 
-        let result = self.data
+        let result = profile::tables::<57, _, _>(|| {
+            self.data
                 .modules
                 .find_local_by_ident(id)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModuleNotFound(id.name().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_module_same(id);
+                let other = profile::log::<57, _, _>(|| log.find_module_same(id));
                 shadow::compare(
                     "find_module_same",
                     &format!("{:?}", id),
@@ -3093,7 +3303,9 @@ impl Env {
             return Some(f(&stored));
         }
 
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
                 let tables = path
                     .as_pident()
@@ -3123,15 +3335,18 @@ impl Env {
                     "with_local_module_components",
                     &path.name(),
                     &tables.is_some(),
-                    &log.local_module_components_shared(path).is_some(),
+                    &profile::log::<58, _, _>(|| log.with_local_module_components(path, |_| ()))
+                        .is_some(),
                 );
             });
         }
 
-        let PathView::Pident(id) = path.view() else {
-            return None;
-        };
-        let components = self.data.module_components.find_by_ident(id)?;
+        let components = profile::tables::<58, _, _>(|| {
+            let PathView::Pident(id) = path.view() else {
+                return None;
+            };
+            self.data.module_components.find_by_ident(id)
+        })?;
         Some(f(components.as_ref()))
     }
 
@@ -3156,7 +3371,9 @@ impl Env {
             return Some(Rc::new(stored));
         }
 
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
                 let tables = path
                     .as_pident()
@@ -3186,19 +3403,22 @@ impl Env {
                     "local_module_components_shared",
                     &path.name(),
                     &tables.is_some(),
-                    &log.local_module_components_shared(path).is_some(),
+                    &profile::log::<59, _, _>(|| log.local_module_components_shared(path))
+                        .is_some(),
                 );
             });
         }
 
-        let PathView::Pident(id) = path.view() else {
-            return None;
-        };
         // OCaml compiler/ml/env.ml:1573-1578 stores component thunks in the
         // component table and shares the forced lazy value. Return the stored
         // Rc directly so child component maps keep the same thunk instead of
         // deep-cloning its captured seed environment.
-        self.data.module_components.find_by_ident(id).cloned()
+        profile::tables::<59, _, _>(|| {
+            let PathView::Pident(id) = path.view() else {
+                return None;
+            };
+            self.data.module_components.find_by_ident(id).cloned()
+        })
     }
 
     /// Find a module by path.
@@ -3208,7 +3428,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_module(path);
         }
 
-        let result = {
+        let result = profile::tables::<60, _, _>(|| {
             fn lookup_submodule_in_module_type<'a>(
                 env: &'a Env,
                 mty: &'a ModuleType,
@@ -3264,10 +3484,12 @@ impl Env {
 
             let mut visiting = smallvec::SmallVec::new();
             lookup_module_inner(self, path, &mut visiting)
-        };
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_module(path);
+                let other = profile::log::<60, _, _>(|| log.lookup_module(path));
                 shadow::compare(
                     "lookup_module",
                     &format!("{:?}", path),
@@ -3289,10 +3511,13 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().normalize_path(ctx, path);
         }
 
-        let result = *self.normalize_shared_path(ctx, &Arc::new(*path), 0);
-        if let Some(log) = &self.data.shadow {
+        let result =
+            profile::tables::<61, _, _>(|| *self.normalize_shared_path(ctx, &Arc::new(*path), 0));
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.normalize_path(ctx, path);
+                let other = profile::log::<61, _, _>(|| log.normalize_path(ctx, path));
                 shadow::compare("normalize_path", &format!("{:?}", path), &result, &other);
             });
         }
@@ -3313,16 +3538,18 @@ impl Env {
                 .normalize_path_prefix(ctx, path);
         }
 
-        let result = match path.view() {
+        let result = profile::tables::<62, _, _>(|| match path.view() {
             PathView::Pdot(..) => {
                 ctx.rebuild_dotted(path, |prefix| self.normalize_shared_path(ctx, prefix, 0))
             }
             PathView::Pident(_) => *path,
             PathView::Papply(_, _) => panic!("normalize_path_prefix called on Papply"),
-        };
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.normalize_path_prefix(ctx, path);
+                let other = profile::log::<62, _, _>(|| log.normalize_path_prefix(ctx, path));
                 shadow::compare(
                     "normalize_path_prefix",
                     &format!("{:?}", path),
@@ -3366,16 +3593,25 @@ impl Env {
 
     /// Add a module type binding.
     pub fn add_modtype(&mut self, id: Ident, decl: ModtypeDeclaration) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<191, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_modtype(id, decl.clone());
+                let shadow_input = decl.clone();
+                profile::log::<63, _, _>(|| log.add_modtype(id, shadow_input));
                 shadow::count("add_modtype");
             });
         }
-        self.bump_scope();
-        let decl = Arc::new(decl);
-        self.data_mut().modtypes.add(id, decl);
+        profile::tables::<63, _, _>(|| {
+            self.bump_scope();
+            let decl = Arc::new(decl);
+            self.data_mut().modtypes.add(id, decl);
+        });
     }
 
     /// Find a module type by name.
@@ -3385,14 +3621,18 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().find_modtype(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<64, _, _>(|| {
+            self.data
                 .modtypes
                 .find_by_name(name)
                 .map(|m| m.as_ref())
-                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_modtype(name);
+                let other = profile::log::<64, _, _>(|| log.find_modtype(name));
                 shadow::compare(
                     "find_modtype",
                     name.text(),
@@ -3422,14 +3662,18 @@ impl Env {
                 .find_modtype_with_path(name);
         }
 
-        let result = self.data
+        let result = profile::tables::<65, _, _>(|| {
+            self.data
                 .modtypes
                 .find_by_name_with_path(name)
                 .map(|(path, decl)| (path, decl.as_ref()))
-                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()));
-        if let Some(log) = &self.data.shadow {
+                .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_modtype_with_path(name);
+                let other = profile::log::<65, _, _>(|| log.find_modtype_with_path(name));
                 shadow::compare(
                     "find_modtype_with_path",
                     name.text(),
@@ -3448,7 +3692,7 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().lookup_modtype(path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<66, _, _>(|| {
             match path.view() {
                 PathView::Pident(id) => self
                     .data
@@ -3480,10 +3724,12 @@ impl Env {
                     Err(EnvError::ModtypeNotFound("(functor application)".into()))
                 }
             }
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.lookup_modtype(path);
+                let other = profile::log::<66, _, _>(|| log.lookup_modtype(path));
                 shadow::compare(
                     "lookup_modtype",
                     &format!("{:?}", path),
@@ -3506,10 +3752,12 @@ impl Env {
             return self.data.shadow.as_ref().unwrap().has_local_constraints();
         }
 
-        let result = !self.data.local_constraints.is_empty();
-        if let Some(log) = &self.data.shadow {
+        let result = profile::tables::<67, _, _>(|| !self.data.local_constraints.is_empty());
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.has_local_constraints();
+                let other = profile::log::<67, _, _>(|| log.has_local_constraints());
                 shadow::compare("has_local_constraints", "", &result, &other);
             });
         }
@@ -3518,17 +3766,26 @@ impl Env {
 
     /// Add a local constraint.
     pub fn add_local_constraint(&mut self, path: Path, decl: TypeDeclaration) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<196, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_local_constraint(path, decl.clone());
+                let shadow_input = decl.clone();
+                profile::log::<68, _, _>(|| log.add_local_constraint(path, shadow_input));
                 shadow::count("add_local_constraint");
             });
         }
-        self.bump_scope();
-        self.data_mut()
-            .local_constraints
-            .insert(path, Arc::new(decl));
+        profile::tables::<68, _, _>(|| {
+            self.bump_scope();
+            self.data_mut()
+                .local_constraints
+                .insert(path, Arc::new(decl));
+        });
     }
 
     /// Find a local constraint.
@@ -3543,17 +3800,19 @@ impl Env {
                 .find_local_constraint(path);
         }
 
-        let result = (|| {
+        let result = profile::tables::<69, _, _>(|| {
             // Local constraints only exist under GADT pattern refinement; skip
             // hashing the path in the common empty case.
             if self.data.local_constraints.is_empty() {
                 return None;
             }
             self.data.local_constraints.get(path).map(|d| d.as_ref())
-        })();
-        if let Some(log) = &self.data.shadow {
+        });
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let other = log.find_local_constraint(path);
+                let other = profile::log::<69, _, _>(|| log.find_local_constraint(path));
                 shadow::compare(
                     "find_local_constraint",
                     &format!("{:?}", path),
@@ -3567,14 +3826,18 @@ impl Env {
 
     /// Iterate over all local constraints.
     pub fn iter_local_constraints(&self) -> impl Iterator<Item = (&Path, &TypeDeclaration)> {
-        if let Some(log) = &self.data.shadow {
+        if let Some(log) = &self.data.shadow
+            && profile::comparisons_enabled()
+        {
             shadow::cold(|| {
-                let mut tables: Vec<_> = self.data
-                        .local_constraints
-                        .iter()
-                        .map(|(p, d)| (p, d.as_ref()))
-                .collect();
-                let mut other: Vec<_> = log.iter_local_constraints().collect();
+                let mut tables: Vec<_> = self
+                    .data
+                    .local_constraints
+                    .iter()
+                    .map(|(p, d)| (p, d.as_ref()))
+                    .collect();
+                let mut other: Vec<_> =
+                    profile::log::<70, _, _>(|| log.iter_local_constraints()).collect();
                 tables.sort_by_key(|(path, _)| (path.name(), path.head().stamp()));
                 other.sort_by_key(|(path, _)| (path.name(), path.head().stamp()));
                 shadow::compare("iter_local_constraints", "", &tables, &other);
@@ -3590,14 +3853,22 @@ impl Env {
     /// Rust does not track GADT instances, so only the fresh scope identity
     /// that the scope-keyed caches observe is kept.
     pub fn add_gadt_instance_level(&mut self) {
-        if self.data.shadow.is_some() {
+        #[cfg(feature = "env-shadow-profile")]
+        if profile::comparisons_enabled() {
+            profile::tables::<199, _, _>(|| {
+                std::hint::black_box(self.data_mut());
+            });
+        }
+        if self.data.shadow.is_some() && profile::comparisons_enabled() {
             shadow::cold(|| {
                 let log = self.data_mut().shadow.as_mut().unwrap();
-                log.add_gadt_instance_level();
+                profile::log::<71, _, _>(|| log.add_gadt_instance_level());
                 shadow::count("add_gadt_instance_level");
             });
         }
-        self.bump_scope();
+        profile::tables::<71, _, _>(|| {
+            self.bump_scope();
+        });
     }
 
     // ========================================================================
@@ -4692,6 +4963,10 @@ pub(crate) mod shadow {
 
     pub(crate) fn begin(enabled: bool, unit: &str) {
         ENABLED.set(enabled);
+        #[cfg(feature = "env-shadow-profile")]
+        if enabled {
+            profile::calibrate();
+        }
         if enabled {
             STATE.with(|state| {
                 let mut state = state.borrow_mut();
@@ -4822,5 +5097,92 @@ mod shadow_tests {
         assert_eq!(env.id(), clone.id());
         assert_eq!(env.scope_id(), clone.scope_id());
         shadow::finish(Ok(())).unwrap();
+    }
+}
+
+/// Measurement-only boundaries. Normal builds inline these wrappers away.
+/// A table entry suppresses nested shadow checks: its inclusive cost is only
+/// table work. The matching log entry is separate from equality/counter work.
+mod profile {
+    #[cfg(feature = "env-shadow-profile")]
+    thread_local! {
+        static INSIDE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+
+    #[inline(always)]
+    pub(super) fn comparisons_enabled() -> bool {
+        #[cfg(feature = "env-shadow-profile")]
+        {
+            !INSIDE.get()
+        }
+        #[cfg(not(feature = "env-shadow-profile"))]
+        {
+            true
+        }
+    }
+
+    #[inline(always)]
+    pub(super) fn tables<const OP: u8, R, F: FnOnce() -> R>(f: F) -> R {
+        #[cfg(feature = "env-shadow-profile")]
+        if comparisons_enabled() && super::shadow::enabled() {
+            return table_entry::<OP, R, F>(f);
+        }
+        f()
+    }
+
+    #[inline(always)]
+    pub(super) fn log<const OP: u8, R, F: FnOnce() -> R>(f: F) -> R {
+        #[cfg(feature = "env-shadow-profile")]
+        if comparisons_enabled() && super::shadow::enabled() {
+            return log_entry::<OP, R, F>(f);
+        }
+        f()
+    }
+
+    /// Empty entries bound the instrumentation overhead. One calibration per
+    /// worker; operation 255 is reserved and excluded from operation totals.
+    #[cfg(feature = "env-shadow-profile")]
+    pub(super) fn calibrate() {
+        thread_local! { static DONE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) }; }
+        if DONE.replace(true) {
+            return;
+        }
+        for _ in 0..10_000 {
+            tables::<255, _, _>(|| ());
+            log::<255, _, _>(|| ());
+        }
+    }
+
+    #[cfg(feature = "env-shadow-profile")]
+    struct Guard;
+    #[cfg(feature = "env-shadow-profile")]
+    impl Guard {
+        fn enter() -> Self {
+            assert!(!INSIDE.replace(true));
+            Self
+        }
+    }
+    #[cfg(feature = "env-shadow-profile")]
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            INSIDE.set(false);
+        }
+    }
+
+    #[cfg(feature = "env-shadow-profile")]
+    #[inline(never)]
+    fn table_entry<const OP: u8, R, F: FnOnce() -> R>(f: F) -> R {
+        let _guard = Guard::enter();
+        // A distinct tag prevents identical-function folding across operations.
+        std::hint::black_box(OP);
+        std::hint::black_box(f())
+    }
+
+    #[cfg(feature = "env-shadow-profile")]
+    #[inline(never)]
+    fn log_entry<const OP: u8, R, F: FnOnce() -> R>(f: F) -> R {
+        let _guard = Guard::enter();
+        std::hint::black_box(OP);
+        std::hint::black_box(f())
     }
 }
