@@ -7563,6 +7563,7 @@ pub(crate) fn type_exp<'a>(
         expr.pexp_desc,
         crate::parser::ast::ExpressionDesc::Pexp_constant(_)
             | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_field(..)
     ) {
         return type_expect_full(
             tctx,
@@ -8103,6 +8104,20 @@ fn type_expect_with_recarg_unscoped<'a>(
             tctx.typed
                 .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
         });
+    }
+    if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
+        let record_expr = tctx.arena.get_expr(*record_expr_idx);
+        let typed_field = type_field(
+            tctx,
+            env,
+            loc,
+            record_expr,
+            field_lid,
+            &expr.pexp_attributes,
+        )?;
+        // OCaml: rue { ... exp_type = ty_arg; ... }
+        finish_expected(tctx, expr, typed_field.exp_type, expected_ty, context)?;
+        return Ok(typed_field);
     }
     let expected_ty = match expected_ty {
         Expected::Known(ty) => ty,
@@ -8867,20 +8882,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_record(tctx, env, loc, inner, expected_ty, attrs, recarg)
         }
 
-        ED::Pexp_field(record_expr_idx, field_lid) => {
-            let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            let typed_field = type_field(
-                tctx,
-                env,
-                loc,
-                record_expr,
-                field_lid,
-                &expr.pexp_attributes,
-            )?;
-            // OCaml: rue { ... exp_type = ty_arg; ... }
-            rue_unify(tctx, loc, typed_field.exp_type, expected_ty, context)?;
-            Ok(typed_field)
-        }
+        ED::Pexp_field(..) => unreachable!("field access was typed above"),
 
         ED::Pexp_setfield(inner) => {
             let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
