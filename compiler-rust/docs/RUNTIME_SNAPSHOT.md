@@ -623,6 +623,37 @@ files. No files or assertions in that test were removed or weakened.
 
 ### F.2 S2: the runtime path made reliable
 
+#### SN2 baseline (x86-64 Linux, Cachegrind 3.22)
+
+At `ca587c441`, a fat-LTO release executable is 36,712,568 bytes.
+The disposable project `snapshot-one-module` has one source, `src/Main.res`:
+`let value = list{1, 2, 3}->List.length`. Its config has `sources: ["src"]`,
+ES modules, in-source output, and suffix `.mjs`; it has no Belt dependency.
+With `RAYON_NUM_THREADS=1` and `RESCRIPT_RUNTIME` pointing to the repository
+runtime, `valgrind --tool=cachegrind --cache-sim=no --branch-sim=no` reports:
+
+| Build | Instructions | Compiled modules |
+| --- | ---: | ---: |
+| Clean (after `rescript clean`) | 17,588,559 | 1 |
+| Immediately repeated, unchanged | 6,164,684 | 0 |
+
+`cg_annotate --auto=no --threshold=0` attributes 20,226 clean-build
+instructions directly to `ModuleRegistry::register_stored_parts` (zero on
+the unchanged build). The clean build's BLAKE3 function self costs include
+120,526 in `ChunkState::update`, 62,524 in `Hasher::update`, and 59,253 in
+`Hasher::merge_cv_stack`. These are **not** an inclusive runtime-verification
+cost: fat LTO inlines the digest caller, and hashing also serves other work.
+A complete attribution remains to be measured; these self costs must not be
+reported as the total saving available.
+
+Code/document disagreement: `compile::compile` returns before runtime
+precompilation when there are no dirty modules and no support work. Thus this
+unchanged build already does **zero runtime verification or registration**;
+a runtime memo cannot remove millions of instructions from that path. Its
+benefit must instead be measured on a changed application source with unchanged
+runtime sources (and on Belt verification when Belt is present).
+
+
 - **Changes.** Accept a runtime without `rescript.json` (B.5), and add
   `rescript.json` to the runtime package's `files` so that a fallback can
   read its flags. Rebase paths for runtime units (B.4), and make the digest
