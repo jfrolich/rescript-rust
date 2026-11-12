@@ -1,0 +1,1 @@
+- Keep the first type and arrow-parameter lists in leased arrays, sharing the type-node lease helper and preserving list handles and overflow boundaries.
