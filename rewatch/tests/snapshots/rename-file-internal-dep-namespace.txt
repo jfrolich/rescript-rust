@@ -1,7 +1,7 @@
 Cleaned 1 stale module
 Parsed 2 source files
-Parsed 467 source files
-Compiled 463 modules
+Parsed 424 source files
+Compiled 420 modules
 
   Warning number 32
   /packages/watch-warnings/src/ModuleA.res:1:5-15

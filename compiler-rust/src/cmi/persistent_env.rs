@@ -107,12 +107,15 @@ impl<V> Default for SharedRegistryMap<V> {
     }
 }
 
+/// Database/inline entries retained when a package index is attached.
+type PendingModules = Mutex<HashMap<String, Arc<Mutex<Option<PendingCore>>>>>;
+
 /// The stored modules of a registry whose signature and JS metadata are not
 /// decoded yet, with the registry maps that decoding one fills. An entry is
 /// decoded once, by the first lookup of its name; until then the module
 /// costs only its encoded bytes.
 pub struct LazyStoredModules {
-    pending: Arc<Mutex<HashMap<String, Arc<Mutex<Option<PendingCore>>>>>>,
+    pending: Arc<PendingModules>,
     snapshot: Option<Arc<dyn SnapshotModules>>,
     cached_modules: Arc<RwLock<HashMap<String, Arc<PortablePersStruct>>>>,
     module_info: Arc<RwLock<HashMap<String, InMemoryModuleInfo>>>,
