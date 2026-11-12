@@ -619,7 +619,9 @@ impl Bir {
                 flags.0 |= NodeFlags::NO_ALLOC;
             }
             if !matches!(self.view(id), View::Var { .. }) {
-                if let Some(strict) = j::facts::purity(self, id, true, |c| j::facts::strictly_pure(self, c)) {
+                if let Some(strict) = j::facts::purity(self, id, true, |c| {
+                    matches!(self.view(c), View::Var { .. }) || j::facts::strictly_pure(self, c)
+                }) {
                     flags.0 &= !NodeFlags::STRICT;
                     if strict { flags.0 |= NodeFlags::STRICT; }
                 }

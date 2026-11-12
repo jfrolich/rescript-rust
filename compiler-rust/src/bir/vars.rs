@@ -78,6 +78,8 @@ impl VarFlags {
 /// Structure-of-arrays storage; mutation is restricted to Bir's editing API.
 #[derive(Default)]
 pub struct VarTable {
+    /// J-only copies retain their source printing identity while owning distinct binders.
+    pub(super) j_origin: crate::fast_hash::AHashMap<VarId, VarId>,
     pub(super) name: Vec<Name>,
     pub(super) order: Vec<u32>,
     pub(super) flags: Vec<VarFlags>,

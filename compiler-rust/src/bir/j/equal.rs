@@ -16,7 +16,9 @@ pub fn equal(b: &Bir, left: NodeId, right: NodeId, steps: &mut usize) -> bool {
             (View::JUndefined, View::JUndefined) | (View::JBool, View::JBool) => {
                 (la != 0) == (ra != 0)
             }
-            (View::Var { var: x }, View::Var { var: y }) => x == y,
+            (View::Var { var: x }, View::Var { var: y }) => {
+                b.vars.j_origin.get(&x).copied().unwrap_or(x) == b.vars.j_origin.get(&y).copied().unwrap_or(y)
+            },
             (
                 View::JQualified {
                     module: x,

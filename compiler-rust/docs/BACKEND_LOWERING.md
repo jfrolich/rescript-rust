@@ -1914,11 +1914,19 @@ The lowering also builds nodes without a constructor, on purpose: a plain
 `If` at C:4147 so that rule 2 of J-S3 does not swap it back, a plain `===` in
 J-M2, `raw_bin` (B:383) in J-E5. The port keeps each such call plain.
 
-Termination of J-E7 and J-S3 is not argued here; S3.2 owes the measure, as
-C.5 gives one for level L. J-E9 is bounded by its depth limit, but it calls
-itself up to three times per level, so one attempt can take 3^10 steps in the
-worst case; S3.2 counts the steps of an attempt and reports the maximum over
-the corpora.
+J-E1 and J-E7 use loops and explicit suffix stacks: each reassociation or
+conditional merge removes an input append/conditional node; stripping a leading
+negation or paired comma suffix removes those input nodes. J-E9 uses the legacy
+`n > 10` cutoff (so n=10 still tries the rules). The left-And arm can make four
+recursive attempts, not three: two operand attempts, a third on `(a,b)`, and a
+fourth force attempt on its result. The logical-attempt tree has a conservative
+O(4^11) bound; equality and negation additionally inspect their compared trees.
+Negation and equality use explicit stacks, never expression-depth recursion.
+The 10,000-term chain test measures 8,188 inspected pairs/planner steps (one
+step when a true operand immediately selects the chain). Successful recipes
+move disjoint subtrees and copy only repeated/overlapping occurrences; failed
+attempts leave both operands untouched. J-S3's measure is specified with its
+implementation below.
 
 ## 7. Cost
 
@@ -1972,7 +1980,7 @@ positions.
 | lowering a node | the node, its J nodes, its statements | constant per node, plus the rows below |
 | grouping switch cases and exit handlers (3.9 step 2) | each case is compared with the heads of the groups before it by `eq_approx`, which stops at the first difference | `cases x groups` comparisons. Quadratic for a switch with many distinct bodies. The step count of the compared node pairs is reported per corpus (as `Stats::compared` is for N11, C.5). Open (Q7): whether a cached structural hash is needed |
 | J-E7, J-S3 rules that compare branches (`ocaml_eq_expression`, `ocaml_eq_block`) | stops at the first difference | counted the same way |
-| J-E9 | up to 3^10 | counted (section 6) |
+| J-E9 | O(4^11) bounded logical attempts, plus equality/negation inspections and duplicated output | counted (section 6) |
 | flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT` | each handler is walked at most once per catch chain it is flattened in |
 | sequencing arguments | one right-to-left scan; a held argument's literal is entered once | linear in the arguments |
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |

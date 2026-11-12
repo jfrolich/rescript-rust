@@ -1,6 +1,8 @@
 //! J construction for the first lowering slice. Plain constructors stay plain;
 //! only reachable normalization rows live in `norm`.
 pub mod norm;
+pub mod plain;
+mod logic;
 pub mod facts;
 pub mod equal;
 
@@ -59,3 +61,6 @@ pub(crate) fn return_value(bir: &mut Bir, value: NodeId) -> NodeId {
 
 #[cfg(test)]
 mod facts_tests;
+
+#[cfg(test)]
+mod norm_tests;

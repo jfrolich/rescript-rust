@@ -739,7 +739,7 @@ impl Importer {
                 }
             }
         }
-        let node = self.b.new_node(view, aux);
+        let node = super::j::plain::node(&mut self.b, view, aux);
         let cold = match s {
             Source::Expr(e) => a.expr_cold(e),
             Source::Stmt(s) => a.stmt_cold(s),
@@ -987,6 +987,7 @@ struct Exporter<'a> {
 }
 impl Exporter<'_> {
     fn ident(&self, v: VarId) -> Result<Ident, Unsupported> {
+        let v = self.p.arena.vars.j_origin.get(&v).copied().unwrap_or(v);
         self.p
             .idents
             .get(v.index())

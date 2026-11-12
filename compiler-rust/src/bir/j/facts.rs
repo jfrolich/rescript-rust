@@ -111,7 +111,7 @@ pub fn is_array_is_array(b: &Bir, id: NodeId) -> bool {
     false
 }
 
-/// A cached strict fact; a shared Var leaf is always pure in both languages.
+/// A cached strict fact, including shared Var leaves before L tail marking.
 pub fn strictly_pure(b: &Bir, id: NodeId) -> bool {
-    matches!(b.view(id), View::Var { .. }) || b.node(id).flags().contains(NodeFlags::STRICT)
+    b.node(id).flags().contains(NodeFlags::STRICT)
 }
