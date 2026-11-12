@@ -176,7 +176,7 @@ fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> 
                     let output = std::fs::read(&target.path)?;
                     let suffix = if format == 1 { if suffix == ".js" { ".cjs" } else { ".res.cjs" } } else { suffix };
                     let (text, positions) = template(&output, suffix.as_bytes())?;
-                    anyhow::ensure!(render_template(&text, &positions, suffix.as_bytes())? == output,
+                    anyhow::ensure!(render_template(&text, positions.iter().copied(), suffix.as_bytes())? == output,
                         "Belt template reconstruction failed for {name}");
                     javascript[format] = text;
                     slots[format] = positions;
@@ -236,10 +236,10 @@ fn template(output: &[u8], suffix: &[u8]) -> Result<(Vec<u8>, Vec<u32>)> {
 
 /// O(text bytes + slot count * suffix bytes), with one output allocation and
 /// one forward pass. Slots are offsets into the suffix-free text.
-fn render_template(text: &[u8], slots: &[u32], suffix: &[u8]) -> Result<Vec<u8>> {
+fn render_template(text: &[u8], slots: impl ExactSizeIterator<Item = u32>, suffix: &[u8]) -> Result<Vec<u8>> {
     let mut output = Vec::with_capacity(text.len() + slots.len() * suffix.len());
     let mut previous = 0;
-    for &slot in slots {
+    for slot in slots {
         let slot = slot as usize;
         anyhow::ensure!(slot >= previous && slot <= text.len(), "invalid template slot");
         output.extend_from_slice(&text[previous..slot]);
@@ -537,10 +537,10 @@ mod tests {
         let source = b"import * as M from \"./M.res.mjs\";\n".repeat(10_000);
         let (text, slots) = template(&source, b".res.mjs").unwrap();
         assert_eq!(slots.len(), 10_000);
-        assert_eq!(render_template(&text, &slots, b".res.mjs").unwrap(), source);
-        let changed = render_template(&text, &slots, b".js").unwrap();
+        assert_eq!(render_template(&text, slots.iter().copied(), b".res.mjs").unwrap(), source);
+        let changed = render_template(&text, slots.iter().copied(), b".js").unwrap();
         assert_eq!(changed, b"import * as M from \"./M.js\";\n".repeat(10_000));
-        assert!(render_template(b"a", &[2], b".js").is_err());
+        assert!(render_template(b"a", [2].into_iter(), b".js").is_err());
     }
 
     #[test]
@@ -626,6 +626,7 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
     let provider = std::sync::Arc::new(BeltPackage {
         index, package: package.clone(), root_config: state.get_root_config().clone(),
     });
+    provider.write_javascript()?;
     state.module_registry.lock().unwrap().register_snapshot(provider);
     state.build_state.packages.get_mut("@rescript/belt").unwrap().prebuilt = true;
     Ok(())
@@ -643,5 +644,31 @@ pub(crate) fn suppress_prebuilt_parses(state: &mut super::build_types::BuildComm
                 if let Some(interface) = &mut source.interface { interface.parse_dirty = false; }
             }
         }
+    }
+}
+
+impl BeltPackage {
+    /// O(emitted JavaScript bytes + slot count + output file count). Only this
+    /// output pass visits all module records; it never touches their cores.
+    fn write_javascript(&self) -> Result<()> {
+        for slot in 0..self.index.len() {
+            let name = std::str::from_utf8(self.index.blob(slot, 0, 1).ok_or_else(|| anyhow!("invalid snapshot module name"))?)?;
+            let source = PathBuf::from("src").join(format!("{name}.res"));
+            let targets = compile::js_output_targets_for_source(&self.package, &source, &self.root_config);
+            for (target, spec) in targets.iter().zip(self.root_config.get_package_specs()) {
+                let format = match spec.module {
+                    crate::config::PackageModule::EsModule => 0,
+                    crate::config::PackageModule::CommonJs => 1,
+                };
+                let text = self.index.blob(slot, 16 + format * 8, 1).ok_or_else(|| anyhow!("invalid snapshot JavaScript"))?;
+                let positions = self.index.blob(slot, 32 + format * 8, 4).ok_or_else(|| anyhow!("invalid snapshot slots"))?;
+                let slots = positions.chunks_exact(4).map(|bytes| u32::from_le_bytes(bytes.try_into().unwrap()));
+                let output = render_template(text, slots, self.root_config.get_suffix(&spec).as_bytes())?;
+                if std::fs::read(&target.path).ok().as_deref() == Some(output.as_slice()) { continue; }
+                std::fs::create_dir_all(target.path.parent().expect("JavaScript output parent"))?;
+                std::fs::write(&target.path, output)?;
+            }
+        }
+        Ok(())
     }
 }
