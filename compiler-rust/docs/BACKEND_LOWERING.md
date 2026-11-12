@@ -528,6 +528,13 @@ here. The call information is not printed, but the printer's eta reduction
 (`eta_reduce_function_body`, A.7) and J1 read it, so it is part of the J node
 and of the gate (8.1).
 
+**Reachable J rules.** The call, the function built for a partial application,
+and strict temporary declarations are plain constructors. Assignment conversion
+does not match J-E4 folding triggers. Calls make retained sequence heads effectful:
+J-M1 joins statement-free sequence values and J-M14 emits or splits discarded
+effects. J-M14 removes pure numeric/undefined leaves, so its emitted call leaves
+cannot trigger J-S1. These are the section-6 rows needed by the application slice.
+
 **Cross-module call** (`compile_external_field_apply` (C:1266)):
 
 - with cross-module inlining on, a callee that is a closed function of

@@ -431,3 +431,82 @@ fn cross_module_applications_without_summary_in_all_contexts() {
         compare(a, root);
     }
 }
+
+#[test]
+fn call_effects_and_statement_arguments_in_all_contexts() {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    for shape in 0..8 {
+        let mut a = LamArena::new();
+        let f = Ident::new("f", 10, IdentFlags::NONE);
+        let x = Ident::new("x", 11, IdentFlags::NONE);
+        let callee = a.var(f);
+        let call = a.apply_raw(callee, &[], ApInfo { status: ApplyStatus::InferFull, loc: LamLoc::NONE });
+        let value = a.const_(C::Int { i: 42, comment: None });
+        let read = a.var(x);
+        let binding = a.let_(LetKind::Strict, x, value, read);
+        let root = match shape {
+            0 => a.seq_raw(call, value),
+            1 => a.seq_raw(value, call),
+            2 => a.seq_raw(call, binding),
+            3 => a.seq_raw(binding, call),
+            4 => { let seq = a.seq_raw(call, value); a.seq_raw(seq, binding) },
+            5 => { let seq = a.seq_raw(binding, call); a.seq_raw(value, seq) },
+            6 => { let func = a.var(f); a.apply_raw(func, &[call, binding], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE }) },
+            7 => { let func = a.var(f); a.apply_raw(func, &[binding, call], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE }) },
+            _ => unreachable!(),
+        };
+        compare(a, root);
+    }
+}
+
+#[test]
+fn application_width_and_na_spines_have_linear_step_counts() {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    for shape in 0..3 {
+        let mut source = LamArena::new();
+        let f = Ident::new("f", 1, IdentFlags::NONE);
+        let mut root = source.var(f);
+        let mut args = Vec::new();
+        for i in 0..10_000 {
+            let mut arg = source.const_(C::JsNull);
+            if shape == 1 && i == 9_999 {
+                let var = Ident::new("last", 2, IdentFlags::NONE);
+                let value = source.var(var);
+                arg = source.let_(LetKind::Strict, var, arg, value);
+            }
+            if shape == 2 {
+                root = source.apply_raw(root, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+            } else { args.push(arg); }
+        }
+        if shape != 2 {
+            root = source.apply_raw(root, &args, ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+        }
+        let input = bridge::import_lambda(&source, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), root).unwrap();
+        let nodes = if shape == 2 { 20_001 } else if shape == 1 { 10_004 } else { 10_002 };
+        assert_eq!(state.source_steps, nodes);
+        assert_eq!(state.sequence_steps, if shape == 1 { 20_001 } else { 10_001 });
+        let lowered = state.complete(Cx::value(), probed);
+        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+    }
+}
+
+#[test]
+fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc};
+    let mut source = LamArena::new();
+    let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
+    let a = source.const_(C::JsNull);
+    let b = source.const_(C::JsTrue);
+    let c = source.const_(C::JsFalse);
+    let arg = source.if_raw(a, b, c);
+    let root = source.apply_raw(f, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
+    let input = bridge::import_lambda(&source, root).unwrap();
+    let root = input.root;
+    let mut state = State::new(input);
+    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("if"))));
+    let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
+    assert!(matches!(state.probe(cx, root), Err(Unsupported("let rec"))));
+}

@@ -7,6 +7,7 @@ use crate::lambda::ApplyStatus;
 pub(super) struct Call {
     pub operands: Vec<NodeId>,
     pub status: ApplyStatus,
+    pub loc: crate::lambda::LamLoc,
     pub external: Option<(
         crate::bir::ImportId,
         crate::bir::StrId,
@@ -23,8 +24,9 @@ impl State {
         args: &[NodeId],
         info: ApplyId,
     ) -> Result<Call, Unsupported> {
+        let loc = self.arena.pools.apply[info.index()].loc;
         let status = self.arena.pools.apply[info.index()].status;
-        let mut groups = vec![args.to_vec()];
+        let mut reversed: Vec<_> = args.iter().rev().copied().collect();
         if status == ApplyStatus::Na {
             while let View::Apply {
                 callee: inner,
@@ -36,15 +38,13 @@ impl State {
                     break;
                 }
                 self.source_steps += 1;
-                groups.push(args.to_vec());
+                reversed.extend(args.iter().rev().copied());
                 callee = inner;
             }
         }
-        let mut operands = Vec::with_capacity(1 + groups.iter().map(Vec::len).sum::<usize>());
+        let mut operands = Vec::with_capacity(1 + reversed.len());
         operands.push(callee);
-        for group in groups.into_iter().rev() {
-            operands.extend(group);
-        }
+        operands.extend(reversed.into_iter().rev());
         let external = self.module_field_apply_target(callee);
         let external = if let Some((module, member)) = external {
             let name = self.arena.text(member);
@@ -74,6 +74,7 @@ impl State {
         Ok(Call {
             operands,
             status,
+            loc,
             external,
         })
     }
@@ -137,6 +138,14 @@ impl State {
                 Self::call_info_of_apply_status(call.status),
             )
         };
+        // C:1129 compile_apply_call: attach only a real, non-ghost location.
+        if self.locations.as_ref().and_then(|locations| locations.get(call.loc))
+            .is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
+            self.arena.set_cold(value, crate::bir::Cold { loc: call.loc, comment: None });
+            let mut flags = self.arena.node(value).flags();
+            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+            self.arena.nodes[value.index()].set_flags(flags);
+        }
         if !self.statements.has_statements(statements) {
             // Holes carry no effects; pop them before returning a free value.
             self.statements.remove_empty(statements);

@@ -280,6 +280,8 @@ struct State {
     next_order: u32,
     resolver: Option<crate::js_ir::ModulePathResolver>,
     cross_module_inline: bool,
+    locations: Option<crate::lambda::LamLocTable>,
+    sequence_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -319,6 +321,8 @@ impl State {
             next_order,
             resolver: None,
             cross_module_inline: false,
+            locations: None,
+            sequence_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -388,6 +392,12 @@ impl ProbeRules for State {
             ),
             View::Const { value } => self.constant(value),
             View::Apply { callee, args, info } => {
+                // K7: C:4558 try_compile_self_tailcall_block. S3.6 owns the
+                // loop record and matching callee; no such record exists yet.
+                if matches!(cx.cont, Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
+                    | Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+                    return Err(Unsupported("let rec"));
+                }
                 let args = args.to_vec();
                 let call = self.application(callee, &args, info)?;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
@@ -411,7 +421,7 @@ impl ProbeRules for State {
                 }));
             }
             View::Seq { first, second } => {
-                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
+                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, .. } => {

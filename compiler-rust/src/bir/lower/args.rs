@@ -55,6 +55,7 @@ impl State {
         let mut values = Vec::new();
         let mut statements = Vec::new();
         while let Some(task) = work.pop() {
+            self.sequence_steps += 1;
             match task {
                 Work::Enter(value) => {
                     if self.delay_safe(value) {
@@ -171,6 +172,7 @@ impl State {
         let mut later_defines_pure = true;
         let mut values = Vec::with_capacity(args.len());
         for (i, arg) in args.into_iter().enumerate().rev() {
+            self.sequence_steps += 1;
             let value = arg.value.expect("argument value");
             let (held, value) =
                 if !needs_holds || !has_code || (later_defines_pure && self.runs_no_code(value)) {

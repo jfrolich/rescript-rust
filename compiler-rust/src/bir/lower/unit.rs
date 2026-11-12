@@ -16,6 +16,7 @@ pub(super) fn lower(
     state.direct = direct;
     state.resolver = resolver.cloned();
     state.cross_module_inline = cross_module_inline;
+    state.locations = locations.cloned();
     if let Some(locations) = locations {
         state.located_functions = state
             .arena
@@ -57,6 +58,7 @@ pub(super) fn lower(
         if next.is_some() {
             if let Some(value) = out.value.take() {
                 state.drop_pure_effect(value);
+                out.stmts = state.statements.since(Span { start: out.stmts.start, len: 0 });
             }
         }
         let value = out.value;

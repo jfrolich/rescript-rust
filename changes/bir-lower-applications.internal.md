@@ -1,0 +1,1 @@
+- Lower applications through the opt-in Bir backend, preserving argument evaluation order and export arity information.
