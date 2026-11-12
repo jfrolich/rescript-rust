@@ -9780,9 +9780,25 @@ fn render_js_program(
         debug,
         jsx_preserve,
     } = settings;
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
-            Err(crate::emit::Unsupported("source maps (S1.2)"))
+            if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
+                crate::emit::emit_with_source_map(program, resolver, file_directives, debug,
+                    jsx_preserve, !options.no_version_header, &crate::emit::sourcemap::Options {
+                        target, source, mode: options.source_map,
+                        sources_content: options.source_map_sources_content,
+                        source_root: &options.source_map_root, locations: lam_locs.clone(),
+                    })
+            } else {
+                Err(crate::emit::Unsupported("source map: missing output or source path"))
+            }
         } else {
             crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
         };
@@ -9792,13 +9808,6 @@ fn render_js_program(
             Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),
         }
     }
-    let source_path = options.source_filename.as_deref().map(FsPath::new);
-    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
-        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
-            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
-            source.with_extension("js")
-        })
-    });
     if let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) {
         print_deps_program_with_source_map(
             program,
