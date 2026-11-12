@@ -892,8 +892,30 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
         .map(|(module_name, _)| module_name.clone())
         .collect();
     let needed = modules_to_compile(build_state, &stale);
+    let mut deferred_parse_dirty = Vec::new();
     {
         let stored_asts = build_state.stored_asts.lock().unwrap();
+        // Skip already parsed warning sources only for this second round.
+        // Their dirty flags must survive for subsequent watch builds.
+        for (module_name, module) in build_state.build_state.modules.iter_mut() {
+            if let SourceType::SourceFile(source_file) = &mut module.source_type {
+                let implementation = source_file.implementation.parse_dirty
+                    && stored_asts.contains_key(&format!("{module_name}:impl"));
+                let interface = source_file.interface.as_ref().is_some_and(|interface| {
+                    interface.parse_dirty
+                        && stored_asts.contains_key(&format!("{module_name}:intf"))
+                });
+                if implementation || interface {
+                    deferred_parse_dirty.push((module_name.clone(), implementation, interface));
+                    if implementation {
+                        source_file.implementation.parse_dirty = false;
+                    }
+                    if interface {
+                        source_file.interface.as_mut().unwrap().parse_dirty = false;
+                    }
+                }
+            }
+        }
         let unparsed: Vec<String> = needed
             .into_iter()
             .filter(|module_name| !stored_asts.contains_key(&format!("{module_name}:impl")))
@@ -910,11 +932,24 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
             }
         }
     }
-    warnings.push_str(&super::parse::generate_asts(
+    let second_round = super::parse::generate_asts(
         build_state,
         &inc,
         super::parse::ParseWarningLog::Append,
-    )?);
+    );
+    // Restore before propagating a parse failure too: watch mode retains this
+    // state and must report the warnings again after the error is corrected.
+    for (module_name, implementation, interface) in deferred_parse_dirty {
+        if let Some(module) = build_state.build_state.modules.get_mut(&module_name)
+            && let SourceType::SourceFile(source_file) = &mut module.source_type
+        {
+            source_file.implementation.parse_dirty |= implementation;
+            if let Some(source_interface) = &mut source_file.interface {
+                source_interface.parse_dirty |= interface;
+            }
+        }
+    }
+    warnings.push_str(&second_round?);
     // Parsing marks what it parsed for compilation; the plan decides.
     for (module_name, module) in build_state.build_state.modules.iter_mut() {
         module.compile_dirty = stale.contains(module_name);
