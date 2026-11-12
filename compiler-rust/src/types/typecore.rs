@@ -8114,11 +8114,7 @@ fn type_expect_full<'a>(
     if typed.exp_env == EnvRef(0) {
         typed.exp_env = tctx.type_ctx.store_typed_env(env);
     }
-    Ok(super::unit_reads::record(
-        typed,
-        &mut tctx.read_log,
-        &tctx.typed,
-    ))
+    Ok(typed)
 }
 
 fn type_expect_with_recarg_unscoped<'a>(
@@ -17166,6 +17162,10 @@ fn type_open(
 
     // Type check the body expression in the extended environment
     let typed_body = type_expect(tctx, &open_env, body, expected_ty, None)?;
+
+    if let Some(log) = &mut tctx.read_log {
+        log.path(&path, crate::cmi::item_deps::Kind::Module);
+    }
 
     // Return expression with Texp_open in exp_extra (matching OCaml)
     Ok(prepend_exp_extra(

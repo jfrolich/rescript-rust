@@ -10694,7 +10694,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
             &type_ctx,
-            tctx.read_log.as_ref().expect("unit read logging enabled"),
+            tctx.read_log.as_mut().expect("unit read logging enabled"),
             &options.open_modules,
         )
     } else {
@@ -11548,7 +11548,7 @@ pub fn typecheck_preprocessed_signature_in_process(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
             &type_ctx,
-            tctx.read_log.as_ref().expect("unit read logging enabled"),
+            tctx.read_log.as_mut().expect("unit read logging enabled"),
             &options.open_modules,
         )
     } else {

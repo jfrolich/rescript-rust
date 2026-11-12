@@ -20,7 +20,8 @@ struct SeenTypes {
 }
 
 impl SeenTypes {
-    /// Mark `ty`; false when it was already marked.
+    /// Mark `ty`; false when it was already marked. One indexed bit probe;
+    /// growing the bitset costs O(new words), amortized over its largest index.
     #[inline]
     fn insert(&mut self, ty: TypeExprRef) -> bool {
         let raw = ty.0;
@@ -46,22 +47,45 @@ impl SeenTypes {
 
 /// Reads recorded as typed nodes are constructed. Type roots are retained until
 /// checking finishes: unification can change their descendants after creation.
-/// Owned paths keep the interned nodes alive for address-based deduplication.
+/// Paths are immutable, process-interned pointers, not dense arena indices.
 #[derive(Default)]
 pub struct ReadLog {
-    paths: ahash::AHashMap<(usize, Kind), Path>,
+    paths: ahash::AHashSet<(usize, Kind)>,
+    out: Vec<UnitRead>,
     seen: SeenTypes,
     types: Vec<TypeExprRef>,
+    #[cfg(test)]
+    root_events: usize,
+    #[cfg(test)]
+    path_events: usize,
+    #[cfg(test)]
+    type_steps: usize,
+    #[cfg(test)]
+    expanded_nodes: usize,
 }
 
 impl ReadLog {
-    /// Record a resolved path in its namespace.
+    /// Record a path: expected O(1) for a duplicate; for a fresh path, the
+    /// cost of `read_of_path` (its path edges plus emitted segments).
+    #[inline]
     pub fn path(&mut self, path: &Path, kind: Kind) {
-        self.paths.entry((path.node_addr(), kind)).or_insert(*path);
+        #[cfg(test)]
+        {
+            self.path_events += 1;
+        }
+        if self.paths.insert((path.node_addr(), kind)) {
+            read_of_path(path, kind, None, &mut self.out);
+        }
     }
 
-    /// Record a type root without observing its still-mutable descendants.
+    /// Record a root without observing its still-mutable descendants.
+    /// One bitset probe, and one amortized O(1) pool push for a new root.
+    #[inline]
     pub fn ty(&mut self, ty: TypeExprRef) {
+        #[cfg(test)]
+        {
+            self.root_events += 1;
+        }
         if self.seen.insert(ty) {
             self.types.push(ty);
         }
@@ -77,22 +101,37 @@ struct TypeReader<'a> {
     /// depend only on those, and many type nodes share a path.
     paths: ahash::AHashSet<(usize, Kind)>,
     out: Vec<UnitRead>,
+    #[cfg(test)]
+    steps: usize,
+    #[cfg(test)]
+    expanded: usize,
 }
 
 impl TypeReader<'_> {
+    /// Expected O(1) deduplication, plus `read_of_path` for a fresh path.
+    #[inline]
     fn path(&mut self, path: &Path, kind: Kind) {
         if self.paths.insert((path.node_addr(), kind)) {
             read_of_path(path, kind, None, &mut self.out);
         }
     }
 
-    fn ty(&mut self, root: TypeExprRef) {
+    /// Traverse the recorded roots in O(V + E) type steps: each reachable
+    /// node is expanded once and each outgoing edge is pushed once.
+    fn types(&mut self) {
         let ctx = self.ctx;
         let mut stack = std::mem::take(&mut self.stack);
-        stack.push(root);
         while let Some(ty) = stack.pop() {
+            #[cfg(test)]
+            {
+                self.steps += 1;
+            }
             if !self.seen.insert(ty) {
                 continue;
+            }
+            #[cfg(test)]
+            {
+                self.expanded += 1;
             }
             // The children are those `btype::iter_type_expr` visits; only a
             // variant goes through it, for its row walk.
@@ -133,34 +172,46 @@ impl TypeReader<'_> {
         }
         self.stack = stack;
     }
-
 }
 
 impl ReadLog {
-    fn resolve(&self, ctx: &TypeContext, opens: &[String]) -> Vec<UnitRead> {
+    /// Resolve a unit in O(R + V + E + P): roots, reachable type nodes,
+    /// type edges and path decoding. Reuses the recording buffers; no tree walk.
+    fn resolve(&mut self, ctx: &TypeContext, opens: &[String]) -> Vec<UnitRead> {
+        for space in &mut self.seen.spaces {
+            space.fill(0);
+        }
         let mut reader = TypeReader {
             ctx,
-            seen: SeenTypes::default(),
-            stack: Vec::new(),
-            paths: ahash::AHashSet::new(),
-            out: opened(opens).collect(),
+            seen: std::mem::take(&mut self.seen),
+            stack: std::mem::take(&mut self.types),
+            paths: std::mem::take(&mut self.paths),
+            out: std::mem::take(&mut self.out),
+            #[cfg(test)]
+            steps: 0,
+            #[cfg(test)]
+            expanded: 0,
         };
-        for ((_, kind), path) in &self.paths {
-            reader.path(path, *kind);
-        }
-        for ty in &self.types {
-            reader.ty(*ty);
+        reader.out.extend(opened(opens));
+        reader.types();
+        #[cfg(test)]
+        {
+            self.type_steps = reader.steps;
+            self.expanded_nodes = reader.expanded;
         }
         reader.out
     }
-
 }
 
 // These callbacks inspect only the node just constructed, never its children.
 pub(crate) trait ReadNode {
+    /// O(1) plus this node's immediate extras, fields or constructor arguments;
+    /// never visits a child node or allocates a per-node traversal buffer.
     fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena);
 }
 
+/// One option test when disabled; otherwise the node-specific `log_reads`
+/// cost. The node is moved through its construction site, not cloned or walked.
 #[inline]
 pub(crate) fn record<T: ReadNode>(node: T, log: &mut Option<ReadLog>, ta: &TypedArena) -> T {
     if let Some(log) = log {
@@ -170,6 +221,8 @@ pub(crate) fn record<T: ReadNode>(node: T, log: &mut Option<ReadLog>, ta: &Typed
 }
 
 impl ReadNode for Expression {
+    /// O(extras + record fields + constructor arity), no child traversal.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena) {
         let e = self;
         for (extra, _, _) in ta.exp_extra(e).iter() {
@@ -195,6 +248,8 @@ impl ReadNode for Expression {
 }
 
 impl ReadNode for Pattern {
+    /// O(extras + record fields + constructor arity), no child traversal.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, ta: &TypedArena) {
         let p = self;
         for (extra, _, _) in ta.pat_extra(p).iter() {
@@ -219,6 +274,8 @@ impl ReadNode for Pattern {
 }
 
 impl ReadNode for TypedCoreType {
+    /// O(1) root recording plus fresh-path decoding; no child traversal.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let t = self;
         match &t.ctyp_desc {
@@ -231,6 +288,8 @@ impl ReadNode for TypedCoreType {
 }
 
 impl ReadNode for ModuleExpr {
+    /// O(1) except decoding a fresh module path; no child traversal.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let m = self;
         if let ModuleExprDesc::Tmod_ident(path, _) = &m.mod_desc {
@@ -240,6 +299,8 @@ impl ReadNode for ModuleExpr {
 }
 
 impl ReadNode for ModuleType {
+    /// O(with constraints) plus fresh-path decoding; no child traversal.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let m = self;
         match &m.mty_desc {
@@ -260,6 +321,8 @@ impl ReadNode for ModuleType {
 }
 
 impl ReadNode for StructureItem {
+    /// O(1) except decoding a fresh open/extension path.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let item = self;
         match &item.str_desc {
@@ -271,6 +334,8 @@ impl ReadNode for StructureItem {
 }
 
 impl ReadNode for TypedSignatureItem {
+    /// O(1) except decoding a fresh open/extension path.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let item = self;
         match &item.sig_desc {
@@ -282,6 +347,8 @@ impl ReadNode for TypedSignatureItem {
 }
 
 impl ReadNode for ExtensionConstructor {
+    /// O(1) except decoding a fresh rebound extension path.
+    #[inline]
     fn log_reads(&self, log: &mut ReadLog, _ta: &TypedArena) {
         let ext = self;
         if let ExtensionConstructorKind::Text_rebind(path, _) = &ext.ext_kind {
@@ -291,6 +358,8 @@ impl ReadNode for ExtensionConstructor {
 }
 
 impl ReadLog {
+    /// O(arity) root insertions plus extension-path decoding, no type walk.
+    #[inline]
     fn constructor(&mut self, cd: &ConstructorDescription) {
         if let ConstructorKind::Extension(path) = &cd.cstr_kind {
             self.path(path, Kind::Extension);
@@ -301,13 +370,15 @@ impl ReadLog {
         }
     }
 
+    /// Two O(1) amortized root insertions, no type walk.
+    #[inline]
     fn label(&mut self, ld: &LabelDescription) {
         self.ty(ld.lbl_res);
         self.ty(ld.lbl_arg);
     }
 }
 
-
+/// O(1) to create the iterator; O(total name bytes) to consume it.
 fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
     opens.iter().map(|unit| UnitRead {
         unit: Name::new(unit),
@@ -318,18 +389,188 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 
 /// The reads of an implementation; `opens` are the units opened by the
 /// command line (read as whole modules). No typed tree is needed.
-pub fn structure_reads(ctx: &TypeContext, log: &ReadLog, opens: &[String]) -> Vec<UnitRead> {
+/// O(roots + reachable type nodes and edges + decoded path segments).
+pub fn structure_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
 
 /// The reads of an interface. No typed tree is needed.
-pub fn signature_reads(ctx: &TypeContext, log: &ReadLog, opens: &[String]) -> Vec<UnitRead> {
+/// O(roots + reachable type nodes and edges + decoded path segments).
+pub fn signature_reads(ctx: &TypeContext, log: &mut ReadLog, opens: &[String]) -> Vec<UnitRead> {
     log.resolve(ctx, opens)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ten_thousand_immediate_fields_extras_and_constraints_are_linear() {
+        use crate::parse_arena::{LidentIdx, LocIdx, Located};
+        use crate::parser::ast::ClosedFlag;
+        use crate::types::DeclLoc;
+        use crate::types::asttypes::{MutableFlag, PrivateFlag};
+        use crate::types::decl::{LabelArrayRef, RecordRepresentation};
+        use std::sync::Arc;
+
+        const N: usize = 10_000;
+        let ty = TypeExprRef(0);
+        let path = Path::pident(crate::ident::Ident::create_persistent("Dependency"));
+        let loc = Located {
+            txt: LidentIdx(0),
+            loc: LocIdx(0),
+        };
+        let label = Arc::new(LabelDescription {
+            lbl_name: Name::new("field"),
+            lbl_runtime_name: Name::new("field"),
+            lbl_res: ty,
+            lbl_arg: ty,
+            lbl_mut: MutableFlag::Immutable,
+            lbl_optional: false,
+            lbl_pos: 0,
+            lbl_all: LabelArrayRef::NONE,
+            lbl_repres: RecordRepresentation::RecordRegular,
+            lbl_private: PrivateFlag::Public,
+            lbl_loc: DeclLoc::none(),
+        });
+        let mut ta = TypedArena::new();
+        let child = ta.push_expr(Expression::new(
+            ExpressionDesc::Texp_break,
+            LocIdx(0),
+            ty,
+            EnvRef(0),
+        ));
+        let fields = vec![(label.clone(), loc, child); N];
+        let mut expr = Expression::new(
+            ExpressionDesc::Texp_record {
+                fields: ta.push_record_fields(fields),
+                empty_representation: None,
+                extended_expression: None,
+            },
+            LocIdx(0),
+            ty,
+            EnvRef(0),
+        );
+        for _ in 0..N {
+            ta.push_exp_extra(
+                &mut expr,
+                (
+                    ExpExtra::Texp_open(
+                        crate::parser::ast::OverrideFlag::Fresh,
+                        path,
+                        loc,
+                        EnvRef(0),
+                    ),
+                    LocIdx(0),
+                    Default::default(),
+                ),
+            );
+        }
+        let mut log = ReadLog::default();
+        expr.log_reads(&mut log, &ta);
+        assert_eq!(log.root_events, 2 * N + 1);
+        assert_eq!(log.path_events, N);
+
+        let child = ta.push_pattern(Pattern::new(
+            PatternDesc::Tpat_any,
+            LocIdx(0),
+            ty,
+            EnvRef(0),
+        ));
+        let mut pat = Pattern::new(
+            PatternDesc::Tpat_record(
+                vec![(loc, label, child, false); N],
+                ClosedFlag::Closed,
+                None,
+            ),
+            LocIdx(0),
+            ty,
+            EnvRef(0),
+        );
+        ta.set_pat_extra(
+            &mut pat,
+            vec![
+                (
+                    PatExtra::Tpat_type(path, loc),
+                    LocIdx(0),
+                    Default::default()
+                );
+                N
+            ],
+        );
+        let mut log = ReadLog::default();
+        pat.log_reads(&mut log, &ta);
+        assert_eq!(log.root_events, 2 * N + 1);
+        assert_eq!(log.path_events, N);
+
+        let child = ta.push_module_type(ModuleType {
+            mty_desc: ModuleTypeDesc::Tmty_alias(path, loc),
+            mty_type: super::super::decl::ModuleType::MtySignature(Arc::new(vec![])),
+            mty_env: EnvRef(0),
+            mty_loc: LocIdx(0),
+            mty_attributes: Default::default(),
+        });
+        let module = ModuleType {
+            mty_desc: ModuleTypeDesc::Tmty_with(
+                child,
+                vec![(path, loc, WithConstraint::Twith_module(path, loc)); N],
+            ),
+            mty_type: super::super::decl::ModuleType::MtySignature(Arc::new(vec![])),
+            mty_env: EnvRef(0),
+            mty_loc: LocIdx(0),
+            mty_attributes: Default::default(),
+        };
+        let mut log = ReadLog::default();
+        module.log_reads(&mut log, &ta);
+        assert_eq!(log.path_events, N);
+        assert_eq!(log.paths.len(), 1);
+
+        let constructor = ConstructorDescription {
+            cstr_name: "Extension".into(),
+            cstr_res: ty,
+            cstr_existentials: vec![],
+            cstr_args: vec![ty; N],
+            cstr_arity: N as i32,
+            cstr_kind: ConstructorKind::Extension(path),
+            cstr_generalized: false,
+            cstr_private: PrivateFlag::Public,
+            cstr_loc: DeclLoc::none(),
+            cstr_attributes: vec![],
+            cstr_inlined: None,
+        };
+        let mut log = ReadLog::default();
+        log.constructor(&constructor);
+        assert_eq!(log.root_events, N + 1);
+        assert_eq!(log.path_events, 1);
+    }
+
+    #[test]
+    fn ten_thousand_shared_type_edges_are_visited_once() {
+        let ctx = TypeContext::new(std::sync::Arc::new(crate::IdGenerator::new()));
+        let mut log = ReadLog::default();
+        let mut root = ctx.new_var(None);
+        let leaf = root;
+        for _ in 0..10_000 {
+            root = ctx.new_tuple(vec![root, leaf]);
+            log.ty(root);
+            log.ty(root);
+        }
+        assert_eq!(log.root_events, 20_000);
+        assert_eq!(log.types.len(), 10_000);
+        assert!(log.resolve(&ctx, &[]).is_empty());
+        assert_eq!(log.expanded_nodes, 10_001);
+        assert_eq!(log.type_steps, 30_000); // 10,000 roots + 20,000 edges
+    }
+
+    #[test]
+    fn read_walk_handles_fit_in_sixteen_bytes() {
+        assert_eq!(std::mem::size_of::<TypeExprRef>(), 4);
+        assert_eq!(std::mem::size_of::<Path>(), 8);
+        assert_eq!(std::mem::size_of::<(usize, Kind)>(), 16);
+        assert_eq!(std::mem::size_of::<&mut ReadLog>(), 8);
+        assert_eq!(std::mem::size_of::<&mut TypeReader<'_>>(), 8);
+        // ReadLog/TypeReader are per-compilation buffers, never per-node values.
+    }
 
     #[test]
     fn read_log_observes_unification_after_recording_a_root() {
