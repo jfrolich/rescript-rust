@@ -1,6 +1,8 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod ffi_args;
+mod external;
 mod call;
 mod cond;
 mod exit;
@@ -340,6 +342,11 @@ struct State {
     invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
+    external_references: Vec<Option<crate::bir::ImportId>>,
+    external_globals: Vec<Option<VarId>>,
+    inline_globals: Vec<Ident>,
+    inline_scratch: crate::bir::l::beta::Scratch,
+    external_bindings: Vec<[Option<VarId>; 2]>,
     module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
@@ -408,6 +415,11 @@ impl State {
             invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
+            external_references: Vec::new(),
+            external_globals: Vec::new(),
+            inline_globals: Vec::new(),
+            inline_scratch: Default::default(),
+            external_bindings: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
@@ -528,7 +540,7 @@ impl ProbeRules for State {
                     return Err(Unsupported("let rec"));
                 }
                 let args = args.to_vec();
-                let call = self.application(callee, &args, info)?;
+                let call = self.application(cx, callee, &args, info)?;
                 return Ok(ProbePlan::Children(expr::Resume::Call(call)));
             }
             View::Fun { body, header } => {
@@ -585,21 +597,9 @@ impl ProbeRules for State {
                         return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
                     }
                 }
-                let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => {
-                        unreachable!("short circuits are lowered above")
-                    }
-                    Primitive::PjsCall(_)
-                    | Primitive::PjsApply
-                    | Primitive::PjsObjectCreate(_)
-                    | Primitive::PjsObjectGet(_)
-                    | Primitive::PjsObjectSet(_)
-                    | Primitive::PjsFnMethod => "external",
-                    _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        primitive, operands: self.source.node(node).primitive_arguments(),
-                    }))),
-                };
-                return Err(Unsupported(reason));
+                return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
+                    primitive, operands: self.source.node(node).primitive_arguments(),
+                })));
             }
             View::If { condition, then_, else_ } => {
                 let conditional = self.conditional(cx, cond::Kind::If, condition, then_, else_)?;

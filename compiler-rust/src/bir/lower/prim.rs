@@ -120,6 +120,19 @@ impl State {
                 Probed::Free(_) => unreachable!("argument realized before its next sibling"),
             })
             .collect();
+        let outputs = match &payload.primitive {
+            Primitive::PjsCall(call) => self.hold_external_args(cx, &call.arg_types, outputs),
+            Primitive::PjsObjectCreate(specs) => self.hold_external_obj_args(cx, specs, outputs),
+            Primitive::PjsObjectGet(_) => {
+                let mut outputs: smallvec::SmallVec<[Out; 4]> = outputs;
+                if outputs.len() == 1 {
+                    let arg = outputs.pop().unwrap();
+                    outputs.push(self.hold_external_receiver(cx, arg));
+                }
+                outputs
+            }
+            _ => outputs,
+        };
         let (statements, values) = self.sequence_arguments(false, outputs);
         self.primitive_steps += values.len() + 1;
         let primitive = &payload.primitive;
@@ -307,9 +320,10 @@ impl State {
                 norm::jm3_to_int32(&mut self.arena, length)
             }
             Primitive::PisPolyVarBlock => {
-                let typeof_ = plain::node(&mut self.arena, View::JTypeof { value: values[0] }, 0);
+                // P:642 / E:653 folds typeof before comparing the type name.
+                let typeof_ = norm::jm9_typeof(&mut self.arena, values[0]);
                 let object = plain::string(&mut self.arena, "object");
-                plain::bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
+                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
             }
             // P: compile_primitive_js, indexing. Both string forms are checked.
             Primitive::Pstringrefs | Primitive::Pstringrefu => {
@@ -728,14 +742,38 @@ impl State {
             Primitive::Parraylength => {
                 norm::je2_length(&mut self.arena, values[0], LengthObject::Array)
             }
+            Primitive::PjsCall(call) => self.compile_js_call(cx, prim.primitive, call, values),
+            Primitive::PjsApply => match values.split_first() {
+                Some((&callee, args)) => self.call_node(callee, args, Default::default()),
+                None => plain::node(&mut self.arena, View::JUndefined, 0),
+            },
+            Primitive::PjsObjectCreate(specs) => self.compile_js_object_create(cx, specs, values),
+            Primitive::PjsFnMethod => {
+                let mut values = values.into_iter();
+                let value = values.next().unwrap_or_else(|| plain::node(&mut self.arena, View::JUndefined, 0));
+                for unused in values { self.arena.release(unused); }
+                if let View::JFun { header, .. } = self.arena.view(value) {
+                    self.arena.pools.funcs[header.index()].flags |= crate::bir::FuncHeader::METHOD;
+                }
+                value
+            }
+            Primitive::PjsObjectGet(name) | Primitive::PjsObjectSet(name) => {
+                match (primitive, values.as_slice()) {
+                    (Primitive::PjsObjectGet(_), &[receiver]) => self.static_member(receiver, name),
+                    (Primitive::PjsObjectSet(_), &[receiver, value]) => {
+                        let target = self.static_member(receiver, name);
+                        let assign = plain::bin(&mut self.arena, BinOp::Eq, target, value);
+                        let unit = plain::node(&mut self.arena, View::JUndefined, 1);
+                        plain::seq(&mut self.arena, assign, unit)
+                    }
+                    _ => {
+                        for value in values { self.arena.release(value); }
+                        plain::node(&mut self.arena, View::JUndefined, 0)
+                    }
+                }
+            }
             Primitive::Psequand
             | Primitive::Psequor
-            | Primitive::PjsCall(_)
-            | Primitive::PjsApply
-            | Primitive::PjsObjectCreate(_)
-            | Primitive::PjsObjectGet(_)
-            | Primitive::PjsObjectSet(_)
-            | Primitive::PjsFnMethod
             => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }
