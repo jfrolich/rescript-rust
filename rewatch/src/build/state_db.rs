@@ -25,6 +25,28 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rescript_compiler::timing::{self, Phase};
+
+/// Scoped persistence subphase, disabled with the compiler's other timers.
+pub(super) struct RecordTimer {
+    phase: Phase,
+    started: Option<std::time::Instant>,
+}
+
+impl RecordTimer {
+    pub(super) fn start(phase: Phase) -> Self {
+        Self { phase, started: timing::enabled().then(std::time::Instant::now) }
+    }
+}
+
+impl Drop for RecordTimer {
+    fn drop(&mut self) {
+        if let Some(started) = self.started {
+            timing::record(self.phase, started.elapsed());
+        }
+    }
+}
+
 pub const DB_FILE: &str = "rescript.sqlite";
 const META_RECORD_COMPLETE: &str = "record_complete";
 
@@ -693,28 +715,29 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     }
     // Encode the rows to set up front, in parallel: the transaction below
     // runs on one thread, and a large package sets ~100k rows.
-    let reads: Vec<(&String, String)> = new
+    let reads: Vec<(&String, String)> = timing::measure(Phase::RecordReadsEncode, || new
         .reads_updates
         .par_iter()
         .map(|(module, reads)| (module, encode_reads(reads)))
-        .collect();
-    let items: Vec<(&String, String)> = new
+        .collect());
+    let items: Vec<(&String, String)> = timing::measure(Phase::RecordItemsEncode, || new
         .items_updates
         .par_iter()
         .map(|(module, items)| (module, encode_items(items)))
-        .collect();
-    let module_rows = changed_rows(&previous.modules, &new.modules, |row| {
+        .collect());
+    let module_rows = timing::measure(Phase::RecordImportsEncode, || changed_rows(&previous.modules, &new.modules, |row| {
         row.imports.as_ref().map(Imports::encode)
-    });
-    let deps_rows = changed_rows(&previous.deps, &new.deps, |row| row.deps.join("\n"));
+    }));
+    let deps_rows = timing::measure(Phase::RecordDepsEncode, || changed_rows(&previous.deps, &new.deps, |row| row.deps.join("\n")));
     let write = || -> rusqlite::Result<()> {
-        let mut conn = open_for_write(package)?;
-        conn.execute(
+        let mut conn = timing::measure(Phase::RecordSqlOpen, || open_for_write(package))?;
+        timing::measure(Phase::RecordSqlMeta, || conn.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')",
             [META_RECORD_COMPLETE],
-        )?;
+        ))?;
         let tx = conn.transaction()?;
         {
+            let table_timer = RecordTimer::start(Phase::RecordSqlMeta);
             let mut set_meta = tx.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
             for (key, value) in &new.meta {
                 if previous.meta.get(key) != Some(value) {
@@ -722,6 +745,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 }
             }
 
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlSources);
             let mut delete_source = tx.prepare("DELETE FROM sources WHERE path = ?1")?;
             let mut set_source =
                 tx.prepare("INSERT OR REPLACE INTO sources (path, module) VALUES (?1, ?2)")?;
@@ -737,14 +762,20 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 },
             )?;
 
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlReads);
             let mut set_reads = tx.prepare("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
             for (module, reads) in &reads {
                 set_reads.execute(params![module, reads])?;
             }
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlItems);
             let mut set_items = tx.prepare("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
             for (module, items) in &items {
                 set_items.execute(params![module, items])?;
             }
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlInterfaces);
             let mut set_interface =
                 tx.prepare("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
             let mut set_extras =
@@ -757,6 +788,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                     None => delete_extras.execute(params![module])?,
                 };
             }
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlModules);
             let mut delete_interface = tx.prepare("DELETE FROM interfaces WHERE module = ?1")?;
             let mut delete_reads = tx.prepare("DELETE FROM reads WHERE module = ?1")?;
             let mut delete_items = tx.prepare("DELETE FROM items WHERE module = ?1")?;
@@ -793,6 +826,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 },
             )?;
 
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlWarnings);
             let mut delete_warning = tx.prepare("DELETE FROM parse_warnings WHERE source = ?1")?;
             let mut set_warning =
                 tx.prepare("INSERT OR REPLACE INTO parse_warnings (source, text) VALUES (?1, ?2)")?;
@@ -804,6 +839,8 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 |source, text| set_warning.execute(params![source, text]).map(drop),
             )?;
 
+            drop(table_timer);
+            let table_timer = RecordTimer::start(Phase::RecordSqlDeps);
             let mut delete_deps = tx.prepare("DELETE FROM deps WHERE source = ?1")?;
             let mut set_deps =
                 tx.prepare("INSERT OR REPLACE INTO deps (source, mtime, deps) VALUES (?1, ?2, ?3)")?;
@@ -815,6 +852,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                 |source| delete_deps.execute(params![source]).map(drop),
                 |source, row, deps| set_deps.execute(params![source, row.mtime, deps]).map(drop),
             )?;
+            drop(table_timer);
         }
         #[cfg(debug_assertions)]
         if std::env::var("RESCRIPT_TEST_ABORT_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
@@ -826,7 +864,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
             [META_RECORD_COMPLETE],
         )?;
-        tx.commit()
+        timing::measure(Phase::RecordSqlCommit, || tx.commit())
     };
     if let Err(err) = write() {
         log::warn!("Could not record the build state of {}: {err}", package.name);

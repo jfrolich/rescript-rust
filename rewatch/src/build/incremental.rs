@@ -38,6 +38,8 @@
 
 use super::build_types::{BuildCommandState, Module, PendingReads, SourceType};
 use super::packages::Package;
+use super::state_db::RecordTimer;
+use rescript_compiler::timing::{self, Phase};
 use super::state_db::{self, ItemDigests, ModuleRow, PackageState, SourceDeps, UnitReads};
 use crate::config::{Config, SourceMapCommand};
 use ahash::{AHashMap, AHashSet};
@@ -264,6 +266,7 @@ pub fn current_record(
     package_name: &str,
     digests: &UnitDigests,
 ) -> PackageState {
+    let meta_timer = RecordTimer::start(Phase::RecordMetaRows);
     let mut record = PackageState::default();
     let previous = build_state
         .previous_in_process
@@ -307,6 +310,8 @@ pub fn current_record(
             .to_string(),
         );
     }
+    drop(meta_timer);
+    let interface_timer = RecordTimer::start(Phase::RecordInterfaceRows);
     // The interfaces of the modules this build compiled, where they differ
     // from the stored ones (by content: the interface digest leaves out
     // locations, which the stored interface keeps).
@@ -346,6 +351,7 @@ pub fn current_record(
         .collect::<Vec<_>>()
         .into_iter()
         .collect();
+    drop(interface_timer);
     let mut written: AHashMap<&String, WrittenRecord> = build_state
         .modules
         .par_iter()
@@ -375,6 +381,7 @@ pub fn current_record(
             continue;
         };
         if !record.partial {
+            let _timer = RecordTimer::start(Phase::RecordSourceRows);
             record
                 .sources
                 .insert(source_file.implementation.path.clone(), module_name.clone());
@@ -382,6 +389,7 @@ pub fn current_record(
                 record.sources.insert(interface.path.clone(), module_name.clone());
             }
         }
+        let _timer = RecordTimer::start(Phase::RecordModuleRows);
         // A module this build did not write keeps what its last written
         // compile read and published, with the imports this build checked
         // item by item brought up to date.
@@ -445,6 +453,7 @@ pub fn current_record(
         }
         record.modules.insert(module_name.clone(), row);
     }
+    let deps_timer = RecordTimer::start(Phase::RecordDependencyRows);
     let in_memory_deps = &compiles.in_memory_deps;
     // A partial record sets the rows of the sources this build parsed; the
     // others are as recorded.
@@ -500,6 +509,8 @@ pub fn current_record(
             }
         }
     }
+    drop(deps_timer);
+    let _timer = RecordTimer::start(Phase::RecordWarningRows);
     record.parse_warnings = build_state
         .parse_warnings
         .lock()
@@ -1633,6 +1644,7 @@ fn written_interface(
     if !build_state.written_modules.contains(module_name) {
         return None;
     }
+    let read_timer = RecordTimer::start(Phase::RecordReadRows);
     let own = digests.get(module_name)?;
     // What inlinable bodies refer to is added now, with dependencies' JS
     // metadata final (they may publish it after this module compiled).
@@ -1676,12 +1688,15 @@ fn written_interface(
         imports.push((unit.to_string(), unit_digests.0));
         reads.insert(unit.to_string(), (read_digest, keys));
     }
+    drop(read_timer);
+    let import_timer = RecordTimer::start(Phase::RecordImportRows);
     imports.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+    drop(import_timer);
     Some(WrittenRecord {
         digest: own.0,
         imports,
         reads,
-        items: ItemDigests::clone(&own.1),
+        items: timing::measure(Phase::RecordItemRows, || ItemDigests::clone(&own.1)),
     })
 }
 

@@ -39,10 +39,56 @@ pub enum Phase {
     RecordInterfaces,
     /// Package record construction, encoding and SQLite persistence.
     RecordWrite,
+    /// Detailed persistence subphase: MetaRows.
+    RecordMetaRows,
+    /// Detailed persistence subphase: InterfaceRows.
+    RecordInterfaceRows,
+    /// Detailed persistence subphase: ModuleRows.
+    RecordModuleRows,
+    /// Detailed persistence subphase: SourceRows.
+    RecordSourceRows,
+    /// Detailed persistence subphase: DependencyRows.
+    RecordDependencyRows,
+    /// Detailed persistence subphase: WarningRows.
+    RecordWarningRows,
+    /// Detailed persistence subphase: ReadRows.
+    RecordReadRows,
+    /// Detailed persistence subphase: ImportRows.
+    RecordImportRows,
+    /// Detailed persistence subphase: ItemRows.
+    RecordItemRows,
+    /// Detailed persistence subphase: ReadsEncode.
+    RecordReadsEncode,
+    /// Detailed persistence subphase: ItemsEncode.
+    RecordItemsEncode,
+    /// Detailed persistence subphase: ImportsEncode.
+    RecordImportsEncode,
+    /// Detailed persistence subphase: DepsEncode.
+    RecordDepsEncode,
+    /// Detailed persistence subphase: SqlOpen.
+    RecordSqlOpen,
+    /// Detailed persistence subphase: SqlMeta.
+    RecordSqlMeta,
+    /// Detailed persistence subphase: SqlSources.
+    RecordSqlSources,
+    /// Detailed persistence subphase: SqlReads.
+    RecordSqlReads,
+    /// Detailed persistence subphase: SqlItems.
+    RecordSqlItems,
+    /// Detailed persistence subphase: SqlInterfaces.
+    RecordSqlInterfaces,
+    /// Detailed persistence subphase: SqlModules.
+    RecordSqlModules,
+    /// Detailed persistence subphase: SqlWarnings.
+    RecordSqlWarnings,
+    /// Detailed persistence subphase: SqlDeps.
+    RecordSqlDeps,
+    /// Detailed persistence subphase: SqlCommit.
+    RecordSqlCommit,
 }
 
 impl Phase {
-    const COUNT: usize = Phase::RecordWrite as usize + 1;
+    const COUNT: usize = Phase::RecordSqlCommit as usize + 1;
 }
 
 /// Nanoseconds per phase, indexed by `Phase as usize`.
@@ -64,6 +110,30 @@ impl PhaseTimingSnapshot {
             record_digests: phase(Phase::RecordDigests),
             record_interfaces: phase(Phase::RecordInterfaces),
             record_write: phase(Phase::RecordWrite),
+            record_meta_rows: phase(Phase::RecordMetaRows),
+            record_interface_rows: phase(Phase::RecordInterfaceRows),
+            record_module_rows: phase(Phase::RecordModuleRows),
+            record_source_rows: phase(Phase::RecordSourceRows),
+            record_dependency_rows: phase(Phase::RecordDependencyRows),
+            record_warning_rows: phase(Phase::RecordWarningRows),
+            record_read_rows: phase(Phase::RecordReadRows),
+            record_import_rows: phase(Phase::RecordImportRows),
+            record_item_rows: phase(Phase::RecordItemRows),
+            record_reads_encode: phase(Phase::RecordReadsEncode),
+            record_items_encode: phase(Phase::RecordItemsEncode),
+            record_imports_encode: phase(Phase::RecordImportsEncode),
+            record_deps_encode: phase(Phase::RecordDepsEncode),
+            record_sql_open: phase(Phase::RecordSqlOpen),
+            record_sql_meta: phase(Phase::RecordSqlMeta),
+            record_sql_sources: phase(Phase::RecordSqlSources),
+            record_sql_reads: phase(Phase::RecordSqlReads),
+            record_sql_items: phase(Phase::RecordSqlItems),
+            record_sql_interfaces: phase(Phase::RecordSqlInterfaces),
+            record_sql_modules: phase(Phase::RecordSqlModules),
+            record_sql_warnings: phase(Phase::RecordSqlWarnings),
+            record_sql_deps: phase(Phase::RecordSqlDeps),
+            record_sql_commit: phase(Phase::RecordSqlCommit),
+
         }
     }
 }
@@ -95,6 +165,53 @@ pub struct PhaseTimingSnapshot {
     pub record_interfaces: Duration,
     /// Aggregate package-record construction and persistence time.
     pub record_write: Duration,
+    /// Detailed persistence subphase (MetaRows); nested in record_write.
+    pub record_meta_rows: Duration,
+    /// Detailed persistence subphase (InterfaceRows); nested in record_write.
+    pub record_interface_rows: Duration,
+    /// Detailed persistence subphase (ModuleRows); nested in record_write.
+    pub record_module_rows: Duration,
+    /// Detailed persistence subphase (SourceRows); nested in record_write.
+    pub record_source_rows: Duration,
+    /// Detailed persistence subphase (DependencyRows); nested in record_write.
+    pub record_dependency_rows: Duration,
+    /// Detailed persistence subphase (WarningRows); nested in record_write.
+    pub record_warning_rows: Duration,
+    /// Detailed persistence subphase (ReadRows); nested in record_write.
+    pub record_read_rows: Duration,
+    /// Detailed persistence subphase (ImportRows); nested in record_write.
+    pub record_import_rows: Duration,
+    /// Detailed persistence subphase (ItemRows); nested in record_write.
+    pub record_item_rows: Duration,
+    /// Detailed persistence subphase (ReadsEncode); nested in record_write.
+    pub record_reads_encode: Duration,
+    /// Detailed persistence subphase (ItemsEncode); nested in record_write.
+    pub record_items_encode: Duration,
+    /// Detailed persistence subphase (ImportsEncode); nested in record_write.
+    pub record_imports_encode: Duration,
+    /// Detailed persistence subphase (DepsEncode); nested in record_write.
+    pub record_deps_encode: Duration,
+    /// Detailed persistence subphase (SqlOpen); nested in record_write.
+    pub record_sql_open: Duration,
+    /// Detailed persistence subphase (SqlMeta); nested in record_write.
+    pub record_sql_meta: Duration,
+    /// Detailed persistence subphase (SqlSources); nested in record_write.
+    pub record_sql_sources: Duration,
+    /// Detailed persistence subphase (SqlReads); nested in record_write.
+    pub record_sql_reads: Duration,
+    /// Detailed persistence subphase (SqlItems); nested in record_write.
+    pub record_sql_items: Duration,
+    /// Detailed persistence subphase (SqlInterfaces); nested in record_write.
+    pub record_sql_interfaces: Duration,
+    /// Detailed persistence subphase (SqlModules); nested in record_write.
+    pub record_sql_modules: Duration,
+    /// Detailed persistence subphase (SqlWarnings); nested in record_write.
+    pub record_sql_warnings: Duration,
+    /// Detailed persistence subphase (SqlDeps); nested in record_write.
+    pub record_sql_deps: Duration,
+    /// Detailed persistence subphase (SqlCommit); nested in record_write.
+    pub record_sql_commit: Duration,
+
 }
 
 impl PhaseTimingSnapshot {
@@ -128,8 +245,14 @@ thread_local! {
     static THREAD_TIMINGS: RefCell<Option<ThreadPhaseCounters>> = const { RefCell::new(None) };
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct ThreadPhaseCounters(PhaseNanos);
+
+impl Default for ThreadPhaseCounters {
+    fn default() -> Self {
+        Self([0; Phase::COUNT])
+    }
+}
 
 impl ThreadPhaseCounters {
     fn record(&mut self, phase: Phase, nanos: u64) {
@@ -325,6 +448,29 @@ pub fn print_report() {
     print_phase("record_digests", snapshot.record_digests, total);
     print_phase("record_interfaces", snapshot.record_interfaces, total);
     print_phase("record_write", snapshot.record_write, total);
+    print_phase("record_meta_rows", snapshot.record_meta_rows, total);
+    print_phase("record_interface_rows", snapshot.record_interface_rows, total);
+    print_phase("record_module_rows", snapshot.record_module_rows, total);
+    print_phase("record_source_rows", snapshot.record_source_rows, total);
+    print_phase("record_dependency_rows", snapshot.record_dependency_rows, total);
+    print_phase("record_warning_rows", snapshot.record_warning_rows, total);
+    print_phase("record_read_rows", snapshot.record_read_rows, total);
+    print_phase("record_import_rows", snapshot.record_import_rows, total);
+    print_phase("record_item_rows", snapshot.record_item_rows, total);
+    print_phase("record_reads_encode", snapshot.record_reads_encode, total);
+    print_phase("record_items_encode", snapshot.record_items_encode, total);
+    print_phase("record_imports_encode", snapshot.record_imports_encode, total);
+    print_phase("record_deps_encode", snapshot.record_deps_encode, total);
+    print_phase("record_sql_open", snapshot.record_sql_open, total);
+    print_phase("record_sql_meta", snapshot.record_sql_meta, total);
+    print_phase("record_sql_sources", snapshot.record_sql_sources, total);
+    print_phase("record_sql_reads", snapshot.record_sql_reads, total);
+    print_phase("record_sql_items", snapshot.record_sql_items, total);
+    print_phase("record_sql_interfaces", snapshot.record_sql_interfaces, total);
+    print_phase("record_sql_modules", snapshot.record_sql_modules, total);
+    print_phase("record_sql_warnings", snapshot.record_sql_warnings, total);
+    print_phase("record_sql_deps", snapshot.record_sql_deps, total);
+    print_phase("record_sql_commit", snapshot.record_sql_commit, total);
     print_phase("overhead", snapshot.overhead(), total);
 }
 
