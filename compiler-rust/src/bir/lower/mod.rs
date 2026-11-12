@@ -426,13 +426,12 @@ impl ProbeRules for State {
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, args } => {
-                if matches!(self.arena.primitive(primitive).primitive,
-                    crate::lambda::lam_primitive::Primitive::Pstringlength | crate::lambda::lam_primitive::Primitive::Parraylength) {
+                if Self::supported_primitive(&self.arena.primitive(primitive).primitive) {
                     return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim { primitive, operands: args.to_vec() })));
                 }
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
-                    Primitive::Psequand | Primitive::Psequor => "short circuit",
+                    Primitive::Psequand | Primitive::Psequor => "if",
                     Primitive::PjsCall(_)
                     | Primitive::PjsApply
                     | Primitive::PjsObjectCreate(_)

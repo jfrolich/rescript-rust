@@ -32,7 +32,10 @@ impl State {
         into: &mut Vec<(Cx, NodeId)>,
     ) {
         if let Resume::Prim(prim) = resume {
-            into.extend(prim.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
+            let cont = if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
+                Cont::Effect(Tail::No)
+            } else { Cont::Value(Tail::No) };
+            into.extend(prim.operands.iter().map(|&node| (Cx { cont, ..cx }, node)));
             return;
         }
         if let Resume::Call(call) = resume {
@@ -87,6 +90,12 @@ impl State {
     ) -> Probed {
         if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
             let mut out = self.realize(cx, child);
+            if let Resume::Prim(prim) = resume {
+                if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
+                    if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
+                    out.value = Some(crate::bir::j::plain::node(&mut self.arena, View::JUndefined, 1));
+                }
+            }
             self.statements.reserve();
             out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
             return Probed::Out(out);
