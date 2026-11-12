@@ -143,6 +143,147 @@ impl State {
             && matches!(self.arena.view(left), View::Var { var } if var == target) { Some(right) } else { None }
     }
 
+    /// R4, C:4761 compile_if_effect_block, in its specified rule order.
+    pub(super) fn conditional_effect(
+        &mut self, cx: Cx, condition: NodeId, then_: NodeId, else_: NodeId,
+    ) -> Result<Probed, Unsupported> {
+        let start = self.statements.mark();
+        let value_cx = Cx { cont: Cont::Value(Tail::No), ..cx };
+        let condition = self.probe(value_cx, condition)?;
+        let condition = self.realize(value_cx, condition).value.unwrap();
+        let yes = self.probe(cx, then_)?;
+        let yes = self.save_branch(yes);
+        let no = self.probe(cx, else_)?;
+        let no = self.save_branch(no);
+        let statements = match (yes, no) {
+            // Step 1: J-M0 removes pure subexpressions, not every pure value.
+            (Branch::Free(yes), Branch::Free(no)) => {
+                let yes = self.realize(value_cx, Probed::Free(yes)).value.unwrap();
+                let no = self.realize(value_cx, Probed::Free(no)).value.unwrap();
+                self.free_effect_conditional(condition, yes, no)
+            }
+            (yes, no) => {
+                let yes = self.effect_operand(value_cx, yes);
+                let no = self.effect_operand(value_cx, no);
+                if self.pure_free_effect(&yes) {
+                    // Step 2: the free then branch contributes no effect.
+                    self.release_effect_operand(yes);
+                    let no = self.effect_branch(cx, no);
+                    let test = norm::je8_not(&mut self.arena, condition);
+                    vec![norm::js3_simplify_if(&mut self.arena, test, no, vec![])]
+                } else if self.pure_free_effect(&no) {
+                    // Step 3: the free else branch contributes no effect.
+                    self.release_effect_operand(no);
+                    let yes = self.effect_branch(cx, yes);
+                    vec![norm::js3_simplify_if(&mut self.arena, condition, yes, vec![])]
+                } else {
+                    let mut yes = self.effect_branch(cx, yes);
+                    let no = self.effect_branch(cx, no);
+                    // Step 4a: a single return in else precedes then.
+                    if self.single_return(&no).is_some() {
+                        let test = norm::je8_not(&mut self.arena, condition);
+                        let statement = norm::js3_simplify_if(&mut self.arena, test, no, vec![]);
+                        yes.insert(0, statement);
+                        yes
+                    } else if self.ends_terminal(&yes) {
+                        // Step 4b: terminal then falls through to else.
+                        let statement = norm::js3_simplify_if(&mut self.arena, condition, yes, vec![]);
+                        let mut statements = vec![statement];
+                        statements.extend(no);
+                        statements
+                    } else {
+                        // Step 4c: retain both branches.
+                        vec![norm::js3_simplify_if(&mut self.arena, condition, yes, no)]
+                    }
+                }
+            }
+        };
+        for statement in statements { self.statements.push(statement); }
+        Ok(self.effect_output(start))
+    }
+
+    fn free_effect_conditional(&mut self, condition: NodeId, yes: NodeId, no: NodeId) -> Vec<NodeId> {
+        let yes = norm::jm0_remove_pure_subexpression(&mut self.arena, yes);
+        let no = norm::jm0_remove_pure_subexpression(&mut self.arena, no);
+        let mut statements = Vec::new();
+        match (yes, no) {
+            (None, None) => norm::jm14_push_s_if_empty(&mut self.arena, condition, &mut statements),
+            (Some(yes), Some(no)) => {
+                let value = norm::je7_cond(&mut self.arena, condition, yes, no);
+                norm::jm14_push_effect_expression(&mut self.arena, value, &mut statements);
+            }
+            (Some(value), None) => {
+                let statement = norm::js1_exp(&mut self.arena, value);
+                statements.push(norm::js3_simplify_if(&mut self.arena, condition, vec![statement], vec![]));
+            }
+            (None, Some(value)) => {
+                let test = norm::je8_not(&mut self.arena, condition);
+                let statement = norm::js1_exp(&mut self.arena, value);
+                statements.push(norm::js3_simplify_if(&mut self.arena, test, vec![statement], vec![]));
+            }
+        }
+        statements
+    }
+
+    fn effect_operand(&mut self, cx: Cx, branch: Branch) -> Branch {
+        match branch {
+            Branch::Free(id) => {
+                let out = self.realize(cx, Probed::Free(id));
+                Branch::Statements(vec![], out.value, Finished::Dummy)
+            }
+            branch => branch,
+        }
+    }
+
+    fn pure_free_effect(&self, branch: &Branch) -> bool {
+        matches!(branch, Branch::Statements(_, Some(value), Finished::Dummy)
+            if self.arena.node(*value).flags().contains(crate::bir::NodeFlags::STRICT))
+    }
+
+    fn release_effect_operand(&mut self, branch: Branch) {
+        let Branch::Statements(statements, Some(value), Finished::Dummy) = branch else { unreachable!() };
+        assert!(statements.is_empty());
+        self.arena.release(value);
+    }
+
+    fn effect_branch(&mut self, cx: Cx, branch: Branch) -> Vec<NodeId> {
+        let branch = self.effect_operand(cx, branch);
+        let Branch::Statements(mut statements, value, finished) = branch else { unreachable!() };
+        if let Some(value) = value {
+            if finished == Finished::True { self.arena.release(value); }
+            else { norm::jm14_push_effect_expression(&mut self.arena, value, &mut statements); }
+        }
+        norm::js5_unnest_block(&mut self.arena, statements)
+    }
+
+    fn single_return(&self, statements: &[NodeId]) -> Option<NodeId> {
+        if let [statement] = statements && let View::SReturn { value } = self.arena.view(*statement) { Some(value) }
+        else { None }
+    }
+
+    fn ends_terminal(&self, statements: &[NodeId]) -> bool {
+        statements.last().is_some_and(|&statement| matches!(self.arena.view(statement),
+            View::SReturn { .. } | View::SThrow { .. } | View::SBreak { .. } | View::SContinue { .. }))
+    }
+
+    /// C:7465 compiled_from_effect_block: recover a lone expression, but do
+    /// not flatten a multi-statement block across a conditional boundary.
+    fn effect_output(&mut self, start: Span) -> Probed {
+        let span = self.statements.since(start);
+        let statements = self.conditional_statements(span);
+        let statements = norm::js5_unnest_block(&mut self.arena, statements);
+        let value = if let [statement] = statements.as_slice()
+            && let View::SExp { value } = self.arena.view(*statement) {
+            self.arena.detach(value);
+            self.arena.release(*statement);
+            value
+        } else {
+            for statement in statements { self.statements.push(statement); }
+            self.pure_expression(View::JUndefined, 0)
+        };
+        Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::False })
+    }
+
     /// R3, C:4873 compile_if_assignment_block and C:4895
     /// compile_test_assignment_block: assignments are lowered once.
     pub(super) fn conditional_assignment(
@@ -190,12 +331,16 @@ mod tests {
         }
         let no = source.const_(Constant::JsFalse);
         let root = source.if_raw(condition, yes, no);
+        compare_given(source, root, context);
+    }
+
+    fn compare_given(mut source: LamArena, root: crate::lambda::arena::Lam, context: u8) {
         let input = bridge::import_lambda(&source, root).unwrap();
         let node = input.root;
         let mut state = State::new(input);
         let target = state.fresh_variable("result");
         let target_id = state.idents[target.index()];
-        let cx = match context { 0 => Cx::value(), 1 => Cx::assign(target), 2 => Cx::declare(LetKind::Strict, target), _ => unreachable!() };
+        let cx = match context { 0 => Cx::value(), 1 => Cx::assign(target), 2 => Cx::declare(LetKind::Strict, target), 3 => Cx::effect(), _ => unreachable!() };
         let output = state.probe(cx, node).unwrap();
         let lowered = state.complete(cx, output);
         lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
@@ -208,6 +353,47 @@ mod tests {
         let print = |program: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(
             program, None, &[], false, false, false);
         assert_eq!(print(&actual), print(&expected));
+    }
+
+    fn effect_case(yes_shape: u8, no_shape: u8) {
+        fn branch(source: &mut LamArena, shape: u8, stamp: i32) -> crate::lambda::arena::Lam {
+            let mut body = if shape & 1 == 0 { source.const_(Constant::JsNull) } else {
+                let callee = source.var(Ident::new("effect", stamp, IdentFlags::NONE));
+                source.apply_raw(callee, &[], crate::lambda::ApInfo { loc: crate::lambda::LamLoc::NONE, status: crate::lambda::ApplyStatus::InferFull })
+            };
+            if shape & 2 != 0 {
+                let value = source.const_(Constant::JsNull);
+                body = source.let_(LetKind::Strict, Ident::new("binding", stamp + 1, IdentFlags::NONE), value, body);
+            }
+            body
+        }
+        let mut source = LamArena::new();
+        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let yes = branch(&mut source, yes_shape, 10);
+        let no = branch(&mut source, no_shape, 20);
+        let root = source.if_raw(condition, yes, no);
+        compare_given(source, root, 3);
+    }
+
+    #[test]
+    fn r4_step1_neither_effect() { effect_case(0, 0); }
+    #[test]
+    fn r4_step1_both_effects() { effect_case(1, 1); }
+    #[test]
+    fn r4_step1_then_effect() { effect_case(1, 0); }
+    #[test]
+    fn r4_step1_else_effect() { effect_case(0, 1); }
+    #[test]
+    fn r4_step2_free_pure_then() { effect_case(0, 3); }
+    #[test]
+    fn r4_step3_free_pure_else() { effect_case(3, 0); }
+    #[test]
+    fn r4_step4_nonterminal_branches() { effect_case(3, 3); }
+
+    #[test]
+    fn r4_effects_match_legacy() {
+        compare_context(false, 3);
+        compare_context(true, 3);
     }
 
     #[test]
