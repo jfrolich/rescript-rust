@@ -2202,7 +2202,7 @@ positions.
 | a conditional (3.6) | constant, plus the statements of a branch that becomes a list (copied once) or is discarded; a branch kept as the statements after a guard is not read | each statement is written once and copied to a list once. Measured at 10,000 nested conditionals whose innermost branch needs a statement: 20,001 copies in **V** and **A**, 10,000 in **R** |
 | row R5 step 0 | one `TRIVIAL_UNIT` flag read per branch | maintained by `Bir::repair` from immediate child facts on construction/import and edits; independently checked by `Bir::validate` |
 | row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
-| `S.if_` rules that need a rewrite (7 to 10, and 0 to 6 outside **R**) | `norm::js3_simplify_if` on two vectors: the statements of both branches, and two allocations | linear; taken only when `plain_if` says a rule applies. Open: porting J-S3 to list handles removes the vectors |
+| `S.if_` | `norm::js3_simplify_if` takes two list-pool handles; shared rules 0 to 6 also accept statement-stack run handles so retained tails stay in place | consumed statements and shells, plus structural comparisons and J expression rules; no per-branch vectors |
 
 S3.9 primitive costs: the resume is two `u32` handles (8 bytes), retaining
 an existing source-list handle rather than allocating an operand vector. Up to

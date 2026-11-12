@@ -13,7 +13,8 @@ impl Bir {
     }
 
     /// Attach a finalized lowering statement list without copying its elements
-    /// a second time. Bulk construction owns each detached statement once.
+    /// a second time. O(statements), plus any changed use-weight recounts
+    /// outside bulk construction. Each detached statement is adopted once.
     pub(crate) fn block_from_list(&mut self, list: ListId) -> NodeId {
         self.attach_list(Node::block_list(list), list)
     }
@@ -24,12 +25,17 @@ impl Bir {
     }
 
     fn attach_list(&mut self, node: Node, list: ListId) -> NodeId {
-        assert!(self.bulk, "statement-stack blocks require bulk construction");
         let id = self.allocate(node);
         for i in 0..self.lists.get(list).len() {
             let child = self.lists.get(list)[i];
             self.node(child);
             assert!(self.parents[child.index()].is_none(), "statement already attached");
+            if !self.bulk {
+                let weight = self.weight(child);
+                if weight != 1 {
+                    self.adjust_counts(child, 1 - i64::from(weight));
+                }
+            }
             self.parents[child.index()] = Some(id);
         }
         self.repair(id);

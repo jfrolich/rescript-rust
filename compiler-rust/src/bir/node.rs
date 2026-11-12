@@ -372,6 +372,10 @@ impl Node {
         self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
         self.words[1] = code as u32;
     }
+    /// O(1): borrow an SBlock's list identity without copying its elements.
+    pub(super) fn block_list_id(self) -> Option<ListId> {
+        (self.op == Op::SBlock).then_some(ListId(self.words[0]))
+    }
     pub(super) fn block_list(list: ListId) -> Self {
         Self { op: Op::SBlock, flags: NodeFlags::default(), aux: 0, words: [list.0, 0, 0] }
     }

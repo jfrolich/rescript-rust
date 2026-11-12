@@ -57,6 +57,27 @@ struct Parts {
 
 const EMPTY: Span = Span { start: 0, len: 0 };
 
+impl norm::IfLists for super::out::StatementStack {
+    type Handle = Span;
+    /// O(recorded empty blocks), with no retained-tail scan.
+    fn trim(&mut self, b: &mut Bir, span: Span) { self.drop_empty_blocks(b, span); }
+    /// O(1): a zero-length run.
+    fn empty(&mut self, _: &mut Bir) -> Span { EMPTY }
+    /// O(1) on trimmed runs, plus counted dead-slot skips.
+    fn last(&mut self, _: &Bir, span: Span) -> Option<NodeId> { self.last(span) }
+    /// O(1) on trimmed runs, plus counted dead-slot skips.
+    fn only(&mut self, _: &Bir, span: Span) -> Option<NodeId> {
+        self.only(span).map(|(_, statement)| statement)
+    }
+    /// O(released nodes), leaving other stack runs in place.
+    fn release(&mut self, b: &mut Bir, span: Span) {
+        for statement in self.statements(span) { b.release(statement); }
+        self.kill(span);
+    }
+    /// O(run length): copy each surviving statement into the pool once.
+    fn take(&mut self, b: &mut Bir, span: Span) -> ListId { self.take_list(b, span) }
+}
+
 impl State {
     /// K1: C:1812, rows R1 to R6 and section 3.7, on entering the node. One
     /// call is constant, including the two cached branch facts for R5 step 0.
@@ -341,6 +362,7 @@ impl State {
     }
 
     /// B:1225 block of no statement: an explicit empty block.
+    #[cfg(test)]
     fn empty_block(&mut self) -> NodeId {
         self.arena.new_node(View::SBlock { statements: &[] }, 1)
     }
@@ -355,14 +377,6 @@ impl State {
         };
         self.statements.kill(upper);
         self.statements.kill(lower);
-    }
-
-    /// Release the statements of a discarded run: one step per statement.
-    fn release_run(&mut self, run: Span) {
-        for statement in self.statements.statements(run) {
-            self.arena.release(statement);
-        }
-        self.statements.kill(run);
     }
 
     /// `[return value]`: the statement and the returned value. Constant on a
@@ -413,6 +427,7 @@ impl State {
     }
 
     /// `if (test) yes else no` with both lists as given: no rule of J-S3.
+    #[cfg(test)]
     fn raw_if(&mut self, test: NodeId, yes: ListId, no: ListId) -> NodeId {
         let then_ = self.arena.block_from_list(yes);
         let else_ = self.arena.block_from_list(no);
@@ -426,144 +441,33 @@ impl State {
         )
     }
 
-    /// J-S3 (B:1575 simplify_if) gives exactly `raw_if` for these operands.
-    /// Reads the test, and the first and last statement of each run: constant
-    /// on trimmed runs.
-    fn plain_if(&mut self, test: NodeId, yes: Span, no: Span) -> bool {
-        if matches!(self.arena.view(test), View::JBool) {
-            return false;
-        }
-        let Some(last) = self.statements.last(yes) else {
-            return false;
-        };
-        let terminal = self.terminal(last);
-        let nested = |state: &Self, only: Option<(u32, NodeId)>| {
-            only.is_some_and(|(_, s)| matches!(state.arena.view(s), View::SIf { .. }))
-        };
-        let only_yes = self.statements.only(yes);
-        if self.statements.first(no).is_none() {
-            // Rule 6 with nothing after the guard; else rule 9 on a nested if.
-            return terminal || !nested(self, only_yes);
-        }
-        if matches!(self.arena.view(test), View::JNot { .. }) || terminal {
-            return false;
-        }
-        let only_no = self.statements.only(no);
-        let is = |state: &Self, only: Option<(u32, NodeId)>, effect: bool| {
-            only.is_some_and(|(_, s)| match state.arena.view(s) {
-                View::SExp { .. } => effect,
-                View::SReturn { .. } => !effect,
-                _ => false,
-            })
-        };
-        !is(self, only_no, false)
-            && !(is(self, only_yes, true) && is(self, only_no, true))
-            && !nested(self, only_yes)
-            && !nested(self, only_no)
-    }
-
-    /// B:1575 simplify_if as one statement, consuming both runs. One step per
-    /// statement of the runs (each is copied to its list once). The rules
-    /// that rewrite the operands are `norm::js3_simplify_if`'s; it takes
-    /// owned vectors, and is called only when `plain_if` says a rule applies.
+    /// B:1575 simplify_if as one statement. Each run is copied into the
+    /// arena once; all rules receive pool handles, never branch vectors.
     pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
         self.statements.drop_empty_blocks(&mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.arena, no);
-        if self.plain_if(test, yes, no) {
-            let (yes, no) = if yes.start >= no.start {
-                let yes = self.statements.take_list(&mut self.arena, yes);
-                (yes, self.statements.take_list(&mut self.arena, no))
-            } else {
-                let no = self.statements.take_list(&mut self.arena, no);
-                (self.statements.take_list(&mut self.arena, yes), no)
-            };
-            return self.raw_if(test, yes, no);
-        }
-        let then_: Vec<NodeId> = self.statements.statements(yes).collect();
-        let else_: Vec<NodeId> = self.statements.statements(no).collect();
-        self.statements.copied += then_.len() + else_.len();
-        self.kill(yes, no);
-        norm::js3_simplify_if(&mut self.arena, test, then_, else_)
+        let (yes, no) = if yes.start >= no.start {
+            let yes = self.statements.take_list(&mut self.arena, yes);
+            (yes, self.statements.take_list(&mut self.arena, no))
+        } else {
+            let no = self.statements.take_list(&mut self.arena, no);
+            (self.statements.take_list(&mut self.arena, yes), no)
+        };
+        norm::js3_simplify_if(&mut self.arena, test, yes, no)
     }
 
-    /// B:1575 simplify_if without the block around its result: the head
-    /// statement goes to the `head` slot and a branch the rules keep as the
-    /// following statements stays where it is. Constant, plus the statements
-    /// of a run that becomes a list or is discarded; the kept run is not read.
+    /// Shared J-S3 rules 0..6 leave a retained tail on the statement stack.
+    /// O(consumed statements + test negations), never the untouched tail.
     fn if_in_place(&mut self, head: u32, mut test: NodeId, mut yes: Span, mut no: Span) {
-        self.statements.drop_empty_blocks(&mut self.arena, yes);
-        self.statements.drop_empty_blocks(&mut self.arena, no);
-        loop {
-            if matches!(self.arena.view(test), View::JBool) {
-                // Rule 0: block of the branch taken.
-                let taken = self.arena.node(test).aux() != 0;
-                self.arena.release(test);
-                let (kept, dropped) = if taken { (yes, no) } else { (no, yes) };
-                self.release_run(dropped);
-                if self.statements.first(kept).is_none() {
-                    let block = self.empty_block();
-                    self.place(head, block);
-                }
-                return;
-            }
-            let no_empty = self.statements.first(no).is_none();
-            if !no_empty && let Some(value) = self.positive(test) {
-                // Rule 1.
-                test = value;
-                std::mem::swap(&mut yes, &mut no);
-                continue;
-            }
-            let Some(last) = self.statements.last(yes) else {
-                if no_empty {
-                    // Rule 2: the test alone.
-                    let statement = if self.arena.node(test).flags().contains(NodeFlags::PURE) {
-                        self.arena.release(test);
-                        self.empty_block()
-                    } else {
-                        norm::js1_exp(&mut self.arena, test)
-                    };
-                    self.place(head, statement);
-                    return;
-                }
-                // Rule 3.
-                test = norm::je8_not(&mut self.arena, test);
-                std::mem::swap(&mut yes, &mut no);
-                continue;
-            };
-            if let Some((statement, value)) = self.single_return(no) {
-                self.arena.detach(value);
-                self.arena.release(statement);
-                self.statements.kill(no);
-                let statement = if let Some((statement, then_)) = self.single_return(yes) {
-                    // Rule 4: one return of a conditional expression.
-                    self.arena.detach(then_);
-                    self.arena.release(statement);
-                    self.statements.kill(yes);
-                    let value = norm::je7_cond(&mut self.arena, test, then_, value);
-                    self.arena.new_node(View::SReturn { value }, 0)
-                } else {
-                    // Rule 5: `if (!test) return value`, then `yes` in place.
-                    let test = norm::je8_not(&mut self.arena, test);
-                    let statement = self.arena.new_node(View::SReturn { value }, 0);
-                    let then_ = self.arena.lists.push(&[statement]);
-                    let else_ = self.arena.lists.push(&[]);
-                    self.raw_if(test, then_, else_)
-                };
+        if let Some(result) = norm::simplify_if_head(
+            &mut self.arena, &mut self.statements, &mut test, &mut yes, &mut no,
+        ) {
+            if let Some(statement) = result.statement {
                 self.place(head, statement);
-                return;
             }
-            if self.terminal(last) {
-                // Rule 6: `if (test) yes`, then `no` in place.
-                let then_ = self.statements.take_list(&mut self.arena, yes);
-                let else_ = self.arena.lists.push(&[]);
-                let statement = self.raw_if(test, then_, else_);
-                self.place(head, statement);
-                return;
-            }
-            // Rules 7 to 10, or the plain statement.
+        } else {
             let statement = self.if_statement(test, yes, no);
             self.place(head, statement);
-            return;
         }
     }
 
@@ -1034,6 +938,12 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    fn pooled_if(b: &mut crate::bir::Bir, test: crate::bir::NodeId, yes: Vec<crate::bir::NodeId>, no: Vec<crate::bir::NodeId>) -> crate::bir::NodeId {
+        let yes = b.lists.push(&yes);
+        let no = b.lists.push(&no);
+        norm::js3_simplify_if(b, test, yes, no)
+    }
+
     use super::super::oracle_tests::compare;
     use super::*;
     use crate::bir::{bridge, bridge_j};
@@ -1721,7 +1631,7 @@ mod tests {
         let mut hand = Hand::new();
         let (yes, no) = (hand.list(0, yes), hand.list(1, no));
         let test = hand.test(test);
-        let statement = norm::js3_simplify_if(&mut hand.state.arena, test, yes, no);
+        let statement = pooled_if(&mut hand.state.arena, test, yes, no);
         hand.state.statements.push(statement);
         hand.text(None)
     }
@@ -1785,15 +1695,15 @@ mod tests {
         let arena = &mut hand.state.arena;
         let statements = if no == "r" {
             let test = norm::je8_not(arena, test);
-            let mut statements = vec![norm::js3_simplify_if(arena, test, else_, vec![])];
+            let mut statements = vec![pooled_if(arena, test, else_, vec![])];
             statements.extend(then_);
             statements
         } else if yes.ends_with(['r', 't', 'b', 'k']) {
-            let mut statements = vec![norm::js3_simplify_if(arena, test, then_, vec![])];
+            let mut statements = vec![pooled_if(arena, test, then_, vec![])];
             statements.extend(else_);
             statements
         } else {
-            vec![norm::js3_simplify_if(arena, test, then_, else_)]
+            vec![pooled_if(arena, test, then_, else_)]
         };
         for statement in statements {
             hand.state.statements.push(statement);

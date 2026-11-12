@@ -502,7 +502,7 @@ fn js3_ordered_branch_matrix() {
                         keep.extend_from_slice(&ys);
                         keep.extend_from_slice(&ns);
                         p::retain(b, &[s], &keep);
-                        n::js3_simplify_if(b, condition, ys, ns)
+                        pooled_if(b, condition, ys, ns)
                     },
                 );
             }
@@ -1253,7 +1253,7 @@ fn new_if(b: &mut Bir, s: NodeId) -> NodeId {
     keep.extend_from_slice(&ys);
     keep.extend_from_slice(&ns);
     p::retain(b, &[s], &keep);
-    n::js3_simplify_if(b, condition, ys, ns)
+    pooled_if(b, condition, ys, ns)
 }
 #[test]
 fn js3_nested_if_merges_and_negation_boundaries() {
@@ -1957,7 +1957,7 @@ fn je1_je7_js3_ten_thousand_reassociations() {
             _ => {
                 let condition = p::node(&mut b, View::Var { var }, 0);
                 let no = p::node(&mut b, View::SDebugger, 0);
-                n::js3_simplify_if(&mut b, condition, vec![root], vec![no])
+                pooled_if(&mut b, condition, vec![root], vec![no])
             }
         };
         let reads = b.steps.get();
@@ -2031,4 +2031,57 @@ fn jm11_direct_projection_matches_index_and_field_contract() {
             }
         }
     }
+}
+
+fn pooled_if(b: &mut Bir, test: NodeId, yes: Vec<NodeId>, no: Vec<NodeId>) -> NodeId {
+    let yes = b.lists.push(&yes);
+    let no = b.lists.push(&no);
+    n::js3_simplify_if(b, test, yes, no)
+}
+
+#[test]
+fn ten_thousand_nested_ifs_rewrite_without_branch_vectors_or_list_pushes() {
+    let mut b = Bir::default();
+    b.begin_bulk();
+    let mut root = p::node(&mut b, View::SDebugger, 0);
+    for _ in 0..10_000 {
+        let condition = p::boolean(&mut b, true);
+        let then_ = p::list(&mut b, &[root]);
+        let else_ = p::list(&mut b, &[]);
+        root = p::node(&mut b, View::SIf { condition, then_, else_: Some(else_) }, 0);
+    }
+    // Reserve the arena's reusable release buffers before measuring the rule.
+    b.free_nodes.reserve(b.nodes.len());
+    b.release_stack.reserve(4);
+    let capacity = (b.free_nodes.capacity(), b.release_stack.capacity());
+    let pushes = b.lists.pushes;
+    b.steps.set(0);
+    for _ in 0..10_000 {
+        let View::SIf { condition, then_, else_: Some(no) } = b.view(root) else { panic!() };
+        let yes = b.node(then_).block_list_id().unwrap();
+        let no = b.node(no).block_list_id().unwrap();
+        let child = b.lists.get(yes)[0];
+        b.detach(condition);
+        b.detach(child);
+        b.release(root);
+        root = n::js3_simplify_if(&mut b, condition, yes, no);
+    }
+    assert_eq!(b.lists.pushes - pushes, 0, "no temporary branch lists");
+    assert_eq!((b.free_nodes.capacity(), b.release_stack.capacity()), capacity);
+    assert!(b.steps.get() < 1_000_000);
+    assert!(matches!(b.view(root), View::SDebugger));
+    b.finish_bulk(root);
+    b.validate(Some(root)).unwrap();
+
+    // Pin the removed allocation sites, including nested-if extraction and
+    // shared head rules. Pool push counters above catch arena-list churn;
+    // this guard forbids reintroducing transient branch vectors there.
+    let source = include_str!("norm.rs");
+    let rules = source.split("pub(crate) trait IfLists").nth(1).unwrap()
+        .split("fn trivial(").next().unwrap();
+    for allocation in ["Vec", "vec!", ".to_vec(", ".collect("] {
+        assert!(!rules.contains(allocation), "branch allocation site: {allocation}");
+    }
+    assert_eq!(std::mem::size_of::<n::IfHead<crate::bir::ListId>>(), 12);
+    assert_eq!(std::mem::size_of::<n::IfHead<crate::bir::lower::out::Span>>(), 16);
 }
