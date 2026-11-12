@@ -9,6 +9,13 @@ Scope: everything between the typed tree and the JavaScript file in
 (`src/lambda/`), the JS IR, its passes and its printer (`src/js_ir/`), and the
 per-module summaries a dependent module reads.
 
+The lowering from level L to level J (stages S3.3 to S3.9) is specified in
+[BACKEND_LOWERING.md](BACKEND_LOWERING.md): the continuation each context
+function of `lam_compile.rs` maps to, every construct in every context, the J
+normalising rules, and the slices. Its section 9 lists corrections to A.5,
+A.7, B.3, C.2, C.4 and H.1 of this document; they are marked "Amended (S3
+specification)" below.
+
 Conventions: code is cited by file and function, never by line. "Measured"
 means a number from a profile or an experiment; "estimated" means derived
 arithmetic or judgement; "unknown" means the code does not answer the question
@@ -331,7 +338,7 @@ Order dependence of the passes is the subject of section C.2.
 `lam_compile_primitive.rs`, `lam_compile_external.rs`,
 `lam_compile_arguments.rs`, `lam_compile_const.rs`, `lam_compile_variant.rs`,
 `untagged_dispatch.rs`, `js_exp_make.rs`, `js_stmt_make.rs`,
-`lam_coercion.rs` (about 15,000 lines) are the counterpart of OCaml's
+`lam_coercion.rs` (about 16,000 lines) are the counterpart of OCaml's
 `lam_compile.ml` and `js_exp_make.ml`. One recursive walk of the simplified
 Lambda that builds a `JsArena`. Unlike OCaml, which threads a continuation
 value, the Rust code has one function per context
@@ -342,6 +349,18 @@ value, the Rust code has one function per context
 `BlockOutput { block, finished }`, where `finished` is OCaml's
 `Js_output.output_finished` (control has left: `return`, `throw`, `break`,
 `continue`).
+
+Amended (S3 specification). There are seven such families, not five, three
+stacks for static exits and four more pieces of context state; BACKEND_LOWERING.md
+section 2 lists every function. The inline handler form of a static catch
+(`with_static_handler`) is entered only when the body has no exit to the
+label, so there are two forms in practice, as in OCaml. A branch of a
+conditional is compiled two or three times and a recursive function up to
+twice; identifiers and loop label numbers are consumed by the compilations
+whose output is discarded, and the label numbers are visible in the output
+(BACKEND_LOWERING.md 3.6, 4.5). Two purity predicates are in use at level J
+(`js_ir::build::expression_has_no_side_effects` and
+`js_exp_make::js_expr_no_side_effects`).
 
 Before `compile_expr`, on the simplified Lambda:
 `drop_toplevel_pure_sequence_heads`, `lambda_traverse::arena_assigned_variables`
@@ -425,8 +444,11 @@ Naming (`NameScope`, `add_ident`, `ident_name`, `module_ident_name`,
 
 So names depend on (a) print order, (b) per-function free-variable sets, and
 (c) the relative stamp order of same-named identifiers that are named for the
-first time by one reservation. Point (c) is the only place where stamp
-*order* reaches the output; section E.3 deals with it.
+first time by one reservation. Point (c) is the only place in the printer
+where stamp *order* reaches the output; section E.3 deals with it. Amended
+(S3 specification): the lowering has a second one, the order of the `let x =
+_x` declarations at the top of a self tail call loop
+(`compile_recursive_function_expr`, `ext_ident_cmp`; BACKEND_LOWERING.md 5.1).
 
 Other printer decisions (each a function in `printer.rs`):
 
@@ -617,12 +639,22 @@ What lowering needs is carried as follows:
   what `Compiled` and `BlockOutput` carry today: a statement list, an
   optional value node and the `finished` flag. These are values on the stack
   of the lowering, not stored in nodes. A J statement list is a `ListId`.
+  Amended (S3 specification): the continuation is OCaml's in full, `Effect`
+  and `Value` each with a tail that is "not tail", "return in a `try` body"
+  or "return, with the function's loop record and an `in_catch` bit";
+  statements are built on a stack and block statements stay real nodes until
+  a unit is lowered (BACKEND_LOWERING.md 1.2, 1.3).
 - **Return and tail context.** The `TAIL` flag is set on L nodes in tail
   position of a function when the function body is built (cheap: it follows
   `Let` body, `If` branches, `Switch` actions, `Catch` body and handler,
   `Seq` second). `function_has_self_tailcall` becomes a flag on `FuncHeader`
   set when a `TAIL` `Apply` of the function's own variable is created or
-  rewritten.
+  rewritten. Amended (S3 specification): the lowering needs neither flag. It
+  lowers a recursive function once with a loop record in the continuation
+  and looks at whether a self call triggered it, as OCaml does. The rule in
+  parentheses also differs from the legacy one, which follows the right
+  operand of `&&` and `||` and a `try` handler, and not a `LetRec` body
+  (BACKEND_LOWERING.md 5.1, section 9).
 - **Declared names.** Every binder is a `VarId`; `SDecl` refers to it. Name
   and number are assigned in the naming step (E.3) and stored in
   `VarTable::printed`.
@@ -831,8 +863,8 @@ later).
 | 7 | `alpha_conversion` runs once, after the second inlining sweep, with arities as known then. | R. Round 4. |
 | 8 | `sroa` after `simplify_lets`, `guard_raises` last, `handle_exports` after everything. | R. Rounds 6 and 7. |
 | 9 | Fresh identifiers are numbered in the order passes create them, and the number orders same-named identifiers in the printer's reservation (A.7, point c). | S. See E.3: `order` is assigned at creation, and because rounds sweep in today's traversal order the creation order within a round is today's. A measurement in S1 decides whether the dependence can be replaced by a canonical order. |
-| 10 | Level J: flatten, shadow renaming, tail-call inline, record rest, substitution and dead marks, shake, in that order. | R for tail-call inline before block-field substitution before dead marks before shake. P for flatten: it is a normalising rule (statement lists are built flat). P for dead marks: `uses == 0` and `PURE` are maintained, and `mark_dead_code` is their fixpoint. Shadow renaming moves to naming. |
-| 11 | Lowering creates temporaries, `exit` variables and loop labels in traversal order. | R. Lowering is one recursive walk in today's order. |
+| 10 | Level J: flatten, shadow renaming, tail-call inline, record rest, substitution and dead marks, shake, in that order. | R for tail-call inline before block-field substitution before dead marks before shake. P for flatten: it is a normalising rule (statement lists are built flat); amended (S3 specification): not during lowering, where a block statement hides a trailing `return` from the rules of `S.if_`; lists are flattened once a unit is lowered (BACKEND_LOWERING.md 1.3). P for dead marks: `uses == 0` and `PURE` are maintained, and `mark_dead_code` is their fixpoint. Shadow renaming moves to naming. |
+| 11 | Lowering creates temporaries, `exit` variables and loop labels in traversal order. | R. Lowering is one recursive walk in today's order. Amended (S3 specification): "today's order" is that of the legacy pass whose output is kept, and loop label numbers follow the schedule of BACKEND_LOWERING.md 4.5. |
 | 12 | Match compilation numbers exits in creation order; negative labels are not inlined. | R. The algorithm is unchanged (section D). |
 | 13 | Printer: names are chosen in print order. | R. The naming step walks in print order (E.3). |
 | 14 | Import order: emulated OCaml hash table order, then heap sort. | R. `OcamlModuleSet` and `ocaml_sort_modules` are kept as they are and move to the emit step. |
@@ -844,7 +876,7 @@ Level L rounds replace `simplify_in_arena`. "Sweeps" compares with A.4.
 | Round | Rules (today's function) | Order | Skipped when |
 | ---: | --- | --- | --- |
 | 0 | alias collapse (`collapse`) | no sweep: when conversion builds `let[Alias] x = y`, later uses of `x` are built as `y`; the binding itself is built only if `x` is exported | |
-| 1 | `deep_flatten`; then exits (`subst_helper`) | `aux`'s recursion; then pre-order | exits: no `Catch` |
+| 1 | `deep_flatten`; then exits (`subst_helper`) | flatten: `Order::Stateful`, explicit `aux`/`flatten` continuations; exits: pre-order | flatten: no `Let` or `LetRec`; exits: no `Catch` |
 | 2 | `simplify_alias` | `simpl`'s recursion | |
 | 3 | `deep_flatten`, then `simplify_alias` | two sweeps | |
 | 4 | `deep_flatten`, then `alpha_conversion` | two sweeps | flatten: no `Let` whose value is a `Let`, `Seq`, `LetRec` or named block |
@@ -876,7 +908,7 @@ Level J rounds replace the JS passes:
 | `LamArena::if_`, `seq`, `switch_with`, `string_switch_with`, `apply` | rows N4 to N14 of C.5 (`bir/l/norm.rs`) | normalising, L |
 | `LamArena::let_` | none: it builds the node as given | |
 | `refine_let` | `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
-| `deep_flatten` (`flatten`, `eliminate_tuple`) | `flatten_let` | pass, rounds 1, 3, 4 |
+| `deep_flatten` (`flatten`, `eliminate_tuple`) | `bir/l/flatten.rs`: explicit continuations, binding groups, tuple projection elimination and `refine` | pass, rounds 1, 3, 4; first call checked in S4.2 |
 | `simplify_exits` | `inline_exit`, `drop_catch` | pass, rounds 1, 5, 7 |
 | `simplify_alias` field, option, boolean cases | `fold_field`, `fold_is_some`, `fold_if_var`, `fold_str_switch`, `unwrap_some` | pass, rounds 2, 3, 5 |
 | `simplify_alias` inlining, `lam_beta_reduce` | `inline_call`, `inline_external`, `beta` | pass, rounds 2, 3, 5 |
@@ -886,7 +918,7 @@ Level J rounds replace the JS passes:
 | `guard_raises` | `guard_raise` | pass, round 7 |
 | `handle_exports`, `add_flat_make_aliases` | `bind_exports`, `flat_make_aliases` | round 7, spine only |
 | `js_ir/build.rs`, `js_exp_make.rs` constructors | `jnorm_*` | normalising, J |
-| `flatten_block` | flat statement lists by construction | normalising, J |
+| `flatten_block` | one rule applied when a unit's lowering is done (BACKEND_LOWERING.md 1.3) | normalising, J |
 | `apply_js_tailcall_inline_pass` | `inline_return_call` | pass, J1 |
 | `apply_js_record_rest_pass` | `materialise_rest` | pass, J2 |
 | `Substitute` | `subst_block_field` | pass, J3 |
@@ -973,6 +1005,16 @@ before child; an entry is therefore live when it is popped.
 
 **A round** is one sweep with one rule (C.1), pre- or post-order, with an
 explicit stack. A round whose mask misses the root's summary does nothing.
+`Order::Stateful` additionally lets a pass carry continuations and groups through
+its own explicit stack, using the same edit API. Its driver must call
+`enter_candidate` before aux descent and `finish_candidate` on return; the
+latter refreshes the summary in O(children). Snapshot guards are not yet
+supported for stateful drivers (the engine rejects them). The flatten driver
+precomputes beta-residue suffixes in one linear scan, then visits its input
+nodes once. Candidate scans (`hit`, `safe_alias`, and legacy purity) cost the
+candidate subtree, explicitly in addition to the sweep; these are not bounded
+pattern attempts. `rename_var` allocates and records provenance in amortized
+O(1); bridge registration is also amortized O(1).
 
 **Edits.** Rules edit through the engine: `promote(target, descendant)`,
 `put(target, new node)`, `fill`, `detach`, `node`, and `replace` for a
@@ -1019,12 +1061,12 @@ pass.
    ```rust
    pub static FLATTEN: Round = Round {
        name: "deep_flatten",
-       mask: OpMask::LET.or(OpMask::LETREC).or(OpMask::SEQ),  // what the rule matches
-       order: Order::Post,          // Pre when the pass decides before descending
-       renorm: OpMask::NONE,        // SHALLOW_MAP if the pass rebuilds through shallow_map
+       mask: OpMask::LET.or(OpMask::LETREC),
+       order: Order::Stateful(run), // deep_flatten threads binding groups
+       renorm: OpMask::SHALLOW_MAP.or(OpMask::IF).or(OpMask::SEQ),        // SHALLOW_MAP if the pass rebuilds through shallow_map
        facts: Facts::Current,       // Frozen if it reads ident_tbl
        guard: None,                 // which nodes to snapshot (inlining rounds)
-       rule: flatten_let,
+       rule: |_, _| Changed::No,     // Stateful runs its driver instead
    };
    ```
 
@@ -1042,6 +1084,20 @@ pass.
    state down the recursion that a sweep cannot carry, say so in the stage's
    pull request and extend `Round` there. This is the one part of the round
    interface S4.1 could not test against a real pass.
+   S4.2's answer: `deep_flatten` cannot use two whole-tree Pre/Post sweeps.
+   An ordinary let visits its body before its value; a regrouped let flattens
+   its value before its body and threads a group accumulator across both.
+   Nullable conversion allocates before visiting the argument. Use
+   `Order::Stateful` with an explicit continuation stack when a later pass
+   needs this interleaving; otherwise keep Pre/Post. Its driver owns the
+   ordering, calls `enter_candidate`/`finish_candidate`, edits only through
+   the engine, and documents any candidate scans. A stateful driver cannot
+   yet request snapshot guards: extend the guard-scope API and tests before
+   using this order for an inlining round that needs snapshots.
+   Code correction: `LamArena::shallow_map_impl` currently calls `if_` and
+   `seq` on changed children too, unlike C.1's S4.1 description. Flatten's
+   renorm mask includes IF and SEQ; other rounds must read their actual
+   rebuild code rather than copying the illustrative mask.
 5. Fresh identifiers: `Bir::new_var_id` in the order the pass creates them
    (C.2 row 9). A rule that copies a body uses `copy_subtree` and
    `engine.replace`, not `put`, because the copy may move uses under a
@@ -1103,9 +1159,11 @@ is visible (A.2). Three things change.
    specialisation writes new rows into a row pool instead of cloning
    `Pattern` values (`normalize_pat_owned`, `alloc_cow`, `with_desc` today).
    Contexts and jump summaries (`Ctx`, `Jumps`) keep their definitions but
-   are built lazily: they are needed only to decide whether a failure branch
-   can be reached below a split, and a match that the checker marked total
-   with no guard and no or-pattern under a constructor never asks.
+   are built lazily (done, below): they are read when an exit is taken,
+   when the constructors a switch does not mention are sent to default
+   matrices, when an or-pattern handler selects its columns, and by
+   `compile_list`, which does not compile a cell whose context list is
+   empty.
 
 A fast path is allowed only where it provably produces the general
 algorithm's tree: a single-column match on constructors or constants with no
@@ -1154,6 +1212,48 @@ read, almost all of one row (7,843 rows in 7,603 matrices), where
 without comparing every pair (rows whose first columns are different
 constructors or constants cannot be below one another) has a ceiling under
 0.03% of the build and is not done.
+
+S5.5, second part (done): **context lists are built when they are read.**
+They live in a pool with `u32` handles (`CtxPool`, `CtxId`), one per match.
+A list derived by `filter_ctx` or `ctx_lshift` from a single context whose
+right columns are all wildcards (the starting context is one) is stored as
+its recipe. For such a parent the result is known without building it:
+every arm of `ctx_matcher` accepts a wildcard head and `normalize_pat` makes
+every argument of the tested pattern a wildcard, so `filter_ctx` gives
+exactly one context, again with all-wildcard right columns, and `ctx_lshift`
+moves one wildcard left. The list is therefore not empty, which is all
+`compile_list` asks; a reader that needs the contexts (`comp_exit`,
+`mk_failaction_neg`, `mk_failaction_pos`, `compile_orhandlers`) gets them
+from `CtxPool::get`, which runs the same `filter_ctx` and `ctx_lshift` then,
+each list once. Any other list (one extracted from a jump summary, one
+selected for an or-pattern handler, anything derived from those that is not
+a single all-wildcard context) is built when derived, as before. Measured:
+-0.37% of the application build, -0.12% of `tests/tests`.
+
+S5.4, the row pool: not built. After the two parts of S5.5 the copies of
+case lists and rows are about 0.3% of the application build (the
+instantiations of `Vec` and `VecDeque` on clauses: collected 497,874 times,
+grown by one push 424,136 times, dropped 868,784 times). A pool makes a row
+a slice and removes the vector per row, about half of that; the other half
+is the lists themselves, most of them for the 75% of splits that have one
+row, which a pool does not remove. Its ceiling is therefore 0.15% to 0.2%,
+at the bar set for these stages, and the same cost is better taken by
+splitting a one-row matching without the three work lists of `split_or`.
+
+That is done: `split_or` sorts rows into work lists (rows that may move up,
+or-pattern rows, the rest); for one row that does not start with an
+or-pattern the lists decide nothing and end in `split_constr` on that row
+with the same default environment and no next matching, so `split_or` calls
+it directly and the environment moves instead of being copied. Measured:
+-0.15% of the application build, -0.09% of `tests/tests`; under the bar, and
+kept because it is fifteen lines.
+
+After the three changes match compilation is about 2.9% of the application
+build (3.97% before them). What is left, largest first: action keys 0.47%,
+the constructor listing of `mk_failaction_pos` 0.45% (in
+`types/env_lazy.rs`), case lists of splits of several rows about 0.25%,
+stored overlay patterns 0.12%, `lower_bind` 0.13%; the rest is spread over
+the dispatch itself.
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1770,18 +1870,50 @@ model with this document as its specification.
 | S2.2 | Bridges: import from `LamArena` and from `JsArena`, export to `LamArena`; `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `bir/bridge.rs`, `driver.rs`, `rewatch/src/build/compile.rs`, workflow | import then export is the identity on all corpora (compared with `sexp_lambda`) | 1,500 | S2.1 | yes |
 | S3.1 | Emit reads J-level `Bir` (the emit walk is written against a view trait implemented by `JsArena` and `Bir`); naming on `VarId` | `emit/*` | `JsArena` to `Bir` to text equals `JsArena` to text on all corpora | 800 | S1.4, S2.2 | yes |
 | S3.2 | J normalising rules and rounds J1 to J4, fed by importing the JS IR before the JS passes | `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `Check` against the legacy JS passes | 3,000 | S3.1 | yes, each rule cites its function (C.4) |
-| S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,expr,prim,call,export}.rs` | `Check`; coverage reported | 4,000 | S3.2 | partly: needs a table mapping each context function of `lam_compile.rs` (A.5) to a continuation case, written by whoever starts the stage |
-| S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,500 to 3,000 each | S3.3 | partly, as S3.3; static catch is the hardest and should go to the strongest reviewer |
+| S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs`, `bir/bridge.rs` | `Check`; coverage reported | 4,500 | S2.2 | yes, with [BACKEND_LOWERING.md](BACKEND_LOWERING.md) as the specification: it is the table this row asked for. Exports and their coercion move to S3.9b there, and the gate does not need S3.2 |
+| S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,000 to 3,000 each | S3.3 | yes, per slice of BACKEND_LOWERING.md 8.3, which regroups them (`let rec` of functions with tail loops, `Assign` with loops, export coercion as S3.9b); static catch (S3.5) goes to the strongest reviewer, tail loops (S3.6) and loop labels (in S3.7) to a strong one |
 | S3.10 | Default `New` for level J; then delete `lam_compile*.rs`, `js_pass_*.rs`, `js_shake.rs`, `js_exp_make.rs`, `js_ir/` except what emit's tests need | | fallback zero; instruction count falls by about 6.3% | −45,000 with tests | S3.9 | yes |
 | S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
-| S4.2 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
+| S4.2 | Deep flatten, explicit continuations, fresh-identity export and `lambda-flatten` diagnostic comparison | `bir/l/flatten.rs`, engine, bridge, shadow and coverage ratchet | see S4.2 results below | implemented | S4.1 | yes |
+| S4.3 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); a one-row matching split without work lists (done, D.1: -0.15%); row pool (not built, D.1: ceiling 0.15% to 0.2%) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
+
+### S4.2: first deep-flatten round
+
+Implemented in `bir/l/flatten.rs`; opt-in `RESCRIPT_BACKEND=check` runs
+`lambda-flatten` from the existing shadow hook, before live simplification.
+Its legacy oracle clones the alias-collapsed lowered arena and runs precisely
+`simplify_in_arena`'s first `deep_flatten`, seeding both private counters with
+`ident_stamp_bound`. The pipeline still calls flatten three times; this stage
+checks only the first, not the later calls after alias rewriting.
+
+The existing s-expression diagnostic omits stamps, so flatten additionally
+compares every identifier occurrence and binder by **name, stamp and flags**.
+There is no alpha-renaming relaxation, including for round-created variables.
+`Imported::register_rename` records those identities in allocation order in
+amortized O(1), and imported identities are untouched. A mismatch is an error;
+only the bridge's explicit `Unsupported` reasons may skip a unit.
+
+| Corpus | Units | Identical | Unsupported |
+| --- | ---: | ---: | ---: |
+| runtime | 113 | 113 | 0 |
+| tests/tests | 711 | 711 | 0 |
+| fixtures | 480 | 480 | 0 |
+| 3,735-module application | 3,735 | 3,735 | 0 |
+
+The three repository corpora retain the S4.1 bridge and normalisation counts.
+Tests compare each arm and interactions with the legacy pass, including
+fresh-identifier order. The deep and wide tests use 10,000 bindings each,
+assert at most 90 steps per input node, and validate the resulting arena.
+The root-summary miss test asserts zero entered nodes. The round's syntactic
+beta-residue cache prunes subtrees without lets and clears entries for reused
+slots when it creates nodes; it is not a binding-fact recomputation.
 
 ### H.2 Stage S1 in full
 

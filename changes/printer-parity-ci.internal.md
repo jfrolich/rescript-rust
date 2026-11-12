@@ -1,0 +1,1 @@
+- CI runs the JavaScript, stdlib and genType output suites a second time with the opt-in oxc printer, comparing after reformatting, with a coverage ratchet per corpus.

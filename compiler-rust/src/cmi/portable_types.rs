@@ -932,15 +932,20 @@ pub fn serialize_pers_struct(
             cmi_longident_names: sig.cmi_longident_names.clone(),
         },
     );
-    if ctx.has_saved_store_stamps() {
-        // Most exported signatures mention no store binders. Building the replay
-        // map eagerly would traverse every imported store piece even for those.
-        let stamps = std::cell::OnceCell::new();
+    {
+        // A store binder's stamp depends on the order in which threads built
+        // store data, so a published signature that mentions one (a functor
+        // application's result, say) gives it a stamp of this compilation
+        // instead: a fresh one per binder, in the order the signature first
+        // mentions them, which depends on the signature alone.
+        let stamps = std::cell::RefCell::new(AHashMap::<i32, i32>::new());
         let saved_stamp = |stamp| {
-            stamps
-                .get_or_init(|| ctx.saved_store_stamps())
-                .get(&stamp)
-                .copied()
+            Some(
+                *stamps
+                    .borrow_mut()
+                    .entry(stamp)
+                    .or_insert_with(|| ctx.published_binder_stamp()),
+            )
         };
         remap_saved_stamps(&mut sig.ps_sig, &mut sig.type_graph, &saved_stamp);
         if let Some(raw) = &mut raw {
@@ -959,8 +964,9 @@ pub fn serialize_pers_struct(
     )
 }
 
-/// Apply the same store-binder mapping as Ident's saving serializer, before
-/// either shared nodes or bytes are produced. Graph indices are untouched.
+/// Give every identifier with a store stamp the stamp `stamps` maps it to,
+/// before either shared nodes or bytes are produced. Graph indices are
+/// untouched. `stamps` is asked only for stamps of the store range.
 fn remap_saved_stamps(
     sig: &mut Signature,
     graph: &mut PortableTypeGraph,
@@ -2602,7 +2608,7 @@ mod identity_tests {
     use crate::context::IdGenerator;
 
     #[test]
-    fn decoded_stamp_mapping_matches_the_saving_serializer() {
+    fn store_stamps_are_remapped_everywhere_a_signature_holds_them() {
         use crate::ident::{Ident, IdentFlags, STORE_STAMP_BASE};
         use crate::types::decl::{RecStatus, signature_mut};
         let id = Ident::new("bound", STORE_STAMP_BASE + 7, IdentFlags::NONE);
@@ -2643,19 +2649,25 @@ mod identity_tests {
             variant_layouts: vec![],
             mutabilities: vec![],
         };
-        let stamps = AHashMap::from_iter([(id.stamp(), 42)]);
-        let (expected, unmapped) = crate::ident::saving_store_stamps(stamps.clone(), || {
-            crate::binser::to_vec(&(&sig, &graph)).unwrap()
+        let asked = std::cell::Cell::new(0);
+        remap_saved_stamps(&mut sig, &mut graph, &|stamp| {
+            assert_eq!(stamp, STORE_STAMP_BASE + 7);
+            asked.set(asked.get() + 1);
+            Some(42)
         });
-        assert!(!unmapped);
-        remap_saved_stamps(&mut sig, &mut graph, &|stamp| stamps.get(&stamp).copied());
-        assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
-        // Once mapped, ordinary binders and paths must not ask for a store
-        // replay table at all (the common publication path).
+        assert!(asked.get() > 0);
+        // No identifier of the store range is left, in binders or in paths:
+        // the encoding mentions the mapped stamp only, and a second pass
+        // (the common publication path) never asks for a stamp.
+        let mapped = Ident::new("bound", 42, IdentFlags::NONE);
+        let debug = format!("{sig:?}{graph:?}");
+        assert!(!debug.contains(&(STORE_STAMP_BASE + 7).to_string()), "{debug}");
+        let expected = crate::binser::to_vec(&(&sig, &graph)).unwrap();
         remap_saved_stamps(&mut sig, &mut graph, &|_| {
-            panic!("ordinary binder requested store stamps")
+            panic!("ordinary binder requested a store stamp")
         });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
+        assert!(matches!(&sig[0], SignatureItem::SigModule(id, ..) if id.same(&mapped)));
     }
 
     #[test]
