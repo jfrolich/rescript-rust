@@ -2395,7 +2395,7 @@ mod constructor_tests {
 #[cfg(test)]
 mod boundary_tests {
     use super::*;
-    use crate::lambda::{ApInfo, ApplyStatus, SwitchDispatch};
+    use crate::lambda::SwitchDispatch;
     use crate::name::Name;
 
     #[test]
