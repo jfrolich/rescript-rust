@@ -105,7 +105,8 @@ shadow comparison must supply the same inputs to both printers.
 The bridge does not run optimizations or change the emitter. No J-level
 coverage is implied by the existing Lambda-stage ratchet. Representation limits
 are explicit `Unsupported` values: shared unbounded non-leaf nodes, repeated
-binders, non-contiguous parameter runs, invalid float spelling or template
+binders, contradictory name/flag metadata for one legacy identity,
+non-contiguous parameter runs, invalid float spelling or template
 segment counts, and a try without either handler or finaliser. Shared leaves
 and at most four-child shapes whose children are leaves are copied per edge;
 this bounds expansion rather than unfolding a potentially exponential DAG.
@@ -187,3 +188,33 @@ bytes). Character decoration, which need not equal the integer value, is kept
 in a spare JNumber word with JS_CHAR_PRESENT; the constant fact remains the
 actual integer. Negative static field positions are retained by using the
 same i32::MIN sentinel as JsArena.
+
+## S3.1a validation
+
+The release shadow run reports the following implementation-unit counts. The
+application was clean-built from its own directory with source-only runtime and
+Belt packages, using the same preparation as the benchmark harness. These are
+unit counts, not output-file counts or compilation invocations.
+
+| Corpus | Units | js-bridge identical | Unsupported |
+| --- | ---: | ---: | ---: |
+| Runtime | 113 | 113 | 0 |
+| tests/tests | 711 | 711 | 0 |
+| Focused JavaScript fixtures | 480 | 480 | 0 |
+| 3,735-module application | 3,735 | 3,735 | 0 |
+
+All three Lambda stages (`lambda-bridge`, `lambda-norm`, `lambda-flatten`)
+also report every one of these units identical, with zero fallback. The
+in-repository ratchet keeps their existing numbers unchanged. There are no
+remaining corpus exceptions to schedule; synthetic unsupported DAG/identity
+shapes stay explicit safety limits. Support for a general shared DAG would
+need a specified bounded tree expansion or a different IR ownership model;
+repeated binders need explicit scope splitting before they can enter Bir.
+Malformed metadata is rejected rather than repaired by the bridge.
+
+Verification includes legacy JS, runtime, genType and diagnostic parity,
+compiler and build-system tests, the existing printer/source-map oracles,
+node-kind structural/text round trips, rare optional metadata cases, variable
+facts, and 10,000-element step-count tests. Instruction count is checked by the
+pull request's unchanged default-mode CI gate. No emitter view trait or J
+optimization round is implemented here.
