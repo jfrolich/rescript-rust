@@ -2844,24 +2844,24 @@ mod incremental_cost_tests {
     }
 
     #[test]
-    fn hashed_payloads_preserve_float_bits_and_primitive_identity() {
+    fn hashed_payloads_preserve_float_spelling_and_primitive_identity() {
         use std::hash::{Hash, Hasher};
         let mut b = Bir::default();
-        let pos = b.intern_const(Constant::float(0.0));
-        let neg = b.intern_const(Constant::float(-0.0));
+        let pos = b.intern_float("0.").unwrap();
+        let neg = b.intern_float("-0.").unwrap();
         assert_ne!(pos, neg);
-        let nan = Constant::float(f64::from_bits(0x7ff8_0000_0000_0001));
-        assert_eq!(nan, nan.clone());
-        let id = b.intern_const(nan.clone());
-        assert_eq!(id, b.intern_const(nan.clone()));
-        assert_ne!(
-            id,
-            b.intern_const(Constant::float(f64::from_bits(0x7ff8_0000_0000_0002)))
-        );
+        let id = b.intern_float("nan").unwrap();
+        assert_eq!(id, b.intern_float("nan").unwrap());
+        assert_ne!(id, b.intern_float("NaN").unwrap());
+        let nan = b.constant(id);
+        let Constant::Float(value) = nan else {
+            panic!("not a float")
+        };
+        assert!(value.value().is_nan());
         let mut h1 = std::collections::hash_map::DefaultHasher::new();
         let mut h2 = std::collections::hash_map::DefaultHasher::new();
         nan.hash(&mut h1);
-        nan.clone().hash(&mut h2);
+        nan.hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
         let prim = PrimPayload {
             primitive: Primitive::Paddint,

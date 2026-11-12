@@ -138,8 +138,12 @@ impl Importer {
                 C::String(s) => Constant::String(self.bir.intern_text(s)),
                 C::ImmString(s) => Constant::ImmString(self.bir.intern_text(s)),
                 C::Pointer(s) => Constant::Pointer(self.bir.intern_text(s)),
-                // Bir stores IEEE bits, whereas sexp_lambda preserves spelling.
-                C::Float(_) => return Err(Unsupported("float constant spelling")),
+                C::Float(spelling) => {
+                    let id = self.bir.intern_float(spelling)?;
+                    values.truncate(start);
+                    values.push(id);
+                    continue;
+                }
                 C::BigInt { negative, value } => Constant::BigInt(self.bir.intern_text(&format!(
                     "{}{}",
                     if *negative { "-" } else { "+" },
@@ -491,12 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn spelling_not_representable_falls_back() {
+    fn invalid_spelling_falls_back() {
         let mut a = LamArena::new();
-        let root = a.const_(C::Float("1.00".into()));
+        let root = a.const_(C::Float("not a float".into()));
         assert!(matches!(
             import_lambda(&a, root),
-            Err(Unsupported("float constant spelling"))
+            Err(Unsupported("invalid float constant spelling"))
         ));
     }
 }
@@ -556,7 +560,7 @@ fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
             Constant::String(s) => C::String(b.text(*s).to_owned()),
             Constant::ImmString(s) => C::ImmString(b.text(*s).to_owned()),
             Constant::Pointer(s) => C::Pointer(b.text(*s).to_owned()),
-            Constant::Float(_) => return Err(Unsupported("float constant spelling")),
+            Constant::Float(f) => C::Float(b.text(f.spelling()).to_owned()),
             Constant::BigInt(s) => {
                 let s = b.text(*s);
                 let (sign, value) = s.split_at_checked(1).ok_or(Unsupported("bigint sign"))?;
@@ -768,6 +772,63 @@ mod roundtrip_tests {
             String::from_utf8(before).unwrap(),
             String::from_utf8(after).unwrap()
         );
+    }
+
+    #[test]
+    fn float_spellings_round_trip_including_nested_blocks() {
+        for spelling in [
+            "1.",
+            "1.0",
+            "1e0",
+            "0x1p0",
+            "1.00",
+            "-0.",
+            "-0.0",
+            "infinity",
+            "-infinity",
+            "nan",
+            "-nan",
+            "Infinity",
+            "-Infinity",
+            "NaN",
+            "1e999",
+            "-1e999",
+        ] {
+            let mut a = LamArena::new();
+            let root = a.const_(C::Float(spelling.into()));
+            identity(&a, root);
+            let nested = C::Block {
+                tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
+                elements: vec![C::Some(Box::new(C::Block {
+                    tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
+                    elements: vec![C::Float(spelling.into())],
+                }))],
+            };
+            let root = a.const_(nested);
+            identity(&a, root);
+        }
+    }
+
+    #[test]
+    fn equal_float_values_keep_distinct_pool_entries() {
+        let mut b = Bir::default();
+        let mut ids = Vec::new();
+        for spelling in ["1.", "1.0", "1e0", "0x1p0", "1.00"] {
+            let id = b.intern_float(spelling).unwrap();
+            assert!(!ids.contains(&id));
+            assert_eq!(id, b.intern_float(spelling).unwrap());
+            let Constant::Float(f) = b.constant(id) else {
+                panic!("not a float")
+            };
+            assert_eq!(f.value(), 1.0);
+            assert_eq!(b.text(f.spelling()), spelling);
+            ids.push(id);
+        }
+        let id = b.intern_float("-0.").unwrap();
+        let Constant::Float(f) = b.constant(id) else {
+            panic!("not a float")
+        };
+        assert_eq!(f.value().to_bits(), (-0.0f64).to_bits());
     }
 
     #[test]

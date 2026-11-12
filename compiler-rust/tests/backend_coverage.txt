@@ -1,23 +1,17 @@
 {
   "fixtures": {
-    "identical": 408,
+    "identical": 480,
     "units": 480,
-    "unsupported": {
-      "float constant spelling": 72
-    }
+    "unsupported": {}
   },
   "runtime": {
-    "identical": 107,
+    "identical": 113,
     "units": 113,
-    "unsupported": {
-      "float constant spelling": 6
-    }
+    "unsupported": {}
   },
   "tests/tests": {
-    "identical": 648,
-    "units": 705,
-    "unsupported": {
-      "float constant spelling": 57
-    }
+    "identical": 708,
+    "units": 708,
+    "unsupported": {}
   }
 }
