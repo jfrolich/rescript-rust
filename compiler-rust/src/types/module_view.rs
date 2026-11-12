@@ -579,7 +579,7 @@ fn describe_tables(
                             ctx,
                         )
                     });
-                    crate::cmi::persistent_env::substitute_type_paths_in_value_with_maps(
+                    crate::cmi::persistent_env::substitute_value_type_paths_at_component(
                         &mut desc,
                         maps,
                         &signature,
@@ -842,6 +842,7 @@ impl ModuleView {
     pub(crate) fn alias_sources(&self) -> &[(Path, Path)] {
         &self.alias_sources
     }
+
 
     /// `comp_values` after the component substitution. One probe of the
     /// name index and one read of the value table; the description is
@@ -2140,6 +2141,57 @@ mod tests {
         assert!(
             crate::types::typecore::adopt_child_view(&parent, ordinal, &mut None, &blind).is_none()
         );
+    }
+
+    #[test]
+    fn an_alias_view_walks_each_value_a_fixed_number_of_times() {
+        // An alias of a unit with 10,000 values and 1,000 types: the build
+        // re-roots each value's type once. It does not walk a value's type
+        // once per type and module of the unit, as the lookup of one value
+        // through an alias does (10,000 x 1,000 walks).
+        let walks = || crate::cmi::persistent_env::TYPE_PREFIX_WALKS.with(|walks| walks.get());
+        let build = |values: usize| {
+            let target = unit_of(
+                "Wide_target",
+                Shape {
+                    values,
+                    records: 1_000,
+                    ..Shape::default()
+                },
+            );
+            let name: &'static str = Box::leak(target.ps_name.clone().into_boxed_str());
+            let holder = unit_of(
+                "Wide_holder",
+                Shape {
+                    alias_of: Some(name),
+                    ..Shape::default()
+                },
+            );
+            let parent = view_of(&holder);
+            let (ordinal, _) = parent.world_child("Alias").unwrap();
+            let world = World::current();
+            let (before, steps) = (walks(), build_steps());
+            let view = world
+                .views()
+                .get_or_build(
+                    &world,
+                    &ViewKey::Alias(&AliasKey {
+                        parent: &parent,
+                        ordinal,
+                        unit: &target,
+                    }),
+                )
+                .expect("the alias view builds");
+            assert!(view.lookup_value_for_access(&format!("v{}", values - 1)).is_some());
+            (walks() - before, build_steps() - steps)
+        };
+        let (small_walks, small_steps) = build(1_000);
+        let (large_walks, large_steps) = build(10_000);
+        // The type `t`, the values, 1,000 records, `S`, `Alias`, `Inner`.
+        assert_eq!(small_steps, 1_000 + 1_004);
+        assert_eq!(large_steps, 10_000 + 1_004);
+        // The same walks for the types whatever the number of values.
+        assert_eq!(large_walks - small_walks, 0, "{small_walks} then {large_walks}");
     }
 
     #[test]

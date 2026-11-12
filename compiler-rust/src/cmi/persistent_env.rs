@@ -4278,6 +4278,9 @@ thread_local! {
     /// Component substitutions built on this thread (one pass over a
     /// signature each).
     pub(crate) static SUBST_MAP_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Walks of one type that rewrite one path prefix
+    /// (`rewrite_type_expr_by_path_prefix`).
+    pub(crate) static TYPE_PREFIX_WALKS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     /// Signature items those builds visited.
     pub(crate) static SUBST_MAP_ITEMS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -6407,6 +6410,34 @@ pub fn substitute_type_paths_in_value_with_maps(
     module_path: &Path,
     ctx: &TypeContext,
 ) {
+    substitute_value_type_paths(desc, value_maps, sig_items, module_path, true, ctx);
+}
+
+/// The component substitution of one value (`Subst.value_description sub
+/// decl`, env.ml:1537) for a builder that has put the value's type at
+/// `module_path` already when the module is reached through an alias (one
+/// rewrite of the whole source prefix): the per-item re-rooting of
+/// [`substitute_type_paths_in_value_with_maps`], one walk of the type for
+/// every type and module of the signature, would find nothing. One walk of
+/// the value's type.
+pub(crate) fn substitute_value_type_paths_at_component(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    ctx: &TypeContext,
+) {
+    substitute_value_type_paths(desc, value_maps, sig_items, module_path, false, ctx);
+}
+
+fn substitute_value_type_paths(
+    desc: &mut crate::types::decl::ValueDescription,
+    value_maps: &ValueSubstMaps,
+    sig_items: &[SignatureItem],
+    module_path: &Path,
+    reroot_alias_sources: bool,
+    ctx: &TypeContext,
+) {
     let maps = &value_maps.maps;
     let direct_type_name_map = &value_maps.direct_type_name_map;
     let type_stamp_map = &maps.type_stamp_map;
@@ -6432,6 +6463,9 @@ pub fn substitute_type_paths_in_value_with_maps(
 
     let mut visited = visit_set();
     substitute_type_expr_path(desc.val_type, paths, ctx, &mut visited);
+    if !reroot_alias_sources {
+        return;
+    }
 
     for alias_source in component_alias_sources(module_path, ctx) {
         for item in sig_items {
@@ -7552,6 +7586,8 @@ pub fn rewrite_type_expr_by_path_prefix(
     new_prefix: &Arc<Path>,
     ctx: &TypeContext,
 ) {
+    #[cfg(test)]
+    TYPE_PREFIX_WALKS.with(|walks| walks.set(walks.get() + 1));
     let mut visited = visit_set();
     rewrite_type_expr_by_path_prefix_in(ty_ref, old_prefix, new_prefix, ctx, &mut visited);
 }
