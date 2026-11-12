@@ -326,6 +326,9 @@ pub struct PersStruct {
     pub ps_crcs: Vec<(String, Option<[u8; 16]>)>,
     /// See [`PersStruct::own_alias_rewrites`].
     pub(crate) ps_alias_rewrites: std::sync::OnceLock<Option<Arc<UnitAliasRewrites>>>,
+    /// The view cell of the unit's own path, set when the build's world owns
+    /// the unit (`World::unit`); unset for a unit only this compilation holds.
+    pub(crate) ps_view: std::sync::OnceLock<Arc<crate::types::module_view::ViewCell>>,
 }
 
 /// The alias rewrites of one unit's signature, by flattened module name.
@@ -2178,6 +2181,7 @@ impl PersistentEnv {
             ps_deprecated,
             ps_crcs,
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         }
     }
 
@@ -2969,73 +2973,54 @@ impl PersistentEnv {
         // here so `prefix_idents` and `Subst.modtype_declaration` side effects
         // are not repeated.
         let alias_source = self.qualified_alias_path_for_flattened_head(name);
-        let components = ctx
+        if ctx
             .with_qualified_module_components(&components_key, |components| {
-                Rc::new(components.clone())
+                open_components_into_env(components, root, env, ctx, slot)
             })
-            .unwrap_or_else(|| {
-                // The view of a unit loaded into the worker store is the same
-                // for every compilation (OCaml builds `ps_comps` once per
-                // process), so it is built as a store build and shared.
-                let shareable = alias_source.is_none()
-                    && self.in_process_mode
-                    && ctx.world().is_unit_signature(&ps.ps_sig)
-                    && crate::types::typecore::shared_components_enabled();
-                if shareable
-                    && let Some((components, piece)) =
-                        ctx.thread_store().shared_components(&components_key)
-                {
-                    if ctx.compiler_counters_enabled() {
-                        crate::perf_counters::store_views::record_view_hit();
-                    }
-                    ctx.touch_store_piece(&piece);
-                    ctx.register_qualified_module_components_shared(
-                        components_key.clone(),
-                        components.clone(),
-                    );
-                    return components;
-                }
-                // OCaml compiler/ml/env.ml:1513-1519 builds the component
-                // table after `scrape_alias`, and env.ml:1581-1585 stores the
-                // substituted modtypes in that table. When ReScript's
-                // persistent registry knows this opened unit is the flattened
-                // backing head for a selected alias path, share the same
-                // component modtype force with that alias path.
-                let build = || {
-                    crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
-                        module_path,
-                        ps.ps_sig.clone(),
-                        crate::fast_hash::AHashMap::new(),
-                        alias_source,
-                        ctx,
-                    )
-                };
-                let (components, piece) = if shareable {
-                    ctx.build_in_store(build)
-                } else {
-                    (build(), None)
-                };
-                let components = Rc::new(components);
-                if shareable && ctx.compiler_counters_enabled() {
-                    crate::perf_counters::store_views::record_view_build(
-                        module_path.name(),
-                        piece.is_some(),
-                    );
-                }
-                if shareable {
-                    match piece {
-                        Some(piece) => ctx.thread_store().publish_shared_components(
-                            components_key.clone(),
-                            components.clone(),
-                            piece,
-                        ),
-                        None => components.make_private(),
-                    }
-                }
-                ctx.register_qualified_module_components_shared(components_key, components.clone());
-                components
-            });
-        open_components_into_env(&components, root, env, ctx, slot);
+            .is_some()
+        {
+            return true;
+        }
+        // The view of a unit the world owns is the same for every
+        // compilation (OCaml builds `ps_comps` once per process): it is
+        // built once per build and adopted here.
+        if alias_source.is_none()
+            && self.in_process_mode
+            && let Some(view) =
+                crate::types::typecore::adopt_unit_view(&ps, components_key.clone(), ctx)
+        {
+            open_components_into_env(
+                crate::types::env_lazy::Components::World(&view),
+                root,
+                env,
+                ctx,
+                slot,
+            );
+            return true;
+        }
+        // OCaml compiler/ml/env.ml:1513-1519 builds the component
+        // table after `scrape_alias`, and env.ml:1581-1585 stores the
+        // substituted modtypes in that table. When ReScript's
+        // persistent registry knows this opened unit is the flattened
+        // backing head for a selected alias path, share the same
+        // component modtype force with that alias path.
+        let components = Rc::new(
+            crate::types::env_lazy::QualifiedModuleComponents::new_with_child_components_arc_and_value_source_prefix(
+                module_path,
+                ps.ps_sig.clone(),
+                crate::fast_hash::AHashMap::new(),
+                alias_source,
+                ctx,
+            ),
+        );
+        ctx.register_qualified_module_components_shared(components_key, components.clone());
+        open_components_into_env(
+            crate::types::env_lazy::Components::Local(&components),
+            root,
+            env,
+            ctx,
+            slot,
+        );
         true
     }
 
@@ -3165,6 +3150,7 @@ impl PersistentEnv {
             ps_deprecated: None,
             ps_crcs: Vec::new(),
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         };
         self.unhide_module(namespace_name);
         self.cache_insert(namespace_name.to_string(), Some(Arc::new(ps)));
@@ -4239,11 +4225,20 @@ impl SubstMaps {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Component substitutions built on this thread (one pass over a
+    /// signature each).
+    pub(crate) static SUBST_MAP_BUILDS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn build_subst_maps(
     sig_items: &[SignatureItem],
     module_path: &Path,
     ctx: &TypeContext,
 ) -> SubstMaps {
+    #[cfg(test)]
+    SUBST_MAP_BUILDS.with(|builds| builds.set(builds.get() + 1));
     let mut maps = SubstMaps {
         protected_module_head: nonpersistent_path_head(module_path),
         ..SubstMaps::default()
@@ -5216,6 +5211,62 @@ pub(crate) fn substitute_component_module_type_path(
     let maps = build_subst_maps(sig_items, module_path, ctx);
     substitute_module_type_paths_with_maps(ctx, &mut module_type, &maps);
     Some(module_type)
+}
+
+/// The component substitution of one signature at one path
+/// (`prefix_idents`, env.ml:1530), built once for a builder that applies it
+/// to many items: [`substitute_sig_path`] and
+/// [`substitute_component_module_type_path`] build it on every call.
+pub(crate) struct ComponentSubst(SubstMaps);
+
+impl ComponentSubst {
+    /// One pass over `sig_items`.
+    pub(crate) fn new(sig_items: &[SignatureItem], module_path: &Path, ctx: &TypeContext) -> Self {
+        ComponentSubst(build_subst_maps(sig_items, module_path, ctx))
+    }
+
+    /// [`substitute_sig_path`]: one walk of `path`.
+    pub(crate) fn path(&self, path: &Path, ctx: &TypeContext) -> Path {
+        substitute_type_path(
+            ctx,
+            path,
+            &self.0.type_stamp_map,
+            &self.0.type_name_map,
+            &self.0.module_stamp_map,
+            &self.0.module_name_map,
+            self.0.protected_module_head.as_ref(),
+        )
+    }
+
+    /// [`freshen_component_modtype_declaration_bound_idents`]: one copy of
+    /// the declaration's module type.
+    pub(crate) fn freshen_modtype_declaration(&self, mtd: &mut ModtypeDeclaration, ctx: &TypeContext) {
+        if let Some(module_type) = mtd.mtd_type.as_mut() {
+            *module_type =
+                crate::types::typecore::copy_lookup_module_type_for_subst(module_type, ctx);
+            freshen_module_type_bound_idents_with_maps(module_type, &self.0, ctx);
+        }
+    }
+
+    /// [`substitute_component_module_type_path`]: one walk of the target.
+    pub(crate) fn module_type_path(
+        &self,
+        module_type: &ModuleType,
+        ctx: &TypeContext,
+    ) -> Option<ModuleType> {
+        let target = match module_type {
+            ModuleType::MtyAlias(..) | ModuleType::MtyIdent(_) => {
+                module_type.ident_or_alias_path().unwrap()
+            }
+            _ => return None,
+        };
+        if target.head().is_persistent() {
+            return Some(module_type.clone());
+        }
+        let mut module_type = module_type.clone();
+        substitute_module_type_paths_with_maps(ctx, &mut module_type, &self.0);
+        Some(module_type)
+    }
 }
 
 /// `path` with the items of `sig_items` it names qualified by `module_path`.
@@ -7803,7 +7854,7 @@ fn collect_alias_rewrites<S: AliasRewriteSink>(
 }
 
 pub(crate) fn open_module_components_into_env(
-    components: &crate::types::env_lazy::QualifiedModuleComponents,
+    components: crate::types::env_lazy::Components<'_>,
     root: Path,
     env: &mut Env,
     ctx: &TypeContext,
@@ -7815,6 +7866,15 @@ pub(crate) fn open_module_components_into_env(
     // that module lookup already forced so opened `comp_modules` and
     // `comp_components` share the same lazy state.
     open_components_into_env(components, root, env, ctx, slot);
+}
+
+/// Where `add_signature_to_env_with_options_inner` puts what an open
+/// installs.
+enum OpenedOut<'a> {
+    /// The layer tables, for the caller to attach.
+    Layers(&'a mut Option<crate::types::env::OpenedLayers>),
+    /// The items themselves, for a world view.
+    Items(&'a mut crate::types::module_view::OpenedItems),
 }
 
 /// The layer tables that opening the component table `components` adds.
@@ -7830,25 +7890,49 @@ fn build_opened_layers(
         ctx,
         true,
         false,
-        Some(components),
-        Some(&mut out),
-        None,
+        Some(crate::types::env_lazy::Components::Local(components)),
+        OpenedOut::Layers(&mut out),
     );
     out.expect("opened layers built")
+}
+
+/// What `open` installs for the view being built (env.ml:1841-1877 opens
+/// the component table as is), described on the build's scratch context.
+/// One pass over the view's signature; one description per constructor.
+pub(crate) fn opened_items_of_view(
+    view: &Arc<crate::types::module_view::ModuleView>,
+    ctx: &TypeContext,
+) -> crate::types::module_view::OpenedItems {
+    let mut items = Default::default();
+    add_signature_to_env_with_options_inner(
+        view.signature(),
+        view.access_path(),
+        &mut Env::empty(),
+        ctx,
+        true,
+        false,
+        Some(crate::types::env_lazy::Components::World(view)),
+        OpenedOut::Items(&mut items),
+    );
+    items
 }
 
 /// Open the component view `components` into `env`, reusing the view's
 /// layer tables when another Env already opened it.
 fn open_components_into_env(
-    components: &crate::types::env_lazy::QualifiedModuleComponents,
+    components: crate::types::env_lazy::Components<'_>,
     root: Path,
     env: &mut Env,
     ctx: &TypeContext,
     slot: Option<u32>,
 ) {
-    let layers = components.opened_layers(ctx, || {
-        build_opened_layers(components, ctx)
-    });
+    use crate::types::env_lazy::Components;
+    let layers = match components {
+        Components::World(view) => ctx.thread_store().view_tables(view).opened_layers(view, ctx),
+        Components::Local(components) => {
+            components.opened_layers(ctx, || build_opened_layers(components, ctx))
+        }
+    };
     env.add_prebuilt_open_layers(root, &layers, slot);
 }
 
@@ -7860,10 +7944,13 @@ fn add_signature_to_env_with_options_inner(
     ctx: &TypeContext,
     as_opened: bool,
     apply_path_subst: bool,
-    precomputed_components: Option<&crate::types::env_lazy::QualifiedModuleComponents>,
-    opened_out: Option<&mut Option<crate::types::env::OpenedLayers>>,
-    slot: Option<u32>,
+    precomputed_components: Option<crate::types::env_lazy::Components<'_>>,
+    opened_out: OpenedOut<'_>,
 ) {
+    let collect_items = matches!(opened_out, OpenedOut::Items(_));
+    // For `OpenedOut::Items`: whether each opened module is a direct alias
+    // of a persistent unit.
+    let mut opened_module_aliases = Vec::new();
     // Apply path substitution: rewrite Tconstr paths from internal
     // (e.g., Pident "ref") to qualified (e.g., Pdot(Pident "Pervasives") "ref").
     // This matches OCaml's `prefix_idents` + `Subst.type_path` mechanism.
@@ -8164,7 +8251,12 @@ fn add_signature_to_env_with_options_inner(
                         md.md_type.ident_or_alias_path().map(|p| p.view()),
                         Some(PathView::Pident(alias_id)) if alias_id.is_persistent()
                     );
-                    if direct_persistent_alias && precomputed_components.is_some() {
+                    if collect_items {
+                        // A view records the module; each worker creates its
+                        // component thunk (`env_lazy::ViewTables`).
+                        opened_module_aliases.push(direct_persistent_alias);
+                        opened_modules.push((*id, md.clone(), module_pos));
+                    } else if direct_persistent_alias && precomputed_components.is_some() {
                         // OCaml compiler/ml/env.ml:1516-1518 scrapes a
                         // direct persistent child alias through env.ml:865-875
                         // `find_module`, so the child component table does not
@@ -8262,6 +8354,40 @@ fn add_signature_to_env_with_options_inner(
         }
     }
     if as_opened {
+        if let OpenedOut::Items(items) = opened_out {
+            *items = crate::types::module_view::OpenedItems {
+                values: opened_values
+                    .into_iter()
+                    .map(|(id, desc, pos)| (id, Arc::new(desc), pos))
+                    .collect(),
+                types: opened_types,
+                constructors: opened_constructors
+                    .into_iter()
+                    .map(|(id, desc)| (id, Arc::new(desc)))
+                    .collect(),
+                labels: opened_labels
+                    .into_iter()
+                    .map(|(id, desc)| (id, Arc::new(desc)))
+                    .collect(),
+                modules: opened_modules
+                    .into_iter()
+                    .zip(opened_module_aliases)
+                    .map(|((id, decl, pos), direct_persistent_alias)| {
+                        crate::types::module_view::OpenedModule {
+                            id,
+                            decl: Arc::new(decl),
+                            pos,
+                            direct_persistent_alias,
+                        }
+                    })
+                    .collect(),
+                modtypes: opened_modtypes
+                    .into_iter()
+                    .map(|(id, decl)| (id, Arc::new(decl)))
+                    .collect(),
+            };
+            return;
+        }
         let layers = crate::types::env::OpenedLayers::build(
             opened_values,
             opened_types,
@@ -8272,8 +8398,8 @@ fn add_signature_to_env_with_options_inner(
             opened_modtypes,
         );
         match opened_out {
-            Some(out) => *out = Some(layers),
-            None => env.add_prebuilt_open_layers(*module_path, &layers, slot),
+            OpenedOut::Layers(out) => *out = Some(layers),
+            OpenedOut::Items(_) => unreachable!("returned above"),
         }
     }
 }
@@ -8324,6 +8450,7 @@ mod resolution_view_tests {
             ps_deprecated: None,
             ps_crcs: Vec::new(),
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         }
     }
 

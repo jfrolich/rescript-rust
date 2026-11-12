@@ -91,6 +91,8 @@ pub(crate) struct ThreadTypeStore {
     >,
     /// The `lbl_all` arrays built during store builds (`LabelArrayRef::store`).
     label_families: RefCell<Vec<Arc<Vec<crate::types::decl::LabelDescription>>>>,
+    /// What this worker derived from each world view, by view id.
+    view_tables: RefCell<Vec<Option<Rc<crate::types::env_lazy::ViewTables>>>>,
     generation: u64,
     /// The build's world; holding it keeps every frozen node this store's
     /// data refers to alive.
@@ -117,6 +119,7 @@ impl ThreadTypeStore {
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             shared_components: RefCell::new(HashMap::new()),
             label_families: RefCell::new(Vec::new()),
+            view_tables: RefCell::new(Vec::new()),
             generation,
             world: super::world::World::current(),
             decl_locs: Default::default(),
@@ -213,6 +216,22 @@ impl ThreadTypeStore {
     #[inline]
     pub(crate) fn shared_pool(&self) -> &super::shared_store::SharedTypePool {
         self.world.pool()
+    }
+
+    /// This worker's tables for `view`, created on first use. One read of
+    /// a table indexed by the view's id.
+    pub(crate) fn view_tables(
+        &self,
+        view: &crate::types::module_view::ModuleView,
+    ) -> Rc<crate::types::env_lazy::ViewTables> {
+        let index = view.id().index();
+        let mut tables = self.view_tables.borrow_mut();
+        if tables.len() <= index {
+            tables.resize(index + 1, None);
+        }
+        tables[index]
+            .get_or_insert_with(|| Rc::new(crate::types::env_lazy::ViewTables::new(view)))
+            .clone()
     }
 
     pub(crate) fn shared_components(

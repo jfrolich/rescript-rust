@@ -44,6 +44,7 @@ pub(crate) mod env_lazy;
 pub mod external_ffi_types;
 pub mod includecore;
 pub mod includemod;
+pub(crate) mod module_view;
 pub(crate) mod parmatch;
 pub mod path;
 pub mod predef;

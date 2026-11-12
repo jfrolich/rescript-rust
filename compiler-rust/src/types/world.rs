@@ -23,8 +23,8 @@
 
 use super::context::TypeContext;
 use super::decl::{
-    ConstructorDescription, ConstructorKind, LabelDescription, ModuleDeclaration, Signature,
-    TypeDeclaration, ValueDescription,
+    ConstructorDescription, ConstructorKind, LabelArrayRef, LabelArrayTier, LabelDescription,
+    ModtypeDeclaration, ModuleDeclaration, Signature, TypeDeclaration, ValueDescription,
 };
 use super::decl_loc::DeclLocKind;
 use super::env::Env;
@@ -39,14 +39,15 @@ use super::type_expr::{
 use super::variant_runtime::{Layout, LayoutRef};
 use crate::cmi::persistent_env::PersStruct;
 use crate::cmi::portable_types::{
-    PortablePersStruct, SignatureRefMap, remap_module_decl_refs, remap_signature_refs,
-    remap_type_decl_refs, remap_value_desc_refs,
+    PortablePersStruct, SignatureRefMap, remap_modtype_decl_refs, remap_module_decl_refs,
+    remap_signature_refs, remap_type_decl_refs, remap_value_desc_refs,
 };
 use crate::fast_hash::AHashMap;
 use crate::ident::Ident;
 use crate::parser::longident::Longident;
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicU32, Ordering};
+use super::module_view::{ModuleView, ViewCell, ViewTable};
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// One unit of the build, internalized into the frozen pool.
@@ -75,11 +76,60 @@ pub(crate) struct World {
     predef: OnceLock<Arc<PredefView>>,
     /// How many times this world built `predef` (1 once it is set).
     predef_builds: AtomicU32,
+    /// The `lbl_all` arrays of frozen labels (`LabelArrayRef::frozen`).
+    label_arrays: LabelArrays,
+    /// The module views of this build.
+    views: ViewTable,
+}
+
+/// Frozen label arrays: write-once cells in chunks that are allocated as
+/// the table grows, so a reader takes no lock and a writer never moves a
+/// cell another thread can see.
+struct LabelArrays {
+    chunks: Box<[OnceLock<Box<[OnceLock<Arc<Vec<LabelDescription>>>]>>]>,
+    next: AtomicU32,
+}
+
+const LABEL_CHUNK_BITS: u32 = 10;
+const LABEL_CHUNK_COUNT: usize = 4096;
+
+impl LabelArrays {
+    fn new() -> Self {
+        LabelArrays {
+            chunks: (0..LABEL_CHUNK_COUNT).map(|_| OnceLock::new()).collect(),
+            next: AtomicU32::new(0),
+        }
+    }
+
+    /// Reserve `count` consecutive indices; `None` when the table is full.
+    /// One atomic add.
+    fn reserve(&self, count: usize) -> Option<u32> {
+        let count = u32::try_from(count).ok()?;
+        let base = self.next.fetch_add(count, Ordering::Relaxed);
+        let end = base.checked_add(count)?;
+        (end as usize <= LABEL_CHUNK_COUNT << LABEL_CHUNK_BITS).then_some(base)
+    }
+
+    fn cell(&self, index: u32) -> &OnceLock<Arc<Vec<LabelDescription>>> {
+        let chunk = self.chunks[(index >> LABEL_CHUNK_BITS) as usize].get_or_init(|| {
+            (0..1usize << LABEL_CHUNK_BITS)
+                .map(|_| OnceLock::new())
+                .collect()
+        });
+        &chunk[(index & ((1 << LABEL_CHUNK_BITS) - 1)) as usize]
+    }
+
+    /// Two loads of write-once cells; no lock, no hash.
+    fn get(&self, index: usize) -> Option<&Arc<Vec<LabelDescription>>> {
+        let chunk = self.chunks.get(index >> LABEL_CHUNK_BITS)?.get()?;
+        chunk[index & ((1 << LABEL_CHUNK_BITS) - 1)].get()
+    }
 }
 
 const fn assert_send_sync<T: Send + Sync>() {}
 const _: () = assert_send_sync::<World>();
 const _: () = assert_send_sync::<PredefView>();
+const _: () = assert_send_sync::<ModuleView>();
 
 static CURRENT: Mutex<Option<Arc<World>>> = Mutex::new(None);
 
@@ -110,7 +160,22 @@ impl World {
             unit_signatures: Mutex::new(AHashMap::new()),
             predef: OnceLock::new(),
             predef_builds: AtomicU32::new(0),
+            label_arrays: LabelArrays::new(),
+            views: ViewTable::new(),
         }
+    }
+
+    /// The module views of this build.
+    #[inline]
+    pub(crate) fn views(&self) -> &ViewTable {
+        &self.views
+    }
+
+    /// The frozen label array `index` (`LabelArrayRef::frozen`). Two loads
+    /// of write-once cells; no lock, no hash.
+    #[inline]
+    pub(crate) fn label_array(&self, index: usize) -> Option<&Arc<Vec<LabelDescription>>> {
+        self.label_arrays.get(index)
     }
 
     /// The world of the current build generation
@@ -162,6 +227,9 @@ impl World {
         slot.ps
             .get_or_init(|| {
                 let ps = build()?;
+                // The unit is this world's: its path has a view cell, which
+                // any holder of the unit reaches without the table.
+                let _ = ps.ps_view.set(Arc::new(ViewCell::default()));
                 self.unit_signatures
                     .lock()
                     .unwrap()
@@ -178,12 +246,6 @@ impl World {
             .unwrap()
             .get(&(Arc::as_ptr(sig) as usize))
             .cloned()
-    }
-
-    /// Whether `sig` is the signature of a unit of this world: its items are
-    /// frozen and keep one address for the whole build.
-    pub(crate) fn is_unit_signature(&self, sig: &Arc<Signature>) -> bool {
-        self.unit_of_signature(sig).is_some()
     }
 
     /// The name index of a unit's signature, built once per build; `None`
@@ -258,12 +320,35 @@ impl FrozenExport for ConstructorDescription {
     }
 }
 
-/// `lbl_all` names the label array of the record and is not a type handle:
-/// it is left as it is, so a frozen label keeps the array it was built with.
+/// `lbl_all` names the label array of the record: a freeze moves the array
+/// into the world's table once, whichever of its labels reaches it first.
 impl FrozenExport for LabelDescription {
     fn rewrite_handles(&mut self, map: &impl SignatureRefMap) {
         self.lbl_res = map.ty(self.lbl_res);
         self.lbl_arg = map.ty(self.lbl_arg);
+        self.lbl_all = map.label_array(self.lbl_all);
+    }
+}
+
+impl FrozenExport for ModtypeDeclaration {
+    fn rewrite_handles(&mut self, map: &impl SignatureRefMap) {
+        remap_modtype_decl_refs(self, map);
+    }
+}
+
+impl<T: FrozenExport> FrozenExport for Option<T> {
+    fn rewrite_handles(&mut self, map: &impl SignatureRefMap) {
+        if let Some(value) = self {
+            value.rewrite_handles(map);
+        }
+    }
+}
+
+impl<T: FrozenExport> FrozenExport for Box<[T]> {
+    fn rewrite_handles(&mut self, map: &impl SignatureRefMap) {
+        for value in self.iter_mut() {
+            value.rewrite_handles(map);
+        }
     }
 }
 
@@ -294,6 +379,8 @@ pub(crate) enum Unfreezable {
     UnresolvedName,
     /// The pool has no room for the graph.
     PoolFull,
+    /// A label array the scratch context does not hold.
+    UnknownLabelArray,
 }
 
 /// A value whose every type node is frozen.
@@ -321,6 +408,11 @@ struct FreezeGraph {
     cells: AHashMap<MutabilityRef, MutabilityRef>,
     /// Nodes with a position whose descriptor is not copied yet.
     pending: Vec<(TypeExprRef, u32)>,
+    /// Label arrays the value reaches, at dense positions.
+    families: Vec<Vec<LabelDescription>>,
+    /// Scratch label array (by its index in the scratch context's pool) ->
+    /// position in `families` plus one; 0 for an array not reached yet.
+    family_positions: Vec<u32>,
     failure: Option<Unfreezable>,
 }
 
@@ -554,12 +646,56 @@ impl SignatureRefMap for Freezer<'_> {
         graph.layout_positions.insert(r, position);
         LayoutRef::from_usize(position as usize)
     }
+
+    fn label_array(&self, r: LabelArrayRef) -> LabelArrayRef {
+        let local = match r.tier() {
+            None | Some(LabelArrayTier::Frozen(_)) => return r,
+            Some(LabelArrayTier::Store(_)) => {
+                self.graph
+                    .borrow_mut()
+                    .failure
+                    .get_or_insert(Unfreezable::WorkerStoreNode);
+                return r;
+            }
+            Some(LabelArrayTier::Local(local)) => local,
+        };
+        let position = {
+            let mut graph = self.graph.borrow_mut();
+            if let Some(&position) = graph.family_positions.get(local)
+                && position != 0
+            {
+                return LabelArrayRef::local(position as usize - 1);
+            }
+            if graph.family_positions.len() <= local {
+                graph.family_positions.resize(local + 1, 0);
+            }
+            let position = graph.families.len();
+            graph.families.push(Vec::new());
+            graph.family_positions[local] = position as u32 + 1;
+            position
+        };
+        let Some(family) = self.ctx.label_family(r) else {
+            self.graph
+                .borrow_mut()
+                .failure
+                .get_or_insert(Unfreezable::UnknownLabelArray);
+            return r;
+        };
+        // The array's labels name the array itself: their `lbl_all` finds
+        // the position recorded above.
+        let mut labels = family.as_ref().clone();
+        labels.rewrite_handles(self);
+        self.graph.borrow_mut().families[position] = labels;
+        LabelArrayRef::local(position)
+    }
 }
 
 /// Positions of a freeze become addresses of the graph published at the
 /// base; handles that were frozen before the freeze stay.
 struct Relocation {
     base: u32,
+    /// Index of the freeze's first label array in the world's table.
+    families: u32,
 }
 
 impl SignatureRefMap for Relocation {
@@ -576,6 +712,15 @@ impl SignatureRefMap for Relocation {
             r
         } else {
             LayoutRef::from_shared_index(self.base + r.index() as u32)
+        }
+    }
+
+    fn label_array(&self, r: LabelArrayRef) -> LabelArrayRef {
+        match r.tier() {
+            Some(LabelArrayTier::Local(position)) => {
+                LabelArrayRef::frozen(self.families as usize + position)
+            }
+            _ => r,
         }
     }
 }
@@ -675,9 +820,13 @@ fn relocate(
 /// The predefined declarations satisfy both: they have no locations and
 /// their shapes are the static predefined ones.
 ///
+/// A label array the value reaches (`lbl_all`) moves into the world's table
+/// once, with its labels.
+///
 /// Cost: one hash probe per handle of the value and of the copied nodes,
 /// one descriptor read and one push per copied node, one pass over the
-/// copied nodes to relocate them. Nothing depends on the size of the pool.
+/// copied nodes to relocate them; one copy of each label array reached.
+/// Nothing depends on the size of the pool.
 pub(crate) fn freeze<T: FrozenExport>(
     world: &World,
     scratch: &ViewScratch,
@@ -703,28 +852,52 @@ pub(crate) fn freeze<T: FrozenExport>(
         return Err(failure);
     }
     let sizes = graph.sizes();
-    if sizes.nodes == 0 && sizes.layouts == 0 {
+    let mut families = std::mem::take(&mut graph.families);
+    if sizes.nodes == 0 && sizes.layouts == 0 && families.is_empty() {
         return Ok(Frozen { value, nodes: 0 });
     }
-    let base = world
-        .pool
-        .publish(sizes, |base| {
-            relocate(
-                &mut graph.nodes,
-                &mut graph.payloads,
-                sizes,
-                &Relocation { base },
-            );
-            SharedGraphParts {
-                nodes: std::mem::take(&mut graph.nodes),
-                payloads: std::mem::take(&mut graph.payloads),
-                layouts: std::mem::take(&mut graph.layouts),
-                locations: Default::default(),
-                carried: Default::default(),
-            }
-        })
+    let first_family = world
+        .label_arrays
+        .reserve(families.len())
         .ok_or(Unfreezable::PoolFull)?;
-    value.rewrite_handles(&Relocation { base });
+    let base = if sizes.nodes == 0 && sizes.layouts == 0 {
+        0
+    } else {
+        world
+            .pool
+            .publish(sizes, |base| {
+                relocate(
+                    &mut graph.nodes,
+                    &mut graph.payloads,
+                    sizes,
+                    &Relocation {
+                        base,
+                        families: first_family,
+                    },
+                );
+                SharedGraphParts {
+                    nodes: std::mem::take(&mut graph.nodes),
+                    payloads: std::mem::take(&mut graph.payloads),
+                    layouts: std::mem::take(&mut graph.layouts),
+                    locations: Default::default(),
+                    carried: Default::default(),
+                }
+            })
+            .ok_or(Unfreezable::PoolFull)?
+    };
+    let relocation = Relocation {
+        base,
+        families: first_family,
+    };
+    for (position, mut labels) in families.drain(..).enumerate() {
+        labels.rewrite_handles(&relocation);
+        let published = world
+            .label_arrays
+            .cell(first_family + position as u32)
+            .set(Arc::new(labels));
+        assert!(published.is_ok(), "frozen label array published twice");
+    }
+    value.rewrite_handles(&relocation);
     Ok(Frozen {
         value,
         nodes: sizes.nodes,
@@ -759,6 +932,19 @@ impl ViewScratch {
     /// The context to build on.
     pub(crate) fn ctx(&self) -> &TypeContext {
         &self.ctx
+    }
+
+    /// A scratch context for one view build, dropped when the build ends:
+    /// the build sees no state of an earlier build, and a build that needs
+    /// another view (its parent's) holds no borrow while that one is built.
+    /// Binders created on it take stamps of the process-wide store range,
+    /// so none is `Ident::same` as an identifier of a compilation.
+    ///
+    /// One checker context is created and dropped per view build.
+    pub(crate) fn fresh() -> Self {
+        let scratch = ViewScratch::new();
+        scratch.ctx.set_world_scratch();
+        scratch
     }
 
     /// Run `build` on this worker's scratch context, creating it on first
@@ -894,6 +1080,7 @@ mod tests {
             ps_deprecated: None,
             ps_crcs: vec![],
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         }
     }
 
@@ -945,7 +1132,7 @@ mod tests {
         assert_eq!(builds.load(Ordering::SeqCst), 1);
         for unit in &units {
             assert!(Arc::ptr_eq(unit, &units[0]));
-            assert!(world.is_unit_signature(&unit.ps_sig));
+            assert!(unit.ps_view.get().is_some());
         }
         let index = world.unit_signature_index(&units[0].ps_sig).unwrap();
         assert!(Arc::ptr_eq(
@@ -977,7 +1164,7 @@ mod tests {
             world.unit_signature_index(sig).unwrap();
             let by_signature = unit_probes() - before;
             let before = unit_probes();
-            assert!(!world.is_unit_signature(&Arc::new(Signature::new())));
+            assert!(world.unit_signature_index(&Arc::new(Signature::new())).is_none());
             let miss = unit_probes() - before;
             steps.push((by_unit, by_signature, miss));
         }

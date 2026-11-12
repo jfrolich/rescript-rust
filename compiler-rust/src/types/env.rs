@@ -322,6 +322,42 @@ impl OpenedLayers {
         }
     }
 
+    /// The layer tables of a world view's opened items. One hash insert
+    /// and one reference-count increment per item; no type node.
+    pub(crate) fn from_view(
+        items: &super::module_view::OpenedItems,
+        module_components: Vec<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>,
+    ) -> Self {
+        let no_pos = crate::types::path::NOPOS;
+        OpenedLayers {
+            values: Rc::new(id_open_table(items.values.clone())),
+            types: Rc::new(id_open_table(
+                items
+                    .types
+                    .iter()
+                    .map(|(id, decl)| (*id, decl.clone(), no_pos))
+                    .collect(),
+            )),
+            constrs: Rc::new(tycomp_open_table(items.constructors.clone())),
+            labels: Rc::new(tycomp_open_table(items.labels.clone())),
+            modules: Rc::new(id_open_table(
+                items
+                    .modules
+                    .iter()
+                    .map(|module| (module.id, module.decl.clone(), module.pos))
+                    .collect(),
+            )),
+            module_components: Rc::new(id_open_table(module_components)),
+            modtypes: Rc::new(id_open_table(
+                items
+                    .modtypes
+                    .iter()
+                    .map(|(id, decl)| (*id, decl.clone(), no_pos))
+                    .collect(),
+            )),
+        }
+    }
+
     fn is_empty(&self) -> bool {
         self.values.is_empty()
             && self.types.is_empty()

@@ -2071,6 +2071,7 @@ fn shared_pers_struct_at(
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
         ps_alias_rewrites: Default::default(),
+        ps_view: Default::default(),
     };
     Some((Arc::new(ps), base))
 }
@@ -2111,6 +2112,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                     ps_filename: pps.ps_filename.clone(),
                     ps_deprecated: pps.ps_deprecated.clone(), ps_crcs: pps.ps_crcs.clone(),
                     ps_alias_rewrites: Default::default(),
+                    ps_view: Default::default(),
                 }));
             }
             drop(decoded);
@@ -2148,6 +2150,7 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
         ps_alias_rewrites: Default::default(),
+        ps_view: Default::default(),
     })
 }
 
@@ -2680,6 +2683,10 @@ pub(crate) trait SignatureRefMap {
     fn ty(&self, r: TypeExprRef) -> TypeExprRef;
     /// The new name of a variant layout reference.
     fn layout(&self, r: crate::types::VariantLayoutRef) -> crate::types::VariantLayoutRef;
+    /// The new name of a label array (`lbl_all`); only a freeze renames one.
+    fn label_array(&self, r: crate::types::LabelArrayRef) -> crate::types::LabelArrayRef {
+        r
+    }
 }
 
 /// Portable index `i` becomes entry `i` of each table.
@@ -2802,7 +2809,7 @@ pub(crate) fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl Sign
     remap_module_type_refs(&mut md.md_type, map);
 }
 
-fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, map: &impl SignatureRefMap) {
+pub(crate) fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, map: &impl SignatureRefMap) {
     if let Some(ref mut mt) = mtd.mtd_type {
         remap_module_type_refs(mt, map);
     }
@@ -2908,6 +2915,7 @@ mod identity_tests {
             ps_deprecated: None,
             ps_crcs: vec![],
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         };
         let published = publish_signature(
             &source, &ctx, None, SignaturePublicationMode::Eager, false,
@@ -2981,6 +2989,7 @@ mod identity_tests {
                 ps_deprecated: None,
                 ps_crcs: vec![],
                 ps_alias_rewrites: Default::default(),
+                ps_view: Default::default(),
             },
             &ctx,
             None,
@@ -3038,7 +3047,7 @@ mod identity_tests {
             ctx.register_raw_module_sig("Binders", sig.clone());
             PersStruct {
                 ps_name: "Binders".into(), ps_filename: "Binders.res".into(), ps_sig: sig,
-                ps_deprecated: None, ps_crcs: vec![], ps_alias_rewrites: Default::default(),
+                ps_deprecated: None, ps_crcs: vec![], ps_alias_rewrites: Default::default(), ps_view: Default::default(),
             }
         }
         let reference = TypeContext::new(Arc::new(IdGenerator::new()));
@@ -3075,6 +3084,7 @@ mod identity_tests {
             ps_deprecated: None,
             ps_crcs: vec![],
             ps_alias_rewrites: Default::default(),
+            ps_view: Default::default(),
         };
         let oracle = serialize_pers_struct(&ps, &ctx, None).signature();
         let published = {
@@ -3132,6 +3142,7 @@ mod identity_tests {
                 ps_deprecated: None,
                 ps_crcs: vec![],
                 ps_alias_rewrites: Default::default(),
+                ps_view: Default::default(),
             },
             &ctx,
             None,
@@ -3151,7 +3162,7 @@ mod identity_tests {
                 panic!("dependent rebuilt the published graph")
             })
             .unwrap();
-        assert!(ctx.world().is_unit_signature(&shared.ps_sig));
+        assert!(shared.ps_view.get().is_some());
         assert!(published.has_decoded_signatures());
     }
 
@@ -3166,6 +3177,7 @@ mod identity_tests {
                 ps_deprecated: None,
                 ps_crcs: vec![],
                 ps_alias_rewrites: Default::default(),
+                ps_view: Default::default(),
             },
             &ctx,
             None,

@@ -692,9 +692,41 @@ pub(crate) mod world {
         }
     }
 
+    static VIEWS_BUILT: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_ADOPTED: AtomicU64 = AtomicU64::new(0);
+    static VIEW_NODES_COPIED: AtomicU64 = AtomicU64::new(0);
+    static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
+    static CHILD_NODES: AtomicU64 = AtomicU64::new(0);
+
+    /// A module view was built; freezing it created `nodes` nodes.
+    pub(crate) fn record_view_build(nodes: usize) {
+        if super::enabled() {
+            VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
+            VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// A compilation adopted a module view. The caller tests the flag.
+    pub(crate) fn record_view_adoption() {
+        VIEWS_ADOPTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A child module declaration of a view was forced into `nodes` nodes.
+    pub(crate) fn record_forced_child(nodes: usize) {
+        if super::enabled() {
+            CHILDREN_FORCED.fetch_add(1, Ordering::Relaxed);
+            CHILD_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn reset() {
         PREDEF_BUILDS.store(0, Ordering::Relaxed);
         PREDEF_NODES.store(0, Ordering::Relaxed);
+        VIEWS_BUILT.store(0, Ordering::Relaxed);
+        VIEWS_ADOPTED.store(0, Ordering::Relaxed);
+        VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
+        CHILDREN_FORCED.store(0, Ordering::Relaxed);
+        CHILD_NODES.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn print_report() {
@@ -702,6 +734,17 @@ pub(crate) mod world {
             "[compiler-counter] world predef_builds={} predef_nodes={}",
             PREDEF_BUILDS.load(Ordering::Relaxed),
             PREDEF_NODES.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] world_views built={} adopted={} children_forced={}",
+            VIEWS_BUILT.load(Ordering::Relaxed),
+            VIEWS_ADOPTED.load(Ordering::Relaxed),
+            CHILDREN_FORCED.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] world_view_nodes copied={} shared=0 child_nodes={}",
+            VIEW_NODES_COPIED.load(Ordering::Relaxed),
+            CHILD_NODES.load(Ordering::Relaxed),
         );
     }
 }
