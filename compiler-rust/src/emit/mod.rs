@@ -3,6 +3,7 @@ mod build;
 mod literal;
 mod naming;
 mod program;
+pub mod sourcemap;
 mod walk;
 
 use crate::js_ir::{ModulePathResolver, arena::JsDepsProgram};
@@ -78,7 +79,16 @@ pub fn emit(
     jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
-    program::emit(program, resolver, directives, debug, jsx_preserve, header)
+    program::emit(program, resolver, directives, debug, jsx_preserve, header, None)
+}
+
+/// Emit with source maps, retaining whole-file fallback on unsupported mappings.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_with_source_map(
+    program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
+    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+) -> Result<(String, Option<String>), Unsupported> {
+    program::emit(program, resolver, directives, debug, jsx_preserve, header, Some(options))
 }
 
 #[cfg(test)]
