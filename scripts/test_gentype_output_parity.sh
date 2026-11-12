@@ -2,11 +2,10 @@
 
 # GenType generated-output parity.
 #
-# This is intentionally one no-argument entrypoint. It always runs the two
-# in-repo GenType suites and the local Tella checkout, comparing raw generated
-# .gen.ts/.gen.tsx files that correspond to local .res/.resi source artifacts
-# from the OCaml compiler against the Rust in-process compiler. Do not add
-# normalization or repo-selection options here.
+# Without arguments this runs the two in-repo GenType suites and the local
+# Tella checkout, comparing raw generated .gen.ts/.gen.tsx files from OCaml
+# against Rust. --printer oxc additionally compares JavaScript via the shared
+# batch runner; generated TypeScript remains byte-for-byte in both modes.
 #
 # The one exception is GENTYPE_PARITY_WITHOUT_TELLA=1, for CI, which has no
 # Tella checkout: it runs the in-repo suites only and says so in the summary.
