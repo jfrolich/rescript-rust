@@ -204,6 +204,9 @@ jobs:
           cargo build --release --locked --manifest-path rewatch/Cargo.toml
           cargo test --release --locked --manifest-path rewatch/Cargo.toml
 
+      - name: Check signature publication and stored interface determinism
+        run: python3 scripts/test_signature_publication.py
+
       # This job saves the release cache rather than the build job, which
       # the parity jobs wait for: saving a gigabyte takes a while.
       - uses: actions/cache/save@v5
@@ -243,6 +246,9 @@ jobs:
             echo "::endgroup::"
           done
           exit $status
+
+      - name: Test build comparison layouts
+        run: python3 scripts/test_build_comparison_layouts.py
 
   compiler-tests:
     runs-on: ubuntu-24.04-arm
@@ -318,6 +324,20 @@ jobs:
       # those benchmarks do not compete with one another for CPU time.
       - name: Test Rust compiler
         run: cargo test --locked --manifest-path compiler-rust/Cargo.toml -- --test-threads=1
+
+  backend-coverage:
+    name: Backend bridge coverage
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Check Lambda bridge identity and coverage ratchet
+        run: |
+          python3 -m unittest discover -s scripts -p test_backend_coverage_test.py
+          python3 scripts/test_backend_coverage.py
 
   # The parity suites that gate a change (see "The Correctness Contract" in
   # AGENTS.md), each its own check so that a pull request shows which one

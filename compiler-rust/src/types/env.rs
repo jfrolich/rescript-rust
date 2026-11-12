@@ -1403,6 +1403,14 @@ struct ScopeCaches {
     module_path_requires_env_scoped: RefCell<HashMap<String, bool>>,
 }
 
+/// Opaque identity of an environment snapshot. Only equality and hashing matter.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct EnvId(u64);
+
+/// Opaque identity of the bindings used by module-path resolution.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct ScopeId(u64);
+
 /// The typing environment.
 ///
 /// This tracks all bindings visible during type checking.
@@ -1477,10 +1485,6 @@ struct EnvData {
 
     /// Environment flags.
     flags: EnvFlags,
-
-    /// The usage slot the next opened component layers take (the `slot`
-    /// OCaml `Env.open_signature` passes to `add_components`).
-    pending_open_slot: Option<u32>,
 }
 
 impl Clone for Env {
@@ -1510,13 +1514,6 @@ impl Env {
     #[inline]
     fn data_mut(&mut self) -> &mut EnvData {
         std::rc::Rc::make_mut(&mut self.data)
-    }
-
-    /// `Env.in_signature b env` (env.ml:495-499).
-    pub fn in_signature(&self, b: bool) -> Env {
-        let mut env = self.clone();
-        env.data_mut().flags.in_signature = b;
-        env
     }
 
     /// `Env.implicit_coercion env` (env.ml:502-503).
@@ -1566,7 +1563,6 @@ impl Env {
                 local_constraints: PersistentHashMap::default(),
                 type_label_families: PersistentHashMap::default(),
                 flags: EnvFlags::default(),
-                pending_open_slot: None,
             }),
         }
     }
@@ -1628,15 +1624,9 @@ impl Env {
             .collect()
     }
 
-    /// Set the usage slot of the opened layers the next open adds (OCaml
-    /// `open_signature (Some slot)`); `None` after the open.
-    pub(crate) fn set_pending_open_slot(&mut self, slot: Option<u32>) {
-        self.data_mut().pending_open_slot = slot;
-    }
-
     /// Unique identifier for this environment instance.
-    pub fn id(&self) -> u64 {
-        self.id
+    pub fn id(&self) -> EnvId {
+        EnvId(self.id)
     }
 
     /// Clone an environment while preserving its current identity.
@@ -1663,8 +1653,8 @@ impl Env {
     }
 
     /// Identity of the module-level bindings (see the `scope_id` field).
-    pub fn scope_id(&self) -> u64 {
-        self.scope_id
+    pub fn scope_id(&self) -> ScopeId {
+        ScopeId(self.scope_id)
     }
 
     fn invalidate_module_alias_caches(&mut self) {
@@ -1800,19 +1790,7 @@ impl Env {
             .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
     }
 
-    /// Find a value by name with the path selected by OCaml `IdTbl.find_name`.
-    ///
-    /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
-    /// `Pdot(root, name, pos)` from the symbolic open layer.
-    pub fn find_value_with_path(&self, name: impl crate::name::NameKey) -> EnvResult<(Path, &ValueDescription)> {
-        self.data
-            .values
-            .find_by_name_with_path(name)
-            .map(|(path, desc)| (path, desc.as_ref()))
-            .ok_or_else(|| EnvError::ValueNotFound(name.text().into()))
-    }
-
-    /// Like `find_value_with_path`, sharing the stored description.
+    /// Find a value and its local or opened path, sharing the stored description.
     pub fn find_value_arc_with_path(
         &self,
         name: impl crate::name::NameKey,
@@ -1936,17 +1914,6 @@ impl Env {
             .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
     }
 
-    /// Find a type by name, returning the identifier and declaration.
-    /// The returned identifier has the canonical stamp from the environment
-    /// (e.g., persistent ident for predef types).
-    pub fn find_type_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &TypeDeclaration)> {
-        self.data
-            .types
-            .find_by_name_with_id(name)
-            .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
-    }
-
     /// Find a type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
@@ -1968,11 +1935,6 @@ impl Env {
             .types
             .find_by_name_with_path(name)
             .ok_or_else(|| EnvError::TypeNotFound(name.text().into()))
-    }
-
-    /// Iterate over visible type bindings.
-    pub fn iter_types(&self) -> impl Iterator<Item = (&Ident, &TypeDeclaration)> {
-        self.data.types.iter().map(|(id, decl)| (id, decl.as_ref()))
     }
 
     /// The name list OCaml builds with `Env.fold_types (fun x _ _ xs -> x :: xs)
@@ -2131,18 +2093,6 @@ impl Env {
             .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
     }
 
-    /// Find a constructor by name with its local/opened origin flag.
-    pub fn find_constructor_with_origin(
-        &self,
-        name: impl crate::name::NameKey,
-    ) -> EnvResult<(&Ident, &ConstructorDescription, bool)> {
-        self.data
-            .constrs
-            .find_by_name_with_origin(name)
-            .map(|(id, c, is_local)| (id, c.as_ref(), is_local))
-            .ok_or_else(|| EnvError::ConstructorNotFound(name.text().into()))
-    }
-
     /// Find all constructors with a given name.
     pub fn find_all_constructors(&self, name: impl crate::name::NameKey) -> Vec<&ConstructorDescription> {
         self.data
@@ -2151,11 +2101,6 @@ impl Env {
             .into_iter()
             .map(|c| c.as_ref())
             .collect()
-    }
-
-    /// Iterate over visible constructor bindings.
-    pub fn iter_constructors(&self) -> impl Iterator<Item = (&Ident, &ConstructorDescription)> {
-        self.data.constrs.iter().map(|(id, c)| (id, c.as_ref()))
     }
 
     // ========================================================================
@@ -2190,18 +2135,6 @@ impl Env {
             .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
     }
 
-    /// Find a label by name with its local/opened origin flag.
-    pub fn find_label_with_origin(
-        &self,
-        name: impl crate::name::NameKey,
-    ) -> EnvResult<(&Ident, &LabelDescription, bool)> {
-        self.data
-            .labels
-            .find_by_name_with_origin(name)
-            .map(|(id, l, is_local)| (id, l.as_ref(), is_local))
-            .ok_or_else(|| EnvError::LabelNotFound(name.text().into()))
-    }
-
     /// Find all labels with a given name.
     pub fn find_all_labels(&self, name: impl crate::name::NameKey) -> Vec<&LabelDescription> {
         self.data
@@ -2210,11 +2143,6 @@ impl Env {
             .into_iter()
             .map(|l| l.as_ref())
             .collect()
-    }
-
-    /// Iterate over visible label bindings.
-    pub fn iter_labels(&self) -> impl Iterator<Item = (&Ident, &LabelDescription)> {
-        self.data.labels.iter().map(|(id, l)| (id, l.as_ref()))
     }
 
     // ========================================================================
@@ -2276,13 +2204,17 @@ impl Env {
     }
 
     /// Open `layers` (the component tables of one signature) under `root`.
-    pub(crate) fn add_prebuilt_open_layers(&mut self, root: Path, layers: &OpenedLayers) {
+    pub(crate) fn add_prebuilt_open_layers(
+        &mut self,
+        root: Path,
+        layers: &OpenedLayers,
+        slot: Option<u32>,
+    ) {
         if layers.is_empty() {
             return;
         }
         self.bump_scope();
         self.invalidate_module_alias_caches();
-        let slot = self.data.pending_open_slot;
         let root = Arc::new(root);
         let data = self.data_mut();
         data.values
@@ -2373,11 +2305,6 @@ impl Env {
             .implicit_open_roots
             .contains(component_path.head().name())
             && self.path_starts_with_opened_component(path)
-    }
-
-    /// Iterate over visible module bindings.
-    pub fn iter_modules(&self) -> impl Iterator<Item = (&Ident, &ModuleDeclaration)> {
-        self.data.modules.iter().map(|(id, m)| (id, m.as_ref()))
     }
 
     pub(crate) fn has_module_ident(&self, id: &Ident) -> bool {
@@ -2561,15 +2488,6 @@ impl Env {
             .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
     }
 
-    /// Find a module type by name, returning both the identifier and declaration.
-    pub fn find_modtype_with_id(&self, name: impl crate::name::NameKey) -> EnvResult<(&Ident, &ModtypeDeclaration)> {
-        self.data
-            .modtypes
-            .find_by_name_with_id(name)
-            .map(|(id, decl)| (id, decl.as_ref()))
-            .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
-    }
-
     /// Find a module type by name with the path selected by OCaml `IdTbl.find_name`.
     ///
     /// Local bindings resolve to `Pident(id)`, while opened bindings resolve to
@@ -2580,14 +2498,6 @@ impl Env {
             .find_by_name_with_path(name)
             .map(|(path, decl)| (path, decl.as_ref()))
             .ok_or_else(|| EnvError::ModtypeNotFound(name.text().into()))
-    }
-
-    /// Iterate over visible module type bindings.
-    pub fn iter_modtypes(&self) -> impl Iterator<Item = (&Ident, &ModtypeDeclaration)> {
-        self.data
-            .modtypes
-            .iter()
-            .map(|(id, mtd)| (id, mtd.as_ref()))
     }
 
     /// Find a module type by path.
@@ -3207,6 +3117,57 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn identities_and_open_slots_remain_independent() {
+        let mut env = Env::empty();
+        let snapshot = env.clone_preserve_id();
+        let clone = env.clone();
+        assert_eq!(env.id(), snapshot.id());
+        assert_ne!(env.id(), clone.id());
+        assert_eq!(env.scope_id(), clone.scope_id());
+        let id = Ident::create_persistent("x");
+        let desc = ValueDescription {
+            val_type: TypeExprRef(0),
+            val_kind: super::super::decl::ValueKind::ValReg,
+            val_loc: crate::types::DeclLoc::none(),
+            val_attributes: Default::default(),
+            val_path: None,
+        };
+        env.add_value(id, desc.clone());
+        assert_ne!(env.id(), snapshot.id());
+        assert_eq!(env.scope_id(), snapshot.scope_id());
+        let layers = OpenedLayers::build(
+            vec![(id, desc, 0)],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        );
+        let root = Path::pident(Ident::create_persistent("M"));
+        env.add_prebuilt_open_layers(root, &layers, Some(7));
+        assert_ne!(env.scope_id(), snapshot.scope_id());
+        assert_eq!(
+            env.open_slot_use(OpenLookupKind::Value, "x"),
+            Some(OpenSlotUse {
+                slot: 7,
+                shadowed: true
+            })
+        );
+        let opened = env.clone_preserve_id();
+        env.add_prebuilt_open_layers(root, &layers, None);
+        assert_eq!(env.open_slot_use(OpenLookupKind::Value, "x"), None);
+        assert_eq!(
+            opened
+                .open_slot_use(OpenLookupKind::Value, "x")
+                .unwrap()
+                .slot,
+            7
+        );
+        assert!(snapshot.find_value("x").is_err());
+    }
 
     #[test]
     fn initial_env_is_built_once_per_worker_store() {

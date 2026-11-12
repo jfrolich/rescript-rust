@@ -61,12 +61,6 @@ pub fn get_loc_item(
         LocType::Typed(n, _, _) => n.clone(),
         _ => "NotFound".to_string(),
     };
-    fn typed_name(li: &LocItem) -> Option<&str> {
-        match &li.loc_type {
-            LocType::Typed(n, _, _) => Some(n),
-            _ => None,
-        }
-    }
     fn kind(li: &LocItem) -> Option<&LocKind> {
         match &li.loc_type {
             LocType::Typed(_, _, kind) => Some(kind),
@@ -74,37 +68,6 @@ pub fn get_loc_item(
         }
     }
     let item = match loc_items.as_slice() {
-        [li1, li2, li3, li4, ..]
-            if typed_name(li4) == Some("makeProps") && uri::is_interface(&full.file.uri) =>
-        {
-            log(out, 1, "heuristic for makeProps in interface files");
-            if debug {
-                out.print(&format!(
-                    "n1:{} n2:{} n3:{}\n",
-                    name_of(li1),
-                    name_of(li2),
-                    name_of(li3)
-                ));
-            }
-            Some(*li4)
-        }
-        [li1, li2]
-            if matches!(li1.loc_type, LocType::Constant(_))
-                && typed_name(li2) == Some("createDOMElementVariadic") =>
-        {
-            log(out, 3, "heuristic for <div>");
-            Some(*li2)
-        }
-        [li1, li2, ..]
-            if typed_name(li1) == Some("makeProps") && typed_name(li2) == Some("make") =>
-        {
-            log(
-                out,
-                4,
-                "heuristic for </Comp> within fragments: take make as makeProps does not work\nthe type is not great but jump to definition works",
-            );
-            Some(*li2)
-        }
         [li1, li2]
             if matches!(kind(li1), Some(LocKind::LocalReference(..)))
                 && kind(li2).is_some()

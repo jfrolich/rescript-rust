@@ -1,0 +1,1 @@
+- Add opt-in JavaScript AST emission with explicit whole-file fallback and coverage reporting; the legacy printer remains the default.

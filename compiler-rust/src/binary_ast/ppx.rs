@@ -348,13 +348,12 @@ fn is_obj_literal(expr: &oxc_ast::ast::Expression<'_>) -> bool {
 
 fn extract_raw_js_literal_comment(s: &str) -> Option<String> {
     use oxc_allocator::Allocator;
-    use oxc_ast::ast::CommentKind;
     use oxc_parser::Parser;
     use oxc_span::SourceType;
 
     let allocator = Allocator::default();
     let parser_return = Parser::new(&allocator, s, SourceType::default()).parse();
-    if !parser_return.errors.is_empty() {
+    if !parser_return.diagnostics.is_empty() {
         return None;
     }
 
@@ -362,7 +361,6 @@ fn extract_raw_js_literal_comment(s: &str) -> Option<String> {
         .program
         .comments
         .iter()
-        .copied()
         .filter(|comment| comment.is_leading());
     let comment = leading_comments.next()?;
     if leading_comments.next().is_some() {
@@ -370,9 +368,10 @@ fn extract_raw_js_literal_comment(s: &str) -> Option<String> {
     }
 
     let comment_text = comment.content_span().source_text(s);
-    Some(match comment.kind {
-        CommentKind::Block => format!("/*{comment_text}*/"),
-        CommentKind::Line => format!("//{comment_text}"),
+    Some(if comment.is_block() {
+        format!("/*{comment_text}*/")
+    } else {
+        format!("//{comment_text}")
     })
 }
 
@@ -461,7 +460,7 @@ pub fn classify_js_stmt(s: &str) -> JsStmtClassification {
     let source_type = SourceType::default();
     let parser_return = Parser::new(&allocator, s, source_type).parse();
 
-    if parser_return.errors.is_empty() && parser_return.program.body.is_empty() {
+    if parser_return.diagnostics.is_empty() && parser_return.program.body.is_empty() {
         JsStmtClassification::JsStmtComment
     } else {
         JsStmtClassification::JsStmtUnknown
@@ -697,7 +696,10 @@ fn flow_like_raw_js_expression_parse_warning(
     start_offset: usize,
     end_offset: usize,
 ) -> (String, usize, usize) {
-    if is_js_regex_like_literal(code) && oxc_message == "Unterminated regular expression" {
+    if is_js_regex_like_literal(code)
+        && (oxc_message == "Unterminated regular expression"
+            || (code.trim() == "/" && oxc_message == "Unexpected token"))
+    {
         let eof_offset = code.len();
         return (
             "Invalid regular expression: missing /".to_string(),
@@ -861,12 +863,22 @@ fn raw_js_expression_parse_warning(
         Err(errors) => errors.into_iter(),
     };
     let first_error = errors.next()?;
-    let first_label = first_error
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.first());
-    let start_offset = first_label.map_or(code.len(), |label| label.offset());
-    let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
+    let first_label = first_error.labels.first();
+    let start_offset = first_label.map_or(code.len(), |label| label.offset() as usize);
+    let end_offset = first_label.map_or(start_offset, |label| (label.offset() + label.len()) as usize);
+    // Flow's `do_parse ... Parse.expression false` does not require EOF
+    // (compiler/ml/ast_payload.ml:177-180). Oxc 0.158 does. A complete
+    // expression followed by another token is not a Flow parse warning.
+    if first_error.to_string() == "Unexpected token"
+        && start_offset > 0
+        && code.get(..start_offset).is_some_and(|prefix| {
+            Parser::new(&allocator, prefix, SourceType::default())
+                .parse_expression()
+                .is_ok()
+        })
+    {
+        return None;
+    }
     let (message, start_offset, end_offset) = flow_like_raw_js_expression_parse_warning(
         code,
         &first_error.to_string(),
@@ -897,13 +909,10 @@ fn raw_js_program_parse_warning(
 
     let allocator = Allocator::default();
     let parser_return = Parser::new(&allocator, code, SourceType::default()).parse();
-    let first_error = parser_return.errors.into_iter().next()?;
-    let first_label = first_error
-        .labels
-        .as_ref()
-        .and_then(|labels| labels.first());
-    let start_offset = first_label.map_or(code.len(), |label| label.offset());
-    let end_offset = first_label.map_or(start_offset, |label| label.offset() + label.len());
+    let first_error = parser_return.diagnostics.into_iter().next()?;
+    let first_label = first_error.labels.first();
+    let start_offset = first_label.map_or(code.len(), |label| label.offset() as usize);
+    let end_offset = first_label.map_or(start_offset, |label| (label.offset() + label.len()) as usize);
     let (message, start_offset, end_offset) = flow_like_raw_js_program_parse_warning(
         code,
         &first_error.to_string(),
@@ -1321,6 +1330,9 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        if arena.expr_needs_no_attribute_sweep(idx) {
+            return;
+        }
         // `Pexp_constant` runs the literal check and then sweeps only its
         // attributes, without `super.expr` (bs_ast_invariant.ml).
         let expr = arena.get_expr(idx);
@@ -10193,6 +10205,12 @@ struct NestedExternals {
 }
 
 impl super::ast_iter::AstIter for NestedExternals {
+    fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        if !arena.expr_needs_no_rewrite(idx) {
+            super::ast_iter::walk_expr(self, arena, idx);
+        }
+    }
+
     fn structure_item(&mut self, arena: &ParseArena, item: &StructureItem) {
         if let StructureItemDesc::Pstr_primitive(vd) = &item.pstr_desc {
             self.externals.push((**vd).clone());
@@ -10427,7 +10445,12 @@ fn rewrite_structure_item_no_spice(
                     let sig_mod_type_idx = arena.push_mod_type(ModuleType {
                         pmty_desc: ModuleTypeDesc::Pmty_signature(Box::new(vec![SignatureItem {
                             psig_desc: SignatureItemDesc::Psig_value(Box::new(sig_value)),
-                            psig_loc: loc,
+                            // This signature describes the same declaration as the
+                            // implementation, not a second unused value. Preserve
+                            // its identity even when source spans are not retained.
+                            // compiler/frontend/ast_external.ml:78-98 gives both
+                            // declarations the same source span.
+                            psig_loc: item.pstr_loc,
                         }])),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
@@ -11756,4 +11779,39 @@ type envelope = Story(Story.event)
             ["event_encode", "event_encodeJson", "event_decode"]
         );
     }
+
+    #[test]
+    fn validation_skips_preserve_diagnostics_and_order() {
+        for source in [
+            "let x = (2147483648, 4294967296, 1)",
+            "let x = (f(a, b), @string c, d)",
+            "let x = () => (f(a), %todo(\"first\"), await g(b))",
+            "let seed = 0\nmodule M = { @get external bad: int = \"bad\" }",
+            "let x = { module M = { @get external bad: int = \"bad\" }; f(a) }",
+            "let x = (@unknown(%todo(\"payload\")) f(a), %todo(\"last\"))",
+        ] {
+            let run = |disable_skipping| {
+                let (mut arena, items) = parse_structure(source);
+                if disable_skipping {
+                    // Mutable access to the earliest node invalidates every
+                    // allocation-time proof, without changing the tree.
+                    arena.get_expr_mut(ExprIdx(0));
+                }
+                let (result, warnings) = rewrite_structure_with_warnings(&items, &mut arena, true);
+                match result {
+                    Ok(items) => {
+                        if disable_skipping {
+                            arena.get_expr_mut(ExprIdx(0));
+                        }
+                        let (sweep, error) =
+                            collect_unused_attribute_warnings_structure(&items, &arena);
+                        format!("{warnings:?}; {sweep:?}; {error:?}")
+                    }
+                    Err(error) => format!("{warnings:?}; {error:?}"),
+                }
+            };
+            assert_eq!(run(false), run(true), "{source}");
+        }
+    }
+
 }

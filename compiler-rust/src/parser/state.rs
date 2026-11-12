@@ -73,6 +73,16 @@ pub struct ParserSnapshot<'src> {
     pending_signature_len: usize,
 }
 
+/// Lexical cursor saved only for arrow lookahead. Diagnostics and comments are
+/// deliberately not replayed: the enclosing lookahead discards them.
+struct ArrowCursor<'src> {
+    scanner: super::scanner::ScannerSnapshot,
+    token: Token<'src>,
+    start: Position,
+    end: Position,
+    prev_end: Position,
+}
+
 /// Parser state for ReScript.
 ///
 /// This structure tracks all state needed during parsing:
@@ -82,6 +92,9 @@ pub struct ParserSnapshot<'src> {
 /// - Collected errors, diagnostics, and comments
 /// - Arena for interned positions and locations
 pub struct Parser<'src> {
+    // Keyed by the first ordinary token after an opener and its expected closer.
+    // Nested traversals populate this table too; it survives parser rollback.
+    arrow_closings: std::collections::HashMap<(i32, u8), ArrowCursor<'src>>,
     /// The scanner for lexical analysis.
     scanner: Scanner<'src>,
     /// Current token.
@@ -186,6 +199,7 @@ impl<'src> Parser<'src> {
         let default_pos = Position::default();
         let default_pos_idx = arena.push_position(default_pos);
         let mut parser = Parser {
+            arrow_closings: std::collections::HashMap::new(),
             scanner,
             token: Token::Semicolon, // Placeholder, will be replaced by first scan
             start_pos: default_pos,
@@ -575,7 +589,7 @@ impl<'src> Parser<'src> {
     /// Comments are collected in the parser's comment list.
     /// Note: Doc/module comments are currently treated as comments (not tokens).
     pub fn next(&mut self) {
-        if self.token == Token::Eof {
+        if matches!(self.token, Token::Eof) {
             return;
         }
         self.consume_line_break();
@@ -657,7 +671,7 @@ impl<'src> Parser<'src> {
 
     /// Advance to the next token, but only if not at EOF.
     pub fn next_unsafe(&mut self) {
-        if self.token != Token::Eof {
+        if !matches!(self.token, Token::Eof) {
             self.next();
         }
     }
@@ -798,6 +812,46 @@ impl<'src> Parser<'src> {
     /// Get the current breadcrumbs.
     pub fn breadcrumbs(&self) -> &[(Grammar, Position)] {
         &self.breadcrumbs
+    }
+
+    /// Inspect one ordinary successor without cloning parser bookkeeping.
+    pub(super) fn followed_by_arrow(&mut self) -> bool {
+        let snapshot = self.scanner.snapshot();
+        let answer = loop {
+            match self.scanner.scan().token {
+                Token::Comment(_) => continue,
+                token => break matches!(token, Token::EqualGreater),
+            }
+        };
+        self.scanner.restore(snapshot);
+        answer
+    }
+
+    /// Reuse a bracket traversal only inside the side-effect-free arrow probe.
+    pub(super) fn arrow_closing(&mut self, key: (i32, u8)) -> bool {
+        debug_assert!(self.lookahead_depth > 0);
+        let Some(cursor) = self.arrow_closings.get(&key) else {
+            return false;
+        };
+        self.scanner.restore(cursor.scanner.clone());
+        self.token = cursor.token.clone();
+        self.start_pos = cursor.start;
+        self.end_pos = cursor.end;
+        self.prev_end_pos = cursor.prev_end;
+        true
+    }
+
+    pub(super) fn save_arrow_closing(&mut self, key: (i32, u8)) {
+        self.arrow_closings.insert(
+            key,
+            ArrowCursor {
+                scanner: self.scanner.snapshot(),
+                token: self.token.clone(),
+                start: self.start_pos,
+                end: self.end_pos,
+                prev_end: self.prev_end_pos,
+            },
+        );
     }
 
     /// Execute a callback with lookahead, then restore parser state.

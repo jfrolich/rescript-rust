@@ -20,7 +20,7 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
-use crate::cmi::portable_types::PortablePersStruct;
+use crate::cmi::portable_types::{PortablePersStruct, SignaturePublicationMode};
 use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
@@ -629,6 +629,10 @@ fn place_location_free_warnings(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Dormant backend migration mode, selected before compiling modules.
+    pub backend: crate::bir::shadow::BackendMode,
+    /// Experimental JavaScript printer, selected once when options are created.
+    pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
     pub check_only: bool,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
@@ -874,6 +878,8 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            backend: crate::bir::shadow::BackendMode::from_env(),
+            js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
             dump_lambda: false,
             dump_typed_sexp: false,
@@ -6997,6 +7003,10 @@ fn compile_source_to_js_with_options_inner(
         &export_idents,
     );
 
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+    }
+
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.lowered_lambda = format!("{:#?}", lowered_arena.export(lowered_root));
@@ -8178,6 +8188,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
@@ -8196,6 +8207,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
@@ -8216,6 +8228,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
             env,
             ctx,
+            None,
         ) {
             // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
             // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
@@ -9360,7 +9373,7 @@ pub struct InProcessCompileResult {
     /// The unit's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// The module has no top-level side effects (`.cmj` `pure`).
     pub is_pure: bool,
     /// `.cmj` constants other modules inline in place of the export.
@@ -9412,7 +9425,7 @@ pub struct InProcessPreJsCompileResult {
     /// The unit's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// Resolves the location handles of `lowered_lambda`; outlives the parse
     /// arena and typed tree.
     pub lam_locs: crate::lambda::LamLocTable,
@@ -9449,7 +9462,7 @@ pub struct InProcessJsMetadataReady {
     /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining.
     pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
 }
 
 /// Signature payload produced after in-process implementation typechecking but
@@ -9458,7 +9471,7 @@ pub struct InProcessJsMetadataReady {
 /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
 pub struct InProcessSignatureReady {
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
 }
 
 /// Receives a unit's signature once it is typed; may return a registry to
@@ -9479,7 +9492,7 @@ pub struct InProcessInterfaceResult {
     /// The interface's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// What GenType read in the interface (GenTypeMain.ml:91-107), for the
     /// implementation's compile; `None` without GenType.
     pub gentype: Option<crate::gentype::main::InterfaceRead>,
@@ -9782,6 +9795,18 @@ fn render_js_program(
         debug,
         jsx_preserve,
     } = settings;
+    if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
+        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
+            Err(crate::emit::Unsupported("source maps (S1.2)"))
+        } else {
+            crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
+        };
+        stats.record(&result);
+        match result {
+            Ok(output) => return output,
+            Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),
+        }
+    }
     let source_path = options.source_filename.as_deref().map(FsPath::new);
     let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
         (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
@@ -10058,6 +10083,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         has_interface,
         gentype_interface,
         signature_ready,
+        SignaturePublicationMode::Eager,
     )?;
 
     let refreshed_registry = if let Some(hook) = before_js {
@@ -10269,6 +10295,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
@@ -10558,6 +10585,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
+    let mut publication_guard =
+        (!has_interface).then(crate::perf_counters::SignaturePublication::begin);
     let (mut pers_struct, persistent_env_after_signature) = if has_interface {
         (
             None,
@@ -10648,7 +10677,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let pers_struct = if options.publish_in_process_signature {
-            internal_env.extract_module_update(module_name, &type_ctx, Some(arena))
+            internal_env.extract_module_update(module_name, &type_ctx, Some(arena), publication)
         } else {
             None
         };
@@ -10671,6 +10700,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         && arena.stores_locations()
         && let Some(hook) = signature_ready.take()
     {
+        drop(publication_guard.take());
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
         })?;
@@ -10699,6 +10729,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             return Err(UserDiagnostic::new(warnings, 2).into());
         }
         if !has_interface && let Some(hook) = signature_ready {
+            drop(publication_guard.take());
             let _ = hook(InProcessSignatureReady {
                 pers_struct: pers_struct.take(),
             })?;
@@ -10976,6 +11007,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &export_idents,
         )
     });
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+    }
     let lowered_lambda = crate::lambda::arena::LamProgram {
         arena: lowered_arena,
         root: lowered_root,
@@ -11018,6 +11052,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     };
 
     if !has_interface && let Some(hook) = signature_ready {
+        drop(publication_guard.take());
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
         })?;
@@ -11508,6 +11543,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
+    let _publication_guard = crate::perf_counters::SignaturePublication::begin();
     // js_implementation.ml:66: `Builtin_attributes.deprecated_of_sig ast`.
     // The raw `ps_sig` of the saved interface (env.ml:1949-1952,
     // env.ml:669-678), before registration substitutes component paths in
@@ -11564,7 +11600,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
-    let pers_struct = internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
+    // The implementation reads its own interface even when the module is a leaf.
+    let pers_struct = internal_env.extract_module_update(
+        module_name,
+        &type_ctx,
+        Some(arena),
+        SignaturePublicationMode::Eager,
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

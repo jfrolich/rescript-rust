@@ -7539,12 +7539,52 @@ fn type_pattern_exception(
 // Expression Type Checking
 // ============================================================================
 
+/// An inferred expression replaces an otherwise unobservable fresh expected
+/// variable. Unconverted constructs still materialise that variable.
+#[derive(Clone, Copy)]
+enum Expected {
+    Known(TypeExprRef),
+    Infer { level: i32, site: InferenceSite },
+}
+
+#[derive(Clone, Copy)]
+enum InferenceSite {
+    Expression,
+    ApplicationFunction,
+}
+
+impl From<TypeExprRef> for Expected {
+    fn from(ty: TypeExprRef) -> Self {
+        Self::Known(ty)
+    }
+}
+
 pub(crate) fn type_exp<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
+    if matches!(
+        expr.pexp_desc,
+        crate::parser::ast::ExpressionDesc::Pexp_constant(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_field(..)
+            | crate::parser::ast::ExpressionDesc::Pexp_apply(_)
+    ) {
+        return type_expect_full(
+            tctx,
+            env,
+            expr,
+            Expected::Infer {
+                level: tctx.type_ctx.current_level(),
+                site: InferenceSite::Expression,
+            },
+            context,
+            RecArg::Rejected,
+            None,
+        );
+    }
     if tctx.type_ctx.compiler_counters_enabled() {
         crate::perf_counters::record_expected_var(expected_var_use(expr));
     }
@@ -7897,11 +7937,12 @@ fn type_expect_full<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
+    expected_ty: impl Into<Expected>,
     context: Option<TypeClashContext>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
+    let expected_ty = expected_ty.into();
     let arena = tctx.arena;
     let mut typed = crate::types::typemod::with_warning_scope(
         tctx,
@@ -7935,7 +7976,7 @@ fn type_expect_with_recarg_unscoped<'a>(
     tctx: &mut TypeCheckContext<'a>,
     env: &Env,
     expr: &ParsedExpression,
-    expected_ty: TypeExprRef,
+    mut expected_ty: Expected,
     context: Option<TypeClashContext>,
     recarg: RecArg,
     match_context: Option<MatchContext>,
@@ -7964,6 +8005,140 @@ fn type_expect_with_recarg_unscoped<'a>(
     // unify-state snapshot on each type_expect entry.
     tctx.set_unify_env(env);
 
+    if let ED::Pexp_constant(cst) = &expr.pexp_desc {
+        let constant = convert_constant(cst, loc, tctx.arena)?;
+        let ty = type_constant(ctx, env, &constant);
+        match expected_ty {
+            Expected::Known(expected) => rue_unify(tctx, loc, ty, expected, context)?,
+            Expected::Infer { level, .. } => {
+                // type_constant instances a nullary predefined constructor at
+                // current_level. No scope or universal variable can escape, and
+                // unifying with a fresh variable at this level only links that
+                // variable to this exact node (ctype.ml:2280-2286).
+                debug_assert_eq!(ctx.get_level(ctx.repr(ty)), level);
+            }
+        }
+        let node = Expression::new(
+            ExpressionDesc::Texp_constant(constant),
+            loc,
+            ty,
+            exp_env_ref,
+        );
+        return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
+    }
+    if let ED::Pexp_ident(lid) = &expr.pexp_desc {
+        let longident = tctx.arena.get_longident(lid.txt);
+
+        // Normal identifier expression. typetexp.ml `find_value`:
+        // `Env.check_value_name (Longident.last lid) loc` before lookup.
+        {
+            let last = tctx.arena.get_string(longident.last_idx());
+            if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
+                .is_err()
+            {
+                return Err(TypeCoreError::IllegalValueName {
+                    loc: lid.loc,
+                    name: last.to_string(),
+                });
+            }
+        }
+        mark_open_lid_use(
+            ctx,
+            env,
+            tctx.arena,
+            longident,
+            crate::types::env::OpenLookupKind::Value,
+            Some(lid.loc),
+        );
+        let (path, desc) = match env.lookup_value_by_lid(
+            longident,
+            tctx.arena,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        ) {
+            Some(result) => result,
+            None => {
+                if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
+                    return Err(err);
+                }
+                // typecore.ml Pexp_ident: `<Button />` refers to
+                // `Button.make`. The module exists (otherwise the lookup
+                // reports it as unbound), but it defines no component.
+                if let Longident::Ldot(module_lid, last) = longident
+                    && matches!(context, Some(TypeClashContext::JsxComponent))
+                    && tctx.arena.get_string(*last) == "make"
+                {
+                    let module_lid = tctx.longident_to_string(module_lid);
+                    let alternatives = unbound_value_alternatives(tctx, env, longident);
+                    return Err(TypeCoreError::JsxComponentWithoutMake {
+                        loc: lid.loc,
+                        module_lid,
+                        alternatives,
+                    });
+                }
+                return Err(unbound_value_error(tctx, env, lid.loc, longident));
+            }
+        };
+        // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
+        let used_name = tctx.arena.name(longident.last_idx());
+        tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
+        // typetexp.ml:117-123 via typecore.ml:2381-2388.
+        let deprecated_context = if deprecated_function_call {
+            crate::types::context::DeprecatedContext::FunctionCall
+        } else {
+            crate::types::context::DeprecatedContext::Reference
+        };
+        record_deprecated_used(
+            tctx,
+            lid.loc,
+            &desc.val_attributes,
+            Some(deprecated_context),
+        )?;
+        if let Some(warning) = deprecated_warning_for_value(&path, &desc)
+            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+        {
+            tctx.report_warning(lid.loc, warning);
+        }
+        check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
+
+        let ty = crate::types::instance(ctx, desc.val_type);
+        finish_expected(tctx, expr, ty, &mut expected_ty, context)?;
+
+        return Ok({
+            let typed_node = Expression::new(
+                ExpressionDesc::Texp_ident(path, *lid, desc),
+                loc,
+                ty,
+                tctx.type_ctx.store_typed_env(env),
+            );
+            tctx.typed
+                .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+        });
+    }
+    if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
+        let record_expr = tctx.arena.get_expr(*record_expr_idx);
+        let typed_field = type_field(
+            tctx,
+            env,
+            loc,
+            record_expr,
+            field_lid,
+            &expr.pexp_attributes,
+        )?;
+        // OCaml: rue { ... exp_type = ty_arg; ... }
+        finish_expected(tctx, expr, typed_field.exp_type, &mut expected_ty, context)?;
+        return Ok(typed_field);
+    }
+    if let ED::Pexp_apply(inner) = &expr.pexp_desc {
+        let typed_apply =
+            type_application(tctx, env, expr, inner, &mut expected_ty, context.clone())?;
+        // The two rue checks share one expected type, including when an Infer
+        // request must be materialised by the first check or a lowered apply.
+        finish_expected(tctx, expr, typed_apply.exp_type, &mut expected_ty, context)?;
+        return Ok(typed_apply);
+    }
+    let expected_ty = materialize_expected(tctx, expr, &mut expected_ty);
+
     match &expr.pexp_desc {
         ED::Pexp_braces(braces) => {
             // typecore.ml: type the inner expression, then prepend the
@@ -7976,115 +8151,9 @@ fn type_expect_with_recarg_unscoped<'a>(
             Ok(tctx.typed.with_exp_attributes(exp, attrs))
         }
         ED::Pexp_regexp(_) => unreachable!("Lowered by the built-in frontend mapper."),
-        ED::Pexp_ident(lid) => {
-            let longident = tctx.arena.get_longident(lid.txt);
+        ED::Pexp_ident(_) => unreachable!("identifiers were typed above"),
 
-            // Normal identifier expression. typetexp.ml `find_value`:
-            // `Env.check_value_name (Longident.last lid) loc` before lookup.
-            {
-                let last = tctx.arena.get_string(longident.last_idx());
-                if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
-                    .is_err()
-                {
-                    return Err(TypeCoreError::IllegalValueName {
-                        loc: lid.loc,
-                        name: last.to_string(),
-                    });
-                }
-            }
-            mark_open_lid_use(
-                ctx,
-                env,
-                tctx.arena,
-                longident,
-                crate::types::env::OpenLookupKind::Value,
-                Some(lid.loc),
-            );
-            let (path, desc) = match env.lookup_value_by_lid(
-                longident,
-                tctx.arena,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            ) {
-                Some(result) => result,
-                None => {
-                    if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
-                        return Err(err);
-                    }
-                    // typecore.ml Pexp_ident: `<Button />` refers to
-                    // `Button.make`. The module exists (otherwise the lookup
-                    // reports it as unbound), but it defines no component.
-                    if let Longident::Ldot(module_lid, last) = longident
-                        && matches!(context, Some(TypeClashContext::JsxComponent))
-                        && tctx.arena.get_string(*last) == "make"
-                    {
-                        let module_lid = tctx.longident_to_string(module_lid);
-                        let alternatives = unbound_value_alternatives(tctx, env, longident);
-                        return Err(TypeCoreError::JsxComponentWithoutMake {
-                            loc: lid.loc,
-                            module_lid,
-                            alternatives,
-                        });
-                    }
-                    return Err(unbound_value_error(tctx, env, lid.loc, longident));
-                }
-            };
-            // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-            let used_name = tctx.arena.name(longident.last_idx());
-            tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
-            // typetexp.ml:117-123 via typecore.ml:2381-2388.
-            let deprecated_context = if deprecated_function_call {
-                crate::types::context::DeprecatedContext::FunctionCall
-            } else {
-                crate::types::context::DeprecatedContext::Reference
-            };
-            record_deprecated_used(
-                tctx,
-                lid.loc,
-                &desc.val_attributes,
-                Some(deprecated_context),
-            )?;
-            if let Some(warning) = deprecated_warning_for_value(&path, &desc)
-                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-            {
-                tctx.report_warning(lid.loc, warning);
-            }
-            check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
-
-            let ty = crate::types::instance(ctx, desc.val_type);
-            rue_unify(tctx, loc, ty, expected_ty, context)?;
-
-            Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_ident(path, *lid, desc),
-                    loc,
-                    ty,
-                    tctx.type_ctx.store_typed_env(env),
-                );
-                tctx.typed
-                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-            })
-        }
-
-        ED::Pexp_constant(cst) => {
-            // Constant expression
-            let constant = convert_constant(cst, loc, tctx.arena)?;
-            let ty = type_constant(ctx, env, &constant);
-
-            // OCaml: rue { ... exp_type = type_constant cst; ... }
-            rue_unify(tctx, loc, ty, expected_ty, context)?;
-
-            Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_constant(constant),
-                    loc,
-                    ty,
-                    exp_env_ref,
-                );
-                tctx.typed
-                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-            })
-        }
+        ED::Pexp_constant(_) => unreachable!("constants were typed above"),
 
         ED::Pexp_break => {
             if tctx.loop_depth == 0 {
@@ -8682,15 +8751,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             })
         }
 
-        ED::Pexp_apply(inner) => {
-            // Function application
-            let typed_apply =
-                type_application(tctx, env, expr, inner, expected_ty, context.clone())?;
-            // Match OCaml Pexp_apply: mk_apply applies rue once, then the
-            // caller applies rue again on the resulting expression.
-            rue_unify(tctx, loc, typed_apply.exp_type, expected_ty, context)?;
-            Ok(typed_apply)
-        }
+        ED::Pexp_apply(_) => unreachable!("applications were typed above"),
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
@@ -8824,20 +8885,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_record(tctx, env, loc, inner, expected_ty, attrs, recarg)
         }
 
-        ED::Pexp_field(record_expr_idx, field_lid) => {
-            let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            let typed_field = type_field(
-                tctx,
-                env,
-                loc,
-                record_expr,
-                field_lid,
-                &expr.pexp_attributes,
-            )?;
-            // OCaml: rue { ... exp_type = ty_arg; ... }
-            rue_unify(tctx, loc, typed_field.exp_type, expected_ty, context)?;
-            Ok(typed_field)
-        }
+        ED::Pexp_field(..) => unreachable!("field access was typed above"),
 
         ED::Pexp_setfield(inner) => {
             let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
@@ -9038,6 +9086,51 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_jsx_element(_) => {
             // JSX element - typically transformed before type checking
             Err(TypeCoreError::JsxNotEnabled { loc })
+        }
+    }
+}
+
+/// Finish a case-1 expression. Materialise when unification would do more
+/// than link the unobservable expected variable, retaining the original
+/// representative choice, level updates and error traces in those cases.
+fn finish_expected(
+    tctx: &mut TypeCheckContext<'_>,
+    expr: &ParsedExpression,
+    ty: TypeExprRef,
+    expected: &mut Expected,
+    context: Option<TypeClashContext>,
+) -> TypeCoreResult<()> {
+    if let Expected::Infer { level, .. } = *expected
+        && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
+    {
+        return Ok(());
+    }
+    let expected = materialize_expected(tctx, expr, expected);
+    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
+}
+
+fn materialize_expected(
+    tctx: &TypeCheckContext<'_>,
+    expr: &ParsedExpression,
+    expected: &mut Expected,
+) -> TypeExprRef {
+    match *expected {
+        Expected::Known(ty) => ty,
+        Expected::Infer { level, site } => {
+            if tctx.type_ctx.compiler_counters_enabled() {
+                let site = match site {
+                    InferenceSite::Expression => expected_var_use(expr),
+                    InferenceSite::ApplicationFunction => crate::perf_counters::ExpectedVar {
+                        construct: "application: function",
+                        case: 1,
+                    },
+                };
+                crate::perf_counters::record_expected_var(site);
+            }
+            let ty = tctx.type_ctx.new_var(None);
+            tctx.type_ctx.set_level(ty, level);
+            *expected = Expected::Known(ty);
+            ty
         }
     }
 }
@@ -9248,7 +9341,7 @@ fn translate_unified_ops(
     sexp: &ParsedExpression,
     apply: &PexpApply,
     typed_funct: &Expression,
-    expected_ty: TypeExprRef,
+    expected_ty: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> Option<TypeCoreResult<Expression>> {
     let loc = sexp.pexp_loc;
@@ -9337,7 +9430,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -9393,7 +9486,7 @@ fn translate_unified_ops(
             };
 
             // OCaml: rue { ... exp_type = ty_res; ... } (unified ops are Pexp_apply)
-            if let Err(e) = rue_unify(tctx, loc, result_ty, expected_ty, context) {
+            if let Err(e) = finish_expected(tctx, sexp, result_ty, expected_ty, context) {
                 return Some(Err(e));
             }
 
@@ -9737,7 +9830,7 @@ fn type_application(
     env: &Env,
     sexp: &ParsedExpression,
     apply: &PexpApply,
-    expected_ty: TypeExprRef,
+    expected_ty: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<Expression> {
     let loc = sexp.pexp_loc;
@@ -9856,19 +9949,26 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     if ctx.compiler_counters_enabled() {
-        // Section C.9: the two variables of an application, one the
-        // expected type of the function, one made below only to lower the
-        // function type's level.
-        for construct in ["application: function", "application: lowering"] {
-            crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
-                construct,
-                case: 1,
-            });
-        }
+        // Retain the second variable: its check below may lower the function
+        // type after end_def, and must preserve escape diagnostics.
+        crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
+            construct: "application: lowering",
+            case: 1,
+        });
     }
-    let funct_ty = ctx.new_var(None);
     tctx.deprecated_function_call = true;
-    let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
+    let typed_funct = type_expect_full(
+        tctx,
+        env,
+        funct,
+        Expected::Infer {
+            level: ctx.current_level(),
+            site: InferenceSite::ApplicationFunction,
+        },
+        None,
+        RecArg::Rejected,
+        None,
+    )?;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(*path),
         _ => None,
@@ -9883,7 +9983,8 @@ fn type_application(
         if let Some((_arg_ty, ty_res)) =
             filter_arrow_for_lowered_apply(tctx, env, typed_funct.exp_type, args.len())
         {
-            let expected_inst = crate::types::instance(ctx, expected_ty);
+            let expected = materialize_expected(tctx, sexp, expected_ty);
+            let expected_inst = crate::types::instance(ctx, expected);
             unify_expression_types(tctx, loc, ty_res, expected_inst, None)?;
         }
     }
@@ -10286,7 +10387,7 @@ fn type_application(
     unify_expression_types(tctx, loc, ctx.new_var(None), typed_funct.exp_type, None)?;
 
     // OCaml: rue { ... exp_type = ty_res; ... }
-    rue_unify(tctx, loc, result_ty, expected_ty, context)?;
+    finish_expected(tctx, sexp, result_ty, expected_ty, context)?;
 
     Ok({
         let typed_node = Expression::new(
@@ -15371,7 +15472,6 @@ fn type_record(
                             lbl_repres: env_label.lbl_repres.clone(),
                             lbl_private: env_label.lbl_private,
                             lbl_loc: env_label.lbl_loc,
-                            lbl_attributes: env_label.lbl_attributes.clone(),
                         },
                         input_ty,
                         original_label_arg,
@@ -16679,7 +16779,6 @@ fn type_open(
         Some(lid.loc),
     );
     let slot = tctx.open_signature_slot(*override_flag, loc);
-    open_env.set_pending_open_slot(slot);
 
     let persistent_root_open = match open_lid {
         Longident::Lident(mod_idx) => {
@@ -16697,7 +16796,7 @@ fn type_open(
                     // env.ml:1012: `Pident (Ident.create_persistent s)`.
                     let root =
                         Path::pident(tctx.type_ctx.create_ast_persistent_ident(tctx.arena, *mod_idx));
-                    if pers.open_module(mod_name, root, &mut open_env, tctx.type_ctx) {
+                    if pers.open_module(mod_name, root, &mut open_env, tctx.type_ctx, slot) {
                         Some(root)
                     } else {
                         None
@@ -16723,6 +16822,7 @@ fn type_open(
         &mut open_env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
+        slot,
     ) {
         path
     } else {
@@ -16734,7 +16834,6 @@ fn type_open(
         }
     };
 
-    open_env.set_pending_open_slot(None);
     tctx.set_open_slot_root(slot, &path);
 
     // Type check the body expression in the extended environment
@@ -22387,18 +22486,20 @@ impl Env {
                 let mod_name = arena.get_string(*mod_idx);
                 // First try local environment
                 if let Ok((access_path_hint, md)) = self.find_module_with_path(mod_name) {
-                    let module_cache_key = path_cache_key(&access_path_hint)
+                    let (module_cache_key, scope) = path_cache_key(&access_path_hint)
                         .map(|key| {
-                            format!(
-                                "module::access::{}::subst{}",
-                                scope_local_module_cache_key(&key, &access_path_hint, self),
-                                apply_subst as u8
+                            (
+                                format!("module::access::{}::subst{}", key, apply_subst as u8),
+                                scope_local_module_cache_key(&access_path_hint, self),
                             )
                         })
                         .unwrap_or_else(|| {
-                            format!("module::lident::{}::subst{}", mod_name, apply_subst as u8)
+                            (
+                                format!("module::lident::{}::subst{}", mod_name, apply_subst as u8),
+                                None,
+                            )
                         });
-                    if let Some(cached) = ctx.find_resolved_module_sig(&module_cache_key) {
+                    if let Some(cached) = ctx.find_resolved_module_sig(&module_cache_key, scope) {
                         return Some(cached);
                     }
                     if apply_subst {
@@ -22411,6 +22512,7 @@ impl Env {
                             )?;
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
+                            scope,
                             resolved_path,
                             resolved_sig.clone(),
                         );
@@ -22427,6 +22529,7 @@ impl Env {
                         let sig = Arc::new(sig);
                         ctx.register_resolved_module_sig(
                             &module_cache_key,
+                            scope,
                             path,
                             sig.clone(),
                         );
@@ -25837,12 +25940,8 @@ fn module_path_requires_env_scoped_cache(env: &Env, module_path: &Path) -> bool 
     env.module_path_requires_env_scoped_cache(module_path)
 }
 
-fn scope_local_module_cache_key(base_key: &str, module_path: &Path, env: &Env) -> String {
-    if module_path_requires_env_scoped_cache(env, module_path) {
-        format!("{base_key}::env{}", env.scope_id())
-    } else {
-        base_key.to_string()
-    }
+fn scope_local_module_cache_key(module_path: &Path, env: &Env) -> Option<super::env::ScopeId> {
+    module_path_requires_env_scoped_cache(env, module_path).then_some(env.scope_id())
 }
 
 fn module_components_cache_key(
@@ -26424,6 +26523,7 @@ pub(crate) fn open_module_lid_components_into_env(
     target_env: &mut Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
+    slot: Option<u32>,
 ) -> Option<Path> {
     // OCaml compiler/ml/typemod.ml:88-90 and typecore.ml open modules through
     // `Env.open_signature`, which in compiler/ml/env.ml:1874-1877 forces the
@@ -26460,7 +26560,7 @@ pub(crate) fn open_module_lid_components_into_env(
         |path: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
             let path = *path.expect("lookup path requested");
             crate::cmi::persistent_env::open_module_components_into_env(
-                components, path, target_env, ctx,
+                components, path, target_env, ctx, slot,
             );
             Some(path)
         };
@@ -29886,6 +29986,69 @@ mod tests {
             crate::parser::ast::Constant::Integer(arena.intern_string("00x1_000_000"), Some('n'));
         let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert!(matches!(result, Constant::BigInt(true, d) if d == "00x1000000"));
+    }
+
+    #[test]
+    fn inferred_variable_result_materializes_once_for_repeated_rue() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+        let literal = arena.intern_string("42");
+        let expr = ParsedExpression {
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(
+                crate::parser::ast::Constant::Integer(literal, None),
+            ),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Default::default(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        tctx.set_unify_env(&env);
+        ctx.set_current_level(11);
+        let result = ctx.new_var(None);
+        let mut expected = Expected::Infer { level: 10, site: InferenceSite::Expression };
+        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        let Expected::Known(materialized) = expected else {
+            panic!("variable roots retain ordinary unification");
+        };
+        assert_eq!(ctx.repr(result), materialized);
+        assert_eq!(ctx.get_level(materialized), 10);
+        finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
+        assert!(matches!(expected, Expected::Known(ty) if ty == materialized));
+        assert_eq!(ctx.repr(result), materialized);
+    }
+
+    #[test]
+    fn inferred_constant_keeps_the_instantiated_node_and_level() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = crate::types::initial_env(&ctx);
+        let mut arena = ParseArena::new();
+        let literal = arena.intern_string("42");
+        let expr = ParsedExpression {
+            pexp_desc: crate::parser::ast::ExpressionDesc::Pexp_constant(
+                crate::parser::ast::Constant::Integer(literal, None),
+            ),
+            pexp_loc: LocIdx::none(),
+            pexp_attributes: Default::default(),
+        };
+        let mut tctx = TypeCheckContext::new(&ctx, &arena);
+        for level in [1, 10, 1000] {
+            ctx.set_current_level(level);
+            let inferred = type_exp(&mut tctx, &env, &expr, None).unwrap();
+            assert_eq!(ctx.repr(inferred.exp_type), inferred.exp_type);
+            assert_eq!(ctx.get_level(inferred.exp_type), level);
+            let expected = ctx.new_var(None);
+            let checked = type_expect(&mut tctx, &env, &expr, expected, None).unwrap();
+            assert_eq!(ctx.repr(expected), checked.exp_type);
+            assert_eq!(ctx.get_level(checked.exp_type), level);
+            assert_ne!(inferred.exp_type, checked.exp_type);
+            let (TypeDesc::Tconstr { path: inferred_path, .. },
+                 TypeDesc::Tconstr { path: checked_path, .. }) =
+                (ctx.get_desc(inferred.exp_type).into_desc(),
+                 ctx.get_desc(checked.exp_type).into_desc()) else {
+                panic!("integer constants have constructor types");
+            };
+            assert!(inferred_path.same(&checked_path));
+        }
     }
 
     #[test]
