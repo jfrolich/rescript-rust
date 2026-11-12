@@ -229,9 +229,6 @@ impl State {
             // Several handlers in one dispatch: the next slice of this file.
             return Err(Unsupported("static catch"));
         }
-        if matches!(cx.cont, Cont::Value(_) | Cont::Declare(..)) {
-            return Err(Unsupported("static catch"));
-        }
 
         let start = self.statements.mark();
         // Step 2: the cheap form, the first arm of `compile_staticcatch`.
@@ -622,7 +619,7 @@ mod tests {
     use crate::lambda::{LamLoc, SwitchDispatch, SwitchKey};
 
     /// The continuations this file lowers a catch in so far.
-    const SUPPORTED: &[u8] = &[1, 3];
+    const SUPPORTED: &[u8] = &[0, 1, 2, 3];
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -676,7 +673,7 @@ mod tests {
     }
 
     #[test]
-    fn one_handler_in_effect_and_assignment() {
+    fn one_handler_in_value_declaration_effect_and_assignment() {
         // A handler with an effect, a constant handler, an empty handler, a
         // body that finishes, and a handler that finishes.
         for case in 0..5 {
@@ -694,7 +691,7 @@ mod tests {
     }
 
     #[test]
-    fn handler_parameters_in_effect_and_assignment() {
+    fn handler_parameters_in_value_declaration_effect_and_assignment() {
         // One parameter given a variable, a call, a conditional that needs
         // statements, and a raise; then two parameters, lowered last first
         // and emitted in source order; then a finished first argument.
@@ -738,7 +735,7 @@ mod tests {
     }
 
     #[test]
-    fn exits_under_a_switch_in_effect_and_assignment() {
+    fn exits_under_a_switch_in_value_declaration_effect_and_assignment() {
         let mut a = LamArena::new();
         let cases = [a.static_raise(1, &[]), effect(&mut a, 2), a.static_raise(1, &[])];
         let default = a.static_raise(1, &[]);
