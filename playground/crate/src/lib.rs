@@ -2,7 +2,7 @@ use wasm_bindgen::prelude::*;
 
 use std::cell::RefCell;
 
-use rescript_compiler::cmi::persistent_env::ModuleRegistry;
+use rescript_compiler::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
 use rescript_compiler::driver::{self, CompilerOptions};
 use rescript_compiler::parser::{module, Parser};
 use rescript_compiler::wasm_vfs;
@@ -45,8 +45,7 @@ pub fn vfs_clear() {
 pub fn register_source_module(module_name: &str, source_path: &str) {
     REGISTRY.with(|r| {
         r.borrow_mut()
-            .source_fallback_paths
-            .insert(module_name.to_string(), source_path.into());
+            .insert_source_fallback_path(module_name.to_string(), source_path.into());
     });
 }
 
@@ -123,8 +122,7 @@ pub fn compile_all(source: &str, filename: &str) -> String {
     // (so a previous compile's signature doesn't shadow the new source).
     REGISTRY.with(|r| {
         let mut reg = r.borrow_mut();
-        reg.cached_modules.remove(&module_name);
-        reg.module_info.remove(&module_name);
+        reg.purge_module(&module_name);
     });
 
     let options = CompilerOptions {
@@ -142,6 +140,7 @@ pub fn compile_all(source: &str, filename: &str) -> String {
         &options,
         &registry_snapshot,
         false,
+        None,
     );
 
     match result {
@@ -149,7 +148,15 @@ pub fn compile_all(source: &str, filename: &str) -> String {
             REGISTRY.with(|r| {
                 let mut reg = r.borrow_mut();
                 if let Some(ps) = compiled.pers_struct {
-                    reg.cached_modules.insert(module_name.clone(), ps);
+                    let info = InMemoryModuleInfo::new(
+                        filename.into(),
+                        compiled.is_pure,
+                        compiled.cmj_export_constants,
+                        false,
+                    )
+                    .with_cmj_export_arities(compiled.cmj_export_arities)
+                    .with_cmj_export_lambdas(compiled.cmj_export_lambdas);
+                    reg.register_module(&module_name, ps, info);
                 }
             });
             serde_json::json!({
