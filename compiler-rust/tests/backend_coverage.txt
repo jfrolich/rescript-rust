@@ -136,11 +136,11 @@
     "tests/tests": {
       "identical": 157,
       "shared_catch_only": 1,
-      "units": 719,
+      "units": 721,
       "unsupported": {
         "assign": 9,
         "await": 13,
-        "external": 288,
+        "external": 289,
         "flat make": 3,
         "if": 85,
         "import": 3,
@@ -151,7 +151,7 @@
         "record rest": 2,
         "shared Lambda subtree with binder": 1,
         "static catch": 11,
-        "string switch": 7,
+        "string switch": 8,
         "switch": 57,
         "try": 11
       }
