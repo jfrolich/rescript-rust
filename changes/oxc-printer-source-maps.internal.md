@@ -1,0 +1,1 @@
+- Add opt-in oxc source maps with a mapping-sequence oracle and explicit whole-file fallback for unsupported mapping points; leave the default printer unchanged.
