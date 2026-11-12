@@ -17,7 +17,7 @@
 //!   the result is a function of the tree alone. A rule pushes only the node
 //!   it was given or nodes it created below it, parent before child; an entry
 //!   is therefore never released before it is popped.
-//! - A **rule attempt** reads the node and a bounded number of levels below
+//! - A **normalising rule attempt** reads the node and a bounded number of levels below
 //!   it (`norm.rs` states the pattern of each row); it never walks a subtree,
 //!   with one documented exception (row N11).
 //! - An **edit** ([`Engine::promote`], [`Engine::put`]) costs the nodes it
@@ -26,6 +26,9 @@
 //! - A **round** is one sweep of the tree in a fixed order. A subtree whose
 //!   summary does not intersect the round's mask is not entered. The sweep
 //!   uses an explicit stack. Total cost: the nodes entered plus the rewrites.
+//!   Stateful drivers additionally state and count their candidate scans;
+//!   flatten caches beta suffixes once and scans candidates for legacy purity
+//!   and variable occurrences (see `bir/l/flatten.rs`).
 //! - A **summary** is a 16-bit set of opcode classes per node, a superset of
 //!   the classes in its subtree. It is set when the engine creates a node and
 //!   widened on the way back up a sweep; it is recomputed in one walk only
@@ -123,13 +126,17 @@ pub enum Changed {
 }
 
 /// When a round's rule runs relative to the node's children.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy)]
 pub enum Order {
     /// The rule runs first; the sweep then enters the children the node has
     /// after the rule.
     Pre,
     /// The children are swept first.
     Post,
+    /// A pass with state threaded through its recursion. The driver uses an
+    /// explicit continuation stack and the engine's edit API. Cost is the
+    /// entered nodes plus the driver's documented scans and rewrites.
+    Stateful(fn(&mut Engine<'_>, NodeId) -> Changed),
 }
 
 /// Which binding facts the rules of a round read.
@@ -180,6 +187,10 @@ pub struct Stats {
     pub snapshots: u64,
     /// Nodes compared by row N11's structural equality.
     pub compared: u64,
+    /// Pass rules fired, deterministically ordered for reporting.
+    pub rules: std::collections::BTreeMap<&'static str, u64>,
+    /// (Fresh variable, source identity), in allocation order for the bridge.
+    pub renames: Vec<(VarId, VarId)>,
 }
 
 struct Guard {
@@ -208,6 +219,7 @@ pub struct Engine<'a> {
     guards: Vec<Guard>,
     snapshots: AHashMap<NodeId, NodeId>,
     snapshot_roots: Vec<NodeId>,
+    stamp: u32,
     /// Counters.
     pub stats: Stats,
 }
@@ -227,8 +239,38 @@ impl<'a> Engine<'a> {
             guards: Vec::new(),
             snapshots: AHashMap::default(),
             snapshot_roots: Vec::new(),
+            stamp: 0,
             stats: Stats::default(),
         }
+    }
+
+    /// Start a round's private identifier counter. Constant time.
+    pub fn set_current_stamp(&mut self, stamp: u32) {
+        self.stamp = stamp;
+    }
+
+    /// Rename in O(1) amortized time, recording provenance for diagnostic export.
+    pub fn rename_var(&mut self, source: VarId) -> VarId {
+        self.stamp = self.stamp.checked_add(1).expect("identifier stamp overflow");
+        let var = self.bir.new_var_id(self.bir.vars().name(source), self.stamp);
+        self.stats.renames.push((var, source));
+        var
+    }
+
+    /// Enter a stateful driver's candidate, pruning by summary in O(1).
+    pub fn enter_candidate(&mut self, node: NodeId, mask: OpMask) -> bool {
+        if self.summary(node).intersects(mask) {
+            self.stats.entered += 1;
+            true
+        } else {
+            self.stats.pruned += 1;
+            false
+        }
+    }
+
+    /// Refresh a stateful driver's completed node, costing its child count.
+    pub fn finish_candidate(&mut self, node: NodeId) {
+        self.set_summary(node);
     }
 
     /// The arena, read-only: every edit goes through the engine.
@@ -457,6 +499,14 @@ impl<'a> Engine<'a> {
             self.facts.extend_from_slice(&self.bir.vars.fact);
         }
         self.in_sweep = true;
+        if let Order::Stateful(driver) = round.order {
+            assert!(round.guard.is_none(), "stateful drivers must maintain snapshot scopes");
+            let changed = driver(self, root);
+            self.in_sweep = false;
+            self.frozen = false;
+            self.end_round();
+            return changed;
+        }
         let mut stack: Vec<Frame> = Vec::new();
         let mut result = Changed::No;
         let mut enter = Some(root);
@@ -468,7 +518,7 @@ impl<'a> Engine<'a> {
                     self.guards.push(Guard { node, taken: false });
                 }
                 let mut changed = false;
-                if round.order == Order::Pre
+                if matches!(round.order, Order::Pre)
                     && round.mask.intersects(OpMask::of(self.bir.node(node).op()))
                 {
                     changed = (round.rule)(self, node) == Changed::Yes;
@@ -506,7 +556,7 @@ impl<'a> Engine<'a> {
             {
                 self.normalise(node);
             }
-            if round.order == Order::Post
+            if matches!(round.order, Order::Post)
                 && round.mask.intersects(OpMask::of(self.bir.node(node).op()))
             {
                 changed |= (round.rule)(self, node) == Changed::Yes;
