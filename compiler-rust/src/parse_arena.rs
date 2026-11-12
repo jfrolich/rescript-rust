@@ -164,6 +164,11 @@ impl ArenaIdx for ArityIdx {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExprIdx(pub u32);
 
+/// Bit 2 of an expression's entry in `ParseArena::rewrite_free_exprs`.
+const EXPANSION_BIT: u64 = 4;
+/// Expressions per page of `ParseArena::expansion_targets`.
+const EXPANSION_PAGE: usize = 64;
+
 impl ArenaIdx for ExprIdx {
     fn from_u32(idx: u32) -> Self {
         ExprIdx(idx)
@@ -756,13 +761,20 @@ pub struct ParseArena {
     /// This lets marshal distinguish mapper-rebuilt expression attributes
     /// (fresh payload wrappers) from parser-preserved ones.
     rewritten_expr_locs: HashSet<LocIdx>,
-    /// Three bits per expression: two proofs computed bottom-up at allocation (no builtin
-    /// rewrite/checker targets (bit 0), and no unused-attribute sweep targets
-    /// (bit 1)), and an expansion-present flag (bit 2). Unknown kinds and
-    /// mutable slots are never certified.
+    /// Four bits per expression, sixteen expressions per word: two proofs
+    /// computed bottom-up at allocation (no builtin rewrite/checker targets,
+    /// bit 0; no unused-attribute sweep targets, bit 1), and "has an
+    /// expansion" (bit 2, see `set_expansion`). Bit 3 is unused. Unknown kinds
+    /// and mutable slots are never certified.
     rewrite_free_exprs: Vec<u64>,
-    /// Built-in expansions leave the original syntax nodes intact.
-    expansions: HashMap<ExprIdx, ExprIdx>,
+    /// The expansions of the built-in rewrites, in pages of
+    /// `EXPANSION_PAGE` consecutive expressions: `expansion_pages[idx / 64]`
+    /// is 0 for a page without expansions, or 1 + the page's position in
+    /// `expansion_targets`. The nodes as parsed are never overwritten.
+    expansion_pages: Vec<u32>,
+    /// `EXPANSION_PAGE` targets per allocated page; an entry is meaningful
+    /// only where bit 2 of `rewrite_free_exprs` is set.
+    expansion_targets: Vec<ExprIdx>,
     /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
     dummy_loc: LocIdx,
     /// Spice PPX local caches for generated location/string/lident nodes.
@@ -1123,7 +1135,8 @@ impl Default for ParseArena {
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
             rewrite_free_exprs: Vec::new(),
-            expansions: HashMap::new(),
+            expansion_pages: Vec::new(),
+            expansion_targets: Vec::new(),
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
             shareable_literal_strs: HashSet::new(),
@@ -2681,9 +2694,11 @@ impl ParseArena {
         let certificates = self.expression_certificates(&expr);
         let idx = self.expressions.push(expr);
         if certificates != 0 {
-            let word = idx.0 as usize / 21;
-            self.rewrite_free_exprs.resize(self.rewrite_free_exprs.len().max(word + 1), 0);
-            self.rewrite_free_exprs[word] |= certificates << (3 * (idx.0 % 21));
+            let word = idx.0 as usize / 16;
+            if word >= self.rewrite_free_exprs.len() {
+                self.rewrite_free_exprs.resize(word + 1, 0);
+            }
+            self.rewrite_free_exprs[word] |= certificates << (4 * (idx.0 % 16));
         }
         idx
     }
@@ -2744,29 +2759,57 @@ impl ParseArena {
     #[inline]
     fn expr_certificates(&self, idx: ExprIdx) -> u64 {
         self.rewrite_free_exprs
-            .get(idx.0 as usize / 21)
-            .map_or(0, |word| (word >> (3 * (idx.0 % 21))) & 3)
+            .get(idx.0 as usize / 16)
+            .map_or(0, |word| (word >> (4 * (idx.0 % 16))) & 3)
     }
 
-    /// Record a completed built-in expansion without overwriting source syntax.
+    /// Record `expanded` as what the compiler reads in place of `original`.
+    /// The node at `original` and every ancestor of it stay as parsed;
+    /// `expanded` is a node appended after it. Recording a second expansion
+    /// for the same node replaces the first.
+    ///
+    /// Cost: one bit set and one store; the first expansion in a page of
+    /// `EXPANSION_PAGE` expressions also appends that page (256 bytes).
     pub fn set_expansion(&mut self, original: ExprIdx, expanded: ExprIdx) {
-        assert_ne!(original, expanded, "an expansion must be a new node");
-        self.invalidate_rewrite_free_exprs(original);
-        self.expansions.insert(original, expanded);
-        let word = original.0 as usize / 21;
-        self.rewrite_free_exprs.resize(self.rewrite_free_exprs.len().max(word + 1), 0);
-        self.rewrite_free_exprs[word] |= 4 << (3 * (original.0 % 21));
+        debug_assert_ne!(original, expanded, "an expansion must be a new node");
+        debug_assert_eq!(self.expr_certificates(original), 0, "a certified node has no rewrite");
+        debug_assert!(original.0 < SHARED_EXPRESSION_BASE);
+        let slot = original.0 as usize;
+        let word = slot / 16;
+        if word >= self.rewrite_free_exprs.len() {
+            self.rewrite_free_exprs.resize(word + 1, 0);
+        }
+        self.rewrite_free_exprs[word] |= EXPANSION_BIT << (4 * (slot % 16));
+        let page = slot / EXPANSION_PAGE;
+        if page >= self.expansion_pages.len() {
+            self.expansion_pages.resize(page + 1, 0);
+        }
+        if self.expansion_pages[page] == 0 {
+            let len = self.expansion_targets.len();
+            self.expansion_targets.resize(len + EXPANSION_PAGE, original);
+            self.expansion_pages[page] = (len / EXPANSION_PAGE) as u32 + 1;
+        }
+        let base = (self.expansion_pages[page] as usize - 1) * EXPANSION_PAGE;
+        self.expansion_targets[base + slot % EXPANSION_PAGE] = expanded;
     }
 
-    /// Resolve an expression at a consumer entry; ordinary nodes need no hash lookup.
+    /// The node the compiler reads for `idx`: its expansion when a built-in
+    /// rewrite recorded one, otherwise `idx` itself. Readers of the tree as
+    /// compiled (the checker, dependency collection, the unused-attribute
+    /// sweep, the v0 mapper) call this where they turn a handle into a node;
+    /// readers of the tree as written (the printer, `check::Checker`) do not.
+    ///
+    /// Cost: one bit test for a node without an expansion (a load, a shift
+    /// and a branch); two more indexed loads for a node with one. No hashing.
     #[inline]
     pub fn expanded(&self, idx: ExprIdx) -> ExprIdx {
-        if self.rewrite_free_exprs.get(idx.0 as usize / 21)
-            .is_some_and(|word| word & (4 << (3 * (idx.0 % 21))) != 0)
-        {
-            self.expansions[&idx]
-        } else {
-            idx
+        let slot = idx.0 as usize;
+        match self.rewrite_free_exprs.get(slot / 16) {
+            Some(word) if word & (EXPANSION_BIT << (4 * (slot % 16))) != 0 => {
+                let base = (self.expansion_pages[slot / EXPANSION_PAGE] as usize - 1) * EXPANSION_PAGE;
+                self.expansion_targets[base + slot % EXPANSION_PAGE]
+            }
+            _ => idx,
         }
     }
 
@@ -2785,13 +2828,17 @@ impl ParseArena {
     /// Parents are allocated after children. A mutation invalidates both
     /// proofs for the node and all possible parents, without a reverse-edge
     /// table or tree walk. Reserved slots are never certified.
+    ///
+    /// Cost: the words after `idx`'s, which keep only their expansion bits.
+    /// Nothing on a compile path mutates an expression after the built-in
+    /// rewrites have recorded an expansion.
     fn invalidate_rewrite_free_exprs(&mut self, idx: ExprIdx) {
-        let word = idx.0 as usize / 21;
+        let word = idx.0 as usize / 16;
         if word < self.rewrite_free_exprs.len() {
-            // Invalidate proofs, not expansions: their original nodes still exist.
-            const EXPANSION_BITS: u64 = 0x4924924924924924;
+            // The proofs go; the expansions stay: their nodes still exist.
+            const EXPANSION_BITS: u64 = 0x4444_4444_4444_4444;
             self.rewrite_free_exprs[word] &=
-                ((1u64 << (3 * (idx.0 % 21))) - 1) | EXPANSION_BITS;
+                ((1u64 << (4 * (idx.0 % 16))) - 1) | EXPANSION_BITS;
             for bits in &mut self.rewrite_free_exprs[word + 1..] {
                 *bits &= EXPANSION_BITS;
             }
@@ -4333,34 +4380,85 @@ mod tests {
         assert_eq!(seconds, vec![c]);
     }
 
-    #[test]
-    fn expansion_preserves_original_syntax_and_unexpanded_identity() {
-        let mut arena = ParseArena::new();
-        let original = arena.push_expr(ParseArena::placeholder_expr());
-        assert_eq!(arena.expanded(original), original);
-        let expanded = arena.push_expr(Expression {
-            pexp_desc: ExpressionDesc::Pexp_await(original),
+    /// An expression without a certificate, like every node a rewrite
+    /// applies to.
+    fn uncertified_expr(arena: &mut ParseArena) -> ExprIdx {
+        let operand = arena.push_expr(ParseArena::placeholder_expr());
+        let idx = arena.push_expr(Expression {
+            pexp_desc: ExpressionDesc::Pexp_await(operand),
             ..ParseArena::placeholder_expr()
         });
-        arena.set_expansion(original, expanded);
-        assert_eq!(arena.expanded(original), expanded);
-        assert!(matches!(arena.get_expr(original).pexp_desc, ExpressionDesc::Pexp_ident(_)));
-        assert!(!arena.expr_needs_no_rewrite(original));
-        assert!(!arena.expr_needs_no_attribute_sweep(original));
+        assert!(!arena.expr_needs_no_rewrite(idx));
+        idx
     }
 
     #[test]
-    fn expansion_bits_survive_certificate_invalidation_across_words() {
+    fn an_expansion_is_read_through_expanded_and_the_original_stays() {
         let mut arena = ParseArena::new();
-        let nodes: Vec<_> = (0..70).map(|_| arena.push_expr(ParseArena::placeholder_expr())).collect();
-        for &idx in &[nodes[20], nodes[21], nodes[42], nodes[69]] {
-            arena.set_expansion(idx, nodes[0]);
+        let original = uncertified_expr(&mut arena);
+        let neighbour = uncertified_expr(&mut arena);
+        assert_eq!(arena.expanded(original), original);
+        let before = arena.get_expr(original).clone();
+        let expanded = arena.push_expr(ParseArena::placeholder_expr());
+        arena.set_expansion(original, expanded);
+        assert_eq!(arena.expanded(original), expanded);
+        assert_eq!(arena.get_expr(original), &before);
+        // A neighbour in the same page, and nodes past the table's end.
+        assert_eq!(arena.expanded(neighbour), neighbour);
+        assert_eq!(arena.expanded(expanded), expanded);
+        assert_eq!(arena.expanded(ExprIdx(1 << 20)), ExprIdx(1 << 20));
+        // A certificate elsewhere in the same word is not disturbed.
+        assert!(arena.expr_needs_no_rewrite(expanded));
+        // The last expansion recorded for a node is the one read.
+        let second = arena.push_expr(ParseArena::placeholder_expr());
+        arena.set_expansion(original, second);
+        assert_eq!(arena.expanded(original), second);
+    }
+
+    #[test]
+    fn expansions_survive_the_invalidation_of_certificates() {
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..70).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for &idx in &[nodes[7], nodes[8], nodes[42], nodes[69]] {
+            arena.set_expansion(idx, target);
         }
+        assert!(arena.expr_needs_no_rewrite(target));
         arena.get_expr_mut(nodes[0]).pexp_desc = ExpressionDesc::Pexp_break;
-        for &idx in &[nodes[20], nodes[21], nodes[42], nodes[69]] {
-            assert_eq!(arena.expanded(idx), nodes[0]);
+        assert!(!arena.expr_needs_no_rewrite(target));
+        for &idx in &[nodes[7], nodes[8], nodes[42], nodes[69]] {
+            assert_eq!(arena.expanded(idx), target);
         }
         assert_eq!(arena.expanded(nodes[22]), nodes[22]);
+    }
+
+    #[test]
+    fn ten_thousand_expansions_take_one_page_per_sixty_four_expressions() {
+        // Dense: 10,000 consecutive pairs (operand, await), each await expanded.
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..10_000).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for &idx in &nodes {
+            arena.set_expansion(idx, ExprIdx(target.0 + idx.0));
+        }
+        for &idx in &nodes {
+            assert_eq!(arena.expanded(idx), ExprIdx(target.0 + idx.0));
+            assert_eq!(arena.expanded(ExprIdx(idx.0 - 1)), ExprIdx(idx.0 - 1));
+        }
+        let pages = (2 * 10_000usize).div_ceil(EXPANSION_PAGE);
+        assert_eq!(arena.expansion_targets.len(), pages * EXPANSION_PAGE);
+
+        // Sparse: one expansion every 1,000 expressions costs one page each,
+        // not an entry per expression.
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..50_000).map(|_| uncertified_expr(&mut arena)).collect();
+        let target = arena.push_expr(ParseArena::placeholder_expr());
+        for idx in nodes.iter().step_by(500) {
+            arena.set_expansion(*idx, target);
+        }
+        assert_eq!(arena.expansion_targets.len(), 100 * EXPANSION_PAGE);
+        // The page index ends at the last page with an expansion.
+        assert_eq!(arena.expansion_pages.len(), (2 * 49_500 + 1) / EXPANSION_PAGE + 1);
     }
 
     #[test]
