@@ -825,7 +825,7 @@ fn preprocess_signature_for_typecheck_with_source(
         signature
     };
 
-    if options.no_builtin_ppx {
+    if file_config.no_builtin_ppx(options) {
         Ok(signature)
     } else {
         arena.set_builtin_spice(options.builtin_spice());
@@ -6139,7 +6139,7 @@ pub fn run_implementation_frontend(
         structure
     };
 
-    let structure = if options.no_builtin_ppx {
+    let structure = if file_config.no_builtin_ppx(options) {
         structure
     } else {
         // OCaml `Ast_config.process_str` marks the leading `@@config` before
@@ -7413,7 +7413,7 @@ pub fn run_interface_frontend(
         out,
     );
     let signature = signature?;
-    if !options.no_builtin_ppx {
+    if !file_config.no_builtin_ppx(options) {
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
         let (unused_attribute_warnings, invariant_error) =
@@ -8249,9 +8249,20 @@ pub struct FileConfigOverrides {
     /// `-bs-no-version-header` (`Js_config.no_version_header`,
     /// js_dump_program.ml:133).
     pub no_version_header: bool,
+    /// `-bs-no-builtin-ppx` (`Js_config.no_builtin_ppx`), which
+    /// `Ppx_entry` reads right after processing the `@@config`
+    /// (compiler/frontend/ppx_entry.ml:39, 58). Only the frontend reads it,
+    /// so [`Self::apply`] leaves it out; see [`Self::no_builtin_ppx`].
+    pub no_builtin_ppx: bool,
 }
 
 impl FileConfigOverrides {
+    /// Whether the builtin PPX is off for this file: by the command line or
+    /// its `@@config`.
+    pub fn no_builtin_ppx(&self, options: &CompilerOptions) -> bool {
+        options.no_builtin_ppx || self.no_builtin_ppx
+    }
+
     /// Whether any flag changes a [`CompilerOptions`] field in [`Self::apply`].
     fn changes_options(&self) -> bool {
         self.cross_module_inline.is_some()
@@ -8413,6 +8424,7 @@ fn run_file_level_flags(
                 "-noassert" => overrides.noassert = true,
                 "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
                 "-bs-no-version-header" => overrides.no_version_header = true,
+                "-bs-no-builtin-ppx" => overrides.no_builtin_ppx = true,
                 _ => {}
             }
             continue;
