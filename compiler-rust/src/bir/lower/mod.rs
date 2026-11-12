@@ -133,6 +133,92 @@ pub trait Realizer {
     fn cond(&mut self, cx: Cx, test: NodeId, then_: Out, else_: Out) -> Out;
 }
 
+/// One source visit either completes an output or schedules child occurrences.
+pub enum ProbePlan<R> {
+    /// This source node has already been lowered.
+    Ready(Probed),
+    /// Resume after the children, without re-reading the source node.
+    Children(R),
+}
+
+/// Source dispatch for the single-pass probe. Resume records contain decoded
+/// operands, not source trees. The output algebra does not prescribe constructs.
+pub trait ProbeRules {
+    /// Decoded operands required after visiting children.
+    type Resume;
+    /// K1: C:1529 compile_expr; inspect and lower a source node exactly once.
+    fn enter(
+        &mut self,
+        cx: Cx,
+        node: NodeId,
+    ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
+    /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
+    fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
+    /// K0/K2: C:119 append / C:4715 append_effect_output; combine child outputs.
+    fn finish(
+        &mut self,
+        cx: Cx,
+        resume: Self::Resume,
+        children: impl Iterator<Item = Probed>,
+    ) -> Result<Probed, super::bridge::Unsupported>;
+}
+
+/// Explicit source traversal, separate from realization of deferred J operands.
+#[derive(Default)]
+pub struct SourceProbe {
+    /// Source occurrences offered to dispatch (one per incoming tree edge).
+    pub steps: usize,
+}
+impl SourceProbe {
+    /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output.
+    /// A source node is entered once. Finish frames receive the saved operands
+    /// and child outputs, never a request to compile the same child again.
+    pub fn probe(
+        &mut self,
+        rules: &mut impl ProbeRules,
+        cx: Cx,
+        node: NodeId,
+    ) -> Result<Probed, super::bridge::Unsupported> {
+        enum Work<R> {
+            Enter(Cx, NodeId),
+            Finish(Cx, R, usize),
+        }
+        let mut work = vec![Work::Enter(cx, node)];
+        let mut values = Vec::new();
+        let mut children = Vec::new();
+        while let Some(task) = work.pop() {
+            match task {
+                Work::Enter(cx, node) => {
+                    self.steps += 1;
+                    match rules.enter(cx, node)? {
+                        ProbePlan::Ready(value) => values.push(value),
+                        ProbePlan::Children(resume) => {
+                            rules.children(cx, &resume, &mut children);
+                            work.push(Work::Finish(cx, resume, children.len()));
+                            work.extend(
+                                children
+                                    .drain(..)
+                                    .rev()
+                                    .map(|(cx, node)| Work::Enter(cx, node)),
+                            );
+                        }
+                    }
+                }
+                Work::Finish(cx, resume, count) => {
+                    let start = values
+                        .len()
+                        .checked_sub(count)
+                        .expect("source probe children");
+                    let value = rules.finish(cx, resume, values.drain(start..))?;
+                    values.push(value);
+                }
+            }
+        }
+        assert_eq!(values.len(), 1);
+        Ok(values.pop().expect("source probe output"))
+    }
+}
+
 /// N1: C:663 compile_deps_program_in_arena. The final statement is a plain
 /// SExp carrying Out::value for the migration exporter, not an emitted effect.
 pub(crate) struct Lowered {
@@ -180,5 +266,76 @@ mod tests {
             assert_eq!(cx.switch_depth, 0);
             assert!(!cx.return_unit);
         }
+    }
+    #[test]
+    fn source_probe_visits_ten_thousand_nested_nodes_once() {
+        struct Rules<'a> {
+            source: &'a super::super::Bir,
+            seen: Vec<u8>,
+        }
+        impl ProbeRules for Rules<'_> {
+            type Resume = (NodeId, NodeId);
+            fn enter(
+                &mut self,
+                _: Cx,
+                node: NodeId,
+            ) -> Result<ProbePlan<Self::Resume>, super::super::bridge::Unsupported> {
+                self.seen[node.index()] += 1;
+                match self.source.view(node) {
+                    super::super::View::Seq { first, second } => {
+                        Ok(ProbePlan::Children((first, second)))
+                    }
+                    super::super::View::Const { .. } => Ok(ProbePlan::Ready(Probed::Out(Out {
+                        stmts: Span::default(),
+                        value: Some(node),
+                        finished: Finished::False,
+                    }))),
+                    other => panic!("unexpected test source: {other:?}"),
+                }
+            }
+            fn children(
+                &self,
+                cx: Cx,
+                &(first, second): &Self::Resume,
+                into: &mut Vec<(Cx, NodeId)>,
+            ) {
+                into.extend([(cx, first), (cx, second)]);
+            }
+            fn finish(
+                &mut self,
+                _: Cx,
+                _: Self::Resume,
+                mut children: impl Iterator<Item = Probed>,
+            ) -> Result<Probed, super::super::bridge::Unsupported> {
+                assert!(children.next().is_some());
+                Ok(children.next().unwrap())
+            }
+        }
+        for first_position in [false, true] {
+            let mut source = super::super::Bir::default();
+            source.begin_bulk();
+            let constant = source.intern_const(super::super::Constant::Null);
+            let mut root = source.new_node(super::super::View::Const { value: constant }, 0);
+            for _ in 0..10_000 {
+                let leaf = source.new_node(super::super::View::Const { value: constant }, 0);
+                let (first, second) = if first_position {
+                    (root, leaf)
+                } else {
+                    (leaf, root)
+                };
+                root = source.new_node(super::super::View::Seq { first, second }, 0);
+            }
+            source.finish_bulk(root);
+            let mut rules = Rules {
+                source: &source,
+                seen: vec![0; source.nodes.len()],
+            };
+            let mut probe = SourceProbe::default();
+            probe.probe(&mut rules, Cx::value(), root).unwrap();
+            assert_eq!(probe.steps, 20_001);
+            assert!(rules.seen.iter().all(|&visits| visits == 1));
+        }
+        assert_eq!(std::mem::size_of::<SourceProbe>(), 8);
+        assert_eq!(std::mem::size_of::<ProbePlan<()>>(), 20);
     }
 }
