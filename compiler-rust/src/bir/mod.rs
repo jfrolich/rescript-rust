@@ -23,6 +23,7 @@ mod edit;
 mod node;
 mod pools;
 mod validate;
+mod tail_facts;
 mod vars;
 
 use crate::lambda::{ApInfo, FunctionAttribute, LamLoc};
@@ -50,6 +51,9 @@ pub struct Bir {
     death_candidates: Vec<NodeId>,
     deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
+    tail_candidates: Vec<tail_facts::Candidates>,
+    tail_calls: Vec<tail_facts::Candidate>,
+    self_tail: Vec<bool>,
     capture_boundaries: usize,
     weighted_switches: usize,
     // Zero is unknown; every valid use weight is positive. Cache invalidation

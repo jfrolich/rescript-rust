@@ -172,6 +172,19 @@ impl Bir {
                 return fail("stale exit count");
             }
         }
+        let mut tail_work = Vec::new();
+        for &id in &order {
+            if let View::LetRec { first, values, .. } = self.view(id) {
+                for (i, &function) in values.iter().enumerate() {
+                    if let View::Fun { body, .. } = self.view(function) {
+                        let expected = self.validate_self_tail(body, VarId(first.0 + i as u32), &mut tail_work);
+                        if self.has_self_tail_call(function) != expected {
+                            return fail("stale self-tail-call fact");
+                        }
+                    }
+                }
+            }
+        }
         let mut effects = vec![(false, false); self.nodes.len()];
         let mut strict = vec![false; self.nodes.len()];
         let mut subexpression = vec![false; self.nodes.len()];

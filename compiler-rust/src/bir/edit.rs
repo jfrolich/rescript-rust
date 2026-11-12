@@ -169,6 +169,10 @@ impl Bir {
         self.register_kind(node, true);
         if let Some(id) = self.free_nodes.pop() {
             self.nodes[id.index()] = node;
+            if id.index() < self.tail_candidates.len() {
+                self.tail_candidates[id.index()] = Default::default();
+                self.self_tail[id.index()] = false;
+            }
             self.parents[id.index()] = None;
             self.weights[id.index()] = 0;
             if !self.cold.is_empty() {
@@ -664,7 +668,13 @@ impl Bir {
         }
         facts
     }
-    fn repair(&mut self, mut id: NodeId) {
+    /// O(affected ancestor edges and their direct operands); stops at an unchanged fact.
+    fn repair(&mut self, id: NodeId) {
+        self.repair_with_tail_child(id, None);
+    }
+    /// Same bound as repair, including changed tail-position edges whose list
+    /// endpoints stayed fixed. A recursive binding also reads its tail candidates.
+    fn repair_with_tail_child(&mut self, mut id: NodeId, mut changed_child: Option<NodeId>) {
         loop {
             let (pure, no_alloc) = self.effects(id, |c| {
                 let f = self.node(c).flags();
@@ -706,10 +716,12 @@ impl Bir {
                 }
             }
             self.nodes[id.index()].set_flags(flags);
-            let facts_changed = self.update_facts(id);
+            let tail_changed = self.repair_tail_candidates(id, changed_child);
+            let facts_changed = self.update_facts(id) || tail_changed;
             if flags == old_flags && !facts_changed {
                 break;
             }
+            changed_child = tail_changed.then_some(id);
             match self.parents[id.index()] {
                 Some(parent) => id = parent,
                 None => break,
@@ -889,6 +901,13 @@ impl Bir {
         let content = self.nodes[replacement.index()];
         let cold = self.cold.get(replacement.index()).copied().flatten();
         self.unbind(replacement);
+        let tail_changed = if !self.tail_candidates.is_empty() {
+            let before = self.tail_candidates[target.index()];
+            self.tail_candidates[target.index()] = self.tail_candidates[replacement.index()];
+            self.self_tail[target.index()] = self.self_tail[replacement.index()];
+            before != self.tail_candidates[target.index()]
+                || parent.is_some_and(|parent| matches!(self.view(parent), View::Apply { callee, .. } if callee == target))
+        } else { false };
         self.nodes[target.index()] = content;
         self.parents[target.index()] = parent;
         for child in self.view(target).children() {
@@ -924,8 +943,8 @@ impl Bir {
                 View::Prim { args, .. } if args.get(1) == Some(&target)
             );
             let j_shape = matches!(self.view(parent), View::JBin { .. } | View::JCall { .. });
-            if effects_changed || second_operand || j_shape || self.update_facts(parent) {
-                self.repair(parent);
+            if effects_changed || second_operand || j_shape || self.update_facts(parent) || tail_changed {
+                self.repair_with_tail_child(parent, tail_changed.then_some(target));
             }
             // Array.isArray recognises a two-edge callee shape, not just purity.
             if matches!(self.view(parent), View::JDot { .. }) {
