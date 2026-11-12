@@ -374,7 +374,7 @@ impl State {
                 let parts = segments
                     .iter()
                     .map(|s| crate::bir::TemplatePart {
-                        raw: self.arena.intern_text(&s),
+                        raw: self.arena.intern_text(s),
                         cooked: None,
                     })
                     .collect();
@@ -683,7 +683,7 @@ impl State {
                 )
             }
             Primitive::PcreateExtension(name) => {
-                let name = plain::string(&mut self.arena, &name);
+                let name = plain::string(&mut self.arena, name);
                 let call = self.primitive_runtime("Primitive_exceptions", "create", &[name]);
                 let comment = Some(self.arena.intern_text("@__PURE__"));
                 self.arena.set_cold(

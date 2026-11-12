@@ -75,7 +75,7 @@ impl State {
         }
         let field = match info {
             FieldDbgInfo::Module { name } => {
-                crate::js_ir::printer::convert_ident_cow(&name).into_owned()
+                crate::js_ir::printer::convert_ident_cow(name).into_owned()
             }
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
