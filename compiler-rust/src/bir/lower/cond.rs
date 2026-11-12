@@ -45,6 +45,9 @@ pub(super) struct Conditional {
     unit: bool,
     /// A slot for a declaration is reserved before the head slot.
     declares: bool,
+    /// Row R5 step 1 may apply: neither branch holds a construct that is
+    /// lowered to statements in every continuation (C:5139).
+    folds: bool,
 }
 
 /// Where the output of a conditional starts and where its head slot is. The
@@ -55,7 +58,7 @@ struct Parts {
     head: u32,
 }
 
-const EMPTY: Span = Span { start: 0, len: 0 };
+pub(super) const EMPTY: Span = Span { start: 0, len: 0 };
 
 impl State {
     /// K1: C:1812, rows R1 to R6 and section 3.7, on entering the node. One
@@ -95,6 +98,11 @@ impl State {
             // 3.7: the result of a short circuit is created after its operands.
             (Kind::And | Kind::Or, Cont::Value(_) | Cont::Effect(_)) => (Target::None, !returns),
         };
+        // C:5139 lambda_contains_statement_value_form, as two flag reads.
+        let statement = |node: NodeId| {
+            self.source.node(node).flags().contains(NodeFlags::HAS_STATEMENT)
+        };
+        let folds = !statement(then_) && !statement(else_);
         Ok(Conditional {
             condition,
             then_,
@@ -103,6 +111,7 @@ impl State {
             kind,
             unit,
             declares,
+            folds,
         })
     }
 
@@ -232,7 +241,7 @@ impl State {
         let yes = children.next().expect("first branch");
         if conditional.kind == Kind::If {
             let no = children.next().expect("second branch");
-            return self.finish_if(cx, conditional.target, parts, test, yes, no);
+            return self.finish_if(cx, conditional.target, conditional.folds, parts, test, yes, no);
         }
         let and = conditional.kind == Kind::And;
         if !matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
@@ -243,9 +252,9 @@ impl State {
         let constant = self.pure_expression(View::JBool, u16::from(!and));
         let constant = Probed::Free(self.free.push(Free::Leaf(constant)));
         if and {
-            self.finish_if(cx, Target::None, parts, test, yes, constant)
+            self.finish_if(cx, Target::None, conditional.folds, parts, test, yes, constant)
         } else {
-            self.finish_if(cx, Target::None, parts, test, constant, yes)
+            self.finish_if(cx, Target::None, conditional.folds, parts, test, constant, yes)
         }
     }
 
@@ -255,6 +264,7 @@ impl State {
         &mut self,
         cx: Cx,
         target: Target,
+        folds: bool,
         parts: Parts,
         test: NodeId,
         yes: Probed,
@@ -282,7 +292,9 @@ impl State {
         };
         match (cx.cont, target) {
             (Cont::Effect(Tail::No), _) => self.effect_conditional(cx, parts, test, yes, no),
-            (Cont::Effect(Tail::Return(_)), _) => self.return_conditional(cx, parts, test, yes, no),
+            (Cont::Effect(Tail::Return(_)), _) => {
+                self.return_conditional(cx, folds, parts, test, yes, no)
+            }
             (_, Target::Result(target) | Target::Given(target)) => {
                 let assign = Cx {
                     cont: Cont::Assign(target),
@@ -360,7 +372,7 @@ impl State {
     }
 
     /// Release the statements of a discarded run: one step per statement.
-    fn release_run(&mut self, run: Span) {
+    pub(super) fn release_run(&mut self, run: Span) {
         for statement in self.statements.statements(run) {
             self.arena.release(statement);
         }
@@ -830,6 +842,7 @@ impl State {
     fn return_conditional(
         &mut self,
         cx: Cx,
+        folds: bool,
         parts: Parts,
         test: NodeId,
         yes: Probed,
@@ -837,10 +850,9 @@ impl State {
     ) -> Probed {
         let yes = self.run(cx, yes);
         let no = self.run(cx, no);
-        // Step 1, C:5241 try_fold_effect_only_return_tail. The legacy gate
-        // lambda_contains_statement_value_form (C:5139) holds for every unit
-        // this lowering accepts: each such form is still Unsupported.
-        if self.returns_after_effects(yes) && self.returns_after_effects(no) {
+        // Step 1, C:5241 try_fold_effect_only_return_tail, behind the legacy
+        // gate lambda_contains_statement_value_form (C:5139): `folds`.
+        if folds && self.returns_after_effects(yes) && self.returns_after_effects(no) {
             let then_ = self.fold_return_tail(yes);
             let else_ = self.fold_return_tail(no);
             self.kill(yes, no);

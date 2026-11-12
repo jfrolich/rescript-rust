@@ -34,6 +34,11 @@ impl NodeFlags {
     /// (`Lam_exit_code.has_exit`, lam_exit_code.ml:35). Reuses the bit that
     /// only a `JNumber` reads as `JS_CHAR_PRESENT`.
     pub const HAS_EXIT: u8 = Self::JS_CHAR_PRESENT;
+    /// L-only, never on a `Var`: the subtree holds, outside a `Fun`, a
+    /// construct that is lowered to statements in every continuation (C:5139
+    /// lambda_contains_statement_value_form). Reuses the bit level J reads as
+    /// `JS_LOC_PRESENT`.
+    pub const HAS_STATEMENT: u8 = Self::JS_LOC_PRESENT;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0

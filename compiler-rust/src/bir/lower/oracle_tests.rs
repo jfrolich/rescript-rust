@@ -664,3 +664,23 @@ fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
     assert_eq!(print(&old), "\n\n\nfunction pair_0(x) {\n  return x;\n}\n\nfunction run() {\n  return pair_0(2);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
     assert_eq!(print(&new), "\n\n\nfunction run() {\n  return 2;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
 }
+
+#[test]
+fn a_return_conditional_does_not_fold_over_a_statement_form() {
+    // C:5139 lambda_contains_statement_value_form: the branch is a string
+    // switch of one complete case, lowered to its body `e; return 5`. The
+    // conditional stays a statement instead of `return x ? (e, 5) : 2`.
+    use crate::lambda::LamLoc;
+    use crate::lambda::lam_primitive::Primitive as P;
+    let mut a = LamArena::new();
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let effect = a.prim_raw(P::PinitMod, &[one], LamLoc::NONE);
+    let five = a.const_(C::Int { i: 5, comment: None });
+    let body = a.seq_raw(effect, five);
+    let y = a.var(Ident::new("y", 11, IdentFlags::NONE));
+    let branch = a.string_switch(y, &[("a", body)], None);
+    let x = a.var(Ident::new("x", 10, IdentFlags::NONE));
+    let two = a.const_(C::Int { i: 2, comment: None });
+    let root = a.if_(x, branch, two);
+    compare(a, root);
+}
