@@ -148,11 +148,11 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
         for source in &package.source_folders {
             let dir = package.path.join(&source.dir);
             if !dir.exists() {
-                log::error!(
-                    "Could not read folder: {:?}. Specified in dependency: {}, located {:?}...",
+                eprintln!(
+                    "warning: source folder {:?} of package {} ({}) does not exist or is not a folder",
                     source.dir,
                     package.name,
-                    package.path
+                    package.path.display()
                 );
                 continue;
             }

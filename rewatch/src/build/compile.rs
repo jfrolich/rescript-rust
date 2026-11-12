@@ -1340,7 +1340,7 @@ pub fn compile(
     }
 
     trace!(
-        "Compiled {} out of {} in the universe",
+        "compiled {} of the {} modules to check",
         completed_count, total_universe_count,
     );
 

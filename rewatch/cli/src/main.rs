@@ -115,13 +115,13 @@ fn run_main(otel_enabled: bool) -> Result<i32> {
 
     if !otel_enabled {
         let stdout_logger = env_logger::Builder::new()
-            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .format(write_log_record)
             .filter_level(log_level_filter)
             .target(env_logger::fmt::Target::Stdout)
             .build();
 
         let stderr_logger = env_logger::Builder::new()
-            .format(|buf, record| writeln!(buf, "{}:\n{}", record.level(), record.args()))
+            .format(write_log_record)
             .filter_level(log_level_filter)
             .target(env_logger::fmt::Target::Stderr)
             .build();
@@ -276,6 +276,17 @@ where
             Err(panic) => std::panic::resume_unwind(panic),
         }
     })
+}
+
+/// A log record as printed: verbose logs are labeled inline (`debug: …`,
+/// `trace: …`, as rewatch-ocaml's `Output.log`), the others on a line of
+/// their own (`WARN:`).
+fn write_log_record(buf: &mut env_logger::fmt::Formatter, record: &log::Record) -> std::io::Result<()> {
+    match record.level() {
+        log::Level::Debug => writeln!(buf, "debug: {}", record.args()),
+        log::Level::Trace => writeln!(buf, "trace: {}", record.args()),
+        level => writeln!(buf, "{level}:\n{}", record.args()),
+    }
 }
 
 struct SplitLogger {

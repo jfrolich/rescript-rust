@@ -187,7 +187,8 @@ fn format_files(mut files: Vec<String>, check: bool) -> Result<()> {
     let mut failed = false;
     for (file, outcome) in files.iter().zip(&outcomes) {
         if let FileOutcome::Failed(report) = outcome {
-            eprintln!("{}", formatting_error(&display_path(file, &current_dir), report));
+            let error = formatting_error(&display_path(file, &current_dir), report);
+            eprintln!("{}", crate::build::compiler_output(&error));
             failed = true;
         }
     }

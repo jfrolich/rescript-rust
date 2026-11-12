@@ -222,13 +222,12 @@ fn remove_gentype_file(package: &Package, source: &Path) {
 
 /// Read the previous in-process build's records and remove the outputs of
 /// sources it compiled that no longer exist: the JS output and any typed
-/// artifacts in `lib/rescript`. Returns (removed sources, recorded sources).
-pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> (usize, usize) {
+/// artifacts in `lib/rescript`. Returns the number of removed sources.
+pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) -> usize {
     let root_config = build_state.get_root_config();
     let suffix = root_config.get_suffix(root_config.get_package_specs().first().unwrap());
     let current = in_process_source_paths(build_state);
     let mut removed = 0;
-    let mut total = 0;
     let mut deleted_modules = AHashSet::new();
     let mut previous = build::incremental::PreviousInProcessBuild::default();
     let states: Vec<(&String, build::state_db::PackageState)> = build_state
@@ -243,7 +242,6 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
             .map(|entries| entries.iter().map(|(_, path)| path).collect())
             .unwrap_or_default();
         for (path, module_name) in &state.sources {
-            total += 1;
             if current_paths.contains(path) {
                 continue;
             }
@@ -275,7 +273,7 @@ pub fn cleanup_previous_in_process_build(build_state: &mut BuildCommandState) ->
     }
     build_state.deleted_modules = deleted_modules;
     build_state.previous_in_process = Some(previous);
-    (removed, total)
+    removed
 }
 
 pub fn cleanup_after_build(build_state: &BuildCommandState, compiler_info_write: build::CompilerInfoWrite) {
@@ -332,12 +330,19 @@ pub fn clean(path: &Path, show_progress: bool, plain_output: bool, prod: bool) -
 
     let timing_clean_mjs = Instant::now();
     let root_config = project_context.get_root_config();
-    let suffix_for_print = root_config
+    let suffixes = root_config
         .get_package_specs()
         .iter()
         .map(|spec| root_config.get_suffix(spec))
         .collect::<Vec<String>>()
         .join(", ");
+    // The step names the suffixes, or the generated files in general when
+    // there are none to name (rewatch-ocaml's `Clean.run`).
+    let suffix_for_print = if suffixes.is_empty() {
+        "generated".to_string()
+    } else {
+        suffixes
+    };
 
     if !plain_output && show_progress {
         print!(

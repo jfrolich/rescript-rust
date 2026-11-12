@@ -163,7 +163,7 @@ fn exit_with(error: Error, locked: impl FnOnce(u32) -> String) -> ! {
     match error {
         Error::Locked(pid) => eprintln!("{}", locked(pid)),
         Error::ProjectFolderMissing(_) => eprintln!("{error}"),
-        Error::WritingLockfile(_) => eprintln!("Could not start Rescript build: {error}"),
+        Error::WritingLockfile(_) => eprintln!("Could not start ReScript build: {error}"),
     }
     std::process::exit(1);
 }
@@ -171,7 +171,7 @@ fn exit_with(error: Error, locked: impl FnOnce(u32) -> String) -> ! {
 pub fn get_lock_or_exit(kind: LockKind, folder: &str) -> LockGuard {
     match get(kind, folder) {
         Lock::Error(error) => exit_with(error, |pid| {
-            format!("Could not start Rescript build: {}", Error::Locked(pid))
+            format!("Could not start ReScript build: {}", Error::Locked(pid))
         }),
         Lock::Acquired(guard) => guard,
     }

@@ -400,7 +400,7 @@ fn read_dependencies(
                         .unwrap_or(&current_package_path);
 
                     eprintln!(
-                        "Duplicated package: {} ./{} (chosen) vs ./{} in ./{}",
+                        "warning: duplicated package: {} ./{} (chosen) vs ./{} in ./{}",
                         package_name,
                         chosen_relative.to_string_lossy(),
                         duplicate_relative.to_string_lossy(),
@@ -578,10 +578,9 @@ fn make_package(
         None => {
             if !is_root {
                 let package_path_str = package_path.to_string_lossy();
-                log::warn!(
-                    "Package '{}' has not defined any sources, but is not the root package. This is likely a mistake. It is located: {}",
-                    config.name,
-                    package_path_str
+                eprintln!(
+                    "warning: package '{}' has not defined any sources, but is not the root package. This is likely a mistake. It is located: {}",
+                    config.name, package_path_str
                 );
             }
 
@@ -1220,9 +1219,8 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                                     interface_display
                                 ));
                             }
-                            println!(
-                                "{} No implementation file found for interface file (skipping): {}",
-                                LINE_CLEAR,
+                            eprintln!(
+                                "warning: no implementation file found for interface file (skipping): {}",
                                 file.to_string_lossy()
                             )
                         }

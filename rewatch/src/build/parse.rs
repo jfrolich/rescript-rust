@@ -420,8 +420,7 @@ fn generate_ast(
         log::debug!("Parsing {} with source locations", source.file_path.display());
         result = parse_saved_source(&source, true);
     }
-    let (stderr, mut stored_ast, deps) =
-        result.map_err(|err| anyhow!("Error in {}:\n{}", package.name, err))?;
+    let (stderr, mut stored_ast, deps) = result.map_err(|err| anyhow!("{err}"))?;
     if !stored_ast.arena().stores_locations() {
         match &mut stored_ast {
             StoredAst::Structure(ast) => Arc::get_mut(ast).unwrap().retry_source = Some(source),
