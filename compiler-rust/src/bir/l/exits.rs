@@ -461,7 +461,7 @@ mod tests {
         for &(var, source) in &stats.renames {
             imported.register_rename(var, source).unwrap();
         }
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let actual = export_lambda(&imported).unwrap();
         assert_eq!(
             super::super::flatten::identities(&a, expected),
@@ -651,7 +651,7 @@ mod tests {
             };
             let nodes = if wide { 10_004 } else { 20_001 };
             assert!(steps <= 120 * nodes, "wide={wide}, steps={steps}");
-            imported.arena.validate(Some(imported.root), false).unwrap();
+            imported.arena.validate(Some(imported.root)).unwrap();
             eprintln!("exits wide={wide}: {steps} steps");
         }
     }

@@ -16,7 +16,7 @@ pub struct Imported {
     pub arena: Bir,
     /// Synthetic top-level statement list.
     pub root: NodeId,
-    idents: Vec<Ident>,
+    pub(super) idents: Vec<Ident>,
     modules: Vec<js::ModuleId>,
     exports: Vec<Ident>,
     export_set: ahash::AHashSet<Ident>,
@@ -1557,7 +1557,7 @@ mod tests {
     }
     fn roundtrip(p: &j::JsDepsProgram) {
         let imported = import_js(p).unwrap();
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let q = export_js(&imported).unwrap();
         assert_eq!(
             js::dump::block(&p.program.arena, &p.program.block),

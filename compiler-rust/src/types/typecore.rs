@@ -69,7 +69,7 @@ fn extension_eval_string(
     let crate::parser::ast::StructureItemDesc::Pstr_eval(eval) = &item.pstr_desc else {
         return None;
     };
-    let expr = arena.get_expr(eval.0);
+    let expr = arena.get_expanded_expr(eval.0);
     let crate::parser::ast::ExpressionDesc::Pexp_constant(constant) = &expr.pexp_desc else {
         return None;
     };
@@ -4247,7 +4247,7 @@ fn normalize_constructor_expr_args(
     sargs: &Located<crate::parse_arena::ExprList>,
 ) -> Vec<crate::parse_arena::ExprIdx> {
     match arena.expr_list(sargs.txt) {
-        [se] if arity > 1 => match &arena.get_expr(*se).pexp_desc {
+        [se] if arity > 1 => match &arena.get_expanded_expr(*se).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_tuple(args) => arena.expr_list(*args).to_vec(),
             _ => vec![*se],
         },
@@ -7824,7 +7824,7 @@ fn final_subexpression<'e>(
             },
             _ => return sexp,
         };
-        sexp = arena.get_expr(next);
+        sexp = arena.get_expanded_expr(next);
     }
 }
 
@@ -8119,7 +8119,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         // Special errors for braced identifiers passed to records.
         ED::Pexp_braces(braces)
             if matches!(
-                &tctx.arena.get_expr(braces.expr).pexp_desc,
+                &tctx.arena.get_expanded_expr(braces.expr).pexp_desc,
                 ED::Pexp_ident(_)
             ) =>
         {
@@ -8243,7 +8243,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         });
     }
     if let ED::Pexp_field(record_expr_idx, field_lid) = &expr.pexp_desc {
-        let record_expr = tctx.arena.get_expr(*record_expr_idx);
+        let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
         let typed_field = type_field(
             tctx,
             env,
@@ -8270,7 +8270,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_braces(braces) => {
             // typecore.ml: type the inner expression, then prepend the
             // braces node's attributes.
-            let inner = tctx.arena.get_expr(braces.expr);
+            let inner = tctx.arena.get_expanded_expr(braces.expr);
             tctx.deprecated_function_call = deprecated_function_call;
             let exp = type_expect_with_recarg(tctx, env, inner, expected_ty, context, recarg)?;
             let mut attrs = expr.pexp_attributes.clone();
@@ -8341,7 +8341,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Type check each element
             let mut typed_exprs = Vec::new();
             for (e, ty) in tctx.arena.expr_list(*exprs).iter().zip(elem_types.iter()) {
-                let typed_expr = type_expect(tctx, env, tctx.arena.get_expr(*e), *ty, None)?;
+                let typed_expr = type_expect(tctx, env, tctx.arena.get_expanded_expr(*e), *ty, None)?;
                 typed_exprs.push(typed_expr);
             }
 
@@ -8428,7 +8428,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             )?;
 
             // Type check body in extended environment
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             let typed_body =
                 type_expect_with_module_unpacks(tctx, &new_env, body, expected_ty, &unpacks, None)?;
             let body_type = typed_body.exp_type;
@@ -8455,7 +8455,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_sequence(e1_idx, e2_idx) => {
             // Sequence expression: e1; e2
-            let e1 = tctx.arena.get_expr(*e1_idx);
+            let e1 = tctx.arena.get_expanded_expr(*e1_idx);
             let typed_e1 = type_statement(tctx, env, e1)?;
             if matches!(
                 &typed_e1.exp_desc,
@@ -8466,7 +8466,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             }
 
             // e2 has the expected type
-            let e2 = tctx.arena.get_expr(*e2_idx);
+            let e2 = tctx.arena.get_expanded_expr(*e2_idx);
             let typed_e2 = type_expect(tctx, env, e2, expected_ty, None)?;
             let e2_type = typed_e2.exp_type;
 
@@ -8504,7 +8504,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let bool_ty = env.type_bool(ctx);
 
             // Condition should be bool
-            let cond = tctx.arena.get_expr(*cond_idx);
+            let cond = tctx.arena.get_expanded_expr(*cond_idx);
             let typed_cond = type_expect(
                 tctx,
                 env,
@@ -8512,8 +8512,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 bool_ty,
                 Some(ClashSite::IfCondition),
             )?;
-            let then_branch = tctx.arena.get_expr(*then_idx);
-            let else_branch = else_idx.map(|idx| tctx.arena.get_expr(idx));
+            let then_branch = tctx.arena.get_expanded_expr(*then_idx);
+            let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
 
             match else_branch {
                 Some(else_branch) => {
@@ -8581,7 +8581,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Use separate unit types for body and result (matching OCaml's rue pattern).
             let bool_ty = env.type_bool(ctx);
 
-            let cond = tctx.arena.get_expr(*cond_idx);
+            let cond = tctx.arena.get_expanded_expr(*cond_idx);
             let typed_cond = type_expect(
                 tctx,
                 env,
@@ -8589,7 +8589,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 bool_ty,
                 Some(ClashSite::WhileCondition),
             )?;
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             let typed_body = with_loop_depth(tctx, |tctx| type_statement(tctx, env, body))?;
 
             // OCaml typecore.ml:3082-3090: `rue { ... exp_type = instance_def
@@ -8616,7 +8616,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // Assert expression
             let bool_ty = env.type_bool(ctx);
 
-            let e = tctx.arena.get_expr(*e_idx);
+            let e = tctx.arena.get_expanded_expr(*e_idx);
             let typed_e = type_expect(
                 tctx,
                 env,
@@ -8664,7 +8664,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 let typed_e = type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*e),
+                    tctx.arena.get_expanded_expr(*e),
                     elem_ty,
                     Some(ClashSite::ArrayLiteral),
                 )?;
@@ -8704,14 +8704,14 @@ fn type_expect_with_recarg_unscoped<'a>(
                                 txt: tctx.arena.get_string(key.txt).to_string(),
                                 loc: key.loc,
                             },
-                            { let value = type_expect(tctx, env, tctx.arena.get_expr(*svalue), ty, None)?; tctx.push_expr(value) },
+                            { let value = type_expect(tctx, env, tctx.arena.get_expanded_expr(*svalue), ty, None)?; tctx.push_expr(value) },
                         )
                     }
                     crate::parser::ast::DictEntry::Pdict_spread(sspread) => {
                         TypedDictEntry::Tdict_spread({ let value = type_expect(
                             tctx,
                             env,
-                            tctx.arena.get_expr(*sspread),
+                            tctx.arena.get_expanded_expr(*sspread),
                             dict_type(ty),
                             None,
                         )?; tctx.push_expr(value) })
@@ -8758,7 +8758,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 parts.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(spart),
+                    tctx.arena.get_expanded_expr(spart),
                     container_type(ty),
                     None,
                 )?);
@@ -8793,7 +8793,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 values.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*value),
+                    tctx.arena.get_expanded_expr(*value),
                     string_ty,
                     Some(ClashSite::StringConcat),
                 )?);
@@ -8820,7 +8820,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         // value of the builtin `taggedTemplate<'param, 'output>` type.
         ED::Pexp_tagged_template(template) => {
             ctx.begin_def();
-            let stag = tctx.arena.get_expr(template.tag);
+            let stag = tctx.arena.get_expanded_expr(template.tag);
             let tag_var = ctx.new_var(None);
             tctx.deprecated_function_call = true;
             let tag = type_expect(tctx, env, stag, tag_var, None)?;
@@ -8849,7 +8849,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 values.push(type_expect(
                     tctx,
                     env,
-                    tctx.arena.get_expr(*value),
+                    tctx.arena.get_expanded_expr(*value),
                     param_ty,
                     Some(ClashSite::TaggedTemplateValue),
                 )?);
@@ -8882,7 +8882,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
-            let scrutinee = tctx.arena.get_expr(*scrutinee_idx);
+            let scrutinee = tctx.arena.get_expanded_expr(*scrutinee_idx);
 
             // Normal match expression
             type_match(
@@ -8899,14 +8899,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_try(inner) => {
             let (ref body_idx, ref handlers, ref finally) = *inner;
             // Try expression
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_try(
                 tctx,
                 env,
                 expr,
                 body,
                 tctx.arena.case_list(*handlers),
-                finally.map(|finally| tctx.arena.get_expr(finally)),
+                finally.map(|finally| tctx.arena.get_expanded_expr(finally)),
                 expected_ty,
             )
         }
@@ -8992,7 +8992,7 @@ fn type_expect_with_recarg_unscoped<'a>(
                 env,
                 expr,
                 label,
-                sarg.map(|idx| tctx.arena.get_expr(idx)),
+                sarg.map(|idx| tctx.arena.get_expanded_expr(idx)),
                 expected_ty,
                 context,
             )
@@ -9006,7 +9006,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             // `sexp.pexp_attributes` at the result uses the spread expression's
             // attributes, not the record expression's attributes.
             let attrs = match base {
-                Some(base_expr) => &tctx.arena.get_expr(*base_expr).pexp_attributes,
+                Some(base_expr) => &tctx.arena.get_expanded_expr(*base_expr).pexp_attributes,
                 None => &expr.pexp_attributes,
             };
             type_record(tctx, env, loc, inner, expected_ty, attrs, recarg)
@@ -9017,8 +9017,8 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_setfield(inner) => {
             let (ref record_expr_idx, ref field_lid, ref new_value_idx) = **inner;
             // Field assignment
-            let record_expr = tctx.arena.get_expr(*record_expr_idx);
-            let new_value = tctx.arena.get_expr(*new_value_idx);
+            let record_expr = tctx.arena.get_expanded_expr(*record_expr_idx);
+            let new_value = tctx.arena.get_expanded_expr(*new_value_idx);
             type_setfield(
                 tctx,
                 env,
@@ -9035,7 +9035,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_constraint(inner) => {
             let (ref inner_expr_idx, ref core_type) = **inner;
             // Type constraint
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             let core_type_ref = tctx.arena.get_core_type(*core_type);
             type_constraint(
                 tctx,
@@ -9051,7 +9051,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_coerce(inner) => {
             let (ref inner_expr_idx, ref opt_from_type, ref to_type) = **inner;
             // Type coercion: (E :> T) or (E : T1 :> T2)
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             let to_type_ref = tctx.arena.get_core_type(*to_type);
             let opt_from_type_ref = opt_from_type.map(|idx| tctx.arena.get_core_type(idx));
             type_coerce(
@@ -9069,14 +9069,14 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_open(inner) => {
             let (ref override_flag, ref lid, ref body_idx) = **inner;
             // Open expression: M.{ E } or open M; E
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_open(tctx, env, expr, override_flag, lid, body, expected_ty)
         }
 
         ED::Pexp_newtype(inner) => {
             let (ref name, ref body_idx) = **inner;
             // Newtype expression: (type t) => E
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_newtype(
                 tctx,
                 env,
@@ -9090,7 +9090,7 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_await(inner_expr_idx) => {
             // Await expression: await E
-            let inner_expr = tctx.arena.get_expr(*inner_expr_idx);
+            let inner_expr = tctx.arena.get_expanded_expr(*inner_expr_idx);
             type_await(
                 tctx,
                 env,
@@ -9105,7 +9105,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_object_get(inner) => {
             let (ref obj_expr_idx, ref method) = **inner;
             // Method send: E#m
-            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
+            let obj_expr = tctx.arena.get_expanded_expr(*obj_expr_idx);
             type_object_get(
                 tctx,
                 env,
@@ -9120,8 +9120,8 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_object_set(inner) => {
             let (ref obj_expr_idx, ref field, ref value_idx) = **inner;
-            let obj_expr = tctx.arena.get_expr(*obj_expr_idx);
-            let value = tctx.arena.get_expr(*value_idx);
+            let obj_expr = tctx.arena.get_expanded_expr(*obj_expr_idx);
+            let value = tctx.arena.get_expanded_expr(*value_idx);
             type_object_set(
                 tctx,
                 env,
@@ -9148,7 +9148,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         ED::Pexp_letexception(inner) => {
             let (ref ext_constr, ref body_idx) = **inner;
             // Let exception: { exception C; E }
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_letexception(
                 tctx,
                 env,
@@ -9183,7 +9183,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             let (ref name, ref module_expr, ref body_idx) = **inner;
             // Let module: { module M = ME; E }
             let module_expr_ref = tctx.arena.get_mod_expr(*module_expr);
-            let body = tctx.arena.get_expr(*body_idx);
+            let body = tctx.arena.get_expanded_expr(*body_idx);
             type_letmodule(
                 tctx,
                 env,
@@ -9496,8 +9496,8 @@ fn translate_unified_ops(
 
     match entry.form {
         UnifiedOpForm::Binary if args.len() == 2 => {
-            let lhs_expr = tctx.arena.get_expr(args[0].1);
-            let rhs_expr = tctx.arena.get_expr(args[1].1);
+            let lhs_expr = tctx.arena.get_expanded_expr(args[0].1);
+            let rhs_expr = tctx.arena.get_expanded_expr(args[1].1);
 
             let lhs = match type_exp(tctx, env, lhs_expr, None) {
                 Ok(e) => e,
@@ -9589,7 +9589,7 @@ fn translate_unified_ops(
             }))
         }
         UnifiedOpForm::Unary if args.len() == 1 => {
-            let arg_expr = tctx.arena.get_expr(args[0].1);
+            let arg_expr = tctx.arena.get_expanded_expr(args[0].1);
             let arg = match type_exp(tctx, env, arg_expr, None) {
                 Ok(e) => e,
                 Err(e) => return Some(Err(e)),
@@ -9960,7 +9960,7 @@ fn type_application(
     let loc = sexp.pexp_loc;
     let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let arena = tctx.arena;
-    let funct = arena.get_expr(apply.funct);
+    let funct = arena.get_expanded_expr(apply.funct);
     let args = arena.apply_args(apply.args);
     let partial = apply.partial;
     let transformed_jsx = apply.transformed_jsx;
@@ -9977,7 +9977,7 @@ fn type_application(
             .find(|(label, _)| !matches!(label, ArgLabel::Nolabel))
     {
         return Err(TypeCoreError::MisplacedLabelSyntax {
-            loc: tctx.arena.get_expr(*arg_idx).pexp_loc,
+            loc: tctx.arena.get_expanded_expr(*arg_idx).pexp_loc,
         });
     }
 
@@ -10160,7 +10160,7 @@ fn type_application(
         );
         if ctx.get_level(uncommitted_funct_ty) >= ctx.get_level(ret) && !is_identity {
             for (_, arg) in args {
-                tctx.report_warning(tctx.arena.get_expr(*arg).pexp_loc, Warning::UnusedArgument);
+                tctx.report_warning(tctx.arena.get_expanded_expr(*arg).pexp_loc, Warning::UnusedArgument);
             }
         }
         let arrow = ctx.new_type(TypeDesc::Tarrow { args: params, ret });
@@ -10234,7 +10234,7 @@ fn type_application(
         {
             let arg_index = remaining_args.remove(match_index);
             let (call_label, arg_expr_idx) = &args[arg_index];
-            let arg_expr = tctx.arena.get_expr(*arg_expr_idx);
+            let arg_expr = tctx.arena.get_expanded_expr(*arg_expr_idx);
             let call_is_optional = call_label.is_optional();
             if !param.label().is_optional() && call_is_optional {
                 tctx.report_warning(
@@ -10323,13 +10323,13 @@ fn type_application(
         let unit_sentinel = remaining_args.len() == 1
             && matches!(args[remaining_args[0]].0, ArgLabel::Nolabel)
             && matches!(
-                &tctx.arena.get_expr(args[remaining_args[0]].1).pexp_desc,
+                &tctx.arena.get_expanded_expr(args[remaining_args[0]].1).pexp_desc,
                 crate::parser::ast::ExpressionDesc::Pexp_construct(lid, args)
                     if tctx.arena.is_lident(lid.txt, "()") && args.txt.is_empty()
             );
         if !(all_ignored_optional && unit_sentinel) {
             let (label, arg_idx) = &args[remaining_args[0]];
-            let arg_expr = tctx.arena.get_expr(*arg_idx);
+            let arg_expr = tctx.arena.get_expanded_expr(*arg_idx);
             let result_ty = if omitted.is_empty() && ignored.is_empty() {
                 declared_ret
             } else {
@@ -11510,7 +11510,7 @@ fn type_match_cases_batch_non_gadt<'a>(
         for pending in pending_cases {
             let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
                 let bool_ty = env.type_bool(ctx);
-                let guard_expr = tctx.arena.get_expr(*guard);
+                let guard_expr = tctx.arena.get_expanded_expr(*guard);
                 Some(type_expect_with_module_unpacks(
                     tctx,
                     &pending.case_env,
@@ -11534,7 +11534,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                 body_ty
             };
 
-            let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+            let body_expr = tctx.arena.get_expanded_expr(pending.parsed_case.pc_rhs);
             let typed_body = type_expect_with_module_unpacks(
                 tctx,
                 &pending.case_env,
@@ -12150,13 +12150,13 @@ fn collect_lident_idents_in_module_expr(
             for item in items.iter() {
                 match &item.pstr_desc {
                     SID::Pstr_eval(inner) => {
-                        collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+                        collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
                     }
                     SID::Pstr_value(inner) => {
                         for binding in arena.vb_list(inner.1).iter() {
                             collect_lident_idents_in_expression(
                                 arena,
-                                arena.get_expr(binding.pvb_expr),
+                                arena.get_expanded_expr(binding.pvb_expr),
                                 out,
                             );
                         }
@@ -12207,7 +12207,7 @@ fn collect_lident_idents_in_module_expr(
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*inner), out);
         }
         MED::Pmod_unpack(expr) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
         }
     }
 }
@@ -12235,56 +12235,56 @@ fn collect_lident_idents_in_expression(
         | ED::Pexp_continue => {}
         ED::Pexp_let(inner) => {
             for binding in arena.vb_list(inner.1).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(binding.pvb_expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(binding.pvb_expr), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_fun(inner) => {
             if let Some(default) = inner.default {
-                collect_lident_idents_in_expression(arena, arena.get_expr(default), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(default), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.rhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.rhs), out);
         }
         ED::Pexp_apply(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.funct), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.funct), out);
             for (_label, arg) in arena.apply_args(inner.args) {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_template(template) => {
             for value in &template.values {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
             }
         }
         ED::Pexp_tagged_template(template) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(template.tag), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(template.tag), out);
             for value in &template.values {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
             }
         }
         ED::Pexp_match((scrutinee, cases)) | ED::Pexp_try((scrutinee, cases, None)) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*scrutinee), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*scrutinee), out);
             for case in arena.case_list(*cases).iter() {
                 if let Some(guard) = case.pc_guard {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(guard), out);
                 }
-                collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(case.pc_rhs), out);
             }
         }
         // typecore.ml `iter_expression`: `expr e; List.iter case pel; Option.iter expr finally`.
         ED::Pexp_try((body, cases, Some(finally))) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*body), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*body), out);
             for case in arena.case_list(*cases).iter() {
                 if let Some(guard) = case.pc_guard {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(guard), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(guard), out);
                 }
-                collect_lident_idents_in_expression(arena, arena.get_expr(case.pc_rhs), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(case.pc_rhs), out);
             }
-            collect_lident_idents_in_expression(arena, arena.get_expr(*finally), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*finally), out);
         }
         ED::Pexp_tuple(items) | ED::Pexp_array(items) => {
             for item in arena.expr_list(*items).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*item), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*item), out);
             }
         }
         ED::Pexp_dict(entries) => {
@@ -12292,108 +12292,108 @@ fn collect_lident_idents_in_expression(
                 match entry {
                     crate::parser::ast::DictEntry::Pdict_entry(_, e)
                     | crate::parser::ast::DictEntry::Pdict_spread(e) => {
-                        collect_lident_idents_in_expression(arena, arena.get_expr(*e), out)
+                        collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*e), out)
                     }
                 }
             }
         }
         ED::Pexp_spread(_, elements) => {
             for element in arena.spread_element_list(*elements) {
-                collect_lident_idents_in_expression(arena, arena.get_expr(element.expr()), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(element.expr()), out);
             }
         }
         ED::Pexp_construct(_, args) => {
             for arg in arena.expr_list(args.txt).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_variant(inner) => {
             for arg in arena.expr_list(inner.1.txt).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*arg), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*arg), out);
             }
         }
         ED::Pexp_record(inner) => {
             for field in arena.expr_field_list(inner.0).iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(field.expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(field.expr), out);
             }
             if let Some(base) = inner.1 {
-                collect_lident_idents_in_expression(arena, arena.get_expr(base), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(base), out);
             }
         }
         ED::Pexp_field(expr, _) | ED::Pexp_assert(expr) | ED::Pexp_await(expr) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
         }
         ED::Pexp_setfield(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_ifthenelse(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
             if let Some(else_expr) = inner.2 {
-                collect_lident_idents_in_expression(arena, arena.get_expr(else_expr), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(else_expr), out);
             }
         }
         ED::Pexp_ternary(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_braces(braces) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(braces.expr), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(braces.expr), out);
         }
         ED::Pexp_regexp(_) => {}
         ED::Pexp_sequence(lhs, rhs) | ED::Pexp_while(lhs, rhs) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(*lhs), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(*rhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*lhs), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*rhs), out);
         }
         ED::Pexp_for(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.4), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.4), out);
         }
         ED::Pexp_for_of(inner) | ED::Pexp_for_await_of(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_constraint(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_coerce(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_object_get(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
         }
         ED::Pexp_object_set(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.0), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.0), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_object_literal(fields) => {
             for (_, field) in fields.iter() {
-                collect_lident_idents_in_expression(arena, arena.get_expr(*field), out);
+                collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*field), out);
             }
         }
         ED::Pexp_letmodule(inner) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(inner.1), out);
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_letexception(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
         }
         ED::Pexp_newtype(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.1), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.1), out);
         }
         ED::Pexp_pack(mod_expr) => {
             collect_lident_idents_in_module_expr(arena, arena.get_mod_expr(*mod_expr), out);
         }
         ED::Pexp_open(inner) => {
-            collect_lident_idents_in_expression(arena, arena.get_expr(inner.2), out);
+            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(inner.2), out);
         }
         ED::Pexp_jsx_element(inner) => match &**inner {
             JsxElement::Fragment(fragment) => {
                 for child in fragment.children.iter() {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(*child), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*child), out);
                 }
             }
             JsxElement::Unary(unary) => {
@@ -12401,10 +12401,10 @@ fn collect_lident_idents_in_expression(
                     match prop {
                         JsxProp::Punning { .. } => {}
                         JsxProp::Value { value, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
                         }
                         JsxProp::Spreading { expr, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
                         }
                     }
                 }
@@ -12414,15 +12414,15 @@ fn collect_lident_idents_in_expression(
                     match prop {
                         JsxProp::Punning { .. } => {}
                         JsxProp::Value { value, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*value), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*value), out);
                         }
                         JsxProp::Spreading { expr, .. } => {
-                            collect_lident_idents_in_expression(arena, arena.get_expr(*expr), out);
+                            collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*expr), out);
                         }
                     }
                 }
                 for child in container.children.iter() {
-                    collect_lident_idents_in_expression(arena, arena.get_expr(*child), out);
+                    collect_lident_idents_in_expression(arena, arena.get_expanded_expr(*child), out);
                 }
             }
         },
@@ -12443,13 +12443,13 @@ fn all_idents_cases_with_generalized_constructor_order(
         if let Some(guard) = case.pc_guard {
             collect_lident_idents_in_expression(
                 tctx.arena,
-                tctx.arena.get_expr(guard),
+                tctx.arena.get_expanded_expr(guard),
                 &mut encountered,
             );
         }
         collect_lident_idents_in_expression(
             tctx.arena,
-            tctx.arena.get_expr(case.pc_rhs),
+            tctx.arena.get_expanded_expr(case.pc_rhs),
             &mut encountered,
         );
     }
@@ -12734,7 +12734,7 @@ fn type_pending_case_body(
     // Type check the guard if present.
     let typed_guard = if let Some(guard) = &pending.parsed_case.pc_guard {
         let bool_ty = env.type_bool(tctx.type_ctx);
-        let guard_expr = tctx.arena.get_expr(*guard);
+        let guard_expr = tctx.arena.get_expanded_expr(*guard);
         Some(type_expect_with_module_unpacks(
             tctx,
             &pending.case_env,
@@ -12753,7 +12753,7 @@ fn type_pending_case_body(
     } else {
         body_ty
     };
-    let body_expr = tctx.arena.get_expr(pending.parsed_case.pc_rhs);
+    let body_expr = tctx.arena.get_expanded_expr(pending.parsed_case.pc_rhs);
     let typed_body = type_expect_with_module_unpacks(
         tctx,
         &pending.case_env,
@@ -12872,7 +12872,7 @@ fn desugar_nary_function_defaults(
             let crate::parser::ast::ArgLabel::Optional(label) = param.p_lbl else {
                 unreachable!("defaults are only valid on optional parameters");
             };
-            let default_loc = arena.get_expr(default_idx).pexp_loc;
+            let default_loc = arena.get_expanded_expr(default_idx).pexp_loc;
             let source_pat_loc = arena.get_pat(param.p_pat).ppat_loc;
             let sloc_start = arena.loc_start_idx(source_pat_loc);
             let sloc_end = arena.loc_end_idx(default_loc);
@@ -13553,7 +13553,7 @@ fn type_function_nary(
     let typed_body = type_expect_with_module_unpacks(
         tctx,
         &body_env,
-        tctx.arena.get_expr(body),
+        tctx.arena.get_expanded_expr(body),
         body_result_type,
         &unpacks,
         None,
@@ -13720,9 +13720,9 @@ fn type_for(
     let arena = tctx.arena;
     let (pat, start_expr, end_expr, direction, body) = *for_loop;
     let pat = arena.get_pat(pat);
-    let start_expr = arena.get_expr(start_expr);
-    let end_expr = arena.get_expr(end_expr);
-    let body = arena.get_expr(body);
+    let start_expr = arena.get_expanded_expr(start_expr);
+    let end_expr = arena.get_expanded_expr(end_expr);
+    let body = arena.get_expanded_expr(body);
     let ctx = tctx.type_ctx;
     // OCaml passes Predef.type_int (generic singleton) to type_expect for each bound.
     // Inside type_expect, `rue` calls instance(ty_expected) — creating a FRESH copy
@@ -13904,8 +13904,8 @@ fn type_for_of(
     let arena = tctx.arena;
     let (pat, iterable_expr, body) = *for_of;
     let pat = arena.get_pat(pat);
-    let iterable_expr = arena.get_expr(iterable_expr);
-    let body = arena.get_expr(body);
+    let iterable_expr = arena.get_expanded_expr(iterable_expr);
+    let body = arena.get_expanded_expr(body);
     let ctx = tctx.type_ctx;
 
     // OCaml only accepts `_` or a variable for the for-of binding.
@@ -14314,14 +14314,14 @@ fn type_construct(
     let recarg = if cstr_desc.cstr_inlined.is_none() {
         RecArg::Rejected
     } else {
-        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expr(*arg_idx).pexp_desc {
+        let inline_record_arg_shape = matches!(sargs.as_slice(), [arg_idx] if match &tctx.arena.get_expanded_expr(*arg_idx).pexp_desc {
             crate::parser::ast::ExpressionDesc::Pexp_ident(_) => true,
             crate::parser::ast::ExpressionDesc::Pexp_record(inner) => {
                 let (_, base) = inner;
                 match base {
                     None => true,
                     Some(base_idx) => matches!(
-                        &tctx.arena.get_expr(*base_idx).pexp_desc,
+                        &tctx.arena.get_expanded_expr(*base_idx).pexp_desc,
                         crate::parser::ast::ExpressionDesc::Pexp_ident(_)
                     ),
                 }
@@ -14343,7 +14343,7 @@ fn type_construct(
         .zip(arg_types_for_expect.iter())
         .zip(arg_types_for_unify.iter())
     {
-        let arg_expr = tctx.arena.get_expr(*arg_idx);
+        let arg_expr = tctx.arena.get_expanded_expr(*arg_idx);
         let typed_arg = type_expect_with_recarg(tctx, env, arg_expr, *arg_ty, None, recarg)?;
         unify_expression_types(tctx, loc, typed_arg.exp_type, *arg_ty0, None)?;
         typed_args.push(typed_arg);
@@ -15039,7 +15039,7 @@ fn type_record(
 ) -> TypeCoreResult<Expression> {
     let arena = tctx.arena;
     let fields = arena.expr_field_list(record.0);
-    let base = record.1.map(|idx| arena.get_expr(idx));
+    let base = record.1.map(|idx| arena.get_expanded_expr(idx));
     let ctx = tctx.type_ctx;
     // typecore.ml Pexp_record: record syntax on a dict points to `dict{...}`,
     // checked against the expected type and, with a spread, its type.
@@ -15470,7 +15470,7 @@ fn type_record(
 
                     if field.opt && !env_label.lbl_optional {
                         return Err(TypeCoreError::FieldNotOptional {
-                            loc: tctx.arena.get_expr(field.expr).pexp_loc,
+                            loc: tctx.arena.get_expanded_expr(field.expr).pexp_loc,
                             name: env_label.lbl_name.to_string(),
                             typ: env_label.lbl_res,
                         });
@@ -15630,7 +15630,7 @@ fn type_record(
             let typed_expr = type_expect(
                 tctx,
                 env,
-                tctx.arena.get_expr(field.expr),
+                tctx.arena.get_expanded_expr(field.expr),
                 field_input_ty,
                 field_context,
             )?;
@@ -15672,7 +15672,7 @@ fn type_record(
             // typecore.ml:2373-2379 builds `Some e` with `~loc:e.pexp_loc`
             // before typing, so it keeps the field expression's own location
             // (for `{ open M; body }` the block's, not the body's).
-            let wrapped_loc = tctx.arena.get_expr(field.expr).pexp_loc;
+            let wrapped_loc = tctx.arena.get_expanded_expr(field.expr).pexp_loc;
             let wrapped_env = typed_expr.exp_env;
             Expression::new(
                 ExpressionDesc::Texp_construct(
@@ -16976,10 +16976,10 @@ fn type_value_binding_expression(
         .value_constraint(binding.pvb_pat)
         .and_then(|constraint| constraint.pvc_expression)
     {
-        let expression = tctx.arena.get_expr(expression).clone();
+        let expression = tctx.arena.get_expanded_expr(expression).clone();
         type_expect(tctx, env, &expression, expected_ty, None)
     } else {
-        let expression = tctx.arena.get_expr(binding.pvb_expr).clone();
+        let expression = tctx.arena.get_expanded_expr(binding.pvb_expr).clone();
         let match_context = (let_check == LetCheck::FakeOptional).then_some(MatchContext::Function);
         type_expect_full(
             tctx,
@@ -17431,7 +17431,7 @@ fn type_object_literal(
     let mut seen: HashMap<String, TypeExprRef> = HashMap::new();
     let mut fields: Vec<(Located<String>, TExprIdx)> = Vec::with_capacity(sfields.len());
     for (name, sfield) in sfields {
-        let sfield = tctx.arena.get_expr(*sfield);
+        let sfield = tctx.arena.get_expanded_expr(*sfield);
         let field = match seen.get(name.txt.as_ref()).copied() {
             Some(ty) => type_expect(tctx, env, sfield, ty, None)?,
             None => {
@@ -19490,11 +19490,11 @@ fn type_approx_for_rec_let(
 
     match &sexp.pexp_desc {
         ED::Pexp_braces(braces) => {
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(braces.expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(braces.expr))
         }
         ED::Pexp_let(inner) => {
             let (_, _, body) = inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*body))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*body))
         }
         ED::Pexp_fun(inner) => {
             let params = tctx.arena.nary_fun_params(inner).into_owned();
@@ -19511,47 +19511,47 @@ fn type_approx_for_rec_let(
                     typ,
                 )
             }));
-            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(body))?;
+            let ret = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(body))?;
             Ok(ctx.new_type(TypeDesc::Tarrow { args, ret }))
         }
         ED::Pexp_match(inner) => {
             let (_, cases) = inner;
             match tctx.arena.case_list(*cases).first() {
-                Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(case.pc_rhs)),
+                Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
             }
         }
         ED::Pexp_try(inner) => {
             let (expr, _, _) = inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))
         }
         ED::Pexp_tuple(items) => {
             let tys: TypeCoreResult<Vec<_>> = tctx
                 .arena
                 .expr_list(*items)
                 .iter()
-                .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*item)))
+                .map(|item| type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*item)))
                 .collect();
             Ok(ctx.new_tuple(tys?))
         }
         ED::Pexp_ifthenelse(inner) => {
             let (_, then_expr, _) = &**inner;
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*then_expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*then_expr))
         }
-        ED::Pexp_ternary(inner) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(inner.1)),
+        ED::Pexp_ternary(inner) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(inner.1)),
         ED::Pexp_sequence(_, expr) => {
-            type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))
+            type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))
         }
         ED::Pexp_constraint(inner) => {
             let (expr, sty) = &**inner;
-            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))?;
+            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))?;
             let ty1 = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*sty));
             unify_expression_types(tctx, loc, ty, ty1, None)?;
             Ok(ty1)
         }
         ED::Pexp_coerce(inner) => {
             let (expr, _sty1, sty2) = &**inner;
-            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(*expr))?;
+            let ty = type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(*expr))?;
             let ty1 = ctx.new_var(None);
             let ty2 = approx_type_for_rec_let(tctx, env, tctx.arena.get_core_type(*sty2));
             unify_expression_types(tctx, loc, ty, ty1, None)?;
@@ -20824,7 +20824,7 @@ fn type_let_bindings(
         if rec_flag == RecFlag::Recursive {
             for (typed_pat, binding) in typed_patterns.iter().zip(bindings.iter()) {
                 let approx_ty =
-                    type_approx_for_rec_let(tctx, env, tctx.arena.get_expr(binding.pvb_expr))?;
+                    type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(binding.pvb_expr))?;
                 let pat_ty_for_unify = {
                     let pat_ty = typed_pat.pat_type;
                     let pat_repr = ctx.repr(pat_ty);

@@ -16,8 +16,6 @@ impl NodeFlags {
     pub const NO_ALLOC: u8 = 2;
     /// Source metadata is present.
     pub const HAS_LOC: u8 = 4;
-    /// Tail position in a function.
-    pub const TAIL: u8 = 8;
     /// The expression's value is discarded.
     pub const VALUE_UNUSED: u8 = 16;
     /// A let's released, pure value is no longer evaluated.
@@ -26,8 +24,8 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
-    /// J-only: strict purity, reusing the L tail-position bit after lowering.
-    pub const STRICT: u8 = Self::TAIL;
+    /// J-only: strict purity.
+    pub const STRICT: u8 = 8;
     /// J-only: removable by E:146 is_pure_subexpression (not general purity).
     pub const J_SUBEXPR: u8 = Self::DEAD;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.

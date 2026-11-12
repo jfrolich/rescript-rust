@@ -357,9 +357,9 @@ impl Mapper for TailcallInlineState {
 
 /// Counts the uses of each local and records each declaration's purity.
 #[derive(Default)]
-struct UseCounts {
-    decls: HashMap<Ident, bool>,
-    counts: HashMap<Ident, usize>,
+pub(crate) struct UseCounts {
+    pub(crate) decls: HashMap<Ident, bool>,
+    pub(crate) counts: HashMap<Ident, usize>,
 }
 
 impl Visitor for UseCounts {

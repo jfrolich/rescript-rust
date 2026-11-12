@@ -406,7 +406,7 @@ mod tests {
             lowered
                 .program
                 .arena
-                .validate(Some(lowered.program.root), false)
+                .validate(Some(lowered.program.root))
                 .unwrap();
             let actual = bridge_j::export_js(&lowered.program).unwrap();
             let (mut block, values) = legacy.sequence_arguments(method, expected_args);
