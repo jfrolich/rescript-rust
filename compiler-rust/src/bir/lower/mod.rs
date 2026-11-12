@@ -456,7 +456,9 @@ impl ProbeRules for State {
             View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Effect(Tail::No)) => {
                 return self.conditional_effect(cx, condition, then_, else_).map(ProbePlan::Ready);
             }
-            View::If { .. } => return Err(Unsupported("if")),
+            View::If { condition, then_, else_ } => {
+                return self.conditional_return(cx, condition, then_, else_).map(ProbePlan::Ready);
+            }
             View::Switch { .. } => return Err(Unsupported("switch")),
             View::StrSwitch { .. } => return Err(Unsupported("string switch")),
             View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),

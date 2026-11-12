@@ -284,6 +284,110 @@ impl State {
         Probed::Out(Out { stmts: self.statements.since(start), value: Some(value), finished: Finished::False })
     }
 
+    /// R5, C:5144 compile_if_return_output, including both folding stages.
+    pub(super) fn conditional_return(
+        &mut self, cx: Cx, condition: NodeId, then_: NodeId, else_: NodeId,
+    ) -> Result<Probed, Unsupported> {
+        // R6 cannot occur before S3.6 installs tail-loop records. Keep the
+        // same explicit let-rec boundary as the application lowering.
+        if matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))
+            | Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+            return Err(Unsupported("let rec"));
+        }
+        let start = self.statements.mark();
+        let value_cx = Cx { cont: Cont::Value(Tail::No), ..cx };
+        let test = self.probe(value_cx, condition)?;
+        let test = self.realize(value_cx, test).value.unwrap();
+        // Step 0, C:3579 compile_if_unit_return_tail_block.
+        if cx.return_unit && self.trivial_unit(then_) && self.trivial_unit(else_) {
+            let mut statements = Vec::new();
+            norm::jm14_push_s_if_empty(&mut self.arena, test, &mut statements);
+            for statement in statements { self.statements.push(statement); }
+            return Ok(Probed::Out(Out { stmts: self.statements.since(start), value: None, finished: Finished::True }));
+        }
+        let yes = self.probe(cx, then_)?;
+        let yes = self.save_branch(yes);
+        let no = self.probe(cx, else_)?;
+        let no = self.save_branch(no);
+        let finished = match (yes, no) {
+            // Step 2: statement-free values need no return-block fallback.
+            (Branch::Free(yes), Branch::Free(no)) => {
+                let yes = self.realize(value_cx, Probed::Free(yes)).value.unwrap();
+                let no = self.realize(value_cx, Probed::Free(no)).value.unwrap();
+                let value = norm::je7_cond(&mut self.arena, test, yes, no);
+                let statement = crate::bir::j::return_value(&mut self.arena, value);
+                self.statements.push(statement);
+                Finished::True
+            }
+            (yes, no) => {
+                let yes = self.branch_statements(cx, yes);
+                let no = self.branch_statements(cx, no);
+                // Step 1, C:5118 try_fold_effect_only_return_tail: retain the
+                // comma shape before J-S3 sees the raw return blocks.
+                if self.effect_return_tail(&yes) && self.effect_return_tail(&no) {
+                    let yes = self.fold_return_tail(yes);
+                    let no = self.fold_return_tail(no);
+                    let value = norm::je7_cond(&mut self.arena, test, yes, no);
+                    let statement = crate::bir::j::return_value(&mut self.arena, value);
+                    self.statements.push(statement);
+                    Finished::True
+                } else {
+                    // Step 3, C:5231 compile_test_return_block_with_fallback.
+                    let statement = if self.single_return(&yes).is_some() && self.single_return(&no).is_some() {
+                        norm::js3_simplify_if(&mut self.arena, test, yes, no)
+                    } else if self.single_return(&no).is_some() {
+                        let test = norm::je8_not(&mut self.arena, test);
+                        let guard = norm::js3_simplify_if(&mut self.arena, test, no, vec![]);
+                        let mut statements = vec![guard];
+                        statements.extend(yes);
+                        // The wrapper hides the terminal tail from an outer If.
+                        norm::js2_block(&mut self.arena, statements)
+                    } else {
+                        norm::js3_simplify_if(&mut self.arena, test, yes, no)
+                    };
+                    self.statements.push(statement);
+                    Finished::False
+                }
+            }
+        };
+        // C:3179 compile_return_output applies output_as_block after the rule.
+        let span = self.statements.since(start);
+        let statements = self.conditional_statements(span);
+        for statement in norm::js5_unnest_block(&mut self.arena, statements) { self.statements.push(statement); }
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: None, finished }))
+    }
+
+    fn trivial_unit(&self, mut node: NodeId) -> bool {
+        loop {
+            match self.source.view(node) {
+                View::Const { value } => return matches!(self.arena.constant(value), crate::bir::Constant::Undefined(true)),
+                View::Seq { first, second } if self.source.node(first).flags().contains(crate::bir::NodeFlags::PURE) => node = second,
+                View::Let { value: Some(value), body, .. } if self.source.node(value).flags().contains(crate::bir::NodeFlags::PURE) => node = body,
+                _ => return false,
+            }
+        }
+    }
+
+    fn effect_return_tail(&self, statements: &[NodeId]) -> bool {
+        let Some((last, prefix)) = statements.split_last() else { return false };
+        matches!(self.arena.view(*last), View::SReturn { .. })
+            && prefix.iter().all(|&statement| matches!(self.arena.view(statement), View::SExp { .. }))
+    }
+
+    fn fold_return_tail(&mut self, mut statements: Vec<NodeId>) -> NodeId {
+        let last = statements.pop().unwrap();
+        let View::SReturn { value: mut result } = self.arena.view(last) else { unreachable!() };
+        self.arena.detach(result);
+        self.arena.release(last);
+        for statement in statements.into_iter().rev() {
+            let View::SExp { value } = self.arena.view(statement) else { unreachable!() };
+            self.arena.detach(value);
+            self.arena.release(statement);
+            result = norm::jm1_js_seq(&mut self.arena, value, result);
+        }
+        result
+    }
+
     /// R3, C:4873 compile_if_assignment_block and C:4895
     /// compile_test_assignment_block: assignments are lowered once.
     pub(super) fn conditional_assignment(
@@ -340,7 +444,7 @@ mod tests {
         let mut state = State::new(input);
         let target = state.fresh_variable("result");
         let target_id = state.idents[target.index()];
-        let cx = match context { 0 => Cx::value(), 1 => Cx::assign(target), 2 => Cx::declare(LetKind::Strict, target), 3 => Cx::effect(), _ => unreachable!() };
+        let cx = match context { 0 => Cx::value(), 1 => Cx::assign(target), 2 => Cx::declare(LetKind::Strict, target), 3 => Cx::effect(), 4 => Cx::returning(), _ => unreachable!() };
         let output = state.probe(cx, node).unwrap();
         let lowered = state.complete(cx, output);
         lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
@@ -389,6 +493,57 @@ mod tests {
     fn r4_step3_free_pure_else() { effect_case(3, 0); }
     #[test]
     fn r4_step4_nonterminal_branches() { effect_case(3, 3); }
+
+    #[test]
+    fn r5_step1_effect_return_tails() {
+        let mut source = LamArena::new();
+        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let mut branches = Vec::new();
+        for stamp in [10, 20] {
+            let callee = source.var(Ident::new("effect", stamp, IdentFlags::NONE));
+            let call = source.apply_raw(callee, &[], crate::lambda::ApInfo {
+                loc: crate::lambda::LamLoc::NONE, status: crate::lambda::ApplyStatus::InferFull,
+            });
+            let value = source.const_(Constant::JsUndefined { is_unit: true });
+            branches.push(source.seq_raw(call, value));
+        }
+        let root = source.if_raw(condition, branches[0], branches[1]);
+        compare_given(source, root, 4);
+    }
+
+    #[test]
+    fn r5_step0_unit_function() {
+        let mut source = LamArena::new();
+        let id = Ident::new("condition", 1, IdentFlags::NONE);
+        let condition = source.var(id);
+        let yes = source.const_(Constant::JsUndefined { is_unit: true });
+        let no = source.const_(Constant::JsUndefined { is_unit: true });
+        let body = source.if_raw(condition, yes, no);
+        let root = source.function_(1, &[id], body, crate::lambda::FunctionAttribute {
+            return_unit: true, ..Default::default()
+        }, crate::lambda::LamLoc::NONE);
+        compare_given(source, root, 0);
+    }
+
+    #[test]
+    fn r6_tail_loop_remains_explicitly_unsupported() {
+        let mut source = LamArena::new();
+        let condition = source.const_(Constant::JsTrue);
+        let yes = source.const_(Constant::JsTrue);
+        let no = source.const_(Constant::JsFalse);
+        let root = source.if_raw(condition, yes, no);
+        let input = bridge::import_lambda(&source, root).unwrap();
+        let node = input.root;
+        let mut state = State::new(input);
+        let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
+        assert!(matches!(state.probe(cx, node), Err(Unsupported("let rec"))));
+    }
+
+    #[test]
+    fn r5_returns_match_legacy() {
+        compare_context(false, 4);
+        compare_context(true, 4);
+    }
 
     #[test]
     fn r4_effects_match_legacy() {
