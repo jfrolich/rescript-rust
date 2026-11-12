@@ -2280,6 +2280,7 @@ fn build_package_compiler_options(
         };
 
     Ok(rescript_compiler::driver::CompilerOptions {
+        backend: rescript_compiler::bir::shadow::BackendMode::from_env(),
         check_only: build_command_state.check_only,
         include_paths,
         runtime_path,
@@ -3805,6 +3806,7 @@ pub(crate) fn runtime_compiler_options(
     let output_path = js_output_targets.first().map(|target| target.path.clone());
 
     rescript_compiler::driver::CompilerOptions {
+        backend: rescript_compiler::bir::shadow::BackendMode::from_env(),
         include_paths: vec![runtime_path.to_path_buf()],
         runtime_path: Some(runtime_root.to_path_buf()),
         open_modules: parsed_flags.open_modules,

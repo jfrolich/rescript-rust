@@ -55,9 +55,11 @@ impl Bir {
     }
 
     /// Defer capture analysis while constructing a complete tree. Do not edit or
-    /// query capture flags until `finish_bulk`; bulk sessions cannot nest.
+    /// query capture flags until `finish_bulk`; the arena must be fresh.
+    /// Weighted uses are finalized in the same pass.
     pub fn begin_bulk(&mut self) {
         assert!(!self.bulk, "bulk construction already active");
+        assert!(self.nodes.is_empty(), "bulk construction needs a fresh arena");
         self.bulk = true;
     }
 
