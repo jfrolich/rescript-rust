@@ -520,8 +520,8 @@ fn copy_j(b: &mut Bir, root: NodeId) -> NodeId {
         let old_vars = b.binders(old);
         let new_vars = b.binders(new);
         for (old, new) in old_vars.into_iter().zip(new_vars) {
-            let origin = b.vars.j_origin.get(&old).copied().unwrap_or(old);
-            b.vars.j_origin.insert(new, origin);
+            let origin = b.vars.j_origin[old.index()];
+            b.vars.j_origin[new.index()] = origin;
         }
         stack.extend(
             b.view(old)

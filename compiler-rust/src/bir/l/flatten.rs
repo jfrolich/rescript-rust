@@ -6,7 +6,7 @@ use crate::bir::*;
 use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::FieldDbgInfo;
 use crate::lambda::lam_primitive::{Mutable, Primitive};
-use std::collections::BTreeMap;
+use crate::bir::dense::DenseTable;
 
 /// `aux` matches lets and recursive groups (legacy lines 222-252); sequences
 /// are candidates only while `flatten` threads groups through them (198-210).
@@ -126,13 +126,16 @@ pub(crate) fn hit(e: &Engine<'_>, root: NodeId, var: VarId) -> bool {
 }
 
 /// Legacy eliminate_tuple, lines 45-70; lam_pass_deep_flatten.ml:31-34.
-/// Ordered map lookup only; duplicate indices retain the last projection.
+/// Dense field-index lookup; duplicate indices retain the last projection.
+/// O(projection spine + hit scan); scratch entries are cleared only when touched.
 fn eliminate_tuple(
     e: &Engine<'_>,
     var: VarId,
     mut body: NodeId,
-) -> Option<(BTreeMap<i32, VarId>, NodeId)> {
-    let mut mapping = BTreeMap::new();
+    fields: usize,
+    mapping: &mut DenseTable<VarId>,
+) -> Option<NodeId> {
+    mapping.clear();
     loop {
         if let View::Let {
             var: projected,
@@ -147,11 +150,16 @@ fn eliminate_tuple(
             && let Primitive::Pfield(index, _) = e.bir().primitive(primitive).primitive
             && variable(e.bir(), *tuple, var)
         {
-            mapping.insert(index, projected);
+            // Only real block field positions are queried by block_binding.
+            // Negative/out-of-range source projections were never read from
+            // the old map either; do not size storage by an arbitrary i32.
+            if let Ok(index) = usize::try_from(index) && index < fields {
+                mapping.insert(index, projected);
+            }
             body = next;
             continue;
         }
-        return (!hit(e, body, var)).then_some((mapping, body));
+        return (!hit(e, body, var)).then_some(body);
     }
 }
 
@@ -410,6 +418,7 @@ fn block_binding(
     n: NodeId,
     value: NodeId,
     groups: &mut Vec<Group>,
+    mapping: &mut DenseTable<VarId>,
 ) -> Option<NodeId> {
     let View::Let { var, body, .. } = e.bir().view(n) else {
         unreachable!()
@@ -417,16 +426,16 @@ fn block_binding(
     if !named(e, n, var) || !immutable(e.bir(), value) {
         return None;
     }
-    let (mapping, stripped) = eliminate_tuple(e, var, body)?;
     let View::Prim { args, .. } = e.bir().view(value) else {
         unreachable!()
     };
+    let stripped = eliminate_tuple(e, var, body, args.len(), mapping)?;
     let args = args.to_vec();
     let kind = e.bir().node(n).aux();
     for (i, arg) in args.into_iter().enumerate() {
         e.detach(arg);
-        groups.push(match mapping.get(&(i as i32)) {
-            Some(var) => Group::Single(kind, *var, arg),
+        groups.push(match mapping.get(i) {
+            Some(var) => Group::Single(kind, var, arg),
             None => Group::Nop(arg),
         });
     }
@@ -544,6 +553,9 @@ fn flatten_terminal(work: &mut Vec<Work>, n: NodeId) {
 /// both orders and the time at which a null conversion allocates its rename.
 fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
     let mut beta = beta_table(e, root);
+    // A block's arity is bounded by the original unit's node count. This
+    // scratch table is reused for every candidate, clearing touched fields.
+    let mut mapping = DenseTable::new(e.bir().nodes.len());
     let mut work = vec![Work::Aux(root)];
     let mut groups: Vec<Vec<Group>> = Vec::new();
     let mut result = root;
@@ -617,7 +629,7 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                 result = n;
             }
             Work::Binding(n, body, index, residue) => {
-                if !residue && let Some(stripped) = block_binding(e, n, result, &mut groups[index])
+                if !residue && let Some(stripped) = block_binding(e, n, result, &mut groups[index], &mut mapping)
                 {
                     work.push(Work::Flat(stripped, index));
                 } else {

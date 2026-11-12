@@ -19,6 +19,7 @@ pub mod lower;
 pub mod replay;
 pub mod shadow;
 mod dump;
+mod dense;
 mod edit;
 mod node;
 mod pools;
@@ -128,6 +129,7 @@ impl Bir {
         let id = VarId(index(self.vars.len()));
         self.capture_binders.push(0);
         self.bulk_binders.push((0, 0));
+        self.vars.j_origin.push(id);
         self.vars.name.push(name);
         self.vars.order.push(order);
         self.vars.flags.push(VarFlags::default());

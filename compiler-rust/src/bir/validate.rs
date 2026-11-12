@@ -24,6 +24,7 @@ impl Bir {
         }
         let nvars = self.vars.len();
         if [
+            self.vars.j_origin.len(),
             self.vars.order.len(),
             self.vars.flags.len(),
             self.vars.uses.len(),
