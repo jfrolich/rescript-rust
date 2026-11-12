@@ -252,6 +252,8 @@ impl<'a, 'r> Build<'a, 'r> {
         tag: &crate::lambda::TagInfo,
     ) -> Result<Expression<'a>, Unsupported> {
         use crate::lambda::TagInfo;
+        walk::block_supported(elements, tag)?;
+        let children = || walk::block_elements(self.arena, elements, tag);
         let mut properties = self.b.vec();
         let mut indexed = String::with_capacity(21); // One scratch buffer per block, not per field.
         let mut field = |name: &str, value: Expr| -> Result<(), Unsupported> {
@@ -260,10 +262,8 @@ impl<'a, 'r> Build<'a, 'r> {
         };
         match tag {
             TagInfo::Record(r) if !r.array && r.fields.len() == elements.len() => {
-                for ((name, optional), &value) in r.fields.iter().zip(elements) {
-                    if !(*optional && walk::undefined(self.arena, value)) {
-                        field(name, value)?;
-                    }
+                for (i, value) in children() {
+                    field(&r.fields[i].0, value)?;
                 }
             }
             TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => {
@@ -273,17 +273,17 @@ impl<'a, 'r> Build<'a, 'r> {
                         self.block_tag(&t.tag.literal)?,
                     ));
                 }
-                for ((name, optional), &value) in r.fields.iter().zip(elements) {
-                    if !(*optional && walk::undefined(self.arena, value)) {
-                        properties.push(self.block_property(name, self.expr(value)?));
-                    }
+                for (i, value) in children() {
+                    properties.push(self.block_property(&r.fields[i].0, self.expr(value)?));
                 }
             }
             TagInfo::Module(names) if names.len() == elements.len() => {
                 // Longest replacement is $question (9 bytes); reserve once.
-                let mut scratch = String::with_capacity(2 + names.iter().map(|s| s.len()).max().unwrap_or(0) * 9);
-                for (name, &value) in names.iter().zip(elements) {
-                    field(literal::module_field(name, &mut scratch), value)?;
+                let mut scratch = String::with_capacity(
+                    2 + names.iter().map(|s| s.len()).max().unwrap_or(0) * 9,
+                );
+                for (i, value) in children() {
+                    field(literal::module_field(&names[i], &mut scratch), value)?;
                 }
             }
             TagInfo::Constructor(c) => {
@@ -293,7 +293,7 @@ impl<'a, 'r> Build<'a, 'r> {
                         self.block_tag(&c.runtime.tag.literal)?,
                     ));
                 }
-                for (i, &value) in elements.iter().enumerate() {
+                for (i, value) in children() {
                     let name = if c.name == "::" && i < 2 {
                         if i == 0 { "hd" } else { "tl" }
                     } else {
@@ -328,16 +328,12 @@ impl<'a, 'r> Build<'a, 'r> {
                 }
             }
             TagInfo::PolyVar(_) => {
-                let Some(&name) = elements.first() else {
-                    return Err(Unsupported("block literal: empty polymorphic variant"));
-                };
-                field("NAME", name)?;
-                if let Some(&value) = elements.get(1) {
-                    field("VAL", value)?;
+                for (i, value) in children() {
+                    field(if i == 0 { "NAME" } else { "VAL" }, value)?;
                 }
             }
             TagInfo::Extension | TagInfo::RecordExt { .. } => {
-                for (i, &value) in elements.iter().enumerate() {
+                for (i, value) in children() {
                     let name = if i == 0 {
                         "RE_EXN_ID"
                     } else if let TagInfo::RecordExt { fields, .. } = tag
@@ -361,7 +357,7 @@ impl<'a, 'r> Build<'a, 'r> {
             | TagInfo::SomeNotNested
             | TagInfo::ModuleExport(_) => {
                 let mut values = self.b.vec();
-                for &value in elements {
+                for (_, value) in children() {
                     values.push(if let ExprKind::Spread(inner) = self.arena.ek(value) {
                         ArrayExpressionElement::SpreadElement(self.b.alloc(SpreadElement::new(
                             SPAN,
@@ -411,9 +407,7 @@ impl<'a, 'r> Build<'a, 'r> {
             T::String(s) => self.string_expr(s),
             T::Int(i) => self.number(&Number::int(*i as i32))?,
             T::Float(s) => {
-                let value = s
-                    .parse::<f64>()
-                    .map_err(|_| Unsupported("block literal: float tag"))?;
+                let value = walk::block_float_tag(s)?;
                 let literal = Expression::new_numeric_literal(
                     SPAN,
                     value.abs(),
