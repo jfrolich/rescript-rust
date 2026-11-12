@@ -1,6 +1,6 @@
 //! Tests of the environment log: the cost of every operation in counted
-//! steps, the module seam, and the property test against today's `Env`
-//! (docs/CHECKER_REDESIGN.md F.8 and H.2.8 step 4).
+//! steps, the module seam, the property test against today's `Env`
+//! (docs/CHECKER_REDESIGN.md F.8 and H.2.8 step 4), and the layout.
 
 use super::*;
 use crate::context::IdGenerator;
@@ -1709,4 +1709,374 @@ fn the_property_test_catches_an_injected_fault() {
         .filter(|line| line.starts_with("    "))
         .count();
     assert!(steps <= 4, "the failing sequence was not shrunk:\n{report}");
+}
+
+// ============================================================================
+// Layout
+// ============================================================================
+
+#[test]
+fn layout_of_an_entry_a_version_and_an_environment() {
+    assert_eq!(std::mem::size_of::<Tip>(), 4);
+    assert_eq!(std::mem::size_of::<Entry>(), 40);
+    // A pool slot adds nothing to an entry or to a shared payload.
+    assert_eq!(std::mem::size_of::<OnceCell<Entry>>(), 40);
+    assert_eq!(std::mem::size_of::<OnceCell<Arc<ValueDescription>>>(), 8);
+    assert_eq!(std::mem::size_of::<LogEnv>(), 16);
+    assert_eq!(std::mem::size_of::<EnvSeed>(), 16);
+    // Today: two words of identity and one pointer.
+    assert_eq!(std::mem::size_of::<Env>(), 24);
+}
+
+// ============================================================================
+// A counted comparison with today's tables
+// ============================================================================
+
+/// The operations the comparison drives, on either representation.
+trait Subject: Clone {
+    fn start() -> Self;
+    fn bind_value(&mut self, id: Ident, desc: ValueDescription);
+    fn bind_type(&mut self, id: Ident, decl: Arc<TypeDeclaration>);
+    fn open(&mut self, root: Path, layers: &OpenedLayers);
+    fn value(&self, name: Name) -> Option<u32>;
+    fn type_arity(&self, name: Name) -> Option<i32>;
+}
+
+impl Subject for Env {
+    fn start() -> Self {
+        Env::empty()
+    }
+    fn bind_value(&mut self, id: Ident, desc: ValueDescription) {
+        self.add_value(id, desc);
+    }
+    fn bind_type(&mut self, id: Ident, decl: Arc<TypeDeclaration>) {
+        self.add_type(id, decl);
+    }
+    fn open(&mut self, root: Path, layers: &OpenedLayers) {
+        self.add_prebuilt_open_layers(root, layers, Some(1));
+    }
+    fn value(&self, name: Name) -> Option<u32> {
+        self.find_value_arc_with_path(name)
+            .ok()
+            .map(|(_, desc)| desc.val_type.0)
+    }
+    fn type_arity(&self, name: Name) -> Option<i32> {
+        self.find_type(name).ok().map(|decl| decl.type_arity)
+    }
+}
+
+impl Subject for LogEnv {
+    fn start() -> Self {
+        LogEnv::empty()
+    }
+    fn bind_value(&mut self, id: Ident, desc: ValueDescription) {
+        self.add_value(id, desc);
+    }
+    fn bind_type(&mut self, id: Ident, decl: Arc<TypeDeclaration>) {
+        self.add_type(id, decl);
+    }
+    fn open(&mut self, root: Path, layers: &OpenedLayers) {
+        self.add_prebuilt_open_layers(root, layers, Some(1));
+    }
+    fn value(&self, name: Name) -> Option<u32> {
+        self.find_value_arc_with_path(name)
+            .ok()
+            .map(|(_, desc)| desc.val_type.0)
+    }
+    fn type_arity(&self, name: Name) -> Option<i32> {
+        self.find_type(name).ok().map(|decl| decl.type_arity)
+    }
+}
+
+/// What the comparison is made of, built once so that neither side pays for
+/// interning names or building declarations.
+struct Workload {
+    opens: Vec<(Path, OpenedLayers)>,
+    /// Top-level items and, per item, the bindings of its body.
+    items: Vec<(Ident, Vec<Ident>)>,
+    types: Vec<(Ident, Arc<TypeDeclaration>)>,
+    opened_names: Vec<Name>,
+    binds: usize,
+}
+
+fn workload() -> Workload {
+    // Three opened modules of 1,000 values and 200 types each.
+    let opens = (0..3)
+        .map(|m| {
+            let layers = OpenedLayers::build(
+                (0..1_000)
+                    .map(|n| (local(&format!("m{m}_v{n}"), 50_000 + n), value(n as u32), n))
+                    .collect(),
+                (0..200)
+                    .map(|n| {
+                        (
+                            local(&format!("m{m}_t{n}"), 60_000 + n),
+                            Arc::new(type_decl(n as u32)),
+                        )
+                    })
+                    .collect(),
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+                vec![],
+            );
+            (root(&format!("Opened{m}")), layers)
+        })
+        .collect();
+    // 1,000 top-level items; the body of each binds nine locals, which the
+    // next item does not see: 10,000 value bindings.
+    let mut stamp = 100_000;
+    let mut fresh = |name: String| {
+        stamp += 1;
+        local(&name, stamp)
+    };
+    let items: Vec<(Ident, Vec<Ident>)> = (0..1_000)
+        .map(|item| {
+            let top = fresh(format!("item{item}"));
+            // Bodies reuse a few local names, as functions do.
+            let body = (0..9)
+                .map(|n| fresh(format!("local{}", (item + n) % 40)))
+                .collect();
+            (top, body)
+        })
+        .collect();
+    let types = (0..100)
+        .map(|n| (fresh(format!("ty{n}")), Arc::new(type_decl(n as u32))))
+        .collect();
+    let opened_names = (0..3)
+        .flat_map(|m| {
+            (0..1_000)
+                .step_by(7)
+                .map(move |n| Name::new(&format!("m{m}_v{n}")))
+        })
+        .collect();
+    Workload {
+        opens,
+        items,
+        types,
+        opened_names,
+        binds: 10_000,
+    }
+}
+
+/// 10,000 value bindings in the shape of a module (items at the top level,
+/// each with a body of nested bindings that the next item leaves), 100 type
+/// bindings, three opens of 1,200-name modules, 50 retained snapshots and
+/// 100,000 lookups. During checking, 71% of the lookups are at the newest
+/// version, 28% at an older version on the path and 1% at a version off it,
+/// a sibling scope: the shares measured on a 3,735-module application
+/// (H.2.10). Then the backend reads the 50 snapshots in the order they were
+/// taken, 200 lookups each. Returns a checksum of every lookup result.
+fn drive<S: Subject>(work: &Workload) -> (u64, Vec<S>) {
+    let mut sum = 0u64;
+    let mut note = |found: Option<u32>| {
+        sum = sum
+            .wrapping_mul(31)
+            .wrapping_add(u64::from(found.unwrap_or(7)))
+    };
+    let mut top = S::start();
+    for (root, layers) in &work.opens {
+        top.open(*root, layers);
+    }
+    let mut retained: Vec<S> = Vec::new();
+    // A scope of the previous item: off the path while this item is checked.
+    let mut sibling: Option<S> = None;
+    let mut rng = Rng(42);
+    let mut lookups = 0usize;
+    let mut binds = 0usize;
+    for (item, (top_id, body_ids)) in work.items.iter().enumerate() {
+        if item % 10 == 0 {
+            let (id, decl) = &work.types[item / 10];
+            top.bind_type(*id, decl.clone());
+        }
+        // The body: a chain of nested scopes off the top-level environment.
+        let mut body = top.clone();
+        let mut next_sibling = None;
+        for (depth, id) in body_ids.iter().enumerate() {
+            body.bind_value(*id, value(binds as u32));
+            binds += 1;
+            if depth == 2 {
+                next_sibling = Some(body.clone());
+            }
+            // Ten lookups per binding.
+            for n in 0..10 {
+                lookups += 1;
+                let pick = rng.below(100);
+                let earlier_item = work.items[rng.below(item as u32 + 1) as usize]
+                    .0
+                    .name_atom();
+                match (pick, &sibling) {
+                    (99, Some(sibling)) => note(sibling.value(earlier_item)),
+                    // The top-level environment, while the body is newest.
+                    (71.., _) if n % 2 == 0 => note(top.value(earlier_item)),
+                    (71.., _) => note(top.value(body_ids[0].name_atom())),
+                    // At the newest version: a local of this body, an
+                    // earlier item, an opened name or a type.
+                    _ => match n % 4 {
+                        0 => note(
+                            body.value(body_ids[rng.below(depth as u32 + 1) as usize].name_atom()),
+                        ),
+                        1 => note(body.value(earlier_item)),
+                        2 => note(body.value(
+                            work.opened_names[rng.below(work.opened_names.len() as u32) as usize],
+                        )),
+                        _ => note(
+                            body.type_arity(work.types[rng.below(100) as usize].0.name_atom())
+                                .map(|n| n as u32),
+                        ),
+                    },
+                }
+            }
+            if binds % 200 == 105 && retained.len() < 50 {
+                retained.push(body.clone());
+            }
+        }
+        sibling = next_sibling;
+        // The item itself, bound in the top-level environment: the body's
+        // bindings are left behind.
+        top.bind_value(*top_id, value(binds as u32));
+        binds += 1;
+    }
+    assert_eq!((binds, lookups, retained.len()), (work.binds, 90_000, 50));
+    for snapshot in &retained {
+        for n in 0..200 {
+            note(snapshot.value(work.items[(n * 5) % 1_000].0.name_atom()));
+        }
+    }
+    retained.push(top);
+    (sum, retained)
+}
+
+#[test]
+fn counted_comparison_with_the_tables() {
+    let work = workload();
+    let (table_sum, _tables) = drive::<Env>(&work);
+    let (log_sum, logs) = drive::<LogEnv>(&work);
+    assert_eq!(table_sum, log_sum, "both give the same 100,000 answers");
+    let steps = counted(logs.last().unwrap());
+    eprintln!("environment log, counted: {steps:?}");
+    // 10,000 values, 100 types and 3 opens: one entry each.
+    assert_eq!(steps.appended, 10_103);
+    // One probe per bind (two for a type: its label family) and per lookup.
+    assert_eq!(steps.probes, 10_000 + 200 + 100_000);
+    // Path moves stay below one entry per operation.
+    assert!(steps.moved + steps.ancestors < 40_000, "{steps:?}");
+    assert_eq!(steps.walked, 0);
+}
+
+/// The bindings of `drive` without its lookups: the cost of extending,
+/// cloning at every item and dropping every version.
+fn drive_binds<S: Subject>(work: &Workload) -> u64 {
+    let mut top = S::start();
+    for (root, layers) in &work.opens {
+        top.open(*root, layers);
+    }
+    let mut binds = 0u32;
+    for (top_id, body_ids) in &work.items {
+        let mut body = top.clone();
+        for id in body_ids {
+            body.bind_value(*id, value(binds));
+            binds += 1;
+        }
+        top.bind_value(*top_id, value(binds));
+        binds += 1;
+    }
+    u64::from(binds)
+}
+
+/// 100,000 lookups at the newest version of `env`: locals, opened names
+/// and types in turn.
+fn drive_lookups<S: Subject>(work: &Workload, env: &S) -> u64 {
+    let mut sum = 0u64;
+    for n in 0..25_000usize {
+        let item = &work.items[(n * 7) % 1_000];
+        sum += u64::from(env.value(item.0.name_atom()).unwrap_or(7));
+        sum += u64::from(env.value(item.1[n % 9].name_atom()).unwrap_or(7));
+        sum += u64::from(
+            env.value(work.opened_names[n % work.opened_names.len()])
+                .unwrap_or(7),
+        );
+        sum += env
+            .type_arity(work.types[n % 100].0.name_atom())
+            .unwrap_or(7) as u64;
+    }
+    sum
+}
+
+/// The same workload, timed. Run it optimised:
+/// `cargo test --release --lib env_log_timed -- --ignored --nocapture`.
+#[test]
+#[ignore = "a timing, meaningful in a release build only"]
+fn env_log_timed_comparison_with_the_tables() {
+    let work = workload();
+    let time = |run: &dyn Fn() -> u64| {
+        let mut best = std::time::Duration::MAX;
+        let mut sum = 0;
+        for _ in 0..25 {
+            let started = std::time::Instant::now();
+            sum = run();
+            best = best.min(started.elapsed());
+        }
+        (best, sum)
+    };
+    let report =
+        |what: &str, tables: (std::time::Duration, u64), log: (std::time::Duration, u64)| {
+            assert_eq!(tables.1, log.1, "{what}: both give the same answers");
+            println!(
+                "  {what}: tables {:.2?}, log {:.2?} ({:.2}x)",
+                tables.0,
+                log.0,
+                tables.0.as_secs_f64() / log.0.as_secs_f64()
+            );
+        };
+    println!("best of 25:");
+    report(
+        "10,100 binds, 3 opens, 50 retained clones, 100,000 lookups",
+        time(&|| drive::<Env>(&work).0),
+        time(&|| drive::<LogEnv>(&work).0),
+    );
+    report(
+        "the 10,000 binds and 1,000 clones alone",
+        time(&|| drive_binds::<Env>(&work)),
+        time(&|| drive_binds::<LogEnv>(&work)),
+    );
+    let (tables, logs) = (drive::<Env>(&work).1, drive::<LogEnv>(&work).1);
+    // One kind of lookup at a time, 100,000 each.
+    let (table_env, log_env) = (tables.last().unwrap(), logs.last().unwrap());
+    let kinds: [(&str, &dyn Fn(usize) -> Name); 4] = [
+        ("a local value, bound after the opens", &|n| {
+            work.items[(n * 7) % 1_000].0.name_atom()
+        }),
+        ("a name bound nowhere, past three opens", &|n| {
+            work.items[(n * 7) % 1_000].1[n % 9].name_atom()
+        }),
+        ("a value of an opened module", &|n| {
+            work.opened_names[n % work.opened_names.len()]
+        }),
+        ("a local type", &|n| work.types[n % 100].0.name_atom()),
+    ];
+    for (kind, (what, name)) in kinds.iter().enumerate() {
+        let each =
+            |lookup: &dyn Fn(Name) -> u64| (0..100_000).map(|n| lookup(name(n))).sum::<u64>();
+        let found = |value: Option<u32>| u64::from(value.unwrap_or(7));
+        if kind == 3 {
+            report(
+                what,
+                time(&|| each(&|name| found(table_env.type_arity(name).map(|n| n as u32)))),
+                time(&|| each(&|name| found(log_env.type_arity(name).map(|n| n as u32)))),
+            );
+        } else {
+            report(
+                what,
+                time(&|| each(&|name| found(table_env.value(name)))),
+                time(&|| each(&|name| found(log_env.value(name)))),
+            );
+        }
+    }
+    report(
+        "100,000 lookups at the newest version, the four kinds in turn",
+        time(&|| drive_lookups(&work, table_env)),
+        time(&|| drive_lookups(&work, log_env)),
+    );
 }
