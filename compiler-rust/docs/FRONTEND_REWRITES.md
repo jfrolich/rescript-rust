@@ -423,3 +423,89 @@ The saving is below the 1% that THREE_TREES section 11 expected of this
 slice: the rebuilt spine was 0.70% of the build, not the 4.13% of the two
 entry paths. What is left in those paths is not rebuilding.
 
+
+### T7 pre-change inventory
+
+Baseline: `3fa9eb29e` (includes T2). Line numbers below refer to that commit.
+These are shared functions, not four independently removable passes.
+
+| Row | Implementation in `binary_ast/ppx.rs` | What must remain |
+| --- | --- | --- |
+| A, `l` integer | `rewrite_expr:7173` constant arm at 7190; `rewrite_pattern:6670` constant arm at 6676; `pattern_needs_no_rewrite:7082` certificate test | The expression/pattern traversals serve all other rewrites. Remove their integer arms, not these shared functions. Patterns are rebuilt, not entered in the expression expansion table. |
+| B, boolean match | `boolean_match_arms:7728`, called by `rewrite_expr:7346` | Ordinary match case traversal remains. Recognition requires exactly two unguarded nullary unqualified constructors, in either order. |
+| C, record/dictionary let | `rewrite_single_binding_let:7761`, record arm after the unwrap arm | The same function implements `let?`, which stays an expansion. Includes one alias wrapper; excludes recursive/grouped bindings and packed-module RHS. |
+| D, async/await | `rewrite_fun:7901`, `wrap_with_unsafe_async:5575`, `transform_await:5536`; `rewrite_expr:7552` | `transform_await` is also called by `create_await_module_expression:5787`; the async wrapper is also called by `rewrite_method_callback_expression:6923`. Module await and method callbacks are separate expansion rows. |
+
+#### Readers of the compiled form
+
+Audit command: `rg -n 'expanded\(|get_expanded_expr' compiler-rust/src`.
+At the baseline this returns 207 lines. Three `types/ctype.rs` hits are
+`has_constr_row_expanded`, unrelated to parse expansions. The parse-arena
+hits include accessor definitions and tests, not independent consumers.
+
+| Reader | A: integer | B: boolean match | C: record let | D: async/await |
+| --- | --- | --- | --- | --- |
+| `types/typecore.rs` (143 hits), `types/typemod.rs` (12 hits) | `convert_constant` must accept the digits without treating `l` as an unknown modifier; both expression and pattern consumers use it | Dispatch to the existing conditional rule, preserving `IfCondition`/`IfReturn` and boolean arm order; shape-sensitive diagnostic/nonexpansiveness readers also need auditing | Dispatch to `type_match` with one borrowed case, not ordinary let typing; preserve merged attributes and the packed-module exclusion | Build the same primitive identifier/application typed nodes, with the same type instantiation, locations and attributes; the existing `type_await:17138` is an incomplete stub, not an implementation to reuse |
+| `binary_ast/deps.rs:137` | No dependencies in the digits | Same source children; boolean constructors add no module dependency | Same RHS, pattern and body; preserve module-unpack scope | The generated identifier supplies `Primitive_promise`; original async/await nodes must contribute that implicit dependency explicitly |
+| `binary_ast/ast_iter.rs:38`, used by `UnusedAttributeSweep` | `check_constant:1219` currently warns only on suffix-free integers; it must recognize `l` through the same digit accessor | Expansion discards the case patterns; walking originals must not introduce warnings for their attributes | Expansion merges binding attributes onto the match; preserve sweep ordering and warning locations | Expansion drops await-node attributes, uses a ghost operand location, and wraps async bodies at parameter location; walking original nodes must preserve that attribute policy |
+| `binary_ast/mapper_to0.rs:233` | Can encode the original suffix; any compiled-value consumer needs the digit accessor | Original match is representable in v0 | Original let is representable in v0 | Original await is encoded with `res.await`; original async with the function marker. This is not the same v0 shape as the primitive expansion |
+| `binary_ast/writer.rs` | Uses `mapper_to0` and dependency collection, not a separate expansion lookup | Same | Same | Same; artifact usability must be verified, not inferred from changed bytes |
+| `binary_ast/ppx.rs` (32 hits) | Inline implementation/signature constants currently match `Integer(_, None)`; these consumers must also use the accessor | Pipe and payload readers inspect expanded shapes; removal must not change their classification | Same; retain the separate unwrap and packed-module rules | Braces copy an expanded inner location; removing await also affects the braces expansion count. Method callbacks and module await share the primitive helpers |
+| `ast_payload.rs:14` | String-only extraction does not consume integer values | Unwraps braces; no boolean-specific need | Unwraps braces; no let-specific need | Unwraps braces; location/attribute policy belongs to callers |
+| genType | Reads typed constants, not parsed digits | Reads the resulting typed conditional | Reads the resulting typed match | Reads the resulting primitive application/function; no parse-expansion lookup found |
+| Editor analysis | Reads typed constants and original source locations | Reads typed conditional and source | Reads typed match and source | Reads typed applications/function and source; no parse-expansion lookup found |
+
+The binary writer's module comment still promises byte-identical `.ast`
+files, whereas the correctness contract requires usable artifacts, not
+identical intermediate representations. A direct implementation must check
+usability explicitly. In particular, simply deleting an await expansion is
+not sufficient: the checker stub neither constrains the operand to a promise
+nor constructs the primitive application used today.
+
+#### Baseline instruction profile
+
+One clean, single-worker `tests/tests` build, Linux x86-64, normal fat-LTO
+release, Callgrind `--dump-instr=yes`: **4,043,070,987 Ir**, 735 modules.
+The runtime was built before measurement. Inclusive attribution from
+`callgrind_annotate --inclusive=yes --threshold=100`:
+
+| Function | Ir (inclusive, recursion contexts combined) |
+| --- | ---: |
+| `rewrite_expr` | 124,080,794 |
+| `rewrite_pattern` | 1,970,655 |
+| `rewrite_single_binding_let` | 382,901 |
+| `rewrite_fun` | 22,323,820 |
+| `transform_await` | 157,831 |
+| `wrap_with_unsafe_async` | 120,476 |
+
+These are overlapping inclusive costs, not additive row savings.
+`boolean_match_arms` has no separate symbol in this optimized profile; its
+instructions are charged to `rewrite_expr`. The shared functions include
+other rewrites and child visits, so none of these numbers is an exclusive
+cost of a direct row. No performance saving is claimed by this inventory.
+
+#### Baseline rewrite counts
+
+A temporary, uncommitted `eprintln!` probe at each direct rewrite arm, and
+at `expand`, was compiled into a second release executable. A clean
+single-worker build of `tests/tests` (735 compiled modules, the runtime
+already built) produced:
+
+```text
+      3 T7 A-expression
+      0 T7 A-pattern
+      2 T7 B
+     15 T7 C
+    171 T7 D-async
+    167 T7 D-await
+   3400 T7 expansion
+```
+
+The four direct arms fire **358** times. `expand` counts expression
+expansions through that helper, not calls to `set_expansion` made directly
+by the unwrap binding or extension paths. The async count excludes the
+separate method-callback rewrite, and the await count excludes module
+await. The probes were removed after measurement. Additional expansions
+caused by changed brace locations or pattern handles are not attributed by
+these probes; the end-state exact-delta gate needs those accounted for,
+not silently included in the 358.
