@@ -28,7 +28,20 @@ are the OCaml analysis's output and the reference for both analyses.
 `make test-analysis` (from the repository root) builds each project and
 regenerates its snapshots with `rescript-editor-analysis`, failing when they
 change. That binary reads `.cmt` files; in-process Rust builds write none, so
-it only passes on a build that writes them (`rescript-ocaml`).
+it fails on them. To regenerate the snapshots, build with the OCaml compiler
+first, the runtime and the dependencies before the projects:
+
+```sh
+rescript=$PWD/packages/@rescript/<platform>/bin/rescript.exe
+bsc=$PWD/_build/install/default/bin/bsc
+export RESCRIPT_RUNTIME=$PWD/packages/@rescript/runtime
+for dir in packages/@rescript/runtime packages/@rescript/belt \
+  tests/dependencies/rescript-react; do
+  "$rescript" build-reference --bsc "$bsc" "$dir"
+done
+cd tests/analysis_tests/tests   # or another project
+"$rescript" build-reference --bsc "$bsc" . && bash ./test.sh
+```
 
 ## The Rust analysis
 
