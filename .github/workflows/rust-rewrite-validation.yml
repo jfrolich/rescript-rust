@@ -265,6 +265,53 @@ jobs:
             rewatch/target
           key: ${{ steps.cache.outputs.cache-primary-key }}
 
+  # The same build-system tests on macOS. Linux and macOS differ where the
+  # build touches the file system (file locks, rename, case folding), and a
+  # change that hangs or fails only there is otherwise seen by nobody: every
+  # other job runs on Linux.
+  build-system-tests-macos:
+    name: build-system-tests (macOS)
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: actions/cache/restore@v5
+        id: cache
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-${{ github.sha }}
+          restore-keys: |
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('rust-toolchain.toml', 'rewatch/Cargo.lock') }}-
+            validation-release-v1-${{ runner.os }}-${{ runner.arch }}-
+
+      - uses: ./.github/actions/setup-node
+
+      - name: Test release build system
+        run: |
+          cargo build --release --locked --manifest-path rewatch/Cargo.toml
+          cargo test --release --locked --manifest-path rewatch/Cargo.toml
+
+      - name: Check signature publication and stored interface determinism
+        run: python3 scripts/test_signature_publication.py
+
+      - uses: actions/cache/save@v5
+        if: ${{ !cancelled() && github.event_name == 'push' && steps.cache.outputs.cache-hit != 'true' }}
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            rewatch/target
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
   # The parity scripts' own tests. They need nothing built.
   script-tests:
     runs-on: ubuntu-24.04-arm
