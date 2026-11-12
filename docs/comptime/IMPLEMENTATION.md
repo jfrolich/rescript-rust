@@ -8,10 +8,10 @@ compiler. Read that first.
 | Path | What |
 | --- | --- |
 | `compiler-rust/src/macros/mod.rs` | The `MacroHost` trait (the JavaScript engine), `MacroExpansionRequired`, and where compiler text and engine text are converted. |
-| `compiler-rust/src/macros/expand.rs` | The expansion of one file: the pass loop, `%comptime` evaluation, position mapping. |
+| `compiler-rust/src/macros/expand.rs` | The expansion of one file: the pass loop, `%Macro.eval`, position mapping. |
 | `compiler-rust/src/macros/discover.rs` | The type checker's hooks: recognizing macro uses, running the macro, recording edits, instances of generics. |
 | `compiler-rust/src/macros/quote.rs` | Lowering `%code`, `%type` and `%pat` in a macro's own file. |
-| `compiler-rust/src/macros/reflect.rs` | Answers about types: `Type.info`, printing a type as source, the literal shape of a `%comptime` value. |
+| `compiler-rust/src/macros/reflect.rs` | Answers about types: `Type.info`, printing a type as source, the literal shape of a `%Macro.eval` value. |
 | `compiler-rust/src/macros/edit.rs` | `SourceText`: text that knows where each character comes from, and edits on it. |
 | `compiler-rust/src/macros/report.rs` | What a diagnostic says about generated code. |
 | `compiler-rust/src/macros/host.js` | The engine side: module loader, sandbox, call entry point. The same script in QuickJS and in the browser. |
@@ -66,7 +66,7 @@ sequenceDiagram
     E-->>T: need info:3
     T->>E: call again, with the answer
     E-->>T: code as text
-    T-->>X: edits, errors, %comptime sites
+    T-->>X: edits, errors, %Macro.eval sites
     X->>X: apply edits
   end
   X-->>D: expanded text + origin map
@@ -185,7 +185,7 @@ are called from `typecore.rs` and `typemod.rs`:
 
 | Hook | Called at | Does |
 | --- | --- | --- |
-| `expression_extension` | `Pexp_extension` | `%M.f(...)`, `%comptime`, leftover quotes and holes |
+| `expression_extension` | `Pexp_extension` | `%M.f(...)`, `%Macro.eval`, leftover quotes and holes |
 | `type_extension`, `pattern_extension` | `Ptyp_extension`, `Ppat_extension` | macros in type and pattern position |
 | `declarations_extension` | `Pstr_extension`, `Pmod_extension` | macros that return declarations |
 | `type_item`, `value_item` | a `type` or `let` item with a macro attribute | derive on a type, rewrite of a `let` |
@@ -237,11 +237,16 @@ passes of a file.
 The calls a generated instance makes to the generic (the `encode(...)` on
 each field) are ordinary uses, found by the next pass.
 
-### `%comptime`
+### `%Macro.eval`
+
+`%Macro.eval(expr)` is known by its name (`macros::EVAL_MACRO`); the module
+`Macro` has no value `eval`. It parses as any macro use does, with the
+expression as its argument, and in a place other than an expression it is
+an error.
 
 A discovery pass types the expression and records the site with the shape
 of its type (`reflect::value_shape`). After the pass,
-`expand::evaluate_comptime` compiles `opens + let value = <expr>` as a
+`expand::evaluate` compiles `opens + let value = <expr>` as a
 module of its own in memory, sends its JavaScript to the engine (`kind:
 "eval"`), and `host.js` writes the value as a literal by the shape.
 

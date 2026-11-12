@@ -609,14 +609,15 @@ let marathon = (miles: float) => Length.milesToMeters(miles) /. 1000.0
 
 ### Computing now
 
-`%comptime(expr)` evaluates an expression while compiling and puts the value
-in its place as a literal. It needs no macro: `expr` is ordinary code that
-uses other modules.
+`%Macro.eval(expr)` evaluates an expression while compiling and puts the
+value in its place as a literal. It is the one macro the compiler has built
+in, so there is none to write: `expr` is ordinary code that uses other
+modules.
 
-<!-- example: comptime -->
+<!-- example: eval -->
 
 ```rescript
-let primes = %comptime(Sieve.primesBelow(60))
+let primes = %Macro.eval(Sieve.primesBelow(60))
 ```
 
 ```js
@@ -756,7 +757,6 @@ it is in the expanded source. So is generated code that does not parse:
 | `%pat(...)` | expression | A quoted pattern. |
 | `${...}` | inside a quote | A hole: an expression of type `code`, `typ` or `pat`, by its position. |
 | `${...items}` | in a list of a quote | A splice hole: an array of the items of the list. The three dots are written. |
-| `%comptime(expr)` | expression | The value of `expr`, computed while compiling. |
 
 Everything else is the module `Macro` of the standard library
 (`packages/@rescript/runtime/Macro.res`).
@@ -794,6 +794,7 @@ compile-time parameter has to be called directly.
 | | |
 | --- | --- |
 | `code<'a>`, `typ`, `pat`, `decls` | Code that evaluates to an `'a`; a type; a pattern; declarations. |
+| `%Macro.eval(expr)` | The value of `expr`, computed while compiling. A macro the compiler has built in: it is written with this name, and is not a value of the module. |
 | `error(message)`, `errorAt(~offset, message)` | Stop compilation at the macro use. |
 | `typeOf(code)` | The type of an argument of a `@generic`. |
 | `expected()` | The type the call site of a `@generic` expects as result. |
@@ -861,7 +862,7 @@ A `field` has `name`, `jsName` (the `@as` name), `typ` (the type of
   types and values of its arguments and its result type. A file has one
   instance per key, in a `let rec` group before the first top-level item
   that needs it. Instances are not shared between files.
-- **`%comptime`** can use other modules, not values of its own file. The
+- **`%Macro.eval`** can use other modules, not values of its own file. The
   value has to be writable as a literal: numbers, strings, booleans, `()`,
   arrays, tuples, options, dicts and records of those.
 
@@ -993,7 +994,7 @@ implemented:
    noisier, and cannot be passed as a value.
 3. **The engine.** QuickJS only, or Node as an option for macros that need
    npm packages with native parts. QuickJS runs plain JavaScript packages.
-4. **Names.** `@macro`, `@generic`, `%code`, `%comptime`, the module
+4. **Names.** `@macro`, `@generic`, `%code`, `%Macro.eval`, the module
    `Macro`. `Macro.Type` takes the place of the standard library's `Type`
    under `open Macro`; it includes that module so nothing is lost.
 5. **Text or trees.** Expansion edits source text and type checks again.

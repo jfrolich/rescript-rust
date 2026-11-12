@@ -21,7 +21,7 @@
 
 #### :rocket: New Feature
 
-- Add compile-time macros to the Rust compiler: `@macro` and `@generic` functions that return quoted code (`%code`, `%type`, `%pat` with `${...}` holes), `%comptime`, and the `Macro` module. `rescript build` does not expand them yet; see `docs/comptime`. https://github.com/jfrolich/rescript-rust/pull/90
+- Add compile-time macros to the Rust compiler: `@macro` and `@generic` functions that return quoted code (`%code`, `%type`, `%pat` with `${...}` holes), `%Macro.eval`, and the `Macro` module. `rescript build` does not expand them yet; see `docs/comptime`. https://github.com/jfrolich/rescript-rust/pull/90
 
 #### :bug: Bug fix
 
