@@ -71,8 +71,8 @@ rewrite targets.
 ## Safe subtree skipping
 
 `ParseArena::push_expr` computes a bottom-up certificate using existing child
-certificates. `rewrite_free_exprs` holds one bit per expression, not a field on
-each node. `expr_needs_no_rewrite` is an O(1) lookup used by `rewrite_child`.
+certificates. `rewrite_free_exprs` holds two bits per expression, not fields on
+each node (see Validation traversals). `expr_needs_no_rewrite` is an O(1) lookup used by `rewrite_child`.
 The whitelist contains attribute-free ordinary applications (not pipes),
 constants except `l` integers, identifiers, break/continue, tuples, arrays,
 constructors/variants, field access, assertions, sequences, while loops,
@@ -82,7 +82,7 @@ certified. New/unknown expression variants default to the full mapper.
 Functions, patterns, types, braces, modules, bindings, extensions, JSX and all
 attributes remain conservative. In particular, braces must not be skipped based
 only on their own attributes: an enclosing `@this` can be forwarded through them.
-No checker/warning sweep is skipped. The marshal location marker is retained for
+Only certified diagnostic-free expression subtrees are skipped by validation. The marshal location marker is retained for
 the skipped root; attribute-free descendants do not require attribute-wrapper
 sharing markers. This does not claim byte-identical intermediate AST encoding.
 
@@ -91,6 +91,113 @@ certificates. Certified parents are allocated after their certified children;
 reserved slots are never certified. This deliberately sacrifices some skip
 opportunities rather than keeping stale proofs after mutation. Shared synthetic
 expressions have no certificate. No new global state or unsafe code is used.
+
+## Validation traversals
+
+The three traversals have different inputs and observable scheduling. None is
+merged here: sharing their recursion would require replaying separate event
+streams, retaining the original and rewritten trees, and reproducing the
+mapper's early exits. Skipping provably irrelevant subtrees avoids that state.
+
+### `check::Checker` (original tree)
+
+Carries mutable arena access, `async_context` (initially true), the fixed
+`let_unwrap` feature setting, and an ordered warning vector. Each expression
+saves/restores async state; functions replace it with their own async flag,
+`@this` callbacks and functor bodies clear it. Await validation is post-order.
+The first error aborts; only warnings preceding it survive.
+
+It follows the builtin mapper, **not** `AstIter`: attributes precede ordinary
+expression children; constructor arguments/record fields of the mapper are
+evaluated right-to-left, lists left-to-right. Cases visit RHS, guard, pattern;
+nonrecursive binding groups visit last binding first. Structure ordering uses
+`structure_mapper_order`, including head-first special items and awaited-module
+checks; signatures are left-to-right. Boolean matches use false arm, true arm,
+scrutinee. Record/unwrap bindings follow their rewritten match order. Object
+types visit tagged field types in reverse, excluding inherited types and the
+object's own attributes. Attribute payloads recurse through structures,
+signatures, types, and pattern guards (guard before pattern). Expression
+extensions validate their own payload without traversing it; raw/todo nodes
+also have dedicated handling. Integer `l` expressions/patterns ignore attributes.
+`@@config` is not mapped; consumed deriving attributes are omitted.
+
+The diagnostic-producing sites (other nodes only lead to these sites) are:
+
+| Site | Checks and diagnostics |
+|---|---|
+| Await expressions, `for await`, awaited local/structure modules | Await outside async context error |
+| `@this` functions, including forwarding through braces | Non-variable first parameter and optional-argument errors |
+| Pipe applications | Labelled arguments and non-binary pipe errors |
+| Local/top-level unwrap bindings | Feature disabled, unsupported shape/type, top-level unwrap errors |
+| Packed-module record destructuring | Record-rest and invalid field-pattern errors |
+| Raw nodes, `%raw`, `%ffi`, `%%raw`, regexp literals | Raw payload kind / non-function FFI errors; JS/regexp parse diagnostics (`BsFfiWarning`) |
+| Todo nodes and `%todo` | `BsTodo`, including semantic string escape errors |
+| Inline string bindings, payload semantic strings | Invalid template escape errors |
+| Last declaration's `@deriving` | Duplicate/configuration/unsupported or removed deriver errors; `BsDeriveWarning`; accessors inline-record constructor errors and abstract/open type warnings |
+| ReScript external declarations | `validate_external_attribute_errors`: attribute payload/conflict/name/arity errors, object argument rules, argument/result FFI annotations and return-wrapper rules; associated FFI/unused-attribute warnings |
+
+External validation reads the entire arrow type, argument/result annotations,
+primitive and declaration attributes (rewriting their payloads first). Its
+helper chain is `validate_external_attribute_payload_errors`,
+`parse_external_attrs`, `validate_plain_obj_arg_type_errors` or
+`validate_non_obj_arg_type_errors`, plus the remaining checks in
+`validate_external_attribute_errors`; it also marks consumed attributes used.
+The external attribute inventory above lists the names, including `@as`,
+`@string`, `@int`, `@unwrap`, `@ignore` and `@return` on types.
+
+### `NestedExternals` (each expanded item, before rewriting it)
+
+Uses ordinary `AstIter` order, traversing all node children and all four
+payload kinds. Its only state is a preorder vector of cloned value
+descriptions: `Pstr_primitive` and **every** `Psig_value`, including values
+without primitives. The caller starts with `walk_*_item`, so the root item's
+external is excluded (validated separately). Descendants include modules,
+functors, module types, local modules and payloads. After collection it calls
+`validate_external_attribute_errors` in vector order, stopping at the first
+error. It has the same external errors and attribute-use effects described
+above, but discards the helper's warning vector. Derive expansion precedes
+this traversal, so it is not interchangeable with the original-tree Checker.
+
+### `UnusedAttributeSweep` (rewritten tree)
+
+Uses `AstIter` order with an ordered warning vector, `stopped` flag and first
+error. This is a later phase: attributes may have been consumed or generated,
+externals encoded, and integer `l` suffixes removed. It inspects:
+
+- Attributes: errors for removed `ocaml.deprecated`, `ocaml.unboxed`,
+  `ocaml.immediate`, `ocaml.warnerror`, `ocaml.boxed`,
+  `ocaml.deprecated_mutable`, `ocaml.text`, `ocaml.warning`,
+  `ocaml.ppwarning`; `BsUnusedAttribute` for non-ghost, unused `as`, `config`,
+  `ignore`, `int`, `optional`, `res.hoistedFunction`, `string`, `unwrap`.
+  **Attribute payloads are not traversed.**
+- Extensions: removed `ocaml.error` error, then payload traversal otherwise.
+- Expression and pattern constants: unsuffixed integer overflow warning
+  (`BsIntegerLiteralOverflow`), then attributes only.
+- Type declarations: built-in rank-zero type redefinition error before children.
+- Value descriptions: `%identity`/`%component_identity` arity-one error;
+  unsafe primitive names (not starting `%`, `#`, `?`) emit `BsFfiWarning`
+  and skip children. Other descriptions recurse normally.
+- Label declarations: semantic string `@as` marks usage before children;
+  invalid string escapes raise an error.
+- Constructors: `process_constructor_tag` errors (invalid/duplicate `@as`
+  and invalid runtime tags), then redefinition of `false`, `true`, `()`;
+  otherwise children are visited.
+
+The first raised error stops subsequent emission; earlier warnings are kept.
+Keeping the phase and traversal order unchanged preserves this behavior.
+
+### Certificates
+
+The existing rewrite whitelist excludes every Checker and NestedExternals
+trigger: even ordinary applications exclude pipes. Both can return immediately
+when bit 0 is set. It is **not** sufficient for UnusedAttributeSweep: ordinary
+unsuffixed integers can overflow. Bit 1 excludes those literals as well,
+without parsing their text during allocation. Both bits share the packed side
+table (two bits per expression) and are computed in one bottom-up immediate-
+child pass. Intersection propagates both proofs; unknown kinds, attributes,
+patterns, types and modules remain conservative. Mutable access and reserved
+slot initialization invalidate both bits at that index and every later index.
+There is no cached diagnostic or change to warning state at a skipped node.
 
 ## Measurements
 
@@ -195,3 +302,44 @@ tests/tests`, using the same environment as above:
 
 This short local timing sample is supporting evidence, not a performance
 promise. The CI instruction gate remains authoritative.
+
+### Validation subtree skipping
+
+Baseline `8a19c272c`, same Linux x86-64 toolchain, fat-LTO release,
+single-thread clean `tests/tests` build and warmed executable identity protocol
+as above. Both builds parsed/compiled 711 modules. These are new measurements,
+not a continuation of the earlier baseline/candidate sample.
+
+| Instructions (Ir) | Before | After | Change |
+|---|---:|---:|---:|
+| Checker self | 25,524,372 | 12,465,060 | -51.16% |
+| NestedExternals self | 9,297,545 | 5,493,386 | -40.92% |
+| UnusedAttributeSweep self | 13,095,539 | 8,503,068 | -35.07% |
+| Three validation families self | 47,917,456 | 26,461,514 | -44.78% |
+| All PPX-named symbols self | 90,457,455 | 69,181,839 | -23.52% |
+| Builtin structure + signature entry paths inclusive | 211,395,554 | 175,553,776 | -16.95% |
+| Whole clean build | 4,522,664,496 | 4,480,699,379 | -0.93% |
+
+The three self-cost rows sum all symbols naming the corresponding visitor
+(including generic AstIter instantiations), using `callgrind_annotate
+--inclusive=no --threshold=100`. They do not include out-of-module callees or
+shared `validate_*` helpers, unlike the earlier Diagnostics/validation row.
+The pass row again adds only the outer `rewrite_structure_impl` and
+`rewrite_signature_with_warnings`, not recursive entries. UnusedAttributeSweep
+is outside those entry paths and is included in the whole-build count.
+
+Hyperfine, five runs with one warmup and a clean before each run:
+
+| | Mean ± standard deviation | Min–max |
+|---|---|---|
+| Before | 512.0 ± 13.5 ms | 502.8–535.6 ms |
+| After | 669.8 ± 311.2 ms | 505.2–1225.7 ms |
+
+The candidate timing sample has a large outlier; it does **not** demonstrate a
+wall-time improvement. Instruction counts, rather than this noisy timing,
+are the performance evidence. CI's repeated instruction-count gate is the
+acceptance check.
+
+CI Instruction count (five runs, minimum of each side): **4,508,872,410 →
+4,464,721,357**, a reduction of **44,151,053 instructions (0.979%)** across
+711 modules. [Comparison run](https://github.com/jfrolich/rescript-rust/actions/runs/43125250180).
