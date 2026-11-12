@@ -1,0 +1,1 @@
+- Emit raw JavaScript verbatim through reserved oxc placeholders and verify raw payload bytes separately from canonical surrounding output.

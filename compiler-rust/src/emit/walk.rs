@@ -264,14 +264,61 @@ fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
     matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
 }
 
-/// Legacy raw expressions carry programmer text, with classification-dependent
-/// grouping; raw statements have surrounding newlines and a statement-level
-/// semicolon except for comment-only snippets. Neither introduces IR identifiers.
-/// The classifier discards its parsed AST today. Until verbatim assembly can
-/// satisfy the unchanged fixed-point oracle, retain the whole-file legacy path:
-/// reparsing and formatting here would not preserve the programmer's text.
-pub(super) fn raw_supported<T>() -> Result<T, Unsupported> {
-    Err(Unsupported("verbatim raw JavaScript"))
+/// Raw text meets no IR identifiers. Statements keep surrounding newlines and
+/// their trailing semicolon, except comment-only snippets. Expressions use the
+/// existing classifier's grouping rule; arrow bodies and expression statements
+/// add the legacy outer parentheses. No new parser is used by the emitter.
+#[derive(Clone, Copy)]
+pub(super) enum RawContext {
+    Expression,
+    Arrow,
+    Statement,
+}
+
+pub(super) fn raw_wrapping(
+    info: &crate::js_ir::JsRawInfo,
+    context: RawContext,
+) -> Result<(&'static str, &'static str, bool), Unsupported> {
+    use crate::binary_ast::ppx::{
+        JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+    };
+    if info.is_stmt {
+        if !matches!(context, RawContext::Statement) {
+            return Err(Unsupported("raw statement in expression position"));
+        }
+        return Ok(
+            if matches!(
+                classify_js_stmt(&info.code),
+                JsStmtClassification::JsStmtComment
+            ) {
+                ("", "", true)
+            } else {
+                ("\n", "\n", false)
+            },
+        );
+    }
+    let classification = classify_js_exp(&info.code);
+    // Legacy drops the literal and may keep only one leading comment. Keeping
+    // the entire payload would violate that rule, so retain a specific fallback.
+    if matches!(context, RawContext::Statement)
+        && matches!(classification, JsExpClassification::JsLiteral { .. })
+    {
+        return Err(Unsupported("raw literal expression statement elision"));
+    }
+    let grouped = crate::js_ir::printer::raw_js_expression_needs_paren_classified(
+        &info.code,
+        &classification,
+    );
+    Ok(
+        match (
+            grouped,
+            matches!(context, RawContext::Arrow | RawContext::Statement),
+        ) {
+            (false, false) => ("", "", false),
+            (true, true) => ("((", "))", false),
+            _ => ("(", ")", false),
+        },
+    )
 }
 
 /// `print_exp_statement_of`: only unit tails discard numbers/undefined and
@@ -416,6 +463,19 @@ pub(super) fn range_supported(
         return Err(Unsupported(
             "range initializer sequence without cached bound",
         ));
+    }
+    Ok(())
+}
+
+/// A legacy call of the external `delete` parses as a unary operator, not a
+/// call. Raw support exposes this previously hidden shape; keep it on fallback
+/// until its separate AST rule is implemented rather than relaxing fixed points.
+pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupported> {
+    if let ExprKind::Var(id) = a.ek(callee) {
+        let id = a.ident(id);
+        if id.name() == "delete" && (id.stamp() == 0 || id.is_js()) {
+            return Err(Unsupported("delete call syntax"));
+        }
     }
     Ok(())
 }

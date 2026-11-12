@@ -3,7 +3,7 @@
 use js_reformat::{ReformatOptions, reformat};
 use rescript_compiler::{
     driver::{CompilerOptions, compile_file_to_js_with_options},
-    emit::{PrinterMode, PrinterStats},
+    emit::{PrinterMode, PrinterStats, RawSegment},
     js_ir::ModuleFormat,
 };
 use std::{
@@ -11,6 +11,30 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
+
+/// Raw files have three independent obligations: canonicalized equality with
+/// legacy, byte-identical IR payloads in output order, and a fixed point after
+/// masking just those payloads plus their legacy wrapping. Non-raw files keep
+/// the original exact canonical-output/fixed-point requirement unchanged.
+fn mask_raw(actual: &str, segments: &[RawSegment]) -> String {
+    let mut masked = String::new();
+    let mut cursor = 0;
+    for segment in segments {
+        let range = &segment.replacement_range;
+        assert!(range.start >= cursor && range.end <= actual.len());
+        assert!(segment.text_range.start >= range.start && segment.text_range.end <= range.end);
+        assert_eq!(
+            &actual[segment.text_range.clone()],
+            segment.text,
+            "verbatim IR payload"
+        );
+        masked.push_str(&actual[cursor..range.start]);
+        masked.push_str(&segment.placeholder);
+        cursor = range.end;
+    }
+    masked.push_str(&actual[cursor..]);
+    masked
+}
 
 fn sources(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap() {
@@ -113,7 +137,7 @@ fn run() {
             };
             let legacy = compile_file_to_js_with_options(path, &options)
                 .unwrap_or_else(|e| panic!("legacy {}: {e:#}", path.display()));
-            let stats = Arc::new(PrinterStats::default());
+            let stats = Arc::new(PrinterStats::with_raw_audit());
             options.js_printer = PrinterMode::Oxc(stats.clone());
             let actual = compile_file_to_js_with_options(path, &options)
                 .unwrap_or_else(|e| panic!("oxc {}: {e:#}", path.display()));
@@ -139,14 +163,19 @@ fn run() {
                 supported += 1;
                 let expected = reformat(&legacy, mode)
                     .unwrap_or_else(|e| panic!("reference {}: {e}", path.display()));
-                if expected != actual {
-                    failures.push(format!("{} {format:?}: reference differs\nEXPECTED:\n{expected}\nACTUAL:\n{actual}", path.strip_prefix(root).unwrap().display()));
-                }
+                let raw = stats.take_raw_segments();
                 let normalized = reformat(&actual, mode)
                     .unwrap_or_else(|e| panic!("candidate {}: {e}", path.display()));
-                if normalized != actual {
+                let comparable = if raw.is_empty() { &actual } else { &normalized };
+                if &expected != comparable {
+                    failures.push(format!("{} {format:?}: reference differs\nEXPECTED:\n{expected}\nACTUAL:\n{actual}", path.strip_prefix(root).unwrap().display()));
+                }
+                let masked = mask_raw(&actual, &raw);
+                let masked_normalized = reformat(&masked, mode)
+                    .unwrap_or_else(|e| panic!("masked candidate {}: {e}", path.display()));
+                if masked_normalized != masked {
                     failures.push(format!(
-                        "{} {format:?}: not a fixed point",
+                        "{} {format:?}: not a fixed point\nMASKED:\n{masked}\nNORMALIZED:\n{masked_normalized}",
                         path.strip_prefix(root).unwrap().display()
                     ));
                 }
