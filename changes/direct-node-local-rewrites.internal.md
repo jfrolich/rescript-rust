@@ -1,0 +1,1 @@
+- Read machine-integer literals directly without allocating frontend expansion nodes.

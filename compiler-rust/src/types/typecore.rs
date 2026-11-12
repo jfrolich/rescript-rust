@@ -2536,7 +2536,8 @@ pub fn convert_constant(
     use crate::parser::ast::Constant as ParsedConstant;
 
     match cst {
-        ParsedConstant::Integer(s, None) => {
+        ParsedConstant::Integer(_, None | Some('l')) => {
+            let digits = cst.integer_digits().expect("machine integer");
             // Parse integer literal, handling underscores and 0x/0o/0b prefixes.
             // OCaml's native int is 63-bit on 64-bit systems. We parse as i64
             // and simulate 63-bit wrapping to match OCaml's int_of_string
@@ -2544,7 +2545,7 @@ pub fn convert_constant(
             // intervals must see Lambda's int32 value (`Int32.to_int
             // (Int32.of_int value)`), so -0xFFFF_FFFF and 1 are the same key.
             // This does not change overflow diagnostics.
-            match parse_int_literal(arena.get_string(*s)) {
+            match parse_int_literal(arena.get_string(digits)) {
                 Some(n) => Ok(Constant::Int(i64::from(wrap_to_ocaml_int(n) as i32))),
                 None => Err(TypeCoreError::LiteralOverflow {
                     loc,
@@ -30104,6 +30105,20 @@ mod tests {
         let cst = crate::parser::ast::Constant::Integer(arena.intern_string("42"), None);
         let result = convert_constant(&cst, LocIdx(0), &arena).unwrap();
         assert_eq!(result, Constant::Int(42));
+    }
+
+    #[test]
+    fn test_convert_constant_l_suffix() {
+        let mut arena = crate::parse_arena::ParseArena::new();
+        for digits in ["42", "0xffff_ffff", "-0xffff_ffff", "999999999999999999999999999999"] {
+            let digits = arena.intern_string(digits);
+            let plain = crate::parser::ast::Constant::Integer(digits, None);
+            let suffixed = crate::parser::ast::Constant::Integer(digits, Some('l'));
+            assert_eq!(
+                format!("{:?}", convert_constant(&plain, LocIdx(0), &arena)),
+                format!("{:?}", convert_constant(&suffixed, LocIdx(0), &arena)),
+            );
+        }
     }
 
     #[test]

@@ -1222,8 +1222,8 @@ fn check_constant(
     warnings: &mut Vec<PpxWarning>,
     arena: &ParseArena,
 ) {
-    if let Constant::Integer(s, None) = constant {
-        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(*s)) {
+    if let Some(digits) = constant.integer_digits() {
+        if !crate::types::typecore::int32_literal_fits_ocaml(arena.get_string(digits)) {
             warnings.push(PpxWarning {
                 loc,
                 warning: Warning::BsIntegerLiteralOverflow,
@@ -4550,8 +4550,9 @@ fn transform_inline_sig_value(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline(42) let x: t
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(ValueDescription {
                     pval_jsx_component: None,
@@ -4665,8 +4666,9 @@ fn transform_inline_binding(
         ExpressionDesc::Pexp_constant(c) => match c {
             Constant::String(_) => None,
             // @inline let x = 42
-            Constant::Integer(s, None) => {
-                let i = arena.get_string(*s).parse::<i32>().ok()?;
+            Constant::Integer(_, None | Some('l')) => {
+                let digits = c.integer_digits().expect("machine integer");
+                let i = arena.get_string(digits).parse::<i32>().ok()?;
                 let prim = inline_int_primitive(i);
                 Some(StructureItem {
                     pstr_desc: StructureItemDesc::Pstr_primitive(Box::new(ValueDescription {
@@ -6671,14 +6673,7 @@ fn rewrite_pattern(pat: &Pattern, arena: &mut ParseArena) -> Pattern {
     let attrs = rewrite_attributes(&pat.ppat_attributes, arena);
 
     let desc = match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => match c {
-            // Strip 'l' suffix from integer literals
-            Constant::Integer(s, Some('l')) => {
-                PatternDesc::Ppat_constant(Constant::Integer(*s, None))
-            }
-            // Other constants: no transformation needed
-            _ => PatternDesc::Ppat_constant(*c),
-        },
+        PatternDesc::Ppat_constant(c) => PatternDesc::Ppat_constant(*c),
 
         // Alias pattern: recurse into the aliased pattern
         PatternDesc::Ppat_alias(inner_idx, name) => {
@@ -7093,7 +7088,7 @@ fn pattern_needs_no_rewrite(arena: &ParseArena, idx: PatIdx) -> bool {
             .all(|p| pattern_needs_no_rewrite(arena, *p))
     };
     match &pat.ppat_desc {
-        PatternDesc::Ppat_constant(c) => !matches!(c, Constant::Integer(_, Some('l'))),
+        PatternDesc::Ppat_constant(_) => true,
         PatternDesc::Ppat_alias(inner, _) | PatternDesc::Ppat_exception(inner) => {
             pattern_needs_no_rewrite(arena, *inner)
         }
@@ -7185,16 +7180,6 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
     let expr = arena.get_expr(idx);
     let loc = expr.pexp_loc;
     match &expr.pexp_desc {
-        // bs_builtin_ppx.ml: `{e with pexp_desc = Pexp_constant
-        // (Pconst_integer (s, None))}`, the attributes as they are.
-        ExpressionDesc::Pexp_constant(Constant::Integer(digits, Some('l'))) => {
-            let expanded = Expression {
-                pexp_desc: ExpressionDesc::Pexp_constant(Constant::Integer(*digits, None)),
-                pexp_loc: loc,
-                pexp_attributes: expr.pexp_attributes.clone(),
-            };
-            return expand(arena, idx, expanded);
-        }
         ExpressionDesc::Pexp_apply(apply) => {
             if let Some((a, f)) = pipe_operands(arena, apply) {
                 let attrs = expr.pexp_attributes.clone();
@@ -11490,7 +11475,11 @@ let e = () =>
         assert_eq!(arena.get_expr(root), &root_before);
         for (idx, before) in items.iter().zip(&before) {
             assert_eq!(arena.get_expr(*idx), before, "the node as parsed is kept");
-            assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            if *idx == items[4] {
+                assert_eq!(arena.expanded(*idx), *idx, "integer stays as written");
+            } else {
+                assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
+            }
         }
         let expanded = |i: usize| &arena.get_expr(arena.expanded(items[i])).pexp_desc;
         assert!(matches!(expanded(0), ExpressionDesc::Pexp_constraint(_)));
@@ -11508,7 +11497,7 @@ let e = () =>
         assert_eq!(arena.apply_args(call.args).len(), 2);
         assert!(matches!(
             expanded(4),
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, None))
+            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l')))
         ));
         assert!(matches!(expanded(5), ExpressionDesc::Pexp_apply(_)));
         assert!(matches!(expanded(6), ExpressionDesc::Pexp_ifthenelse(_)));
@@ -11536,24 +11525,29 @@ let e = () =>
     }
 
     #[test]
-    fn a_changed_pattern_expands_only_the_expression_that_holds_it() {
+    fn integer_patterns_keep_their_handles_and_create_no_expansion() {
         let (mut arena, root, items) =
             bound_tuple("let x = (a, switch b { | 1l => (c, d) | _ => (d, c) })\n");
+        let before = arena.get_expr(items[1]).clone();
         let appended = appended_exprs(&mut arena, |arena| rewrite_expr(root, arena));
-        assert_eq!(appended, 1, "the match with its mapped pattern");
+        assert_eq!(appended, 0);
         assert_eq!(arena.expanded(root), root);
-        let expanded = arena.expanded(items[1]);
-        assert_ne!(expanded, items[1]);
-        let (ExpressionDesc::Pexp_match((scrutinee, cases)), ExpressionDesc::Pexp_match((_, old))) =
-            (&arena.get_expr(expanded).pexp_desc, &arena.get_expr(items[1]).pexp_desc)
-        else {
-            panic!("expected matches");
-        };
-        assert!(matches!(arena.get_expr(*scrutinee).pexp_desc, ExpressionDesc::Pexp_ident(_)));
-        let (new, old) = (arena.case_list(*cases), arena.case_list(*old));
-        assert_ne!(new[0].pc_lhs, old[0].pc_lhs);
-        assert_eq!(new[0].pc_rhs, old[0].pc_rhs);
-        assert_eq!(new[1], old[1]);
+        assert_eq!(arena.expanded(items[1]), items[1]);
+        assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_integer_suffixes_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"1l, ".repeat(10_000));
+        source.push_str("]\n");
+        assert_eq!(mapper_cost(&source), (0, 0));
+        let mut source = String::from("let x = switch a {\n");
+        for i in 0..10_000 {
+            source.push_str(&format!("| {i}l => b\n"));
+        }
+        source.push_str("}\n");
+        assert_eq!(mapper_cost(&source), (10_001, 0));
     }
 
     /// `rewrite_expr` on the single binding of `source`: the nodes entered

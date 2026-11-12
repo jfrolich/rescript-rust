@@ -2742,8 +2742,7 @@ impl ParseArena {
             ExpressionDesc::Pexp_ident(_)
             | ExpressionDesc::Pexp_break
             | ExpressionDesc::Pexp_continue => 3,
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l'))) => 0,
-            ExpressionDesc::Pexp_constant(Constant::Integer(_, None)) => 1,
+            ExpressionDesc::Pexp_constant(c) if c.integer_digits().is_some() => 1,
             ExpressionDesc::Pexp_constant(_) => 3,
             ExpressionDesc::Pexp_apply(apply) => {
                 let is_pipe = matches!(&self.get_expr(apply.funct).pexp_desc,
