@@ -19,12 +19,13 @@
 //! constant time. A function that may be inlined is copied once, before the
 //! first edit inside it, and only then (`Engine::guard_enter`). An inlined
 //! application costs the analyses and the copy of the body (`beta.rs`).
+use super::beta::{self, ParamStats, Scratch};
 use crate::bir::bridge::Unsupported;
 use crate::bir::engine::{Changed, Engine, Facts, OpMask, Order, Round};
 use crate::bir::*;
 use crate::lambda::LamLoc;
 use crate::lambda::lam_compat::{Comparison, FieldDbgInfo};
-use crate::lambda::lam_primitive::Primitive;
+use crate::lambda::lam_primitive::{Mutable, Primitive};
 use crate::lambda::lam_tag_info::TagInfo;
 
 /// `simpl` has its own arms for applications, primitives, conditionals and
@@ -55,6 +56,9 @@ pub static ALIAS: Round = Round {
     guard: Some(|e, n| may_be_inlined(e.bir(), n)),
     rule: |_, _| Changed::No,
 };
+
+/// `MAX_INLINE_DEPTH` (lam_pass_remove_alias.rs:107-112, C.2 row 2).
+const MAX_INLINE_DEPTH: usize = crate::lambda::lam_pass_remove_alias::MAX_INLINE_DEPTH;
 
 /// `Lam_compile_context.rec_flag` of a bound function.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -307,6 +311,30 @@ impl Table {
         }
         entry
     }
+
+    /// `register_bound_param_kind` (lam_beta_reduce.rs:452-466,
+    /// lam_beta_reduce.ml:66-73): a parameter bound by a reduction to an
+    /// immutable block or to `Some(x)` gets an entry.
+    fn register(&mut self, e: &Engine<'_>, var: VarId, value: NodeId) {
+        let b = e.bir();
+        let View::Prim { args, primitive } = b.view(value) else {
+            return;
+        };
+        let entry = match (&b.primitive(primitive).primitive, args) {
+            (Primitive::Pmakeblock(_, Mutable::Immutable), args) => {
+                let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+                self.block(b, &args)
+            }
+            (Primitive::Psome | Primitive::PsomeNotNest, [x]) => {
+                Entry::Optional(match element(b, *x) {
+                    simple @ (Elem::Var(_) | Elem::Const(_)) => simple,
+                    _ => Elem::Na,
+                })
+            }
+            _ => return,
+        };
+        self.set(var, entry);
+    }
 }
 
 /// `Constant::some_none_depth` (lam_constant.rs:197-209).
@@ -352,16 +380,20 @@ enum Work {
     Field(NodeId, u64),
     Nullable(NodeId, VarId, BoxedNullable),
     StrSwitch(NodeId, ConstId),
+    Apply(NodeId, u64),
     GuardEnter(NodeId),
     GuardExit,
+    DepthDown,
     BoundaryEnter,
     BoundaryExit,
 }
 
 struct Pass {
     table: Table,
+    scratch: Scratch,
     work: Vec<Work>,
     revision: u64,
+    depth: usize,
     /// Functions and loop bodies around the node being swept.
     boundaries: usize,
 }
@@ -767,6 +799,180 @@ impl Pass {
         e.finish_candidate(n);
     }
 
+    /// Replace the application `n` by the reduction of `function` on the
+    /// application's arguments.
+    fn inline(
+        &mut self,
+        e: &mut Engine<'_>,
+        n: NodeId,
+        function: NodeId,
+        stats: Option<&[ParamStats]>,
+    ) -> Result<(), Unsupported> {
+        let View::Apply { args, .. } = e.bir().view(n) else {
+            unreachable!()
+        };
+        let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+        let weight = e.weight(n);
+        // The application may lie inside the function it applies: the body
+        // read below must not be the one the arguments are taken out of.
+        e.flush_guards();
+        let function = e.as_of_round_start(function);
+        let View::Fun { body, header } = e.bir().view(function) else {
+            unreachable!()
+        };
+        let params = e.bir().function(header).params;
+        for &arg in &args {
+            e.detach(arg);
+        }
+        let table = &mut self.table;
+        let reduced = beta::reduce(
+            e,
+            &mut self.scratch,
+            params,
+            body,
+            &args,
+            stats,
+            weight,
+            &mut |e, var, value| table.register(e, var, value),
+        )?;
+        self.place(e, n, reduced);
+        self.revision += 1;
+        Ok(())
+    }
+
+    /// `simpl_apply` (lam_pass_remove_alias.rs:310-426,
+    /// lam_pass_remove_alias.ml:125-246), before the arguments are swept.
+    fn apply(&mut self, e: &mut Engine<'_>, n: NodeId) -> Result<(), Unsupported> {
+        let View::Apply { callee, args, .. } = e.bir().view(n) else {
+            unreachable!()
+        };
+        // Cross-module inlining (lam_pass_remove_alias.rs:319-339,
+        // lam_pass_remove_alias.ml:131-162).
+        if let Some((module, field)) = beta::module_field(e.bir(), callee) {
+            let arity = args.len();
+            let Some(function) = e.external_function(module, field.as_str())? else {
+                self.shallow(e, n);
+                return Ok(());
+            };
+            let View::Apply { args, .. } = e.bir().view(n) else {
+                unreachable!()
+            };
+            let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+            let View::Fun { header, .. } = e.bir().view(function) else {
+                unreachable!()
+            };
+            // `external_inline_args_are_allowed` (lam_pass_remove_alias.rs:100-105).
+            let allowed = args.iter().all(|arg| match e.bir().view(*arg) {
+                View::Var { var } => self.table.entry(e, var) != Entry::Param,
+                _ => true,
+            });
+            let inline = e.bir().function(header).params.len() == arity
+                && allowed
+                && crate::lambda::lam_analysis::attr_can_be_inlined(
+                    e.bir().function_attributes(header),
+                );
+            if inline {
+                self.inline(e, n, function, None)?;
+                fired(e, "inline-external");
+                self.work.push(Work::Simpl(n));
+            } else {
+                self.shallow(e, n);
+            }
+            e.release(function);
+            return Ok(());
+        }
+        match e.bir().view(callee) {
+            View::Var { .. } => {
+                let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+                self.work.push(Work::Apply(n, self.revision));
+                self.work.extend(args.into_iter().rev().map(Work::Simpl));
+            }
+            // lam_pass_remove_alias.rs:416-423: an applied function.
+            View::Fun { header, .. }
+                if e.bir().function(header).params.len() == args.len()
+                    && crate::lambda::lam_analysis::attr_can_be_inlined(
+                        e.bir().function_attributes(header),
+                    ) =>
+            {
+                self.inline(e, n, callee, None)?;
+                fired(e, "inline-applied-function");
+                self.work.push(Work::Simpl(n));
+            }
+            _ => self.shallow(e, n),
+        }
+        Ok(())
+    }
+
+    /// `simpl_apply` on a variable (lam_pass_remove_alias.rs:341-415,
+    /// lam_pass_remove_alias.ml:163-240), once the arguments are swept.
+    fn apply_known(&mut self, e: &mut Engine<'_>, n: NodeId, before: u64) -> Result<(), Unsupported> {
+        use crate::lambda::InlineAttribute;
+        let View::Apply { callee, args, .. } = e.bir().view(n) else {
+            unreachable!()
+        };
+        let View::Var { var } = e.bir().view(callee) else {
+            unreachable!()
+        };
+        let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+        let Entry::Function {
+            node,
+            rec,
+            inlinable: true,
+        } = self.table.entry(e, var)
+        else {
+            self.finish(e, n, before);
+            return Ok(());
+        };
+        let function = e.as_of_round_start(node);
+        let View::Fun { body, header } = e.bir().view(function) else {
+            unreachable!()
+        };
+        let attr = e.bir().function_attributes(header);
+        let (functor, always) = (attr.is_a_functor, attr.inline == InlineAttribute::Always);
+        let params = e.bir().function(header).params;
+        if !crate::lambda::lam_analysis::attr_can_be_inlined(attr) || args.len() != params.len() {
+            self.finish(e, n, before);
+            return Ok(());
+        }
+        if functor {
+            self.inline(e, n, node, None)?;
+            fired(e, "inline-functor");
+            self.work.push(Work::Simpl(n));
+            return Ok(());
+        }
+        if !beta::ok_to_inline(e, function, &args) {
+            self.finish(e, n, before);
+            return Ok(());
+        }
+        let (closed, stats) = beta::closed_with_stats(e, &mut self.scratch, params, body);
+        if e.bir().vars().flags(var).contains(VarFlags::EXPORTED) && !closed {
+            self.finish(e, n, before);
+            return Ok(());
+        }
+        match rec {
+            Rec::Rec => {
+                self.inline(e, n, node, Some(&stats))?;
+                fired(e, "inline-recursive");
+                e.finish_candidate(n);
+            }
+            Rec::SelfRec => self.finish(e, n, before),
+            Rec::NonRec => {
+                if args.iter().any(|arg| super::flatten::hit(e, *arg, var))
+                    || (self.depth >= MAX_INLINE_DEPTH && !always)
+                {
+                    self.finish(e, n, before);
+                } else {
+                    self.inline(e, n, node, Some(&stats))?;
+                    fired(e, "inline-application");
+                    self.depth += 1;
+                    self.work.push(Work::DepthDown);
+                    self.work.push(Work::Simpl(n));
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// `simpl` (lam_pass_remove_alias.rs:155-220).
     fn simpl(&mut self, e: &mut Engine<'_>, n: NodeId) -> Result<(), Unsupported> {
         if !e.enter_candidate(n, CANDIDATES) {
@@ -775,8 +981,7 @@ impl Pass {
         match e.bir().node(n).op() {
             Op::Prim => self.prim(e, n),
             Op::If => self.if_(e, n),
-            // Applications: `simpl_apply`, in the commits that follow.
-            Op::Apply => self.shallow(e, n),
+            Op::Apply => self.apply(e, n)?,
             Op::StrSwitch => self.str_switch(e, n),
             Op::Let | Op::LetRec => {
                 if matches!(e.bir().view(n), View::Let { value: None, .. }) {
@@ -803,8 +1008,10 @@ fn is_const_some(b: &Bir, c: ConstId) -> bool {
 fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
     let mut pass = Pass {
         table: Table::new(e),
+        scratch: Scratch::default(),
         work: vec![Work::Simpl(root)],
         revision: 0,
+        depth: 0,
         boundaries: 0,
     };
     while let Some(task) = pass.work.pop() {
@@ -826,12 +1033,17 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
                 pass.str_switch_done(e, n, value);
                 Ok(())
             }
+            Work::Apply(n, before) => pass.apply_known(e, n, before),
             Work::GuardEnter(n) => {
                 e.guard_enter(n);
                 Ok(())
             }
             Work::GuardExit => {
                 e.guard_exit();
+                Ok(())
+            }
+            Work::DepthDown => {
+                pass.depth -= 1;
                 Ok(())
             }
             Work::BoundaryEnter => {
@@ -864,7 +1076,6 @@ mod tests {
     use crate::lambda::arena::LamArena;
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::Constant as C;
-    use crate::lambda::lam_primitive::Mutable;
     use crate::lambda::lam_tag_info::TagInfo;
 
     /// Where the maintained fact and the legacy entry differ by design
