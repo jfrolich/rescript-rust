@@ -1079,14 +1079,22 @@ variable's `order` (B.4) is a creation sequence number and gaps are harmless.
 (`prepend_declaration_or_fold_final_assignment` (C:5070)). **A**, **E**, **R**:
 the switch in that continuation. A switch never probes.
 
-**Order.** The scrutinee is lowered in **V** first. Then the cases, in the
-order of the grouped list, each group's body once; then the default
-(C:5693-5740; OCaml lowers the default before the cases,
-`lam_compile.ml:793-798`, which changes only identifier numbers). Bodies are
-lowered with `switch_depth + 1`.
+**Order.** Integer, string and named dispatch lower the scrutinee in **V**,
+then each grouped body once, then the default. Integer/named/untagged **V**
+allocate the result temporary before the scrutinee; string **V** allocates it
+afterward. Untagged emission follows the existing planner: actual switches
+lower the default before their clauses, while a single-typeof conditional
+lowers its clause before the default. A reused action is lowered once per
+in-switch state and its J output is copied for additional emitted occurrences.
 
-**Forms.** Which form a switch takes is decided by its `SwitchHeader`
-(B.3) and the number of cases, never by the continuation:
+Direct integer and string wrappers enter switch context for the scrutinee and
+bodies, including small string forms. Named dispatch enters it only for the
+bodies of a general side switch; untagged dispatch only for actual switches
+in its plan. The explicit traversal carries these contexts without recursion.
+
+**Forms.** The header selects the representation. Small string/named forms
+also depend on completeness: direct string **E** treats cases as incomplete,
+even without a default, unlike its other continuations:
 
 | Form | When | Function |
 | --- | --- | --- |
@@ -1104,15 +1112,19 @@ The general case of the last two (`compile_general_cases`,
    the first group whose head has an equal body, else starts a group; groups
    keep the order of their last member (`stable_group_switch_cases` (V:180)). All
    members of a group but the last get an empty clause that falls through;
-3. zero cases: the default's block. One case and complete: the case's block.
-   One case with or without default, or two cases and complete:
-   `if_(scrutinee === key, case, other)`. Otherwise a `switch` statement;
+3. direct integer dispatch always retains `switch` syntax, including zero,
+   one and two cases. String/named dispatch selects small forms **before**
+   filtering/grouping: zero cases is the default's block; one complete case
+   without a default is its body; one incomplete case or two complete cases
+   use `if_(scrutinee === key, case, other)`. Other forms use a switch;
 4. `break`: in **E** and **A** a clause breaks unless its output is finished
    (`to_break_block`, `js_output.ml:88-100`; `compile_switch_value_block` (C:5306)).
    In **R** a clause breaks only if its body contains an exit **and** its
    output is not finished (`return_case_needs_break` (C:6643));
-5. in **E**, a switch whose clauses and default are all empty is the
-   scrutinee alone (C:5866-5875).
+5. in **E**, a direct integer/string switch whose clauses and default are
+   all empty is the scrutinee alone (C:5866-5875). Named general switches retain
+   their switch even when empty. The legacy-output oracle wins these form
+   distinctions over the earlier generalization of this section.
 
 "Equal" in steps 1 and 2 is `eq_approx` (`lambda/arena.rs`), structural
 equality on ten node kinds that is false for the others. Section 7 bounds its
@@ -1128,10 +1140,11 @@ string switches (`compile_named_string_switch_assignment` (V:1248),
 `compile_named_string_switch_effect_with_strategy` (V:1584)). In the new lowering
 each is one function taking `Cx`.
 
-Incidental, stays in the lowering: a labelled `break` or `continue` is
-emitted whenever `switch_depth > 0`, that is inside any L switch, also one
-that is printed as `if` statements. Tested (section 4.4, `break loop_0` under
-an `if` chain).
+Incidental, stays in the lowering: labels use `switch_depth > 0`. Direct
+integer/string wrappers include small forms, but named and untagged dispatch
+only enter the scopes described above. Loop/exit lowering remains the later
+slices' responsibility; this slice tests the dispatcher and nested unsupported
+reasons rather than claiming support for those bodies.
 
 Incidental, legacy only: `compile_hoisted_named_string_return_tail` (C:3918) and
 `should_hoist_grouped_named_string_return_tail` (C:3905) act only when a
@@ -2347,6 +2360,44 @@ steps). These are opt-in lowering costs: this slice claims no improvement to
 the default emitted backend. Arena-owned variable-width cold payloads (block
 metadata, property lists, templates) continue to use the existing J pool API;
 this slice does not replace those representations.
+
+S3.4 switch costs (`switch.rs`, `variant.rs`, `untagged.rs`, `location.rs`):
+
+- Source bodies have dense 16-byte fingerprint/exit records. A fingerprint
+  indexes case positions, and candidate matches are confirmed with iterative
+  `eq_approx`; case heads/links and plan handles are dense arrays. A primitive's
+  payload is borrowed, not cloned just to dispatch on it.
+- Direct/named grouping takes expected O(cases + newly fingerprinted nodes +
+  confirmed pairs), preserving last-member group order. The unchanged untagged
+  planner retains its own grouping/simplification costs; the new emitter is an
+  explicit linear program over its emitted tree. This does not claim that the
+  existing planner's pairwise grouping became linear.
+- Continuation handles are 4 bytes. Emission operations are 8 bytes, pending
+  untagged walks 12, and action/output records 16. Cold integer/string, named,
+  and untagged plans are respectively 200, 88, and 336 bytes, pinned by tests.
+- Source maps alone allocate an 8-byte-per-source-node location cache. Each
+  search node is visited once; a located NONE stops the search before filtering,
+  and fallthrough labels retain their own location rather than the group's.
+- Repeated untagged outputs use the arena's existing subtree copier, with
+  binder remapping and bulk use-count finalization. Single-use runs are moved,
+  not copied. The existing copier has its existing map/allocation costs; no
+  claim of an allocation-free copier is made here.
+
+| 10,000-element shape | Source visits | Fingerprint visits | Equality confirmations |
+| --- | ---: | ---: | ---: |
+| distinct integer bodies | 10,002 | 10,000 | 0 |
+| equal pairs | 5,002 | 10,000 | 5,000 |
+| one shared body | 3 | 10,000 | 9,999 |
+| nested integer switches (all five continuations) | 20,001 | 10,000 | 0 |
+| distinct named bodies | 10,002 | 10,000 | 0 |
+| nested small named sides | 20,001 | 0 | 0 |
+| nested untagged payload dispatches | 20,001 | 10,000 | 0 |
+
+A separate 10,000-switch source-location chain takes 10,001 location visits;
+repeating the search takes none. Mapped oracle tests cover all four dispatch
+families and all five continuations. Normalized J expressions also cache delay
+safety from immediate children: corpus checking exposed an unnecessary held
+arithmetic argument when a later argument was an untagged switch.
 
 ### 7.4 Step-count tests each stage adds
 

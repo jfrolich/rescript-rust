@@ -1,0 +1,1 @@
+Lower integer, string, named-variant and untagged switches through the opt-in backend IR, preserving legacy small forms, grouping, declaration folding, source maps and switch scopes. Add legacy-output oracles, linear-work tests and coverage ratchets; default JavaScript output is unchanged.

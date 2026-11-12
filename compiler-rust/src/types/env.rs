@@ -227,9 +227,22 @@ pub fn check_value_name(name: &str, loc: Location) -> EnvResult<()> {
 // Binding Tables
 // ============================================================================
 
+#[cfg(test)]
+thread_local! {
+    /// Items put into opened layer tables on this thread.
+    pub(crate) static OPEN_TABLE_INSERTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_open_table_insert() {
+    #[cfg(test)]
+    OPEN_TABLE_INSERTS.with(|inserts| inserts.set(inserts.get() + 1));
+}
+
 fn id_open_table<T>(components: Vec<(Ident, T, i32)>) -> OpenedMap<(Ident, T, i32)> {
     let mut table = OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value, pos) in components {
+        count_open_table_insert();
         table.insert(id.name_atom(), (id, value, pos));
     }
     table
@@ -239,6 +252,7 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     let mut table: OpenedMap<Vec<(Ident, T)>> =
         OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value) in components {
+        count_open_table_insert();
         let name = id.name_atom();
         match table.get_mut(&name) {
             Some(entries) => entries.insert(0, (id, value)),
@@ -317,6 +331,42 @@ impl OpenedLayers {
                 modtypes
                     .into_iter()
                     .map(|(id, decl)| (id, Arc::new(decl), crate::types::path::NOPOS))
+                    .collect(),
+            )),
+        }
+    }
+
+    /// The layer tables of a world view's opened items. One hash insert
+    /// and one reference-count increment per item; no type node.
+    pub(crate) fn from_view(
+        items: &super::module_view::OpenedItems,
+        module_components: Vec<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>,
+    ) -> Self {
+        let no_pos = crate::types::path::NOPOS;
+        OpenedLayers {
+            values: Rc::new(id_open_table(items.values.clone())),
+            types: Rc::new(id_open_table(
+                items
+                    .types
+                    .iter()
+                    .map(|(id, decl)| (*id, decl.clone(), no_pos))
+                    .collect(),
+            )),
+            constrs: Rc::new(tycomp_open_table(items.constructors.clone())),
+            labels: Rc::new(tycomp_open_table(items.labels.clone())),
+            modules: Rc::new(id_open_table(
+                items
+                    .modules
+                    .iter()
+                    .map(|module| (module.id, module.decl.clone(), module.pos))
+                    .collect(),
+            )),
+            module_components: Rc::new(id_open_table(module_components)),
+            modtypes: Rc::new(id_open_table(
+                items
+                    .modtypes
+                    .iter()
+                    .map(|(id, decl)| (*id, decl.clone(), no_pos))
                     .collect(),
             )),
         }

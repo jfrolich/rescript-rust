@@ -472,13 +472,23 @@ pub struct LabelDescription {
 /// OCaml `lbl_all`: a handle to the array of all labels of a record, shared
 /// by those labels (`Datarepr.label_descrs`, compiler/ml/datarepr.ml:261-288).
 ///
-/// Like `TypeExprRef`, the handle names one of two pools: with
-/// `type_expr::STORE_REF_TAG` an array built during a worker-store build,
-/// valid for every compilation leasing that store; otherwise entry `n - 1` of
-/// the compilation's own pool. `NONE` is `dummy_label`'s empty `lbl_all`
-/// (datarepr.ml:245-258) and never names an array.
+/// Like `TypeExprRef`, the handle names one of three pools: with
+/// `type_expr::SHARED_REF_BITS` an array of the build's world
+/// (`World::label_array`), frozen and valid on every worker; with
+/// `type_expr::STORE_REF_TAG` alone an array built during a worker-store
+/// build, valid for every compilation leasing that store; otherwise entry
+/// `n - 1` of the compilation's own pool. `NONE` is `dummy_label`'s empty
+/// `lbl_all` (datarepr.ml:245-258) and never names an array.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct LabelArrayRef(pub u32);
+
+/// The pool a [`LabelArrayRef`] names, with the array's index there.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LabelArrayTier {
+    Frozen(usize),
+    Store(usize),
+    Local(usize),
+}
 
 impl LabelArrayRef {
     /// `dummy_label.lbl_all`: no array.
@@ -498,19 +508,32 @@ impl LabelArrayRef {
     pub(crate) fn store(idx: usize) -> Self {
         let raw = u32::try_from(idx).expect("label array index exceeds u32::MAX");
         assert!(
-            raw & super::type_expr::STORE_REF_TAG == 0,
+            raw & super::type_expr::SHARED_REF_BITS == 0,
             "store label array index exceeds the tag range"
         );
         LabelArrayRef(raw | super::type_expr::STORE_REF_TAG)
     }
 
-    /// Where the handle points: `Some(Ok(i))` for the store's `i`-th array,
-    /// `Some(Err(i))` for the compilation's, `None` for `NONE`.
-    pub(crate) fn index(self) -> Option<Result<usize, usize>> {
-        if self.0 & super::type_expr::STORE_REF_TAG != 0 {
-            Some(Ok((self.0 & !super::type_expr::STORE_REF_TAG) as usize))
+    /// The `idx`-th array of the world's table.
+    pub(crate) fn frozen(idx: usize) -> Self {
+        let raw = u32::try_from(idx).expect("label array index exceeds u32::MAX");
+        assert!(
+            raw & super::type_expr::SHARED_REF_BITS == 0,
+            "frozen label array index exceeds the tag range"
+        );
+        LabelArrayRef(raw | super::type_expr::SHARED_REF_BITS)
+    }
+
+    /// Where the handle points; `None` for `NONE`. Two bit tests.
+    #[inline]
+    pub(crate) fn tier(self) -> Option<LabelArrayTier> {
+        use super::type_expr::{SHARED_REF_BITS, STORE_REF_TAG};
+        if self.0 & SHARED_REF_BITS == SHARED_REF_BITS {
+            Some(LabelArrayTier::Frozen((self.0 & !SHARED_REF_BITS) as usize))
+        } else if self.0 & STORE_REF_TAG != 0 {
+            Some(LabelArrayTier::Store((self.0 & !STORE_REF_TAG) as usize))
         } else {
-            (self.0 as usize).checked_sub(1).map(Err)
+            (self.0 as usize).checked_sub(1).map(LabelArrayTier::Local)
         }
     }
 }

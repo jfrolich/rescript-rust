@@ -699,9 +699,60 @@ pub(crate) mod world {
         }
     }
 
+    static VIEWS_BUILT: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_ADOPTED: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_FAILED: AtomicU64 = AtomicU64::new(0);
+    static VIEW_NODES_COPIED: AtomicU64 = AtomicU64::new(0);
+    static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
+    static CHILD_NODES: AtomicU64 = AtomicU64::new(0);
+
+    /// What the views of a build hold: signature items, values,
+    /// constructors and labels of the lookup tables, then the opened
+    /// values, types, constructors and labels.
+    static VIEW_ITEMS: [AtomicU64; 8] = [const { AtomicU64::new(0) }; 8];
+
+    /// A module view was built; freezing it created `nodes` nodes, and it
+    /// holds `items` (see `VIEW_ITEMS`). The caller tests the flag.
+    pub(crate) fn record_view_build(nodes: usize, items: [usize; 8]) {
+        VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
+        VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+        for (total, count) in VIEW_ITEMS.iter().zip(items) {
+            total.fetch_add(count as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// The pool had no room for a module view.
+    pub(crate) fn record_view_failure() {
+        if super::enabled() {
+            VIEWS_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+
+    /// A compilation adopted a module view. The caller tests the flag.
+    pub(crate) fn record_view_adoption() {
+        VIEWS_ADOPTED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A child module declaration of a view was forced into `nodes` nodes.
+    pub(crate) fn record_forced_child(nodes: usize) {
+        if super::enabled() {
+            CHILDREN_FORCED.fetch_add(1, Ordering::Relaxed);
+            CHILD_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
     pub(super) fn reset() {
         PREDEF_BUILDS.store(0, Ordering::Relaxed);
         PREDEF_NODES.store(0, Ordering::Relaxed);
+        VIEWS_BUILT.store(0, Ordering::Relaxed);
+        VIEWS_ADOPTED.store(0, Ordering::Relaxed);
+        VIEWS_FAILED.store(0, Ordering::Relaxed);
+        for total in &VIEW_ITEMS {
+            total.store(0, Ordering::Relaxed);
+        }
+        VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
+        CHILDREN_FORCED.store(0, Ordering::Relaxed);
+        CHILD_NODES.store(0, Ordering::Relaxed);
     }
 
     pub(super) fn print_report() {
@@ -709,6 +760,30 @@ pub(crate) mod world {
             "[compiler-counter] world predef_builds={} predef_nodes={}",
             PREDEF_BUILDS.load(Ordering::Relaxed),
             PREDEF_NODES.load(Ordering::Relaxed),
+        );
+        eprintln!(
+            "[compiler-counter] world_views built={} adopted={} failed={} children_forced={}",
+            VIEWS_BUILT.load(Ordering::Relaxed),
+            VIEWS_ADOPTED.load(Ordering::Relaxed),
+            VIEWS_FAILED.load(Ordering::Relaxed),
+            CHILDREN_FORCED.load(Ordering::Relaxed),
+        );
+        let items = |index: usize| VIEW_ITEMS[index].load(Ordering::Relaxed);
+        eprintln!(
+            "[compiler-counter] world_view_items signature_items={} values={} constructors={} labels={} opened_values={} opened_types={} opened_constructors={} opened_labels={}",
+            items(0),
+            items(1),
+            items(2),
+            items(3),
+            items(4),
+            items(5),
+            items(6),
+            items(7),
+        );
+        eprintln!(
+            "[compiler-counter] world_view_nodes copied={} shared=0 child_nodes={}",
+            VIEW_NODES_COPIED.load(Ordering::Relaxed),
+            CHILD_NODES.load(Ordering::Relaxed),
         );
     }
 }

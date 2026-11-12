@@ -1,0 +1,8 @@
+We've found a bug for you!
+  /.../fixtures/Cross_nested_module_value_type/User.res:1:14-31
+
+  1 │ let _: int = Outer.Inner.make()
+  2 │ 
+
+  This has type: Outer.Inner.t
+  But it's expected to have type: int
