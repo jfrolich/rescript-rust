@@ -67,17 +67,19 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
                 modules: vec![],
                 side_effect: None,
             };
+            for preserve in [false, true] {
             let print = |p: &JsDepsProgram| {
                 crate::js_ir::print_deps_program_with_directives_and_options(
                     p,
                     None,
                     &[],
                     false,
-                    false,
+                    preserve,
                     false,
                 )
             };
-            assert_eq!(print(&actual), print(&expected), "context {cx:?}");
+            assert_eq!(print(&actual), print(&expected), "context {cx:?}, preserve {preserve}");
+            }
         }
     }
 }

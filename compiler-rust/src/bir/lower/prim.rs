@@ -717,6 +717,7 @@ impl State {
                     finished: Finished::True,
                 }));
             }
+            Primitive::Pjsx(jsx) => self.compile_jsx(&jsx, values),
             Primitive::Pimport(source) => self.compile_import(&source),
             Primitive::Pduprecord => self.duplicate_record(values[0]),
             Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
@@ -736,7 +737,6 @@ impl State {
             | Primitive::PjsObjectGet(_)
             | Primitive::PjsObjectSet(_)
             | Primitive::PjsFnMethod
-            | Primitive::Pjsx(_)
             => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }

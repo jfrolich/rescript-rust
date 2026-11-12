@@ -8,6 +8,7 @@ mod konst;
 mod prim;
 mod record;
 mod import;
+mod jsx;
 mod prim_cmp;
 mod prim_block;
 #[cfg(test)]
@@ -511,7 +512,6 @@ impl ProbeRules for State {
                     | Primitive::PjsObjectGet(_)
                     | Primitive::PjsObjectSet(_)
                     | Primitive::PjsFnMethod => "external",
-                    Primitive::Pjsx(_) => "jsx",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
                         source: node, primitive, operands: self.source.node(node).primitive_arguments(),
                     }))),
