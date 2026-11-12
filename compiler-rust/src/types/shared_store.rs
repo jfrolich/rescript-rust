@@ -72,6 +72,85 @@ pub(crate) struct SharedGraph {
     locations: super::decl_loc::DeclLocTable,
 }
 
+impl SharedGraph {
+    /// The graph's first shared index.
+    pub(crate) fn base(&self) -> u32 {
+        self.base
+    }
+
+    /// The nodes, by offset from the base.
+    pub(crate) fn nodes(&self) -> &[SharedTypeNode] {
+        &self.nodes
+    }
+
+    /// The variant layouts, by offset from the base.
+    pub(crate) fn layouts(&self) -> &[Layout] {
+        &self.layouts
+    }
+
+    /// The location table of the graph's declarations and labels.
+    pub(crate) fn locations(&self) -> &super::decl_loc::DeclLocTable {
+        &self.locations
+    }
+
+    /// The offset of the node `r` names, `None` when it is no node of this
+    /// graph.
+    pub(crate) fn node_offset(&self, r: TypeExprRef) -> Option<usize> {
+        if !r.is_shared() {
+            return None;
+        }
+        let offset = r.shared_index().checked_sub(self.base)? as usize;
+        (offset < self.nodes.len()).then_some(offset)
+    }
+
+    /// Offset from the base of a payload index of this graph.
+    fn payload_offset(&self, raw: u32) -> usize {
+        ((raw & !SHARED_REF_BITS) - self.base) as usize
+    }
+
+    /// The elements of a type list of one of this graph's nodes.
+    pub(crate) fn list(&self, list: TypeRefList) -> &[TypeExprRef] {
+        if list.is_empty() {
+            return &[];
+        }
+        let start = self.payload_offset(list.raw_start()) - self.nodes.len();
+        &self.lists[start..start + list.len()]
+    }
+
+    /// The parameters of an arrow node of this graph.
+    pub(crate) fn args(&self, list: TypeArgList) -> &[TypeArg] {
+        if list.is_empty() {
+            return &[];
+        }
+        let start = self.payload_offset(list.raw_start()) - self.nodes.len() - self.lists.len();
+        &self.args[start..start + list.len()]
+    }
+
+    /// The row of a variant node of this graph.
+    pub(crate) fn row(&self, row: RowDescRef) -> &RowDesc {
+        &self.rows
+            [self.payload_offset(row.raw()) - self.nodes.len() - self.lists.len() - self.args.len()]
+    }
+
+    /// The constraint names of a package node of this graph.
+    pub(crate) fn lids(&self, lids: PackageLidsRef) -> &[Longident] {
+        &self.lids[self.payload_offset(lids.raw())
+            - self.nodes.len()
+            - self.lists.len()
+            - self.args.len()
+            - self.rows.len()]
+    }
+}
+
+/// The graph published at `base`.
+pub(crate) fn graph_at(pages: &[OnceLock<Arc<SharedGraph>>], base: u32) -> &Arc<SharedGraph> {
+    let graph = pages[(base >> PAGE_BITS) as usize]
+        .get()
+        .expect("no shared graph is published at this index");
+    assert_eq!(graph.base, base, "shared index is not the base of a graph");
+    graph
+}
+
 /// Internalization slot of one portable dependency signature.
 struct PersSlot {
     /// Keeps the portable struct alive so its address cannot be reused as a

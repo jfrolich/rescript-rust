@@ -1,0 +1,1 @@
+- Hash a published interface's type graph with its sharing, in time linear in the graph, for the interface fingerprint and item digests; add an opt-in check (`RESCRIPT_SIGNATURE_CHECK=1`) that the shared pool's frozen graph gives the same fingerprint, item digests and stored bytes as the portable form.

@@ -14,11 +14,14 @@
 pub mod cmi_format;
 pub mod digest_ser;
 pub mod ffi_decode;
+pub mod graph_hash;
 pub mod item_deps;
 pub mod marshal_reader;
 pub mod persistent_env;
 pub mod portable_types;
+pub(crate) mod shared_reader;
 pub mod sig_reader;
+pub mod signature_check;
 pub mod stored_module;
 
 pub use cmi_format::CmiInfos;
