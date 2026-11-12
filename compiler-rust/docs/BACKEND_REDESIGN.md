@@ -1266,8 +1266,8 @@ The pinned codegen does not emit a start mapping for every expression kind
 mappings with the **last** one, whereas the legacy builder keeps the **first**.
 The first implementation therefore supports leaf-expression mappings and
 statement/declaration/function starts, and conservatively falls back for
-located compound expressions, transformed function bodies and eta-reduced
-declarations. Whole-file fallback is reported under a `source map:` reason;
+located compound expressions, transformed function bodies, eta-reduced
+declarations and switch-clause markers. Whole-file fallback is reported under a `source map:` reason;
 unsupported JS constructs still have their existing reasons. A function
 initializer and its declaration at one token retain the declaration's mark.
 New construct support must extend the mapping hooks as well as AST building.

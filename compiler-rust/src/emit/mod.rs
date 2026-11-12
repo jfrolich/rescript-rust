@@ -173,6 +173,27 @@ mod oracle_tests {
         }
     }
     #[test]
+    fn control_flow_source_oracle() {
+        for source in [
+            "let f = n => { for i in 0 to n { effect(i) } }",
+            "let f = n => { for i in n downto 0 { effect(i) } }",
+            "let f = n => { while condition(n) { effect(n) } }",
+            "type box = {mutable value: int}; let f = n => { let x = {value: n}; x.value = n; effect(x.value) }",
+            "let f = n => switch n { | 0 => effect(0) | 1 => effect(1) | _ => effect(n) }",
+            "external raise: exn => 'a = \"%raise\"; let f = e => raise(e)",
+            "let f = n => { effect(n); effect(n) }",
+        ] {
+            for commonjs in [false, true] {
+                oracle(
+                    &format!(
+                        "@val external effect: int => unit = \"effect\"; @val external condition: int => bool = \"condition\"; {source}"
+                    ),
+                    commonjs,
+                );
+            }
+        }
+    }
+    #[test]
     fn scoped_names_source_oracle() {
         for source in [
             "let x = 1; let x = 2; let y = x",
