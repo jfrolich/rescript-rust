@@ -2,6 +2,7 @@
 //! Context references are indices, never references into growing state pools.
 mod args;
 mod call;
+mod cond;
 mod expr;
 mod konst;
 #[cfg(test)]
@@ -442,6 +443,9 @@ impl ProbeRules for State {
                     _ => "prim",
                 };
                 return Err(Unsupported(reason));
+            }
+            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Value(Tail::No)) => {
+                return self.conditional_value(cx, condition, then_, else_).map(ProbePlan::Ready);
             }
             View::If { .. } => return Err(Unsupported("if")),
             View::Switch { .. } => return Err(Unsupported("switch")),
