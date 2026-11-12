@@ -1665,6 +1665,27 @@ impl PersistentEnv {
             })
     }
 
+    /// [`Self::extract_module_update`] in signature check mode: the
+    /// publication and its comparison with the frozen shared graph
+    /// (`portable_types::publish_pers_struct_checked`).
+    pub fn extract_module_update_checked(
+        &self,
+        module_name: &str,
+        ctx: &TypeContext,
+        arena: Option<&crate::parse_arena::ParseArena>,
+        publication: portable_types::SignaturePublicationMode,
+    ) -> Option<(Arc<PortablePersStruct>, super::signature_check::Comparison)> {
+        self.cache_lookup(module_name)
+            .and_then(|opt| opt)
+            .map(|ps| {
+                portable_types::publish_pers_struct_checked(
+                    portable_types::serialize_pers_struct(ps.as_ref(), ctx, arena),
+                    ctx,
+                    publication,
+                )
+            })
+    }
+
     /// Extract all currently-cached modules as portable structs, plus the full
     /// alias-rewrite table. Used by the playground to hydrate the shared
     /// registry after a compile so subsequent compiles can reuse the typed

@@ -381,6 +381,22 @@ jobs:
           python3 -m unittest discover -s scripts -p test_backend_coverage_test.py
           python3 scripts/test_backend_coverage.py
 
+  # Fingerprint, item digests and encoded bytes computed from the frozen
+  # shared graph must equal those of the portable form, unit by unit.
+  signature-equality:
+    name: Signature equality
+    needs: [build, ocaml]
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+      - uses: ./.github/actions/setup-node
+      - uses: ./.github/actions/prepare-parity
+      - name: Compare portable and frozen shared signatures
+        run: |
+          python3 -m unittest discover -s scripts -p test_signature_equality_test.py
+          python3 scripts/test_signature_equality.py
+
   # The parity suites that gate a change (see "The Correctness Contract" in
   # AGENTS.md), each its own check so that a pull request shows which one
   # failed.
