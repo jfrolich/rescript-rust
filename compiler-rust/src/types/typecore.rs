@@ -19623,6 +19623,11 @@ fn type_approx_for_rec_let(
         }
         ED::Pexp_match(inner) => {
             let (_, cases) = inner;
+            // The direct boolean rule is a conditional: pre-unification must
+            // approximate its true arm even when false appears first in source.
+            if let Some((ifso, _)) = crate::parser::parsetree_viewer::boolean_match_arms(tctx.arena, *cases) {
+                return type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(ifso));
+            }
             match tctx.arena.case_list(*cases).first() {
                 Some(case) => type_approx_for_rec_let(tctx, env, tctx.arena.get_expanded_expr(case.pc_rhs)),
                 None => Ok(ctx.new_var(None)),
