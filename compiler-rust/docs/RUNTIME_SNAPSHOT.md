@@ -847,3 +847,35 @@ the package root while excluding its descendants cannot be implemented by the
 specified directives alone. Source-only directory layout or a separate external
 membership stamp would be needed for that stronger requirement; neither is
 introduced here. D5 (new sources missed) is closed, not output exclusion.
+
+### S4 production and freshness implementation
+
+The single public producer is `snapshot::produce` (previously named `compile`).
+Both hidden commands enter before public CLI parsing, like `bsc`; they are not
+listed in public help. `RESCRIPT_RUNTIME` selects the runtime root; otherwise
+normal project runtime resolution is used. Belt is its sibling `belt`, exactly
+as in the build script's producer, not independently resolved from a project.
+The commands require source package configurations, not the config-less
+published layout accepted by the normal snapshot consumer.
+
+`--check` produces once and compares the complete bytes. On mismatch it borrows
+index/blob slices; it never decodes embedded stored cores. B.2's format now has
+a cold trailer: sorted `(package name, source filename, BLAKE3(source))` records,
+with length-prefixed names and a final little-endian `u32` trailer byte length.
+Normal loading does not read the trailer. This is necessary because editing a
+source can leave all compiled cores equal: the previous package-wide digest
+could detect this but could not name the module. The trailer adds one source
+read/hash during production only. A source/options digest mismatch with identical
+source records and cores is reported at package level, rather than falsely
+naming an unchanged module. Compilation errors are reported by the producer.
+
+Tests cover two productions in one process, writes in separate processes,
+freshness in a relocated copy, edits to each package, a new runtime module,
+hidden help, absence, and a linear scan of 10,000 source records. No new
+per-node type or normal-build walk is introduced; the borrowed reader is 16
+bytes. Normal builds execute none of the freshness or manifest code. The
+expected default-path saving is zero, not an optimization claim.
+
+`make lib` checks after both package build stamps. CI should run the same check
+after building runtime and Belt; the exact workflow insertion is supplied in
+the pull request, not a workflow edit here.

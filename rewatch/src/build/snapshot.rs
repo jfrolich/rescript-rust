@@ -201,7 +201,7 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
     };
     let belt_root = runtime_root.parent().expect("runtime package parent").join("belt");
     if belt_root.join("rescript.json").is_file() {
-        let belt = produce_belt(&belt_root, runtime_root, &runtime).context(BeltProofFailure)?;
+        let belt = compile_belt(&belt_root, runtime_root, &runtime).context(BeltProofFailure)?;
         encode(&[runtime, belt])
     } else {
         encode(&[runtime])
@@ -226,7 +226,7 @@ pub fn is_belt_proof_failure(error: &anyhow::Error) -> bool {
 /// Compile Belt through the ordinary package pipeline for both formats, two
 /// suffixes and both layouts. Producer only: four package compiles plus linear
 /// template comparison and one core encoding per module.
-fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> Result<ProducedPackage> {
+fn compile_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> Result<ProducedPackage> {
     anyhow::ensure!(alternate_backend_option().is_none(),
         "produce snapshots with the default JavaScript printer and backend");
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("rescript.json"))?)?;
@@ -827,7 +827,7 @@ mod tests {
     }
 
     #[test]
-    fn producer_is_deterministic_and_packages_have_no_build_paths() {
+    fn repeated_production_is_deterministic_and_packages_have_no_build_paths() {
         let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
         let first = produce(&runtime).unwrap();
         assert_eq!(first, produce(&runtime).unwrap());
