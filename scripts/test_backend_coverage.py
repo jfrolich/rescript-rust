@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RATCHET = ROOT / "compiler-rust/tests/backend_coverage.txt"
 
 
-STAGES = ("lambda-bridge", "lambda-norm")
+STAGES = ("lambda-bridge", "lambda-norm", "js-bridge")
 
 
 def summarize(directory, stage, prefix=None):

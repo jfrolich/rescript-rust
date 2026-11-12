@@ -137,3 +137,13 @@ or 18 significant digits (`ocaml_float::js_number_to_string` in Rust).
 Bulk import accumulates weighted uses once in the arena, indexed by variable
 ID. `try_finish_bulk` reports weight/count overflow as `Unsupported`; a failed
 partially finalized arena is discarded. No importer use-count maps are needed.
+
+## J-level shadow stage (`js-bridge`)
+
+Both opt-in backend modes now check the post-pass JS program immediately before
+printing. The original and the exported program use the legacy printer with the
+same resolver, file directives, debug/JSX options and header choice. Unsupported
+representations are reported by reason; a mismatch or invalid Bir is a compiler
+error naming the source unit. Default mode does not import or print a second
+program. The coverage harness ratchets `js-bridge` separately; Lambda stage
+counts are unchanged. The emitter and its view trait are not part of this slice.

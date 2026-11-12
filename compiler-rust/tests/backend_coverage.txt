@@ -1,4 +1,26 @@
 {
+  "js-bridge": {
+    "fixtures": {
+      "identical": 472,
+      "units": 480,
+      "unsupported": {
+        "multiply bound JS identifier": 8
+      }
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 709,
+      "units": 711,
+      "unsupported": {
+        "multiply bound JS identifier": 1,
+        "shared non-leaf JS node": 1
+      }
+    }
+  },
   "lambda-bridge": {
     "fixtures": {
       "identical": 480,
