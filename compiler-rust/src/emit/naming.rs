@@ -68,6 +68,7 @@ struct Scope {
 #[derive(Default)]
 pub(super) struct Names {
     printed: HashMap<Ident, Name>,
+    finishes: HashMap<Stmt, Name>,
     visible: HashMap<Ident, Name>,
     visible_groups: HashMap<Name, usize>,
     scopes: Vec<Scope>,
@@ -88,6 +89,10 @@ impl Names {
     }
     pub(super) fn get(&self, id: &Ident) -> &str {
         &self.printed[id]
+    }
+
+    pub(super) fn finish(&self, s: Stmt) -> &str {
+        &self.finishes[&s]
     }
 
     fn base(&mut self, id: Ident) -> Name {
@@ -378,7 +383,21 @@ impl Names {
                     self.analyze_block(a, a.stmts(f), defined, used)?;
                 }
                 StmtKind::Debugger => {}
-                other => return Err(unsupported_statement(other)),
+                _ => walk::statement_children(a, *s, |child| {
+                    match child {
+                        walk::StatementChild::Binder(id) => {
+                            defined.insert(id);
+                        }
+                        walk::StatementChild::Finish(_) => {}
+                        walk::StatementChild::Expression(e) => {
+                            self.analyze_expr(a, e, defined, used)?
+                        }
+                        walk::StatementChild::Block(b) => {
+                            self.analyze_block(a, a.stmts(b), defined, used)?
+                        }
+                    }
+                    Ok(())
+                })?,
             }
         }
         Ok(())
@@ -490,6 +509,11 @@ impl Names {
                     self.expr(a, e)?;
                 }
             }
+            StmtKind::Return(e) if tail == Some(true) => {
+                if let Some(e) = walk::tail_effect(a, e) {
+                    self.expr(a, e)?;
+                }
+            }
             StmtKind::Return(e) => {
                 if !walk::undefined(a, e) {
                     self.expr(a, e)?;
@@ -510,24 +534,30 @@ impl Names {
                 }
             }
             StmtKind::Debugger => {}
-            other => return Err(unsupported_statement(other)),
+            _ => walk::statement_children(a, s, |child| {
+                match child {
+                    walk::StatementChild::Binder(id) => self.add(id, false)?,
+                    walk::StatementChild::Finish(s) => {
+                        let StmtKind::ForRange(id) = a.sk(s) else {
+                            unreachable!()
+                        };
+                        let base = self.base(a.ident(a.for_range(id).ident));
+                        let stamp = -1 - self.finishes.len() as i32;
+                        let name = self.assign(Name::new(&format!("{base}_finish")), stamp)?;
+                        if self.finishes.insert(s, name).is_some_and(|old| old != name) {
+                            return Err(Unsupported(
+                                "range finish spelling differs between occurrences",
+                            ));
+                        }
+                    }
+                    walk::StatementChild::Expression(e) => self.expr(a, e)?,
+                    walk::StatementChild::Block(b) => self.block(a, a.stmts(b), false, None)?,
+                }
+                Ok(())
+            })?,
         }
         Ok(())
     }
-}
-
-fn unsupported_statement(s: StmtKind) -> Unsupported {
-    Unsupported(match s {
-        StmtKind::While(..)
-        | StmtKind::ForRange(_)
-        | StmtKind::ForOf(_)
-        | StmtKind::ForAwaitOf(_) => "loop",
-        StmtKind::IntSwitch(..) | StmtKind::StringSwitch(..) => "switch",
-        StmtKind::Try(_) => "try",
-        StmtKind::Throw(_) => "throw",
-        StmtKind::Break(_) | StmtKind::Continue(_) => "break/continue",
-        _ => unreachable!("supported statement"),
-    })
 }
 
 // Child order is the legacy printer's order. Shape decisions remain in walk;
@@ -556,6 +586,11 @@ fn children(
         | ExprKind::CamlBlockTag(e, _)
         | ExprKind::Await(e)
         | ExprKind::Spread(e) => visit(e)?,
+        ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
+            walk::assignment_target(a, l)?;
+            visit(l)?;
+            visit(r)?;
+        }
         ExprKind::Bin(_, l, r)
         | ExprKind::In(l, r)
         | ExprKind::Seq(l, r)
