@@ -174,6 +174,7 @@ impl Bir {
         }
         let mut effects = vec![(false, false); self.nodes.len()];
         let mut strict = vec![false; self.nodes.len()];
+        let mut trivial_unit = vec![false; self.nodes.len()];
         let mut subexpression = vec![false; self.nodes.len()];
         for &id in order.iter().rev() {
             let actual = self.effects(id, |c| effects[c.index()]);
@@ -192,6 +193,14 @@ impl Bir {
                 }
             }
             let flags = self.node(id).flags();
+            trivial_unit[id.index()] = self.trivial_unit_fact(self.view(id), |c| {
+                (effects[c.index()].0, trivial_unit[c.index()])
+            });
+            if matches!(self.view(id), View::Const { .. } | View::Seq { .. } | View::Let { .. })
+                && flags.contains(NodeFlags::TRIVIAL_UNIT) != trivial_unit[id.index()]
+            {
+                return fail("stale trivial unit flag");
+            }
             if flags.contains(NodeFlags::PURE) != actual.0
                 || flags.contains(NodeFlags::NO_ALLOC) != actual.1
             {

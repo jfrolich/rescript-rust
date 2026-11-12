@@ -59,9 +59,7 @@ const EMPTY: Span = Span { start: 0, len: 0 };
 
 impl State {
     /// K1: C:1812, rows R1 to R6 and section 3.7, on entering the node. One
-    /// call is constant, except in a return continuation of a function that
-    /// returns unit: there it reads the Let/Seq spine of both branches (row
-    /// R5 step 0), and a spine node belongs to one conditional.
+    /// call is constant, including the two cached branch facts for R5 step 0.
     pub(super) fn conditional(
         &mut self,
         cx: Cx,
@@ -915,30 +913,12 @@ impl State {
         result.expect("a return statement")
     }
 
-    /// C:3662 lambda_is_trivial_unit_undefined on the forms this lowering
-    /// accepts. One step per Let/Seq node of the spine, counted in
-    /// `spine_steps`; purity is the node's cached flag.
-    fn trivial_unit(&mut self, mut node: NodeId) -> bool {
-        let pure =
-            |state: &Self, node: NodeId| state.source.node(node).flags().contains(NodeFlags::PURE);
-        loop {
-            self.spine_steps += 1;
-            match self.source.view(node) {
-                View::Const { value } => {
-                    return matches!(
-                        self.arena.constant(value),
-                        crate::bir::Constant::Undefined(true)
-                    );
-                }
-                View::Seq { first, second } if pure(self, first) => node = second,
-                View::Let {
-                    value: Some(value),
-                    body,
-                    ..
-                } if pure(self, value) => node = body,
-                _ => return false,
-            }
-        }
+    /// C:3662 lambda_is_trivial_unit_undefined. One cached flag read,
+    /// independent of branch size. Bir::repair records TRIVIAL_UNIT when
+    /// building/importing L nodes; Bir::validate independently checks it.
+    fn trivial_unit(&mut self, node: NodeId) -> bool {
+        self.spine_steps += 1;
+        self.source.node(node).flags().contains(NodeFlags::TRIVIAL_UNIT)
     }
 
     /// Section 3.7 outside a return continuation: C:2918
@@ -2034,9 +2014,25 @@ mod tests {
         let root = input.root;
         let mut state = State::new(input);
         state.probe(Cx::value(), root).unwrap();
-        assert_eq!(state.spine_steps, DEPTH as usize + 2);
+        assert_eq!(state.spine_steps, 2);
         // Only the test was lowered: the conditional, its test, the function.
         assert_eq!(state.source_steps, 3);
+    }
+
+    #[test]
+    fn r5_forty_thousand_nodes_cost_one_flag_read() {
+        let mut a = LamArena::new();
+        let mut body = unit(&mut a);
+        for level in 0..20_000 {
+            let pure = int(&mut a, level);
+            body = a.seq_raw(pure, body);
+        }
+        let input = bridge::import_lambda(&a, body).unwrap();
+        input.arena.validate(Some(input.root)).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        assert!(state.trivial_unit(root));
+        assert_eq!(state.spine_steps, 1);
     }
 
     #[test]

@@ -544,16 +544,33 @@ impl Bir {
         self.count_stack = stack;
     }
 
+    /// R5 step 0, from immediate child facts: constant work per call.
+    /// Only these L forms can denote a trivial unit spine; J uses the same
+    /// bit for strict purity and never calls this predicate during lowering.
+    pub(super) fn trivial_unit_fact(
+        &self,
+        view: View<'_>,
+        child: impl Fn(NodeId) -> (bool, bool),
+    ) -> bool {
+        match view {
+            View::Const { value } => matches!(self.constant(value), Constant::Undefined(true)),
+            View::Seq { first, second } => child(second).1 && child(first).0,
+            View::Let { value: Some(value), body, .. } => child(body).1 && child(value).0,
+            _ => false,
+        }
+    }
+
     pub(super) fn effects(
         &self,
         id: NodeId,
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
-        let children = self.view(id).children();
+        let view = self.view(id);
+        let children = view.children();
         let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
         let all_pure = children.iter().all(|&c| child_effects(c).0);
         let no_alloc = children.iter().all(|&c| child_effects(c).1);
-        let effects = match self.view(id) {
+        let effects = match view {
             View::Var { .. }
             | View::Global { .. }
             | View::JQualified { .. }
@@ -643,6 +660,18 @@ impl Bir {
                     if j::facts::subexpression(self, id, |c| matches!(self.view(c), View::Var { .. }) || self.node(c).flags().contains(NodeFlags::J_SUBEXPR)) {
                         flags.0 |= NodeFlags::J_SUBEXPR;
                     }
+                }
+            }
+            if matches!(old_node.op(), Op::Const | Op::Seq | Op::Let) {
+                flags.0 &= !NodeFlags::TRIVIAL_UNIT;
+                if self.trivial_unit_fact(old_node.view(&self.lists), |c| {
+                    let child = self.node(c);
+                    let flags = child.flags();
+                    (flags.contains(NodeFlags::PURE),
+                        matches!(child.op(), Op::Const | Op::Seq | Op::Let)
+                            && flags.contains(NodeFlags::TRIVIAL_UNIT))
+                }) {
+                    flags.0 |= NodeFlags::TRIVIAL_UNIT;
                 }
             }
             self.nodes[id.index()].set_flags(flags);

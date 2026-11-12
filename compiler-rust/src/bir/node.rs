@@ -24,6 +24,9 @@ impl NodeFlags {
     pub const JS_LOC_PRESENT: u8 = 64;
     /// A JNumber carries an optional character decoration in its spare word.
     pub const JS_CHAR_PRESENT: u8 = 128;
+    /// L-only: a pure Let/Seq spine ending in the unit constant.
+    /// Shares the J strict-purity bit; L and J operations are disjoint.
+    pub const TRIVIAL_UNIT: u8 = 8;
     /// J-only: strict purity.
     pub const STRICT: u8 = 8;
     /// J-only: removable by E:146 is_pure_subexpression (not general purity).
