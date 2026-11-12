@@ -1,0 +1,14 @@
+lib/rescript
+*.lock
+.buildstamp
+bs/
+*.ast
+*.iast
+rescript.lock
+.compiler.log
+src/*.js
+src/*.mjs
+src/*.cjs
+lib/**/*.res.js
+lib/es6
+lib/js
