@@ -108,9 +108,8 @@
       "units": 480,
       "unsupported": {
         "external": 72,
-        "if": 48,
         "loop": 8,
-        "prim": 328,
+        "prim": 376,
         "record copy": 8,
         "switch": 16
       }
@@ -122,11 +121,10 @@
       "unsupported": {
         "await": 1,
         "external": 5,
-        "if": 14,
         "let rec": 1,
         "loop": 1,
-        "prim": 80,
-        "short circuit": 1,
+        "prim": 94,
+        "string switch": 1,
         "switch": 1,
         "try": 9
       }
@@ -139,16 +137,14 @@
         "assign": 7,
         "await": 9,
         "external": 170,
-        "if": 49,
         "import": 3,
-        "jsx": 2,
+        "jsx": 3,
         "let rec": 41,
-        "loop": 9,
-        "prim": 362,
+        "loop": 10,
+        "prim": 412,
         "record copy": 2,
         "shared Lambda subtree with binder": 1,
-        "short circuit": 4,
-        "static catch": 6,
+        "static catch": 7,
         "string switch": 7,
         "switch": 43,
         "try": 4
