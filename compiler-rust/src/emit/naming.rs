@@ -28,7 +28,7 @@
 //!
 //! Costs: visible lookup is one expected O(1) hash lookup, never a scope-chain
 //! search. Entry costs O(environment identifiers); exit costs O(inherited bases
-//! + assignments made in that scope).
+//! plus assignments made in that scope).
 //! Suffix tables are persistent HAMTs (bounded depth for machine-word hashes),
 //! so entry shares them without copying stamps. A candidate can belong to only
 //! two tables: its literal base, or the prefix before a final canonical $number.
