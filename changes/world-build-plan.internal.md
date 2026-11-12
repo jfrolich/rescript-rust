@@ -1,0 +1,1 @@
+- Add the build plan for the shared world to the checker redesign document: the end state as checks on the code, the frozen pool, the slices with their worker prompts, and the saving re-derived from measurements.
