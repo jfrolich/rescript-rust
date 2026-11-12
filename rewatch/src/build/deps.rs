@@ -2,6 +2,7 @@ use super::build_types::*;
 use super::packages;
 use ahash::{AHashMap, AHashSet};
 use rayon::prelude::*;
+use std::path::PathBuf;
 use rescript_compiler::binary_ast::Dependencies;
 
 /// What resolving a module's raw dependency names needs from its package.
@@ -241,6 +242,23 @@ pub fn plan_gentype(build_state: &mut BuildCommandState) {
     if rescript_compiler::perf_counters::enabled() {
         eprintln!("[compiler-counter] gentype_closure needed={} total={}",
             needed.len(), build_state.modules.len());
+    }
+    // Also mark unparsed, stored modules, so a closure bug cannot turn a
+    // missing cache entry into a silently ignored CMT lookup.
+    for (name, module) in &build_state.modules {
+        if needed.contains(name) { continue; }
+        let SourceType::SourceFile(source) = &module.source_type else { continue; };
+        let package = &build_state.packages[&module.package_name];
+        if package.config.gentype_config.is_none() { continue; }
+        let suffix = package.namespace.to_suffix().map(|ns| format!("-{ns}")).unwrap_or_default();
+        let paths = std::iter::once((&source.implementation.path, "cmt"))
+            .chain(source.interface.as_ref().map(|interface| (&interface.path, "cmti")))
+            .map(|(path, extension)| {
+                PathBuf::from(&package.path).join("lib/rescript")
+                    .join(format!("{}{suffix}.{extension}", path.file_stem().unwrap().to_string_lossy()))
+                    .to_string_lossy().into_owned()
+            }).collect::<Vec<_>>();
+        rescript_compiler::gentype::main::skip_type_declarations(name, &paths);
     }
     build_state.gentype_needed = Some(needed);
 }

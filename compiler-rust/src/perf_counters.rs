@@ -50,9 +50,27 @@ impl GentypeCounts {
 
 static GENTYPE_COUNTS: [GentypeCounts; 2] = [GentypeCounts::new(), GentypeCounts::new()];
 
+#[cfg(test)]
+thread_local! {
+    static GENTYPE_TEST_COUNTS: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+#[cfg(test)]
+pub(crate) fn gentype_counts_for_test() -> [u64; 4] {
+    GENTYPE_TEST_COUNTS.with(std::cell::Cell::get)
+}
+
 /// Successful declaration-cache translations and the declarations they produce.
 /// This excludes the separate translation for an annotated module's own output.
 pub(crate) fn record_gentype_translation(annotated: bool, declarations: usize) {
+    #[cfg(test)]
+    GENTYPE_TEST_COUNTS.with(|counts| {
+        let mut values = counts.get();
+        let offset = usize::from(annotated) * 2;
+        values[offset] += 1;
+        values[offset + 1] += declarations as u64;
+        counts.set(values);
+    });
     if enabled() {
         GENTYPE_COUNTS[usize::from(annotated)].record(declarations);
     }

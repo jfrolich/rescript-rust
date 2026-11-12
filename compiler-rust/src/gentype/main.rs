@@ -110,6 +110,9 @@ pub type EncodedTypeDeclarations = crate::binser::Encoded<InProcessTypeDeclarati
 struct InProcessTypeDeclarationsTables {
     by_cmt: HashMap<String, EncodedTypeDeclarations>,
     by_module: HashMap<String, Vec<String>>,
+    skipped: HashMap<String, String>,
+    #[cfg(debug_assertions)]
+    skipped_requests: Vec<(String, String)>,
 }
 
 type InProcessTypeDeclarationsCache = Mutex<InProcessTypeDeclarationsTables>;
@@ -236,7 +239,7 @@ fn has_in_process_type_declarations(cmt_file: &Path) -> bool {
     let key = normalize_cmt_cache_key(cmt_file);
     in_process_type_declarations_cache()
         .lock()
-        .map(|cache| cache.by_cmt.contains_key(&key))
+        .map(|cache| cache.by_cmt.contains_key(&key) || cache.skipped.contains_key(&key))
         .unwrap_or(false)
 }
 
@@ -264,9 +267,49 @@ fn register_in_process_type_declarations(
             if !keys.contains(&key) {
                 keys.push(key.clone());
             }
+            cache.skipped.remove(&key);
             cache.by_cmt.insert(key, type_declarations)
         });
     drop(replaced);
+}
+
+/// Register the build planner's proof that these artifact paths are unneeded.
+/// The tombstones are deliberately not encoded as type declarations. They make
+/// path resolution reach the missing-declaration error instead of silently
+/// treating a skipped artifact as a nonexistent external CMT.
+pub fn skip_type_declarations(module_name: &str, artifact_paths: &[String]) {
+    let keys: Vec<_> = artifact_paths.iter().map(|path| normalize_cmt_cache_key(path)).collect();
+    let mut cache = in_process_type_declarations_cache().lock().unwrap();
+    if let Some(old_keys) = cache.by_module.remove(module_name) {
+        for key in old_keys { cache.by_cmt.remove(&key); }
+    }
+    for key in keys { cache.skipped.insert(key, module_name.to_string()); }
+}
+
+/// Additional debug-build audit; a skipped lookup is an error in release too.
+pub fn verify_skipped_declarations() -> Result<(), String> {
+    #[cfg(debug_assertions)]
+    if std::env::var_os("RESCRIPT_VERIFY_GENTYPE_CLOSURE").is_some() {
+        let cache = in_process_type_declarations_cache().lock().unwrap();
+        if !cache.skipped_requests.is_empty() {
+            return Err(format!("Internal genType closure error: skipped requests {:?}", cache.skipped_requests));
+        }
+        assert!(cache.skipped.keys().all(|key| !cache.by_cmt.contains_key(key)));
+    }
+    Ok(())
+}
+
+fn skipped_declaration_error(cmt_file: &str, importer: &str) -> Option<String> {
+    let key = normalize_cmt_cache_key(cmt_file);
+    let cache = in_process_type_declarations_cache().lock().unwrap();
+    let module = cache.skipped.get(&key)?.clone();
+    #[cfg(debug_assertions)]
+    {
+        drop(cache);
+        in_process_type_declarations_cache().lock().unwrap()
+            .skipped_requests.push((importer.to_string(), module.clone()));
+    }
+    Some(format!("Internal genType dependency-closure error: module {importer} requested skipped declarations of module {module}"))
 }
 
 /// The type declarations `module_name`'s typed artifacts registered, by
@@ -303,6 +346,7 @@ pub fn restore_type_declarations(
     let keys = entries.iter().map(|(key, _)| key.clone()).collect();
     cache.by_module.insert(module_name.to_string(), keys);
     for (key, declarations) in entries {
+        cache.skipped.remove(&key);
         cache.by_cmt.insert(key, declarations);
     }
 }
@@ -549,6 +593,9 @@ pub fn input_cmt_translate_type_declarations(
     // compiler/gentype/EmitJs.ml:449-453: the declarations are translated
     // here in OCaml, so the warnings their translation prints are printed,
     // and an exception it raised is raised, here.
+    if let Some(error) = skipped_declaration_error(cmt_file, _output_file_relative) {
+        return Err(error);
+    }
     match lookup_in_process_type_declarations(cmt_file) {
         Some(InProcessTypeDeclarations {
             notes: translation_notes,
@@ -768,7 +815,7 @@ fn register_type_declarations(
         artifact,
     )
     .map(|translation| {
-        if crate::perf_counters::enabled() {
+        if crate::perf_counters::enabled() || cfg!(test) {
             let ignore_interface = std::cell::Cell::new(false);
             let annotated = typed_artifact_check_annotations(
                 &|arena, _loc, attributes| {
@@ -834,6 +881,14 @@ fn plan_output(
         };
         let project_root = config.project_root.clone();
         let get_cmt_file = |cmt: &str| get_cmt_file_for_typed_artifact_import(&project_root, cmt);
+        let read_declarations = |notes: &crate::gentype::log_::Notes,
+            config: &mut crate::gentype::config::T, output: &str,
+            resolver: &crate::gentype::module_resolver::Resolver, cmt: &str| {
+            if let Some(error) = skipped_declaration_error(cmt, &artifact.compiler_module_name) {
+                return Err(error);
+            }
+            input_cmt_translate_type_declarations(notes, config, output, resolver, cmt)
+        };
         // Only emitting mutates the config; modules without GenType
         // annotations skip the copy.
         let mut config = config.clone();
@@ -846,7 +901,7 @@ fn plan_output(
                 output_file_relative: &prepared.output_file_relative,
                 resolver,
                 get_cmt_file: &get_cmt_file,
-                input_cmt_translate_type_declarations: &input_cmt_translate_type_declarations,
+                input_cmt_translate_type_declarations: &read_declarations,
             },
             &prepared.source_file,
             &translation,
@@ -891,11 +946,11 @@ pub fn read_input_check_annotation(
 /// retaining the normal removal of an obsolete generated file. No resolver,
 /// annotation walk, translation or declaration encoding is needed here.
 fn unneeded_artifact(config: &crate::gentype::config::T, artifact: &TypedArtifact<'_>) -> Outcome {
-    let mut cache = in_process_type_declarations_cache().lock().unwrap();
-    if let Some(keys) = cache.by_module.remove(&artifact.compiler_module_name) {
-        for key in keys { cache.by_cmt.remove(&key); }
+    if let Some(source) = artifact.source_file
+        && let Some(cmt) = cmt_file_for_typed_artifact(config, source, artifact.is_interface)
+    {
+        skip_type_declarations(&artifact.compiler_module_name, &[cmt]);
     }
-    drop(cache);
     if artifact.declarations_only {
         return Outcome::default();
     }
@@ -1151,6 +1206,10 @@ mod tests {
     /// What GenType does for `source` (see `gentype_with_bad_strings`), not
     /// yet applied.
     fn gentype_outcome(root: &Path, module: &str, source: &str) -> Outcome {
+        gentype_outcome_with_needed(root, module, source, true)
+    }
+
+    fn gentype_outcome_with_needed(root: &Path, module: &str, source: &str, needed: bool) -> Outcome {
         let id_gen = IdGenerator::with_start_stamp(999);
         let type_ctx = TypeContext::new(std::sync::Arc::new(id_gen));
         let source_file = format!("src/{module}.res");
@@ -1223,10 +1282,40 @@ mod tests {
                 file_name: crate::gentype::paths::get_module_name_from_source_path(&source_file),
                 is_interface: false,
                 declarations_only: false,
-                declarations_needed: true,
+                declarations_needed: needed,
                 render_escape: &render_escape,
             },
         )
+    }
+
+    #[test]
+    fn unreachable_artifact_translates_zero_declarations() {
+        let root = project("unreachable");
+        let before = crate::perf_counters::gentype_counts_for_test();
+        let outcome = gentype_outcome_with_needed(&root, "Unreachable", "type t = int", false);
+        assert!(outcome.result.is_ok());
+        assert_eq!(crate::perf_counters::gentype_counts_for_test(), before);
+        assert!(type_declarations_of_module("Unreachable").is_empty());
+        let outcome = gentype_outcome_with_needed(&root, "Reachable", "type t = int", true);
+        assert!(outcome.result.is_ok());
+        let after = crate::perf_counters::gentype_counts_for_test();
+        assert_eq!(after[0], before[0] + 1);
+        assert_eq!(after[1], before[1] + 1);
+    }
+
+    #[test]
+    fn skipped_artifact_lookup_fails_with_importer_and_owner() {
+        let root = project("closure-error");
+        let path = root.join("Missing.cmt").to_string_lossy().into_owned();
+        skip_type_declarations("Missing", &[path.clone()]);
+        assert!(has_in_process_type_declarations(Path::new(&path)));
+        let error = skipped_declaration_error(&path, "Importer").unwrap();
+        assert!(error.contains("module Importer"), "{error}");
+        assert!(error.contains("module Missing"), "{error}");
+        assert!(type_declarations_of_module("Missing").is_empty());
+        #[cfg(debug_assertions)]
+        in_process_type_declarations_cache().lock().unwrap().skipped_requests
+            .retain(|(importer, owner)| importer != "Importer" || owner != "Missing");
     }
 
     fn project(name: &str) -> PathBuf {

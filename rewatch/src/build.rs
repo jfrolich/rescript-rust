@@ -823,6 +823,8 @@ pub fn incremental_build_without_lock(
         || pb.inc(1),
         |size| pb.set_length(size),
     );
+    rescript_compiler::gentype::main::verify_skipped_declarations()
+        .expect("genType dependency-closure audit failed");
     // Workers request the retry while compiling. Consume the request even when
     // `compile` fails afterwards, so it cannot start a retry in a later build.
     let retry_with_locations = build_state
