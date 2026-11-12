@@ -312,11 +312,15 @@ impl<'a, 'r> Build<'a, 'r> {
     /// the right child remains grouped, unlike logical chains. Visit leaves
     /// left to right and build postorder without recursing through the chain.
     fn string_append(&self, root: Expr) -> Result<Expression<'a>, Unsupported> {
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: string concatenation"));
+        }
         let mut tasks = self.string_tasks.take();
         let mut values = self.string_values.take();
         tasks.push((root, false));
         let result = (|| {
             while let Some((expr, finish)) = tasks.pop() {
+                walk::expression_comment(self.arena, expr)?;
                 if let Some((left, right)) = walk::string_children(self.arena, expr) {
                     if finish {
                         let right = values.pop().unwrap();
@@ -1991,6 +1995,19 @@ mod remaining_expression_tests {
             let expr = a.expr(ExprKind::RecordRest(fields, value));
             oracle(&a, expr);
         }
+    }
+
+    #[test]
+    fn string_spine_does_not_bypass_comment_rejection() {
+        let mut a = JsArena::new();
+        let value = a.expr(ExprKind::Null);
+        let inner = a.expr_commented(ExprKind::StringAppend(value, value), "keep me");
+        let root = a.expr(ExprKind::StringAppend(value, inner));
+        let alloc = Allocator::default();
+        let names = Names::default();
+        let error = Build::new(&alloc, &a, &names).expr(root).unwrap_err();
+        assert_eq!(error, Unsupported("non-decoration expression comment"));
+        assert_eq!(walk::string_leaves(&a, root, &mut Vec::new(), |_| Ok(())), Err(error));
     }
 
     #[test]

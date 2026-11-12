@@ -471,6 +471,7 @@ pub(super) fn string_leaves(
 ) -> Result<(), Unsupported> {
     pending.push(root);
     while let Some(e) = pending.pop() {
+        expression_comment(a, e)?;
         if let Some((l, r)) = string_children(a, e) {
             pending.push(r);
             pending.push(l);
