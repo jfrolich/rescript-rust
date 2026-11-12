@@ -134,7 +134,7 @@ impl State {
     ) -> Probed {
         match resume {
             Resume::Call(call) => self.finish_application(cx, call, children),
-            Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
+            Resume::Prim(_) => unreachable!("primitive finished by dispatch"),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {
                     Probed::Out(out) => out,

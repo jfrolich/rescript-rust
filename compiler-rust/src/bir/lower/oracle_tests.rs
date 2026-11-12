@@ -10,7 +10,7 @@ pub(super) fn compare(arena: LamArena, root: Lam) {
     compare_with_resolver(arena, root, None);
 }
 
-fn compare_with_resolver(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
+pub(super) fn compare_with_resolver(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
     compare_with_options(arena, root, resolver, true);
 }
 

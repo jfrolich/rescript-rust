@@ -8,6 +8,7 @@ use crate::lambda::lam_primitive::Primitive;
 
 pub(super) struct Prim {
     pub primitive: PrimId,
+    pub source: NodeId,
     pub operands: Vec<NodeId>,
 }
 
@@ -18,6 +19,7 @@ impl State {
             | Primitive::Pignore | Primitive::Ptypeof | Primitive::PrawJsCode(_)
             | Primitive::PcreateExtension(_) | Primitive::PinitMod | Primitive::PupdateMod
             | Primitive::Praise | Primitive::Pdebugger
+            | Primitive::Pmakeblock(_, _) | Primitive::Pmakelist | Primitive::Pmakearray | Primitive::Pfield(_, _) | Primitive::Psetfield(_, _) | Primitive::Pobjtag | Primitive::Pobjsize | Primitive::PisPolyVarBlock | Primitive::Pstringrefs | Primitive::Pstringrefu | Primitive::Parrayrefu | Primitive::Parrayrefs | Primitive::Parraysetu | Primitive::Ptemplate(_) | Primitive::PtaggedTemplate(_)
             | Primitive::Psome | Primitive::PsomeNotNest | Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest | Primitive::PisNotNone | Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt | Primitive::PisNull | Primitive::PisUndefined | Primitive::PisNullUndefined
             | Primitive::Pintcomp(_) | Primitive::Pboolcomp(_) | Primitive::Pstringcomp(_) | Primitive::Pbigintcomp(_) | Primitive::Pobjcomp(_) | Primitive::Pfloatcomp(_) | Primitive::Pjscomp(_) | Primitive::Pobjorder | Primitive::Pobjmin | Primitive::Pobjmax | Primitive::Pboolorder | Primitive::Pboolmin | Primitive::Pboolmax | Primitive::Pintorder | Primitive::Pintmin | Primitive::Pintmax | Primitive::Pfloatorder | Primitive::Pfloatmin | Primitive::Pfloatmax | Primitive::Pbigintorder | Primitive::Pbigintmin | Primitive::Pbigintmax | Primitive::Pstringorder | Primitive::Pstringmin | Primitive::Pstringmax
             | Primitive::Paddint | Primitive::Psubint | Primitive::Pmulint | Primitive::Pdivint | Primitive::Pmodint | Primitive::Ppowint | Primitive::Pandint | Primitive::Porint | Primitive::Pxorint | Primitive::Plslint | Primitive::Paddfloat | Primitive::Psubfloat | Primitive::Pmulfloat | Primitive::Pdivfloat | Primitive::Pmodfloat | Primitive::Ppowfloat | Primitive::Paddbigint | Primitive::Psubbigint | Primitive::Pmulbigint | Primitive::Ppowbigint | Primitive::Pandbigint | Primitive::Porbigint | Primitive::Pxorbigint | Primitive::Plslbigint | Primitive::Pasrbigint | Primitive::Pasrint | Primitive::Pnotint | Primitive::Pnotbigint | Primitive::Pintoffloat | Primitive::Pnegint | Primitive::Pnegfloat | Primitive::Pnegbigint | Primitive::Plsrint | Primitive::Pdivbigint | Primitive::Pmodbigint)
@@ -75,7 +77,7 @@ impl State {
         cx: Cx,
         prim: Prim,
         children: impl Iterator<Item = Probed>,
-    ) -> Probed {
+    ) -> Result<Probed, Unsupported> {
         let outputs = children.map(|child| match child {
             Probed::Out(out) => out,
             Probed::Free(_) => unreachable!("argument realized before its next sibling"),
@@ -83,7 +85,65 @@ impl State {
         let (statements, values) = self.sequence_arguments(false, outputs);
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
+        // P: compile_flat_make_field. Cache module-path membership per source
+        // occurrence, so a deep chain is inspected once, not walked per field.
+        if let Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) = &primitive {
+            if let [arg] = prim.operands.as_slice() {
+                let nested = self.module_paths[arg.index()];
+                if nested && name.as_str() == "make" { return Err(Unsupported("flat make")); }
+                self.module_paths[prim.source.index()] = nested || matches!(self.source.view(*arg), View::Global { .. });
+            }
+        }
         let value = match primitive {
+            // P: compile_primitive_js, blocks and fields (K: compile_field_access).
+            Primitive::Pmakeblock(tag, mutable) => {
+                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                plain::node(&mut self.arena, View::JBlockLit { values: &values, info },
+                    if matches!(mutable, crate::lambda::lam_primitive::Mutable::Mutable) { 0 } else { 1 })
+            }
+            Primitive::Pmakelist => {
+                let info = self.arena.js_info(crate::bir::JsPayload::Block(crate::lambda::TagInfo::constructor("::", 1)));
+                plain::node(&mut self.arena, View::JBlockLit { values: &values, info }, 0)
+            }
+            Primitive::Pmakearray => plain::node(&mut self.arena, View::JArray { values: &values }, 0),
+            Primitive::Pfield(idx, info) => self.primitive_field(idx, info, values[0]),
+            Primitive::Psetfield(idx, info) => self.primitive_set_field(idx, info.name(), values[0], values[1]),
+            Primitive::Pobjtag => {
+                let property = self.arena.intern_text("TAG");
+                plain::node(&mut self.arena, View::JDot { object: values[0], property, position: crate::js_ir::arena::FieldPos::NONE }, 1)
+            }
+            Primitive::Pobjsize => {
+                let length = norm::je2_length(&mut self.arena, values[0], LengthObject::CamlBlock);
+                norm::jm3_to_int32(&mut self.arena, length)
+            }
+            Primitive::PisPolyVarBlock => {
+                let typeof_ = plain::node(&mut self.arena, View::JTypeof { value: values[0] }, 0);
+                let object = plain::string(&mut self.arena, "object");
+                plain::bin(&mut self.arena, BinOp::EqEqEq, typeof_, object)
+            }
+            // P: compile_primitive_js, indexing. Both string forms are checked.
+            Primitive::Pstringrefs | Primitive::Pstringrefu => self.primitive_runtime("Primitive_string", "getChar", &values),
+            Primitive::Parrayrefs => self.primitive_runtime("Primitive_array", "get", &values),
+            Primitive::Parrayrefu => {
+                if let [object, index] = values.as_slice() {
+                    plain::node(&mut self.arena, View::JIndex { object: *object, index: *index }, 0)
+                } else { for v in values { self.arena.release(v); } plain::node(&mut self.arena, View::JUndefined, 0) }
+            }
+            Primitive::Parraysetu => {
+                if let [object, index, value] = values.as_slice() {
+                    let target = plain::node(&mut self.arena, View::JIndex { object: *object, index: *index }, 0);
+                    let assignment = norm::je4_bin(&mut self.arena, BinOp::Eq, target, *value);
+                    let unit = plain::node(&mut self.arena, View::JUndefined, 0);
+                    plain::seq(&mut self.arena, assignment, unit)
+                } else { for v in values { self.arena.release(v); } plain::node(&mut self.arena, View::JUndefined, 0) }
+            }
+            // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
+            Primitive::Ptemplate(segments) => norm::jm12_interpolated_template(&mut self.arena, segments, values),
+            Primitive::PtaggedTemplate(segments) => {
+                let parts = segments.into_iter().map(|s| crate::bir::TemplatePart { raw: self.arena.intern_text(&s), cooked: None }).collect();
+                let info = self.arena.js_info(crate::bir::JsPayload::Tagged(parts));
+                plain::node(&mut self.arena, View::JTagged { tag: values[0], values: &values[1..], info }, 0)
+            }
             // X: some_expr / optional_block. Identity is a shape test, not purity.
             Primitive::Psome | Primitive::PsomeNotNest => {
                 let value = values[0];
@@ -252,13 +312,13 @@ impl State {
                     Cont::Value(_) | Cont::Effect(Tail::No) => Some(plain::node(&mut self.arena, View::JUndefined, 0)),
                     _ => None,
                 };
-                return Probed::Out(Out { stmts: self.statements.since(Span { start: statements.start, len: 0 }), value, finished: Finished::True });
+                return Ok(Probed::Out(Out { stmts: self.statements.since(Span { start: statements.start, len: 0 }), value, finished: Finished::True }));
             }
             Primitive::Pstringlength => norm::je2_length(&mut self.arena, values[0], LengthObject::String),
             Primitive::Parraylength => norm::je2_length(&mut self.arena, values[0], LengthObject::Array),
             _ => unreachable!("primitive admitted by dispatch"),
         };
-        self.primitive_result(cx, self.statements.since(Span { start: statements.start, len: 0 }), value)
+        Ok(self.primitive_result(cx, self.statements.since(Span { start: statements.start, len: 0 }), value))
     }
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.

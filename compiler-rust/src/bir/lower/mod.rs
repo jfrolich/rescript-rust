@@ -6,6 +6,7 @@ mod expr;
 mod konst;
 mod prim;
 mod prim_cmp;
+mod prim_block;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -278,6 +279,7 @@ struct State {
     statements: StatementStack,
     free: FreePool,
     source_steps: usize,
+    module_paths: Vec<bool>,
     direct: bool,
     located_functions: Vec<bool>,
     next_order: u32,
@@ -314,6 +316,7 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
+            module_paths: vec![false; input.arena.nodes.len()],
             source: input.arena,
             arena,
             idents: input.idents,
@@ -431,7 +434,7 @@ impl ProbeRules for State {
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, args } => {
                 if Self::supported_primitive(&self.arena.primitive(primitive).primitive) {
-                    return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim { primitive, operands: args.to_vec() })));
+                    return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim { source: node, primitive, operands: args.to_vec() })));
                 }
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
@@ -532,7 +535,10 @@ impl ProbeRules for State {
         resume: Self::Resume,
         children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
-        Ok(self.finish_expression(cx, resume, children))
+        match resume {
+            expr::Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
+            resume => Ok(self.finish_expression(cx, resume, children)),
+        }
     }
 }
 
