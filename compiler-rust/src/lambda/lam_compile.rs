@@ -607,6 +607,22 @@ impl LambdaCompiler {
         self.compile_deps_program_owned(lam).program
     }
 
+    #[cfg(test)]
+    pub(crate) fn bir_lower_oracle(
+        &mut self, arena: &mut LamArena, root: Lam,
+        cont: crate::bir::lower::Cont, target: Ident,
+    ) -> Compiled {
+        use crate::bir::lower::{Cont, Tail};
+        let output = match cont {
+            Cont::Value(Tail::No) | Cont::Value(Tail::Return(_)) => return self.compile_expr(arena, root),
+            Cont::Effect(Tail::No) => return self.compile_effect_output(arena, root),
+            Cont::Declare(kind, _) => self.compile_let_binding_output(arena, kind, &target, root),
+            Cont::Assign(_) => self.compile_assign_to_target_output(arena, &target, root),
+            Cont::Effect(Tail::Return(_)) => self.compile_return_output(arena, root),
+        };
+        Compiled { prelude: output.block, expr: JE::undefined(false, &mut self.j), finished: output.finished }
+    }
+
     /// Compile a Lambda expression into a JS IR program with module metadata.
     pub fn compile_deps_program(&mut self, lam: &Lambda) -> DepsProgram {
         self.compile_deps_program_with_possible_required_modules(lam, &AHashSet::new())
@@ -666,6 +682,16 @@ impl LambdaCompiler {
         lam: Lam,
         possible_required_modules: AHashSet<ModuleId>,
     ) -> DepsProgram {
+        self.compile_deps_program_with_lower_check::<false>(arena, lam, possible_required_modules).0
+    }
+
+    /// The exact lowering boundary, with capture compiled out of the default path.
+    pub(crate) fn compile_deps_program_with_lower_check<const CHECK: bool>(
+        &mut self,
+        arena: LamArena,
+        lam: Lam,
+        possible_required_modules: AHashSet<ModuleId>,
+    ) -> (DepsProgram, Option<crate::bir::shadow::LowerCheck>) {
         let _span = info_span!(
             "compiler.lambda_to_js_collected",
             possible_required_modules = possible_required_modules.len(),
@@ -757,128 +783,167 @@ impl LambdaCompiler {
             .max(crate::ident::Ident::current_local_stamp());
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
+        let candidate = if CHECK {
+            Some(crate::bir::shadow::prepare_lower(&a, root, self.source_map_enabled.then_some(&self.lam_locs)))
+        } else { None };
         crate::timing::measure(crate::timing::Phase::Codegen, || {
             let compiled = {
                 let _phase = info_span!("compiler.lambda_compile_expr").entered();
                 self.compile_expr(&mut a, root)
             };
-            let mut j = std::mem::take(&mut self.j);
-            let mut block = compiled.prelude;
-            let compiled_expr = compiled.expr;
-            let (exports, name_reservations) = {
-                let _phase = info_span!("compiler.lambda_exports").entered();
-                if let Some(mut exports) =
-                    extract_toplevel_exports(&mut j, compiled_expr, &mut block)
-                {
-                    // lam_compile_main.ml:390-395: a finished toplevel output.
-                    if compiled.finished == OutputFinished::True {
-                        for value in &mut exports.values {
-                            *value = JE::undefined(false, &mut j);
-                        }
-                    }
-                    self.coerce_toplevel_exports_with_name_reservations(
-                        &mut j,
-                        &mut block,
-                        exports,
-                        compiled.finished,
-                    )
-                } else {
-                    (vec![], vec![])
-                }
-            };
-            // lam_compile_main.ml `declare_undeclared_exports`: when the
-            // toplevel always throws, the groups after the throw are dropped
-            // and the identifiers they bind are undeclared. Declare each such
-            // exported identifier after the throw.
-            if compiled.finished == OutputFinished::True {
-                let declared: AHashSet<Ident> = block
-                    .iter()
-                    .filter_map(|stmt| match j.sk(*stmt) {
-                        StmtKind::Variable(v) => Some(j.var(v).ident),
-                        _ => None,
-                    })
-                    .collect();
-                for id in &exports {
-                    if !declared.contains(id) {
-                        let stmt = JS::define(*id, None, LetKind::Strict, &mut j);
-                        block.push(stmt);
-                    }
-                }
-            }
-            let exports = resolve_export_aliases(&mut j, &block, exports);
+            let j = std::mem::take(&mut self.j);
             let side_effect = module_side_effect_reason(&a, root);
             drop(a);
+            let shadow_side_effect = if CHECK { side_effect.clone() } else { None };
+            let deps = self.coerce_lowered_output(j, compiled, side_effect);
+            let before = if CHECK { Some(deps.clone()) } else { None };
+            let dynamic = if CHECK { self.dynamic_import_modules.clone() } else { Vec::new() };
+            let deps = self.finish_lowered_output(deps, &possible_required_modules);
+            let checked = candidate.map(|candidate| match candidate {
+                Ok((j, compiled)) => {
+                    let saved_stamp = self.id_gen.current_stamp();
+                    let new_before = self.coerce_lowered_output(j, compiled, shadow_side_effect);
+                    self.id_gen.restore_current_stamp(saved_stamp);
+                    self.dynamic_import_modules = dynamic;
+                    let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
+                    crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
+                        before: [before.expect("check capture"), new_before],
+                        after: [deps.clone(), new_after],
+                        locations: self.source_map_enabled.then(|| std::sync::Arc::new(self.lam_locs.clone())),
+                    }))
+                }
+                Err(failure) => crate::bir::shadow::LowerCheck::Failed(failure),
+            });
+            (deps, checked)
+        })
+    }
 
-            let export_set = exports.iter().copied().collect();
-            let mut deps = DepsProgram {
-                program: Program {
-                    arena: j,
-                    block,
-                    exports,
-                    export_set,
-                    name_reservations,
-                },
-                modules: vec![],
-                side_effect,
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_flatten").entered();
-                apply_js_flatten_pass(deps)
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_external_shadow").entered();
-                apply_external_shadow_pass(deps)
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
-                apply_js_tailcall_inline_pass(deps)
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_record_rest").entered();
-                apply_js_record_rest_pass(deps)
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
-                apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
-            };
-            deps = {
-                let _phase = info_span!("compiler.js_pass_shake").entered();
-                apply_js_shake_pass(deps)
-            };
-            {
-                let _phase = info_span!("compiler.js_required_modules").entered();
-                let mut required_modules = OcamlModuleSet::new();
-                collect_modules_from_js_block(
-                    &deps.program.arena,
-                    &deps.program.block,
-                    &mut required_modules,
-                );
-                for module in std::mem::take(&mut self.dynamic_import_modules) {
-                    if required_module_side_effect_reason(
-                        self.module_path_resolver.as_ref(),
-                        std::slice::from_ref(&module),
-                    )
-                    .is_some()
-                    {
-                        required_modules.insert(module);
+    /// C:774–827: export extraction and coercion, shared by both lowerings.
+    fn coerce_lowered_output(
+        &mut self,
+        mut j: JsArena,
+        compiled: Compiled,
+        side_effect: Option<String>,
+    ) -> DepsProgram {
+        let mut block = compiled.prelude;
+        let compiled_expr = compiled.expr;
+        let (exports, name_reservations) = {
+            let _phase = info_span!("compiler.lambda_exports").entered();
+            if let Some(mut exports) = extract_toplevel_exports(&mut j, compiled_expr, &mut block) {
+                // lam_compile_main.ml:390-395: a finished toplevel output.
+                if compiled.finished == OutputFinished::True {
+                    for value in &mut exports.values {
+                        *value = JE::undefined(false, &mut j);
                     }
                 }
-                populate_required_modules(
-                    self.module_path_resolver.as_ref(),
-                    &possible_required_modules,
-                    &mut required_modules,
-                );
-                deps.modules = required_modules.to_vec();
-                ocaml_sort_modules(&mut deps.modules);
-                if deps.side_effect.is_none() {
-                    deps.side_effect = required_module_side_effect_reason(
-                        self.module_path_resolver.as_ref(),
-                        &deps.modules,
-                    );
+                self.coerce_toplevel_exports_with_name_reservations(
+                    &mut j,
+                    &mut block,
+                    exports,
+                    compiled.finished,
+                )
+            } else {
+                (vec![], vec![])
+            }
+        };
+        // lam_compile_main.ml `declare_undeclared_exports`: when the
+        // toplevel always throws, the groups after the throw are dropped
+        // and the identifiers they bind are undeclared. Declare each such
+        // exported identifier after the throw.
+        if compiled.finished == OutputFinished::True {
+            let declared: AHashSet<Ident> = block
+                .iter()
+                .filter_map(|stmt| match j.sk(*stmt) {
+                    StmtKind::Variable(v) => Some(j.var(v).ident),
+                    _ => None,
+                })
+                .collect();
+            for id in &exports {
+                if !declared.contains(id) {
+                    let stmt = JS::define(*id, None, LetKind::Strict, &mut j);
+                    block.push(stmt);
                 }
             }
-            deps
-        })
+        }
+        let exports = resolve_export_aliases(&mut j, &block, exports);
+
+        let export_set = exports.iter().copied().collect();
+        DepsProgram {
+            program: Program {
+                arena: j,
+                block,
+                exports,
+                export_set,
+                name_reservations,
+            },
+            modules: vec![],
+            side_effect,
+        }
+    }
+
+    /// C:828–881: the six JS passes and dependency tail, shared by both lowerings.
+    fn finish_lowered_output(
+        &mut self,
+        mut deps: DepsProgram,
+        possible_required_modules: &AHashSet<ModuleId>,
+    ) -> DepsProgram {
+        deps = {
+            let _phase = info_span!("compiler.js_pass_flatten").entered();
+            apply_js_flatten_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_external_shadow").entered();
+            apply_external_shadow_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_tailcall_inline").entered();
+            apply_js_tailcall_inline_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_record_rest").entered();
+            apply_js_record_rest_pass(deps)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_flatten_mark_dead").entered();
+            apply_js_flatten_and_mark_dead_pass(deps, self.jsx_preserve)
+        };
+        deps = {
+            let _phase = info_span!("compiler.js_pass_shake").entered();
+            apply_js_shake_pass(deps)
+        };
+        {
+            let _phase = info_span!("compiler.js_required_modules").entered();
+            let mut required_modules = OcamlModuleSet::new();
+            collect_modules_from_js_block(
+                &deps.program.arena,
+                &deps.program.block,
+                &mut required_modules,
+            );
+            for module in std::mem::take(&mut self.dynamic_import_modules) {
+                if required_module_side_effect_reason(
+                    self.module_path_resolver.as_ref(),
+                    std::slice::from_ref(&module),
+                )
+                .is_some()
+                {
+                    required_modules.insert(module);
+                }
+            }
+            populate_required_modules(
+                self.module_path_resolver.as_ref(),
+                possible_required_modules,
+                &mut required_modules,
+            );
+            deps.modules = required_modules.to_vec();
+            ocaml_sort_modules(&mut deps.modules);
+            if deps.side_effect.is_none() {
+                deps.side_effect = required_module_side_effect_reason(
+                    self.module_path_resolver.as_ref(),
+                    &deps.modules,
+                );
+            }
+        }
+        deps
     }
 
     /// Whether to record source locations for a source map.

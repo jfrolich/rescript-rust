@@ -27,8 +27,8 @@ pub struct Imported {
     pub arena: Bir,
     /// The unit's root.
     pub root: NodeId,
-    idents: Vec<Ident>,
-    globals: Vec<Ident>,
+    pub(super) idents: Vec<Ident>,
+    pub(super) globals: Vec<Ident>,
     #[cfg(test)]
     identifier_lookups: usize,
 }
@@ -410,10 +410,77 @@ pub(super) fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
     }
 }
 
-/// Import the reachable program. A shared source node is a fallback: expanding
-/// a DAG into a tree can be exponential in source node count. Each source node
-/// is looked up at most once, even on that fallback path.
+/// Memoized bottom-up binder facts. Each reachable source node is decoded
+/// once; the expansion walk only reads these facts, never scans a subtree.
+fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
+    enum Work { Enter(Lam), Finish(Lam, L) }
+    let mut state = vec![0u8; arena.node_count()];
+    let mut binder = vec![0u8; arena.node_count()];
+    let mut shared = 0u8;
+    let mut labels = crate::fast_hash::AHashSet::new();
+    let mut reachable = 0;
+    let mut work = vec![Work::Enter(root)];
+    while let Some(task) = work.pop() {
+        match task {
+            Work::Enter(id) => {
+                if state[id.index()] == 2 { shared |= binder[id.index()]; continue; }
+                assert_eq!(state[id.index()], 0, "cyclic Lambda arena");
+                state[id.index()] = 1;
+                reachable += 1;
+                let node = arena.node(id);
+                if let L::StaticCatch { info, .. } = node {
+                    if !labels.insert(arena.catch_payload(info).label) { shared |= 4; }
+                }
+                work.push(Work::Finish(id, node));
+                work.extend(children(arena, node).into_iter().rev().map(Work::Enter));
+            }
+            Work::Finish(id, node) => {
+                let local = match node {
+                    L::Let { .. } | L::LetRec { .. } | L::TryWith { .. }
+                    | L::For { .. } | L::ForOf { .. } | L::ForAwaitOf { .. } => 1,
+                    L::Function { info, .. } => u8::from(!arena.params(info).is_empty()),
+                    L::StaticCatch { info, .. } => 2 | u8::from(!arena.idents(arena.catch_payload(info).params).is_empty()),
+                    L::Var(_) | L::GlobalModule(_) | L::Const(_) | L::Break | L::Continue
+                    | L::Apply { .. } | L::Prim { .. } | L::Switch { .. } | L::StringSwitch { .. }
+                    | L::StaticRaise { .. } | L::TryFinally { .. } | L::If { .. }
+                    | L::Sequence(..) | L::While(..) | L::Assign { .. } => 0,
+                };
+                binder[id.index()] = children(arena, node).into_iter().fold(local, |bits, c| bits | binder[c.index()]);
+                state[id.index()] = 2;
+            }
+        }
+    }
+    (binder, reachable, shared)
+}
+
+/// Import occurrences, as the legacy lowering does. Binder-free shared
+/// subtrees are copied per edge, with a hard budget of four times the reachable
+/// source nodes. Repeated binder subtrees cannot retain unique Bir binders.
 pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupported> {
+    import_with_sharing(arena, root, false).0
+}
+
+/// Same import, with the subset of binder fallbacks due solely to catch labels.
+/// The binder analysis runs once, also when the import is unsupported.
+pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<Imported, Unsupported>, bool) {
+    import_with_sharing(arena, root, true)
+}
+
+fn import_with_sharing(arena: &LamArena, root: Lam, lowering: bool) -> (Result<Imported, Unsupported>, bool) {
+    let (binders, reachable, shared) = sharing_facts(arena, root);
+    let catch_only = shared != 0 && shared & 1 == 0;
+    let result = if shared == 4 && !lowering {
+        // Earlier round oracles retain their established label-shadowing reason.
+        Err(Unsupported("reused static catch label"))
+    } else if shared != 0 {
+        Err(Unsupported("shared Lambda subtree with binder"))
+    } else {
+        import_with_facts(arena, root, &binders, reachable)
+    };
+    (result, catch_only)
+}
+
+fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: usize) -> Result<Imported, Unsupported> {
     enum Work {
         Enter(Lam),
         Finish(L, usize),
@@ -423,11 +490,17 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
     let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
     let mut seen = vec![false; arena.node_count()];
+    let budget = reachable.saturating_mul(4);
+    let mut occurrences = 0;
     while let Some(task) = work.pop() {
         match task {
             Work::Enter(id) => {
-                if std::mem::replace(&mut seen[id.index()], true) {
-                    return Err(Unsupported("shared Lambda node"));
+                if std::mem::replace(&mut seen[id.index()], true) && has_binder[id.index()] != 0 {
+                    return Err(Unsupported("shared Lambda subtree with binder"));
+                }
+                occurrences += 1;
+                if occurrences > budget {
+                    return Err(Unsupported("shared Lambda expansion"));
                 }
                 let node = arena.node(id);
                 importer.binders(arena, node)?;
@@ -499,14 +572,100 @@ mod tests {
     }
 
     #[test]
-    fn shared_nodes_fall_back_without_expansion() {
+    fn simplify_lets_creates_shared_constant_occurrences() {
+        let mut a = LamArena::new();
+        let id = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let f = Ident::new("f", 2, crate::ident::IdentFlags::NONE);
+        let value = a.const_(C::Int { i: 42, comment: None });
+        let callee = a.var(f);
+        let x = a.var(id);
+        let y = a.var(id);
+        let call = a.apply_raw(callee, &[x, y], crate::lambda::ApInfo { loc: crate::lambda::LamLoc::NONE, status: crate::lambda::ApplyStatus::Na });
+        let root = a.let_(LetKind::Alias, id, value, call);
+        import_lambda(&a, root).unwrap();
+        let root = crate::lambda::lam_pass_lets_dce::simplify_lets(&mut a, root);
+        let L::Apply { args, .. } = a.node(root) else { panic!("expected call") };
+        assert_eq!(a.list(args)[0], a.list(args)[1]);
+        import_lambda(&a, root).unwrap();
+    }
+
+    #[test]
+    fn shared_constant_occurrences_round_trip() {
         let mut a = LamArena::new();
         let c = a.const_(C::JsNull);
         let root = a.seq_raw(c, c);
-        assert!(matches!(
-            import_lambda(&a, root),
-            Err(Unsupported("shared Lambda node"))
-        ));
+        let imported = import_lambda(&a, root).unwrap();
+        let exported = export_lambda(&imported).unwrap();
+        let mut before = Vec::new();
+        let mut after = Vec::new();
+        crate::lambda::sexp_lambda::print_lambda(&a.export(root), &mut before).unwrap();
+        crate::lambda::sexp_lambda::print_lambda(&exported.to_tree(), &mut after).unwrap();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn constant_shared_by_ten_thousand_parents_is_linear() {
+        let mut a = LamArena::new();
+        let c = a.const_(C::JsNull);
+        let mut root = a.const_(C::JsNull);
+        for _ in 0..10_000 { root = a.seq_raw(c, root); }
+        let (_, visits, _) = sharing_facts(&a, root);
+        assert_eq!(visits, 10_002);
+        let imported = import_lambda(&a, root).unwrap();
+        assert_eq!(imported.arena.nodes.len(), 20_001);
+        assert!(imported.arena.steps.get() < 40 * 20_001);
+        imported.arena.validate(Some(imported.root), false).unwrap();
+    }
+
+    #[test]
+    fn exponential_shared_chain_hits_expansion_budget() {
+        let mut a = LamArena::new();
+        let mut root = a.const_(C::JsNull);
+        for _ in 0..30 { root = a.seq_raw(root, root); }
+        let (_, visits, _) = sharing_facts(&a, root);
+        assert_eq!(visits, 31);
+        assert!(matches!(import_lambda(&a, root), Err(Unsupported("shared Lambda expansion"))));
+    }
+
+    #[test]
+    fn shared_parameterless_catch_is_a_binder_fallback() {
+        let mut a = LamArena::new();
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let catch = a.static_catch(body, 1, &[], handler);
+        let root = a.seq_raw(catch, catch);
+        let (binders, _, shared) = sharing_facts(&a, root);
+        assert_eq!(binders[catch.index()], 2, "catch label, no handler parameters");
+        assert_eq!(shared, 2);
+        let (result, catch_only) = import_for_lowering(&a, root);
+        assert!(catch_only);
+        assert!(matches!(result, Err(Unsupported("shared Lambda subtree with binder"))));
+    }
+
+    #[test]
+    fn rebuilt_catches_sharing_a_label_are_catch_only_binders() {
+        let mut a = LamArena::new();
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let first = a.static_catch(body, 1, &[], handler);
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let second = a.static_catch(body, 1, &[], handler);
+        let root = a.seq_raw(first, second);
+        let (result, catch_only) = import_for_lowering(&a, root);
+        assert!(catch_only);
+        assert!(matches!(result, Err(Unsupported("shared Lambda subtree with binder"))));
+    }
+
+    #[test]
+    fn shared_subtree_with_let_is_unsupported() {
+        let mut a = LamArena::new();
+        let id = Ident::new("x", 1, crate::ident::IdentFlags::NONE);
+        let value = a.const_(C::JsNull);
+        let body = a.var(id);
+        let binding = a.let_(LetKind::Strict, id, value, body);
+        let root = a.seq_raw(binding, binding);
+        assert!(matches!(import_lambda(&a, root), Err(Unsupported("shared Lambda subtree with binder"))));
     }
 
     #[test]
