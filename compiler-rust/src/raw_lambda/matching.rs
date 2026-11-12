@@ -2316,7 +2316,8 @@ struct MakeKeyWriter<'b, B: RawLambdaBuilder> {
     b: &'b B,
     count: i32,
     next_id: i32,
-    env: Vec<(Ident, KeyBinding)>,
+    /// The lets in scope, innermost last; rarely more than a few.
+    env: smallvec::SmallVec<[(Ident, KeyBinding); 2]>,
 }
 
 impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
@@ -2325,7 +2326,7 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             b,
             count: 0,
             next_id: 0,
-            env: Vec::new(),
+            env: smallvec::SmallVec::new(),
         }
     }
 
@@ -2388,7 +2389,7 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
                     Some((_, KeyBinding::Alias(replacement))) => out.bytes(replacement),
                     Some((bound, KeyBinding::Renamed(stamp))) => {
                         out.byte(key_tag::VAR);
-                        write_renamed_ident_key(out, bound.name(), *stamp);
+                        write_renamed_ident_key(out, bound.name_atom(), *stamp);
                     }
                     None => {
                         out.byte(key_tag::VAR);
@@ -2560,7 +2561,7 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         kind.encode(out);
         let renamed_stamp = self.next_id;
         self.next_id += 1;
-        write_renamed_ident_key(out, x.name(), renamed_stamp);
+        write_renamed_ident_key(out, x.name_atom(), renamed_stamp);
         match a {
             Some(a) => self.write_raw(a, ex, out)?,
             None => self.write_raw(&*self.b.get(), ex, out)?,
@@ -2612,24 +2613,30 @@ fn same_var_body(a: &impl RawLambdaRead, body: &KeyBody<'_>, id: &Ident) -> bool
 }
 
 fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
-    write_ident_key_parts(out, id.name(), id.stamp(), id.is_global());
+    write_ident_key_parts(out, id.name_atom(), id.stamp(), id.is_global());
 }
 
 /// The identifier a kept `Llet` renames its variable to
 /// (`compiler/ml/lambda.ml:456`): never global.
-fn write_renamed_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
+fn write_renamed_ident_key(out: &mut KeyOut<'_>, name: crate::name::Name, stamp: i32) {
     write_ident_key_parts(out, name, stamp, false);
 }
 
 /// An identifier by name and stamp, as `Ident.unique_toplevel_name` printed
 /// it in the first keys: the stamps 0 and -1 carry no global flag, so a
 /// global and a local identifier of that name and stamp key the same.
-fn write_ident_key_parts(out: &mut KeyOut<'_>, name: &str, stamp: i32, is_global: bool) {
-    out.str(name);
-    out.int(i128::from(stamp));
-    if stamp != 0 && stamp != -1 {
-        is_global.encode(out);
-    }
+/// Thirteen bytes: the name's identity, the stamp, the flag.
+fn write_ident_key_parts(
+    out: &mut KeyOut<'_>,
+    name: crate::name::Name,
+    stamp: i32,
+    is_global: bool,
+) {
+    let mut bytes = [0u8; 13];
+    bytes[..8].copy_from_slice(&(name.identity() as u64).to_ne_bytes());
+    bytes[8..12].copy_from_slice(&stamp.to_ne_bytes());
+    bytes[12] = u8::from(is_global && stamp != 0 && stamp != -1);
+    out.bytes(&bytes);
 }
 
 /// A switch case's key by what its `Display` shows, which the first keys

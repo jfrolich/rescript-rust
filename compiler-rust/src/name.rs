@@ -101,6 +101,15 @@ impl Name {
         self.0.hash
     }
 
+    /// A number that is equal for two names exactly when the names are
+    /// equal: the address of the interned string. It differs from run to
+    /// run, so it may be compared for equality and nothing else: never
+    /// stored, shown or ordered by.
+    #[inline]
+    pub(crate) fn identity(self) -> usize {
+        std::ptr::from_ref(self.0) as usize
+    }
+
     /// The interned string.
     #[inline]
     pub fn as_str(self) -> &'static str {

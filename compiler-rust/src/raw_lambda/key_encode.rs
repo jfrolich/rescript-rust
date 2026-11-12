@@ -15,7 +15,10 @@
 //! equal. None of these types holds a float, so that is also exactly when
 //! their derived `Debug` text, which the keys used at first, is equal. A
 //! type with a hand-written `Debug` keeps that text, length-prefixed, so its
-//! equality classes do not change.
+//! equality classes do not change. An interned [`Name`](crate::name::Name)
+//! is written as its identity, eight bytes that are equal exactly when the
+//! names are; keys are therefore meaningful within one process only, and
+//! nothing but their equality is ever observed.
 //!
 //! The `impl`s below follow the type definitions field by field and match
 //! every variant, so a new field or variant is a compile error here.
@@ -26,7 +29,7 @@
 use std::hash::BuildHasher;
 
 /// Key bytes; most keys fit inline.
-pub(super) type KeyBuf = smallvec::SmallVec<[u8; 120]>;
+pub(super) type KeyBuf = smallvec::SmallVec<[u8; 248]>;
 
 /// The hash keys are compared by first. O(key length), computed once per
 /// key. Only equality of hashes is ever observed, and equal hashes are
@@ -84,6 +87,7 @@ impl<'e> KeyOut<'e> {
     }
 
     /// Raw bytes. Callers keep the whole key self-delimiting.
+    #[inline]
     pub(super) fn bytes(&mut self, s: &[u8]) {
         count_steps(s.len());
         match self.expect {
@@ -99,7 +103,7 @@ impl<'e> KeyOut<'e> {
     }
 
     /// One byte: a node tag, a flag or an `Option` marker.
-    #[inline]
+    #[inline(always)]
     pub(super) fn byte(&mut self, b: u8) {
         count_steps(1);
         match self.expect {
@@ -114,6 +118,7 @@ impl<'e> KeyOut<'e> {
         }
     }
 
+    #[inline(always)]
     pub(super) fn push(&mut self, c: char) {
         debug_assert!(c.is_ascii());
         self.byte(c as u8);
@@ -125,12 +130,20 @@ impl<'e> KeyOut<'e> {
 
     /// A signed integer: zigzag, then seven bits per byte, low bits first,
     /// the high bit set on every byte but the last. No code is a prefix of
-    /// another, so an integer needs no terminator.
+    /// another, so an integer needs no terminator. Variant indices, lengths
+    /// and field positions are below 64 and take one byte.
+    #[inline(always)]
     pub(super) fn int(&mut self, value: i128) {
-        let mut n = ((value << 1) ^ (value >> 127)) as u128;
-        if n < 0x80 {
-            return self.byte(n as u8);
+        if (0..64).contains(&value) {
+            self.byte((value as u8) << 1);
+        } else {
+            self.wide_int(value);
         }
+    }
+
+    #[inline(never)]
+    fn wide_int(&mut self, value: i128) {
+        let mut n = ((value << 1) ^ (value >> 127)) as u128;
         let mut buf = [0u8; 19];
         let mut len = 0;
         loop {
@@ -189,6 +202,12 @@ impl KeyEncode for usize {
 impl KeyEncode for bool {
     fn encode(&self, out: &mut KeyOut<'_>) {
         out.push(if *self { 't' } else { 'f' });
+    }
+}
+
+impl KeyEncode for crate::name::Name {
+    fn encode(&self, out: &mut KeyOut<'_>) {
+        out.bytes(&self.identity().to_ne_bytes());
     }
 }
 
