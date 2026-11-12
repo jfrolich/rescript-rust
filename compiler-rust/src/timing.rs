@@ -100,10 +100,14 @@ pub enum Phase {
     GentypeEmission,
     /// Output file writes, no-match removal checks, and deletions.
     GentypeFiles,
+    /// Annotated output: compare existing contents and write when needed.
+    GentypeFileWrite,
+    /// Unannotated output: check for and remove an obsolete generated file.
+    GentypeFileNoMatch,
 }
 
 impl Phase {
-    const COUNT: usize = Phase::GentypeFiles as usize + 1;
+    const COUNT: usize = Phase::GentypeFileNoMatch as usize + 1;
 }
 
 /// Nanoseconds per phase, indexed by `Phase as usize`.
@@ -499,6 +503,8 @@ pub fn print_report() {
         ("gentype_encoding", Phase::GentypeEncoding),
         ("gentype_emission", Phase::GentypeEmission),
         ("gentype_files", Phase::GentypeFiles),
+        ("gentype_file_write", Phase::GentypeFileWrite),
+        ("gentype_file_no_match", Phase::GentypeFileNoMatch),
     ] {
         eprintln!("[phase-timing] phase={} ms={:.3} artifacts={}", name,
             ms(Duration::from_nanos(PHASE_NS[phase as usize].load(Ordering::Relaxed))),
@@ -537,6 +543,9 @@ mod tests {
         nanos[Phase::Gentype as usize] = 100;
         nanos[Phase::GentypeDeclarations as usize] = 70;
         nanos[Phase::GentypeEmission as usize] = 30;
+        nanos[Phase::GentypeFiles as usize] = 20;
+        nanos[Phase::GentypeFileWrite as usize] = 18;
+        nanos[Phase::GentypeFileNoMatch as usize] = 2;
         let snapshot = PhaseTimingSnapshot::from_nanos(Duration::from_nanos(110), nanos);
         assert_eq!(snapshot.recorded(), Duration::from_nanos(100));
         assert_eq!(snapshot.overhead(), Duration::from_nanos(10));

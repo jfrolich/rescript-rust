@@ -2814,7 +2814,15 @@ fn raw_snippet_exp_simple_enough(s: &str) -> bool {
 }
 
 fn raw_js_expression_needs_paren(code: &str) -> bool {
-    match classify_js_exp(code) {
+    raw_js_expression_needs_paren_classified(code, &classify_js_exp(code))
+}
+
+/// Share the legacy grouping rule with the emitter without classifying twice.
+pub(crate) fn raw_js_expression_needs_paren_classified(
+    code: &str,
+    classification: &JsExpClassification,
+) -> bool {
+    match classification {
         JsExpClassification::JsLiteral { .. } => false,
         JsExpClassification::JsFunction { .. } | JsExpClassification::JsExpUnknown => {
             !raw_snippet_exp_simple_enough(code)

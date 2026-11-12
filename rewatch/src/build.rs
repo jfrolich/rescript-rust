@@ -583,6 +583,15 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
+    if build_state.packages.values().any(|package| package.config.js_post_build.is_some()) {
+        // A command can create another module's output after discovery.
+        // Do not use a directory snapshot across arbitrary user code.
+        for package in build_state.build_state.packages.values_mut() {
+            package.gentype_outputs = None;
+        }
+    } else if !matches!(build_state.build_run, BuildRun::NotStarted) {
+        packages::refresh_gentype_outputs(&mut build_state.build_state.packages);
+    }
     build_state.build_run = BuildRun::Running {
         started_at: std::time::SystemTime::now(),
     };

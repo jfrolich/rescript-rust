@@ -12,6 +12,11 @@ use super::arena::*;
 /// children; every variable declaration before its initializer.
 pub(crate) trait Visitor {
     fn visit_expression(&mut self, _a: &JsArena, _expression: Expr) {}
+    /// An opt-in visitor may handle a string spine iteratively. Default visitors
+    /// retain their traversal; monomorphization removes this hook for them.
+    fn visit_string_children(&mut self, _a: &JsArena, _left: Expr, _right: Expr) -> bool {
+        false
+    }
     fn visit_declaration(&mut self, _a: &JsArena, _declaration: &VarDecl) {}
     /// Called for every block before its statements.
     fn visit_block(&mut self, _a: &JsArena, _block: &[Stmt]) {}
@@ -131,8 +136,13 @@ pub(crate) fn walk_expression(visitor: &mut impl Visitor, a: &JsArena, expressio
         | ExprKind::Await(inner)
         | ExprKind::Spread(inner)
         | ExprKind::RecordRest(_, inner) => walk_expression(visitor, a, inner),
-        ExprKind::StringAppend(left, right)
-        | ExprKind::In(left, right)
+        ExprKind::StringAppend(left, right) => {
+            if !visitor.visit_string_children(a, left, right) {
+                walk_expression(visitor, a, left);
+                walk_expression(visitor, a, right);
+            }
+        }
+        ExprKind::In(left, right)
         | ExprKind::Seq(left, right)
         | ExprKind::Bin(_, left, right)
         | ExprKind::FlatCall(left, right)
