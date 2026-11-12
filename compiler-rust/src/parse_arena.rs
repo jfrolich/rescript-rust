@@ -756,11 +756,12 @@ pub struct ParseArena {
     /// Counter for generating unique local module names (for %%private).
     /// OCaml uses a global ref counter, so this matches that behavior.
     local_module_counter: u32,
-    /// Expression locations rewritten via the default/generic PPX mapper path.
+    /// The locations of the expressions the built-in mapper visited, one bit
+    /// per location index.
     ///
-    /// This lets marshal distinguish mapper-rebuilt expression attributes
-    /// (fresh payload wrappers) from parser-preserved ones.
-    rewritten_expr_locs: HashSet<LocIdx>,
+    /// This lets marshal distinguish the attributes of expressions the OCaml
+    /// mapper rebuilt (fresh payload wrappers) from parser-preserved ones.
+    rewritten_expr_locs: Vec<u64>,
     /// Four bits per expression, sixteen expressions per word: two proofs
     /// computed bottom-up at allocation (no builtin rewrite/checker targets,
     /// bit 0; no unused-attribute sweep targets, bit 1), and "has an
@@ -1133,7 +1134,7 @@ impl Default for ParseArena {
             ppx_undefined_str,
             template_concat_str,
             local_module_counter: 0,
-            rewritten_expr_locs: HashSet::new(),
+            rewritten_expr_locs: Vec::new(),
             rewrite_free_exprs: Vec::new(),
             expansion_pages: Vec::new(),
             expansion_targets: Vec::new(),
@@ -2580,14 +2581,39 @@ impl ParseArena {
         self.local_module_counter = 0;
     }
 
-    /// Mark an expression location as rewritten by the generic PPX mapper path.
-    pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
-        self.rewritten_expr_locs.insert(loc);
+    /// The bit of `loc` in `rewritten_expr_locs`: two per location index,
+    /// for the location and its ghost (bit 30 of a `LocIdx`). `None` for a
+    /// synthetic location of the type checker, which the mapper never sees.
+    #[inline]
+    fn rewritten_expr_loc_bit(loc: LocIdx) -> Option<usize> {
+        (loc.0 < SYNTHETIC_LOCATION_BASE)
+            .then(|| (loc.0 & 0x3FFF_FFFF) as usize * 2 + (loc.0 >> 30) as usize)
     }
 
-    /// Returns true when this expression location was rewritten generically.
+    /// Mark an expression location as visited by the built-in mapper.
+    ///
+    /// Cost: one bit set; the bit vector grows to the location's word.
+    #[inline]
+    pub fn mark_rewritten_expr_loc(&mut self, loc: LocIdx) {
+        let Some(bit) = Self::rewritten_expr_loc_bit(loc) else {
+            return;
+        };
+        if bit / 64 >= self.rewritten_expr_locs.len() {
+            self.rewritten_expr_locs.resize(bit / 64 + 1, 0);
+        }
+        self.rewritten_expr_locs[bit / 64] |= 1 << (bit % 64);
+    }
+
+    /// Returns true when the built-in mapper visited an expression at this
+    /// location.
+    ///
+    /// Cost: one bit test.
     pub fn is_rewritten_expr_loc(&self, loc: LocIdx) -> bool {
-        self.rewritten_expr_locs.contains(&loc)
+        Self::rewritten_expr_loc_bit(loc).is_some_and(|bit| {
+            self.rewritten_expr_locs
+                .get(bit / 64)
+                .is_some_and(|word| word & (1 << (bit % 64)) != 0)
+        })
     }
 
     /// Record the source constructor string identity for a varified type var.
@@ -4459,6 +4485,22 @@ mod tests {
         assert_eq!(arena.expansion_targets.len(), 100 * EXPANSION_PAGE);
         // The page index ends at the last page with an expansion.
         assert_eq!(arena.expansion_pages.len(), (2 * 49_500 + 1) / EXPANSION_PAGE + 1);
+    }
+
+    #[test]
+    fn a_visited_location_and_its_ghost_are_two_bits_of_one_word() {
+        let mut arena = ParseArena::new();
+        let (loc, ghost) = (LocIdx(5), LocIdx(5 | 0x4000_0000));
+        arena.mark_rewritten_expr_loc(ghost);
+        assert!(arena.is_rewritten_expr_loc(ghost));
+        assert!(!arena.is_rewritten_expr_loc(loc));
+        arena.mark_rewritten_expr_loc(loc);
+        assert!(arena.is_rewritten_expr_loc(loc));
+        assert!(!arena.is_rewritten_expr_loc(LocIdx(6)));
+        // A synthetic location of the type checker is never marked.
+        arena.mark_rewritten_expr_loc(LocIdx(SYNTHETIC_LOCATION_BASE + 5));
+        assert!(!arena.is_rewritten_expr_loc(LocIdx(SYNTHETIC_LOCATION_BASE + 5)));
+        assert_eq!(arena.rewritten_expr_locs.len(), 1);
     }
 
     #[test]
