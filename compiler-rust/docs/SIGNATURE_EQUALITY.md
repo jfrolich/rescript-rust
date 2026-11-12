@@ -87,20 +87,20 @@ shared pool is full").
 The raw signature (`PortableRawSignature`) is not compared: it has no shared
 graph. P3b keeps writing it from the `TypeContext` (H.1.5, step 9).
 
-## What the frozen graph does not hold
+## What the node arrays do not hold
 
 `internalize_signature_into_shared` drops or rewrites four things one way.
-The inverse is exact only when it is given them (`shared_reader::Carried`,
-recorded during the import in check mode). The comparison never changes
+The inverse reads them from `SharedGraph::carried`, recorded during every
+import, not just in check mode. The comparison never changes
 either side to make them agree: it carries the missing data and lists, per
 unit, which of it was not empty.
 
-| `carried` | What the import does | What P3b must carry or change |
+| `carried` | What the import does | What the frozen graph retains |
 |---|---|---|
 | `file names` | A location names its file by a pool index allocated at import. The portable signature holds `cmi_longident_names`: the names with their portable keys, in order of first use, including names only the raw signature uses | the `(key, name)` list of the publication |
-| `allocation scopes` | The scope of a location identity and of a shape's attribute string becomes a hash of the unit and the scope (`identity_in_namespace`) | the producer's scope of each imported scope, or an import that keeps the pair |
-| `shape allocations` | A shape allocation becomes a hash of the unit and the allocation | the producer's allocation of each imported one, likewise |
-| `link levels` | Every `Tlink` entry is stored at the generic level | the level of each link that is not generic, or portable bytes that store links at the generic level (a link's level is dead state) |
+| `allocation scopes` | The scope of a location identity and of a shape's attribute string becomes a hash of the unit and the scope (`identity_in_namespace`) | the producer's scope of each imported scope |
+| `shape allocations` | A shape allocation becomes a hash of the unit and the allocation | the producer's allocation of each imported one |
+| `link levels` | Every `Tlink` entry is stored at the generic level | the level of each link that is not generic (a link's level is dead state) |
 
 Exact without carried data: node order and descriptors, type lists, arrow
 parameters with their labels, rows, package constraints, object-field
@@ -121,3 +121,23 @@ by reason for each comparison, where the shared graphs came from, and how
 many units needed each kind of carried data. It fails on a failed build, on
 zero reports, on fewer units than `tests/signature_equality_minimum.json`,
 on any difference and on a report that is missing a field.
+
+## P3b slice 1: ownership of serialization metadata
+
+The four kinds of metadata now live in a cold record in each frozen graph,
+not in the equality check. `portable_signature` accepts only the frozen
+graph reader and shared signature; the portable comparison cannot supply
+its missing inputs. Both normal and checked publication populate the record.
+
+- File names retain their original keys and order, including raw-only names.
+  Pool names alone cannot reconstruct this table. Cost: one list per graph.
+- Allocation scopes and shape allocations retain inverse import maps.
+  Reversing the namespace hash is impossible; keeping these sparse maps
+  preserves existing identities without changing any dependent's view.
+- Link levels retain a sparse list of non-generic entries. Type readers
+  continue seeing generic links; stored bytes retain their original levels.
+
+None of these fields enlarges a type node. Their lifetime is the graph's,
+so inverse serialization needs neither the producer's context nor its
+portable signature. Capture and reconstruction are linear in graph size
+and metadata size, with maps per graph, not per node.

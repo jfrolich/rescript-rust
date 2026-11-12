@@ -1738,7 +1738,7 @@ pub fn publish_pers_struct_checked(
     ctx: &TypeContext,
     mode: SignaturePublicationMode,
 ) -> (Arc<PortablePersStruct>, super::signature_check::Comparison) {
-    use super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    use super::shared_reader::{FrozenGraph, portable_signature};
     use super::signature_check::{Comparison, Outcome};
     pps.published_generation = Some(crate::types::thread_store::build_generation());
     let pps = Arc::new(pps);
@@ -1746,14 +1746,10 @@ pub fn publish_pers_struct_checked(
     let pool = store.shared_pool();
     let decoded = pps.decoded.lock().unwrap();
     let portable = &decoded.as_ref().expect("new publication").0;
-    let mut carried = Carried {
-        file_names: portable.cmi_longident_names.clone(),
-        ..Default::default()
-    };
     let (shared_graph, shared) = if pps.shareable {
         let mut base = None;
         let ps = pool.pers_struct(&pps, || {
-            let (ps, at) = shared_pers_struct_at(&pps, portable, pool, Some(&mut carried))?;
+            let (ps, at) = shared_pers_struct_at(&pps, portable, pool)?;
             base = Some(at);
             Some(ps)
         });
@@ -1778,7 +1774,6 @@ pub fn publish_pers_struct_checked(
             &files,
             pool,
             Some(&pps.ps_filename),
-            Some(&mut carried),
         );
         (
             "forced: not shareable",
@@ -1801,7 +1796,7 @@ pub fn publish_pers_struct_checked(
             };
             Comparison {
                 shared_graph,
-                carried: carried.needed(),
+                carried: crate::types::shared_store::graph_at(&pages, base).carried.needed(),
                 outcomes: [
                     Outcome::fingerprint(pps.fingerprint, signature_fingerprint(&frozen, &sig)),
                     Outcome::item_hashes(
@@ -1813,7 +1808,7 @@ pub fn publish_pers_struct_checked(
                     ),
                     Outcome::bytes(
                         &encode(portable),
-                        &encode(&portable_signature(&frozen, &sig, &carried)),
+                        &encode(&portable_signature(&frozen, &sig)),
                     ),
                 ],
             }
@@ -1828,17 +1823,14 @@ fn shared_pers_struct(
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
 ) -> Option<Arc<PersStruct>> {
-    Some(shared_pers_struct_at(pps, portable, pool, None)?.0)
+    Some(shared_pers_struct_at(pps, portable, pool)?.0)
 }
 
 /// [`shared_pers_struct`], with the base index of the graph it published.
-/// `carried` receives what the published graph does not hold of `portable`
-/// (the signature equality check, `signature_check.rs`).
 fn shared_pers_struct_at(
     pps: &PortablePersStruct,
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
-    carried: Option<&mut super::shared_reader::Carried>,
 ) -> Option<(Arc<PersStruct>, u32)> {
     let intern = |name: &str| pool.intern_longident_name(name);
     let files = FileRemap::new(&portable.cmi_longident_names, &intern);
@@ -1849,7 +1841,6 @@ fn shared_pers_struct_at(
         &files,
         pool,
         Some(&pps.ps_filename),
-        carried,
     )?;
     let ps = PersStruct {
         ps_name: pps.ps_name.clone(),
@@ -2086,7 +2077,6 @@ fn internalize_signature_into_shared(
     files: &FileRemap<'_>,
     pool: &crate::types::shared_store::SharedTypePool,
     unit: Option<&str>,
-    carried: Option<&mut super::shared_reader::Carried>,
 ) -> Option<(Signature, u32)> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
@@ -2143,14 +2133,17 @@ fn internalize_signature_into_shared(
             })
             .collect();
         shapes.signature(&mut sig);
-        if let Some(carried) = carried {
-            carried.record_import(graph, &scopes, shapes);
-        }
+        let mut carried = super::shared_reader::Carried {
+            file_names: files.original.to_vec(),
+            ..Default::default()
+        };
+        carried.record_import(graph, &scopes, shapes);
         crate::types::shared_store::SharedGraphParts {
             nodes,
             payloads: sink.payloads.into_inner(),
             layouts,
             locations: table,
+            carried,
         }
     })?;
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
@@ -2207,6 +2200,7 @@ pub(crate) fn internalize_raw_signature(
 /// same base, so each imported name gets a fresh index in the importing
 /// owner, once.
 struct FileRemap<'a> {
+    original: &'a [(u32, String)],
     names: AHashMap<u32, &'a str>,
     fresh: std::cell::RefCell<AHashMap<u32, crate::intern::StrIdx>>,
     intern: &'a dyn Fn(&str) -> crate::intern::StrIdx,
@@ -2215,6 +2209,7 @@ struct FileRemap<'a> {
 impl<'a> FileRemap<'a> {
     fn new(names: &'a [(u32, String)], intern: &'a dyn Fn(&str) -> crate::intern::StrIdx) -> Self {
         FileRemap {
+            original: names,
             names: names
                 .iter()
                 .map(|(raw, name)| (*raw, name.as_str()))
@@ -2794,8 +2789,8 @@ mod identity_tests {
     }
 
     #[test]
-    fn a_frozen_graph_reads_back_with_what_it_does_not_hold() {
-        use super::super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    fn a_frozen_graph_reads_back_without_portable_side_inputs() {
+        use super::super::shared_reader::{FrozenGraph, portable_signature};
         use crate::types::asttypes::MutableFlag;
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let pool = ctx.thread_store().shared_pool();
@@ -2810,7 +2805,9 @@ mod identity_tests {
         // the first and the last share a mutability cell.
         let portable = PortableSignature {
             ps_sig: vec![],
-            cmi_longident_names: vec![],
+            // Includes a file used only by the raw signature. Preserve its key
+            // and order even though no location in this graph references it.
+            cmi_longident_names: vec![(17, "Raw.res".into()), (4, "Unit.res".into())],
             type_graph: PortableTypeGraph {
                 entries: vec![
                     entry(PortableTypeDesc::Tlink(1), 3),
@@ -2827,7 +2824,6 @@ mod identity_tests {
         };
         let intern = |name: &str| pool.intern_longident_name(name);
         let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-        let mut carried = Carried::default();
         let (sig, base) = internalize_signature_into_shared(
             &portable.ps_sig,
             &portable.type_graph,
@@ -2835,27 +2831,33 @@ mod identity_tests {
             &files,
             pool,
             Some("Unit.res"),
-            Some(&mut carried),
         )
         .unwrap();
         let pages = pool.pages();
         let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
         let bytes = |sig: &PortableSignature| crate::binser::to_vec(sig).unwrap();
-        assert_eq!(carried.needed(), ["link levels"]);
         assert_eq!(
-            bytes(&portable_signature(&frozen, &sig, &carried)),
+            crate::types::shared_store::graph_at(&pages, base).carried.needed(),
+            ["file names", "link levels"]
+        );
+        assert_eq!(
+            bytes(&portable_signature(&frozen, &sig)),
             bytes(&portable)
         );
-        // The pages alone hold the link at the generic level.
-        assert_ne!(
-            bytes(&portable_signature(&frozen, &sig, &Carried::default())),
-            bytes(&portable)
+        // Type readers still see the normalized link level.
+        assert_eq!(
+            crate::types::shared_store::graph_at(&pages, base).nodes()[0].level,
+            GENERIC_LEVEL
         );
         // Both forms hash alike.
         assert_eq!(
             signature_fingerprint(&frozen, &sig),
             signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig)
         );
+        let expected = bytes(&portable);
+        drop(files);
+        drop(portable);
+        assert_eq!(bytes(&portable_signature(&frozen, &sig)), expected);
     }
 
     #[test]
@@ -2992,7 +2994,6 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             None,
-            None,
         )
         .unwrap()
         .0;
@@ -3022,7 +3023,6 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             Some(unit),
-            None,
         )
         .unwrap()
         .0;

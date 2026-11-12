@@ -70,6 +70,8 @@ pub(crate) struct SharedGraph {
     /// Locations of the graph's declarations and type labels
     /// (`DeclLocKind::Shared` handles naming this graph by `base`).
     locations: super::decl_loc::DeclLocTable,
+    /// Cold serialization metadata; never consulted by type-node readers.
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 impl SharedGraph {
@@ -297,6 +299,7 @@ pub(crate) struct SharedGraphParts {
     pub(crate) payloads: SharedGraphPayloads,
     pub(crate) layouts: Vec<Layout>,
     pub(crate) locations: super::decl_loc::DeclLocTable,
+    pub(crate) carried: crate::cmi::shared_reader::Carried,
 }
 
 pub(crate) struct SharedTypePool {
@@ -382,6 +385,7 @@ impl SharedTypePool {
             payloads,
             layouts: built_layouts,
             locations,
+            carried,
         } = build(base);
         assert_eq!(descs.len(), sizes.nodes, "shared graph node count changed");
         assert_eq!(
@@ -426,6 +430,7 @@ impl SharedTypePool {
             lids: payloads.lids.into_boxed_slice(),
             layouts: built_layouts.into_boxed_slice(),
             locations,
+            carried,
         });
         for page in (base >> PAGE_BITS)..(end >> PAGE_BITS) {
             let published = self.pages[page as usize].set(graph.clone());
@@ -528,6 +533,7 @@ mod tests {
                     ],
                     payloads: Default::default(),
                     layouts: Vec::new(),
+                    carried: Default::default(),
                     locations: [crate::location::Location::in_file(StrIdx::from_raw(4))]
                         .into_iter()
                         .collect(),
@@ -545,6 +551,7 @@ mod tests {
                     payloads: Default::default(),
                     layouts: Vec::new(),
                     locations: Default::default(),
+                    carried: Default::default(),
                 },
             )
             .unwrap();

@@ -13,7 +13,7 @@
 //!   hold everything that signature holds; [`Carried`] is the rest, and
 //!   says so field by field.
 //!
-//! Today only the signature equality check calls them (`signature_check`).
+//! Serialization metadata lives with the frozen graph, including outside check mode.
 //! Every function here is linear in the graph it reads.
 
 use std::borrow::Cow;
@@ -195,10 +195,10 @@ impl TypeGraph for FrozenGraph<'_> {
 }
 
 /// What a frozen graph does not hold of the portable signature it was built
-/// from. `internalize_signature_into_shared` drops or rewrites each of
-/// these one way, so a writer of the portable form that reads the frozen
-/// graph (P3b, step 12 of H.1.5) has to be given them.
-#[derive(Default)]
+/// from. Stored once beside the node arrays in the frozen graph: readers
+/// need none of it for type checking, but serialization needs all of it.
+/// No field enlarges an individual node.
+#[derive(Debug, Default)]
 pub(crate) struct Carried {
     /// `PortableSignature::cmi_longident_names`: the file names of the
     /// signature's and of the raw signature's locations, with their
@@ -296,14 +296,14 @@ impl SignatureRefMap for PortableRefs<'_> {
 
 /// The portable signature that `sig`, a signature whose types are nodes of
 /// `frozen`, was internalized from: the inverse of
-/// `portable_types::internalize_signature_into_shared`, given what that
-/// import does not keep (`carried`). Linear in the signature and the graph.
+/// `portable_types::internalize_signature_into_shared`. All serialization
+/// metadata is read from the frozen graph. Linear in the signature and graph.
 pub(crate) fn portable_signature(
     frozen: &FrozenGraph<'_>,
     sig: &Signature,
-    carried: &Carried,
 ) -> PortableSignature {
     let graph = frozen.graph;
+    let carried = &graph.carried;
     let base = graph.base();
 
     // File names: pool index -> name -> portable key. A file the import did
