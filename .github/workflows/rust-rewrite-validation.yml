@@ -523,6 +523,11 @@ jobs:
               REWATCH_BIN="$PWD/rewatch/target/release/rescript" \
               RUST_BSC="$PWD/rewatch/target/release/bsc" \
                 ./scripts/test_gentype_output_parity.sh
+          - suite: analysis
+            # The Rust editor analysis against the OCaml analysis snapshots.
+            run: |
+              ./tests/analysis_tests/no-watcher.sh
+              ./tests/analysis_tests/test-rust.sh
     steps:
       - uses: actions/checkout@v6
       - uses: ./.github/actions/setup-node

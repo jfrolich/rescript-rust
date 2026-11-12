@@ -258,6 +258,23 @@ impl CmjExportLambdas {
         Self::new(ordered.into_iter().collect(), table)
     }
 
+    /// Rebase filename-table entries once when decoding an owned snapshot core.
+    /// O(filename bytes), independent of the number of exported Lambda nodes.
+    pub fn rebase_stored_paths(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        for name in Arc::make_mut(&mut self.locs.file_names).values_mut() {
+            crate::cmi::stored_module::rebase_filename(name, from, to);
+        }
+        for name in &mut self.locs.imported_files {
+            crate::cmi::stored_module::rebase_filename(name, from, to);
+        }
+        let old_index = std::mem::take(&mut self.locs.imported_file_index);
+        self.locs.imported_file_index.reserve(old_index.len());
+        for (mut name, index) in old_index {
+            crate::cmi::stored_module::rebase_filename(&mut name, from, to);
+            self.locs.imported_file_index.insert(name, index);
+        }
+    }
+
     /// The table the exported handles resolve in.
     pub fn locs(&self) -> &LamLocTable {
         &self.locs
@@ -486,6 +503,26 @@ mod tests {
         assert_eq!(table.len(), 2);
         assert_eq!(table.get(a), Some(loc(3, 7)));
         assert_eq!(table.get(LamLoc::NONE), Some(Location::none()));
+    }
+
+    #[test]
+    fn snapshot_rebases_both_filename_tables_at_ten_thousand_entries() {
+        let names = (1..=10_000).map(|i| (StrIdx(i), format!("producer/src/M{i}.res"))).collect();
+        let original = LamLocTable::located(Arc::new(names));
+        let mut imported = LamLocTable::located(Arc::new(HashMap::new()));
+        for i in 1..=10_000 { imported.import_file(&original, StrIdx(i)); }
+        let mut exports = CmjExportLambdas::new(Default::default(), imported);
+        exports.rebase_stored_paths(std::path::Path::new("producer"), std::path::Path::new("installed"));
+        assert_eq!(exports.locs.imported_files.len(), 10_000);
+        for (name, &index) in &exports.locs.imported_file_index {
+            assert!(name.starts_with("installed/src/"));
+            assert_eq!(exports.locs.file_name(index), Some(name.as_str()));
+        }
+        let mut exports = CmjExportLambdas::new(Default::default(), original);
+        exports.rebase_stored_paths(std::path::Path::new("producer"), std::path::Path::new("installed"));
+        for i in 1..=10_000 {
+            assert_eq!(exports.locs.file_name(StrIdx(i)).unwrap(), format!("installed/src/M{i}.res"));
+        }
     }
 
     #[test]
