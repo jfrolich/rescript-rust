@@ -27279,6 +27279,11 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         (build(pers_env), None)
     };
     let components = Rc::new(components?);
+    if ctx.compiler_counters_enabled()
+        && (matches!(module_path.view(), PathView::Papply(..)) || module_path.has_apply_prefix())
+    {
+        crate::perf_counters::world::record_papply_view_build();
+    }
     if shared_key.is_some() && piece.is_none() {
         components.make_private();
     }
