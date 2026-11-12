@@ -4223,11 +4223,17 @@ struct SubstMaps {
 
 /// Fixed hasher keys: `AHashMap::default()` derives fresh random keys per
 /// map, and substitution maps are built for every qualified signature.
+///
+/// The first seed must not equal the first word of ahash's second constant
+/// table: `with_seeds` combines its arguments with that table by exclusive
+/// or, a first key of zero results, and integer keys (on every target) and
+/// all keys of ahash's fallback hasher then hash to 0 (one bucket, quadratic
+/// inserts). `subst_map_hashes_are_distinct` checks it.
 static SUBST_MAP_STATE: ahash::RandomState = ahash::RandomState::with_seeds(
-    0x452821e6_38d01377,
-    0xbe5466cf_34e90c6c,
-    0xc0ac29b7_c97c50dd,
-    0x3f84d5b5_b5470917,
+    0x9e37_79b9_7f4a_7c15,
+    0xf39c_c060_5ced_c834,
+    0x1082_276b_f3a2_7251,
+    0xf86c_6a11_d0c1_8e95,
 );
 
 fn subst_map<K, V>() -> HashMap<K, V> {
@@ -8888,5 +8894,27 @@ mod snapshot_index_tests {
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
         assert!(registry.module_info.with_value("M10000", |_| ()).is_none());
         assert_eq!(index.decodes.load(Ordering::Relaxed), 2);
+    }
+}
+
+#[cfg(test)]
+mod subst_map_hash_tests {
+    /// 10,000 integers and 10,000 names (the key kinds of the substitution
+    /// maps) must not share a hash: a first key of zero gives one hash for
+    /// all of them, and every substitution map becomes one bucket.
+    #[test]
+    fn subst_map_hashes_are_distinct() {
+        use std::hash::BuildHasher;
+        let ints: std::collections::HashSet<u64> = (0..10_000i32)
+            .map(|n| BuildHasher::hash_one(&super::SUBST_MAP_STATE, n))
+            .collect();
+        assert!(ints.len() >= 9_990, "{} distinct hashes of 10,000 integers", ints.len());
+        let names: std::collections::HashSet<u64> = (0..10_000)
+            .map(|n| {
+                let name = crate::name::Name::new(&format!("t{n}"));
+                BuildHasher::hash_one(&super::SUBST_MAP_STATE, name)
+            })
+            .collect();
+        assert!(names.len() >= 9_990, "{} distinct hashes of 10,000 names", names.len());
     }
 }
