@@ -1330,6 +1330,7 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
     }
 
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
+        let idx = arena.expanded(idx);
         if arena.expr_needs_no_attribute_sweep(idx) {
             return;
         }

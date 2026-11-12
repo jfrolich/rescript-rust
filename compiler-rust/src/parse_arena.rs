@@ -2985,6 +2985,12 @@ impl ParseArena {
         }
     }
 
+    /// Read the built-in expansion at a compiler consumer's handle boundary.
+    #[inline]
+    pub fn get_expanded_expr(&self, idx: ExprIdx) -> &Expression {
+        self.get_expr(self.expanded(idx))
+    }
+
     /// Append an expression while the arena is shared. Such expressions have
     /// no sparse side-table entries, so they must not carry function
     /// defaults, case guards or other side-table payloads.
