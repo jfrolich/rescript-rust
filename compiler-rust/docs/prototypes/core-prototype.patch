@@ -1,0 +1,327 @@
+diff --git a/compiler-rust/src/types/context.rs b/compiler-rust/src/types/context.rs
+index f8ff5d8..9f0dfdb 100644
+--- a/compiler-rust/src/types/context.rs
++++ b/compiler-rust/src/types/context.rs
+@@ -43,6 +43,12 @@ use std::sync::Arc;
+ /// allocation does not copy earlier nodes and reads take no borrow flag; a
+ /// node's position is its `TypeExprRef` index.
+ pub(crate) struct TypeNodes {
++    /// Nodes `0..FIRST_LEN`: one fixed-size chunk, taken from a per-thread
++    /// free list and given back on drop.
++    first: Rc<[TypeNode; TypeNodes::FIRST_LEN]>,
++    /// Raw handles below this are in `first` and may be read directly:
++    /// `FIRST_LEN`, or 0 while direct reads are off (see `set_direct`).
++    fast_limit: Cell<u32>,
+     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
+     len: Cell<usize>,
+ }
+@@ -55,14 +61,43 @@ struct TypeNode {
+     id: Cell<i32>,
+ }
+ 
++thread_local! {
++    /// This thread's first chunks. One whose only owner is this list is free.
++    static FIRST_CHUNKS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
++}
++
+ impl TypeNodes {
++    const FIRST_BITS: u32 = 16;
++    const FIRST_LEN: usize = 1 << Self::FIRST_BITS;
+     const FIRST_CHUNK_BITS: u32 = 8;
+     /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
+     /// chunks cover every index a `TypeExprRef` can hold.
+     const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
+ 
+     pub(crate) fn new() -> Self {
++        let first = FIRST_CHUNKS.with(|chunks| {
++            let mut chunks = chunks.borrow_mut();
++            if let Some(free) = chunks.iter().find(|chunk| Rc::strong_count(chunk) == 1) {
++                return Rc::clone(free);
++            }
++            let chunk: Rc<[TypeNode]> = (0..Self::FIRST_LEN)
++                .map(|_| TypeNode {
++                    desc: Cell::new(TypeDesc::Tnil),
++                    level: Cell::new(0),
++                    id: Cell::new(0),
++                })
++                .collect();
++            let chunk: Rc<[TypeNode; Self::FIRST_LEN]> = match chunk.try_into() {
++                Ok(chunk) => chunk,
++                Err(_) => unreachable!(),
++            };
++            chunks.push(Rc::clone(&chunk));
++            if std::env::var_os("PROTO_DEBUG").is_some() { eprintln!("[proto] fresh first chunk #{} on {:?}", chunks.len(), std::thread::current().id()); }
++            chunk
++        });
+         TypeNodes {
++            first,
++            fast_limit: Cell::new(Self::FIRST_LEN as u32),
+             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
+             len: Cell::new(0),
+         }
+@@ -76,10 +111,36 @@ impl TypeNodes {
+         (bit - Self::FIRST_CHUNK_BITS as usize, biased - (1 << bit))
+     }
+ 
++    /// The node of raw handle `raw` when it is a local handle in the first
++    /// chunk and direct reads are on: one compare covers the tier bits, the
++    /// chunk bound and the switch.
++    #[inline(always)]
++    fn direct(&self, raw: u32) -> Option<&TypeNode> {
++        if raw < self.fast_limit.get() {
++            Some(&self.first[raw as usize & (Self::FIRST_LEN - 1)])
++        } else {
++            None
++        }
++    }
++
++    /// Turn direct reads on or off.
++    fn set_direct(&self, on: bool) {
++        self.fast_limit.set(if on { Self::FIRST_LEN as u32 } else { 0 });
++    }
++
+     /// Node `idx` (a local index or a store index with the tag stripped).
+     #[inline(always)]
+     fn node(&self, idx: usize) -> &TypeNode {
+-        let (chunk, offset) = Self::locate(idx);
++        if idx < Self::FIRST_LEN {
++            return &self.first[idx];
++        }
++        self.node_far(idx)
++    }
++
++    #[inline(never)]
++    #[cold]
++    fn node_far(&self, idx: usize) -> &TypeNode {
++        let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
+         &self.chunks[chunk]
+             .get()
+             .expect("type node index refers to an unallocated chunk")[offset]
+@@ -113,16 +174,20 @@ impl TypeNodes {
+     /// Append a node and return its index.
+     pub(crate) fn push(&self, desc: TypeDesc, level: i32, id: i32) -> usize {
+         let idx = self.len.get();
+-        let (chunk, offset) = Self::locate(idx);
+-        let node = &self.chunks[chunk].get_or_init(|| {
+-            (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
+-                .map(|_| TypeNode {
+-                    desc: Cell::new(TypeDesc::Tnil),
+-                    level: Cell::new(0),
+-                    id: Cell::new(0),
+-                })
+-                .collect()
+-        })[offset];
++        let node = if idx < Self::FIRST_LEN {
++            self.node(idx)
++        } else {
++            let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
++            &self.chunks[chunk].get_or_init(|| {
++                (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
++                    .map(|_| TypeNode {
++                        desc: Cell::new(TypeDesc::Tnil),
++                        level: Cell::new(0),
++                        id: Cell::new(0),
++                    })
++                    .collect()
++            })[offset]
++        };
+         node.desc.set(desc);
+         node.level.set(level);
+         node.id.set(id);
+@@ -2561,6 +2626,14 @@ impl TypeContext {
+     /// into callers.
+     #[inline(always)]
+     fn desc(&self, r: TypeExprRef) -> TypeDesc {
++        if let Some(node) = self.types.direct(r.0) {
++            return node.desc.get();
++        }
++        self.desc_indirect(r)
++    }
++
++    #[inline(never)]
++    fn desc_indirect(&self, r: TypeExprRef) -> TypeDesc {
+         if r.is_store() {
+             return self.store_desc(r);
+         }
+@@ -2591,6 +2664,14 @@ impl TypeContext {
+     /// Get the level of a type.
+     #[inline]
+     pub fn get_level(&self, r: TypeExprRef) -> i32 {
++        if let Some(node) = self.types.direct(r.0) {
++            return node.level.get();
++        }
++        self.level_indirect(r)
++    }
++
++    #[inline(never)]
++    fn level_indirect(&self, r: TypeExprRef) -> i32 {
+         if r.is_store() {
+             return self.store_level(r);
+         }
+@@ -2714,6 +2795,15 @@ impl TypeContext {
+     /// Level write without journaling (also used to undo).
+     #[inline]
+     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
++        if let Some(node) = self.types.direct(r.0) {
++            node.level.set(level);
++            return;
++        }
++        self.write_level_indirect(r, level);
++    }
++
++    #[inline(never)]
++    fn write_level_indirect(&self, r: TypeExprRef, level: i32) {
+         if r.is_store() {
+             if r.is_shared() {
+                 self.shared_level_overlay
+@@ -2748,6 +2838,15 @@ impl TypeContext {
+     /// Descriptor write without journaling (also used to undo).
+     #[inline]
+     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
++        if let Some(node) = self.types.direct(r.0) {
++            node.desc.set(desc);
++            return;
++        }
++        self.write_desc_indirect(r, desc);
++    }
++
++    #[inline(never)]
++    fn write_desc_indirect(&self, r: TypeExprRef, desc: TypeDesc) {
+         if r.is_store() {
+             if r.is_shared() {
+                 self.set_shared_desc(r, desc);
+@@ -4645,9 +4744,11 @@ impl TypeContext {
+             self.store_build_row_start.set(self.store.row_field_count());
+         }
+         self.store_build_depth.set(depth + 1);
++        self.types.set_direct(depth + 1 == 0);
+         super::thread_store::set_store_build_depth(depth + 1);
+         let result = build();
+         self.store_build_depth.set(depth);
++        self.types.set_direct(depth == 0);
+         super::thread_store::set_store_build_depth(depth);
+         if depth == 0 && self.compiler_counters_enabled {
+             crate::perf_counters::record_store_build_nodes(
+@@ -4809,9 +4910,11 @@ impl TypeContext {
+     /// separately.
+     pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
+         let depth = self.store_build_depth.replace(0);
++        self.types.set_direct(true);
+         super::thread_store::set_store_build_depth(0);
+         let result = f();
+         self.store_build_depth.set(depth);
++        self.types.set_direct(depth == 0);
+         super::thread_store::set_store_build_depth(depth);
+         result
+     }
+diff --git a/compiler-rust/src/types/type_expr.rs b/compiler-rust/src/types/type_expr.rs
+index 752ddc7..dc794d3 100644
+--- a/compiler-rust/src/types/type_expr.rs
++++ b/compiler-rust/src/types/type_expr.rs
+@@ -340,19 +340,99 @@ impl<S, const FIRST_BITS: u32> PayloadChunks<S, FIRST_BITS> {
+     }
+ }
+ 
+-/// Lists of `Copy` elements (type lists, arrow parameters).
+-type ListChunks<T> = PayloadChunks<Cell<T>, 8>;
++/// Elements of a recycled first chunk: each element type has its own
++/// per-thread list of first chunks.
++pub(crate) trait ListElem: Copy + 'static {
++    const FILL: Self;
++    fn first_chunk() -> std::rc::Rc<[Cell<Self>; LIST_FIRST_LEN]>;
++}
++
++pub(crate) const LIST_FIRST_LEN: usize = 1 << 16;
++
++fn lease_first_chunk<T: ListElem>(
++    chunks: &RefCell<Vec<std::rc::Rc<[Cell<T>; LIST_FIRST_LEN]>>>,
++) -> std::rc::Rc<[Cell<T>; LIST_FIRST_LEN]> {
++    let mut chunks = chunks.borrow_mut();
++    if let Some(free) = chunks.iter().find(|chunk| std::rc::Rc::strong_count(chunk) == 1) {
++        return std::rc::Rc::clone(free);
++    }
++    let chunk: std::rc::Rc<[Cell<T>]> = (0..LIST_FIRST_LEN).map(|_| Cell::new(T::FILL)).collect();
++    let chunk: std::rc::Rc<[Cell<T>; LIST_FIRST_LEN]> = match chunk.try_into() {
++        Ok(chunk) => chunk,
++        Err(_) => unreachable!(),
++    };
++    chunks.push(std::rc::Rc::clone(&chunk));
++    chunk
++}
++
++thread_local! {
++    static FIRST_TYPE_LISTS: RefCell<Vec<std::rc::Rc<[Cell<TypeExprRef>; LIST_FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
++    static FIRST_ARG_LISTS: RefCell<Vec<std::rc::Rc<[Cell<TypeArg>; LIST_FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
++}
++
++impl ListElem for TypeExprRef {
++    const FILL: Self = TypeExprRef(0);
++    fn first_chunk() -> std::rc::Rc<[Cell<Self>; LIST_FIRST_LEN]> {
++        FIRST_TYPE_LISTS.with(lease_first_chunk)
++    }
++}
++
++impl ListElem for TypeArg {
++    const FILL: Self = TypeArg { name: None, loc: DeclLoc::none(), typ: TypeExprRef(0), optional: false };
++    fn first_chunk() -> std::rc::Rc<[Cell<Self>; LIST_FIRST_LEN]> {
++        FIRST_ARG_LISTS.with(lease_first_chunk)
++    }
++}
++
++/// Lists of `Copy` elements (type lists, arrow parameters): slots
++/// `0..LIST_FIRST_LEN` in one recycled chunk, the rest in a chunk ladder.
++struct ListChunks<T: ListElem> {
++    first: std::rc::Rc<[Cell<T>; LIST_FIRST_LEN]>,
++    far: PayloadChunks<Cell<T>, 8>,
++    len: Cell<usize>,
++}
+ 
+-impl<T: Copy> ListChunks<T> {
++impl<T: ListElem> Default for ListChunks<T> {
++    fn default() -> Self {
++        ListChunks { first: T::first_chunk(), far: PayloadChunks::default(), len: Cell::new(0) }
++    }
++}
++
++impl<T: ListElem> ListChunks<T> {
+     /// Append `items` (not empty) and return their untagged start.
+     fn append(&self, items: &[T]) -> usize {
++        let start = self.len.get();
++        let n = items.len();
++        if start + n <= LIST_FIRST_LEN {
++            for (slot, &item) in self.first[start..start + n].iter().zip(items) {
++                slot.set(item);
++            }
++            self.len.set(start + n);
++            return start;
++        }
++        self.len.set(LIST_FIRST_LEN);
+         let first = items[0];
+-        let (start, slots, offset) =
+-            self.reserve(items.len(), |size| vec![Cell::new(first); size].into_boxed_slice());
+-        for (slot, &item) in slots[offset..offset + items.len()].iter().zip(items) {
++        let (far_start, slots, offset) =
++            self.far.reserve(n, |size| vec![Cell::new(first); size].into_boxed_slice());
++        for (slot, &item) in slots[offset..offset + n].iter().zip(items) {
+             slot.set(item);
+         }
+-        start
++        far_start + LIST_FIRST_LEN
++    }
++
++    /// Slots `start..start + n`.
++    #[inline(always)]
++    fn slots(&self, start: usize, n: usize) -> &[Cell<T>] {
++        if start < LIST_FIRST_LEN {
++            return &self.first[start..start + n];
++        }
++        self.far_slots(start, n)
++    }
++
++    #[inline(never)]
++    #[cold]
++    fn far_slots(&self, start: usize, n: usize) -> &[Cell<T>] {
++        self.far.slots(start - LIST_FIRST_LEN, n)
+     }
+ }
+ 

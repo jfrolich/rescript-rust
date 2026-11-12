@@ -1,0 +1,1 @@
+- Document incremental build-record storage, readers, write costs, and measured reduction trade-offs.

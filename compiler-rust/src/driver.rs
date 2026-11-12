@@ -10038,7 +10038,7 @@ fn compile_with_lower_check(
     jsx_preserve: bool,
     unit: &str,
 ) -> Result<DepsProgram> {
-    if options.backend == crate::bir::shadow::BackendMode::Legacy {
+    if !options.backend.checks_lowering() {
         return Ok(compiler.compile_deps_program_in_arena(arena, root, possible));
     }
     let (program, check) = compiler.compile_deps_program_with_lower_check::<true>(arena, root, possible);
