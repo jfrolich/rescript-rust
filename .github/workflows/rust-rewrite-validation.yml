@@ -247,6 +247,9 @@ jobs:
           done
           exit $status
 
+      - name: Test build comparison layouts
+        run: python3 scripts/test_build_comparison_layouts.py
+
   compiler-tests:
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 40
