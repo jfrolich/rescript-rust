@@ -63,6 +63,10 @@ struct TypeNode {
 thread_local! {
     // The list retains one owner. A second owner leases the array exclusively.
     static FIRST_NODE_ARRAYS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+    #[cfg(test)]
+    static FIRST_NODE_LEASE_PROBES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static FIRST_NODE_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
 }
 
 impl TypeNodes {
@@ -73,20 +77,47 @@ impl TypeNodes {
     /// chunks cover every index a `TypeExprRef` can hold.
     const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
 
+    /// One thread-local acquisition and at most one reference-count probe per
+    /// retained array. Reuse initializes no nodes; a fresh lease initializes
+    /// FIRST_LEN nodes and appends one Rc to the list (amortized O(1)).
     pub(crate) fn new() -> Self {
         let first = FIRST_NODE_ARRAYS.with(|arrays| {
             let mut arrays = arrays.borrow_mut();
-            if let Some(free) = arrays.iter().find(|array| Rc::strong_count(array) == 1) {
+            #[cfg(test)]
+            let mut probes = 0;
+            let free = arrays.iter().find(|array| {
+                #[cfg(test)]
+                {
+                    probes += 1;
+                }
+                Rc::strong_count(array) == 1
+            });
+            #[cfg(test)]
+            {
+                FIRST_NODE_LEASE_PROBES.with(|count| count.set(probes));
+                FIRST_NODE_INITIALIZATIONS.with(|count| count.set(0));
+            }
+            if let Some(free) = free {
                 return Rc::clone(free);
             }
             // Collect on the heap rather than constructing a large stack array.
+            #[cfg(test)]
+            let mut initialized = 0;
             let array: Rc<[TypeNode]> = (0..Self::FIRST_LEN)
-                .map(|_| TypeNode {
-                    desc: Cell::new(TypeDesc::Tnil),
-                    level: Cell::new(0),
-                    id: Cell::new(0),
+                .map(|_| {
+                    #[cfg(test)]
+                    {
+                        initialized += 1;
+                    }
+                    TypeNode {
+                        desc: Cell::new(TypeDesc::Tnil),
+                        level: Cell::new(0),
+                        id: Cell::new(0),
+                    }
                 })
                 .collect();
+            #[cfg(test)]
+            FIRST_NODE_INITIALIZATIONS.with(|count| count.set(initialized));
             let array: Rc<[TypeNode; Self::FIRST_LEN]> = match array.try_into() {
                 Ok(array) => array,
                 Err(_) => unreachable!("first node array has FIRST_LEN elements"),
@@ -112,6 +143,8 @@ impl TypeNodes {
 
     /// One comparison excludes tagged handles, far nodes and active store builds.
     /// The mask makes the array bound explicit without a second runtime check.
+    /// Cost: O(1), one limit comparison and, on success, one indexed address;
+    /// no allocation, reference-count update or thread-local access.
     #[inline(always)]
     fn direct(&self, raw: u32) -> Option<&TypeNode> {
         if raw < self.fast_limit.get() {
@@ -121,6 +154,7 @@ impl TypeNodes {
         }
     }
 
+    /// Cost: O(1), select the limit and write one Cell; no node traversal.
     fn set_direct(&self, on: bool) {
         self.fast_limit.set(if on { Self::FIRST_LEN as u32 } else { 0 });
     }
@@ -134,6 +168,8 @@ impl TypeNodes {
         self.node_far(idx)
     }
 
+    /// Cost: O(1), one chunk calculation and two indexed loads, no traversal
+    /// or allocation. Kept out of line because first-array reads dominate.
     #[cold]
     #[inline(never)]
     fn node_far(&self, idx: usize) -> &TypeNode {
@@ -2671,6 +2707,9 @@ impl TypeContext {
         self.desc_indirect(r)
     }
 
+    /// Cost: O(1) local addressing or the existing stored-node lookup (expected
+    /// O(1) exception-table probe when writes exist). Active builds also mark
+    /// local reads as poisoned; optional debug tracing is outside this bound.
     #[inline(never)]
     fn desc_indirect(&self, r: TypeExprRef) -> TypeDesc {
         if r.is_store() {
@@ -2709,6 +2748,9 @@ impl TypeContext {
         self.level_indirect(r)
     }
 
+    /// Cost: O(1) local addressing or the existing stored-level lookup (expected
+    /// O(1) exception-table probe when writes exist), plus poison bookkeeping.
+    /// Optional debug tracing is outside this bound.
     #[inline(never)]
     fn level_indirect(&self, r: TypeExprRef) -> i32 {
         if r.is_store() {
@@ -2858,6 +2900,9 @@ impl TypeContext {
         self.write_level_indirect(r, level)
     }
 
+    /// Cost: O(1) for local/build-owned nodes, expected amortized O(1) for an
+    /// existing frozen-write table insertion otherwise. No graph traversal;
+    /// optional poison debug tracing is outside this bound.
     #[inline(never)]
     fn write_level_indirect(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
@@ -2909,6 +2954,10 @@ impl TypeContext {
         self.write_desc_indirect(r, desc)
     }
 
+    /// Cost: O(1) for local nodes, expected amortized O(1) for a frozen-write
+    /// insertion. Build-owned descriptors retain the existing list-copy and
+    /// validation cost, proportional to their payload. Optional poison debug
+    /// tracing is outside these bounds.
     #[inline(never)]
     fn write_desc_indirect(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
@@ -5473,6 +5522,37 @@ mod tests {
         drop(ctx);
         assert_eq!(first.id(), env.id());
         assert_eq!(second.id(), env.id());
+    }
+
+    #[test]
+    fn type_nodes_lease_scan_is_linear_at_10000_entries() {
+        std::thread::spawn(|| {
+            let busy = TypeNodes::new();
+            // Simulate 10,000 occupied entries without allocating 10,000 arrays.
+            // Each alias is busy because this test retains the original lease.
+            FIRST_NODE_ARRAYS.with(|arrays| {
+                let mut arrays = arrays.borrow_mut();
+                arrays.extend((1..10_000).map(|_| Rc::clone(&busy.first)));
+            });
+            let fresh = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_000));
+            FIRST_NODE_INITIALIZATIONS.with(|count| {
+                assert_eq!(count.get(), TypeNodes::FIRST_LEN);
+            });
+            assert!(!Rc::ptr_eq(&busy.first, &fresh.first));
+            drop(fresh);
+            let reused = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_001));
+            FIRST_NODE_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+            assert_eq!(reused.len(), 0);
+            // Leave only the first entry; the next lease must stop after one probe.
+            drop(reused);
+            FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow_mut().truncate(1));
+            drop(busy);
+            let reused = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(reused.len(), 0);
+        }).join().unwrap();
     }
 
     #[test]
