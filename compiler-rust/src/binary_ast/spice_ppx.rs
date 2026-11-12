@@ -160,25 +160,31 @@ fn lident_path_spice_prefix(arena: &mut ParseArena, prefix: StrIdx, suffix: &str
     lident_path_from_parts(arena, &[prefix, suffix_idx])
 }
 
+/// O(path depth) borrowed comparisons and O(1) stack; no allocation.
+/// In particular, checking every field type does not build a temporary Vec.
 fn longident_matches(arena: &ParseArena, lid_idx: LidentIdx, parts: &[&str]) -> bool {
-    fn collect<'a>(arena: &'a ParseArena, lid: &Longident, out: &mut Vec<&'a str>) {
+    longident_matches_borrowed(arena, arena.get_longident(lid_idx), parts).0
+}
+
+/// O(path depth), inspecting each path segment at most once. The count is used
+/// by the 10,000-segment cost test and discarded by production callers.
+fn longident_matches_borrowed(arena: &ParseArena, mut lid: &Longident, mut parts: &[&str]) -> (bool, usize) {
+    let mut steps = 0;
+    loop {
+        steps += 1;
         match lid {
-            Longident::Lident(idx) => out.push(arena.get_string(*idx)),
-            Longident::Ldot(prefix, idx) => {
-                collect(arena, prefix, out);
-                out.push(arena.get_string(*idx));
+            Longident::Lident(name) => return (parts.len() == 1 && arena.get_string(*name) == parts[0], steps),
+            Longident::Ldot(prefix, name) => {
+                let Some((last, rest)) = parts.split_last() else { return (false, steps); };
+                if arena.get_string(*name) != *last { return (false, steps); }
+                lid = prefix;
+                parts = rest;
             }
-            Longident::Lapply(_, _) => {}
+            // Preserve the previous collector's behaviour: an application
+            // contributes no segments, even as the prefix of a dotted path.
+            Longident::Lapply(_, _) => return (parts.is_empty(), steps),
         }
     }
-
-    let lid = arena.get_longident(lid_idx);
-    let mut segs = Vec::new();
-    collect(arena, lid, &mut segs);
-    if segs.len() != parts.len() {
-        return false;
-    }
-    segs.iter().zip(parts.iter()).all(|(a, b)| *a == *b)
 }
 
 fn expr_ident_with_loc(lid_idx: LidentIdx, ident_loc: LocIdx, expr_loc: LocIdx) -> Expression {
@@ -4099,19 +4105,21 @@ fn unused_value_warning_attribute(arena: &mut ParseArena) -> Attribute {
 fn generate_codec_decls(
     type_name: &str,
     param_names: &[String],
-    value_encoder: Option<Expression>,
+    mut value_encoder: Option<Expression>,
     codecs: (Option<Expression>, Option<Expression>),
     arena: &mut ParseArena,
 ) -> Vec<ValueBinding> {
-    let mut vbs = Vec::new();
+    let count = usize::from(codecs.0.is_some()) * 2 + usize::from(codecs.1.is_some());
+    let mut vbs = Vec::with_capacity(count);
 
     if let Some(encoder) = codecs.0 {
+        let mut encoder = Some(encoder);
         for suffix in [ENCODER_FUNC_SUFFIX, VALUE_ENCODER_FUNC_SUFFIX] {
             let runtime_v_idx = arena.spice_runtime_v();
             let selected_encoder = if suffix == VALUE_ENCODER_FUNC_SUFFIX {
-                value_encoder.clone().unwrap_or_else(|| encoder.clone())
+                value_encoder.take().unwrap_or_else(|| encoder.take().expect("encoder consumed once"))
             } else {
-                encoder.clone()
+                encoder.as_ref().expect("encoder retained for value encoder").clone()
             };
             let applied = expr_apply(
                 selected_encoder,
@@ -5931,4 +5939,19 @@ fn map_signature_items_with_mapper(
         expanded.extend(map_signature_item_spice(item, arena, mapper_active)?);
     }
     Ok(expanded)
+}
+
+#[cfg(test)]
+#[test]
+fn longident_comparison_steps_are_linear_without_collecting_segments() {
+    let mut arena = ParseArena::new();
+    let name = arena.intern_string("M");
+    let mut path = Longident::Lident(name);
+    for _ in 1..10_000 { path = Longident::Ldot(Box::new(path), name); }
+    assert_eq!(longident_matches_borrowed(&arena, &path, &vec!["M"; 10_000]), (true, 10_000));
+    assert_eq!(longident_matches_borrowed(&arena, &path, &["different"]), (false, 1));
+    // Avoid a recursive drop of the intentionally deep test path.
+    while let Longident::Ldot(prefix, _) = path { path = *prefix; }
+    let apply = Longident::Lapply(Box::new(Longident::Lident(name)), Box::new(Longident::Lident(name)));
+    assert_eq!(longident_matches_borrowed(&arena, &apply, &[]), (true, 1));
 }
