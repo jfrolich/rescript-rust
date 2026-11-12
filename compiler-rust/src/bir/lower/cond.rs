@@ -379,7 +379,7 @@ impl State {
 
     /// C:5187 take_single_result_assignment: `[target = value]`, the
     /// statement and the value. Constant on a trimmed run.
-    fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
+    pub(super) fn single_assignment(&mut self, run: Span, target: VarId) -> Option<(NodeId, NodeId)> {
         let (_, statement) = self.statements.only(run)?;
         let View::SExp { value } = self.arena.view(statement) else {
             return None;
@@ -468,7 +468,7 @@ impl State {
     /// statement of the runs (each is copied to its list once). The rules
     /// that rewrite the operands are `norm::js3_simplify_if`'s; it takes
     /// owned vectors, and is called only when `plain_if` says a rule applies.
-    fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
+    pub(super) fn if_statement(&mut self, test: NodeId, yes: Span, no: Span) -> NodeId {
         self.statements.drop_empty_blocks(&mut self.arena, yes);
         self.statements.drop_empty_blocks(&mut self.arena, no);
         if self.plain_if(test, yes, no) {
@@ -587,7 +587,7 @@ impl State {
     /// B:1565 unnest_block over the output from `start`: a block that is its
     /// only statement is replaced by its statements. Constant when it is not;
     /// else one step per statement of the block.
-    fn unnest(&mut self, start: u32) -> Option<(u32, NodeId)> {
+    pub(super) fn unnest(&mut self, start: u32) -> Option<(u32, NodeId)> {
         loop {
             let run = self.statements.trim(Self::from(start));
             let only = self.statements.only(run)?;
@@ -696,7 +696,7 @@ impl State {
     /// normalize_if_assignment_merge_order, then the conditional expression
     /// when each run is the one statement `target = x` (the runs are
     /// consumed), else the operands after the swap. Constant on trimmed runs.
-    fn merge_assignments(
+    pub(super) fn merge_assignments(
         &mut self,
         mut test: NodeId,
         target: VarId,
@@ -724,7 +724,7 @@ impl State {
     }
 
     /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
-    fn assignment_statement(
+    pub(super) fn assignment_statement(
         &mut self,
         target: VarId,
         merged: Result<NodeId, (NodeId, Span, Span)>,

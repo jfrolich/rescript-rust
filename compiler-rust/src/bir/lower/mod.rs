@@ -174,6 +174,9 @@ pub trait ProbeRules {
     ) -> Result<ProbePlan<Self::Resume>, super::bridge::Unsupported>;
     /// K1/K2: C:1529 compile_expr / C:4603 compile_effect_output; child order.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>);
+    /// Resolve a child continuation after preceding siblings have completed.
+    /// O(1); string-switch V allocates its result after lowering the scrutinee.
+    fn child_context(&self, cx: Cx, _resume: &Self::Resume, _index: usize) -> Cx { cx }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     /// Consume a child's result before entering its next sibling when required.
     fn child(&mut self, _cx: Cx, _resume: &Self::Resume, _index: usize, output: Probed) -> Probed {
@@ -206,6 +209,7 @@ impl SourceProbe {
     ) -> Result<Probed, super::bridge::Unsupported> {
         enum Work<R> {
             Enter(Cx, NodeId),
+            EnterChild(Cx, NodeId, usize, usize),
             Finish(Cx, R, usize),
             Child(Cx, usize, usize),
         }
@@ -213,7 +217,15 @@ impl SourceProbe {
         let mut values = Vec::new();
         let mut children = Vec::new();
         while let Some(task) = work.pop() {
+            let task = match task {
+                Work::EnterChild(cx, node, parent, index) => {
+                    let Work::Finish(_, resume, _) = &work[parent] else { unreachable!("parent resume") };
+                    Work::Enter(rules.child_context(cx, resume, index), node)
+                }
+                task => task,
+            };
             match task {
+                Work::EnterChild(..) => unreachable!("resolved child context"),
                 Work::Enter(cx, node) => {
                     self.steps += 1;
                     match rules.enter(cx, node)? {
@@ -224,7 +236,7 @@ impl SourceProbe {
                             work.push(Work::Finish(cx, resume, children.len()));
                             for (index, (cx, node)) in children.drain(..).enumerate().rev() {
                                 work.push(Work::Child(cx, parent, index));
-                                work.push(Work::Enter(cx, node));
+                                work.push(Work::EnterChild(cx, node, parent, index));
                             }
                         }
                     }
@@ -234,6 +246,7 @@ impl SourceProbe {
                         unreachable!("parent resume frame")
                     };
                     let child = values.pop().expect("completed source child");
+                    let cx = rules.child_context(cx, resume, index);
                     values.push(rules.child(cx, resume, index, child));
                 }
                 Work::Finish(cx, resume, count) => {
@@ -530,7 +543,10 @@ impl ProbeRules for State {
                 let operands = self.source.node(node).switch_actions();
                 return Ok(ProbePlan::Children(expr::Resume::Switch(self.integer_switch(cx, scrutinee, operands, header)?)));
             }
-            View::StrSwitch { .. } => return Err(Unsupported("string switch")),
+            View::StrSwitch { scrutinee, header, .. } => {
+                let operands = self.source.node(node).switch_actions();
+                return Ok(ProbePlan::Children(expr::Resume::Switch(self.string_switch(cx, scrutinee, operands, header)?)));
+            }
             View::Catch { .. } | View::Exit { .. } => return Err(Unsupported("static catch")),
             View::Try { .. } | View::TryFinally { .. } => return Err(Unsupported("try")),
             View::While { .. }
@@ -597,6 +613,13 @@ impl ProbeRules for State {
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
         self.expression_children(cx, resume, into);
+    }
+    /// V: compile_string_switch_inner. O(1), after the scrutinee allocates
+    /// its temporaries and the switch result obtains its identity.
+    fn child_context(&self, cx: Cx, resume: &Self::Resume, index: usize) -> Cx {
+        if let expr::Resume::Switch(frame) = resume {
+            self.switch_child_context(cx, *frame, index)
+        } else { cx }
     }
     /// K4/K2: C:2411 compile_let_binding_output / C:4603 compile_effect_output.
     fn child(&mut self, cx: Cx, resume: &Self::Resume, index: usize, output: Probed) -> Probed {

@@ -9,6 +9,14 @@ use crate::bir::{CaseKey, ClauseMeta, SwitchId};
 #[derive(Clone, Copy)]
 pub(super) struct Switch(pub u32);
 
+/// Legacy small string cases are selected before grouping.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Form {
+    General,
+    Body,
+    If,
+}
+
 /// Cold per-switch data, not copied down the source walk.
 pub(super) struct Plan {
     scrutinee: NodeId,
@@ -22,6 +30,12 @@ pub(super) struct Plan {
     start: Span,
     value: Option<NodeId>,
     target: Option<VarId>,
+    runs: [Span; 2],
+    declaration: Option<u32>,
+    head: u32,
+    form: Form,
+    string: bool,
+    pending_value: bool,
 }
 
 impl State {
@@ -44,19 +58,64 @@ impl State {
         {
             return Err(Unsupported("switch"));
         }
+        self.plan_switch(cx, scrutinee, operands, header, false)
+    }
+
+    /// V: compile_string_switch_inner and C: compile_string_switch_*_block_inner.
+    /// O(c + compared nodes + new payload bytes); no branch is probed.
+    pub(super) fn string_switch(
+        &mut self,
+        cx: Cx,
+        scrutinee: NodeId,
+        operands: crate::bir::ListId,
+        header: SwitchId,
+    ) -> Result<Switch, Unsupported> {
+        self.plan_switch(cx, scrutinee, operands, header, true)
+    }
+
+    /// Select the legacy form and prepare its single child schedule.
+    /// O(c + compared nodes), with amortized payload fingerprinting.
+    fn plan_switch(
+        &mut self,
+        cx: Cx,
+        scrutinee: NodeId,
+        operands: crate::bir::ListId,
+        header: SwitchId,
+        string: bool,
+    ) -> Result<Switch, Unsupported> {
+        let h = self.arena.switch(header);
         let count = h.keys.len();
         let default = h
             .has_default
             .then(|| self.source.lists.get(operands)[count]);
-        self.prepare_switch_hashes();
-        let (groups, next, bodies) = self.group_switch_cases(operands, count, default);
+        let complete = default.is_none() && !matches!(cx.cont, Cont::Effect(Tail::No));
+        let form = if !string {
+            Form::General
+        } else if count == 0 || count == 1 && complete {
+            Form::Body
+        } else if count == 1 || count == 2 && complete {
+            Form::If
+        } else {
+            Form::General
+        };
+        let (groups, next, bodies) = if form == Form::General {
+            self.prepare_switch_hashes();
+            self.group_switch_cases(operands, count, default)
+        } else {
+            (
+                (0..count).collect(),
+                vec![NONE; count],
+                self.source.lists.get(operands)[..count].to_vec(),
+            )
+        };
         let start = self.statements.mark();
         let binding = match cx.cont {
-            Cont::Value(_) => Some((LetKind::Strict, self.fresh_variable("tmp"))),
+            Cont::Value(_) if !string => Some((LetKind::Strict, self.fresh_variable("tmp"))),
             Cont::Declare(kind, var) => Some((kind, var)),
             _ => None,
         };
-        if let Some((kind, var)) = binding {
+        let declaration = (string && binding.is_some()).then(|| self.statements.reserve());
+        if let Some((kind, var)) = binding.filter(|_| !string) {
             let declaration = plain::node(
                 &mut self.arena,
                 View::SDecl { var, value: None },
@@ -77,6 +136,12 @@ impl State {
             start,
             value: None,
             target: binding.map(|(_, var)| var),
+            runs: [Span::default(); 2],
+            declaration,
+            head: 0,
+            form,
+            string,
+            pending_value: string && matches!(cx.cont, Cont::Value(_)),
         });
         Ok(frame)
     }
@@ -412,6 +477,20 @@ impl State {
         same
     }
 
+    /// Resolve the result allocated after a string scrutinee. O(1).
+    pub(super) fn switch_child_context(&self, cx: Cx, frame: Switch, index: usize) -> Cx {
+        if index == 0 {
+            cx
+        } else {
+            Cx {
+                cont: self.switches[frame.0 as usize]
+                    .target
+                    .map_or(cx.cont, Cont::Assign),
+                ..cx
+            }
+        }
+    }
+
     /// C: compile_switch_*_block_inner: scrutinee V, then groups, then default.
     /// O(number of groups); no body is offered to the traversal twice.
     pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {
@@ -449,10 +528,29 @@ impl State {
         let plan = &mut self.switches[frame.0 as usize];
         if index == 0 {
             plan.value = out.value.take();
+            if plan.pending_value {
+                let target = self.fresh_variable("tmp");
+                let declaration = self.statements.reserve();
+                let plan = &mut self.switches[frame.0 as usize];
+                plan.target = Some(target);
+                plan.declaration = Some(declaration);
+            }
+            if self.switches[frame.0 as usize].form != Form::General {
+                self.switches[frame.0 as usize].head = self.statements.reserve();
+            }
         } else {
             let start = out.stmts.start;
             if let Some(value) = out.value.take() {
                 self.drop_pure_effect(value);
+            }
+            if self.switches[frame.0 as usize].form != Form::General {
+                let run = self.statements.trim(Span { start, len: 0 });
+                self.switches[frame.0 as usize].runs[index - 1] = run;
+                return Probed::Out(Out {
+                    stmts: self.statements.mark(),
+                    value: None,
+                    finished: out.finished,
+                });
             }
             let plan = &self.switches[frame.0 as usize];
             let is_default = index > plan.bodies.len();
@@ -502,11 +600,14 @@ impl State {
             .pop()
             .expect("switch frames close in stack order");
         assert_eq!(frame.0 as usize, self.switches.len());
+        if plan.form != Form::General {
+            return self.finish_small_switch(cx, plan);
+        }
         let scrutinee = plan.value.expect("lowered scrutinee");
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
         let empty = plan.output.iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
         if empty && matches!(cx.cont, Cont::Effect(Tail::No)) {
-            for body in plan.output {
+            for &body in &plan.output {
                 self.arena.release(body);
             }
             self.statements
@@ -518,7 +619,13 @@ impl State {
             for (group, &head) in plan.groups.iter().enumerate() {
                 let mut case = head;
                 loop {
-                    keys.push(self.arena.switch(plan.header).keys[case].clone());
+                    let key = &self.arena.switch(plan.header).keys[case];
+                    keys.push(match key {
+                        CaseKey::String(text) => CaseKey::JavaScript(
+                            crate::lambda::SwitchCaseTag::String(self.arena.text(*text).to_owned()),
+                        ),
+                        key => key.clone(),
+                    });
                     if plan.next[case] == NONE {
                         actions.push(plan.output[group]);
                         clauses.push(plan.clauses[group]);
@@ -563,9 +670,67 @@ impl State {
                     actions: &actions,
                     header,
                 },
-                0,
+                u16::from(plan.string),
             );
             self.statements.push(statement);
+        }
+        self.switch_result(cx, &plan)
+    }
+
+    /// C: prepend_declaration_or_fold_final_assignment; V: compile_string_switch_inner.
+    /// O(trailing holes), amortized linear: trim pops each hole once.
+    fn switch_result(&mut self, cx: Cx, plan: &Plan) -> Probed {
+        if let Some(slot) = plan.declaration {
+            let target = plan.target.unwrap();
+            let kind = match cx.cont {
+                Cont::Declare(kind, _) => kind,
+                _ => LetKind::Strict,
+            };
+            // The declaration hole must survive even when the body is empty.
+            let floor = Span {
+                start: slot + 1,
+                len: 0,
+            };
+            let run = self.statements.trim(floor);
+            let candidate = if matches!(cx.cont, Cont::Value(_)) {
+                if plan.form != Form::General && self.statements.mark().start > plan.head {
+                    Some(self.statements.since(Span {
+                        start: plan.head,
+                        len: 0,
+                    }))
+                } else {
+                    None
+                }
+            } else if run.len > 0 {
+                Some(Span {
+                    start: run.start + run.len - 1,
+                    len: 1,
+                })
+            } else {
+                None
+            };
+            if let Some((statement, value)) =
+                candidate.and_then(|run| self.single_assignment(run, target))
+            {
+                self.arena.detach(value);
+                self.arena.release(statement);
+                self.statements.kill(candidate.unwrap());
+                let statement = crate::bir::j::declare(&mut self.arena, kind, target, value);
+                self.statements.push(statement);
+            } else {
+                let declaration = plain::node(
+                    &mut self.arena,
+                    View::SDecl {
+                        var: target,
+                        value: None,
+                    },
+                    kind as u16 | ((crate::js_ir::op::UsedStats::Used as u16) << 2),
+                );
+                self.statements.fill(slot, declaration);
+            }
+        }
+        if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
+            self.unnest(plan.start.start);
         }
         let value = match cx.cont {
             Cont::Value(_) => Some(self.pure_expression(
@@ -716,6 +881,45 @@ impl State {
     }
 }
 
+impl State {
+    /// V: compile_small_string_switch_assignment/return/effect, one Cx path.
+    /// O(statements consumed by J-S3); the direct-body form copies no run.
+    fn finish_small_switch(&mut self, cx: Cx, plan: Plan) -> Probed {
+        let scrutinee = plan.value.unwrap();
+        if plan.form == Form::Body {
+            self.arena.release(scrutinee);
+        } else {
+            let CaseKey::String(key) = self.arena.switch(plan.header).keys[0] else {
+                unreachable!()
+            };
+            let key = plain::node(&mut self.arena, View::JStr { text: key }, 0);
+            let test = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key);
+            let yes = plan.runs[0];
+            let no = if plan.bodies.len() + usize::from(plan.default.is_some()) == 2 {
+                plan.runs[1]
+            } else {
+                self.statements.mark()
+            };
+            let statement = match plan.target.map_or(cx.cont, Cont::Assign) {
+                Cont::Assign(target) => {
+                    let merged = self.merge_assignments(test, target, yes, no);
+                    self.assignment_statement(target, merged)
+                }
+                Cont::Effect(_) => self.if_statement(test, yes, no),
+                _ => unreachable!("small switch branches assign their result"),
+            };
+            if matches!(cx.cont, Cont::Effect(Tail::No))
+                && matches!(self.arena.view(statement), View::SBlock { statements } if statements.is_empty())
+            {
+                self.arena.release(statement);
+            } else {
+                self.statements.fill(plan.head, statement);
+            }
+        }
+        self.switch_result(cx, &plan)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -763,11 +967,80 @@ mod tests {
         super::super::oracle_tests::compare_in_contexts(a, root, None, true, contexts);
     }
 
+    fn string_case(
+        count: usize,
+        default: bool,
+        shared: bool,
+        effect: bool,
+        throwing: bool,
+        nested_scrutinee: bool,
+    ) {
+        let mut a = LamArena::new();
+        let mut x = a.var(Ident::new("x", 10, crate::ident::IdentFlags::NONE));
+        if nested_scrutinee {
+            let y = a.const_(C::String("a".into()));
+            let z = a.const_(C::String("b".into()));
+            let actions = a.add_list(&[y, z]);
+            let info = a.add_switch(
+                true,
+                [SwitchKey::Int(0), SwitchKey::Int(1)],
+                false,
+                std::iter::empty(),
+                false,
+                SwitchDispatch::Direct,
+            );
+            x = a.switch_raw(x, actions, info);
+        }
+        let actions: Vec<_> = (0..count + usize::from(default))
+            .map(|i| {
+                let n = a.const_(C::Int {
+                    i: if shared { 42 } else { i as i32 },
+                    comment: None,
+                });
+                if throwing {
+                    a.prim_raw(P::Praise, &[n], LamLoc::NONE)
+                } else if effect {
+                    a.prim_raw(P::PinitMod, &[n], LamLoc::NONE)
+                } else {
+                    n
+                }
+            })
+            .collect();
+        let actions = a.add_list(&actions);
+        let keys: Vec<_> = (0..count).map(|i| format!("case{i}")).collect();
+        let info = a.add_str_switch(keys.iter().map(String::as_str), default);
+        let root = a.string_switch_raw(x, actions, info);
+        super::super::oracle_tests::compare(a, root);
+    }
+
+    #[test]
+    fn string_forms_in_all_continuations() {
+        for count in 0..=5 {
+            for default in [false, true] {
+                for shared in [false, true] {
+                    for effect in [false, true] {
+                        for throwing in [false, true] {
+                            string_case(count, default, shared, effect, throwing, false);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    #[test]
+    fn string_scrutinee_precedes_value_temporary_and_declaration_fold() {
+        for count in [0, 1, 2, 3] {
+            for default in [false, true] {
+                string_case(count, default, false, false, false, true);
+            }
+        }
+    }
+
     #[test]
     fn frames_and_facts_are_small() {
         assert_eq!(std::mem::size_of::<Switch>(), 4);
         assert_eq!(std::mem::size_of::<Facts>(), 16);
-        assert_eq!(std::mem::size_of::<Plan>(), 160);
+        assert_eq!(std::mem::size_of::<Plan>(), 192);
     }
     #[test]
     fn ten_thousand_cases_have_linear_comparison_counts() {
