@@ -3,9 +3,9 @@
 //! Every worker of an in-process build loads the same `.cmi`-equivalent
 //! signatures (OCaml: one `persistent_structures` entry per process,
 //! `compiler/ml/env.ml:669-678`). The per-worker `ThreadTypeStore` already
-//! avoids re-internalizing a signature for every unit on one worker; this pool
-//! goes one step further and internalizes each dependency graph once per
-//! build, for all workers.
+//! keeps what one worker builds; this pool holds each dependency graph once
+//! per build, for all workers. It belongs to the build's `World`
+//! (`types/world.rs`), whose unit table says which graph is which unit's.
 //!
 //! Layout follows Zig's `InternPool`: a node index is a position in one
 //! global index space, split into fixed-size pages. Each published graph owns
@@ -25,12 +25,10 @@ use super::type_expr::{
 };
 use crate::parser::longident::Longident;
 use super::variant_runtime::{Layout, LayoutRef};
-use crate::cmi::persistent_env::PersStruct;
-use crate::cmi::portable_types::PortablePersStruct;
 use crate::fast_hash::AHashMap as HashMap;
 use crate::intern::StrIdx;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{Arc, Mutex, OnceLock, RwLock};
+use std::sync::{Arc, OnceLock, RwLock};
 
 const PAGE_BITS: u32 = 10;
 const PAGE_SIZE: u32 = 1 << PAGE_BITS;
@@ -246,14 +244,6 @@ pub(crate) fn graph_at(pages: &[OnceLock<Arc<SharedGraph>>], base: u32) -> &Arc<
     graph
 }
 
-/// Internalization slot of one portable dependency signature.
-struct PersSlot {
-    /// Keeps the portable struct alive so its address cannot be reused as a
-    /// key for another graph.
-    _owner: Arc<PortablePersStruct>,
-    ps: OnceLock<Option<Arc<PersStruct>>>,
-}
-
 /// Page table: page number -> the graph published on that page. Readers keep
 /// their own handle to it (`SharedPages::clone`) so a node read does not
 /// go through the pool.
@@ -396,12 +386,10 @@ pub(crate) struct SharedGraphParts {
 }
 
 pub(crate) struct SharedTypePool {
-    generation: u64,
     pages: SharedPages,
     next_index: AtomicU32,
     shuffle: Option<u64>,
     reservations: AtomicU32,
-    pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
     longident_names: Arc<RwLock<HashMap<u32, String>>>,
     next_longident_idx: AtomicU32,
 }
@@ -419,24 +407,22 @@ impl SharedTypePool {
 
 
 
-    fn new(generation: u64) -> Self {
+    pub(crate) fn new() -> Self {
         static SEED: OnceLock<Option<u64>> = OnceLock::new();
-        Self::with_seed(generation, *SEED.get_or_init(|| {
+        Self::with_seed(*SEED.get_or_init(|| {
             std::env::var("RESCRIPT_WORLD_SHUFFLE").ok()?.parse().ok()
         }))
     }
 
-    fn with_seed(generation: u64, shuffle: Option<u64>) -> Self {
+    fn with_seed(shuffle: Option<u64>) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
             .map(|_| OnceLock::new())
             .collect();
         SharedTypePool {
-            generation,
             pages,
             next_index: AtomicU32::new(0),
             shuffle,
             reservations: AtomicU32::new(0),
-            pers: Mutex::new(HashMap::new()),
             longident_names: Arc::new(RwLock::new(HashMap::new())),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
         }
@@ -539,31 +525,6 @@ impl SharedTypePool {
         Some(base)
     }
 
-    /// The shared internalization of `pps`, building it with `build` the
-    /// first time any worker asks. Concurrent requests for the same struct
-    /// wait for the first builder. `None` when `build` could not place the
-    /// graph in the pool.
-    pub(crate) fn pers_struct(
-        &self,
-        pps: &Arc<PortablePersStruct>,
-        build: impl FnOnce() -> Option<Arc<PersStruct>>,
-    ) -> Option<Arc<PersStruct>> {
-        let key = Arc::as_ptr(pps) as usize;
-        let slot = self
-            .pers
-            .lock()
-            .unwrap()
-            .entry(key)
-            .or_insert_with(|| {
-                Arc::new(PersSlot {
-                    _owner: pps.clone(),
-                    ps: OnceLock::new(),
-                })
-            })
-            .clone();
-        slot.ps.get_or_init(build).clone()
-    }
-
     pub(crate) fn intern_longident_name(&self, name: &str) -> StrIdx {
         let raw = self.next_longident_idx.fetch_add(1, Ordering::Relaxed);
         assert!(raw < 0xE000_0000, "shared longident index range exhausted");
@@ -597,22 +558,6 @@ pub(crate) fn shared_ref(base: u32, offset: usize) -> TypeExprRef {
     TypeExprRef::from_shared_index(base + offset as u32)
 }
 
-static POOL: Mutex<Option<Arc<SharedTypePool>>> = Mutex::new(None);
-
-/// The pool of build `generation`; a pool from an earlier build is replaced
-/// (and freed once the last worker store holding it is dropped).
-pub(crate) fn pool_for(generation: u64) -> Arc<SharedTypePool> {
-    let mut slot = POOL.lock().unwrap();
-    match &*slot {
-        Some(pool) if pool.generation == generation => pool.clone(),
-        _ => {
-            let pool = Arc::new(SharedTypePool::new(generation));
-            *slot = Some(pool.clone());
-            pool
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -622,8 +567,8 @@ mod tests {
     #[test]
     fn shuffled_graphs_keep_descriptors_and_levels() {
         let pools = [
-            SharedTypePool::with_seed(1, Some(1)),
-            SharedTypePool::with_seed(1, Some(2)),
+            SharedTypePool::with_seed(Some(1)),
+            SharedTypePool::with_seed(Some(2)),
         ];
         let mut bases = [Vec::new(), Vec::new()];
         for (index, pool) in pools.iter().enumerate() {
@@ -663,7 +608,7 @@ mod tests {
 
     #[test]
     fn published_graphs_are_readable_from_other_threads() {
-        let pool = Arc::new(SharedTypePool::new(u64::MAX));
+        let pool = Arc::new(SharedTypePool::new());
         let base = pool
             .publish(
                 SharedGraphSizes {
