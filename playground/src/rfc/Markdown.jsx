@@ -141,15 +141,20 @@ function block(token, index, links) {
  * Split the document at its markers. `<!-- example: id -->` up to
  * `<!-- /example -->` is replaced by the live example (the static code in
  * between is what other renderers show); `<!-- chart: id -->` up to
- * `<!-- /chart -->` is replaced by a chart of the table in between.
+ * `<!-- /chart -->` is replaced by a chart of the table in between;
+ * `<!-- repl -->` up to `<!-- /repl -->` by the read-eval-print loop, whose
+ * opening session is the transcript in between.
  */
 export function segments(markdown) {
   const out = [];
-  const marker = /<!-- example: ([\w-]+) -->[\s\S]*?<!-- \/example -->|<!-- chart: ([\w-]+) -->[\s\S]*?<!-- \/chart -->/g;
+  const marker =
+    /<!-- example: ([\w-]+) -->[\s\S]*?<!-- \/example -->|<!-- chart: ([\w-]+) -->[\s\S]*?<!-- \/chart -->|<!-- (repl) -->[\s\S]*?<!-- \/repl -->/g;
   let position = 0;
   for (const match of markdown.matchAll(marker)) {
     if (match.index > position) out.push({ type: "markdown", text: markdown.slice(position, match.index) });
-    out.push(match[1] ? { type: "example", id: match[1] } : { type: "chart", id: match[2] });
+    if (match[1]) out.push({ type: "example", id: match[1] });
+    else if (match[2]) out.push({ type: "chart", id: match[2] });
+    else out.push({ type: "repl" });
     position = match.index + match[0].length;
   }
   if (position < markdown.length) out.push({ type: "markdown", text: markdown.slice(position) });

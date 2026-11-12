@@ -1,12 +1,18 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { examples } from "../examples.js";
 import prebuilt from "./prebuilt.json";
+import session from "../../examples/repl.json";
+import { sessionLibraries } from "../repl-transcript.js";
 import { Example } from "./Example.jsx";
+import { Repl } from "./Repl.jsx";
 import { CostChart } from "./Diagrams.jsx";
 import { headings, lex, Markdown, segments } from "./Markdown.jsx";
 import { warmUp } from "./compiler.js";
 
 const REPOSITORY = "https://github.com/jfrolich/rescript-rust";
+
+// The modules a session of the read-eval-print loop starts with.
+const libraries = sessionLibraries(examples);
 
 function useTheme() {
   const [theme, setTheme] = useState(() => localStorage.getItem("theme") ?? "auto");
@@ -138,6 +144,9 @@ export function Page({ markdown, title, lede, pages, current }) {
           {parts.map((part, index) => {
             if (part.type === "markdown") return <Markdown key={index} tokens={part.tokens} links={links} />;
             if (part.type === "chart") return <CostChart key={index} />;
+            if (part.type === "repl") {
+              return <Repl key={index} libraries={libraries} intro={prebuilt.$repl ?? []} tries={session.tries} />;
+            }
             const example = examples.find((candidate) => candidate.id === part.id);
             if (!example) return null;
             return <Example key={index} example={example} prebuilt={prebuilt[example.id]} />;

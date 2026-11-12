@@ -2,12 +2,14 @@
 /**
  * Builds every example with the wasm compiler and writes what the RFC page
  * shows before the compiler has loaded in the browser: per file the expanded
- * source and the JavaScript, and the program's output.
+ * source and the JavaScript, and the program's output; and the session the
+ * read-eval-print loop opens with.
  */
 import { readFile, writeFile } from "fs/promises";
 import { join } from "path";
 import * as wasm from "../crate/pkg/rescript_playground_wasm.js";
 import { createEngine } from "../src/engine.js";
+import { runSession, sessionLibraries } from "../src/repl-transcript.js";
 
 const root = join(import.meta.dirname, "..");
 wasm.initSync({ module: await readFile(join(root, "crate/pkg/rescript_playground_wasm_bg.wasm")) });
@@ -15,11 +17,13 @@ const stdlib = JSON.parse(await readFile(join(root, "public/stdlib.json"), "utf-
 const engine = createEngine(wasm, stdlib);
 
 const prebuilt = {};
+const examples = [];
 for (const example of JSON.parse(await readFile(join(root, "examples/index.json"), "utf-8"))) {
   const files = [];
   for (const name of example.files) {
     files.push({ name, source: await readFile(join(root, "examples", example.id, name), "utf-8") });
   }
+  examples.push({ ...example, files });
   const { order, results, logs } = engine.build(files);
   const failed = order.find((name) => results[name]?.type !== "success");
   if (failed || logs === null) {
@@ -43,5 +47,9 @@ for (const example of JSON.parse(await readFile(join(root, "examples/index.json"
     ),
   };
 }
+// The session the read-eval-print loop of the page opens with.
+const session = JSON.parse(await readFile(join(root, "examples/repl.json"), "utf-8"));
+prebuilt.$repl = await runSession(engine, sessionLibraries(examples), session.intro);
+
 await writeFile(join(root, "src/rfc/prebuilt.json"), JSON.stringify(prebuilt));
-console.log(`Prebuilt ${Object.keys(prebuilt).length} examples -> src/rfc/prebuilt.json`);
+console.log(`Prebuilt ${examples.length} examples and the session -> src/rfc/prebuilt.json`);
