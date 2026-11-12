@@ -19,22 +19,30 @@ impl Bir {
             );
         }
         let children = view.children();
-        for (i, &child) in children.iter().enumerate() {
+        #[cfg(debug_assertions)]
+        let mut bulk_children = crate::fast_hash::AHashSet::default();
+        for (_i, &child) in children.iter().enumerate() {
             self.node(child);
+            #[cfg(debug_assertions)]
+            if self.bulk {
+                assert!(bulk_children.insert(child), "shared child");
+            } else {
+                assert!(!children[.._i].contains(&child), "shared child");
+            }
             debug_assert!(
                 self.parents[child.index()].is_none(),
                 "child already attached"
             );
-            debug_assert!(!children[..i].contains(&child), "shared child");
         }
         let packed = Node::pack(view, aux, &mut self.lists);
         let id = self.allocate(packed);
         self.check_shape(id);
         self.bind(id);
         for child in children {
+            debug_assert!(self.parents[child.index()].is_none(), "shared child");
             self.parents[child.index()] = Some(id);
             let multiplier = self.edge_weight(id, child);
-            if multiplier != 1 {
+            if multiplier != 1 && !self.bulk {
                 self.adjust_counts(child, i64::from(multiplier) - 1);
             }
         }
@@ -63,8 +71,8 @@ impl Bir {
 
     fn mark_captures(&mut self, root: NodeId) {
         let epoch = self.next_capture_epoch();
-        let mut stack = vec![(root, 0u32)];
-        while let Some((id, depth)) = stack.pop() {
+        let mut stack = vec![(root, 0u32, 1u32)];
+        while let Some((id, depth, weight)) = stack.pop() {
             let view = self.view(id);
             let children = view.children();
             let boundary = match view {
@@ -88,13 +96,19 @@ impl Bir {
                     self.vars.flags[var.index()].0 |= VarFlags::CAPTURED;
                 }
             }
+            self.weights[id.index()] = weight;
+            if weight != 1 {
+                self.adjust_direct(id, i64::from(weight) - 1);
+            }
             for child in children.into_iter().rev() {
                 let enters = match boundary {
                     Some(None) => true,
                     Some(Some(body)) => body == child,
                     None => false,
                 };
-                stack.push((child, depth + u32::from(enters)));
+                let child_weight = weight.checked_mul(self.edge_weight(id, child))
+                    .expect("Bir use weight overflow");
+                stack.push((child, depth + u32::from(enters), child_weight));
             }
         }
     }
