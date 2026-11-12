@@ -476,6 +476,32 @@ edit `snapshot.rs`.
 
 ### F.1 S1: Belt from the snapshot
 
+#### S1 baseline measurement
+
+Measured at `6f17907981` on x86-64 Linux, with a fat-LTO release build
+(`cargo build --release --manifest-path rewatch/Cargo.toml`), Valgrind 3.22.0
+Cachegrind (`--tool=cachegrind --cache-sim=no`) and `RAYON_NUM_THREADS=1`.
+The project was a disposable source-only copy of `tests/belt_tests`, with
+source-only copies of Belt and the runtime. Runtime preparation was outside
+the measurement; both measured builds used the same executable and paths.
+
+| Build | Modules compiled | Instructions |
+|---|---:|---:|
+| Clean project and Belt | 80 | 1,814,122,576 |
+| Clean project, Belt output retained | 37 | 668,482,159 |
+
+For the second build, only the root project's `lib` directory and generated
+`src/*.mjs` files were removed from the build location; Belt's database and
+JavaScript were retained. The measured difference is 1,145,640,417
+instructions (63.15% of this test project's clean build). The S1 snapshot
+budget for this fixture is at most 701,906,266 instructions (the retained-Belt
+build plus 5%). The baseline executable is 35,292,816 bytes. These counts are
+for the test fixture, not the 3,735-module application.
+
+Code/document discrepancy: build databases are under `lib/rescript`, not
+`lib/bs` as section A.5 says. Hardware instruction counting was unavailable
+in the measurement environment; the figures above are Cachegrind counts.
+
 - **Changes.** Rename `embedded_runtime.rs` to `snapshot.rs` and give it the
   container of B.2 with two packages. The build script produces Belt's part:
   it compiles Belt against the runtime it just compiled, under the proof
