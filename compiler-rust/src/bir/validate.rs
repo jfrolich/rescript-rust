@@ -177,9 +177,25 @@ impl Bir {
             }
         }
         let mut effects = vec![(false, false); self.nodes.len()];
+        let mut strict = vec![false; self.nodes.len()];
+        let mut subexpression = vec![false; self.nodes.len()];
         for &id in order.iter().rev() {
             let actual = self.effects(id, |c| effects[c.index()]);
             effects[id.index()] = actual;
+            if let Some(actual) = j::facts::purity(self, id, true, |c| strict[c.index()]) {
+                strict[id.index()] = actual;
+                let sub = j::facts::subexpression(self, id, |c| subexpression[c.index()]);
+                subexpression[id.index()] = sub;
+                if !matches!(self.view(id), View::Var { .. }) && self.node(id).flags().contains(NodeFlags::J_SUBEXPR) != sub {
+                    return fail("stale J subexpression fact");
+                }
+                // L tail marking owns the aliased bit until lowering.
+                if !self.tails_valid && !matches!(self.view(id), View::Var { .. })
+                    && self.node(id).flags().contains(NodeFlags::STRICT) != actual
+                {
+                    return fail("stale strict purity flag");
+                }
+            }
             let flags = self.node(id).flags();
             if flags.contains(NodeFlags::PURE) != actual.0
                 || flags.contains(NodeFlags::NO_ALLOC) != actual.1
@@ -213,7 +229,7 @@ impl Bir {
                         return fail("live let has no value");
                     }
                 }
-                _ if flags.contains(NodeFlags::DEAD) => return fail("DEAD flag on non-let"),
+                _ if flags.contains(NodeFlags::DEAD) && j::facts::purity(self, id, false, |_| false).is_none() => return fail("DEAD flag on non-let"),
                 _ => {}
             }
         }

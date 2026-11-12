@@ -528,6 +528,13 @@ here. The call information is not printed, but the printer's eta reduction
 (`eta_reduce_function_body`, A.7) and J1 read it, so it is part of the J node
 and of the gate (8.1).
 
+**Reachable J rules.** The call, the function built for a partial application,
+and strict temporary declarations are plain constructors. Assignment conversion
+does not match J-E4 folding triggers. Calls make retained sequence heads effectful:
+J-M1 joins statement-free sequence values and J-M14 emits or splits discarded
+effects. J-M14 removes pure numeric/undefined leaves, so its emitted call leaves
+cannot trigger J-S1. These are the section-6 rows needed by the application slice.
+
 **Cross-module call** (`compile_external_field_apply` (C:1266)):
 
 - with cross-module inlining on, a callee that is a closed function of
@@ -1778,92 +1785,100 @@ builds its node as given.
 
 Purity. Two predicates exist and differ: `expression_has_no_side_effects` (B:102)
 ("pure" below) and `js_expr_no_side_effects` (E:15) ("strictly pure"), which is
-the same except that `**`, `/` and `%` are pure only with a literal right
-operand that cannot throw (a non-zero number, a positive bigint exponent).
+the same except that `**`, `/` and `%` require a literal right operand:
+for integers, `**` accepts any exponent while `/` and `%` require nonzero;
+float literals always qualify (including zero); bigint `**` requires the
+positive-sign marker, while bigint `/` and `%` reject the digit spelling
+`"0"`. These are the legacy predicate's exact syntactic tests, not a general
+JavaScript exception analysis.
 The E and S rows use the first, the M rows and the lowering the second,
 except where a row says otherwise. Both are node flags in `Bir` (section 7).
 
 "Equal" is `ocaml_eq_expression` (B:237) for expressions and `ocaml_eq_block` (B:217)
 for statement lists: structural equality on a fixed set of kinds, false for
 the others (a string append is never equal to anything).
+`j/facts.rs::purity` computes both flags from immediate child facts in O(arity).
+`j/equal.rs::equal` uses an explicit pair stack, stops at the first mismatch,
+and counts compared node pairs. Like the legacy predicate it has no depth
+limit: the bound is the smaller tree's node count plus compared literal bytes.
 
 ### 6.1 Expressions (`build::exp`)
 
-| Row | Constructor | Trigger | Result |
-| --- | --- | --- | --- |
-| J-E1 | `string_append` (B:398) | an operand is the empty string literal | the other operand |
-| | | both are string literals | one literal |
-| | | `(a ^ "b") ^ ("c" ^ d)` | `(a ^ "bc") ^ d`, rebuilt through the constructor |
-| | | `"a" ^ ("b" ^ c)` | `"ab" ^ c` |
-| | | `(c ^ "b") ^ "a"` | `c ^ "ba"` |
-| J-E2 | `length` (B:453) | a pure array or block literal, array length | the element count |
-| | | a string literal, string length | its UTF-16 length |
-| | | a function literal, function length | its parameter count (minus one for a method) |
-| J-E3 | `is_null_or_undefined` (B:480) | `null` or `undefined` | `true` |
-| | | a number, array or block literal | `false` |
-| J-E4 | `bin` (B:491), tried in this order | `x + n`, `n` a negative integer literal (`rewrite_plus_negative_int_rhs` (B:765)) | `x - (-n)` |
-| | | `len >= 0`, `len` a length of a pure target (`rewrite_length_bin_comparison` (B:685)) | `true` |
-| | | `len > 0` | `len !== 0` |
-| | | `<`, `<=`, `>`, `>=` on two integer literals (`fold_int_comparison` (B:659)); the left literal is read as unsigned | the boolean |
-| | | `===` (`fold_strict_equality` (B:704)): two integer literals; two string literals; `null`/`undefined` against each other; `undefined` against a pure optional block; `null` or `undefined` against a pure boolean, number, `typeof`, function, array or block; two optional blocks compare their contents. `!==` is not folded | the boolean |
-| | | `&&` | J-E5 |
-| | | `\|\|` | J-E6 |
-| J-E5 | `js_and` (B:797) | `x && x`, `x` a variable | `x` |
-| | | `x && (x && r)` | the right operand |
-| | | `x && (l && x)` | `x && l` |
-| | | `v !== undefined && v === <string or number literal>` | the right operand |
-| | | both operands pure | J-E9, if it gives a result |
-| J-E6 | `js_or` (B:836) | `x \|\| x`; `x \|\| (x \|\| r)`; `x \|\| (l \|\| x)` | `x`; the right operand; `x \|\| l` |
-| | | both operands pure | J-E10, if it gives a result |
-| J-E7 | `cond` (B:512), tried in this order | both branches are `(effect, undefined)` | `(cond(test, effect_t, effect_e), undefined)` |
-| | | the test is `false` or the integer `0` | the else branch |
-| | | the test is `true`, or a pure number, array or block literal | the then branch |
-| | | the branches are `true` and `false` | the test |
-| | | the branches are equal | the branch if the test is pure, else `(test, branch)` |
-| | | then is `c2 ? a : b` and `b` equals else | `cond(test && c2, a, else)` |
-| | | then is `c2 ? a : b` and `a` equals else | `cond(test && !c2, b, else)` |
-| | | else is `c2 ? a : b` and then equals `a` | `cond(test \|\| c2, then, b)` |
-| | | else is `c2 ? a : b` and then equals `b` | `cond(test \|\| !c2, then, a)` |
-| | | the test is `!c` | `cond(c, else, then)` if else is neither the integer `0` nor `undefined`; otherwise the node as given, the `!` rebuilt without its comment |
-| | | else is `false` and J-E9 applies to `(test, then)` | its result |
-| | | then is `false` and J-E9 applies to `(!test, else)` | its result |
-| J-E8 | `not` (B:599) | an integer literal | `true` for 0, else `false` |
-| | | `!x` | `x` |
-| | | a boolean literal | the other one |
-| | | `===`, `!==`, `<`, `>=`, `<=`, `>` | the opposite comparison |
-| | | `&&` or `\|\|` whose operands can both be negated (`push_negation` (B:633): `!x`, a boolean, `===`, `!==`, and these under `&&`/`\|\|`) | De Morgan |
-| J-E9 | `simplify_and_` (B:956), on pure operands, recursion depth at most 10 | a `false` operand; a `true` operand | `false`; the other operand |
-| | | an operand is `a && b` or `a \|\| b` | the rule applied to the parts, recombined |
-| | | `typeof x === "boolean" \| "string" \| "number"` with `x === <literal>` | the comparison if the literal has that type, else `false` |
-| | | `Array.isArray(x)` with `x === <literal>` | `false` |
-| | | `typeof x === "boolean"` with `x`, `!x` or `x !== <boolean>` | `x === true`, `x === false`, `x === <the other boolean>` |
-| | | `typeof x === "string" \| "number" \| "object"` with `x !== <literal of that type, or null for object>` | no rewrite (the rule stops here) |
-| | | `typeof x === ...` or `Array.isArray(x)` with `x !== <literal>` | the type test |
-| | | equal operands | one of them |
-| | | `x === c1` with `x === c2` or `x !== c2`, both literals | by the JavaScript equality of the literals (`js_eq_literal` (B:188)): one comparison, or `false` |
-| J-E10 | `simplify_or_` (B:1148) | a `true` operand; a `false` operand | `true`; the other operand |
-| | | both operands can be negated | J-E9 on the negations, negated back |
+| Row | Constructor | Trigger | Result | Implemented in |
+| --- | --- | --- | --- | --- |
+| J-E1 | `string_append` (B:398) | an operand is the empty string literal | the other operand | `je1_string_append` |
+| | | both are string literals | one literal |  |
+| | | `(a ^ "b") ^ ("c" ^ d)` | `(a ^ "bc") ^ d`, rebuilt through the constructor |  |
+| | | `"a" ^ ("b" ^ c)` | `"ab" ^ c` |  |
+| | | `(c ^ "b") ^ "a"` | `c ^ "ba"` |  |
+| J-E2 | `length` (B:453) | a pure array or block literal, array length | the element count | `je2_length` |
+| | | a string literal, string length | its UTF-16 length |  |
+| | | a function literal, function length | its parameter count (minus one for a method) |  |
+| J-E3 | `is_null_or_undefined` (B:480) | `null` or `undefined` | `true` | `je3_is_null_or_undefined` |
+| | | a number, array or block literal | `false` |  |
+| J-E4 | `bin` (B:491), tried in this order | `x + n`, `n` a negative integer literal (`rewrite_plus_negative_int_rhs` (B:765)) | `x - (-n)` | `je4_bin` |
+| | | `len >= 0`, `len` a length of a pure target (`rewrite_length_bin_comparison` (B:685)) | `true` |  |
+| | | `len > 0` | `len !== 0` |  |
+| | | `<`, `<=`, `>`, `>=` on two integer literals (`fold_int_comparison` (B:659)); the left literal is read as unsigned | the boolean |  |
+| | | `===` (`fold_strict_equality` (B:704)): two integer literals; two string literals; `null`/`undefined` against each other; `undefined` against a pure optional block; `null` or `undefined` against a pure boolean, number, `typeof`, function, array or block; two optional blocks compare their contents. `!==` is not folded | the boolean |  |
+| | | `&&` | J-E5 |  |
+| | | `\|\|` | J-E6 |  |
+| J-E5 | `js_and` (B:797) | `x && x`, `x` a variable | `x` | `je5_js_and` |
+| | | `x && (x && r)` | the right operand |  |
+| | | `x && (l && x)` | `x && l` |  |
+| | | `v !== undefined && v === <string or number literal>` | the right operand |  |
+| | | both operands pure | J-E9, if it gives a result |  |
+| J-E6 | `js_or` (B:836) | `x \|\| x`; `x \|\| (x \|\| r)`; `x \|\| (l \|\| x)` | `x`; the right operand; `x \|\| l` | `je6_js_or` |
+| | | both operands pure | J-E10, if it gives a result |  |
+| J-E7 | `cond` (B:512), tried in this order | both branches are `(effect, undefined)` | `(cond(test, effect_t, effect_e), undefined)` | `je7_cond` |
+| | | the test is `false` or the integer `0` | the else branch |  |
+| | | the test is `true`, or a pure number, array or block literal | the then branch |  |
+| | | the branches are `true` and `false` | the test |  |
+| | | the branches are equal | the branch if the test is pure, else `(test, branch)` |  |
+| | | then is `c2 ? a : b` and `b` equals else | `cond(test && c2, a, else)` |  |
+| | | then is `c2 ? a : b` and `a` equals else | `cond(test && !c2, b, else)` |  |
+| | | else is `c2 ? a : b` and then equals `a` | `cond(test \|\| c2, then, b)` |  |
+| | | else is `c2 ? a : b` and then equals `b` | `cond(test \|\| !c2, then, a)` |  |
+| | | the test is `!c` | `cond(c, else, then)` if else is neither the integer `0` nor `undefined`; otherwise the node as given, the `!` rebuilt without its comment |  |
+| | | else is `false` and J-E9 applies to `(test, then)` | its result |  |
+| | | then is `false` and J-E9 applies to `(!test, else)` | its result |  |
+| J-E8 | `not` (B:599) | an integer literal | `true` for 0, else `false` | `je8_not` |
+| | | `!x` | `x` |  |
+| | | a boolean literal | the other one |  |
+| | | `===`, `!==`, `<`, `>=`, `<=`, `>` | the opposite comparison |  |
+| | | `&&` or `\|\|` whose operands can both be negated (`push_negation` (B:633): `!x`, a boolean, `===`, `!==`, and these under `&&`/`\|\|`) | De Morgan |  |
+| J-E9 | `simplify_and_` (B:956), on pure operands, recursion depth at most 10 | a `false` operand; a `true` operand | `false`; the other operand | `je9_simplify_and` |
+| | | an operand is `a && b` or `a \|\| b` | the rule applied to the parts, recombined |  |
+| | | `typeof x === "boolean" \| "string" \| "number"` with `x === <literal>` | the comparison if the literal has that type, else `false` |  |
+| | | `Array.isArray(x)` with `x === <literal>` | `false` |  |
+| | | `typeof x === "boolean"` with `x`, `!x` or `x !== <boolean>` | `x === true`, `x === false`, `x === <the other boolean>` |  |
+| | | `typeof x === "string" \| "number" \| "object"` with `x !== <literal of that type, or null for object>` | no rewrite (the rule stops here) |  |
+| | | `typeof x === ...` or `Array.isArray(x)` with `x !== <literal>` | the type test |  |
+| | | equal operands | one of them |  |
+| | | `x === c1` with `x === c2` or `x !== c2`, both literals | by the JavaScript equality of the literals (`js_eq_literal` (B:188)): one comparison, or `false` |  |
+| J-E10 | `simplify_or_` (B:1148) | a `true` operand; a `false` operand | `true`; the other operand | `je10_simplify_or` |
+| | | both operands can be negated | J-E9 on the negations, negated back |  |
 
 ### 6.2 Statements (`build::stmt`)
 
-| Row | Constructor | Trigger | Result |
-| --- | --- | --- | --- |
-| J-S1 | `exp` (B:1207) | `(a, b)` where one side is a number or `undefined` | the statement of the other side |
-| | | a number or `undefined` | the empty block |
-| J-S2 | `block` (B:1225) | no statement; one statement; one statement that is a block | the empty block; that statement; the rule again on the inner list |
-| J-S3 | `simplify_if` (B:1575) (`if_`), tried in this order | 0: empty-block statements in a branch | removed |
-| | | 1: the test is a boolean literal | the taken branch, through J-S2 |
-| | | 2: the test is `!c` and else is not empty | `if_(c, else, then)` |
-| | | 3: then is empty | both empty: nothing if the test is pure, else the test as a statement. Otherwise `if_(not(test), else, [])` |
-| | | 4: each branch is exactly one `return` | `return cond(test, a, b)` |
-| | | 5: else is exactly one `return` | one block: `if (!test) return b;` followed by then |
-| | | 6: then ends in `return`, `throw`, `continue` or `break` | one block: `if (test) then` followed by else |
-| | | 7: each branch is exactly one assignment, to the same target (`same_assignment_target` (B:1522)) | `target = cond(test, a, b)` |
-| | | 8: each branch is exactly one expression statement | the statement `cond(test, a, b)` |
-| | | 9: then is exactly `if (c2) t2 else e2`, and `e2` equals else, or `t2` (not empty) equals else | `if_(test && c2, t2, e2)`; `if_(test && !c2, e2, t2)` |
-| | | 10: else is exactly `if (c2) t2 else e2`, and then (not empty) equals `t2`, or equals `e2` | `if_(test \|\| c2, then, e2)`; `if_(test \|\| !c2, then, t2)` |
-| J-S4 | `normalize` (B:1268) (every statement constructor) | an integer switch on an integer literal; a string switch on a string literal | the matching clause's body, else the default's, as a block |
-| J-S5 | `unnest_block` (B:1565) | a list that is one block statement | its contents, repeatedly |
+| Row | Constructor | Trigger | Result | Implemented in |
+| --- | --- | --- | --- | --- |
+| J-S1 | `exp` (B:1207) | `(a, b)` where one side is a number or `undefined` | the statement of the other side | `js1_exp` |
+| | | a number or `undefined` | the empty block |  |
+| J-S2 | `block` (B:1225) | no statement; one statement; one statement that is a block | the empty block; that statement; the rule again on the inner list | `js2_block` |
+| J-S3 | `simplify_if` (B:1575) (`if_`), tried in this order | 0: empty-block statements in a branch | removed | `js3_simplify_if` |
+| | | 1: the test is a boolean literal | the taken branch, through J-S2 |  |
+| | | 2: the test is `!c` and else is not empty | `if_(c, else, then)` |  |
+| | | 3: then is empty | both empty: nothing if the test is pure, else the test as a statement. Otherwise `if_(not(test), else, [])` |  |
+| | | 4: each branch is exactly one `return` | `return cond(test, a, b)` |  |
+| | | 5: else is exactly one `return` | one block: `if (!test) return b;` followed by then |  |
+| | | 6: then ends in `return`, `throw`, `continue` or `break` | one block: `if (test) then` followed by else |  |
+| | | 7: each branch is exactly one assignment, to the same target (`same_assignment_target` (B:1522)) | `target = cond(test, a, b)` |  |
+| | | 8: each branch is exactly one expression statement | the statement `cond(test, a, b)` |  |
+| | | 9: then is exactly `if (c2) t2 else e2`, and `e2` equals else, or `t2` (not empty) equals else | `if_(test && c2, t2, e2)`; `if_(test && !c2, e2, t2)` |  |
+| | | 10: else is exactly `if (c2) t2 else e2`, and then (not empty) equals `t2`, or equals `e2` | `if_(test \|\| c2, then, e2)`; `if_(test \|\| !c2, then, t2)` |  |
+| J-S4 | `normalize` (B:1268) (every statement constructor) | an integer switch on an integer literal; a string switch on a string literal | the matching clause's body, else the default's, as a block | `js4_normalize` |
+| J-S5 | `unnest_block` (B:1565) | a list that is one block statement | its contents, repeatedly | `js5_unnest_block` |
 
 Rules 5 and 6 of J-S3 return a block, and "ends in" in rule 6 looks at the
 literal last statement of the list. Together with J-S5 this is the mechanism
@@ -1871,27 +1886,27 @@ of 1.3.
 
 ### 6.3 `js_exp_make.rs` and the helpers of the lowering
 
-| Row | Function | Trigger | Result |
-| --- | --- | --- | --- |
-| J-M0 | `remove_pure_subexpression` (E:96) | a variable, string, template, JSON or number literal; an index or array of such; a sequence | nothing; nothing; the sequence of what is left |
-| J-M1 | `js_seq` (E:399) | a side of an inner sequence, or the left operand, is a number or `undefined`; the left operand is a variable | that part dropped |
-| J-M2 | `compile_nullish_strict_comparison` (E:253), `compile_int_equality` (E:327) | `null`/`undefined` against each other, or against a strictly pure value that cannot be nullish; two equal float literals; two integer literals | the boolean. Otherwise a plain `===`/`!==` that J-E4 does not see |
-| J-M3 | `to_int32` (E:483), `int32_bor` (E:570) | two integer literals | the result |
-| | | `x \| (y >>> 0)`, `(x >>> 0) \| y` | the shift dropped |
-| | | `(x >>> n) \| 0`, `n > 0`; `(x \| 0) \| 0` | the inner expression, once |
-| J-M4 | `int32_add` (E:488), `int32_minus` (E:498) | two integer literals | the wrapped result. Otherwise `(a + b) \| 0` through J-E4 and J-M3 |
-| J-M5 | `int32_mul` (E:508) | a literal `0` and a pure other side | `0` |
-| | | two integer literals | the wrapped result |
-| | | a literal positive power of two | a left shift (J-M7) |
-| J-M6 | `int32_pow` (E:545) | two integer literals | `ocaml_int32_pow` (E:535) |
-| J-M7 | `int32_lsl` (E:555) | two integer literals | the result |
-| J-M8 | `int32_lsr` (E:596), `int32_bxor` (E:614), `int32_band` (E:631) | two integer literals; `(x >>> n) >>> 0`; `(x \| 0) >>> 0`; `x ^ (y >>> 0)`; `(x \| 0) & y` | the result; the redundant operation dropped |
-| J-M9 | `ocaml_typeof_expr` (E:640) | a number or length; a string; an array; a boolean | `"number"`, `"string"`, `"object"`, `"boolean"` |
-| J-M10 | `int_bnot` (E:835) | an integer literal | the result |
-| J-M11 | `pure_indexed_block_item` (E:664), `pure_record_field_item` (E:695), `direct_projection_from_pure_literal` (E:711), `poly_var_tag_access` (E:740), `poly_var_value_access` (E:750) (called from `compile_field_access` (K:186)) | a field of a strictly pure array or block literal | the element |
-| J-M12 | `interpolated_template` (E:844) | a value that is a string or template literal without a comment | merged into the neighbouring segments; with no value left, a template literal |
-| J-M13 | `int32_div_expr` (C:6033), `int32_mod_expr` (C:6049) | `len / 2`; a non-zero literal divisor; two literals | `len >> 1`; the plain operation with `\| 0`; the result. A divisor that may be zero: `Primitive_int.div`/`mod_` when checks are on |
-| J-M14 | `push_effect_expression` (O:339), `push_s_if_empty` (O:359), `push_s_exp` (O:368) | a value used as a statement | a sequence split into statements; strictly pure parts dropped (`push_effect_expression`), or only numbers and `undefined` dropped (`push_s_exp`) |
+| Row | Function | Trigger | Result | Implemented in |
+| --- | --- | --- | --- | --- |
+| J-M0 | `remove_pure_subexpression` (E:96) | a variable, string, template, JSON or number literal; an index or array of such; a sequence | nothing; nothing; the sequence of what is left | `jm0_remove_pure_subexpression` |
+| J-M1 | `js_seq` (E:399) | a side of an inner sequence, or the left operand, is a number or `undefined`; the left operand is a variable | that part dropped | `jm1_js_seq` |
+| J-M2 | `compile_nullish_strict_comparison` (E:253), `compile_int_equality` (E:327) | `null`/`undefined` against each other, or against a strictly pure value that cannot be nullish; two equal float literals; two integer literals | the boolean. Otherwise a plain `===`/`!==` that J-E4 does not see | `jm2_nullish_strict_comparison`, `jm2_int_equality` |
+| J-M3 | `to_int32` (E:483), `int32_bor` (E:570) | two integer literals | the result | `jm3_to_int32`, `jm3_int32_bor` |
+| | | `x \| (y >>> 0)`, `(x >>> 0) \| y` | the shift dropped |  |
+| | | `(x >>> n) \| 0`, `n > 0`; `(x \| 0) \| 0` | the inner expression, once |  |
+| J-M4 | `int32_add` (E:488), `int32_minus` (E:498) | two integer literals | the wrapped result. Otherwise `(a + b) \| 0` through J-E4 and J-M3 | `jm4_int32_add_sub` |
+| J-M5 | `int32_mul` (E:508) | a literal `0` and a pure other side | `0` | `jm5_int32_mul` |
+| | | two integer literals | the wrapped result |  |
+| | | a literal positive power of two | a left shift (J-M7) |  |
+| J-M6 | `int32_pow` (E:545) | two integer literals | `ocaml_int32_pow` (E:535) | `jm6_int32_pow` |
+| J-M7 | `int32_lsl` (E:555) | two integer literals | the result | `jm7_int32_lsl` |
+| J-M8 | `int32_lsr` (E:596), `int32_bxor` (E:614), `int32_band` (E:631) | two integer literals for lsr/xor only (band does not fold literals); `(x >>> n) >>> 0`; `(x \| 0) >>> 0`; `x ^ (y >>> 0)`; `(x \| 0) & y` | the result; the redundant operation dropped | `jm8_int32_lsr`, `jm8_int32_bxor`, `jm8_int32_band` |
+| J-M9 | `ocaml_typeof_expr` (E:640) | a number or length; a string; an array; a boolean | `"number"`, `"string"`, `"object"`, `"boolean"` | `jm9_typeof` |
+| J-M10 | `int_bnot` (E:835) | an integer literal | the result | `jm10_int_bnot` |
+| J-M11 | `pure_indexed_block_item` (E:664), `pure_record_field_item` (E:695), `direct_projection_from_pure_literal` (E:711), `poly_var_tag_access` (E:740), `poly_var_value_access` (E:750) (called from `compile_field_access` (K:186)) | a field of a strictly pure array or block literal | the element | `jm11_projection`, `jm11_poly_var_access` |
+| J-M12 | `interpolated_template` (E:844) | a value that is a string or template literal without a comment | merged into the neighbouring segments; with no value left, a template literal | `jm12_interpolated_template` |
+| J-M13 | `int32_div_expr` (C:6174, formerly C:6033), `int32_mod_expr` (C:6190, formerly C:6049) | `len / 2`; nonzero integer divisor; two integer literals | Division: `len >> 1`; plain division with `\| 0`; wrapped quotient. Modulo stays a plain `%`, without coercion or literal folding. A divisor that may be zero: `Primitive_int.div`/`mod_` when checks are on | `jm13_int32_div`, `jm13_int32_mod` |
+| J-M14 | `push_effect_expression` (O:339), `push_s_if_empty` (O:359), `push_s_exp` (O:368) | a value used as a statement | a sequence split into statements; strictly pure parts dropped (`push_effect_expression`), or only numbers and `undefined` dropped (`push_s_exp`) | `jm14_push_effect_expression`, `jm14_push_s_exp`, `jm14_push_s_if_empty` |
 
 Not rewriting: the comparison helpers of E (`comparison_to_binop` (E:161),
 `compare_bool_literals` (E:296), `compare_string_literals` (E:364),
@@ -1906,11 +1921,103 @@ The lowering also builds nodes without a constructor, on purpose: a plain
 `If` at C:4147 so that rule 2 of J-S3 does not swap it back, a plain `===` in
 J-M2, `raw_bin` (B:383) in J-E5. The port keeps each such call plain.
 
-Termination of J-E7 and J-S3 is not argued here; S3.2 owes the measure, as
-C.5 gives one for level L. J-E9 is bounded by its depth limit, but it calls
-itself up to three times per level, so one attempt can take 3^10 steps in the
-worst case; S3.2 counts the steps of an attempt and reports the maximum over
-the corpora.
+J-E1 and J-E7 use loops and explicit suffix stacks: each reassociation or
+conditional merge removes an input append/conditional node; stripping a leading
+negation or paired comma suffix removes those input nodes. J-E9 uses the legacy
+`n > 10` cutoff (so n=10 still tries the rules). The left-And arm can make four
+recursive attempts, not three: two operand attempts, a third on `(a,b)`, and a
+fourth force attempt on its result. The logical-attempt tree has a conservative
+O(4^11) bound; equality and negation additionally inspect their compared trees.
+Negation and equality use explicit stacks, never expression-depth recursion.
+The 10,000-term chain test measures 8,188 inspected pairs/planner steps (one
+step when a true operand immediately selects the chain). Successful recipes
+move disjoint subtrees and copy only repeated/overlapping occurrences; failed
+attempts leave both operands untouched. J-S3 loops only when it removes a leading test negation, swaps an empty then
+branch into the else position, or removes a nested if. The empty-branch swap
+cannot repeat without removing a negation or nested if. All other rules return.
+J-S1/J-S2/J-S5 strip a comma/block shell per iteration; J-S4 scans the switch
+keys once and consumes the selected statement list.
+
+### 6.4 Implementation proofs and cost measurements
+
+Every function in the "Implemented in" column is in `bir/j/norm.rs`.
+`bir/j/plain.rs::node` is the typed, non-normalising constructor for every J
+`View`; `plain::statement` additionally applies J-S4. Deliberately raw nodes
+use `plain::node`, `plain::bin` or `plain::seq`. J1–J4 are not implemented here.
+
+The following counts are **trigger groups** (nonempty Trigger cells in the
+inventory, including their alternatives) and **test functions**, not generated
+matrix cases. Test counts come from `cargo test ... bir::j:: -- --list` and
+associate the row tags in each test name (including the J-M3–J-M8 range).
+Shared matrix functions count for each named row. The functions are in
+`bir/j/norm_tests.rs`, plus the original J-M14 test in `bir/j/norm.rs`.
+Each row has positive and non-trigger cases; the matrices also test operand
+order, differing literals, effectful operands and applicable purity boundaries.
+
+| Row | Functions (`j/norm.rs`) | Trigger groups | Test functions |
+| --- | --- | ---: | ---: |
+| J-E1 | `je1_string_append` | 5 | 3 |
+| J-E2 | `je2_length` | 3 | 3 |
+| J-E3 | `je3_is_null_or_undefined` | 2 | 2 |
+| J-E4 | `je4_bin` | 7 | 2 |
+| J-E5 | `je5_js_and` | 5 | 1 |
+| J-E6 | `je6_js_or` | 2 | 1 |
+| J-E7 | `je7_cond` | 12 | 3 |
+| J-E8 | `je8_not` | 5 | 3 |
+| J-E9 | `je9_simplify_and` | 9 | 6 |
+| J-E10 | `je10_simplify_or` | 2 | 3 |
+| J-S1 | `js1_exp` | 2 | 1 |
+| J-S2 | `js2_block` | 1 | 2 |
+| J-S3 | `js3_simplify_if` | 11 | 4 |
+| J-S4 | `js4_normalize` | 1 | 2 |
+| J-S5 | `js5_unnest_block` | 1 | 1 |
+| J-M0 | `jm0_remove_pure_subexpression` | 1 | 3 |
+| J-M1 | `jm1_js_seq` | 1 | 4 |
+| J-M2 | `jm2_nullish_strict_comparison`, `jm2_int_equality` | 1 | 2 |
+| J-M3 | `jm3_to_int32`, `jm3_int32_bor` | 3 | 2 |
+| J-M4 | `jm4_int32_add_sub` | 1 | 2 |
+| J-M5 | `jm5_int32_mul` | 3 | 2 |
+| J-M6 | `jm6_int32_pow` | 1 | 2 |
+| J-M7 | `jm7_int32_lsl` | 1 | 2 |
+| J-M8 | `jm8_int32_lsr`, `jm8_int32_bxor`, `jm8_int32_band` | 1 | 2 |
+| J-M9 | `jm9_typeof` | 1 | 3 |
+| J-M10 | `jm10_int_bnot` | 1 | 1 |
+| J-M11 | `jm11_projection`, `jm11_poly_var_access` | 1 | 3 |
+| J-M12 | `jm12_interpolated_template` | 1 | 2 |
+| J-M13 | `jm13_int32_div`, `jm13_int32_mod` | 1 | 2 |
+| J-M14 | `jm14_push_effect_expression`, `jm14_push_s_exp`, `jm14_push_s_if_empty` | 1 | 4 |
+
+The 10,000-term tests measure these costs before bulk-finalisation/validation:
+
+| Rule | Shape | Measured cost |
+| --- | --- | ---: |
+| J-E1 | append reassociations | 400,053 node reads |
+| J-E7 | nested conditional merges | 320,082 node reads |
+| J-E8 | deep De Morgan | 680,031 node reads |
+| J-E9 | conjunction chain, nontrivial attempt | 8,188 planner steps/compared pairs |
+| J-E10 | negated conjunction chain | 13,841 planner steps/compared pairs |
+| J-S2/J-S5 | 10,000 shells around 10,000 statements | 80,024 node reads |
+| J-S3 | nested if merges | 440,109 node reads |
+| J-M0 | sequence chain | 130,002 node reads |
+| J-M1 | sequence chain | 110,054 node reads |
+| J-M14 | effect sequence chain | 150,024 node reads |
+
+Node-read counts do not count copied literal bytes. Logical-attempt counts
+include explicit negation visits and partial-equality pairs, not only recursive
+attempt calls. Their depth budget is bounded; the structural inspections are
+bounded by the inspected input/output trees. `Bir::j_stats` records attempt
+counts and per-arena maxima. Set `RESCRIPT_J_NORMALISATION_STATS` to a separate
+output directory during `RESCRIPT_BACKEND=check` corpus builds to collect JSON
+snapshots on J export. Snapshots with identical counters share a filename;
+maxima are independent of thread scheduling. No global counter is used.
+
+Check-mode builds of the runtime, `tests/tests`, and a 3,735-module application
+recorded zero J-E9/J-E10 attempts: the current lowering slice has no logical
+constructor producers. Their corpus maximum is therefore **not applicable**,
+not evidence of trigger coverage. The row oracle matrices and deep tests above
+exercise those rules directly. No lowering cases or fallback baselines were
+expanded by this work.
+
 
 ## 7. Cost
 
@@ -1936,8 +2043,9 @@ positions.
 | `arena_assigned_variables` (whole unit, and per inlined body in `extend_assignable` (A:280)) | `delay_safe` (A:28) | `ASSIGNED` |
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
+| `is_pure_subexpression` (E:146) | J-M0 | J flag `J_SUBEXPR`, reusing L `DEAD`; distinct from both purity predicates |
 | `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
-| `runs_no_code` (A:90) | sequencing | a walk of a chain of member reads only: bounded by the chain |
+| `runs_no_code` (A:90) | sequencing | Iterative inspection of the owned record-field spine; unknown property reads stop it. Variables read the final `JS_GLOBAL` fact. This predicate differs from `J_SUBEXPR` and does not share its bit |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |
 | the second and third lowering of a branch | 3.6 | `probe` |
 | the second lowering of a function | 5.1 | `triggered` |
@@ -1964,7 +2072,7 @@ positions.
 | lowering a node | the node, its J nodes, its statements | constant per node, plus the rows below |
 | grouping switch cases and exit handlers (3.9 step 2) | each case is compared with the heads of the groups before it by `eq_approx`, which stops at the first difference | `cases x groups` comparisons. Quadratic for a switch with many distinct bodies. The step count of the compared node pairs is reported per corpus (as `Stats::compared` is for N11, C.5). Open (Q7): whether a cached structural hash is needed |
 | J-E7, J-S3 rules that compare branches (`ocaml_eq_expression`, `ocaml_eq_block`) | stops at the first difference | counted the same way |
-| J-E9 | up to 3^10 | counted (section 6) |
+| J-E9 | O(4^11) bounded logical attempts, plus equality/negation inspections and duplicated output | counted (section 6) |
 | flattening catches | one flag read per handler; a walk of a handler that has `HAS_EXIT` | each handler is walked at most once per catch chain it is flattened in |
 | sequencing arguments | one right-to-left scan; a held argument's literal is entered once | linear in the arguments |
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
@@ -1991,8 +2099,9 @@ of steps. Each slice adds the tests of its constructs on a 10,000-deep and a
 
 ### 8.1 The gate
 
-Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
-`New` modes (G.1) for every unit:
+Stage name `lower` in `bir::shadow` (C.7 step 7), run in `Check` mode
+(G.1) for every unit. `New` retains the legacy lowering until the complete
+backend can replace it; this slice does not activate application lowering there:
 
 1. **Input.** The simplified Lambda the legacy lowering receives: after
    `simplify_in_arena`, `add_flat_make_aliases` and

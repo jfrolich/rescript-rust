@@ -19,6 +19,13 @@ pub enum BackendMode {
     Check,
 }
 impl BackendMode {
+    /// Application lowering is an oracle only: New retains the legacy lowering
+    /// until the complete backend can replace it.
+    pub(crate) fn checks_lowering(self) -> bool {
+        matches!(self, Self::Check)
+    }
+
+
     /// Read `RESCRIPT_BACKEND` once when constructing compiler options. An absent
     /// or unrecognized value leaves the legacy backend selected.
     pub fn from_env() -> Self {
@@ -225,6 +232,7 @@ pub fn check_js(
         Ok(exported) => exported,
         Err(reason) => return report(unit, "js-bridge", Some(reason.0), None),
     };
+    super::j::write_stats(imported.arena.j_stats)?;
     let print = |p| crate::js_ir::print_deps_program_with_directives_and_options(
         p, Some(resolver), directives, debug, jsx_preserve, emit_header,
     );
@@ -912,6 +920,8 @@ pub(crate) fn prepare_lower(
     arena: &LamArena,
     root: Lam,
     locations: Option<&crate::lambda::LamLocTable>,
+    resolver: Option<&crate::js_ir::ModulePathResolver>,
+    cross_module_inline: bool,
 ) -> Result<
     (
         crate::js_ir::arena::JsArena,
@@ -924,7 +934,7 @@ pub(crate) fn prepare_lower(
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
         _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
     })?;
-    let lowered = super::lower::lower(input, locations, false).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
+    let lowered = super::lower::lower_with_resolver(input, locations, false, resolver, cross_module_inline).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
     lowered
         .program
         .arena
@@ -934,11 +944,13 @@ pub(crate) fn prepare_lower(
     // smart constructor and no normalize. The last SExp transports Out::value.
     let mut exported = super::bridge_j::export_js(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
+    super::j::write_stats(lowered.program.arena.j_stats)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
     #[cfg(debug_assertions)]
     if arena.node_count() <= 128 {
         let (direct, _) = super::bridge::import_for_lowering(arena, root);
         let direct = direct.map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct import: {e}")))?;
-        let direct = super::lower::lower(direct, locations, true)
+        let direct = super::lower::lower_with_resolver(direct, locations, true, resolver, cross_module_inline)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct lower: {e}")))?;
         let direct = super::bridge_j::export_js(&direct.program)
             .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct export: {e}")))?;
@@ -1073,7 +1085,7 @@ mod lower_tests {
         let body = arena.var(id);
         let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
         let root = arena.seq_raw(binding, binding);
-        let result = prepare_lower(&arena, root, None);
+        let result = prepare_lower(&arena, root, None, None, false);
         assert!(matches!(result, Err(LowerFailure::Unsupported(
             super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
         ))));
@@ -1082,5 +1094,17 @@ mod lower_tests {
     fn export_errors_are_not_fallbacks() {
         let check = LowerCheck::Failed(LowerFailure::Error(anyhow::anyhow!("bad exported tree")));
         assert!(check_lower(check, "Example.res", false).is_err());
+    }
+}
+
+#[cfg(test)]
+mod lower_mode_tests {
+    use super::BackendMode;
+
+    #[test]
+    fn lowering_is_only_enabled_in_check_mode() {
+        assert!(!BackendMode::Legacy.checks_lowering());
+        assert!(!BackendMode::New.checks_lowering());
+        assert!(BackendMode::Check.checks_lowering());
     }
 }
