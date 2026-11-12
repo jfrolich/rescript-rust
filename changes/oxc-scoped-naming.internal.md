@@ -1,0 +1,1 @@
+- Assign scoped identifier suffixes in the opt-in oxc JavaScript emitter, preserving legacy naming and whole-file fallback.
