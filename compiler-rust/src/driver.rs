@@ -9839,14 +9839,26 @@ fn render_js_program(
         jsx_preserve,
     } = settings;
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
+        let mut raw_audit = stats.raw_audit_buffer();
         let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
             render_oxc_source_map(program, resolver, JsFileSettings {
                 file_directives, debug, jsx_preserve,
             }, options, output_path, lam_locs.clone())
         } else {
-            crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
+            crate::emit::emit_audited(
+                program,
+                resolver,
+                file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+                raw_audit.as_mut(),
+            )
         };
         stats.record(&result);
+        if result.is_ok() {
+            stats.record_raw(raw_audit);
+        }
         match result {
             Ok(output) => return output,
             Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),

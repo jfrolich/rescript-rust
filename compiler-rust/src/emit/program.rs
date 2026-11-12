@@ -23,6 +23,7 @@ pub(super) fn emit(
     _jsx_preserve: bool,
     header: bool,
     source_map: Option<&super::sourcemap::Options<'_>>,
+    audit: Option<&mut Vec<super::RawSegment>>,
 ) -> Result<(String, Option<String>), Unsupported> {
     let p = &program.program;
     let mut text = String::new();
@@ -206,7 +207,17 @@ pub(super) fn emit(
         }
     }
     let code = output.code;
-    text.push_str(code.trim_end_matches('\n'));
+    let pieces = build.raw_pieces.borrow();
+    let mut seen = b.vec();
+    seen.resize(pieces.len(), false);
+    super::raw::substitute(
+        code.trim_end_matches('\n'),
+        build.raw_prefix,
+        &pieces,
+        &mut seen,
+        &mut text,
+        audit,
+    )?;
     // S0's split-file comparison preserves this gap, not just the comment.
     // With no exports the legacy printer ensures two newlines before the trailer.
     text.push_str(if p.exports.is_empty() {
