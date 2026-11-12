@@ -5250,7 +5250,7 @@ fn pattern_env_ref(tctx: &mut TypeCheckContext<'_>, env: &Env) -> EnvRef {
         && unify_env.id() != env.id()
         && unify_env.has_local_constraints()
     {
-        let mut refined = env.clone_preserve_id();
+        let mut refined = env.clone();
         if add_missing_local_constraints(&mut refined, unify_env) {
             return tctx.type_ctx.store_typed_env(&refined);
         }
@@ -10163,7 +10163,7 @@ fn type_application(
                     .unify_state
                     .env()
                     .filter(|saved_env| saved_env.id() != env.id())
-                    .map(crate::types::env::Env::clone_preserve_id);
+                    .map(crate::types::env::Env::clone);
                 let typed_arg_result =
                     type_expect(tctx, env, expr, arg_expected_ty, Some(context.clone()));
 
@@ -11158,11 +11158,7 @@ fn type_match_cases_batch_non_gadt<'a>(
                 &mut state,
                 0,
             )?;
-            let mut case_env = if state.pattern_variables.is_empty() {
-                env.clone_preserve_id()
-            } else {
-                env.clone()
-            };
+            let mut case_env = env.clone();
             let mut unpacks: Vec<PatternVariable> = Vec::new();
             // typecore.ml:1964-1972: the unused-variable checks are set up in
             // the pattern's warning scope.
@@ -12407,7 +12403,7 @@ fn type_case_pattern_impl<'a>(
         let saved = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone_preserve_id);
+            .map(crate::types::env::Env::clone);
         tctx.unify_state.set_env(&case_env);
         saved
     } else {
@@ -13116,7 +13112,7 @@ fn type_function_nary(
         (ctx.current_level(), env)
     };
 
-    let mut body_env = env.clone_preserve_id();
+    let mut body_env = env.clone();
     let mut typed_patterns = Vec::with_capacity(params.len());
     let mut unpacks = Vec::new();
     let mut default_lets = Vec::new();
@@ -13274,7 +13270,7 @@ fn type_function_nary(
         }
         let mut opt_param = None;
         if let Some(default_binding) = default_binding {
-            let let_env = body_env.clone_preserve_id();
+            let let_env = body_env.clone();
             // typecore.ml:4078-4080: `type_let ~optional_default:true`.
             let (typed_bindings, next_env, let_unpacks) = type_let_bindings(
                 tctx,
@@ -13562,11 +13558,7 @@ fn type_for(
 
     // Extend environment with loop variable
     // Match OCaml add_pattern_variables: `_` keeps the original env.
-    let mut body_env = if state.pattern_variables.is_empty() {
-        env.clone_preserve_id()
-    } else {
-        env.clone()
-    };
+    let mut body_env = env.clone();
     for pv in &state.pattern_variables {
         let val_loc = tctx.arena.to_location(loc);
         let desc = ValueDescription {
@@ -13787,11 +13779,7 @@ fn type_for_of(
         _ => return Err(TypeCoreError::InvalidForOfPattern { loc: pat.ppat_loc }),
     };
 
-    let mut body_env = if state.pattern_variables.is_empty() {
-        env.clone_preserve_id()
-    } else {
-        env.clone()
-    };
+    let mut body_env = env.clone();
     for pv in &state.pattern_variables {
         let val_loc = tctx.arena.to_location(loc);
         let desc = ValueDescription {
@@ -16718,7 +16706,7 @@ fn type_open(
     } else if let Some(path) = open_module_lid_components_into_env(
         open_lid,
         tctx.arena,
-        &env.clone_preserve_id(),
+        &env.clone(),
         &mut open_env,
         &mut tctx.persistent_env,
         tctx.type_ctx,
@@ -18199,7 +18187,7 @@ fn type_letmodule(
         let saved_unify_env = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone_preserve_id);
+            .map(crate::types::env::Env::clone);
         tctx.unify_state.set_env(&body_env);
         let typed_body = type_expect(tctx, &body_env, body, expected_ty, None);
         match saved_unify_env {
@@ -18559,7 +18547,7 @@ fn type_pack(
         let saved_unify_env = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone_preserve_id);
+            .map(crate::types::env::Env::clone);
         tctx.unify_state.set_env(&package_env);
         let mut package_arg_unify_result: TypeCoreResult<()> = Ok(());
         for (lid, package_arg) in pack_lids.iter().zip(&pack_args) {
@@ -18668,7 +18656,7 @@ fn type_pack(
     let saved_unify_env = tctx
         .unify_state
         .env()
-        .map(crate::types::env::Env::clone_preserve_id);
+        .map(crate::types::env::Env::clone);
     tctx.unify_state.set_env(&package_env);
     let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context.clone());
     if let Some(saved_env) = saved_unify_env {
@@ -20527,7 +20515,7 @@ fn type_let_bindings(
         // Match OCaml type_let: pattern typing always starts in the original
         // environment. Recursive RHS typing switches to the environment built
         // from the actual pattern-bound identifiers, not placeholder copies.
-        let mut typing_env = env.clone_preserve_id();
+        let mut typing_env = env.clone();
 
         // Type check each pattern first, collecting pattern variables per binding.
         // Matches OCaml `type_let`: recursive pre-unification runs on typed patterns
@@ -26589,7 +26577,7 @@ fn build_module_components_from_parent_path(
         )
     {
         let stored = crate::types::env_lazy::StoredModuleComponents::new_with_parent_context(
-            env.clone_preserve_id(),
+            env.clone(),
             access_path,
             md,
             Some((parent_access_path, parent_sig)),
@@ -28932,7 +28920,7 @@ fn partial_pred(
     let saved_unify_env = tctx
         .unify_state
         .env()
-        .map(crate::types::env::Env::clone_preserve_id);
+        .map(crate::types::env::Env::clone);
     tctx.unify_state.set_env(env);
     // Ctype.with_passive_variants (ctype.ml:2061-2072).
     let passive = ctx.set_passive_variants(true);
