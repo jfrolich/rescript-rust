@@ -15,6 +15,7 @@
 pub mod bridge;
 pub mod engine;
 pub mod l;
+pub mod replay;
 pub mod shadow;
 mod dump;
 mod edit;
