@@ -2,6 +2,16 @@
 
 set -e
 
+PROJECT_ROOT=$(cd "$(dirname "$0")/.."; pwd -P)
+RUST_TARGET="${RUST_TARGET:-debug}"
+PARITY_PARSE_ONLY=1 source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_parse_printer_args "$@" || exit $?
+set -- "${PARITY_ARGS[@]}"
+if [[ "$PARITY_JS_PRINTER" == oxc && "${PARITY_PRINTER_INNER:-0}" != 1 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+    parity_run_oxc_suite "javascript" "$@"
+    exit $?
+fi
+
 script_dir=$(cd "$(dirname "$0")"; pwd -P)
 project_root=$(cd "$script_dir/.."; pwd -P)
 include_external=false
@@ -51,6 +61,8 @@ if [[ "${fixture_args[0]:-}" == "--help" || "${fixture_args[0]:-}" == "-h" ]]; t
     echo ""
     echo "Options:"
     echo "  --with-external  Include the external corpus via TELLA_DIR as well."
+    echo "  --printer oxc    Rust oxc output, reformat comparison and coverage ratchet."
+    echo "  --record         Update the printer coverage baseline (oxc only)."
     echo "  --reformat       Normalize JS comparisons (default: exact)."
     echo "  --release        Use target/release Rust compiler and rewatch artifacts."
     echo "  -q, --quick      Stop early in focused fixtures and external Tella build."

@@ -2,19 +2,28 @@
 
 # GenType generated-output parity.
 #
-# This is intentionally one no-argument entrypoint. It always runs the two
-# in-repo GenType suites and the local Tella checkout, comparing raw generated
-# .gen.ts/.gen.tsx files that correspond to local .res/.resi source artifacts
-# from the OCaml compiler against the Rust in-process compiler. Do not add
-# normalization or repo-selection options here.
+# Without arguments this runs the two in-repo GenType suites and the local
+# Tella checkout, comparing raw generated .gen.ts/.gen.tsx files from OCaml
+# against Rust. --printer oxc additionally compares JavaScript via the shared
+# batch runner; generated TypeScript remains byte-for-byte in both modes.
 #
 # The one exception is GENTYPE_PARITY_WITHOUT_TELLA=1, for CI, which has no
 # Tella checkout: it runs the in-repo suites only and says so in the summary.
 
 set -uo pipefail
 
+PROJECT_ROOT=$(cd "$(dirname "$0")/.."; pwd -P)
+RUST_TARGET="${RUST_TARGET:-debug}"
+PARITY_PARSE_ONLY=1 source "$PROJECT_ROOT/scripts/parity_lib.sh"
+parity_parse_printer_args "$@" || exit $?
+set -- "${PARITY_ARGS[@]}"
+if [[ "$PARITY_JS_PRINTER" == oxc && "${PARITY_PRINTER_INNER:-0}" != 1 && "${1:-}" != --help && "${1:-}" != -h ]]; then
+    parity_run_oxc_suite "gentype" "$@"
+    exit $?
+fi
+
 if [[ $# -ne 0 ]]; then
-    echo "Usage: $0" >&2
+    echo "Usage: $0 [--printer legacy|oxc] [--record]" >&2
     echo "Runs all GenType output parity suites: react example, stdlib-no-shims, and Tella." >&2
     exit 2
 fi

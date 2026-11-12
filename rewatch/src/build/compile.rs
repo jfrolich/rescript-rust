@@ -4417,7 +4417,7 @@ fn finish_in_process_js_inner(
     }
 
     // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
-    let gentype = pre_js.gentype.take();
+    let mut gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -4508,6 +4508,20 @@ fn finish_in_process_js_inner(
             gentype_output: None,
             registry_updates,
         });
+    }
+
+    // A configured JS suffix can share the genType path. That write can
+    // invalidate the discovery snapshot, so preserve the ordinary probe.
+    if let Some(outcome) = gentype.as_mut()
+        && let Ok(Some(output)) = &mut outcome.result
+        && let rescript_compiler::gentype::main::Output::NoMatch { output_file } = output
+        && !compile_result.js_outputs.is_empty()
+        && !compile_result.js_outputs.iter().any(|js| js.path == Path::new(output_file))
+        && package.gentype_output_absent(Path::new(output_file))
+    {
+        *output = rescript_compiler::gentype::main::Output::Absent {
+            output_file: std::mem::take(output_file),
+        };
     }
 
     let mut write_duration = Duration::default();
@@ -4802,6 +4816,7 @@ mod tests {
             path,
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }

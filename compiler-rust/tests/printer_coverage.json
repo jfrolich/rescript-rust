@@ -1,0 +1,28 @@
+{
+  "gentype-example": {
+    "emitted": 166,
+    "outputs": 166,
+    "unsupported": {}
+  },
+  "gentype-stdlib": {
+    "emitted": 1,
+    "outputs": 1,
+    "unsupported": {}
+  },
+  "runtime": {
+    "emitted": 224,
+    "outputs": 226,
+    "unsupported": {
+      "delete call syntax": 2
+    }
+  },
+  "tests/tests": {
+    "emitted": 705,
+    "outputs": 711,
+    "unsupported": {
+      "JSX preserve mode": 4,
+      "numeric static member": 1,
+      "raw literal expression statement elision": 1
+    }
+  }
+}
