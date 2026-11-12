@@ -10,7 +10,15 @@ pub(super) fn compare(arena: LamArena, root: Lam) {
     compare_with_resolver(arena, root, None);
 }
 
-fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
+pub(super) fn compare_with_resolver(arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>) {
+    compare_with_options(arena, root, resolver, true);
+}
+
+pub(super) fn compare_with_checks(arena: LamArena, root: Lam, checks: bool) {
+    compare_with_options(arena, root, None, checks);
+}
+
+fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir::ModulePathResolver>, checks: bool) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
     for direct in [false, true] {
         for context in 0..5 {
@@ -30,6 +38,7 @@ fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate
             let source_root = input.root;
             let mut state = State::new(input);
             state.direct = direct;
+            state.check_div_by_zero = checks;
             state.resolver = resolver.cloned();
             let probed = state.probe(cx, source_root).unwrap();
             let lowered = state.complete(cx, probed);
@@ -41,6 +50,7 @@ fn compare_with_resolver(mut arena: LamArena, root: Lam, resolver: Option<&crate
             let actual = bridge_j::export_js(&lowered.program).unwrap();
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
+            compiler.check_div_by_zero = checks;
             let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
             use crate::lambda::lam_compile::OutputFinished;
             let expected_finished = match compiled.finished {
@@ -513,13 +523,12 @@ fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
     let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
     let a = source.const_(C::JsNull);
     let b = source.const_(C::JsTrue);
-    let c = source.const_(C::JsFalse);
-    let arg = source.if_raw(a, b, c);
+    let arg = source.prim_raw(crate::lambda::lam_primitive::Primitive::Pawait, &[a, b], LamLoc::NONE);
     let root = source.apply_raw(f, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
     let input = bridge::import_lambda(&source, root).unwrap();
     let root = input.root;
     let mut state = State::new(input);
-    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("if"))));
+    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("await"))));
     let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
     assert!(matches!(state.probe(cx, root), Err(Unsupported("let rec"))));
 }

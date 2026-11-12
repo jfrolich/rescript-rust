@@ -109,3 +109,42 @@ pub fn decode_extras(bytes: &[u8]) -> Option<StoredExtras> {
 pub fn decode_core(bytes: &[u8]) -> Option<StoredCore> {
     crate::binser::from_slice(bytes).ok()
 }
+
+/// Rewrite one filename prefix in O(path bytes), allocating only for a changed
+/// filename-table entry, never per type or Lambda node.
+pub fn rebase_filename(name: &mut String, from: &std::path::Path, to: &std::path::Path) {
+    if let Ok(relative) = std::path::Path::new(name).strip_prefix(from) {
+        *name = to.join(relative).to_string_lossy().into_owned();
+    }
+}
+
+impl StoredCore {
+    /// Rebase paths at first decode. O(signature decoding + filename bytes),
+    /// no traversal of type nodes or exported Lambda nodes.
+    pub fn rebase_paths(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        if let Some(pers) = &mut self.pers_struct { pers.rebase_stored_paths(from, to); }
+        if let Ok(relative) = self.info.source_path.strip_prefix(from) {
+            self.info.source_path = std::sync::Arc::new(to.join(relative));
+        }
+        std::sync::Arc::make_mut(&mut self.info.cmj_export_lambdas).rebase_stored_paths(from, to);
+    }
+}
+
+#[cfg(test)]
+mod snapshot_path_tests {
+    #[test]
+    fn rebases_ten_thousand_filename_entries_without_prefix_collisions() {
+        use std::path::Path;
+        let mut changed = 0;
+        for i in 0..10_000 {
+            let mut name = format!("producer/src/M{i}.res");
+            super::rebase_filename(&mut name, Path::new("producer"), Path::new("installed"));
+            assert_eq!(name, format!("installed/src/M{i}.res"));
+            changed += 1;
+        }
+        assert_eq!(changed, 10_000);
+        let mut other = "producer-other/M.res".to_string();
+        super::rebase_filename(&mut other, Path::new("producer"), Path::new("installed"));
+        assert_eq!(other, "producer-other/M.res");
+    }
+}

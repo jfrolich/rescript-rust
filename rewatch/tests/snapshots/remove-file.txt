@@ -1,5 +1,7 @@
 Cleaned 1 stale module
 Parsed 1 source file
+INFO:
+Not using the prebuilt @rescript/belt: the diagnostic retry requires source declaration locations. Compiling it from source.
 Parsed 466 source files
 Compiled 465 modules
 

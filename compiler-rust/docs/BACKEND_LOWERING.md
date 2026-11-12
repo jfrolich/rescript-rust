@@ -124,6 +124,7 @@ pub struct Cx {
     switch_depth: u32,  // L switches between here and the closest loop
     loops: LoopTop,     // top of the loop-frame stack visible here
     return_unit: bool,  // the enclosing function's `return_unit` attribute
+    probing: bool,      // a conditional reads whether this output is free (1.5)
 }
 pub struct Out {
     stmts: Span,              // a run in the lowering's statement stack (1.3)
@@ -180,6 +181,19 @@ has one `Vec<NodeId>` of J statements for the unit, used as a stack:
   length, and the stack is truncated to the run's start.
 
 So each statement is written to the stack once and copied to a list once.
+
+A conditional needs one more operation: a rule of `S.if_` that keeps one
+branch as the statements following a guard (`if (c) return 1;` followed by
+the else branch). The guard goes into a slot reserved before both branches
+and the kept branch stays where it was lowered. The other branch becomes the
+guard's list; when it lies below the kept branch, its slots become one **dead
+range** (the first slot records the range's length, so a scan crosses it in
+one step) instead of the kept branch being moved down. Dead ranges and holes
+at the top of the stack are popped when a branch is complete, so a run ends in
+a statement and "the last statement" and "exactly one statement" are constant
+reads. The slots of explicit empty blocks are recorded in a sorted side list,
+so that `S.if_` drops the empty blocks of a branch (B:1575) without scanning
+the branch.
 
 `SBlock` is a real node while a unit is being lowered. `S.block`
 (`block` (B:1225)) wraps more than one statement in a block, and the rules of
@@ -275,6 +289,20 @@ Invariant P1 (checked by a debug assertion in `Check` mode): for every node
 and continuation, the result of `probe` followed by `realize` equals lowering
 the node for that continuation directly. The assertion costs a second
 lowering, so it runs only on units below a size bound.
+
+The direct lowering converts a leaf to its continuation at once instead of
+deferring it. Below a branch of a conditional or the right operand of a short
+circuit (`Cx::probing`) a leaf stays deferred in the direct mode as well: the
+form of the conditional is a function of whether its branches are free, and
+the only direct way to learn that is the legacy second lowering, which the
+new lowering does not have. P1 therefore checks deferral outside conditional
+branches; inside them the two modes take the same path.
+
+`Seq` is free in every continuation when its head has no statements and its
+tail is free: `Free::Seq`. In **V** and **E** it is the comma expression at
+once; in **D**, **A** and **R** the head must not be emitted when the
+sequence is lowered, because an enclosing conditional may still read the
+branch as a value (`If(c, Seq(f(), 1), 2)` is `c ? (f(), 1) : 2` in **V**).
 
 ## 2. The contexts
 
@@ -589,6 +617,15 @@ by `LetRec` goes through 5.1 instead.
    comes from a fold that prepends (C:1487); it stays in the lowering;
 2. otherwise `D(kind, id)(value)`, then `k(body)`, appended.
 
+Finished-binding detail (`compile_expr`'s `Let` arm, versus
+`compile_effect_output`): in **V**, a finished binding discards the body's
+statements but retains its value and keeps `finished = True`. In **E** the
+value becomes `undefined`; in **D**, **A**, **R** it is absent. The retained
+export-block value is needed by the shared export coercion to declare the
+exports of a unit that throws. Truncated J statements must be released, not
+merely removed from the statement stack. The S3.3c oracle and shared-tail
+tests cover both cases.
+
 `D(kind, id)` of a value that is itself a `Let` or `Seq` continues through
 it: the inner binding or the head first, then `D(kind, id)` of the rest
 (the `Let` and `Sequence` arms, C:2419 and C:2487). A sequence that ends in the unit value thus
@@ -665,7 +702,29 @@ externals add what S3.8 specifies.
 | JSX, import | `Pjsx`, `Pimport` | S3.9 | |
 
 The row of every primitive is the arm of `compile_primitive_js` (P:188) with its
-name; the port is arm by arm. Facts read by primitives: the option
+name; the port is arm by arm.
+
+Details verified by the S3.3c primitive oracle tests:
+
+- Both `Pstringrefs` and `Pstringrefu` call `Primitive_string.getChar`;
+  only `Parrayrefu` is a direct index. "Checked forms" does not distinguish
+  the two string primitives.
+- `Pdebugger` uses `compile_debugger`, not the nominal arm in
+  `compile_primitive_js`: its result is unit `undefined` (`is_unit = true`),
+  after lowering its arguments in **E**. `Praise`'s placeholder is non-unit
+  `undefined` in a value continuation; it never emits a binding or return.
+- `Pmakedict` recognizes exactly one array argument and extracts only
+  two-field block entries whose key is a string literal. Other entries are
+  skipped; a non-array argument produces `undefined`. `PdictSpread` flattens
+  objects only when every property is a literal key or a symbol.
+- `PisNotNone` folds an optional block to `true` without a purity guard,
+  including an effectful payload. `Psome` marks the optional block as an
+  identity for null, objects, numbers, blocks, arrays, strings and plain
+  template literals, not for booleans or interpolated templates.
+- Null-to-option conversion is inlined only for a variable, null or
+  undefined; qualified reads and all other expressions call the runtime.
+
+These are lowering policies, not new J constructor rules. Facts read by primitives: the option
 `check_div_by_zero`; for `Pfield(Module)` of a `Global`, the other module's
 constant exports (`resolve_cmj_module_field_constant` (K:163): `true`, `false`,
 `null`, `undefined` are inlined, anything else is `JQualified(m, name)`); for
@@ -740,7 +799,7 @@ test in row R6 approximates. The new lowering therefore implements:
 | --- | --- | --- | --- |
 | **V**, **VR** | `A(tmp)`, `tmp` allocated before the branches (3.8) | `Free::Cond` | fill the reserved slot with `let tmp`; `if_(c, T, E)`; value `tmp` |
 | **D** | `A(id)` | `Free::Cond`, realized as `let id = cond(...)` | row R2 |
-| **A** | `A(id)` | realized by row R3 (`id = cond(...)` after the swap) | row R3 |
+| **A** | `A(id)` | `Free::Cond`; realized by row R3 on the two branches realized in **A** | row R3 |
 | **E** | `E` | row R4 step 1 on the two `Free`s | row R4 steps 2 to 4, where a `Free` branch that is needed as statements is realized in **E** |
 | **R** | `R` | `return cond(c, t, e)`, finished | `S.if_` on the two outputs, with the block wrapper of row R5 step 3 |
 
@@ -756,7 +815,7 @@ same conditional; if they do, one of them differs from OCaml.
 | --- | --- |
 | **V**, **VR** | `cond(test, realize(then_, V), realize(else_, V))` |
 | **D** | `let id = ` the **V** result |
-| **A** | row R3 on `id = realize(then_, V)` and `id = realize(else_, V)` |
+| **A** | row R3 on `realize(then_, A)` and `realize(else_, A)`. The legacy row lowers the branches for `A(id)` only, so a free `Seq` branch is `f(); id = 1`, two statements, and the conditional stays a statement; a leaf branch is `id = x` and both merge to `id = cond(...)` |
 | **E** | row R4 step 1 |
 | **R** | `return ` the **V** result, finished |
 
@@ -770,10 +829,51 @@ Incidental, all three stay in the lowering:
 
 - which branch is negated or swapped depends on the order in which the rules
   of `if_` and of rows R2 to R4 are tried; the rule lists are normative;
-- row R5 step 3 wraps its result in one block so that an enclosing `if_` does
-  not see the trailing `return` (1.3);
+- row R5 step 3 constructs one block, but `compile_return_output`
+  (`compiler-rust/src/lambda/lam_compile.rs:3179`) then calls `unnest_block`
+  on the whole output. When the test has no statements the block is the only
+  statement and is removed; after statements of the test it stays one of
+  several statements. The distinction shows in the text printed before the
+  passes. The new lowering never builds the block in the first case: the
+  guard is in the head slot and the kept branch follows it in place;
 - the result temporary is `Strict` in **V** and the declaration precedes the
   `if` but follows the statements of the test.
+
+How the rows are carried out (`bir/lower/cond.rs`):
+
+- the output is `[statements of the test][declaration slot][head slot]
+  [then run][else run]`. The declaration slot exists in **V** and **D**
+  only. A free branch has no run until a rule needs it as statements; it is
+  then realized at the top of the stack, above the other branch, which is why
+  no rule depends on the order of the two runs;
+- `if_(c, T, E)` as one statement is `raw if` when no rule of J-S3 applies to
+  the operands (a constant number of reads of the test and of the first and
+  last statement of each run), and `norm::js3_simplify_if` otherwise;
+- in **R**, `if_` is applied in place (rules 0 to 6 of J-S3 on runs): rule 5
+  and rule 6 leave the kept branch where it is. The result is wrapped in one
+  block only after statements of the test;
+- row R5 step 0 is decided when the conditional is entered, from the `PURE`
+  flags along the `Let`/`Seq` spine of each branch, and then only the test is
+  lowered. Nothing is lowered and discarded;
+- row R5 step 1 reads the statements the branches produced in **R**. Its
+  legacy gate, `lambda_contains_statement_value_form` (C:5139), is true of no
+  unit the lowering accepts today, because every such form is `Unsupported`.
+  The slice that adds the first of them (S3.4) must record the fact on the L
+  node; it must not walk the branch;
+- in **E** a branch that needs statements has the effect of its value pushed
+  when the branch is complete (`compiled_to_effect_block` (C:4875)); the
+  output of the row is then read by `compiled_from_effect_block` (C:7612): a
+  lone expression statement becomes the value.
+
+Every rule above has a test against the legacy lowering in the five
+continuations. Two inputs are not reachable from L yet and are tested on
+hand-built J statements against J-S3 instead: a test that is a boolean
+literal (rule 0 of J-S3) and a branch ending in `break` or `continue` (row
+R4 step 4, rule 6 of J-S3). The same differential test runs every rule of
+J-S3 on runs, in place and as one statement, for each pair of sixteen branch
+shapes and five tests. The merge of rows R2 and R3 on two single assignments
+is reached only through `realize`: a branch that is one assignment is a free
+branch.
 
 ### 3.7 The short circuits: `Prim(Psequand)`, `Prim(Psequor)`
 
@@ -788,9 +888,12 @@ Incidental, all three stay in the lowering:
 | **E** | as **V**, then the value for its effect | | default arm of `compile_effect_block_inner` (C:2593) |
 | **R**, **VR** | as `If(l, r, false)` or `If(l, true, r)` in the same continuation | | `compile_short_circuit_return_output` (C:3075), `compile_short_circuit_tail_loop_return_output` (C:4155) |
 
-`r` is lowered once in every row: no probe is needed. In **R** the rewritten
-conditional is not built as an L node (the legacy code builds the constant
-with `default_lambda`, C:286); the `If` rule is called with a constant branch.
+`r` is lowered once in every row, as a value in **V**, **D**, **A** and **E**
+and for **R** in **R**; whether it is free selects the form. A short circuit
+uses the traversal frame of a conditional, so nested short circuits do not
+nest calls of the lowering. In **R** the rewritten conditional is not built
+as an L node (the legacy code builds the constant with `default_lambda`,
+C:286); the `If` rule is called with a constant free branch.
 
 ### 3.8 Identifiers the lowering creates
 
@@ -2078,6 +2181,28 @@ positions.
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
+| a conditional (3.6) | constant, plus the statements of a branch that becomes a list (copied once) or is discarded; a branch kept as the statements after a guard is not read | each statement is written once and copied to a list once. Measured at 10,000 nested conditionals whose innermost branch needs a statement: 20,001 copies in **V** and **A**, 10,000 in **R** |
+| row R5 step 0 | the `Let`/`Seq` spine of both branches, in a function that returns unit | a spine node belongs to one conditional |
+| row R5 step 1 | the expression statements that lead each branch, stopping at the first other statement | a statement leads the branch of one conditional: an enclosing branch starts with a guard or with other statements, unless a test in between is a boolean literal (rule 0 keeps its branch without a guard) |
+| `S.if_` rules that need a rewrite (7 to 10, and 0 to 6 outside **R**) | `norm::js3_simplify_if` on two vectors: the statements of both branches, and two allocations | linear; taken only when `plain_if` says a rule applies. Open: porting J-S3 to list handles removes the vectors |
+
+S3.3c primitive costs: the resume is three `u32` handles (12 bytes), retaining
+an existing source-list handle rather than allocating an operand vector. Up to
+four sequenced outputs and values are inline. Literal min/max duplication copies
+only leaf handles and decoration, never a generic subtree/hash-map copier.
+Module constant summaries are acquired once per imported module into an
+`ImportId`-indexed table; the summary state is 16 bytes. Export lookup still uses
+field names because the summary interface has no field-index handle.
+
+The primitive cost tests include 10,000 nested identities and a 10,000-element
+block (10,001 source visits / 10,000 argument steps each), 10,000 dictionary
+entries (30,002 source visits / 30,001 argument steps / 50,003 immediate
+primitive steps), and 10,000 runtime-compare shells stripped by one comparison
+(20,003 source visits / 20,002 argument steps / 40,004 immediate primitive
+steps). These are opt-in lowering costs: this slice claims no improvement to
+the default emitted backend. Arena-owned variable-width cold payloads (block
+metadata, property lists, templates) continue to use the existing J pool API;
+this slice does not replace those representations.
 
 ### 7.4 Step-count tests each stage adds
 

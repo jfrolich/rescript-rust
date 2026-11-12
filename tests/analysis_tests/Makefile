@@ -18,6 +18,11 @@ test-reanalyze:
 
 test: test-analysis-binary test-reanalyze
 
+# The Rust editor analysis against the OCaml snapshots (see README.md).
+test-rust:
+	./no-watcher.sh
+	./test-rust.sh
+
 clean:
 	make -C tests clean
 	make -C tests-generic-jsx-transform clean
@@ -26,4 +31,4 @@ clean:
 	make -C tests-sourcedirs-dependency clean
 	make -C tests-reanalyze clean
 
-.PHONY: test-analysis-binary test-reanalyze clean test
+.PHONY: test-analysis-binary test-reanalyze clean test test-rust

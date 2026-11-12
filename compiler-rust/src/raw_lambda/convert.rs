@@ -242,66 +242,6 @@ fn constructor_runtime_tag(
     })
 }
 
-fn config_payload_flags_contains(
-    payload: &crate::parser::ast::Payload,
-    value: &str,
-    arena: &ParseArena,
-) -> bool {
-    use crate::parser::ast::{Constant as PConstant, ExpressionDesc as PExpressionDesc};
-    use crate::parser::longident::Longident;
-
-    let crate::parser::ast::Payload::PStr(items) = payload else {
-        return false;
-    };
-
-    items.iter().any(|item| {
-        let crate::parser::ast::StructureItemDesc::Pstr_eval(inner) = &item.pstr_desc else {
-            return false;
-        };
-        let (expr_idx, _) = &**inner;
-        let expr = arena.get_expr(*expr_idx);
-        let PExpressionDesc::Pexp_record(record) = &expr.pexp_desc else {
-            return false;
-        };
-        let (fields, _) = record;
-        arena.expr_field_list(*fields).iter().any(|field| {
-            let Longident::Lident(name_idx) = arena.get_longident(field.lid.txt) else {
-                return false;
-            };
-            if arena.get_string(*name_idx) != "flags" {
-                return false;
-            }
-            let field_expr = arena.get_expr(field.expr);
-            let PExpressionDesc::Pexp_array(elements) = &field_expr.pexp_desc else {
-                return false;
-            };
-            arena.expr_list(*elements).iter().any(|elem_idx| {
-                let elem = arena.get_expr(*elem_idx);
-                matches!(
-                    &elem.pexp_desc,
-                    PExpressionDesc::Pexp_constant(c)
-                        if matches!(c, PConstant::String(s) if s.semantic(arena) == value)
-                )
-            })
-        })
-    })
-}
-
-fn structure_has_config_string(
-    ta: &TypedArena,
-    structure: &Structure,
-    value: &str,
-    arena: &ParseArena,
-) -> bool {
-    ta.structure_items(structure.str_items).iter().any(|item| {
-        let StructureItemDesc::Tstr_attribute(attr) = &item.str_desc else {
-            return false;
-        };
-        arena.get_string(attr.0.txt) == "config"
-            && config_payload_flags_contains(&attr.1, value, arena)
-    })
-}
-
 fn raw_polyvariant_const<B: RawLambdaBuilder>(rb: &B, tag: &str) -> RawLambda {
     rb.const_(Constant::Int {
         i: crate::types::btype::hash_variant(tag),
@@ -2927,9 +2867,6 @@ impl<'a, B: RawLambdaBuilder> RawLambdaConverter<'a, B> {
         structure: &Structure,
         cc: &ModuleCoercion,
     ) -> RawLambda {
-        if structure_has_config_string(self.ta, structure, "-bs-noassertfalse", self.arena) {
-            self.no_assert_false = true;
-        }
         // The typed tree is complete: repeated type queries on it have one
         // answer per (env, type).
         self.type_ctx.set_typeopt_cache(true);

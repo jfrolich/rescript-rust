@@ -33,8 +33,8 @@ use crate::lambda::lam_compile::LambdaCompiler;
 use crate::location::Location;
 use crate::parse_arena::{ExprIdx, LocIdx, ParseArena, StrIdx};
 use crate::parser::ast::{
-    ArgLabel as ParserArgLabel, Attributes, Constant, Expression, ExpressionDesc, ModuleExpr,
-    ModuleExprDesc, Payload, Signature, SignatureItemDesc, Structure, StructureItemDesc,
+    ArgLabel as ParserArgLabel, Attributes, ExpressionDesc, Payload, Signature, SignatureItemDesc,
+    Structure, StructureItemDesc,
 };
 use crate::parser::{Longident, Parser, code_frame, jsx_ppx, module};
 use crate::types::printtyp::{TAG_ERROR as ERROR, TAG_INFO as INFO, TAG_RESET as RESET};
@@ -115,359 +115,6 @@ pub fn enable_cli_cleanup_skip() {
 }
 
 pub use crate::misc::module_name_from_source_filename;
-
-fn expression_has_string_literal(
-    expr: &Expression,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    use crate::parser::ast::ExpressionDesc as ED;
-
-    match &expr.pexp_desc {
-        ED::Pexp_constant(c) => matches!(c, Constant::String(s) if s.semantic(arena) == value),
-        ED::Pexp_template(template) => template
-            .values
-            .iter()
-            .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena)),
-        ED::Pexp_tagged_template(template) => {
-            expression_has_string_literal(arena.get_expr(template.tag), value, arena)
-                || template
-                    .values
-                    .iter()
-                    .any(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
-        }
-        ED::Pexp_let(inner) => {
-            let (_, bindings, body) = inner;
-            arena
-                .vb_list(*bindings)
-                .iter()
-                .any(|vb| expression_has_string_literal(arena.get_expr(vb.pvb_expr), value, arena))
-                || expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_fun(inner) => {
-            let crate::parser::ast::PexpFun { default, rhs, .. } = &**inner;
-            default
-                .as_ref()
-                .is_some_and(|e| expression_has_string_literal(arena.get_expr(*e), value, arena))
-                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
-        }
-        ED::Pexp_apply(inner) => {
-            let crate::parser::ast::PexpApply { funct, args, .. } = inner;
-            expression_has_string_literal(arena.get_expr(*funct), value, arena)
-                || arena.apply_args(*args).iter().any(|(_, arg)| {
-                    expression_has_string_literal(arena.get_expr(*arg), value, arena)
-                })
-        }
-        ED::Pexp_match((scrutinee, cases)) | ED::Pexp_try((scrutinee, cases, None)) => {
-            expression_has_string_literal(arena.get_expr(*scrutinee), value, arena)
-                || arena.case_list(*cases).iter().any(|case| {
-                    case.pc_guard.as_ref().is_some_and(|g| {
-                        expression_has_string_literal(arena.get_expr(*g), value, arena)
-                    }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
-                })
-        }
-        ED::Pexp_try((body, cases, Some(finally))) => {
-            expression_has_string_literal(arena.get_expr(*body), value, arena)
-                || arena.case_list(*cases).iter().any(|case| {
-                    case.pc_guard.as_ref().is_some_and(|g| {
-                        expression_has_string_literal(arena.get_expr(*g), value, arena)
-                    }) || expression_has_string_literal(arena.get_expr(case.pc_rhs), value, arena)
-                })
-                || expression_has_string_literal(arena.get_expr(*finally), value, arena)
-        }
-        ED::Pexp_tuple(items) | ED::Pexp_array(items) => arena
-            .expr_list(*items)
-            .iter()
-            .any(|item| expression_has_string_literal(arena.get_expr(*item), value, arena)),
-        ED::Pexp_dict(entries) => entries.iter().any(|entry| match entry {
-            crate::parser::ast::DictEntry::Pdict_entry(key, e) => {
-                arena.get_string(key.txt) == value
-                    || expression_has_string_literal(arena.get_expr(*e), value, arena)
-            }
-            crate::parser::ast::DictEntry::Pdict_spread(e) => {
-                expression_has_string_literal(arena.get_expr(*e), value, arena)
-            }
-        }),
-        ED::Pexp_spread(_, elements) => {
-            arena.spread_element_list(*elements).iter().any(|element| {
-                expression_has_string_literal(arena.get_expr(element.expr()), value, arena)
-            })
-        }
-        ED::Pexp_construct(_, args) => arena
-            .expr_list(args.txt)
-            .iter()
-            .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena)),
-        ED::Pexp_variant(inner) => {
-            let (_, args) = &**inner;
-            arena
-                .expr_list(args.txt)
-                .iter()
-                .any(|arg| expression_has_string_literal(arena.get_expr(*arg), value, arena))
-        }
-        ED::Pexp_record(inner) => {
-            let (fields, base) = inner;
-            arena.expr_field_list(*fields).iter().any(|field| {
-                expression_has_string_literal(arena.get_expr(field.expr), value, arena)
-            }) || base.as_ref().is_some_and(|base| {
-                expression_has_string_literal(arena.get_expr(*base), value, arena)
-            })
-        }
-        ED::Pexp_field(expr, _) | ED::Pexp_assert(expr) | ED::Pexp_await(expr) => {
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        ED::Pexp_newtype(inner) => {
-            let (_, expr) = &**inner;
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        ED::Pexp_constraint(inner) => {
-            let (expr, _) = &**inner;
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        ED::Pexp_coerce(inner) => {
-            let (expr, _, _) = &**inner;
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        ED::Pexp_object_get(inner) => {
-            let (expr, _) = &**inner;
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        ED::Pexp_object_set(inner) => {
-            let (lhs, _, rhs) = &**inner;
-            expression_has_string_literal(arena.get_expr(*lhs), value, arena)
-                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
-        }
-        ED::Pexp_object_literal(fields) => fields
-            .iter()
-            .any(|(_, e)| expression_has_string_literal(arena.get_expr(*e), value, arena)),
-        ED::Pexp_setfield(inner) => {
-            let (lhs, _, rhs) = &**inner;
-            expression_has_string_literal(arena.get_expr(*lhs), value, arena)
-                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
-        }
-        ED::Pexp_sequence(lhs, rhs) | ED::Pexp_while(lhs, rhs) => {
-            expression_has_string_literal(arena.get_expr(*lhs), value, arena)
-                || expression_has_string_literal(arena.get_expr(*rhs), value, arena)
-        }
-        ED::Pexp_braces(braces) => {
-            expression_has_string_literal(arena.get_expr(braces.expr), value, arena)
-        }
-        ED::Pexp_regexp(_) => false,
-        ED::Pexp_ternary(inner) => {
-            let (cond, consequent, alternate) = **inner;
-            expression_has_string_literal(arena.get_expr(cond), value, arena)
-                || expression_has_string_literal(arena.get_expr(consequent), value, arena)
-                || expression_has_string_literal(arena.get_expr(alternate), value, arena)
-        }
-        ED::Pexp_ifthenelse(inner) => {
-            let (cond, then_expr, else_expr) = &**inner;
-            expression_has_string_literal(arena.get_expr(*cond), value, arena)
-                || expression_has_string_literal(arena.get_expr(*then_expr), value, arena)
-                || else_expr.as_ref().is_some_and(|else_expr| {
-                    expression_has_string_literal(arena.get_expr(*else_expr), value, arena)
-                })
-        }
-        ED::Pexp_for(inner) => {
-            let (_, start, end, _, body) = &**inner;
-            expression_has_string_literal(arena.get_expr(*start), value, arena)
-                || expression_has_string_literal(arena.get_expr(*end), value, arena)
-                || expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_for_of(inner) | ED::Pexp_for_await_of(inner) => {
-            let (_, iterable, body) = &**inner;
-            expression_has_string_literal(arena.get_expr(*iterable), value, arena)
-                || expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_letmodule(inner) => {
-            let (_, module_expr, body) = &**inner;
-            module_expr_has_config_string(arena.get_mod_expr(*module_expr), value, arena)
-                || expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_pack(module_expr) => {
-            module_expr_has_config_string(arena.get_mod_expr(*module_expr), value, arena)
-        }
-        ED::Pexp_letexception(inner) => {
-            let (_, body) = &**inner;
-            expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_open(inner) => {
-            let (_, _, body) = &**inner;
-            expression_has_string_literal(arena.get_expr(*body), value, arena)
-        }
-        ED::Pexp_extension(inner) => {
-            let (_, payload) = &**inner;
-            payload_has_string_literal(payload, value, arena)
-        }
-        ED::Pexp_raw(_) => false,
-        // The message of `%todo("...")`, which an extension payload held.
-        ED::Pexp_todo(todo) => todo.message.is_some_and(|message| {
-            expression_has_string_literal(arena.get_expr(message), value, arena)
-        }),
-        ED::Pexp_ident(_) | ED::Pexp_break | ED::Pexp_continue | ED::Pexp_jsx_element(_) => false,
-    }
-}
-
-fn payload_has_string_literal(
-    payload: &Payload,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    match payload {
-        Payload::PStr(items) => items.iter().any(|item| match &item.pstr_desc {
-            StructureItemDesc::Pstr_eval(inner) => {
-                let (expr, _) = &**inner;
-                expression_has_string_literal(arena.get_expr(*expr), value, arena)
-            }
-            StructureItemDesc::Pstr_attribute(attr) => {
-                payload_has_string_literal(&attr.1, value, arena)
-            }
-            _ => false,
-        }),
-        Payload::PPat(inner) => {
-            let (pat, guard) = &**inner;
-            pattern_has_string_literal(arena.get_pat(*pat), value, arena)
-                || guard.as_ref().is_some_and(|guard| {
-                    expression_has_string_literal(arena.get_expr(*guard), value, arena)
-                })
-        }
-        Payload::PTyp(_) | Payload::PSig(_) => false,
-    }
-}
-
-fn pattern_has_string_literal(
-    pat: &crate::parser::ast::Pattern,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    use crate::parser::ast::PatternDesc as PD;
-
-    match &pat.ppat_desc {
-        PD::Ppat_constant(c) => matches!(c, Constant::String(s) if s.semantic(arena) == value),
-        PD::Ppat_alias(inner, _) | PD::Ppat_exception(inner) => {
-            pattern_has_string_literal(arena.get_pat(*inner), value, arena)
-        }
-        PD::Ppat_constraint(inner) => {
-            let (inner_pat, _) = &**inner;
-            pattern_has_string_literal(arena.get_pat(*inner_pat), value, arena)
-        }
-        PD::Ppat_tuple(items) | PD::Ppat_array(items) => arena
-            .pat_list(*items)
-            .iter()
-            .any(|item| pattern_has_string_literal(arena.get_pat(*item), value, arena)),
-        PD::Ppat_construct(_, args) => arena
-            .pat_list(args.txt)
-            .iter()
-            .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena)),
-        PD::Ppat_variant(inner) => {
-            let (_, args) = &**inner;
-            arena
-                .pat_list(args.txt)
-                .iter()
-                .any(|arg| pattern_has_string_literal(arena.get_pat(*arg), value, arena))
-        }
-        PD::Ppat_or(lhs, rhs) => {
-            pattern_has_string_literal(arena.get_pat(*lhs), value, arena)
-                || pattern_has_string_literal(arena.get_pat(*rhs), value, arena)
-        }
-        PD::Ppat_record(inner) => {
-            let (rows, _, _) = &**inner;
-            arena
-                .pat_field_list(*rows)
-                .iter()
-                .any(|row| pattern_has_string_literal(arena.get_pat(row.pat), value, arena))
-        }
-        PD::Ppat_dict(entries) => entries.iter().any(|entry| {
-            pattern_has_string_literal(arena.get_pat(entry.pdp_pattern), value, arena)
-        }),
-        PD::Ppat_extension(inner) => {
-            let (_, payload) = &**inner;
-            payload_has_string_literal(payload, value, arena)
-        }
-        _ => false,
-    }
-}
-
-fn module_expr_has_config_string(
-    module_expr: &ModuleExpr,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    match &module_expr.pmod_desc {
-        ModuleExprDesc::Pmod_structure(structure) => {
-            structure_has_config_string(structure, value, arena)
-        }
-        ModuleExprDesc::Pmod_functor(inner) => {
-            let (_, param, body) = &**inner;
-            param.as_ref().is_some_and(|param| {
-                module_type_has_config_string(arena.get_mod_type(*param), value, arena)
-            }) || module_expr_has_config_string(arena.get_mod_expr(*body), value, arena)
-        }
-        ModuleExprDesc::Pmod_apply(lhs, rhs) => {
-            module_expr_has_config_string(arena.get_mod_expr(*lhs), value, arena)
-                || module_expr_has_config_string(arena.get_mod_expr(*rhs), value, arena)
-        }
-        ModuleExprDesc::Pmod_constraint(inner, module_type) => {
-            module_expr_has_config_string(arena.get_mod_expr(*inner), value, arena)
-                || module_type_has_config_string(arena.get_mod_type(*module_type), value, arena)
-        }
-        ModuleExprDesc::Pmod_unpack(expr) => {
-            expression_has_string_literal(arena.get_expr(*expr), value, arena)
-        }
-        _ => false,
-    }
-}
-
-fn module_type_has_config_string(
-    module_type: &crate::parser::ast::ModuleType,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    use crate::parser::ast::ModuleTypeDesc as MTD;
-
-    match &module_type.pmty_desc {
-        MTD::Pmty_signature(sig_items) => sig_items.iter().any(|item| match &item.psig_desc {
-            crate::parser::ast::SignatureItemDesc::Psig_attribute(attr) => {
-                payload_has_string_literal(&attr.1, value, arena)
-            }
-            _ => false,
-        }),
-        MTD::Pmty_functor(inner) => {
-            let (_, param, body) = &**inner;
-            param.as_ref().is_some_and(|param| {
-                module_type_has_config_string(arena.get_mod_type(*param), value, arena)
-            }) || module_type_has_config_string(arena.get_mod_type(*body), value, arena)
-        }
-        MTD::Pmty_with(inner) => {
-            let (inner_mty, _) = &**inner;
-            module_type_has_config_string(arena.get_mod_type(*inner_mty), value, arena)
-        }
-        MTD::Pmty_typeof(module_expr) => {
-            module_expr_has_config_string(arena.get_mod_expr(*module_expr), value, arena)
-        }
-        _ => false,
-    }
-}
-
-fn structure_has_config_string(
-    structure: &Structure,
-    value: &str,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    structure.iter().any(|item| match &item.pstr_desc {
-        StructureItemDesc::Pstr_attribute(attr) => {
-            payload_has_string_literal(&attr.1, value, arena)
-        }
-        StructureItemDesc::Pstr_module(mb) => {
-            module_expr_has_config_string(arena.get_mod_expr(mb.pmb_expr), value, arena)
-        }
-        StructureItemDesc::Pstr_recmodule(mbs) => mbs
-            .iter()
-            .any(|mb| module_expr_has_config_string(arena.get_mod_expr(mb.pmb_expr), value, arena)),
-        StructureItemDesc::Pstr_include(incl) => {
-            module_expr_has_config_string(arena.get_mod_expr(incl.pincl_mod), value, arena)
-        }
-        _ => false,
-    })
-}
 
 /// A concrete JavaScript output target for one compile.
 #[derive(Clone)]
@@ -1141,7 +788,7 @@ pub fn apply_jsx_module_flag(
 }
 
 /// The JSX version: the command line's, else 4 when the file's
-/// `@@config` sets `-bs-jsx`.
+/// `@@config` sets `-bs-jsx` (or a generic `-bs-jsx-module`).
 pub fn jsx_version_for_structure(
     structure: &Structure,
     options: &CompilerOptions,
@@ -1149,7 +796,7 @@ pub fn jsx_version_for_structure(
 ) -> Option<i32> {
     options
         .jsx_version
-        .or_else(|| structure_has_config_string(structure, "-bs-jsx", arena).then_some(4))
+        .or_else(|| extract_file_config_from_structure(structure, arena).jsx_version)
 }
 
 /// Whether `let?` is enabled, by the command line or the file's
@@ -1163,39 +810,25 @@ pub fn experimental_let_unwrap_for_structure(
         || extract_file_config_from_structure(structure, arena).let_unwrap
 }
 
-pub(crate) fn debug_for_structure(
-    structure: &Structure,
-    options: &CompilerOptions,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    options.debug || structure_has_config_string(structure, "-bs-g", arena)
-}
-
-pub(crate) fn jsx_preserve_for_structure(
-    structure: &Structure,
-    options: &CompilerOptions,
-    arena: &crate::parse_arena::ParseArena,
-) -> bool {
-    options.jsx_preserve || structure_has_config_string(structure, "-bs-jsx-preserve", arena)
-}
-
 /// `builtin_ppx_warnings` receives the warnings the JSX and builtin mappers
 /// print, including those emitted before a mapper error.
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
-    let_unwrap: bool,
+    file_config: &FileConfigOverrides,
     arena: &mut crate::parse_arena::ParseArena,
     source: &str,
     filename: &str,
     builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
-    let signature = if let Some(jsx_version) = options.jsx_version {
+    // Ppx_entry.rewrite_signature reads the JSX settings after
+    // `Ast_config.process_sig` (compiler/frontend/ppx_entry.ml:27-37).
+    let signature = if let Some(jsx_version) = options.jsx_version.or(file_config.jsx_version) {
         // The JSX warnings come first, those raised before an error included.
         let (signature, jsx_warnings) = jsx_ppx::transform_signature_collecting_warnings(
             signature,
             jsx_version,
-            jsx_module_name(options, None),
+            jsx_module_name(options, Some(file_config)),
             arena,
         );
         builtin_ppx_warnings.extend(jsx_preprocessor_warnings_to_ppx(arena, jsx_warnings));
@@ -1204,12 +837,16 @@ fn preprocess_signature_for_typecheck_with_source(
         signature
     };
 
-    if options.no_builtin_ppx {
+    if file_config.no_builtin_ppx(options) {
         Ok(signature)
     } else {
         arena.set_builtin_spice(options.builtin_spice());
         let (rewritten, warnings) =
-            ppx::rewrite_signature_with_warnings(&signature, arena, let_unwrap);
+            ppx::rewrite_signature_with_warnings(
+                &signature,
+                arena,
+                options.experimental_let_unwrap || file_config.let_unwrap,
+            );
         builtin_ppx_warnings.extend(warnings);
         rewritten.map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     }
@@ -6423,10 +6060,6 @@ pub struct ImplementationFrontend {
     pub file_config: FileConfigOverrides,
     /// The file's `@@directive` payloads, printed atop the JavaScript.
     pub file_directives: Vec<String>,
-    /// `-bs-g`, from the command line or `@@config`.
-    pub debug: bool,
-    /// `-bs-jsx-preserve`, from the command line or `@@config`.
-    pub jsx_preserve: bool,
     /// `let?` is enabled, by the command line or `@@config`.
     pub experimental_let_unwrap: bool,
 }
@@ -6502,8 +6135,6 @@ pub fn run_implementation_frontend(
     );
     let file_directives = extract_file_directives_from_structure(&structure, parser.arena())
         .map_err(|err| directive_payload_error_to_anyhow(err, parser.arena(), source, filename))?;
-    let debug = debug_for_structure(&structure, options, parser.arena());
-    let jsx_preserve = jsx_preserve_for_structure(&structure, options, parser.arena());
     let experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     // Source fallback path: only run JSX rewrite when the file enables `-bs-jsx`.
     let jsx_version = options.jsx_version.or(file_config.jsx_version);
@@ -6528,7 +6159,7 @@ pub fn run_implementation_frontend(
         structure
     };
 
-    let structure = if options.no_builtin_ppx {
+    let structure = if file_config.no_builtin_ppx(options) {
         structure
     } else {
         // OCaml `Ast_config.process_str` marks the leading `@@config` before
@@ -6600,8 +6231,6 @@ pub fn run_implementation_frontend(
         frontend_warning_specs,
         file_config,
         file_directives,
-        debug,
-        jsx_preserve,
         experimental_let_unwrap,
     })
 }
@@ -6633,10 +6262,12 @@ fn compile_source_to_js_with_options_inner(
         frontend_warning_specs,
         file_config,
         file_directives,
-        debug,
-        jsx_preserve,
         experimental_let_unwrap,
     } = frontend?;
+    // The rest of the compile sees the `@@config` flags applied after the
+    // command line (rescript_compiler_driver.ml:539-557).
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     let ppx_warnings_have_errors = if options.frontend_already_reported {
         report_stored_ast_config_warnings(
             first_config_attribute_of_structure(&structure, parser.arena()),
@@ -6682,8 +6313,8 @@ fn compile_source_to_js_with_options_inner(
         &mut pers_env,
         &mut env,
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         current_unit_name.as_deref(),
     );
 
@@ -7094,9 +6725,9 @@ fn compile_source_to_js_with_options_inner(
     }
     let mut compiler = LambdaCompiler::with_module_path_resolver_and_options(
         Some(module_path_resolver),
-        jsx_preserve,
+        options.jsx_preserve,
         options.check_div_by_zero,
-        file_config.cross_module_inline(options),
+        options.cross_module_inline,
     );
     compiler.set_source_map_enabled(
         options.source_map != crate::js_ir::source_map::SourceMapMode::None,
@@ -7114,7 +6745,7 @@ fn compile_source_to_js_with_options_inner(
     all_possible_required_modules.extend(possible_required_modules.iter().cloned());
     let program = compile_with_lower_check(
         &mut compiler, lowered_arena, lowered_root,
-        all_possible_required_modules, options, jsx_preserve, filename,
+        all_possible_required_modules, options, options.jsx_preserve, filename,
     )?;
     #[cfg(test)]
     if let Some(trace) = discriminator_trace {
@@ -7151,8 +6782,8 @@ fn compile_source_to_js_with_options_inner(
 
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_js(
-            &program, &module_path_resolver, &file_directives, debug, jsx_preserve,
-            !options.no_version_header, filename,
+            &program, &module_path_resolver, &file_directives, options.debug,
+            options.jsx_preserve, !options.no_version_header, filename,
         )?;
     }
 
@@ -7164,8 +6795,8 @@ fn compile_source_to_js_with_options_inner(
         &module_path_resolver,
         JsFileSettings {
             file_directives: &file_directives,
-            debug,
-            jsx_preserve,
+            debug: options.debug,
+            jsx_preserve: options.jsx_preserve,
         },
         options,
         options.output_path.as_deref(),
@@ -7798,7 +7429,7 @@ pub fn run_interface_frontend(
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
-        experimental_let_unwrap,
+        &file_config,
         parser.arena_mut(),
         source,
         filename,
@@ -7813,7 +7444,7 @@ pub fn run_interface_frontend(
         out,
     );
     let signature = signature?;
-    if !options.no_builtin_ppx {
+    if !file_config.no_builtin_ppx(options) {
         // OCaml `Ast_config.process_sig` + `emit_external_warnings_on_signature`.
         ppx::mark_config_attributes_signature(&signature, parser.arena());
         let (unused_attribute_warnings, invariant_error) =
@@ -7886,6 +7517,8 @@ pub fn typecheck_interface_source(
         file_config,
         experimental_let_unwrap,
     } = frontend?;
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     let ppx_warnings_have_errors = if options.frontend_already_reported {
         report_stored_ast_config_warnings(
             first_config_attribute_of_signature(&signature, parser.arena()),
@@ -7931,8 +7564,8 @@ pub fn typecheck_interface_source(
         &mut pers_env,
         &mut env,
         &type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         current_unit_name.as_deref(),
     );
 
@@ -8621,6 +8254,13 @@ fn moregen_link(
 }
 
 /// Per-file configuration overrides extracted from `@@config({flags: [...]})`.
+///
+/// OCaml's `file_level_flags_handler` (compiler/bsc/rescript_compiler_driver.ml:539-557)
+/// runs `Bsc_args.parse_exn` over the whole `command_line_flags` table, so a
+/// file flag mutates the same request-local `Clflags`/`Js_config` state the
+/// command line set, after it: file flags win for the rest of that compile.
+/// This records the flags whose effect a later phase can observe; see
+/// [`run_file_level_flags`] for the ones that have none.
 #[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     /// `-enable-experimental LetUnwrap`.
@@ -8634,14 +8274,109 @@ pub struct FileConfigOverrides {
     /// `-bs-cross-module-opt` (`Some(true)`) or `-bs-no-cross-module-opt`
     /// (`Some(false)`), the last one given (`Js_config.cross_module_inline`).
     pub cross_module_inline: Option<bool>,
+    /// `-bs-g` (`Js_config.debug`, read by js_dump.ml:934).
+    pub debug: bool,
+    /// `-bs-jsx-preserve` (`Clflags.jsx_preserve`, read by
+    /// lam_pass_remove_alias.ml:74, js_pass_flatten_and_mark_dead.ml:280 and
+    /// js_dump.ml:180).
+    pub jsx_preserve: bool,
+    /// `-bs-noassertfalse` (`Clflags.no_assert_false`, translcore.ml:1555).
+    pub no_assert_false: bool,
+    /// `-noassert` (`Clflags.noassert`, translcore.ml:1558).
+    pub noassert: bool,
+    /// `-bs-no-check-div-by-zero` (`Js_config.check_div_by_zero`,
+    /// lam_compile_primitive.ml:246-261).
+    pub no_check_div_by_zero: bool,
+    /// `-bs-no-version-header` (`Js_config.no_version_header`,
+    /// js_dump_program.ml:133).
+    pub no_version_header: bool,
+    /// `-bs-no-builtin-ppx` (`Js_config.no_builtin_ppx`), which
+    /// `Ppx_entry` reads right after processing the `@@config`
+    /// (compiler/frontend/ppx_entry.ml:39, 58). Only the frontend reads it,
+    /// so [`Self::apply`] leaves it out; see [`Self::no_builtin_ppx`].
+    pub no_builtin_ppx: bool,
+    /// `-open` modules in the order given (`Clflags.open_modules`), opened
+    /// after the command line's by `Res_compmisc.initial_env`
+    /// (compiler/core/res_compmisc.ml:47-66), which runs after the
+    /// `@@config` is processed. See [`Self::open_modules`].
+    pub open_modules: Vec<String>,
+    /// `-nopervasives` (`Clflags.nopervasives`, res_compmisc.ml:57).
+    pub nopervasives: bool,
+    /// `-no-alias-deps` (`Clflags.transparent_modules`), read when typing.
+    pub transparent_modules: bool,
+    /// `-keep-locs` (`Some(true)`) or `-no-keep-locs` (`Some(false)`), the
+    /// last one given (`Clflags.keep_locs`, read when saving the signature).
+    pub keep_locs: Option<bool>,
 }
 
 impl FileConfigOverrides {
-    /// `Js_config.cross_module_inline` for this file: its `@@config` flags
-    /// win over the command line.
-    pub fn cross_module_inline(&self, options: &CompilerOptions) -> bool {
-        self.cross_module_inline
-            .unwrap_or(options.cross_module_inline)
+    /// Whether the builtin PPX is off for this file: by the command line or
+    /// its `@@config`.
+    pub fn no_builtin_ppx(&self, options: &CompilerOptions) -> bool {
+        options.no_builtin_ppx || self.no_builtin_ppx
+    }
+
+    /// The modules this file's initial environment opens: the command
+    /// line's, then the `@@config`'s. OCaml processes the `@@config` twice
+    /// (ppx_entry.ml:48, js_implementation.ml:129), adding each module twice;
+    /// opening a module again changes nothing, so it is opened once.
+    /// [`Self::apply`] leaves `options.open_modules` alone: the persistent
+    /// environment compiles other units from source with the command line's.
+    pub fn open_modules<'a>(&self, options: &'a CompilerOptions) -> std::borrow::Cow<'a, [String]> {
+        if self.open_modules.is_empty() {
+            return std::borrow::Cow::Borrowed(&options.open_modules);
+        }
+        let mut open_modules = options.open_modules.clone();
+        open_modules.extend(self.open_modules.iter().cloned());
+        std::borrow::Cow::Owned(open_modules)
+    }
+
+    /// Whether this file's initial environment leaves out Pervasives and
+    /// Stdlib. Like [`Self::open_modules`], only this file's initial
+    /// environment reads it.
+    pub fn nopervasives(&self, options: &CompilerOptions) -> bool {
+        options.nopervasives || self.nopervasives
+    }
+
+    /// Whether any flag changes a [`CompilerOptions`] field in [`Self::apply`].
+    fn changes_options(&self) -> bool {
+        self.cross_module_inline.is_some()
+            || self.debug
+            || self.jsx_preserve
+            || self.no_assert_false
+            || self.noassert
+            || self.no_check_div_by_zero
+            || self.no_version_header
+            || self.transparent_modules
+            || self.keep_locs.is_some()
+    }
+
+    /// The options of this file's compile: the command line's with the
+    /// `@@config` flags applied after them, as `file_level_flags_handler`
+    /// does to the request state. Warning, JSX and `let?` flags are not
+    /// folded in: the frontend applies them itself, in OCaml's order.
+    pub fn apply<'a>(&self, options: &'a CompilerOptions) -> std::borrow::Cow<'a, CompilerOptions> {
+        if !self.changes_options() {
+            return std::borrow::Cow::Borrowed(options);
+        }
+        let mut options = options.clone();
+        if let Some(cross_module_inline) = self.cross_module_inline {
+            options.cross_module_inline = cross_module_inline;
+        }
+        // `set` flags (rescript_compiler_driver.ml:213): a file can turn
+        // them on, never off.
+        options.debug |= self.debug;
+        options.jsx_preserve |= self.jsx_preserve;
+        options.no_assert_false |= self.no_assert_false;
+        options.noassert |= self.noassert;
+        options.no_version_header |= self.no_version_header;
+        // A `clear` flag: it can only turn the check off.
+        options.check_div_by_zero &= !self.no_check_div_by_zero;
+        options.transparent_modules |= self.transparent_modules;
+        if let Some(keep_locs) = self.keep_locs {
+            options.keep_locs = keep_locs;
+        }
+        std::borrow::Cow::Owned(options)
     }
 }
 
@@ -8720,6 +8455,7 @@ fn bsc_flag_arity(flag: &str) -> Option<BscFlagArity> {
         | "-drawlambda"
         | "-dlambda-sexp"
         | "-dlambda-sexp-locs"
+        | "-draw-coercions"
         | "-dsource"
         | "-only-parse"
         | "-editor-mode"
@@ -8743,6 +8479,32 @@ fn bsc_flag_arity(flag: &str) -> Option<BscFlagArity> {
 /// `file_level_flags_handler` on a string array: `Bsc_args.parse_exn`
 /// (compiler/ext/bsc_args.ml) applying each option in order. Returns `false`
 /// when parsing raises, after the options before the failure were applied.
+///
+/// Every `command_line_flags` entry is accepted. The ones recorded in
+/// [`FileConfigOverrides`] are those whose state a later phase of the same
+/// compile reads. The rest are accepted without effect:
+///
+/// - Read before the `@@config` is processed, so OCaml ignores them too:
+///   `-I`, `-nostdlib` and `-runtime-path` (`Res_compmisc.init_path` fixes
+///   the load path before parsing, compiler/core/js_implementation.ml:170),
+///   `-ppx` and `-bs-test-ast-conversion` (`Cmd_ppx_apply` already ran),
+///   `-ignore-parse-errors` (parsing is done), and the no-ops `-bs-jsx-mode`,
+///   `-unsafe` and `-verbose`.
+/// - Without an observable effect: `-bs-cmi` and `-bs-cmj` only skip
+///   rewriting an unchanged `.cmi`/`.cmj` (js_implementation.ml:141,
+///   compiler/core/lam_compile_main.ml:454).
+/// - Not applied per file by Rust: the IR dumps and checks (`-d*`,
+///   `-bs-loc`, `-debug-ir`, `-check-lam`), which are debugging aids; what
+///   the build decides before it compiles the file: its outputs and paths
+///   (`-o`, `-bs-package-output`, `-bs-package-name`, `-bs-ns`,
+///   `-bs-project-root`, `-bs-source-map*`, `-make-runtime`), whether it
+///   has an interface (`-bs-read-cmi`, typemod.ml:1783), the modes that stop
+///   the compile early (`-bs-ast`, `-as-pp`, `-bs-syntax-only`,
+///   `-only-parse`, `-bs-cmi-only`, `-editor-mode`), `-bs-no-bin-annot` and
+///   genType (`-bs-gentype*`); how diagnostics are shown (`-color`,
+///   `-absname`, and `-short-paths`, which Rust does not implement); and
+///   the flags that act at once on another input (`-e`, `-format`,
+///   `-reprint-source`).
 fn run_file_level_flags(
     flags: &[String],
     overrides: &mut FileConfigOverrides,
@@ -8763,6 +8525,21 @@ fn run_file_level_flags(
             match flag {
                 "-bs-cross-module-opt" => overrides.cross_module_inline = Some(true),
                 "-bs-no-cross-module-opt" => overrides.cross_module_inline = Some(false),
+                "-bs-g" => overrides.debug = true,
+                "-bs-jsx-preserve" => overrides.jsx_preserve = true,
+                "-bs-noassertfalse" => overrides.no_assert_false = true,
+                "-noassert" => overrides.noassert = true,
+                "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
+                "-bs-no-version-header" => overrides.no_version_header = true,
+                "-bs-no-builtin-ppx" => overrides.no_builtin_ppx = true,
+                // These print to stdout and raise `Request_exit`, which the
+                // handler's `with _` reports as invalid flags
+                // (rescript_compiler_driver.ml:209-211, 524-528, 556).
+                "-v" | "-version" | "-warn-help" => return false,
+                "-nopervasives" => overrides.nopervasives = true,
+                "-no-alias-deps" => overrides.transparent_modules = true,
+                "-keep-locs" => overrides.keep_locs = Some(true),
+                "-no-keep-locs" => overrides.keep_locs = Some(false),
                 _ => {}
             }
             continue;
@@ -8797,6 +8574,7 @@ fn run_file_level_flags(
             "-bs-jsx-module" => {
                 apply_jsx_module_flag(arg, &mut overrides.jsx_module, &mut overrides.jsx_version);
             }
+            "-open" => overrides.open_modules.push(arg.clone()),
             "-enable-experimental" => {
                 if arg == "LetUnwrap" {
                     overrides.let_unwrap = true;
@@ -9485,12 +9263,9 @@ pub struct InProcessPreJsCompileResult {
     pub ident_stamp_at_js_boundary: i32,
     /// The file's `@@directive` payloads, printed atop the JavaScript.
     pub file_directives: Vec<String>,
-    /// `-bs-g`, from the command line or `@@config`.
-    pub debug: bool,
-    /// `-bs-jsx-preserve`, from the command line or `@@config`.
-    pub jsx_preserve: bool,
-    /// `Js_config.cross_module_inline` for this file.
-    pub cross_module_inline: bool,
+    /// The file's `@@config` flags, which the JS backend applies to the
+    /// options it is given ([`FileConfigOverrides::apply`]).
+    pub file_config: FileConfigOverrides,
     /// The unit's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The unit's interface, published to the modules that depend on it.
@@ -10303,6 +10078,8 @@ fn in_process_type_check_context<'a>(
     file_config: &FileConfigOverrides,
     frontend_warning_specs: &[ppx::WarningAttributeSpec],
 ) -> (TypeCheckContext<'a>, Env) {
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
@@ -10330,8 +10107,8 @@ fn in_process_type_check_context<'a>(
         &mut pers_env,
         &mut env,
         type_ctx,
-        &options.open_modules,
-        options.nopervasives,
+        &file_config.open_modules(options),
+        file_config.nopervasives(options),
         Some(module_name),
     );
     tctx.set_persistent_env(pers_env);
@@ -10499,16 +10276,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     )
     .entered();
     let census_timing = options.derived_census.as_ref().map(|_| crate::timing::ThreadTimingGuard::start());
-    let (file_directives, debug, jsx_preserve) = {
+    let file_directives = {
         let _phase = info_span!("compiler.directives").entered();
-        (
-            extract_file_directives_from_structure(structure, arena)?,
-            debug_for_structure(structure, options, arena),
-            jsx_preserve_for_structure(structure, options, arena),
-        )
+        extract_file_directives_from_structure(structure, arena)?
     };
     let file_config = extract_file_config_from_structure(structure, arena);
-    let cross_module_inline = file_config.cross_module_inline(options);
+    // The rest of the compile sees the `@@config` flags applied after the
+    // command line (rescript_compiler_driver.ml:539-557).
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
@@ -11268,9 +11044,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         flat_make_paths,
         ident_stamp_at_js_boundary,
         file_directives,
-        debug,
-        jsx_preserve,
-        cross_module_inline,
+        file_config,
         signature: published_signature,
         pers_struct,
         lam_locs,
@@ -11318,6 +11092,9 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
             ..Default::default()
         });
     }
+    // The same `@@config` flags the typing phase applied.
+    let effective_options = pre_js.file_config.apply(options);
+    let options = &*effective_options;
     let _span = info_span!(
         "compiler.in_process_js_finish",
         module = options.module_name.as_deref().unwrap_or(""),
@@ -11374,8 +11151,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                pre_js.jsx_preserve,
-                pre_js.cross_module_inline,
+                options.jsx_preserve,
+                options.cross_module_inline,
                 &pre_js.lam_locs,
             )?
         } else {
@@ -11389,8 +11166,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                 primary_output_path,
                 primary_output_module_format,
                 persistent_env_for_js.clone(),
-                pre_js.jsx_preserve,
-                pre_js.cross_module_inline,
+                options.jsx_preserve,
+                options.cross_module_inline,
                 std::mem::take(&mut pre_js.lam_locs),
             )?
         }
@@ -11435,8 +11212,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
                     Some(&target.path),
                     Some(target.module_format),
                     persistent_env_for_js.clone(),
-                    pre_js.jsx_preserve,
-                    pre_js.cross_module_inline,
+                    options.jsx_preserve,
+                    options.cross_module_inline,
                     &pre_js.lam_locs,
                 )?;
             check_module_path_resolution_errors(
@@ -11456,8 +11233,8 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
 
     let js_settings = JsFileSettings {
         file_directives: &pre_js.file_directives,
-        debug: pre_js.debug,
-        jsx_preserve: pre_js.jsx_preserve,
+        debug: options.debug,
+        jsx_preserve: options.jsx_preserve,
     };
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         for (_, program, resolver, _) in &rendered_programs {
@@ -11567,6 +11344,9 @@ pub fn typecheck_preprocessed_signature_in_process(
     .entered();
     let census_timing = options.derived_census.as_ref().map(|_| crate::timing::ThreadTimingGuard::start());
     let file_config = extract_file_config_from_signature(signature, arena);
+    // The saved signature keeps its locations per the file's `-keep-locs`.
+    let effective_options = file_config.apply(options);
+    let options = &*effective_options;
     // The frontend raised on any payload these cannot read.
     let frontend_warning_specs =
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
@@ -11865,16 +11645,40 @@ mod tests {
             super::extract_file_config_from_structure(&structure, parser.arena())
         };
         let mut options = super::CompilerOptions::default();
-        assert!(!overrides("let x = 1\n").cross_module_inline(&options));
+        assert!(!overrides("let x = 1\n").apply(&options).cross_module_inline);
         let on = overrides("@@config({flags: [\"-bs-cross-module-opt\"]})\nlet x = 1\n");
         assert_eq!(on.cross_module_inline, Some(true));
-        assert!(on.cross_module_inline(&options));
+        assert!(on.apply(&options).cross_module_inline);
         let off = overrides(
             "@@config({flags: [\"-bs-cross-module-opt\", \"-bs-no-cross-module-opt\"]})\nlet x = 1\n",
         );
         options.cross_module_inline = true;
-        assert!(!off.cross_module_inline(&options));
-        assert!(overrides("let x = 1\n").cross_module_inline(&options));
+        assert!(!off.apply(&options).cross_module_inline);
+        assert!(overrides("let x = 1\n").apply(&options).cross_module_inline);
+    }
+
+    /// Only the first `@@config` among the leading attributes counts
+    /// (compiler/frontend/ast_config.ml:57-71): a later or nested one, or a
+    /// flag string in another attribute, changes nothing.
+    #[test]
+    fn file_config_reads_only_the_first_leading_config() {
+        let overrides = |source: &str| {
+            let mut parser = super::Parser::new("A.res", source);
+            let structure = super::module::parse_structure(&mut parser);
+            super::extract_file_config_from_structure(&structure, parser.arena())
+        };
+        let first = overrides(
+            "@@warning(\"-a\")\n@@config({flags: [\"-bs-g\"]})\n@@config({flags: [\"-bs-noassertfalse\"]})\nlet x = 1\n",
+        );
+        assert!(first.debug);
+        assert!(!first.no_assert_false);
+        let late = overrides("let x = 1\n@@config({flags: [\"-bs-g\"]})\n");
+        assert!(!late.debug);
+        let nested =
+            overrides("module M = {\n  @@config({flags: [\"-bs-noassertfalse\"]})\n}\n");
+        assert!(!nested.no_assert_false);
+        let unrelated = overrides("@@deprecated(\"-bs-g\")\nlet x = 1\n");
+        assert!(!unrelated.debug);
     }
 
     /// tests/syntax_tests/res_test.ml:27-84: formatting keeps a file's line

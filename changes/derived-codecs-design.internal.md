@@ -1,0 +1,1 @@
+- Add the design for derived codecs that skip most of the pipeline (`compiler-rust/docs/DERIVED_CODECS.md`), with its measurement prototype.
