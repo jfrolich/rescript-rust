@@ -72,15 +72,22 @@ def main():
             reports = Path(temporary) / corpus.replace("/", "-")
             reports.mkdir()
             env["RESCRIPT_BACKEND_STATS"] = str(reports)
-            command = ([str(binary), "build", str(ROOT / folder)] if folder else
-                       ["bash", "scripts/test_js_output_parity_fixtures.sh"])
+            # prepare-parity has already built these packages. A warm build
+            # can reuse every module and never reach the shadow oracle. Clean
+            # through the public CLI first; building the runtime package then
+            # compiles its sources even when embedded interfaces are available.
+            commands = ([[str(binary), "clean", str(ROOT / folder)],
+                         [str(binary), "build", str(ROOT / folder)]] if folder else
+                        [["bash", "scripts/test_js_output_parity_fixtures.sh"]])
             log = Path(temporary) / (corpus.replace("/", "-") + ".log")
             with log.open("w") as output:
-                result = subprocess.run(command, cwd=ROOT, env=env, stdout=output,
-                                        stderr=subprocess.STDOUT, timeout=600)
-            if result.returncode:
-                print(log.read_text())
-                raise RuntimeError(f"{corpus}: oracle command failed ({result.returncode})")
+                for command in commands:
+                    result = subprocess.run(command, cwd=ROOT, env=env, stdout=output,
+                                            stderr=subprocess.STDOUT, timeout=600)
+                    if result.returncode:
+                        output.flush()
+                        print(log.read_text())
+                        raise RuntimeError(f"{corpus}: oracle command failed ({result.returncode})")
             results[corpus] = summarize(reports, ROOT / folder if folder else None)
             if not results[corpus]["units"]:
                 raise RuntimeError(f"{corpus}: no shadow reports (mode was not exercised)")

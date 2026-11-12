@@ -22,6 +22,10 @@ python3 scripts/test_backend_coverage.py --target debug
 ```
 
 The harness checks the runtime, tests/tests and focused JS parity fixtures.
+Before each package build it runs `rescript clean` so the shadow oracle sees
+source compilation rather than an incremental cache hit, including when the
+executable has embedded runtime interfaces. A corpus with zero reports is an
+error, not successful coverage.
 Every supported import is validated. The committed `tests/backend_coverage.txt`
 ratchet requires that unit coverage and the supported share do not fall and
 that neither total fallbacks nor any reason's count grows. `--record` explicitly

@@ -1,6 +1,9 @@
 """Unit tests for the coverage gate; no compiler subprocesses required."""
 import copy
 import unittest
+from unittest.mock import patch
+import subprocess
+import test_backend_coverage as coverage
 import json
 import tempfile
 from pathlib import Path
@@ -28,6 +31,24 @@ class CoverageGateTests(unittest.TestCase):
                 }))
             self.assertEqual(summarize(directory), {
                 "units": 1, "identical": 0, "unsupported": {"reason": 1}})
+
+    def test_package_is_cleaned_and_zero_reports_still_fail(self):
+        with patch("sys.argv", ["test_backend_coverage.py"]), patch.object(
+                coverage.subprocess, "run", return_value=subprocess.CompletedProcess([], 0)) as run:
+            with self.assertRaisesRegex(RuntimeError, "runtime: no shadow reports"):
+                coverage.main()
+        binary = str(coverage.ROOT / "rewatch/target/release/rescript")
+        runtime = str(coverage.ROOT / "packages/@rescript/runtime")
+        self.assertEqual([call.args[0] for call in run.call_args_list], [
+            [binary, "clean", runtime], [binary, "build", runtime]])
+
+    def test_failed_clean_stops_before_build(self):
+        with patch("sys.argv", ["test_backend_coverage.py"]), patch.object(
+                coverage.subprocess, "run", return_value=subprocess.CompletedProcess([], 1)) as run:
+            with self.assertRaisesRegex(RuntimeError, "runtime: oracle command failed"):
+                coverage.main()
+        self.assertEqual(run.call_count, 1)
+        self.assertEqual(run.call_args.args[0][1], "clean")
 
     def test_missing_units_fail(self):
         actual = copy.deepcopy(self.baseline)
