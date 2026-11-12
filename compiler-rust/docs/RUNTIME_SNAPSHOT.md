@@ -1,8 +1,9 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: design. Section A describes trunk; everything from section B on is
-proposed and not implemented. This document is the spec for the stages in
-section F.
+Status: S1 implemented. Section A records the baseline before S1. Sections B
+through E describe the full staged design; runtime changes beyond the shared
+container, verification memoisation, snapshot commands and watch integration
+remain future stages. Section F.1 records S1's implementation and evidence.
 
 ## 0. Summary
 
@@ -80,7 +81,7 @@ S1 starts by measuring.
   interface from the executable instead of the package's build database, and
   the JavaScript from the snapshot instead of an earlier build.
 
-## A. Today
+## A. Baseline before S1
 
 ### A.1 Where the packages are and how they are found
 
@@ -164,7 +165,7 @@ and leaves the core as bytes until the first lookup
 
 ### A.5 What the incremental store records
 
-Each package has `lib/bs/rescript.sqlite` (`state_db.rs`).
+Each package has `lib/rescript/rescript.sqlite` (`state_db.rs`).
 
 - **Runtime.** Only the `runtime_interfaces` table of the root package's
   database, written after a from-source compile. Nothing is written when the
@@ -498,9 +499,95 @@ budget for this fixture is at most 701,906,266 instructions (the retained-Belt
 build plus 5%). The baseline executable is 35,292,816 bytes. These counts are
 for the test fixture, not the 3,735-module application.
 
-Code/document discrepancy: build databases are under `lib/rescript`, not
-`lib/bs` as section A.5 says. Hardware instruction counting was unavailable
-in the measurement environment; the figures above are Cachegrind counts.
+Hardware instruction counting was unavailable in the measurement environment;
+the figures above are Cachegrind counts. Section A.5 has been corrected from
+`lib/bs` to the code's `lib/rescript` layout.
+
+#### S1 after measurement
+
+Repeated with the same release profile, Cachegrind settings and one worker,
+using a fresh disposable copy of `tests/belt_tests`. The candidate includes
+trunk through `5b63dc78b`; the baseline above predates those checker changes,
+so the paired candidate measurements isolate the snapshot's contribution.
+
+| Candidate build | Modules compiled | Instructions |
+|---|---:|---:|
+| Clean, `RESCRIPT_SNAPSHOT=off` | 80 | 1,667,769,849 |
+| Clean root, Belt output retained, `RESCRIPT_SNAPSHOT=off` | 37 | 623,554,268 |
+| Clean, `RESCRIPT_SNAPSHOT=require` | 37 | 635,348,951 |
+
+The snapshot costs 1.89% more than retaining Belt's build output, within the
+5% budget, and saves 61.90% against this candidate's clean from-source build.
+It is also 4.96% below the original retained-Belt count of 668,482,159.
+The release executable grew from 35,292,816 to 36,467,752 bytes: 1,174,936
+bytes (3.33%).
+
+On a 3,735-module application, `scripts/bench_project.sh` counted
+73,856,891,438 instructions for the original baseline and 68,352,078,635 for
+the candidate (7.45% fewer); generated outputs were identical. This comparison
+also includes the intervening trunk checker changes and is not a claim that
+S1 alone saved 7.45%. `scripts/compare_checker_builds.py` also found no
+signature, diagnostic or generated-output differences on that application.
+
+A ten-run, single-worker Hyperfine clean-build comparison on `tests/belt_tests`
+measured the original baseline at 394.4 ± 146.9 ms (293.8–685.2 ms) and the
+candidate at 191.9 ± 44.2 ms (143.2–272.6 ms). The noisy wall times are
+secondary to the instruction counts; the same trunk-change caveat applies.
+
+Local builds, targeted compiler snapshot tests, all rewatch Rust tests, and
+the equivalence script's three projects and twelve configuration cases pass.
+The full `make test-rewatch` shell suite reaches an unrelated failure in
+`watch/04-watch-config-change.sh`: its whole-tree search treats four shipped
+`sury/src/*.res.mjs` files in `node_modules` as stale compiler output. The
+unchanged baseline executable reproduces the same failure on the same four
+files. No files or assertions in that test were removed or weakened.
+
+#### S1 implementation notes
+
+- The container has a runtime entry and a Belt entry. Runtime verification,
+  paths and registration retain their earlier behavior. Belt is attached as
+  one immutable package index; only referenced cores are decoded, through the
+  same lazy stored-module maps used by incremental loading.
+- Belt paths use the logical recorded root `@rescript/belt`, not a producer
+  machine path. The producer proves that rebasing each core back to the
+  compile directory and restoring package fields reproduces the entire
+  original stored core byte for byte. This proves all of its digest inputs,
+  not only one sampled interface digest. The path-free invariant covers the
+  Belt entry; the runtime's known producer paths remain S2 work.
+- Contrary to the single filename-table description in B.4, exported Lambda
+  locations have both original and imported filename tables and an imported
+  filename index. All three are rebased. Signatures also have separate normal
+  and raw filename tables.
+- The configuration parser rejects duplicate suffixes across package specs,
+  even out of source. Proof builds therefore use `.js`/`.cjs` and
+  `.res.mjs`/`.res.cjs`, each in both layouts. The latter layout also enables
+  JSX version/module/preserve and `LetUnwrap`; byte equality is required.
+- CLI logging defaults to `InfoLevel`, so B.7's info message is visible even
+  without `-v` (and is suppressed by quiet mode), rather than verbose-only.
+- The code also exposes alternate JavaScript printers and backends, absent
+  from D. These fall back with an explicit reason. Snapshot production
+  requires the default printer/backend so an environment-selected producer
+  cannot silently embed a different output contract.
+- S1 does not select Belt in watch or check-only mode; those builds retain
+  their earlier behavior. The code's location-bearing diagnostic retry also
+  requires source compilation: it explicitly discards location-free stored
+  interfaces so errors can quote dependency declarations. This internal mode
+  was absent from D and is now an explicit mismatch reason. The switch controls Belt only; changing runtime
+  fallback semantics is reserved for S2.
+- Unreferenced Belt cores are not decoded merely to duplicate them in its
+  build database. The equivalence script compares every dependent stored
+  core, extras entry, item digest and read record; all Belt cores are checked
+  by the producer's byte-for-byte roundtrip. It builds at the same logical
+  path, moving the two completed result trees apart, since different absolute
+  source paths intentionally produce different interface hashes.
+- `make test-rewatch` and `make test-rewatch-rust` run the equivalence script.
+  Its default projects are `tests/belt_tests`, `tests/tests`, and the prepared
+  `rewatch/testrepo`, followed by twelve root-option configurations. Preparing
+  the testrepo uses `yarn --cwd rewatch/testrepo install` and
+  `node rewatch/tests/add-belt-dependencies.mjs`, as the integration suite does.
+  CI maintainers should add those commands and
+  `scripts/test_snapshot_equivalence.sh` alongside the parity gates; this
+  change does not edit workflows.
 
 - **Changes.** Replace the runtime-only container with `snapshot.rs` and the
   container of B.2 with two packages. The build script produces Belt's part:
