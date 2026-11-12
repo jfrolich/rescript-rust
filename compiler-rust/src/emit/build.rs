@@ -16,13 +16,22 @@ pub(super) struct Build<'a, 'r> {
     pub arena: &'r JsArena,
     pub names: &'r Names,
     pub debug: bool,
+    pub raw_prefix: &'a str,
+    pub raw_pieces: std::cell::RefCell<ArenaVec<'a, super::raw::Piece<'a>>>,
     // S1.2: absent on the default, location-free path.
     pub source_map: Option<&'r super::sourcemap::Spans>,
 }
 impl<'a, 'r> Build<'a, 'r> {
     pub fn new(alloc: &'a Allocator, arena: &'r JsArena, names: &'r Names) -> Self {
+        let mut prefix = oxc_allocator::StringBuilder::from_str_in(super::raw::PREFIX, alloc);
+        let prefix_len = names.raw_prefix_len();
+        while prefix.len() < prefix_len {
+            prefix.push('_');
+        }
         Self {
             b: AstBuilder::new(alloc),
+            raw_prefix: prefix.into_str(),
+            raw_pieces: std::cell::RefCell::new(ArenaVec::new_in(&alloc)),
             arena,
             names,
             debug: false,
@@ -521,6 +530,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 Expression::new_sequence_expression(SPAN, expressions, &self.b)
             }
             ExprKind::Call(f, args, _) => {
+                walk::call_supported(a, f)?;
                 let mut call = CallExpression::new(
                     SPAN,
                     self.expr(f)?,
@@ -609,7 +619,7 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::OptionalBlock(e, true) => self.expr(e)?,
             ExprKind::OptionalBlock(_, false) => return Err(Unsupported("optional block helper")),
             ExprKind::CamlBlock(items, _, tag) => self.caml_block(a.exprs(items), a.tag(tag))?,
-            ExprKind::RawJsCode(_) => return walk::raw_supported(),
+            ExprKind::RawJsCode(id) => self.raw(id, walk::RawContext::Expression)?,
             ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
             ExprKind::TemplateLiteral(segment) => Expression::TemplateLiteral(
                 self.b
@@ -635,6 +645,35 @@ impl<'a, 'r> Build<'a, 'r> {
             ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
         })
     }
+    /// The first line receives oxc's surrounding indentation; continuation
+    /// lines are copied byte-for-byte, including their original indentation.
+    /// Adding indentation to them would mutate the programmer's raw payload.
+    fn raw(
+        &self,
+        id: crate::js_ir::arena::RawId,
+        context: walk::RawContext,
+    ) -> Result<Expression<'a>, Unsupported> {
+        use std::fmt::Write;
+        if self.source_map.is_some() {
+            return Err(Unsupported("source map: verbatim raw JavaScript"));
+        }
+        let info = self.arena.raw(id);
+        let (before, after, remove_semicolon) = walk::raw_wrapping(info, context)?;
+        let mut pieces = self.raw_pieces.borrow_mut();
+        let mut token =
+            oxc_allocator::StringBuilder::from_str_in(self.raw_prefix, self.b.allocator());
+        write!(&mut token, "{}$", pieces.len()).expect("arena string write");
+        let token = token.into_str();
+        pieces.push(super::raw::Piece {
+            token,
+            text: literal::arena_raw(&info.code, self.b.allocator()),
+            before,
+            after,
+            remove_semicolon,
+        });
+        Ok(Expression::new_identifier(SPAN, token, &self.b))
+    }
+
     /// JSON is already validated source, not a string value. It meets no
     /// identifiers; parsing reproduces property-key forms and precedence, while
     /// the surrounding oxc node supplies parentheses and statement semicolons.
@@ -738,7 +777,14 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         let body = match walk::function_form(self.arena, f, false)? {
             walk::FunctionForm::Eta(e) => return self.expr(e),
-            walk::FunctionForm::ArrowExpression(e) => ArrowFunctionBody::from(self.expr(e)?),
+            walk::FunctionForm::ArrowExpression(e) => {
+                ArrowFunctionBody::from(if let ExprKind::RawJsCode(id) = self.arena.ek(e) {
+                    walk::expression_comment(self.arena, e)?;
+                    self.raw(id, walk::RawContext::Arrow)?
+                } else {
+                    self.expr(e)?
+                })
+            }
             walk::FunctionForm::ArrowEmpty => ArrowFunctionBody::FunctionBody(
                 self.b
                     .alloc(FunctionBody::new(SPAN, self.b.vec(), self.b.vec(), &self.b)),
@@ -771,7 +817,13 @@ impl<'a, 'r> Build<'a, 'r> {
     }
     fn effect(&self, e: Expr, out: &mut ArenaVec<'a, Statement<'a>>) -> Result<(), Unsupported> {
         if !walk::omitted_expression(self.arena, e) {
-            out.push(self.expression_statement(self.expr(e)?));
+            let expression = if let ExprKind::RawJsCode(id) = self.arena.ek(e) {
+                walk::expression_comment(self.arena, e)?;
+                self.raw(id, walk::RawContext::Statement)?
+            } else {
+                self.expr(e)?
+            };
+            out.push(self.expression_statement(expression));
         }
         Ok(())
     }

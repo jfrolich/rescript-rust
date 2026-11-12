@@ -3,6 +3,8 @@ mod build;
 mod literal;
 mod naming;
 mod program;
+mod raw;
+pub use raw::RawSegment;
 pub mod sourcemap;
 mod walk;
 
@@ -40,7 +42,10 @@ impl PrinterMode {
 
 /// Per-compilation-option counters, shared by workers but never global.
 #[derive(Debug, Default)]
-pub struct PrinterStats(Mutex<Coverage>);
+pub struct PrinterStats {
+    coverage: Mutex<Coverage>,
+    raw_audit: Option<Mutex<Vec<RawSegment>>>,
+}
 
 /// A snapshot of complete-file support and first fallback reasons.
 #[derive(Clone, Debug, Default)]
@@ -52,9 +57,39 @@ pub struct Coverage {
 }
 
 impl PrinterStats {
+    /// Enable IR-derived raw-segment evidence for the oracle only. Ordinary
+    /// compilation does not allocate or retain this diagnostic data.
+    pub fn with_raw_audit() -> Self {
+        Self {
+            coverage: Mutex::default(),
+            raw_audit: Some(Mutex::default()),
+        }
+    }
+
+    pub(crate) fn raw_audit_buffer(&self) -> Option<Vec<RawSegment>> {
+        self.raw_audit.as_ref().map(|_| Vec::new())
+    }
+
+    pub(crate) fn record_raw(&self, raw: Option<Vec<RawSegment>>) {
+        if let (Some(target), Some(raw)) = (&self.raw_audit, raw) {
+            *target.lock().expect("raw audit lock poisoned") = raw;
+        }
+    }
+
+    /// Take the most recently emitted file's raw segments, in output order.
+    pub fn take_raw_segments(&self) -> Vec<RawSegment> {
+        self.raw_audit
+            .as_ref()
+            .map(|raw| std::mem::take(&mut *raw.lock().expect("raw audit lock poisoned")))
+            .unwrap_or_default()
+    }
+
     /// Count one attempted output.
     pub fn record(&self, result: &Result<(String, Option<String>), Unsupported>) {
-        let mut counts = self.0.lock().expect("printer coverage lock poisoned");
+        let mut counts = self
+            .coverage
+            .lock()
+            .expect("printer coverage lock poisoned");
         match result {
             Ok(_) => counts.supported += 1,
             Err(reason) => *counts.unsupported.entry(reason.0).or_default() += 1,
@@ -63,7 +98,7 @@ impl PrinterStats {
 
     /// Read counters without resetting them.
     pub fn snapshot(&self) -> Coverage {
-        self.0
+        self.coverage
             .lock()
             .expect("printer coverage lock poisoned")
             .clone()
@@ -76,19 +111,55 @@ pub fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    jsx_preserve: bool,
+    _jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
-    program::emit(program, resolver, directives, debug, jsx_preserve, header, None)
+    program::emit(
+        program,
+        resolver,
+        directives,
+        debug,
+        header,
+        None,
+        None,
+    )
+}
+
+pub(crate) fn emit_audited(
+    program: &JsDepsProgram,
+    resolver: &ModulePathResolver,
+    directives: &[String],
+    debug: bool,
+    _jsx_preserve: bool,
+    header: bool,
+    audit: Option<&mut Vec<RawSegment>>,
+) -> Result<(String, Option<String>), Unsupported> {
+    program::emit(
+        program,
+        resolver,
+        directives,
+        debug,
+        header,
+        None,
+        audit,
+    )
 }
 
 /// Emit with source maps, retaining whole-file fallback on unsupported mappings.
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
     program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
-    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+    debug: bool, _jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
 ) -> Result<(String, Option<String>), Unsupported> {
-    program::emit(program, resolver, directives, debug, jsx_preserve, header, Some(options))
+    program::emit(
+        program,
+        resolver,
+        directives,
+        debug,
+        header,
+        Some(options),
+        None,
+    )
 }
 
 #[cfg(test)]
@@ -127,7 +198,7 @@ mod oracle_tests {
     use js_reformat::{ReformatOptions, reformat};
 
     fn oracle(source: &str, commonjs: bool) {
-        let stats = Arc::new(PrinterStats::default());
+        let stats = Arc::new(PrinterStats::with_raw_audit());
         let mut options = CompilerOptions {
             js_printer: PrinterMode::Legacy,
             output_module_format: Some(if commonjs {
@@ -146,11 +217,41 @@ mod oracle_tests {
             drop_decoration_comments: true,
             ..Default::default()
         };
-        assert_eq!(reformat(&legacy, mode).unwrap(), actual, "{source}");
+        let segments = stats.take_raw_segments();
+        if source.contains("%raw(") {
+            assert!(
+                !segments.is_empty(),
+                "raw fixture must exercise substitution"
+            );
+        }
+        let normalized = reformat(&actual, mode).unwrap();
         assert_eq!(
-            reformat(&actual, mode).unwrap(),
-            actual,
-            "fixed point: {source}"
+            reformat(&legacy, mode).unwrap(),
+            if segments.is_empty() {
+                actual.clone()
+            } else {
+                normalized
+            },
+            "{source}"
+        );
+        let mut masked = String::new();
+        let mut cursor = 0;
+        for segment in &segments {
+            assert_eq!(
+                &actual[segment.text_range.clone()],
+                segment.text,
+                "IR raw text: {source}"
+            );
+            assert!(segment.replacement_range.start >= cursor);
+            masked.push_str(&actual[cursor..segment.replacement_range.start]);
+            masked.push_str(&segment.placeholder);
+            cursor = segment.replacement_range.end;
+        }
+        masked.push_str(&actual[cursor..]);
+        assert_eq!(
+            reformat(&masked, mode).unwrap(),
+            masked,
+            "masked fixed point: {source}"
         );
     }
 
@@ -172,6 +273,19 @@ mod oracle_tests {
             }
         }
     }
+    #[test]
+    fn placeholder_in_non_raw_string_falls_back_without_replacement() {
+        let source = "let text = \"__rescript_raw$0$\"; let value = %raw(`({x:1})`)";
+        let stats = Arc::new(PrinterStats::with_raw_audit());
+        let mut options = CompilerOptions::default();
+        let legacy = compile_source_to_js_with_options(source, "Collision.res", &options).unwrap();
+        options.js_printer = PrinterMode::Oxc(stats.clone());
+        let actual = compile_source_to_js_with_options(source, "Collision.res", &options).unwrap();
+        assert_eq!(actual, legacy);
+        assert_eq!(stats.snapshot().unsupported["raw placeholder collision"], 1);
+        assert!(stats.take_raw_segments().is_empty());
+    }
+
     #[test]
     fn control_flow_source_oracle() {
         for source in [
@@ -255,9 +369,17 @@ mod oracle_tests {
         }
     }
     #[test]
-    fn verbatim_raw_snippets_fall_back_without_loss() {
+    fn verbatim_raw_snippets_are_preserved() {
         for source in [
             "let value = %raw(`({answer:42})`)",
+            "let f = () => %raw(`({answer:42})`)",
+            "let f = x => %raw(`console.log(  1 )`)",
+            "let value = %raw(`({message: \"__rescript_raw$0$\"})`)",
+            "let value = %raw(`({answer:42,\n  other:43})`)",
+            "%%raw(`console.log(1);\n  console.log(2);`)",
+            "@val external existing: int = \"__rescript_raw$0$\"; let value = (existing, %raw(`({x:1})`))",
+            "let value = (%raw(`({x:1})`), %raw(`({x:1})`))",
+            "let value = %raw(`({text: \"café 😀\"})`)",
             "let value = %raw(`function(x){return x}`)",
             "%%raw(`console.log(  1 )`)\nlet value = 1",
             "%%raw(`// leading comment`)\nlet value = 1",
@@ -267,19 +389,9 @@ mod oracle_tests {
             "%%raw(`console.log(/* argument comment */ 1)`)",
             "%%raw(`console.log(1) // trailing comment`)",
         ] {
-            let stats = Arc::new(PrinterStats::default());
-            let mut options = CompilerOptions {
-                js_printer: PrinterMode::Legacy,
-                ..CompilerOptions::default()
-            };
-            let legacy =
-                compile_source_to_js_with_options(source, "Comments.res", &options).unwrap();
-            options.js_printer = PrinterMode::Oxc(stats.clone());
-            let actual =
-                compile_source_to_js_with_options(source, "Comments.res", &options).unwrap();
-            assert_eq!(actual, legacy);
-            assert_eq!(stats.snapshot().supported, 0, "{source}");
-            assert_eq!(stats.snapshot().unsupported.values().sum::<usize>(), 1);
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
         }
     }
 }
