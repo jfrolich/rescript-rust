@@ -36,11 +36,17 @@ pub enum Phase {
     /// GenType child buckets. They are reported separately, not added again
     /// to the top-level recorded total. Counts are artifact-phase invocations.
     GentypePrepare,
+    /// Typed-artifact annotation discovery.
     GentypeAnnotations,
+    /// Translation of the declaration cache input.
     GentypeDeclarations,
+    /// Conversion of declaration locations to portable handles.
     GentypePortable,
+    /// Encoding translated declarations for the cache/store.
     GentypeEncoding,
+    /// Translation and text generation for an annotated artifact.
     GentypeEmission,
+    /// Output file writes, no-match removal checks, and deletions.
     GentypeFiles,
 }
 
