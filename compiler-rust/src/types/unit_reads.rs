@@ -475,6 +475,8 @@ fn opened(opens: &[String]) -> impl Iterator<Item = UnitRead> + '_ {
 /// The reads of an implementation; `opens` are the units opened by the
 /// command line (read as whole modules).
 pub fn structure_reads(
+    log: &ReadLog,
+    unit: &str,
     ctx: &TypeContext,
     ta: &TypedArena,
     structure: &Structure,
@@ -489,11 +491,14 @@ pub fn structure_reads(
         out: opened(opens).collect(),
     };
     collector.structure(structure);
-    collector.out
+    log.check(ctx, ta, opens, &collector.out, unit);
+    log.resolve(ctx, ta, opens)
 }
 
 /// The reads of an interface.
 pub fn signature_reads(
+    log: &ReadLog,
+    unit: &str,
     ctx: &TypeContext,
     ta: &TypedArena,
     signature: &TypedSignature,
@@ -508,7 +513,8 @@ pub fn signature_reads(
         out: opened(opens).collect(),
     };
     collector.signature(signature);
-    collector.out
+    log.check(ctx, ta, opens, &collector.out, unit);
+    log.resolve(ctx, ta, opens)
 }
 
 #[cfg(test)]

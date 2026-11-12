@@ -10693,6 +10693,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
 
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
+            tctx.read_log.as_ref().expect("unit read logging enabled"),
+            filename,
             &type_ctx,
             &tctx.typed,
             &typed_structure,
@@ -10701,10 +10703,6 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     } else {
         Vec::new()
     };
-
-    if let Some(log) = &tctx.read_log {
-        log.check(&type_ctx, &tctx.typed, &options.open_modules, &unit_reads, filename);
-    }
 
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
@@ -11552,6 +11550,8 @@ pub fn typecheck_preprocessed_signature_in_process(
     };
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
+            tctx.read_log.as_ref().expect("unit read logging enabled"),
+            filename,
             &type_ctx,
             &tctx.typed,
             &typed_signature,
@@ -11560,10 +11560,6 @@ pub fn typecheck_preprocessed_signature_in_process(
     } else {
         Vec::new()
     };
-
-    if let Some(log) = &tctx.read_log {
-        log.check(&type_ctx, &tctx.typed, &options.open_modules, &unit_reads, filename);
-    }
 
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
