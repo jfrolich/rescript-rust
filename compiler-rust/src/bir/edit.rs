@@ -536,9 +536,10 @@ impl Bir {
         child_effects: impl Fn(NodeId) -> (bool, bool),
     ) -> (bool, bool) {
         let children = self.view(id).children();
+        let j_pure = j::facts::purity(self, id, false, |c| child_effects(c).0);
         let all_pure = children.iter().all(|&c| child_effects(c).0);
         let no_alloc = children.iter().all(|&c| child_effects(c).1);
-        match self.view(id) {
+        let effects = match self.view(id) {
             View::Var { .. }
             | View::Global { .. }
             | View::JQualified { .. }
@@ -599,7 +600,8 @@ impl Bir {
             }
             // Property access, coercions, proxies, calls and raw JS may run user code.
             _ => (false, false),
-        }
+        };
+        (j_pure.unwrap_or(effects.0), effects.1)
     }
     fn repair(&mut self, mut id: NodeId) {
         loop {
@@ -607,7 +609,8 @@ impl Bir {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
-            let old_flags = self.node(id).flags();
+            let old_node = self.node(id);
+            let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
             if pure {
@@ -615,6 +618,18 @@ impl Bir {
             }
             if no_alloc {
                 flags.0 |= NodeFlags::NO_ALLOC;
+            }
+            if !matches!(old_node.view(&self.lists), View::Var { .. }) {
+                if let Some(strict) = j::facts::purity(self, id, true, |c| {
+                    matches!(self.view(c), View::Var { .. }) || j::facts::strictly_pure(self, c)
+                }) {
+                    flags.0 &= !NodeFlags::STRICT;
+                    if strict { flags.0 |= NodeFlags::STRICT; }
+                    flags.0 &= !NodeFlags::J_SUBEXPR;
+                    if j::facts::subexpression(self, id, |c| matches!(self.view(c), View::Var { .. }) || self.node(c).flags().contains(NodeFlags::J_SUBEXPR)) {
+                        flags.0 |= NodeFlags::J_SUBEXPR;
+                    }
+                }
             }
             self.nodes[id.index()].set_flags(flags);
             let facts_changed = self.update_facts(id);
@@ -855,7 +870,7 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC;
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
@@ -896,8 +911,17 @@ impl Bir {
                 self.view(parent),
                 View::Prim { args, .. } if args.get(1) == Some(&target)
             );
-            if effects_changed || second_operand || self.update_facts(parent) {
+            let j_shape = matches!(self.view(parent), View::JBin { .. } | View::JCall { .. });
+            if effects_changed || second_operand || j_shape || self.update_facts(parent) {
                 self.repair(parent);
+            }
+            // Array.isArray recognises a two-edge callee shape, not just purity.
+            if matches!(self.view(parent), View::JDot { .. }) {
+                if let Some(grandparent) = self.parents[parent.index()] {
+                    if matches!(self.view(grandparent), View::JCall { .. }) {
+                        self.repair(grandparent);
+                    }
+                }
             }
         }
         // Moving a subtree up to an ancestor's slot removes boundaries between

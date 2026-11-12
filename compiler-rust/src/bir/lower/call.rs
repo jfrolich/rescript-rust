@@ -208,7 +208,7 @@ impl State {
         info: crate::js_ir::CallInfo,
     ) -> NodeId {
         let info = self.arena.js_info(crate::bir::JsPayload::Call(info));
-        self.arena.new_node(View::JCall { callee, args, info }, 0)
+        crate::bir::j::plain::node(&mut self.arena, View::JCall { callee, args, info }, 0)
     }
 
     /// C:1341 apply_with_arity: consume saturated groups once, then eta-expand

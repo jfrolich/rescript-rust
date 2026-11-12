@@ -11,12 +11,9 @@ impl State {
             .contains(NodeFlags::DELAY_SAFE)
     }
 
-    /// A:90 runs_no_code: maintained at J construction, including member chains.
+    /// A:90 runs_no_code: inspect each owned member spine without recursion.
     fn runs_no_code(&self, value: NodeId) -> bool {
-        self.arena
-            .node(value)
-            .flags()
-            .contains(NodeFlags::RUNS_NO_CODE)
+        crate::bir::j::facts::runs_no_code(&self.arena, value)
     }
 
     /// A:96 defines_pure_values: each statement is examined once by sequencing.
@@ -69,7 +66,7 @@ impl State {
                         if self.arena.node(first).flags().contains(NodeFlags::STRICT) {
                             self.arena.release(first);
                         } else {
-                            statements.push(self.arena.new_node(View::SExp { value: first }, 0));
+                            statements.push(crate::bir::j::norm::js1_exp(&mut self.arena, first));
                         }
                         work.push(Work::Enter(second));
                         continue;

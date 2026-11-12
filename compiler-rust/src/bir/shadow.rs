@@ -232,6 +232,7 @@ pub fn check_js(
         Ok(exported) => exported,
         Err(reason) => return report(unit, "js-bridge", Some(reason.0), None),
     };
+    super::j::write_stats(imported.arena.j_stats)?;
     let print = |p| crate::js_ir::print_deps_program_with_directives_and_options(
         p, Some(resolver), directives, debug, jsx_preserve, emit_header,
     );
@@ -943,6 +944,8 @@ pub(crate) fn prepare_lower(
     // smart constructor and no normalize. The last SExp transports Out::value.
     let mut exported = super::bridge_j::export_js(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
+    super::j::write_stats(lowered.program.arena.j_stats)
+        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("J normalisation stats: {error}")))?;
     #[cfg(debug_assertions)]
     if arena.node_count() <= 128 {
         let (direct, _) = super::bridge::import_for_lowering(arena, root);

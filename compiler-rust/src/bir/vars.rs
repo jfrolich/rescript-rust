@@ -68,6 +68,8 @@ impl VarFlags {
     pub const JS_GLOBAL: u8 = 16;
     /// Module identity.
     pub const MODULE: u8 = 32;
+    /// Imported identity is a JavaScript identifier or a persistent global.
+    pub const JS_IDENT: u8 = 64;
     /// Test a property.
     pub fn contains(self, bit: u8) -> bool {
         self.0 & bit != 0
@@ -76,6 +78,8 @@ impl VarFlags {
 /// Structure-of-arrays storage; mutation is restricted to Bir's editing API.
 #[derive(Default)]
 pub struct VarTable {
+    /// J-only copies retain their source printing identity while owning distinct binders.
+    pub(super) j_origin: crate::fast_hash::AHashMap<VarId, VarId>,
     pub(super) name: Vec<Name>,
     pub(super) order: Vec<u32>,
     pub(super) flags: Vec<VarFlags>,
