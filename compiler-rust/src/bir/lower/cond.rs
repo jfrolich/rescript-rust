@@ -639,10 +639,10 @@ impl State {
         &mut self,
         cont: Cont,
         parts: Parts,
-        mut test: NodeId,
+        test: NodeId,
         target: VarId,
-        mut yes: Span,
-        mut no: Span,
+        yes: Span,
+        no: Span,
     ) -> Probed {
         let used = (crate::js_ir::op::UsedStats::Used as u16) << 2;
         if let Cont::Value(_) = cont {
@@ -660,35 +660,15 @@ impl State {
             let value = self.pure_expression(View::Var { var: target }, 0);
             return Probed::Out(self.output(parts.start, Some(value), Finished::False));
         }
-        // C:6741 normalize_if_assignment_merge_order, before the merge.
-        if self.statements.first(no).is_some()
-            && let Some(value) = self.positive(test)
-        {
-            test = value;
-            std::mem::swap(&mut yes, &mut no);
-        }
-        let merged = match (
-            self.single_assignment(yes, target),
-            self.single_assignment(no, target),
-        ) {
-            (Some((then_, yes_value)), Some((else_, no_value))) => {
-                self.arena.detach(yes_value);
-                self.arena.detach(no_value);
-                self.arena.release(then_);
-                self.arena.release(else_);
-                self.kill(yes, no);
-                Some(norm::je7_cond(&mut self.arena, test, yes_value, no_value))
-            }
-            _ => None,
-        };
+        let merged = self.merge_assignments(test, target, yes, no);
         match (cont, merged) {
             // R2, C:5049 compile_declared_if_block.
-            (Cont::Declare(kind, _), Some(value)) => {
+            (Cont::Declare(kind, _), Ok(value)) => {
                 let statement = crate::bir::j::declare(&mut self.arena, kind, target, value);
                 self.statements.fill(parts.head - 1, statement);
                 self.statements.trim(Self::from(parts.head));
             }
-            (Cont::Declare(kind, _), None) => {
+            (Cont::Declare(kind, _), Err((test, yes, no))) => {
                 let statement = self.if_statement(test, yes, no);
                 self.place(parts.head, statement);
                 let declaration = self.arena.new_node(
@@ -701,16 +681,55 @@ impl State {
                 self.statements.fill(parts.head - 1, declaration);
             }
             // R3, C:5018 compile_test_assignment_block.
-            (_, Some(value)) => {
-                let statement = crate::bir::j::assign(&mut self.arena, target, value);
-                self.statements.fill(parts.head, statement);
-            }
-            (_, None) => {
-                let statement = self.if_statement(test, yes, no);
+            (_, merged) => {
+                let statement = self.assignment_statement(target, merged);
                 self.place(parts.head, statement);
             }
         }
         Probed::Out(self.output(parts.start, None, Finished::False))
+    }
+
+    /// Rows R2 and R3 before their result: the swap of C:6741
+    /// normalize_if_assignment_merge_order, then the conditional expression
+    /// when each run is the one statement `target = x` (the runs are
+    /// consumed), else the operands after the swap. Constant on trimmed runs.
+    fn merge_assignments(
+        &mut self,
+        mut test: NodeId,
+        target: VarId,
+        mut yes: Span,
+        mut no: Span,
+    ) -> Result<NodeId, (NodeId, Span, Span)> {
+        if self.statements.first(no).is_some()
+            && let Some(value) = self.positive(test)
+        {
+            test = value;
+            std::mem::swap(&mut yes, &mut no);
+        }
+        let (Some((then_, yes_value)), Some((else_, no_value))) = (
+            self.single_assignment(yes, target),
+            self.single_assignment(no, target),
+        ) else {
+            return Err((test, yes, no));
+        };
+        self.arena.detach(yes_value);
+        self.arena.detach(no_value);
+        self.arena.release(then_);
+        self.arena.release(else_);
+        self.kill(yes, no);
+        Ok(norm::je7_cond(&mut self.arena, test, yes_value, no_value))
+    }
+
+    /// Row R3 as one statement: `target = cond(...)` or `if_(c, T, E)`.
+    fn assignment_statement(
+        &mut self,
+        target: VarId,
+        merged: Result<NodeId, (NodeId, Span, Span)>,
+    ) -> NodeId {
+        match merged {
+            Ok(value) => crate::bir::j::assign(&mut self.arena, target, value),
+            Err((test, yes, no)) => self.if_statement(test, yes, no),
+        }
     }
 
     /// R4 steps 2 to 4, C:4884 compile_if_effect_block, then C:7612
@@ -1000,14 +1019,14 @@ impl State {
         Probed::Out(self.output(parts.start, value, Finished::False))
     }
 
-    /// `realize(Free::Cond, k)` of section 3.6 on the values of the two
-    /// branches. Constant.
+    /// `realize(Free::Cond, k)` of section 3.6: on the values of the two
+    /// branches, or in **A** on their assignments. Constant.
     pub(super) fn realize_conditional(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
-        let start = self.statements.mark().start;
-        let yes = yes.value.expect("free value");
-        let no = no.value.expect("free value");
         match cx.cont {
             Cont::Effect(Tail::No) => {
+                let start = self.statements.mark().start;
+                let yes = yes.value.expect("free value");
+                let no = no.value.expect("free value");
                 self.free_effect(test, yes, no);
                 let Probed::Out(out) = self.effect_output(start) else {
                     unreachable!()
@@ -1015,17 +1034,17 @@ impl State {
                 out
             }
             Cont::Assign(target) => {
-                // R3: the branches are `id = yes` and `id = no`, so the swap
-                // of C:6741 applies and both merge.
-                let value = match self.positive(test) {
-                    Some(test) => norm::je7_cond(&mut self.arena, test, no, yes),
-                    None => norm::je7_cond(&mut self.arena, test, yes, no),
-                };
-                let statement = crate::bir::j::assign(&mut self.arena, target, value);
+                // R3, C:4996: the branches were realized for `A(target)`.
+                let start = yes.stmts.start;
+                let merged = self.merge_assignments(test, target, yes.stmts, no.stmts);
+                let statement = self.assignment_statement(target, merged);
+                self.statements.trim(Self::from(start));
                 self.statements.push(statement);
                 self.output(start, None, Finished::False)
             }
             Cont::Value(_) | Cont::Declare(..) | Cont::Effect(Tail::Return(_)) => {
+                let yes = yes.value.expect("free value");
+                let no = no.value.expect("free value");
                 let value = norm::je7_cond(&mut self.arena, test, yes, no);
                 self.leaf(cx, value)
             }
@@ -1035,276 +1054,454 @@ impl State {
 
 #[cfg(test)]
 mod tests {
+    use super::super::oracle_tests::compare;
     use super::*;
     use crate::bir::{bridge, bridge_j};
     use crate::ident::IdentFlags;
-    use crate::js_ir::arena::{JsDepsProgram, JsProgram, StmtKind};
-    use crate::lambda::{arena::LamArena, lam_compile::LambdaCompiler, lam_constant::Constant};
+    use crate::js_ir::BinOp;
+    use crate::lambda::arena::{Lam, LamArena};
+    use crate::lambda::lam_constant::Constant;
+    use crate::lambda::lam_primitive::Primitive;
+    use crate::lambda::{ApInfo, ApplyStatus, FunctionAttribute, LamLoc};
 
-    fn compare_context(statement_branch: bool, context: u8) {
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
-        let mut yes = source.const_(Constant::JsTrue);
-        if statement_branch {
-            let value = source.const_(Constant::JsNull);
-            yes = source.let_(
-                LetKind::Strict,
-                Ident::new("binding", 2, IdentFlags::NONE),
-                value,
-                yes,
-            );
-        }
-        let no = source.const_(Constant::JsFalse);
-        let root = source.if_raw(condition, yes, no);
-        compare_given(source, root, context);
+    // Level-L shapes. Every oracle test lowers its shape in the five
+    // continuations, probed and direct, against the legacy functions.
+    fn var(a: &mut LamArena, name: &str, stamp: i32) -> Lam {
+        a.var(Ident::new(name, stamp, IdentFlags::NONE))
+    }
+    fn int(a: &mut LamArena, i: i32) -> Lam {
+        a.const_(Constant::Int { i, comment: None })
+    }
+    fn unit(a: &mut LamArena) -> Lam {
+        a.const_(Constant::JsUndefined { is_unit: true })
+    }
+    /// A call: a value with an effect and no statement.
+    fn effect(a: &mut LamArena, stamp: i32) -> Lam {
+        let callee = var(a, "effect", stamp);
+        let info = ApInfo {
+            loc: LamLoc::NONE,
+            status: ApplyStatus::InferFull,
+        };
+        a.apply_raw(callee, &[], info)
+    }
+    /// `let binding = null; body`: a form that needs a statement.
+    fn bound(a: &mut LamArena, stamp: i32, body: Lam) -> Lam {
+        let value = a.const_(Constant::JsNull);
+        a.let_(
+            LetKind::Strict,
+            Ident::new("binding", stamp, IdentFlags::NONE),
+            value,
+            body,
+        )
+    }
+    fn if_(a: &mut LamArena, stamp: i32, yes: Lam, no: Lam) -> Lam {
+        let condition = var(a, "condition", stamp);
+        a.if_raw(condition, yes, no)
+    }
+    fn short(a: &mut LamArena, and: bool, left: Lam, right: Lam) -> Lam {
+        let op = if and {
+            Primitive::Psequand
+        } else {
+            Primitive::Psequor
+        };
+        a.prim_raw(op, &[left, right], LamLoc::NONE)
+    }
+    fn check(build: impl FnOnce(&mut LamArena) -> Lam) {
+        let mut a = LamArena::new();
+        let root = build(&mut a);
+        compare(a, root);
     }
 
-    fn compare_given(mut source: LamArena, root: crate::lambda::arena::Lam, context: u8) {
-        let input = bridge::import_lambda(&source, root).unwrap();
-        let node = input.root;
-        let mut state = State::new(input);
-        let target = state.fresh_variable("result");
-        let target_id = state.idents[target.index()];
-        let cx = match context {
-            0 => Cx::value(),
-            1 => Cx::assign(target),
-            2 => Cx::declare(LetKind::Strict, target),
-            3 => Cx::effect(),
-            4 => Cx::returning(),
-            _ => unreachable!(),
-        };
-        let output = state.probe(cx, node).unwrap();
-        let lowered = state.complete(cx, output);
-        lowered
-            .program
-            .arena
-            .validate(Some(lowered.program.root), false)
-            .unwrap();
-        let actual = bridge_j::export_js(&lowered.program).unwrap();
-        let mut legacy = LambdaCompiler::new();
-        let output = legacy.bir_lower_oracle(&mut source, root, cx.cont, target_id);
-        let mut block = output.prelude;
-        block.push(legacy.j.stmt(StmtKind::Exp(output.expr)));
-        let expected = JsDepsProgram {
-            program: JsProgram::new_in(block, vec![], legacy.j),
-            modules: vec![],
-            side_effect: None,
-        };
-        let print = |program: &JsDepsProgram| {
-            crate::js_ir::print_deps_program_with_directives_and_options(
-                program,
-                None,
-                &[],
-                false,
-                false,
-                false,
-            )
-        };
-        assert_eq!(print(&actual), print(&expected));
+    #[test]
+    fn r1_r2_r3_both_free() {
+        check(|a| {
+            let (yes, no) = (int(a, 1), int(a, 2));
+            if_(a, 1, yes, no)
+        });
     }
-
-    fn effect_case(yes_shape: u8, no_shape: u8) {
-        fn branch(source: &mut LamArena, shape: u8, stamp: i32) -> crate::lambda::arena::Lam {
-            let mut body = if shape & 1 == 0 {
-                source.const_(Constant::JsNull)
-            } else {
-                let callee = source.var(Ident::new("effect", stamp, IdentFlags::NONE));
-                source.apply_raw(
-                    callee,
-                    &[],
-                    crate::lambda::ApInfo {
-                        loc: crate::lambda::LamLoc::NONE,
-                        status: crate::lambda::ApplyStatus::InferFull,
-                    },
-                )
-            };
-            if shape & 2 != 0 {
-                let value = source.const_(Constant::JsNull);
-                body = source.let_(
-                    LetKind::Strict,
-                    Ident::new("binding", stamp + 1, IdentFlags::NONE),
-                    value,
-                    body,
-                );
+    #[test]
+    fn r1_r2_r3_statement_in_then() {
+        check(|a| {
+            let yes = int(a, 1);
+            let (yes, no) = (bound(a, 2, yes), int(a, 2));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r1_r2_r3_statement_in_else() {
+        check(|a| {
+            let no = int(a, 2);
+            let (yes, no) = (int(a, 1), bound(a, 2, no));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r1_r2_r3_statements_in_both() {
+        check(|a| {
+            let (yes, no) = (int(a, 1), int(a, 2));
+            let (yes, no) = (bound(a, 2, yes), bound(a, 3, no));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r1_r2_free_sequence_is_a_comma_and_r3_assigns_in_statements() {
+        check(|a| {
+            let (head, one) = (effect(a, 2), int(a, 1));
+            let (yes, no) = (a.seq_raw(head, one), int(a, 2));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r1_r2_r3_test_with_statements() {
+        check(|a| {
+            let test = var(a, "condition", 1);
+            let test = bound(a, 2, test);
+            let (yes, no) = (int(a, 1), int(a, 2));
+            a.if_raw(test, yes, no)
+        });
+        check(|a| {
+            let test = var(a, "condition", 1);
+            let test = bound(a, 2, test);
+            let yes = int(a, 1);
+            let (yes, no) = (bound(a, 3, yes), int(a, 2));
+            a.if_raw(test, yes, no)
+        });
+    }
+    #[test]
+    fn nested_conditionals_free_and_not() {
+        for statement in [false, true] {
+            for then_position in [false, true] {
+                check(|a| {
+                    let mut inner = int(a, 3);
+                    if statement {
+                        inner = bound(a, 9, inner);
+                    }
+                    let two = int(a, 2);
+                    let inner = if_(a, 2, two, inner);
+                    let one = int(a, 1);
+                    if then_position {
+                        if_(a, 1, inner, one)
+                    } else {
+                        if_(a, 1, one, inner)
+                    }
+                });
             }
-            body
         }
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
-        let yes = branch(&mut source, yes_shape, 10);
-        let no = branch(&mut source, no_shape, 20);
-        let root = source.if_raw(condition, yes, no);
-        compare_given(source, root, 3);
+    }
+    #[test]
+    fn three_deep_chains_with_statements_at_each_level() {
+        for then_position in [false, true] {
+            check(|a| {
+                let mut root = int(a, 0);
+                root = bound(a, 10, root);
+                for level in 1..4 {
+                    let other = int(a, level);
+                    let other = bound(a, 10 + level, other);
+                    root = if then_position {
+                        if_(a, level, root, other)
+                    } else {
+                        if_(a, level, other, root)
+                    };
+                }
+                root
+            });
+        }
+    }
+    #[test]
+    fn conditional_as_binding_argument_and_sequence_head() {
+        check(|a| {
+            let yes = int(a, 1);
+            let (yes, no) = (bound(a, 3, yes), int(a, 2));
+            let value = if_(a, 1, yes, no);
+            let id = Ident::new("x", 4, IdentFlags::NONE);
+            let body = a.var(id);
+            a.let_(LetKind::Strict, id, value, body)
+        });
+        check(|a| {
+            let (yes, no) = (effect(a, 2), effect(a, 3));
+            let head = if_(a, 1, yes, no);
+            let tail = int(a, 1);
+            a.seq_raw(head, tail)
+        });
     }
 
     #[test]
-    fn r4_step1_neither_effect() {
-        effect_case(0, 0);
+    fn r4_step1_neither_branch_has_an_effect() {
+        check(|a| {
+            let (yes, no) = (int(a, 1), int(a, 2));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step1_both_effects() {
-        effect_case(1, 1);
+    fn r4_step1_both_branches_have_effects() {
+        check(|a| {
+            let (yes, no) = (effect(a, 2), effect(a, 3));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step1_then_effect() {
-        effect_case(1, 0);
+    fn r4_step1_only_then_has_an_effect() {
+        check(|a| {
+            let (yes, no) = (effect(a, 2), int(a, 2));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step1_else_effect() {
-        effect_case(0, 1);
+    fn r4_step1_only_else_has_an_effect() {
+        check(|a| {
+            let (yes, no) = (int(a, 1), effect(a, 3));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step2_free_pure_then() {
-        effect_case(0, 3);
+    fn r4_step2_then_is_free_without_effects() {
+        check(|a| {
+            let no = effect(a, 3);
+            let (yes, no) = (int(a, 1), bound(a, 4, no));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step3_free_pure_else() {
-        effect_case(3, 0);
+    fn r4_step3_else_is_free_without_effects() {
+        check(|a| {
+            let yes = effect(a, 2);
+            let (yes, no) = (bound(a, 4, yes), int(a, 2));
+            if_(a, 1, yes, no)
+        });
     }
     #[test]
-    fn r4_step4_nonterminal_branches() {
-        effect_case(3, 3);
+    fn r4_step4_free_branch_with_an_effect_beside_statements() {
+        check(|a| {
+            let no = effect(a, 3);
+            let (yes, no) = (effect(a, 2), bound(a, 4, no));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r4_step4_both_branches_need_statements() {
+        check(|a| {
+            let (yes, no) = (effect(a, 2), effect(a, 3));
+            let (yes, no) = (bound(a, 4, yes), bound(a, 5, no));
+            if_(a, 1, yes, no)
+        });
     }
 
-    fn short_circuit_case(context: u8) {
+    #[test]
+    fn r5_step0_trivial_unit_branches_of_a_unit_function() {
+        for spine in [false, true] {
+            check(|a| {
+                let id = Ident::new("condition", 1, IdentFlags::NONE);
+                let condition = a.var(id);
+                let (mut yes, mut no) = (unit(a), unit(a));
+                if spine {
+                    let pure = int(a, 1);
+                    yes = a.seq_raw(pure, yes);
+                    no = bound(a, 2, no);
+                }
+                let body = a.if_raw(condition, yes, no);
+                let attr = FunctionAttribute {
+                    return_unit: true,
+                    ..Default::default()
+                };
+                a.function_(1, &[id], body, attr, LamLoc::NONE)
+            });
+        }
+    }
+    #[test]
+    fn r5_step0_needs_both_branches_trivial() {
+        check(|a| {
+            let id = Ident::new("condition", 1, IdentFlags::NONE);
+            let condition = a.var(id);
+            let (head, tail) = (effect(a, 2), unit(a));
+            let (yes, no) = (a.seq_raw(head, tail), unit(a));
+            let body = a.if_raw(condition, yes, no);
+            let attr = FunctionAttribute {
+                return_unit: true,
+                ..Default::default()
+            };
+            a.function_(1, &[id], body, attr, LamLoc::NONE)
+        });
+    }
+    #[test]
+    fn r5_step1_effects_before_one_return_fold_to_commas() {
+        check(|a| {
+            let (first, second) = (effect(a, 2), effect(a, 3));
+            let (yes, no) = (unit(a), unit(a));
+            let (yes, no) = (a.seq_raw(first, yes), a.seq_raw(second, no));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r5_step2_both_free() {
+        check(|a| {
+            let (yes, no) = (effect(a, 2), int(a, 2));
+            if_(a, 1, yes, no)
+        });
+    }
+    #[test]
+    fn r5_step3_else_is_one_return() {
+        // The block is the whole output and is unnested.
+        check(|a| {
+            let yes = int(a, 1);
+            let (yes, no) = (bound(a, 2, yes), int(a, 2));
+            if_(a, 1, yes, no)
+        });
+        // After the statements of the test it stays one block.
+        check(|a| {
+            let test = var(a, "condition", 1);
+            let test = bound(a, 3, test);
+            let yes = int(a, 1);
+            let (yes, no) = (bound(a, 2, yes), int(a, 2));
+            a.if_raw(test, yes, no)
+        });
+    }
+    #[test]
+    fn r5_step3_then_ends_in_return() {
+        check(|a| {
+            let no = int(a, 2);
+            let (yes, no) = (int(a, 1), bound(a, 2, no));
+            if_(a, 1, yes, no)
+        });
+        check(|a| {
+            let (yes, no) = (int(a, 1), int(a, 2));
+            let (yes, no) = (bound(a, 2, yes), bound(a, 3, no));
+            if_(a, 1, yes, no)
+        });
+        check(|a| {
+            let test = var(a, "condition", 1);
+            let test = bound(a, 4, test);
+            let (yes, no) = (int(a, 1), int(a, 2));
+            let (yes, no) = (bound(a, 2, yes), bound(a, 3, no));
+            a.if_raw(test, yes, no)
+        });
+    }
+    #[test]
+    fn r6_tail_loop_is_unsupported_until_let_rec() {
+        let mut a = LamArena::new();
+        let (yes, no) = (int(&mut a, 1), int(&mut a, 2));
+        let conditional = if_(&mut a, 1, yes, no);
+        let (left, right) = (var(&mut a, "left", 2), var(&mut a, "right", 3));
+        let circuit = short(&mut a, true, left, right);
+        for root in [conditional, circuit] {
+            let input = bridge::import_lambda(&a, root).unwrap();
+            let node = input.root;
+            let mut state = State::new(input);
+            let named = Ret::Named {
+                loop_: Some(LoopRef(0)),
+                in_catch: false,
+            };
+            for cont in [Cont::Effect(Tail::Return(named)), Cont::Value(Tail::Return(named))] {
+                assert!(matches!(
+                    state.probe(Cx::new(cont), node),
+                    Err(Unsupported("let rec"))
+                ));
+            }
+        }
+    }
+
+    // Section 3.7: each test covers the rows V, D, A, E and R.
+    #[test]
+    fn short_circuit_with_a_free_right_operand() {
+        for and in [false, true] {
+            check(|a| {
+                let (left, right) = (var(a, "left", 1), var(a, "right", 2));
+                short(a, and, left, right)
+            });
+            check(|a| {
+                let (left, right) = (var(a, "left", 1), effect(a, 2));
+                short(a, and, left, right)
+            });
+        }
+    }
+    #[test]
+    fn short_circuit_whose_right_operand_needs_statements() {
+        for and in [false, true] {
+            check(|a| {
+                let (left, right) = (var(a, "left", 1), var(a, "right", 2));
+                let right = bound(a, 3, right);
+                short(a, and, left, right)
+            });
+        }
+    }
+    #[test]
+    fn short_circuit_whose_left_operand_needs_statements() {
         for and in [false, true] {
             for statement in [false, true] {
-                let mut source = LamArena::new();
-                let left = source.var(Ident::new("left", 1, IdentFlags::NONE));
-                let mut right = source.var(Ident::new("right", 2, IdentFlags::NONE));
-                if statement {
-                    let value = source.const_(Constant::JsNull);
-                    right = source.let_(
-                        LetKind::Strict,
-                        Ident::new("binding", 3, IdentFlags::NONE),
-                        value,
-                        right,
-                    );
-                }
-                let op = if and {
-                    crate::lambda::lam_primitive::Primitive::Psequand
-                } else {
-                    crate::lambda::lam_primitive::Primitive::Psequor
-                };
-                let root = source.prim_raw(op, &[left, right], crate::lambda::LamLoc::NONE);
-                compare_given(source, root, context);
-            }
-        }
-    }
-
-    #[test]
-    fn ten_thousand_else_nested_conditionals_have_linear_work() {
-        for depth in [100, 10_000] {
-            for context in [0, 1, 4] {
-                let mut source = LamArena::new();
-                let value = source.const_(Constant::JsNull);
-                let body = source.const_(Constant::Int {
-                    i: -1,
-                    comment: None,
+                check(|a| {
+                    let (left, mut right) = (var(a, "left", 1), var(a, "right", 2));
+                    let left = bound(a, 3, left);
+                    if statement {
+                        right = bound(a, 4, right);
+                    }
+                    short(a, and, left, right)
                 });
-                let mut root = source.let_(
-                    LetKind::Strict,
-                    Ident::new("binding", 1, IdentFlags::NONE),
-                    value,
-                    body,
-                );
-                for i in 0..depth {
-                    let condition = source.var(Ident::new("condition", i + 2, IdentFlags::NONE));
-                    let yes = source.const_(Constant::Int { i, comment: None });
-                    root = source.if_raw(condition, yes, root);
-                }
-                let input = bridge::import_lambda(&source, root).unwrap();
-                let root = input.root;
-                let mut state = State::new(input);
-                let target = state.fresh_variable("result");
-                let cx = match context {
-                    0 => Cx::value(),
-                    1 => Cx::assign(target),
-                    4 => Cx::returning(),
-                    _ => unreachable!(),
-                };
-                let probed = state.probe(cx, root).unwrap();
-                let out = state.realize(cx, probed);
-                eprintln!(
-                    "context={context} source={} pushed={} copied={}",
-                    state.source_steps, state.statements.pushed, state.statements.copied
-                );
-                assert_eq!(state.source_steps, (3 * depth + 3) as usize);
-                assert!(
-                    state.statements.copied <= 20 * state.source_steps,
-                    "statement copying must be linear"
-                );
-                let lowered = state.complete(cx, Probed::Out(out));
-                lowered
-                    .program
-                    .arena
-                    .validate(Some(lowered.program.root), false)
-                    .unwrap();
             }
         }
     }
-
     #[test]
-    fn nested_conditionals_in_all_oracle_contexts() {
-        let mut source = LamArena::new();
-        let a = source.var(Ident::new("a", 1, IdentFlags::NONE));
-        let b = source.var(Ident::new("b", 2, IdentFlags::NONE));
-        let one = source.const_(Constant::Int {
-            i: 1,
-            comment: None,
-        });
-        let two = source.const_(Constant::Int {
-            i: 2,
-            comment: None,
-        });
-        let three = source.const_(Constant::Int {
-            i: 3,
-            comment: None,
-        });
-        let inner = source.if_raw(b, two, three);
-        let root = source.if_raw(a, one, inner);
-        super::super::oracle_tests::compare(source, root);
+    fn short_circuits_nest_in_each_other_and_in_conditionals() {
+        for and in [false, true] {
+            for statement in [false, true] {
+                check(|a| {
+                    let (first, second) = (var(a, "first", 1), var(a, "second", 2));
+                    let mut third = var(a, "third", 3);
+                    if statement {
+                        third = bound(a, 4, third);
+                    }
+                    let inner = short(a, !and, second, third);
+                    short(a, and, first, inner)
+                });
+                check(|a| {
+                    let (left, mut right) = (var(a, "left", 2), var(a, "right", 3));
+                    if statement {
+                        right = bound(a, 4, right);
+                    }
+                    let test = short(a, and, left, right);
+                    let (yes, no) = (int(a, 1), int(a, 2));
+                    a.if_raw(test, yes, no)
+                });
+                check(|a| {
+                    let (left, mut right) = (var(a, "left", 2), var(a, "right", 3));
+                    if statement {
+                        right = bound(a, 4, right);
+                    }
+                    let yes = short(a, and, left, right);
+                    let no = a.const_(Constant::JsFalse);
+                    if_(a, 1, yes, no)
+                });
+            }
+        }
     }
 
     #[test]
     fn conditional_branch_temporaries_preserve_legacy_names() {
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
-        let callee = source.var(Ident::new("callee", 2, IdentFlags::NONE));
-        let effect = source.var(Ident::new("effect", 3, IdentFlags::NONE));
-        let call_info = crate::lambda::ApInfo {
-            loc: crate::lambda::LamLoc::NONE,
-            status: crate::lambda::ApplyStatus::InferFull,
-        };
-        let effect = source.apply_raw(effect, &[], call_info.clone());
-        let binding = Ident::new("tmp", 4, IdentFlags::NONE);
-        let value = source.const_(Constant::JsNull);
-        let use_binding = source.var(binding);
-        let binding = source.let_(LetKind::Strict, binding, value, use_binding);
-        let yes = source.apply_raw(callee, &[effect, binding], call_info);
-        let no = source.const_(Constant::JsFalse);
-        let root = source.if_raw(condition, yes, no);
-        super::super::oracle_tests::compare(source, root);
+        check(|a| {
+            let callee = var(a, "callee", 2);
+            let argument = effect(a, 3);
+            let id = Ident::new("tmp", 4, IdentFlags::NONE);
+            let value = a.const_(Constant::JsNull);
+            let body = a.var(id);
+            let binding = a.let_(LetKind::Strict, id, value, body);
+            let info = ApInfo {
+                loc: LamLoc::NONE,
+                status: ApplyStatus::InferFull,
+            };
+            let yes = a.apply_raw(callee, &[argument, binding], info);
+            let no = a.const_(Constant::JsFalse);
+            if_(a, 1, yes, no)
+        });
     }
 
     #[test]
     fn q2_conditional_loop_keeps_the_loop_boundary() {
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
-        let loop_test = source.const_(Constant::JsTrue);
-        let loop_body = source.const_(Constant::JsUndefined { is_unit: true });
-        let loop_ = source.while_(loop_test, loop_body);
-        let one = source.const_(Constant::Int {
-            i: 1,
-            comment: None,
-        });
-        let yes = source.seq_raw(loop_, one);
-        let no = source.const_(Constant::Int {
-            i: 2,
-            comment: None,
-        });
-        let root = source.if_raw(condition, yes, no);
-        let input = bridge::import_lambda(&source, root).unwrap();
+        let mut a = LamArena::new();
+        let loop_test = a.const_(Constant::JsTrue);
+        let loop_body = unit(&mut a);
+        let loop_ = a.while_(loop_test, loop_body);
+        let one = int(&mut a, 1);
+        let (yes, no) = (a.seq_raw(loop_, one), int(&mut a, 2));
+        let root = if_(&mut a, 1, yes, no);
+        let input = bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
         assert!(matches!(
@@ -1315,22 +1512,15 @@ mod tests {
 
     #[test]
     fn q5_nested_rec_keeps_the_let_rec_boundary() {
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
+        let mut a = LamArena::new();
         let id = Ident::new("nested", 2, IdentFlags::NONE);
-        let body = source.const_(Constant::JsTrue);
-        let function = source.function_(
-            0,
-            &[],
-            body,
-            Default::default(),
-            crate::lambda::LamLoc::NONE,
-        );
-        let yes = source.var(id);
-        let yes = source.letrec(&[(id, function)], yes);
-        let no = source.const_(Constant::JsFalse);
-        let root = source.if_raw(condition, yes, no);
-        let input = bridge::import_lambda(&source, root).unwrap();
+        let body = a.const_(Constant::JsTrue);
+        let function = a.function_(0, &[], body, Default::default(), LamLoc::NONE);
+        let yes = a.var(id);
+        let yes = a.letrec(&[(id, function)], yes);
+        let no = a.const_(Constant::JsFalse);
+        let root = if_(&mut a, 1, yes, no);
+        let input = bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
         let mut state = State::new(input);
         assert!(matches!(
@@ -1339,118 +1529,434 @@ mod tests {
         ));
     }
 
-    #[test]
-    fn short_circuit_value() {
-        short_circuit_case(0);
+    // Level-J rule tests. The lowering cannot yet produce a negated or
+    // constant test, `throw`, `break` or `continue`, so the rules that read
+    // them are tested on statements built by hand, against J-S3 on vectors.
+    struct Hand {
+        state: State,
+        vars: [VarId; 4],
+        /// The variable `l` declares in the then list and in the else list.
+        declared: [VarId; 2],
+        side: usize,
     }
-    #[test]
-    fn short_circuit_assignment() {
-        short_circuit_case(1);
-    }
-    #[test]
-    fn short_circuit_declaration() {
-        short_circuit_case(2);
-    }
-    #[test]
-    fn short_circuit_effect() {
-        short_circuit_case(3);
-    }
-    #[test]
-    fn short_circuit_return() {
-        short_circuit_case(4);
-    }
-
-    #[test]
-    fn r5_step1_effect_return_tails() {
-        let mut source = LamArena::new();
-        let condition = source.var(Ident::new("condition", 1, IdentFlags::NONE));
-        let mut branches = Vec::new();
-        for stamp in [10, 20] {
-            let callee = source.var(Ident::new("effect", stamp, IdentFlags::NONE));
-            let call = source.apply_raw(
-                callee,
-                &[],
-                crate::lambda::ApInfo {
-                    loc: crate::lambda::LamLoc::NONE,
-                    status: crate::lambda::ApplyStatus::InferFull,
-                },
-            );
-            let value = source.const_(Constant::JsUndefined { is_unit: true });
-            branches.push(source.seq_raw(call, value));
+    impl Hand {
+        fn new() -> Self {
+            let mut a = LamArena::new();
+            let root = a.const_(Constant::JsNull);
+            let mut state = State::new(bridge::import_lambda(&a, root).unwrap());
+            let vars = ["c", "d", "x", "y"].map(|name| state.fresh_variable(name));
+            let declared = ["m", "n"].map(|name| state.fresh_variable(name));
+            Self {
+                state,
+                vars,
+                declared,
+                side: 0,
+            }
         }
-        let root = source.if_raw(condition, branches[0], branches[1]);
-        compare_given(source, root, 4);
+        fn var(&mut self, index: usize) -> NodeId {
+            self.state.pure_expression(View::Var { var: self.vars[index] }, 0)
+        }
+        fn assign(&mut self, index: usize) -> NodeId {
+            let one = crate::bir::j::plain::int(&mut self.state.arena, 1);
+            crate::bir::j::assign(&mut self.state.arena, self.vars[index], one)
+        }
+        /// 0: `c`; 1: `!c`; 2: `true`; 3: `false`; 4: `x = 1` (an effect).
+        fn test(&mut self, kind: u8) -> NodeId {
+            match kind {
+                0 => self.var(0),
+                1 => {
+                    let value = self.var(0);
+                    self.state.arena.new_node(View::JNot { value }, 0)
+                }
+                2 | 3 => crate::bir::j::plain::boolean(&mut self.state.arena, kind == 2),
+                _ => {
+                    let (left, right) = (self.var(2), self.var(3));
+                    self.state
+                        .arena
+                        .new_node(View::JBin { left, right }, BinOp::Eq as u16)
+                }
+            }
+        }
+        /// r: `return y`; e: `x = 1`; f: `y = 1`; l: `let m = c`; t: `throw x`;
+        /// b: `break`; k: `continue`; o: `{}`; i: `if (d) { x = 1 }`;
+        /// j: `if (d) { x = 1 } else { y = 1 }`.
+        fn statement(&mut self, kind: char) -> NodeId {
+            match kind {
+                'r' => {
+                    let value = self.var(3);
+                    crate::bir::j::return_value(&mut self.state.arena, value)
+                }
+                'e' => self.assign(2),
+                'f' => self.assign(3),
+                'l' => {
+                    let value = self.var(0);
+                    let var = self.declared[self.side];
+                    crate::bir::j::declare(&mut self.state.arena, LetKind::Strict, var, value)
+                }
+                't' => {
+                    let value = self.var(2);
+                    self.state.arena.new_node(View::SThrow { value }, 0)
+                }
+                'b' => self.state.arena.new_node(View::SBreak { label: None }, 0),
+                'k' => self.state.arena.new_node(View::SContinue { label: None }, 0),
+                'o' => self.state.empty_block(),
+                'i' | 'j' => {
+                    let test = self.var(1);
+                    let yes = self.assign(2);
+                    let yes = self.state.arena.lists.push(&[yes]);
+                    let no = if kind == 'j' { vec![self.assign(3)] } else { vec![] };
+                    let no = self.state.arena.lists.push(&no);
+                    self.state.raw_if(test, yes, no)
+                }
+                _ => unreachable!(),
+            }
+        }
+        fn list(&mut self, side: usize, kinds: &str) -> Vec<NodeId> {
+            self.side = side;
+            kinds.chars().map(|kind| self.statement(kind)).collect()
+        }
+        fn run(&mut self, side: usize, kinds: &str) -> Span {
+            self.side = side;
+            let mark = self.state.statements.mark();
+            for kind in kinds.chars() {
+                let statement = self.statement(kind);
+                let slot = self.state.statements.mark().start;
+                self.state.statements.push(statement);
+                if kind == 'o' {
+                    self.state.statements.note_empty_block(slot, statement);
+                }
+            }
+            self.state.statements.since(mark)
+        }
+        fn text(mut self, value: Option<NodeId>) -> String {
+            let value = value.unwrap_or_else(|| self.state.pure_expression(View::JUndefined, 0));
+            let out = self.state.output(0, Some(value), Finished::False);
+            let lowered = self.state.complete(Cx::effect(), Probed::Out(out));
+            lowered
+                .program
+                .arena
+                .validate(Some(lowered.program.root), false)
+                .unwrap();
+            let program = bridge_j::export_js(&lowered.program).unwrap();
+            crate::js_ir::print_deps_program_with_directives_and_options(
+                &program, None, &[], false, false, false,
+            )
+        }
+    }
+
+    const LISTS: [&str; 16] = [
+        "", "r", "e", "f", "l", "er", "le", "ef", "et", "eb", "ek", "i", "j", "o", "or", "eo",
+    ];
+
+    /// J-S3 on vectors: the statement `norm::js3_simplify_if` builds.
+    fn reference(test: u8, yes: &str, no: &str) -> String {
+        let mut hand = Hand::new();
+        let (yes, no) = (hand.list(0, yes), hand.list(1, no));
+        let test = hand.test(test);
+        let statement = norm::js3_simplify_if(&mut hand.state.arena, test, yes, no);
+        hand.state.statements.push(statement);
+        hand.text(None)
     }
 
     #[test]
-    fn r5_step0_unit_function() {
-        let mut source = LamArena::new();
-        let id = Ident::new("condition", 1, IdentFlags::NONE);
-        let condition = source.var(id);
-        let yes = source.const_(Constant::JsUndefined { is_unit: true });
-        let no = source.const_(Constant::JsUndefined { is_unit: true });
-        let body = source.if_raw(condition, yes, no);
-        let root = source.function_(
-            1,
-            &[id],
-            body,
-            crate::lambda::FunctionAttribute {
-                return_unit: true,
-                ..Default::default()
-            },
-            crate::lambda::LamLoc::NONE,
+    fn if_in_place_then_block_is_simplify_if_for_every_rule() {
+        for test in 0..5 {
+            for yes in LISTS {
+                for no in LISTS {
+                    for swapped in [false, true] {
+                        let mut hand = Hand::new();
+                        let head = hand.state.statements.reserve();
+                        // A free branch realized late lies above the other.
+                        let (yes_run, no_run) = if swapped {
+                            let no_run = hand.run(1, no);
+                            (hand.run(0, yes), no_run)
+                        } else {
+                            let yes_run = hand.run(0, yes);
+                            (yes_run, hand.run(1, no))
+                        };
+                        let condition = hand.test(test);
+                        hand.state.if_in_place(head, condition, yes_run, no_run);
+                        hand.state.block_statement(head);
+                        assert_eq!(
+                            hand.text(None),
+                            reference(test, yes, no),
+                            "test {test}, then {yes:?}, else {no:?}, swapped {swapped}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn if_statement_is_simplify_if_for_every_rule() {
+        for test in 0..5 {
+            for yes in LISTS {
+                for no in LISTS {
+                    let mut hand = Hand::new();
+                    let (yes_run, no_run) = (hand.run(0, yes), hand.run(1, no));
+                    let condition = hand.test(test);
+                    let statement = hand.state.if_statement(condition, yes_run, no_run);
+                    hand.state.statements.push(statement);
+                    assert_eq!(
+                        hand.text(None),
+                        reference(test, yes, no),
+                        "test {test}, then {yes:?}, else {no:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// C:4884 compile_if_effect_block steps 4 on two blocks, written with
+    /// J-S3 on vectors: the guard is one statement, the other branch follows.
+    fn effect_reference(yes: &str, no: &str) -> String {
+        let mut hand = Hand::new();
+        let (then_, else_) = (hand.list(0, yes), hand.list(1, no));
+        let test = hand.test(0);
+        let arena = &mut hand.state.arena;
+        let statements = if no == "r" {
+            let test = norm::je8_not(arena, test);
+            let mut statements = vec![norm::js3_simplify_if(arena, test, else_, vec![])];
+            statements.extend(then_);
+            statements
+        } else if yes.ends_with(['r', 't', 'b', 'k']) {
+            let mut statements = vec![norm::js3_simplify_if(arena, test, then_, vec![])];
+            statements.extend(else_);
+            statements
+        } else {
+            vec![norm::js3_simplify_if(arena, test, then_, else_)]
+        };
+        for statement in statements {
+            hand.state.statements.push(statement);
+        }
+        hand.text(None)
+    }
+
+    fn effect_rule(yes: &str, no: &str) {
+        let mut hand = Hand::new();
+        let head = hand.state.statements.reserve();
+        let branch = |hand: &mut Hand, side: usize, kinds: &str| {
+            Probed::Out(Out {
+                stmts: hand.run(side, kinds),
+                value: None,
+                finished: Finished::False,
+            })
+        };
+        let (then_, else_) = (branch(&mut hand, 0, yes), branch(&mut hand, 1, no));
+        let test = hand.test(0);
+        let parts = Parts { start: 0, head };
+        let Probed::Out(out) = hand
+            .state
+            .effect_conditional(Cx::effect(), parts, test, then_, else_)
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            hand.text(out.value),
+            effect_reference(yes, no),
+            "then {yes:?}, else {no:?}"
         );
-        compare_given(source, root, 0);
     }
 
     #[test]
-    fn r6_tail_loop_remains_explicitly_unsupported() {
-        let mut source = LamArena::new();
-        let condition = source.const_(Constant::JsTrue);
-        let yes = source.const_(Constant::JsTrue);
-        let no = source.const_(Constant::JsFalse);
-        let root = source.if_raw(condition, yes, no);
-        let input = bridge::import_lambda(&source, root).unwrap();
-        let node = input.root;
+    fn r4_step4_else_is_exactly_one_return() {
+        for yes in ["le", "er", "et", "lef"] {
+            effect_rule(yes, "r");
+        }
+    }
+    #[test]
+    fn r4_step4_then_ends_in_return_throw_break_or_continue() {
+        for yes in ["er", "et", "eb", "ek", "ler"] {
+            for no in ["le", "ef", "er", "lef"] {
+                effect_rule(yes, no);
+            }
+        }
+    }
+    #[test]
+    fn r4_step4_otherwise_one_conditional_statement() {
+        for yes in ["le", "ef", "lef"] {
+            for no in ["le", "ef", "er"] {
+                effect_rule(yes, no);
+            }
+        }
+    }
+
+    // Step counts (section 7.4): 10,000 nested constructs, each L node read
+    // once and each statement written and copied a constant number of times.
+    fn steps(
+        cont: u8,
+        nodes: usize,
+        build: impl FnOnce(&mut LamArena) -> Lam,
+    ) -> (usize, usize, usize) {
+        let mut a = LamArena::new();
+        let root = build(&mut a);
+        let input = bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
         let mut state = State::new(input);
-        let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named {
-            loop_: Some(LoopRef(0)),
-            in_catch: false,
-        })));
-        assert!(matches!(state.probe(cx, node), Err(Unsupported("let rec"))));
+        let target = state.fresh_variable("result");
+        let cx = match cont {
+            0 => Cx::value(),
+            1 => Cx::assign(target),
+            2 => Cx::declare(LetKind::Strict, target),
+            3 => Cx::effect(),
+            _ => Cx::returning(),
+        };
+        let probed = state.probe(cx, root).unwrap();
+        let out = state.realize(cx, probed);
+
+        assert_eq!(state.source_steps, nodes, "each L node is read once");
+        let counts = (
+            state.statements.pushed,
+            state.statements.copied,
+            state.statements.scanned,
+        );
+        // The validator walks a nested tree once per level: it checks the
+        // small inputs, the step counts check the large ones.
+        if nodes <= 5_000 {
+            let lowered = state.complete(cx, Probed::Out(out));
+            lowered
+                .program
+                .arena
+                .validate(Some(lowered.program.root), false)
+                .unwrap();
+        }
+        counts
+    }
+
+    const DEPTH: i32 = 10_000;
+
+    /// `if (c1) t else if (c2) t else ... else { let binding = null; -1 }`,
+    /// or the same chain through the then branches.
+    fn chain(a: &mut LamArena, depth: i32, then_position: bool, statement_arm: bool) -> Lam {
+        let mut root = int(a, -1);
+        root = bound(a, 1, root);
+        for level in 0..depth {
+            let mut arm = int(a, level);
+            if statement_arm {
+                arm = bound(a, depth + 2 + level, arm);
+            }
+            root = if then_position {
+                if_(a, level + 2, root, arm)
+            } else {
+                if_(a, level + 2, arm, root)
+            };
+        }
+        root
     }
 
     #[test]
-    fn r5_returns_match_legacy() {
-        compare_context(false, 4);
-        compare_context(true, 4);
+    fn ten_thousand_nested_conditionals_are_linear_in_every_continuation() {
+        for levels in [100, DEPTH] {
+            let depth = levels as usize;
+            for cont in 0..5 {
+                for then_position in [false, true] {
+                    for statement_arm in [false, true] {
+                        let nodes = 3 * depth + 3 + if statement_arm { 2 * depth } else { 0 };
+                        let (pushed, copied, scanned) = steps(cont, nodes, |a| {
+                            chain(a, levels, then_position, statement_arm)
+                        });
+                        assert!(pushed <= 5 * depth + 5, "statements written: {pushed}");
+                        assert!(copied <= 5 * depth + 5, "statements copied: {copied}");
+                        assert!(scanned <= 8 * depth + 8, "slots skipped: {scanned}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
-    fn r4_effects_match_legacy() {
-        compare_context(false, 3);
-        compare_context(true, 3);
+    fn the_else_chain_of_the_return_regression_is_linear() {
+        // If(c1, 1, If(c2, 2, ... Let(Strict, x, null, -1))): the shape whose
+        // return continuation copied 50,035,000 statements at this depth
+        // when each level rebuilt the list of the levels below it.
+        let depth = DEPTH as usize;
+        let counts = [0, 1, 4].map(|cont| steps(cont, 3 * depth + 3, |a| chain(a, DEPTH, false, false)));
+        let [value, assign, returning] = counts;
+        // (written, copied to a list, holes and dead ranges skipped)
+        assert_eq!(value, (2 * depth + 3, 2 * depth + 1, 0));
+        assert_eq!(assign, (2 * depth + 2, 2 * depth + 1, 0));
+        assert_eq!(returning, (2 * depth + 2, depth, 2 * depth));
     }
 
     #[test]
-    fn r2_declarations_match_legacy() {
-        compare_context(false, 2);
-        compare_context(true, 2);
+    fn ten_thousand_nested_short_circuits_are_linear_in_every_continuation() {
+        for levels in [100, DEPTH] {
+            let depth = levels as usize;
+            for cont in 0..5 {
+                for and in [false, true] {
+                    for statement in [false, true] {
+                        let nodes = 2 * depth + 1 + if statement { 2 } else { 0 };
+                        let (pushed, copied, scanned) = steps(cont, nodes, |a| {
+                            let mut root = var(a, "right", 1);
+                            if statement {
+                                root = bound(a, 2, root);
+                            }
+                            for level in 0..levels {
+                                let left = var(a, "left", level + 3);
+                                root = short(a, and, left, root);
+                            }
+                            root
+                        });
+                        assert!(pushed <= 4 * depth + 5, "statements written: {pushed}");
+                        assert!(copied <= 4 * depth + 5, "statements copied: {copied}");
+                        assert!(scanned <= 8 * depth + 8, "slots skipped: {scanned}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]
-    fn r3_assignments_match_legacy() {
-        compare_context(false, 1);
-        compare_context(true, 1);
+    fn r5_step0_reads_each_spine_node_once() {
+        // 10,000 conditionals in a unit function, each branch a pure
+        // sequence spine of two nodes ending in the unit value.
+        let mut a = LamArena::new();
+        let mut body = unit(&mut a);
+        for level in 0..DEPTH {
+            let mut arms = [unit(&mut a), unit(&mut a)];
+            for arm in &mut arms {
+                let pure = int(&mut a, level);
+                *arm = a.seq_raw(pure, *arm);
+            }
+            let conditional = if_(&mut a, level + 1, arms[0], arms[1]);
+            body = a.seq_raw(conditional, body);
+        }
+        let attr = FunctionAttribute {
+            return_unit: true,
+            ..Default::default()
+        };
+        let root = a.function_(0, &[], body, attr.clone(), LamLoc::NONE);
+        let input = bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.spine_steps, 0, "an effect continuation has no step 0");
+        let mut a = LamArena::new();
+        let mut body = unit(&mut a);
+        for level in 0..DEPTH {
+            let pure = int(&mut a, level);
+            body = a.seq_raw(pure, body);
+        }
+        let other = unit(&mut a);
+        let body = if_(&mut a, 1, body, other);
+        let root = a.function_(0, &[], body, attr, LamLoc::NONE);
+        let input = bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.spine_steps, DEPTH as usize + 2);
+        // Only the test was lowered: the conditional, its test, the function.
+        assert_eq!(state.source_steps, 3);
     }
 
     #[test]
-    fn r1_free_branches_match_legacy() {
-        compare_context(false, 0);
-    }
-
-    #[test]
-    fn r1_statement_branch_matches_legacy() {
-        compare_context(true, 0);
+    fn conditional_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Kind>(), 1);
+        assert_eq!(size_of::<Target>(), 8);
+        assert_eq!(size_of::<Conditional>(), 24);
+        assert_eq!(size_of::<Parts>(), 8);
+        assert_eq!(size_of::<Cx>(), 32);
     }
 }

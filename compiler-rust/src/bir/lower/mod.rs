@@ -141,8 +141,10 @@ pub enum ProbeInput {
 pub trait Realizer {
     /// K1/K6: C:6658 return_compiled; convert one lowered value.
     fn leaf(&mut self, cx: Cx, value: NodeId) -> Out;
-    /// K2: C:4715 append_effect_output; combine an effect and a tail.
+    /// K2: C:4715 append_effect_output; join an effect and a tail's value.
     fn seq(&mut self, cx: Cx, first: NodeId, second: Out) -> Out;
+    /// O:339 push_effect_expression; an effect as statements before its tail.
+    fn effect(&mut self, first: NodeId) -> Span;
     /// K6: C:5144 compile_if_return_output; combine lowered branches.
     fn cond(&mut self, cx: Cx, test: NodeId, then_: Out, else_: Out) -> Out;
 }
@@ -594,11 +596,23 @@ impl Realizer for State {
             finished,
         }
     }
-    /// K2: C:4715 append_effect_output. The retained head has no effects in
-    /// this slice; its already-lowered J subtree is released, never recompiled.
-    fn seq(&mut self, _: Cx, first: NodeId, second: Out) -> Out {
-        self.drop_pure_effect(first);
+    /// K2: C:4715 append_effect_output, where the value is kept: a comma,
+    /// or the tail alone when the head has no effect. Constant.
+    fn seq(&mut self, _: Cx, first: NodeId, mut second: Out) -> Out {
+        if self.arena.node(first).flags().contains(super::NodeFlags::STRICT) {
+            self.arena.release(first);
+        } else {
+            let value = second.value.expect("the tail of a kept sequence has a value");
+            second.value = Some(super::j::norm::jm1_js_seq(&mut self.arena, first, value));
+        }
         second
+    }
+    /// O:339 push_effect_expression: the head of a deferred sequence as
+    /// statements. One step per comma operand of the head.
+    fn effect(&mut self, first: NodeId) -> Span {
+        let mark = self.statements.mark();
+        self.drop_pure_effect(first);
+        self.statements.since(mark)
     }
     /// R1–R5: realize a deferred conditional from its value operands.
     fn cond(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {

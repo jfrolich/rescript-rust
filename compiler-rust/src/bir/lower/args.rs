@@ -220,7 +220,7 @@ impl State {
                 });
             if !held.is_empty() {
                 self.statements
-                    .fill_held(arg.stmts.start + arg.stmts.len - 1, held);
+                    .fill_held(arg.stmts.start + arg.stmts.len - 1, &held);
             }
             values.push(value);
         }

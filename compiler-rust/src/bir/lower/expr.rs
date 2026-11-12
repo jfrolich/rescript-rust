@@ -97,13 +97,11 @@ impl State {
         }
         if let Resume::Seq { continuation, .. } = resume {
             if index == 0 {
+                // The head's value is held in every continuation: whether it
+                // becomes a statement depends on the tail (1.5).
+                let _ = continuation;
                 let mut out = self.realize(cx, child);
-                match continuation {
-                    Cont::Value(_) | Cont::Effect(Tail::No) => { self.statements.reserve(); }
-                    Cont::Declare(_, _) | Cont::Assign(_) | Cont::Effect(Tail::Return(_)) => {
-                        if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    }
-                }
+                self.statements.reserve();
                 out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
                 return Probed::Out(out);
             }
@@ -147,9 +145,27 @@ impl State {
                 let Probed::Out(mut first) = children.next().expect("sequence head") else {
                     unreachable!("head realized before tail")
                 };
-                let mut second = self.realize(cx, children.next().expect("sequence tail"));
-                if let Some(value) = first.value.take() {
-                    if !self.statements.has_statements(second.stmts) {
+                let tail = children.next().expect("sequence tail");
+                let head = first.value.take();
+                let keeps_value = matches!(cx.cont, Cont::Value(_) | Cont::Effect(Tail::No));
+                let tail = match (head, tail) {
+                    // 1.5: a free tail after a head without statements is free
+                    // in the continuations that convert a value (1.4) too.
+                    (Some(head), Probed::Free(tail))
+                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    {
+                        self.statements.remove_empty(first.stmts);
+                        if self.arena.node(head).flags().contains(crate::bir::NodeFlags::STRICT) {
+                            self.arena.release(head);
+                            return Probed::Free(tail);
+                        }
+                        return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
+                    }
+                    (_, tail) => tail,
+                };
+                let mut second = self.realize(cx, tail);
+                if let Some(value) = head {
+                    if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
                         let value = if self.arena.node(value).flags().contains(crate::bir::NodeFlags::STRICT) {
                             self.arena.release(value);
@@ -157,9 +173,11 @@ impl State {
                         } else { crate::bir::j::norm::jm1_js_seq(&mut self.arena, value, second_value) };
                         second.value = Some(value);
                     } else {
-                        let mut held = Vec::new();
+                        let mut held = std::mem::take(&mut self.scratch);
                         crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
-                        self.statements.fill_held(first.stmts.start + first.stmts.len - 1, held);
+                        self.statements.fill_held(first.stmts.start + first.stmts.len - 1, &held);
+                        held.clear();
+                        self.scratch = held;
                     }
                 }
                 let value = second.value;

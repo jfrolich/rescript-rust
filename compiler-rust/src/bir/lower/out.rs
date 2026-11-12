@@ -252,11 +252,11 @@ impl StatementStack {
     }
     /// A:191 sequence_arguments: fill an argument's reserved suffix after all
     /// arguments were lowered. Held statements enter the list exactly once.
-    pub(super) fn fill_held(&mut self, slot: u32, statements: Vec<NodeId>) {
+    pub(super) fn fill_held(&mut self, slot: u32, statements: &[NodeId]) {
         assert!(self.slots[slot as usize].is_none());
         let span = Span { start: self.held.len() as u32, len: statements.len() as u32 };
         self.pushed += statements.len();
-        self.held.extend(statements);
+        self.held.extend_from_slice(statements);
         self.slots[slot as usize] = Some(Slot::Held(span));
     }
     /// K0: C:119 append. Both children have already been lowered, even when
@@ -384,6 +384,7 @@ impl FreePool {
         enum Work {
             Enter(FreeId, Cx),
             Seq(NodeId, Cx),
+            After(Span),
             Cond(NodeId, Cx),
         }
         let root = match probed {
@@ -402,20 +403,43 @@ impl FreePool {
                     {
                         Free::Leaf(value) => outputs.push(emit.leaf(cx, value)),
                         Free::Seq { first, second } => {
-                            work.push(Work::Seq(first, cx));
+                            // 3.6: a comma where the value is kept; else the
+                            // head as a statement before the converted tail.
+                            if matches!(
+                                cx.cont,
+                                super::Cont::Value(_) | super::Cont::Effect(super::Tail::No)
+                            ) {
+                                work.push(Work::Seq(first, cx));
+                            } else {
+                                work.push(Work::After(emit.effect(first)));
+                            }
                             work.push(Work::Enter(second, cx));
                         }
                         Free::Cond { test, then_, else_ } => {
                             work.push(Work::Cond(test, cx));
-                            let value_cx = Cx { cont: super::Cont::Value(super::Tail::No), ..cx };
-                            work.push(Work::Enter(else_, value_cx));
-                            work.push(Work::Enter(then_, value_cx));
+                            // 3.6: row R3 reads the branches as assignments;
+                            // every other row reads their values.
+                            let branch = match cx.cont {
+                                super::Cont::Assign(_) => cx,
+                                _ => Cx { cont: super::Cont::Value(super::Tail::No), ..cx },
+                            };
+                            work.push(Work::Enter(else_, branch));
+                            work.push(Work::Enter(then_, branch));
                         }
                     }
                 }
                 Work::Seq(first, cx) => {
                     let second = outputs.pop().expect("sequence child");
                     outputs.push(emit.seq(cx, first, second));
+                }
+                Work::After(head) => {
+                    let mut second = outputs.pop().expect("sequence child");
+                    assert_eq!(head.end(), second.stmts.start as usize);
+                    second.stmts = Span {
+                        start: head.start,
+                        len: head.len + second.stmts.len,
+                    };
+                    outputs.push(second);
                 }
                 Work::Cond(test, cx) => {
                     let else_ = outputs.pop().expect("else child");
@@ -451,6 +475,10 @@ mod tests {
         fn seq(&mut self, _: Cx, first: NodeId, second: Out) -> Out {
             self.visits.push(first.0);
             second
+        }
+        fn effect(&mut self, first: NodeId) -> Span {
+            self.visits.push(first.0);
+            Span::default()
         }
         fn cond(&mut self, _: Cx, test: NodeId, then_: Out, _: Out) -> Out {
             self.visits.push(test.0);
