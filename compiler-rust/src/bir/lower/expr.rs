@@ -4,7 +4,9 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    If(super::cond::Conditional),
     Call(super::call::Call),
+    Prim(super::prim::Prim),
     Let {
         var: VarId,
         kind: LetKind,
@@ -14,7 +16,6 @@ pub(super) enum Resume {
     Seq {
         first: NodeId,
         second: NodeId,
-        continuation: Cont,
     },
     Fun {
         body: NodeId,
@@ -30,12 +31,24 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Prim(prim) = resume {
+            let cont = if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
+                Cont::Effect(Tail::No)
+            } else { Cont::Value(Tail::No) };
+            into.extend(self.source.lists.get(prim.operands).iter().map(|&node| (Cx { cont, ..cx }, node)));
+            return;
+        }
         if let Resume::Call(call) = resume {
             into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
             return;
         }
+        if let Resume::If(conditional) = resume {
+            self.conditional_children(cx, conditional, into);
+            return;
+        }
         match *resume {
-            Resume::Call(_) => unreachable!("call handled above"),
+            Resume::If(_) => unreachable!("conditional handled above"),
+            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
                 kind,
@@ -80,27 +93,34 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
-        if let Resume::Call(_) = resume {
+        if let Resume::If(conditional) = resume {
+            return self.conditional_child(cx, conditional, index, child);
+        }
+        if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
             let mut out = self.realize(cx, child);
+            if let Resume::Prim(prim) = resume {
+                if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
+                    if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
+                    out.value = Some(crate::bir::j::plain::node(&mut self.arena, View::JUndefined, 1));
+                }
+            }
             self.statements.reserve();
             out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
             return Probed::Out(out);
         }
-        if let Resume::Seq { continuation, .. } = resume {
+        if let Resume::Seq { .. } = resume {
             if index == 0 {
+                // The head's value is held in every continuation: whether it
+                // becomes a statement depends on the tail (1.5).
                 let mut out = self.realize(cx, child);
-                match continuation {
-                    Cont::Value(_) | Cont::Effect(Tail::No) => { self.statements.reserve(); }
-                    Cont::Declare(_, _) | Cont::Assign(_) | Cont::Effect(Tail::Return(_)) => {
-                        if let Some(value) = out.value.take() { self.drop_pure_effect(value); }
-                    }
-                }
+                self.statements.reserve();
                 out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
                 return Probed::Out(out);
             }
         }
         let force = match resume {
-            Resume::Call(_) => unreachable!("call handled above"),
+            Resume::If(_) => unreachable!("conditional handled above"),
+            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -119,16 +139,27 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::If(conditional) => self.finish_conditional(cx, conditional, children),
             Resume::Call(call) => self.finish_application(cx, call, children),
+            Resume::Prim(_) => unreachable!("primitive finished by dispatch"),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {
                     Probed::Out(out) => out,
                     Probed::Free(_) => unreachable!("binding was realized before body"),
                 });
-                let body = self.realize(cx, children.next().expect("let body"));
+                let mut body = self.realize(cx, children.next().expect("let body"));
+                if first.as_ref().is_some_and(|first| first.finished == Finished::True)
+                    && matches!(cx.cont, Cont::Value(_)) {
+                    // C: compile_expr Let retains the unreachable body's value,
+                    // unlike compile_effect_output and append_effect_output.
+                    let value = body.value.take();
+                    let mut out = self.append_outputs(first.unwrap(), body, None);
+                    out.value = value;
+                    return Probed::Out(out);
+                }
                 let value = body.value;
                 Probed::Out(match first {
-                    Some(first) => self.statements.append(first, body, value),
+                    Some(first) => self.append_outputs(first, body, value),
                     None => body,
                 })
             }
@@ -136,9 +167,35 @@ impl State {
                 let Probed::Out(mut first) = children.next().expect("sequence head") else {
                     unreachable!("head realized before tail")
                 };
-                let mut second = self.realize(cx, children.next().expect("sequence tail"));
-                if let Some(value) = first.value.take() {
-                    if !self.statements.has_statements(second.stmts) {
+                let tail = children.next().expect("sequence tail");
+                let keeps_value = matches!(cx.cont, Cont::Value(_) | Cont::Effect(Tail::No));
+                let slot = first.stmts.start + first.stmts.len - 1;
+                if first.finished == Finished::True {
+                    let second = self.realize(cx, tail);
+                    if !keeps_value && let Some(value) = first.value.take() {
+                        self.hold_effect(slot, value);
+                    }
+                    return Probed::Out(self.append_outputs(first, second, None));
+                }
+                let head = first.value.take();
+                let tail = match (head, tail) {
+                    // 1.5: a free tail after a head without statements is free
+                    // in the continuations that convert a value (1.4) too.
+                    (Some(head), Probed::Free(tail))
+                        if !keeps_value && !self.statements.has_statements(first.stmts) =>
+                    {
+                        self.statements.remove_empty(first.stmts);
+                        if self.arena.node(head).flags().contains(crate::bir::NodeFlags::STRICT) {
+                            self.arena.release(head);
+                            return Probed::Free(tail);
+                        }
+                        return Probed::Free(self.free.push(Free::Seq { first: head, second: tail }));
+                    }
+                    (_, tail) => tail,
+                };
+                let mut second = self.realize(cx, tail);
+                if let Some(value) = head {
+                    if keeps_value && !self.statements.has_statements(second.stmts) {
                         let second_value = second.value.expect("value continuation");
                         let value = if self.arena.node(value).flags().contains(crate::bir::NodeFlags::STRICT) {
                             self.arena.release(value);
@@ -146,13 +203,11 @@ impl State {
                         } else { crate::bir::j::norm::jm1_js_seq(&mut self.arena, value, second_value) };
                         second.value = Some(value);
                     } else {
-                        let mut held = Vec::new();
-                        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
-                        self.statements.fill_held(first.stmts.start + first.stmts.len - 1, held);
+                        self.hold_effect(slot, value);
                     }
                 }
                 let value = second.value;
-                let out = self.statements.append(first, second, value);
+                let out = self.append_outputs(first, second, value);
                 if !self.statements.has_statements(out.stmts) && let Some(value) = out.value {
                     self.statements.remove_empty(out.stmts);
                     self.probe_leaf(cx, value)
@@ -190,6 +245,15 @@ impl State {
                 self.probe_leaf(cx, value)
             }
         }
+    }
+    /// K2: O:339 push_effect_expression into the slot reserved after the head
+    /// of a sequence. One step per comma operand of the value.
+    fn hold_effect(&mut self, slot: u32, value: NodeId) {
+        let mut held = std::mem::take(&mut self.scratch);
+        crate::bir::j::norm::jm14_push_effect_expression(&mut self.arena, value, &mut held);
+        self.statements.fill_held(slot, &held);
+        held.clear();
+        self.scratch = held;
     }
     /// K2: O:339 push_effect_expression. Calls may have effects; pure values
     /// are removed and comma values are split before statements are emitted.

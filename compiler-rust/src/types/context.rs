@@ -43,6 +43,11 @@ use std::sync::Arc;
 /// allocation does not copy earlier nodes and reads take no borrow flag; a
 /// node's position is its `TypeExprRef` index.
 pub(crate) struct TypeNodes {
+    /// Leased for this store's lifetime; only initialized slots below `len`
+    /// may be read. Reusing an array does not clear its previous contents.
+    first: Rc<[TypeNode; Self::FIRST_LEN]>,
+    /// FIRST_LEN normally, zero while a store build must observe local reads.
+    fast_limit: Cell<u32>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
     len: Cell<usize>,
 }
@@ -55,14 +60,74 @@ struct TypeNode {
     id: Cell<i32>,
 }
 
+thread_local! {
+    // The list retains one owner. A second owner leases the array exclusively.
+    static FIRST_NODE_ARRAYS: RefCell<Vec<Rc<[TypeNode; TypeNodes::FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+    #[cfg(test)]
+    static FIRST_NODE_LEASE_PROBES: Cell<usize> = const { Cell::new(0) };
+    #[cfg(test)]
+    static FIRST_NODE_INITIALIZATIONS: Cell<usize> = const { Cell::new(0) };
+}
+
 impl TypeNodes {
+    // Smaller measured arrays exceed the 0.2% instruction budget versus 65536.
+    const FIRST_LEN: usize = 1 << 16;
     const FIRST_CHUNK_BITS: u32 = 8;
     /// Chunk `k` holds `1 << (FIRST_CHUNK_BITS + k)` nodes; together the
     /// chunks cover every index a `TypeExprRef` can hold.
     const CHUNKS: usize = 32 - Self::FIRST_CHUNK_BITS as usize;
 
+    /// One thread-local acquisition and at most one reference-count probe per
+    /// retained array. Reuse initializes no nodes; a fresh lease initializes
+    /// FIRST_LEN nodes and appends one Rc to the list (amortized O(1)).
     pub(crate) fn new() -> Self {
+        let first = FIRST_NODE_ARRAYS.with(|arrays| {
+            let mut arrays = arrays.borrow_mut();
+            #[cfg(test)]
+            let mut probes = 0;
+            let free = arrays.iter().find(|array| {
+                #[cfg(test)]
+                {
+                    probes += 1;
+                }
+                Rc::strong_count(array) == 1
+            });
+            #[cfg(test)]
+            {
+                FIRST_NODE_LEASE_PROBES.with(|count| count.set(probes));
+                FIRST_NODE_INITIALIZATIONS.with(|count| count.set(0));
+            }
+            if let Some(free) = free {
+                return Rc::clone(free);
+            }
+            // Collect on the heap rather than constructing a large stack array.
+            #[cfg(test)]
+            let mut initialized = 0;
+            let array: Rc<[TypeNode]> = (0..Self::FIRST_LEN)
+                .map(|_| {
+                    #[cfg(test)]
+                    {
+                        initialized += 1;
+                    }
+                    TypeNode {
+                        desc: Cell::new(TypeDesc::Tnil),
+                        level: Cell::new(0),
+                        id: Cell::new(0),
+                    }
+                })
+                .collect();
+            #[cfg(test)]
+            FIRST_NODE_INITIALIZATIONS.with(|count| count.set(initialized));
+            let array: Rc<[TypeNode; Self::FIRST_LEN]> = match array.try_into() {
+                Ok(array) => array,
+                Err(_) => unreachable!("first node array has FIRST_LEN elements"),
+            };
+            arrays.push(Rc::clone(&array));
+            array
+        });
         TypeNodes {
+            first,
+            fast_limit: Cell::new(Self::FIRST_LEN as u32),
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
         }
@@ -76,10 +141,39 @@ impl TypeNodes {
         (bit - Self::FIRST_CHUNK_BITS as usize, biased - (1 << bit))
     }
 
+    /// One comparison excludes tagged handles, far nodes and active store builds.
+    /// The mask makes the array bound explicit without a second runtime check.
+    /// Cost: O(1), one limit comparison and, on success, one indexed address;
+    /// no allocation, reference-count update or thread-local access.
+    #[inline(always)]
+    fn direct(&self, raw: u32) -> Option<&TypeNode> {
+        if raw < self.fast_limit.get() {
+            Some(&self.first[raw as usize & (Self::FIRST_LEN - 1)])
+        } else {
+            None
+        }
+    }
+
+    /// Cost: O(1), select the limit and write one Cell; no node traversal.
+    fn set_direct(&self, on: bool) {
+        self.fast_limit.set(if on { Self::FIRST_LEN as u32 } else { 0 });
+    }
+
     /// Node `idx` (a local index or a store index with the tag stripped).
     #[inline(always)]
     fn node(&self, idx: usize) -> &TypeNode {
-        let (chunk, offset) = Self::locate(idx);
+        if idx < Self::FIRST_LEN {
+            return &self.first[idx];
+        }
+        self.node_far(idx)
+    }
+
+    /// Cost: O(1), one chunk calculation and two indexed loads, no traversal
+    /// or allocation. Kept out of line because first-array reads dominate.
+    #[cold]
+    #[inline(never)]
+    fn node_far(&self, idx: usize) -> &TypeNode {
+        let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
         &self.chunks[chunk]
             .get()
             .expect("type node index refers to an unallocated chunk")[offset]
@@ -113,16 +207,20 @@ impl TypeNodes {
     /// Append a node and return its index.
     pub(crate) fn push(&self, desc: TypeDesc, level: i32, id: i32) -> usize {
         let idx = self.len.get();
-        let (chunk, offset) = Self::locate(idx);
-        let node = &self.chunks[chunk].get_or_init(|| {
-            (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
-                .map(|_| TypeNode {
-                    desc: Cell::new(TypeDesc::Tnil),
-                    level: Cell::new(0),
-                    id: Cell::new(0),
-                })
-                .collect()
-        })[offset];
+        let node = if idx < Self::FIRST_LEN {
+            &self.first[idx]
+        } else {
+            let (chunk, offset) = Self::locate(idx - Self::FIRST_LEN);
+            &self.chunks[chunk].get_or_init(|| {
+                (0..1usize << (Self::FIRST_CHUNK_BITS as usize + chunk))
+                    .map(|_| TypeNode {
+                        desc: Cell::new(TypeDesc::Tnil),
+                        level: Cell::new(0),
+                        id: Cell::new(0),
+                    })
+                    .collect()
+            })[offset]
+        };
         node.desc.set(desc);
         node.level.set(level);
         node.id.set(id);
@@ -2715,6 +2813,17 @@ impl TypeContext {
     /// into callers.
     #[inline(always)]
     fn desc(&self, r: TypeExprRef) -> TypeDesc {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.desc.get();
+        }
+        self.desc_indirect(r)
+    }
+
+    /// Cost: O(1) local addressing or the existing stored-node lookup (expected
+    /// O(1) exception-table probe when writes exist). Active builds also mark
+    /// local reads as poisoned; optional debug tracing is outside this bound.
+    #[inline(never)]
+    fn desc_indirect(&self, r: TypeExprRef) -> TypeDesc {
         if r.is_store() {
             return self.store_desc(r);
         }
@@ -2745,6 +2854,17 @@ impl TypeContext {
     /// Get the level of a type.
     #[inline]
     pub fn get_level(&self, r: TypeExprRef) -> i32 {
+        if let Some(node) = self.types.direct(r.0) {
+            return node.level.get();
+        }
+        self.level_indirect(r)
+    }
+
+    /// Cost: O(1) local addressing or the existing stored-level lookup (expected
+    /// O(1) exception-table probe when writes exist), plus poison bookkeeping.
+    /// Optional debug tracing is outside this bound.
+    #[inline(never)]
+    fn level_indirect(&self, r: TypeExprRef) -> i32 {
         if r.is_store() {
             return self.store_level(r);
         }
@@ -2885,6 +3005,18 @@ impl TypeContext {
     /// Level write without journaling (also used to undo).
     #[inline]
     fn write_level_raw(&self, r: TypeExprRef, level: i32) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.level.set(level);
+            return;
+        }
+        self.write_level_indirect(r, level)
+    }
+
+    /// Cost: O(1) for local/build-owned nodes, expected amortized O(1) for an
+    /// existing frozen-write table insertion otherwise. No graph traversal;
+    /// optional poison debug tracing is outside this bound.
+    #[inline(never)]
+    fn write_level_indirect(&self, r: TypeExprRef, level: i32) {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
@@ -2927,6 +3059,19 @@ impl TypeContext {
     /// Descriptor write without journaling (also used to undo).
     #[inline]
     fn write_desc_raw(&self, r: TypeExprRef, desc: TypeDesc) {
+        if let Some(node) = self.types.direct(r.0) {
+            node.desc.set(desc);
+            return;
+        }
+        self.write_desc_indirect(r, desc)
+    }
+
+    /// Cost: O(1) for local nodes, expected amortized O(1) for a frozen-write
+    /// insertion. Build-owned descriptors retain the existing list-copy and
+    /// validation cost, proportional to their payload. Optional poison debug
+    /// tracing is outside these bounds.
+    #[inline(never)]
+    fn write_desc_indirect(&self, r: TypeExprRef, desc: TypeDesc) {
         if r.is_store() {
             if r.is_shared() {
                 if self.compiler_counters_enabled {
@@ -4857,9 +5002,11 @@ impl TypeContext {
             }
         }
         self.store_build_depth.set(depth + 1);
+        self.types.set_direct(depth + 1 == 0);
         super::thread_store::set_store_build_depth(depth + 1);
         let result = build();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         if depth == 0 && self.compiler_counters_enabled {
             crate::perf_counters::record_store_build_nodes(
@@ -5025,9 +5172,11 @@ impl TypeContext {
     /// separately.
     pub(crate) fn suspend_store_build<R>(&self, f: impl FnOnce() -> R) -> R {
         let depth = self.store_build_depth.replace(0);
+        self.types.set_direct(true);
         super::thread_store::set_store_build_depth(0);
         let result = f();
         self.store_build_depth.set(depth);
+        self.types.set_direct(depth == 0);
         super::thread_store::set_store_build_depth(depth);
         result
     }
@@ -5500,9 +5649,122 @@ mod tests {
     }
 
     #[test]
+    fn type_nodes_lease_scan_is_linear_at_10000_entries() {
+        std::thread::spawn(|| {
+            let busy = TypeNodes::new();
+            // Simulate 10,000 occupied entries without allocating 10,000 arrays.
+            // Each alias is busy because this test retains the original lease.
+            FIRST_NODE_ARRAYS.with(|arrays| {
+                let mut arrays = arrays.borrow_mut();
+                arrays.extend((1..10_000).map(|_| Rc::clone(&busy.first)));
+            });
+            let fresh = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_000));
+            FIRST_NODE_INITIALIZATIONS.with(|count| {
+                assert_eq!(count.get(), TypeNodes::FIRST_LEN);
+            });
+            assert!(!Rc::ptr_eq(&busy.first, &fresh.first));
+            drop(fresh);
+            let reused = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 10_001));
+            FIRST_NODE_INITIALIZATIONS.with(|count| assert_eq!(count.get(), 0));
+            assert_eq!(reused.len(), 0);
+            // Leave only the first entry; the next lease must stop after one probe.
+            drop(reused);
+            FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow_mut().truncate(1));
+            drop(busy);
+            let reused = TypeNodes::new();
+            FIRST_NODE_LEASE_PROBES.with(|count| assert_eq!(count.get(), 1));
+            assert_eq!(reused.len(), 0);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn type_nodes_lease_exclusively_and_reuse_without_clearing() {
+        // A fresh thread gives this test a fresh lease list.
+        std::thread::spawn(|| {
+            let first = TypeContext::new(Arc::new(IdGenerator::new()));
+            let second = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert!(!Rc::ptr_eq(&first.types.first, &second.types.first));
+            let address = Rc::as_ptr(&first.types.first);
+            let idx = first.types.push(TypeDesc::Tvar(None), 37, 91);
+            drop(first);
+            let reused = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert_eq!(Rc::as_ptr(&reused.types.first), address);
+            assert_eq!(reused.types.len(), 0);
+            // Inspect the backing slot, not a live handle: leasing must not clear it.
+            assert_eq!(reused.types.first[idx].level.get(), 37);
+            assert_eq!(reused.types.push(TypeDesc::Tnil, 4, 5), idx);
+            assert!(matches!(reused.types.desc(idx), TypeDesc::Tnil));
+            assert_eq!(reused.types.level(idx), 4);
+            assert_eq!(reused.types.id(idx), 5);
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn type_nodes_direct_excludes_far_and_tagged_handles() {
+        let nodes = TypeNodes::new();
+        assert!(nodes.direct(0).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32 - 1).is_some());
+        assert!(nodes.direct(TypeNodes::FIRST_LEN as u32).is_none());
+        assert!(nodes.direct(1 << 30).is_none());
+        assert!(nodes.direct(1 << 31).is_none());
+        nodes.set_direct(false);
+        assert!(nodes.direct(0).is_none());
+        nodes.set_direct(true);
+        assert!(nodes.direct(0).is_some());
+    }
+
+    #[test]
+    fn local_node_access_poisons_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        for access in 0..4 {
+            let (_, piece) = ctx.build_in_store(|| {
+                assert_eq!(ctx.types.fast_limit.get(), 0);
+                match access {
+                    0 => { ctx.desc(local); }
+                    1 => { ctx.get_level(local); }
+                    2 => ctx.write_desc_raw(local, TypeDesc::Tnil),
+                    3 => ctx.write_level_raw(local, 7),
+                    _ => unreachable!(),
+                }
+            });
+            assert!(piece.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+        }
+    }
+
+    #[test]
+    fn local_node_direct_limit_tracks_nested_and_suspended_store_builds() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let local = ctx.new_type(TypeDesc::Tnil);
+        let (_, piece) = ctx.build_in_store(|| {
+            ctx.suspend_store_build(|| {
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+                assert!(matches!(ctx.desc(local), TypeDesc::Tnil));
+                let (_, nested) = ctx.build_in_store(|| ctx.get_level(local));
+                assert!(nested.is_none());
+                assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+            });
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+            let (_, nested) = ctx.build_in_store(|| ctx.desc(local));
+            assert!(nested.is_none());
+            assert_eq!(ctx.types.fast_limit.get(), 0);
+        });
+        assert!(piece.is_none());
+        assert_eq!(ctx.types.fast_limit.get(), TypeNodes::FIRST_LEN as u32);
+    }
+
+    #[test]
+    fn type_node_size_is_32_bytes() {
+        assert_eq!(std::mem::size_of::<TypeNode>(), 32);
+    }
+
+    #[test]
     fn type_nodes_address_every_node_across_chunks() {
         let nodes = TypeNodes::new();
-        let count = (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
+        let count = TypeNodes::FIRST_LEN + (1 << (TypeNodes::FIRST_CHUNK_BITS + 3)) + 5;
         for i in 0..count {
             assert_eq!(nodes.push(TypeDesc::Tnil, i as i32, -(i as i32)), i);
         }

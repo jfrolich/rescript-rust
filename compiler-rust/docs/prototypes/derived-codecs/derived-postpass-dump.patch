@@ -1,0 +1,103 @@
+diff --git a/compiler-rust/src/binary_ast/derive/census.rs b/compiler-rust/src/binary_ast/derive/census.rs
+index 9712ae039..efd198768 100644
+--- a/compiler-rust/src/binary_ast/derive/census.rs
++++ b/compiler-rust/src/binary_ast/derive/census.rs
+@@ -85,6 +85,10 @@ pub struct Census {
+     pub shape_recursive: Vec<bool>,
+     /// Canonical structural bytes per binding; null means unsupported syntax.
+     pub templates: Vec<Option<Vec<u8>>>,
++    /// Measurement prototype: bound name per generated binding.
++    pub shape_names: Vec<String>,
++    /// Measurement prototype: (table, text, template index) of the declared names per binding.
++    pub shape_name_tables: Vec<Vec<(char, String, u64)>>,
+     #[serde(skip)]
+     pub(crate) observer_ns: u64,
+     #[serde(skip)]
+@@ -104,7 +108,7 @@ impl Census {
+                 && std::env::var("RAYON_NUM_THREADS").as_deref() == Ok("1"))
+                 .then_some([[0; 4]; 2]),
+             typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
+-            shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(), observer_ns: 0 }
++            shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(), shape_names: Vec::new(), shape_name_tables: Vec::new(), observer_ns: 0 }
+     }
+     /// O(new words) on growth, O(1) otherwise; one bit per typed binding-pool slot.
+     pub fn mark_typed_group(&mut self, start: u32) {
+diff --git a/compiler-rust/src/binary_ast/derive/shape.rs b/compiler-rust/src/binary_ast/derive/shape.rs
+index 860e0f2aa..f4d1869c8 100644
+--- a/compiler-rust/src/binary_ast/derive/shape.rs
++++ b/compiler-rust/src/binary_ast/derive/shape.rs
+@@ -258,6 +258,16 @@ pub(crate) fn record(decl: &TypeDeclaration, group: &[TypeDeclaration], recursiv
+     for binding in bindings {
+         let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
+         Visitor { body: &mut body, names: &names }.expr(arena, binding.pvb_expr);
++        census.shape_names.push(match &arena.get_pat(binding.pvb_pat).ppat_desc {
++            PatternDesc::Ppat_var(name) => arena.get_string(name.txt).to_string(),
++            _ => String::new(),
++        });
++        census.shape_name_tables.push(
++            [('f', &names.fields), ('c', &names.constructors), ('v', &names.values), ('l', &names.literals), ('t', &names.types)]
++                .iter()
++                .flat_map(|(tag, table)| table.iter().map(|(name, id)| (*tag, arena.get_string(*name).to_string(), *id)))
++                .collect(),
++        );
+         census.shape_classes.push(class);
+         census.shape_nodes.push(body.nodes);
+         census.shape_parameterised.push(!decl.ptype_params.is_empty());
+diff --git a/compiler-rust/src/driver.rs b/compiler-rust/src/driver.rs
+index 0b9a70cb1..72b477265 100644
+--- a/compiler-rust/src/driver.rs
++++ b/compiler-rust/src/driver.rs
+@@ -10077,6 +10077,11 @@ fn compile_with_lower_check(
+     jsx_preserve: bool,
+     unit: &str,
+ ) -> Result<DepsProgram> {
++    // Measurement prototype: name the unit whose bindings follow.
++    if let Some(path) = std::env::var_os("RESCRIPT_DERIVED_POSTPASS") {
++        use std::io::Write;
++        writeln!(std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap(), "M\t{unit}").unwrap();
++    }
+     if !options.backend.checks_lowering() {
+         return Ok(compiler.compile_deps_program_in_arena(arena, root, possible));
+     }
+diff --git a/compiler-rust/src/lambda/lam_compile_main.rs b/compiler-rust/src/lambda/lam_compile_main.rs
+index 342ec444e..d1e94d62c 100644
+--- a/compiler-rust/src/lambda/lam_compile_main.rs
++++ b/compiler-rust/src/lambda/lam_compile_main.rs
+@@ -127,6 +127,37 @@ pub fn simplify_in_arena(
+     let lam = lam_pass_guard_raises::guard_raises(a, lam);
+     // lam_compile_main.ml:212, lam_coercion.ml:196
+     let lam = handle_exports(a, &mut meta, lam);
++    // Measurement prototype: one line per top-level binding after the passes.
++    if let Some(path) = std::env::var_os("RESCRIPT_DERIVED_POSTPASS") {
++        use std::io::Write;
++        let mut out = Vec::new();
++        let mut cursor = lam;
++        loop {
++            match a.node(cursor) {
++                Node::Let { id, value, body, .. } => {
++                    let mut text = Vec::new();
++                    crate::lambda::printlambda::print_lambda(&a.export(value), &mut text);
++                    let text = String::from_utf8_lossy(&text).replace('\n', " ");
++                    writeln!(out, "B\t{}\t{}", a.ident(id).name(), text).unwrap();
++                    cursor = body;
++                }
++                Node::LetRec { ids, values, body } => {
++                    let values = a.list_vec(values);
++                    let ids = a.ident_run(ids, values.len()).to_vec();
++                    for (id, value) in ids.iter().zip(values) {
++                        let mut text = Vec::new();
++                        crate::lambda::printlambda::print_lambda(&a.export(value), &mut text);
++                        let text = String::from_utf8_lossy(&text).replace('\n', " ");
++                        writeln!(out, "B\t{}\t{}", id.name(), text).unwrap();
++                    }
++                    cursor = body;
++                }
++                Node::Sequence(_, body) => cursor = body,
++                _ => break,
++            }
++        }
++        std::fs::OpenOptions::new().create(true).append(true).open(path).unwrap().write_all(&out).unwrap();
++    }
+     let arena = std::mem::take(a);
+     Simplified { arena, lam, meta }
+ }

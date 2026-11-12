@@ -421,6 +421,28 @@ impl PortablePersStruct {
         }
     }
 
+    /// Rebase the filename side tables of an exclusively owned stored unit.
+    /// Costs one signature decode plus O(filename bytes); no type-node walk.
+    pub fn rebase_stored_paths(&mut self, from: &std::path::Path, to: &std::path::Path) {
+        let mut sig = self.signature();
+        let mut raw = self.raw_signature();
+        super::stored_module::rebase_filename(&mut self.ps_filename, from, to);
+        for (_, name) in &mut sig.cmi_longident_names {
+            super::stored_module::rebase_filename(name, from, to);
+        }
+        if let Some(raw) = &mut raw {
+            for (_, name) in &mut raw.cmi_longident_names {
+                super::stored_module::rebase_filename(name, from, to);
+            }
+        }
+        self.encoded = Default::default();
+        self.summary = Default::default();
+        *self.decoded.get_mut().unwrap() = Some((
+            PublishedSignature::Portable(Box::new(sig)),
+            RawSignature::Decoded(raw.map(Box::new)),
+        ));
+    }
+
     /// Finish a leaf publication after signature release. No dependent needs
     /// its decoded graph, so keep only the bytes storage will need anyway.
     pub fn prepare_for_storage(&self) {

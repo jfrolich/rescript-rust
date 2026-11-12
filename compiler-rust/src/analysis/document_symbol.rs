@@ -116,6 +116,7 @@ impl Collector {
 fn expr_kind(arena: &ParseArena, idx: ExprIdx) -> SymbolKind {
     match &arena.get_expr(idx).pexp_desc {
         ExpressionDesc::Pexp_fun(_) => SymbolKind::Function,
+        ExpressionDesc::Pexp_braces(braces) => expr_kind(arena, braces.expr),
         ExpressionDesc::Pexp_constraint(inner) => expr_kind(arena, inner.0),
         ExpressionDesc::Pexp_constant(constant) => match *constant {
             Constant::String(_) => SymbolKind::String,
@@ -292,5 +293,16 @@ fn add_symbol_to_children(symbol: Symbol, children: &mut Vec<Symbol>) {
             add_symbol_to_children(symbol, last.children.get_or_insert_with(Vec::new));
         }
         _ => children.push(symbol),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_braced_function_is_a_function() {
+        let symbols = get_symbols("let f = {x => x + 1}\n", FileKind::Res).pretty();
+        assert!(symbols.contains("\"kind\": 12"), "{symbols}");
     }
 }

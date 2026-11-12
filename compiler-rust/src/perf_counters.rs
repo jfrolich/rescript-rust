@@ -20,6 +20,13 @@ pub(crate) use checker::{
 #[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
+static SNAPSHOT_MODULE_DECODES: AtomicU64 = AtomicU64::new(0);
+
+/// O(1), one optional counter write per decoded module, not per node/lookup.
+pub fn record_snapshot_module_decode() {
+    if enabled() { SNAPSHOT_MODULE_DECODES.fetch_add(1, Ordering::Relaxed); }
+}
+
 static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
 
 static SIGNATURE_NONSHAREABLE: AtomicU64 = AtomicU64::new(0);
@@ -764,6 +771,7 @@ pub fn enabled() -> bool {
 
 /// Reset all compiler performance counters.
 pub fn reset() {
+    SNAPSHOT_MODULE_DECODES.store(0, Ordering::Relaxed);
     if !enabled() {
         return;
     }
@@ -1074,6 +1082,7 @@ pub fn print_report() {
         return;
     }
 
+    eprintln!("[compiler-counter] snapshot_modules_decoded={}", SNAPSHOT_MODULE_DECODES.load(Ordering::Relaxed));
     eprintln!(
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)

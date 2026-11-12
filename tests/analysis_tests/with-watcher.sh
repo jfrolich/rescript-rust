@@ -8,6 +8,7 @@
 # Usage (from a test project directory): with-watcher.sh <command> [args...]
 set -u
 
+mkdir -p lib
 rm -f lib/rescript-watch.addr
 yarn rescript watch > lib/watch-test.log 2>&1 &
 watcher=$!
