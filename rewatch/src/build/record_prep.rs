@@ -200,8 +200,8 @@ impl FreshRows {
     fn advance(&mut self, mut job: Waiting) {
         loop {
             // Most imports are already complete. Filter them before building
-            // a set, so a ready module needs neither an allocation nor a full
-            // duplicate set of all its read units. Non-project units cannot
+            // a collection, so a ready module needs neither an allocation nor a
+            // duplicate collection of all its read units. Non-project units cannot
             // block this build; memoize that fact as well.
             let mut needs_completion = |name: &Name| {
                 if self.completed.contains(name) {
@@ -213,7 +213,7 @@ impl FreshRows {
                     false
                 }
             };
-            let missing: AHashSet<Name> =
+            let mut missing: Vec<Name> =
                 match &job.stage {
                     ReadStage::Direct => {
                         job.input
@@ -229,6 +229,11 @@ impl FreshRows {
                     }
                     ReadStage::Expanded(keys) => keys.keys().copied().filter(&mut needs_completion).collect(),
                 };
+            // A ready job allocates nothing, including no hash-set seed.
+            // The few outstanding units may occur in both loaded and resolved
+            // reads; deduplicate before registering one wake-up per unit.
+            missing.sort_unstable();
+            missing.dedup();
             if !missing.is_empty() {
                 job.remaining = missing.len();
                 for unit in missing {
