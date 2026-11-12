@@ -518,7 +518,7 @@ fn the_other_operations_cost_what_they_say() {
 // ============================================================================
 
 #[test]
-fn a_component_seed_is_the_version_before_the_binding_and_owns_nothing() {
+fn a_component_seed_is_weak_but_its_exported_handle_retains_the_log() {
     let mut env = LogEnv::empty();
     env.add_value(local("x", 1), value(1));
     let id = local("M", 2);
@@ -540,8 +540,33 @@ fn a_component_seed_is_the_version_before_the_binding_and_owns_nothing() {
     // seed that is a cycle and the log would never be freed.
     let log = Rc::downgrade(&env.log);
     drop((env, seed, working));
-    assert!(thunk.seed.env().is_none());
+    // An exported handle, unlike the pool's weak thunk, must survive the
+    // producing compilation. No table Env participates in this ownership.
+    assert!(thunk.seed.env().is_some());
+    drop(thunk);
     assert_eq!(log.strong_count(), 0);
+}
+
+#[test]
+fn an_open_does_not_retain_table_thunks_that_own_its_log() {
+    shadow::begin(true, "ShadowOwnership.res");
+    let mut env = Env::empty();
+    env.add_value(local("x", 1), value(1));
+    let id = local("M", 2);
+    env.add_module(id, module_of(signature(1)));
+    let log = Rc::downgrade(&env.data.shadow.as_ref().unwrap().log);
+    let thunk = env.local_module_components_shared(&Path::pident(id)).unwrap();
+    let layers = OpenedLayers::build(
+        vec![], vec![], vec![], vec![], vec![],
+        vec![(id, thunk, 0)], vec![],
+    );
+    env.add_prebuilt_open_layers(Path::pident(local("Root", 3)), &layers, Some(1));
+    assert_eq!(env.open_slot_use(OpenLookupKind::Component, "M"), Some(OpenSlotUse {
+        slot: 1, shadowed: true,
+    }));
+    drop((env, layers));
+    assert_eq!(log.strong_count(), 0, "the log retained its table seed through an open");
+    shadow::finish(Ok(())).unwrap();
 }
 
 #[test]

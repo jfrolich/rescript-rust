@@ -268,6 +268,9 @@ pub(crate) struct OpenedLayers {
     modules: Rc<OpenedMap<(Ident, Arc<ModuleDeclaration>, i32)>>,
     module_components: Rc<OpenedMap<(Ident, Rc<super::env_lazy::StoredModuleComponents>, i32)>>,
     modtypes: Rc<OpenedMap<(Ident, Arc<ModtypeDeclaration>, i32)>>,
+    // The log needs component membership for open-slot marking, not table
+    // thunks that capture Env. Keep this index separate to avoid a cycle.
+    shadow_component_names: std::cell::OnceCell<Rc<HashSet<Name>>>,
 }
 
 impl OpenedLayers {
@@ -282,6 +285,7 @@ impl OpenedLayers {
         modtypes: Vec<(Ident, ModtypeDeclaration)>,
     ) -> Self {
         OpenedLayers {
+            shadow_component_names: std::cell::OnceCell::new(),
             values: Rc::new(id_open_table(
                 values
                     .into_iter()

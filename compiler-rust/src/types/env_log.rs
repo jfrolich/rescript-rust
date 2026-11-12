@@ -264,6 +264,7 @@ enum At {
 
 struct OpenRec {
     layers: OpenedLayers,
+    component_names: Rc<HashSet<Name>>,
     root: Arc<Path>,
     slot: Option<u32>,
     /// `Table::bit` of each non-empty table.
@@ -287,7 +288,7 @@ impl OpenRec {
             Table::Values => layers.values.contains_key(&name),
             Table::Types => layers.types.contains_key(&name),
             Table::Modules => layers.modules.contains_key(&name),
-            Table::Components => layers.module_components.contains_key(&name),
+            Table::Components => self.component_names.contains(&name),
             Table::Modtypes => layers.modtypes.contains_key(&name),
             Table::Constructors => layers.constrs.contains_key(&name),
             Table::Labels => layers.labels.contains_key(&name),
@@ -334,6 +335,24 @@ pub(super) struct LogComponents {
     pub(super) access_path: Path,
     pub(super) module_decl: ModuleDeclaration,
     pub(super) parent_context: Option<(Path, Arc<Signature>)>,
+}
+
+/// A thunk exported from its log. The pool retains only `LogComponents`
+/// (whose seed is weak); an external consumer retains this lease instead.
+/// Thus a thunk outliving its compilation can still force its seed, without
+/// a log -> thunk -> log cycle. Cloning shares the thunk and its cached data.
+#[derive(Clone)]
+pub(super) struct LogComponentsHandle {
+    components: Rc<LogComponents>,
+    owner: Rc<EnvLog>,
+}
+
+impl std::ops::Deref for LogComponentsHandle {
+    type Target = LogComponents;
+    fn deref(&self) -> &Self::Target {
+        debug_assert!(self.components.seed.log.ptr_eq(&Rc::downgrade(&self.owner)));
+        &self.components
+    }
 }
 
 /// Work counters, in the units the cost statements use.
@@ -1861,9 +1880,15 @@ impl LogEnv {
                     constrs: layers.constrs.clone(),
                     labels: layers.labels.clone(),
                     modules: layers.modules.clone(),
-                    module_components: layers.module_components.clone(),
+                    // Never retain the table thunks: their seed environments
+                    // can own this log. Only membership is used by the log.
+                    module_components: Rc::default(),
+                    shadow_component_names: OnceCell::new(),
                     modtypes: layers.modtypes.clone(),
                 },
+                component_names: layers.shadow_component_names.get_or_init(|| {
+                    Rc::new(layers.module_components.keys().copied().collect())
+                }).clone(),
                 root: Arc::new(root),
                 slot,
                 mask,
@@ -2010,12 +2035,14 @@ impl LogEnv {
 
     /// `EnvLog::find_ident` and one reference-count update: the thunk is
     /// shared, not copied.
-    pub(super) fn local_module_components_shared(&self, path: &Path) -> Option<Rc<LogComponents>> {
+    pub(super) fn local_module_components_shared(&self, path: &Path) -> Option<LogComponentsHandle> {
         let PathView::Pident(id) = path.view() else {
             return None;
         };
         let (log, entry) = self.log.find_ident(self.tip, Ns::Module, id)?;
-        Some(log.components.get(entry.item).clone())
+        let components = log.components.get(entry.item).clone();
+        let owner = components.seed.log.upgrade().expect("a borrowed log is alive");
+        Some(LogComponentsHandle { components, owner })
     }
 
     /// `Env::lookup_module`: by identifier then name for the head, then
