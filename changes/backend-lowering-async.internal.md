@@ -1,1 +1,1 @@
-- Extend the experimental backend lowering to handle await expressions.
+- Extend the experimental backend lowering to handle JSX, dynamic imports, await, record copy/rest, and flat module `make` reads.

@@ -35,7 +35,12 @@ pub(super) fn lower(
     let mut accumulated: Option<Out> = None;
     loop {
         let view = state.source.view(node);
-        let (cx, group, next) = if let View::Let { var, value, body } = view {
+        let record_candidate = matches!(view, View::Let { value: Some(value), .. }
+            if matches!(state.source.view(value), View::Prim { primitive, .. }
+                if matches!(state.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::Pduprecord)));
+        let (cx, group, next) = if record_candidate {
+            (Cx::value(), node, None)
+        } else if let View::Let { var, value, body } = view {
             state.source_steps += 1;
             let kind = match state.source.node(node).aux() & 3 {
                 0 => LetKind::Strict,

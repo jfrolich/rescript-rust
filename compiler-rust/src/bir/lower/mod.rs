@@ -297,7 +297,7 @@ struct State {
     statements: StatementStack,
     free: FreePool,
     source_steps: usize,
-    module_paths: Vec<bool>,
+    invalid_module_paths: Vec<bool>,
     awaited_units: Vec<bool>,
     dynamic_imports: Vec<crate::js_ir::ModuleId>,
     module_constants: Vec<ModuleConstants>,
@@ -342,7 +342,7 @@ impl State {
             .map(|i| input.arena.vars.order(VarId(i as u32)))
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
-            module_paths: vec![false; input.arena.nodes.len()],
+            invalid_module_paths: vec![false; input.arena.nodes.len()],
             awaited_units: vec![false; input.arena.vars.len()],
             dynamic_imports: Vec::new(),
             module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
@@ -502,6 +502,12 @@ impl ProbeRules for State {
             }
             View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
+                if matches!(self.arena.primitive(primitive).primitive,
+                    Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) if name.as_str() == "make") {
+                    if let Some(value) = self.flat_make_field(node) {
+                        return Ok(ProbePlan::Ready(self.probe_leaf(cx, value)));
+                    }
+                }
                 let reason = match &self.arena.primitive(primitive).primitive {
                     Primitive::Psequand | Primitive::Psequor => {
                         unreachable!("short circuits are lowered above")
@@ -513,7 +519,7 @@ impl ProbeRules for State {
                     | Primitive::PjsObjectSet(_)
                     | Primitive::PjsFnMethod => "external",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        source: node, primitive, operands: self.source.node(node).primitive_arguments(),
+                        primitive, operands: self.source.node(node).primitive_arguments(),
                     }))),
                 };
                 return Err(Unsupported(reason));

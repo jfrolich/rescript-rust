@@ -8,7 +8,6 @@ use crate::lambda::lam_primitive::Primitive;
 
 pub(super) struct Prim {
     pub primitive: PrimId,
-    pub source: NodeId,
     pub operands: crate::bir::ListId,
 }
 
@@ -109,22 +108,6 @@ impl State {
         self.primitive_steps += values.len() + 1;
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
-        // P: compile_flat_make_field. Cache module-path membership per source
-        // occurrence, so a deep chain is inspected once, not walked per field.
-        if let Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) = &primitive {
-            if let [arg] = self.source.lists.get(prim.operands) {
-                let nested = self.module_paths[arg.index()];
-                if nested && name.as_str() == "make" {
-                    self.module_paths[prim.source.index()] = true;
-                    let value = self.flat_make_field(prim.source);
-                    for old in values { self.arena.release(old); }
-                    return Ok(self.primitive_result(cx, statements, value));
-                }
-                self.module_paths[prim.source.index()] =
-                    nested || matches!(self.source.view(*arg), View::Global { .. })
-                    || matches!(self.source.view(*arg), View::Var { var } if self.awaited_units[var.index()]);
-            }
-        }
         let value = match primitive {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
@@ -779,8 +762,8 @@ mod tests {
     use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant};
 
     #[test]
-    fn primitive_resume_is_three_handles() {
-        assert_eq!(std::mem::size_of::<Prim>(), 12);
+    fn primitive_resume_is_two_handles() {
+        assert_eq!(std::mem::size_of::<Prim>(), 8);
         assert_eq!(std::mem::size_of::<ModuleConstants>(), 16);
         assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
     }
@@ -973,6 +956,22 @@ mod tests {
 mod await_tests {
     use super::*;
     use crate::lambda::{LamLoc, arena::LamArena};
+
+    #[test]
+    fn ten_thousand_awaits_are_linear() {
+        let mut a = LamArena::new();
+        let mut root = a.var(Ident::new("promise", 10, crate::ident::IdentFlags::NONE));
+        for _ in 0..10_000 { root = a.prim_raw(Primitive::Pawait, &[root], LamLoc::NONE); }
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 10_001);
+        assert_eq!(state.sequence_steps, 10_000);
+        assert_eq!(state.primitive_steps, 20_000);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+    }
 
     #[test]
     fn await_all_continuations_and_conditional_match_legacy() {

@@ -214,6 +214,50 @@ mod tests {
     }
 
     #[test]
+    fn ten_thousand_jsx_scopes_and_key_fields_are_linear() {
+        for key_fields in [false, true] {
+            let mut jsx = element(0, None, key_fields, false);
+            if !key_fields { jsx.jsx_ffi.scopes = vec!["scope".into(); 10_000]; }
+            let mut a = LamArena::new();
+            let mut args = vec![a.const_(Constant::String("div".into()))];
+            if key_fields {
+                let mut key = a.var(Ident::new("key", 10, IdentFlags::NONE));
+                for _ in 0..10_000 {
+                    key = a.prim_raw(Primitive::Pfield(0, crate::lambda::FieldDbgInfo::Record { name: crate::name::Name::new("field") }), &[key], LamLoc::NONE);
+                }
+                args.push(key);
+            }
+            let root = a.prim_raw(Primitive::Pjsx(Box::new(jsx)), &args, LamLoc::NONE);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let out = state.probe(Cx::value(), root).unwrap();
+            let expected = if key_fields { (10_003, 30_004) } else { (2, 10_001) };
+            eprintln!("JSX key_fields={key_fields}: source={} primitive={}", state.source_steps, state.primitive_steps);
+            assert_eq!((state.source_steps, state.primitive_steps), expected);
+            let lowered = state.complete(Cx::value(), out);
+            lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        }
+    }
+
+    #[test]
+    fn ten_thousand_jsx_children_and_props_are_linear() {
+        for props in [false, true] {
+            let jsx = if props { element(10_000, None, false, false) } else { element(0, Some(10_000), false, false) };
+            let (a, root) = input(jsx, 0, !props);
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let out = state.probe(Cx::value(), root).unwrap();
+            let expected = if props { (10_002, 10_001, 20_002) } else { (20_003, 30_000, 40_001) };
+            eprintln!("JSX props={props}: source={} sequence={} primitive={}", state.source_steps, state.sequence_steps, state.primitive_steps);
+            assert_eq!((state.source_steps, state.sequence_steps, state.primitive_steps), expected);
+            let lowered = state.complete(Cx::value(), out);
+            lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        }
+    }
+
+    #[test]
     fn jsx_external_module_and_fragment_match_legacy() {
         use crate::lambda::lam_primitive::{ExternalModuleName, ModuleBindName};
         for scopes in [vec![], vec!["default".into(), "nested".into()]] {

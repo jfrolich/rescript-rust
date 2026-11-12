@@ -138,6 +138,29 @@ mod tests {
     }
 
     #[test]
+    fn top_level_copy_matches_shared_tail() {
+        let (a, root) = copy(3);
+        let mut compiler = crate::lambda::lam_compile::LambdaCompiler::new();
+        let (_, check) = compiler.compile_deps_program_with_lower_check::<true>(a, root, Default::default());
+        crate::bir::shadow::check_lower(check.unwrap(), "RecordCopy.res", false).unwrap();
+    }
+
+    #[test]
+    fn ten_thousand_record_rest_exclusions_are_linear() {
+        let mut a = LamArena::new();
+        let source = a.var(Ident::new("source", 10, IdentFlags::NONE));
+        let root = a.prim_raw(Primitive::PrecordRest(vec!["field".into(); 10_000]), &[source], LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let out = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 2);
+        assert_eq!(state.primitive_steps, 10_002);
+        let lowered = state.complete(Cx::value(), out);
+        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+    }
+
+    #[test]
     fn ten_thousand_record_overrides_are_linear() {
         let (a, root) = copy(10_000);
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
