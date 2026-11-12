@@ -201,6 +201,7 @@ mod tests {
             path: package_path,
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: false,
         }
