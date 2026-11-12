@@ -1,5 +1,6 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
+mod args;
 mod expr;
 mod konst;
 #[cfg(test)]
@@ -263,6 +264,7 @@ struct State {
     source_steps: usize,
     direct: bool,
     located_functions: Vec<bool>,
+    next_order: u32,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -287,6 +289,9 @@ impl State {
                 dynamic_import: false,
             })
             .collect();
+        let next_order = (0..input.arena.vars.len())
+            .map(|i| input.arena.vars.order(VarId(i as u32)))
+            .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
             source: input.arena,
             arena,
@@ -296,6 +301,7 @@ impl State {
             source_steps: 0,
             direct: false,
             located_functions: Vec::new(),
+            next_order,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert

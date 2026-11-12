@@ -37,10 +37,16 @@ pub struct Out {
     pub finished: Finished,
 }
 
+#[derive(Debug, PartialEq, Eq)]
+enum Slot {
+    Statement(NodeId),
+    Held(Span),
+}
 /// One stack per lowering. A hole is distinct from any valid node handle.
 #[derive(Default)]
 pub struct StatementStack {
-    slots: Vec<Option<NodeId>>,
+    slots: Vec<Option<Slot>>,
+    held: Vec<NodeId>,
     /// Statements written, excluding holes.
     pub pushed: usize,
     /// Statements copied into final lists.
@@ -63,9 +69,21 @@ impl StatementStack {
                 .expect("statement span capacity"),
         }
     }
+    /// A:191 sequence_arguments: skip reserved holes without copying statements.
+    pub(super) fn statements(&self, span: Span) -> impl Iterator<Item = NodeId> + '_ {
+        self.slots[span.start as usize..span.end()].iter().flat_map(|s| match s {
+            Some(Slot::Statement(node)) => std::slice::from_ref(node),
+            Some(Slot::Held(span)) => &self.held[span.start as usize..span.end()],
+            None => &[],
+        }).copied()
+    }
+    /// A:191 sequence_arguments: a reserved hold is not an argument statement.
+    pub(super) fn has_statements(&self, span: Span) -> bool {
+        self.statements(span).next().is_some()
+    }
     /// K0: C:119 append, push a statement once.
     pub fn push(&mut self, statement: NodeId) {
-        self.slots.push(Some(statement));
+        self.slots.push(Some(Slot::Statement(statement)));
         self.pushed += 1;
     }
     /// K12: C:6441 emit_multi_staticcatch_prelude; reserve before a child run.
@@ -78,8 +96,17 @@ impl StatementStack {
     pub fn fill(&mut self, slot: u32, statement: NodeId) {
         let hole = &mut self.slots[slot as usize];
         assert!(hole.is_none(), "reserved slot filled twice");
-        *hole = Some(statement);
+        *hole = Some(Slot::Statement(statement));
         self.pushed += 1;
+    }
+    /// A:191 sequence_arguments: fill an argument's reserved suffix after all
+    /// arguments were lowered. Held statements enter the list exactly once.
+    pub(super) fn fill_held(&mut self, slot: u32, statements: Vec<NodeId>) {
+        assert!(self.slots[slot as usize].is_none());
+        let span = Span { start: self.held.len() as u32, len: statements.len() as u32 };
+        self.pushed += statements.len();
+        self.held.extend(statements);
+        self.slots[slot as usize] = Some(Slot::Held(span));
     }
     /// K0: C:119 append. Both children have already been lowered, even when
     /// the first finishes. Value combination belongs to K2's expression policy.
@@ -113,13 +140,16 @@ impl StatementStack {
             self.slots.len(),
             "only the top run can be consumed"
         );
-        let count = self.slots[span.start as usize..]
-            .iter()
-            .filter(|s| s.is_some())
-            .count();
-        let id = bir
-            .lists
-            .push_iter(count, self.slots.drain(span.start as usize..).flatten());
+        let count = self.statements(span).count();
+        let held = &self.held;
+        let id = bir.lists.push_iter(count, self.slots.drain(span.start as usize..).flat_map(|slot| {
+            let (one, span) = match slot {
+                Some(Slot::Statement(node)) => (Some(node), Span::default()),
+                Some(Slot::Held(span)) => (None, span),
+                None => (None, Span::default()),
+            };
+            one.into_iter().chain(held[span.start as usize..span.end()].iter().copied())
+        }));
         self.copied += count;
         id
     }
@@ -292,7 +322,7 @@ mod tests {
         assert_eq!(size_of::<FreeId>(), 4);
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
-        assert_eq!(size_of::<StatementStack>(), 40);
+        assert_eq!(size_of::<StatementStack>(), 64);
         assert_eq!(size_of::<FreePool>(), 40);
     }
     #[test]
@@ -323,7 +353,7 @@ mod tests {
         let next = output(Span { start: 1, len: 1 }, Some(NodeId(2)), Finished::False);
         let out = stack.append(first, next, None);
         assert_eq!(out.finished, Finished::True);
-        assert_eq!(stack.slots, vec![Some(NodeId(0))]);
+        assert_eq!(stack.slots, vec![Some(Slot::Statement(NodeId(0)))]);
         let dummy = output(stack.mark(), None, Finished::Dummy);
         let out = stack.append(out, dummy, None);
         assert_eq!(out.stmts.len, 1);

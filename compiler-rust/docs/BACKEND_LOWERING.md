@@ -1937,7 +1937,7 @@ positions.
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
 | `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
-| `runs_no_code` (A:90) | sequencing | a walk of a chain of member reads only: bounded by the chain |
+| `runs_no_code` (A:90) | sequencing | J flag `RUNS_NO_CODE` (the L `DEAD` bit): maintained from the receiver flag for known record fields; unknown property reads clear it. Variables read the final `JS_GLOBAL` fact |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |
 | the second and third lowering of a branch | 3.6 | `probe` |
 | the second lowering of a function | 5.1 | `triggered` |

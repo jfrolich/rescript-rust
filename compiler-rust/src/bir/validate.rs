@@ -213,6 +213,11 @@ impl Bir {
                         return fail("live let has no value");
                     }
                 }
+                // J's RUNS_NO_CODE reuses DEAD. These producers are strictly
+                // pure; the paired STRICT bit distinguishes a lowered Var.
+                View::Var { .. } | View::JQualified { .. } | View::JBool
+                | View::JStr { .. } | View::JNumber { .. } | View::JDot { .. }
+                    if flags.contains(NodeFlags::STRICT) => {},
                 _ if flags.contains(NodeFlags::DEAD) => return fail("DEAD flag on non-let"),
                 _ => {}
             }

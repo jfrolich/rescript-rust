@@ -30,6 +30,8 @@ impl NodeFlags {
     pub const STRICT: u8 = Self::TAIL;
     /// J-only: safe to defer evaluation, reusing the L discarded-value bit.
     pub const DELAY_SAFE: u8 = Self::VALUE_UNUSED;
+    /// J-only: evaluating the expression runs no code (A:90).
+    pub const RUNS_NO_CODE: u8 = Self::DEAD;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
