@@ -894,6 +894,20 @@ pub fn parse_and_plan(build_state: &mut BuildCommandState, inc: impl Fn() + Sync
     let needed = modules_to_compile(build_state, &stale);
     {
         let stored_asts = build_state.stored_asts.lock().unwrap();
+        // Warning-producing parses stay dirty for watch builds. This is a
+        // second parse round of the same build: do not parse or log them twice.
+        for (module_name, module) in build_state.build_state.modules.iter_mut() {
+            if let SourceType::SourceFile(source_file) = &mut module.source_type {
+                if stored_asts.contains_key(&format!("{module_name}:impl")) {
+                    source_file.implementation.parse_dirty = false;
+                }
+                if let Some(interface) = &mut source_file.interface
+                    && stored_asts.contains_key(&format!("{module_name}:intf"))
+                {
+                    interface.parse_dirty = false;
+                }
+            }
+        }
         let unparsed: Vec<String> = needed
             .into_iter()
             .filter(|module_name| !stored_asts.contains_key(&format!("{module_name}:impl")))

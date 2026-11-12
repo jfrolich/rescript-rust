@@ -1,0 +1,1 @@
+- Report parse warnings once when an incremental build parses sources in multiple rounds.

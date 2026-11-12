@@ -92,6 +92,7 @@ fi
 ./compile/22-qualified-own-namespace-dependency.sh &&
 ./compile/23-root-source-dir-rebuild.sh &&
 ./compile/24-location-free-retry.sh &&
+./compile/27-warning-build-modes.sh &&
 ./compile/25-deterministic-records.sh &&
 ./compile/26-external-ppx-rejected.sh &&
 ./compile/14-no-testrepo-changes.sh &&
