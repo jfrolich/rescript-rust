@@ -20,7 +20,11 @@ pub(crate) struct Scope {
 impl Scope {
     /// Allocate zeroed rows once at lowering entry. Cost: O(variables).
     pub(crate) fn new(variables: usize) -> Self {
-        Self { uses: vec![Uses::default(); variables], ..Self::default() }
+        Self {
+            uses: vec![Uses::default(); variables],
+            #[cfg(test)]
+            updates: 0,
+        }
     }
 
     /// Add a fresh variable's row. Cost: amortized O(1), no node walk.
