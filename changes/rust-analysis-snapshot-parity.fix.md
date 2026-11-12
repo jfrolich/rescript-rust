@@ -1,1 +1,2 @@
 - Rust editor analysis: report a braced function binding (`let f = {x => x + 1}`) as a function in document symbols.
+- Rust editor analysis: hovering an inline record type shows just its definition again, as the OCaml analysis does.
