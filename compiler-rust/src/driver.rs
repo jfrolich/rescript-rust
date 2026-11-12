@@ -561,9 +561,20 @@ impl CompilerOptions {
         let (Some(package), Some(root)) = (&self.package_name, &self.package_root) else {
             return std::borrow::Cow::Borrowed(filename);
         };
-        let source = FsPath::new(filename);
-        let relative = source.strip_prefix(root).unwrap_or(source);
-        std::borrow::Cow::Owned(format!("{package}/{}", relative.to_string_lossy().replace('\\', "/")))
+        // Package discovery supplies normalized roots and source paths. Check
+        // the separator boundary in bytes instead of walking every component
+        // again for every implementation/interface compilation.
+        let relative = root.to_str().and_then(|root| {
+            let suffix = filename.strip_prefix(root)?;
+            if root.ends_with(std::path::is_separator) || suffix.is_empty() {
+                Some(suffix)
+            } else {
+                suffix.strip_prefix(std::path::is_separator)
+            }
+        }).unwrap_or(filename);
+        #[cfg(windows)]
+        let relative = relative.replace('\\', "/");
+        std::borrow::Cow::Owned(format!("{package}/{relative}"))
     }
 
     /// Read the census switch once per process. Subsequent option creation is
@@ -12384,6 +12395,8 @@ mod package_location_identity_tests {
             ..Default::default()
         };
         assert_eq!(options.location_identity("build/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
+        assert_eq!(options.location_identity("build/runtime-other/Module.res"), "@rescript/runtime/build/runtime-other/Module.res");
+        assert_eq!(options.location_identity("src/Module.res"), "@rescript/runtime/src/Module.res");
         options.package_root = Some(PathBuf::from("installed/runtime"));
         assert_eq!(options.location_identity("installed/runtime/src/Module.res"), "@rescript/runtime/src/Module.res");
         assert_ne!(options.location_identity("installed/runtime/src/Module.resi"), options.location_identity("installed/runtime/src/Module.res"));

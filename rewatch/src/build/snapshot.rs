@@ -727,9 +727,12 @@ mod tests {
             assert!(core.pers_struct.unwrap().ps_filename.starts_with("@rescript/belt/src"));
             assert!(core.info.package_root.is_none());
         }
+        // Both assertions run complete builds, which replace the process-wide
+        // type-store generation. Keep them in one sequential test rather than
+        // letting the test runner overlap independent build generations.
+        relocated_runtime_cores_equal_source_compilation_without_config();
     }
 
-    #[test]
     fn relocated_runtime_cores_equal_source_compilation_without_config() {
         std::thread::Builder::new().stack_size(256 * 1024 * 1024).spawn(|| {
             use rescript_compiler::cmi::persistent_env::SnapshotModules;
