@@ -7,7 +7,7 @@ bold "Test: watch.lock blocks watch and stays separate from build.lock"
 
 cleanup() {
   exit_watcher
-  rm -f rewatch.log second-watch.log
+  rm -f rewatch.log second-watch.log clean-during-watch.log
 }
 
 trap cleanup EXIT
@@ -39,7 +39,7 @@ then
   error "Second watcher should have been blocked by watch.lock"
   cat second-watch.log
   exit 1
-elif grep 'Could not start Rescript build:' second-watch.log > /dev/null;
+elif grep 'Could not start ReScript build:' second-watch.log > /dev/null;
 then
   success "Second watcher is blocked by watch.lock"
 else
@@ -59,6 +59,27 @@ then
 fi
 
 success "Build succeeds while watcher is running"
+
+# A clean would remove the artifacts the watcher keeps reading.
+if rewatch clean > clean-during-watch.log 2>&1;
+then
+  error "Clean should have been refused while the watcher runs"
+  cat clean-during-watch.log
+  exit 1
+elif grep 'Could not clean while rescript watch or another clean is running' clean-during-watch.log > /dev/null;
+then
+  success "Clean is refused while the watcher runs"
+else
+  error "Clean failed without the expected lock message"
+  cat clean-during-watch.log
+  exit 1
+fi
+
+if [ ! -f src/Test.mjs ];
+then
+  error "The refused clean removed the watcher's output"
+  exit 1
+fi
 
 if wait_for_file_gone "lib/rescript/build.lock" 20;
 then

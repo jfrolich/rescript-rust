@@ -19,7 +19,7 @@ use rayon::prelude::*;
 use rescript_compiler::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, InMemoryModuleInfo, ModuleRegistry,
 };
-use rescript_compiler::cmi::portable_types::PortablePersStruct;
+use rescript_compiler::cmi::portable_types::{PortablePersStruct, SignaturePublicationMode};
 use rescript_compiler::parse_arena::ParseArena;
 use rescript_compiler::parser::ast::{Signature, Structure};
 use std::cmp::Ordering;
@@ -327,14 +327,6 @@ fn apply_pending_registry_updates(
     let mut registry = build_command_state.module_registry.lock().unwrap();
     for update in updates {
         if let Some(pers_struct) = update.pers_struct {
-            // No compilation loads the signature of a module nothing depends
-            // on, so it need not keep a decoded one for that.
-            if build_command_state
-                .get_module(&update.module_name)
-                .is_some_and(|module| module.dependents.is_empty())
-            {
-                pers_struct.release_signature_for_dependent();
-            }
             registry.register_module_arc(&update.module_name, pers_struct, update.module_info);
         } else {
             registry.insert_module_info(update.module_name, update.module_info);
@@ -476,6 +468,17 @@ fn compute_critical_path_priorities(
     priorities
 }
 
+fn signature_publication_mode(
+    dependents: &AHashSet<String>,
+    compile_universe: &AHashSet<String>,
+) -> SignaturePublicationMode {
+    if dependents.iter().any(|name| compile_universe.contains(name)) {
+        SignaturePublicationMode::Eager
+    } else {
+        SignaturePublicationMode::OnDemand
+    }
+}
+
 /// Run the short-circuit check or the in-process compile for a single module.
 /// Invoked from worker threads inside the dispatcher scope; only reads
 /// `BuildState`, never mutates it (except via the `BuildCommandState` mutex
@@ -491,6 +494,7 @@ fn compile_one(
     parent_span: Span,
     in_process_hooks: InProcessSchedulerHooks,
     placement: qos::UnitClass,
+    publication: SignaturePublicationMode,
 ) -> WorkerMsg {
     let _placement = qos::UnitPlacementGuard::enter(placement);
     let module = build_state.get_module(module_name).unwrap();
@@ -538,6 +542,7 @@ fn compile_one(
                 build_state,
                 build_command_state,
                 Some(&in_process_hooks),
+                publication,
             );
             let interface_generation_after = build_command_state.get_interface_generation(module_name);
             match result {
@@ -973,6 +978,10 @@ pub fn compile(
                     }
                     let module_name = work.module_name.clone();
                     let is_dirty = dirty_set.contains(&module_name);
+                    let publication = signature_publication_mode(
+                        &build_state_ref.get_module(&module_name).unwrap().dependents,
+                        &compile_universe,
+                    );
                     let tx = tx.clone();
                     let inc_ref = &inc;
                     in_flight += 1;
@@ -1023,6 +1032,7 @@ pub fn compile(
                                 parent_span,
                                 in_process_hooks,
                                 placement,
+                                publication,
                             );
                             if show_progress && matches!(msg, WorkerMsg::Completed(_)) {
                                 inc_ref();
@@ -1340,7 +1350,7 @@ pub fn compile(
     }
 
     trace!(
-        "Compiled {} out of {} in the universe",
+        "compiled {} of the {} modules to check",
         completed_count, total_universe_count,
     );
 
@@ -2448,7 +2458,7 @@ fn js_metadata_registry_updates_for_package(
     is_runtime: bool,
     has_interface: bool,
     interface_registry_update: Option<PendingRegistryUpdate>,
-    pers_struct: Option<PortablePersStruct>,
+    pers_struct: Option<Arc<PortablePersStruct>>,
 ) -> Vec<PendingRegistryUpdate> {
     let module_info = in_memory_module_info_for_package(
         package,
@@ -2475,7 +2485,7 @@ fn js_metadata_registry_updates_for_package(
     } else if let Some(ps) = pers_struct {
         vec![PendingRegistryUpdate {
             module_name: module_name.to_string(),
-            pers_struct: Some(Arc::new(ps)),
+            pers_struct: Some(ps),
             module_info,
         }]
     } else {
@@ -2488,6 +2498,11 @@ fn send_js_metadata_ready(
     module_name: String,
     registry_updates: Vec<PendingRegistryUpdate>,
 ) -> Vec<PendingRegistryUpdate> {
+    for update in &registry_updates {
+        if let Some(pers) = &update.pers_struct {
+            pers.summary();
+        }
+    }
     match metadata_tx.send(WorkerMsg::JsMetadataReady(JsMetadataReadyMsg {
         module_name,
         registry_updates,
@@ -3425,7 +3440,6 @@ fn compile_runtime_module_from_source(
         })?;
 
         if let Some(pers_struct) = intf_result.pers_struct {
-            let pers_struct = Arc::new(pers_struct);
             local_registry.register_module_arc(
                 &module.module_name,
                 pers_struct.clone(),
@@ -3471,7 +3485,7 @@ fn compile_runtime_module_from_source(
             shared_registry.insert_module_info(module.module_name.clone(), module_info);
         }
     } else if let Some(pers_struct) = compile_result.pers_struct {
-        shared_registry.register_module(&module.module_name, pers_struct, module_info);
+        shared_registry.register_module_arc(&module.module_name, pers_struct, module_info);
     }
 
     Ok(())
@@ -3916,6 +3930,7 @@ fn compile_module_in_process_to_js_boundary(
     build_state: &BuildState,
     build_command_state: &BuildCommandState,
     scheduler_hooks: Option<&InProcessSchedulerHooks>,
+    publication: SignaturePublicationMode,
 ) -> Result<PreJsMsg> {
     build_command_state
         .loaded_units
@@ -4058,7 +4073,6 @@ fn compile_module_in_process_to_js_boundary(
             .map(|ps| ps.fingerprint)
             .unwrap_or(0);
         if let Some(ps) = intf_result.pers_struct {
-            let ps = Arc::new(ps);
             let module_info = provisional_module_info.clone();
             local_registry.register_module_arc(module_name, ps.clone(), module_info.clone());
             interface_registry_update = Some(PendingRegistryUpdate {
@@ -4106,12 +4120,20 @@ fn compile_module_in_process_to_js_boundary(
             let Some(hooks) = signature_hooks.as_ref() else {
                 return Ok(None);
             };
+            // The driver has left the signature-release guard. A leaf has no
+            // waiting dependent and needs only stored bytes; release its decoded
+            // graphs now instead of retaining them through the remaining phases.
+            if publication == SignaturePublicationMode::OnDemand
+                && let Some(pers) = &ready.pers_struct
+            {
+                pers.prepare_for_storage();
+            }
             let fingerprint = ready.pers_struct.as_ref().map(|ps| ps.fingerprint).unwrap_or(0);
             let module_info = signature_module_info.clone();
             let registry_updates = if let Some(pers_struct) = ready.pers_struct {
                 vec![PendingRegistryUpdate {
                     module_name: signature_module_name.clone(),
-                    pers_struct: Some(Arc::new(pers_struct)),
+                    pers_struct: Some(pers_struct),
                     module_info,
                 }]
             } else {
@@ -4169,6 +4191,7 @@ fn compile_module_in_process_to_js_boundary(
                             has_interface,
                             gentype_interface.clone(),
                             signature_hook,
+                            publication,
                         )
                     })
                 }
@@ -4424,6 +4447,7 @@ fn finish_in_process_js_inner(
             metadata.cmj_export_lambdas,
             is_runtime,
         );
+        registry_snapshot.prepare_signature_summary(&module_name);
         let registry_updates = vec![PendingRegistryUpdate {
             module_name: module_name.clone(),
             pers_struct: None,
@@ -4644,6 +4668,25 @@ mod tests {
     use std::sync::RwLock;
     use std::time::SystemTime;
     use tempfile::TempDir;
+
+    #[test]
+    fn signature_publication_uses_only_dependents_in_this_build() {
+        let universe = AHashSet::from_iter(["Reader".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&AHashSet::new(), &universe),
+            SignaturePublicationMode::OnDemand,
+        );
+        let dependents = AHashSet::from_iter(["OtherBuild".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&dependents, &universe),
+            SignaturePublicationMode::OnDemand,
+        );
+        let dependents = AHashSet::from_iter(["OtherBuild".to_string(), "Reader".to_string()]);
+        assert_eq!(
+            signature_publication_mode(&dependents, &universe),
+            SignaturePublicationMode::Eager,
+        );
+    }
 
     /// The runtime's stored interfaces are keyed by the compiler that
     /// encoded them: another compiler's key misses them.
