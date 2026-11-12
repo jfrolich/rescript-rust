@@ -7544,7 +7544,13 @@ fn type_pattern_exception(
 #[derive(Clone, Copy)]
 enum Expected {
     Known(TypeExprRef),
-    Infer { level: i32 },
+    Infer { level: i32, site: InferenceSite },
+}
+
+#[derive(Clone, Copy)]
+enum InferenceSite {
+    Expression,
+    ApplicationFunction,
 }
 
 impl From<TypeExprRef> for Expected {
@@ -7570,7 +7576,10 @@ pub(crate) fn type_exp<'a>(
             tctx,
             env,
             expr,
-            Expected::Infer { level: tctx.type_ctx.current_level() },
+            Expected::Infer {
+                level: tctx.type_ctx.current_level(),
+                site: InferenceSite::Expression,
+            },
             context,
             RecArg::Rejected,
             None,
@@ -8001,7 +8010,7 @@ fn type_expect_with_recarg_unscoped<'a>(
         let ty = type_constant(ctx, env, &constant);
         match expected_ty {
             Expected::Known(expected) => rue_unify(tctx, loc, ty, expected, context)?,
-            Expected::Infer { level } => {
+            Expected::Infer { level, .. } => {
                 // type_constant instances a nullary predefined constructor at
                 // current_level. No scope or universal variable can escape, and
                 // unifying with a fresh variable at this level only links that
@@ -9091,7 +9100,7 @@ fn finish_expected(
     expected: &mut Expected,
     context: Option<TypeClashContext>,
 ) -> TypeCoreResult<()> {
-    if let Expected::Infer { level } = *expected
+    if let Expected::Infer { level, .. } = *expected
         && crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level)
     {
         return Ok(());
@@ -9107,9 +9116,16 @@ fn materialize_expected(
 ) -> TypeExprRef {
     match *expected {
         Expected::Known(ty) => ty,
-        Expected::Infer { level } => {
+        Expected::Infer { level, site } => {
             if tctx.type_ctx.compiler_counters_enabled() {
-                crate::perf_counters::record_expected_var(expected_var_use(expr));
+                let site = match site {
+                    InferenceSite::Expression => expected_var_use(expr),
+                    InferenceSite::ApplicationFunction => crate::perf_counters::ExpectedVar {
+                        construct: "application: function",
+                        case: 1,
+                    },
+                };
+                crate::perf_counters::record_expected_var(site);
             }
             let ty = tctx.type_ctx.new_var(None);
             tctx.type_ctx.set_level(ty, level);
@@ -9933,19 +9949,26 @@ fn type_application(
     //   begin_def (); ... type_application/translate_unified_ops ...; end_def ();
     ctx.begin_def();
     if ctx.compiler_counters_enabled() {
-        // Section C.9: the two variables of an application, one the
-        // expected type of the function, one made below only to lower the
-        // function type's level.
-        for construct in ["application: function", "application: lowering"] {
-            crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
-                construct,
-                case: 1,
-            });
-        }
+        // Retain the second variable: its check below may lower the function
+        // type after end_def, and must preserve escape diagnostics.
+        crate::perf_counters::record_expected_var(crate::perf_counters::ExpectedVar {
+            construct: "application: lowering",
+            case: 1,
+        });
     }
-    let funct_ty = ctx.new_var(None);
     tctx.deprecated_function_call = true;
-    let typed_funct = type_expect(tctx, env, funct, funct_ty, None)?;
+    let typed_funct = type_expect_full(
+        tctx,
+        env,
+        funct,
+        Expected::Infer {
+            level: ctx.current_level(),
+            site: InferenceSite::ApplicationFunction,
+        },
+        None,
+        RecArg::Rejected,
+        None,
+    )?;
     let typed_funct_value_path = match &typed_funct.exp_desc {
         ExpressionDesc::Texp_ident(path, _, _) => Some(*path),
         _ => None,
@@ -29983,7 +30006,7 @@ mod tests {
         tctx.set_unify_env(&env);
         ctx.set_current_level(11);
         let result = ctx.new_var(None);
-        let mut expected = Expected::Infer { level: 10 };
+        let mut expected = Expected::Infer { level: 10, site: InferenceSite::Expression };
         finish_expected(&mut tctx, &expr, result, &mut expected, None).unwrap();
         let Expected::Known(materialized) = expected else {
             panic!("variable roots retain ordinary unification");
