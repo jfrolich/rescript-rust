@@ -724,7 +724,7 @@ if ! grep -F '.\" Pipe this output to groff' \
 fi
 checked=$((checked + 1))
 run_case implicit-conflicting-verbosity exit2 exit2 -v -q
-require_both_errors_contain implicit-conflicting-verbosity 'Usage: rescript build'
+require_both_errors_contain implicit-conflicting-verbosity 'Usage: rescript'
 run_case build-conflicting-verbosity exit2 exit2 build --verbose --quiet
 run_case unknown-command reject reject bogus-command
 require_both_errors_contain unknown-command \

@@ -94,15 +94,10 @@ fn main() {
     let telemetry_guard = telemetry::init_telemetry();
     let otel_enabled = telemetry_guard.otel_enabled();
     let exit_code = match run_main(otel_enabled) {
-        Ok(()) => 0,
+        Ok(status) => status,
         Err(err) => {
             eprintln!("{:#}", err);
-            // A dependency that cannot be resolved exits with 2.
-            if err.is::<rescript::build::packages::DependencyError>() {
-                2
-            } else {
-                1
-            }
+            1
         }
     };
     rescript::build::phase_mark("run-main-end");
@@ -112,7 +107,8 @@ fn main() {
     std::process::exit(exit_code);
 }
 
-fn run_main(otel_enabled: bool) -> Result<()> {
+/// Run the command; its exit status on success.
+fn run_main(otel_enabled: bool) -> Result<i32> {
     let cli = cli::parse_with_default().unwrap_or_else(|err| err.exit());
 
     let log_level_filter = cli.verbose.log_level_filter();
@@ -168,11 +164,11 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             if !built {
                 std::process::exit(1);
             }
-            Ok(())
+            Ok(0)
         }
         cli::Command::CompilerArgs { path } => {
             println!("{}", build::get_compiler_args(Path::new(&path))?);
-            Ok(())
+            Ok(0)
         }
         cli::Command::Build(build_args) => {
             let features = build_args.features.parsed();
@@ -210,7 +206,7 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                         // wall time; let the OS reclaim it at process exit instead.
                         std::mem::forget(build_state);
                     }
-                    Ok(())
+                    Ok(0)
                 }
             }
         }
@@ -231,10 +227,8 @@ fn run_main(otel_enabled: bool) -> Result<()> {
                     features,
                 )
             });
-            match watch_result {
-                Err(e) => Err(e),
-                Ok(_) => Ok(()),
-            }
+            // 0, or 128 plus the number of the signal that stopped it.
+            watch_result
         }
         cli::Command::Clean { folder, prod } => {
             // The watch lock first, as `rescript watch` takes it: a watcher
@@ -245,9 +239,9 @@ fn run_main(otel_enabled: bool) -> Result<()> {
             let _ = drop_lock(LockKind::Build, &folder);
             let _ = drop_lock(LockKind::Watch, &folder);
 
-            result
+            result.map(|()| 0)
         }
-        cli::Command::Format { stdin, check, files } => format::format(stdin, check, files),
+        cli::Command::Format { stdin, check, files } => format::format(stdin, check, files).map(|()| 0),
         cli::Command::Analysis { args } => {
             let cwd = std::env::current_dir()?;
             std::process::exit(rescript::tooling_server::run_client(&cwd, &args))

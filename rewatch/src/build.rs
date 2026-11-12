@@ -97,10 +97,24 @@ fn has_config_warnings(build_state: &BuildCommandState) -> bool {
     })
 }
 
+/// " in 1.23s", or nothing when `duration` is `None` (under --no-timing;
+/// rewatch-ocaml's `Output.duration`).
+pub fn duration_suffix(duration: Option<Duration>) -> String {
+    match duration {
+        Some(duration) => format!(" in {:.2}s", duration.as_secs_f64()),
+        None => String::new(),
+    }
+}
+
+/// `elapsed`, unless --no-timing leaves the durations out.
+fn timed(no_timing: bool, elapsed: Duration) -> Option<Duration> {
+    if no_timing { None } else { Some(elapsed) }
+}
+
 pub fn format_finished_compilation_message(
     compilation_kind: Option<&str>,
     outcome: CompilationOutcome,
-    duration: Duration,
+    duration: Option<Duration>,
 ) -> String {
     let compilation_kind = compilation_kind
         .map(|kind| format!("{kind} "))
@@ -111,8 +125,8 @@ pub fn format_finished_compilation_message(
     };
 
     format!(
-        "{LINE_CLEAR}{status}Finished {compilation_kind}compilation{warning_suffix} in {:.2}s",
-        duration.as_secs_f64()
+        "{LINE_CLEAR}{status}Finished {compilation_kind}compilation{warning_suffix}{}",
+        duration_suffix(duration)
     )
 }
 
@@ -262,7 +276,7 @@ fn get_compiler_info_with_mode(
 #[allow(clippy::too_many_arguments)]
 #[instrument(name = "build.initialize", skip_all)]
 pub fn initialize_build(
-    default_timing: Option<Duration>,
+    no_timing: bool,
     filter: &Option<regex::Regex>,
     show_progress: bool,
     path: &Path,
@@ -273,7 +287,7 @@ pub fn initialize_build(
     source_map_command: SourceMapCommand,
 ) -> Result<BuildCommandState> {
     initialize_build_with_mode(
-        default_timing,
+        no_timing,
         filter,
         show_progress,
         path,
@@ -287,7 +301,7 @@ pub fn initialize_build(
 }
 
 fn initialize_build_with_mode(
-    default_timing: Option<Duration>,
+    no_timing: bool,
     filter: &Option<regex::Regex>,
     show_progress: bool,
     path: &Path,
@@ -389,13 +403,13 @@ fn initialize_build_with_mode(
                 );
             }
             println!(
-                "{}{} {}Cleaned {}/{} in {:.2}s",
+                "{}{} {}Cleaned {}/{}{}",
                 LINE_CLEAR,
                 style("[1/3]").bold().dim(),
                 SWEEP,
                 diff_cleanup,
                 total_cleanup,
-                default_timing.unwrap_or(timing_clean_total).as_secs_f64()
+                duration_suffix(timed(no_timing, timing_clean_total))
             );
         }
     }
@@ -464,7 +478,7 @@ pub fn with_build_lock<T>(path: &Path, f: impl FnOnce() -> T) -> T {
 #[instrument(name = "build.incremental", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build(
     build_state: &mut BuildCommandState,
-    default_timing: Option<Duration>,
+    no_timing: bool,
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
@@ -474,7 +488,7 @@ pub fn incremental_build(
     with_build_lock(&build_folder, || {
         incremental_build_without_lock(
             build_state,
-            default_timing,
+            no_timing,
             initial_build,
             show_progress,
             only_incremental,
@@ -511,7 +525,7 @@ pub fn phase_mark(label: &str) {
 #[instrument(name = "build.incremental.unlocked", skip_all, fields(module_count = build_state.modules.len()))]
 pub fn incremental_build_without_lock(
     build_state: &mut BuildCommandState,
-    default_timing: Option<Duration>,
+    no_timing: bool,
     initial_build: bool,
     show_progress: bool,
     only_incremental: bool,
@@ -683,11 +697,11 @@ pub fn incremental_build_without_lock(
 
             if !plain_output && show_progress {
                 eprintln!(
-                    "{}{} {}Error parsing source files in {:.2}s",
+                    "{}{} {}Error parsing source files{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     CROSS,
-                    default_timing.unwrap_or(timing_ast_elapsed).as_secs_f64()
+                    duration_suffix(timed(no_timing, timing_ast_elapsed))
                 );
                 pb.finish();
             }
@@ -724,12 +738,12 @@ pub fn incremental_build_without_lock(
             println!("Parsed {num_dirty_modules} source files")
         } else {
             println!(
-                "{}{} {}Parsed {} source files in {:.2}s",
+                "{}{} {}Parsed {} source files{}",
                 LINE_CLEAR,
                 format_step(current_step, total_steps),
                 PARSE,
                 num_dirty_modules,
-                default_timing.unwrap_or(timing_parse_total).as_secs_f64()
+                duration_suffix(timed(no_timing, timing_parse_total))
             );
         }
     }
@@ -805,7 +819,7 @@ pub fn incremental_build_without_lock(
         mark_modules_dirty(build_state);
         let result = incremental_build_without_lock(
             build_state,
-            default_timing,
+            no_timing,
             initial_build,
             show_progress,
             only_incremental,
@@ -831,12 +845,12 @@ pub fn incremental_build_without_lock(
                 eprintln!("Compiled {num_compiled_modules} modules")
             } else {
                 eprintln!(
-                    "{}{} {}Compiled {} modules in {:.2}s",
+                    "{}{} {}Compiled {} modules{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     CROSS,
                     num_compiled_modules,
-                    default_timing.unwrap_or(compile_duration).as_secs_f64()
+                    duration_suffix(timed(no_timing, compile_duration))
                 );
             }
         }
@@ -870,12 +884,12 @@ pub fn incremental_build_without_lock(
                 println!("Compiled {num_compiled_modules} modules")
             } else {
                 println!(
-                    "{}{} {}Compiled {} modules in {:.2}s",
+                    "{}{} {}Compiled {} modules{}",
                     LINE_CLEAR,
                     format_step(current_step, total_steps),
                     SWORDS,
                     num_compiled_modules,
-                    default_timing.unwrap_or(compile_duration).as_secs_f64()
+                    duration_suffix(timed(no_timing, compile_duration))
                 );
             }
         }
@@ -1012,16 +1026,11 @@ pub fn build(
         prod
     )
     .entered();
-    let default_timing: Option<std::time::Duration> = if no_timing {
-        Some(std::time::Duration::new(0.0 as u64, 0.0 as u32))
-    } else {
-        None
-    };
     let timing_total = Instant::now();
     phase_mark("build-start");
     let run = || {
         let mut build_state = initialize_build_with_mode(
-            default_timing,
+            no_timing,
             filter,
             show_progress,
             path,
@@ -1037,7 +1046,7 @@ pub fn build(
 
         match incremental_build_without_lock(
             &mut build_state,
-            default_timing,
+            no_timing,
             true,
             show_progress,
             false,
@@ -1052,7 +1061,7 @@ pub fn build(
                         format_finished_compilation_message(
                             None,
                             result,
-                            default_timing.unwrap_or(timing_total_elapsed),
+                            timed(no_timing, timing_total_elapsed),
                         )
                     );
                 }
@@ -1193,7 +1202,7 @@ mod tests {
     #[test]
     fn formats_successful_completion_message() {
         assert_eq!(
-            format_finished_compilation_message(None, CompilationOutcome::Clean, Duration::from_millis(1500),),
+            format_finished_compilation_message(None, CompilationOutcome::Clean, Some(Duration::from_millis(1500)),),
             format!("{LINE_CLEAR}{}Finished compilation in 1.50s", CHECKMARK)
         );
     }
@@ -1204,12 +1213,25 @@ mod tests {
             format_finished_compilation_message(
                 Some("incremental"),
                 CompilationOutcome::Warnings,
-                Duration::from_millis(1500),
+                Some(Duration::from_millis(1500)),
             ),
             format!(
                 "{LINE_CLEAR}{}Finished incremental compilation with warnings in 1.50s",
                 WARNING
             )
         );
+    }
+
+    #[test]
+    fn leaves_the_duration_out_under_no_timing() {
+        assert_eq!(
+            format_finished_compilation_message(
+                None,
+                CompilationOutcome::Clean,
+                timed(true, Duration::from_millis(1500))
+            ),
+            format!("{LINE_CLEAR}{}Finished compilation", CHECKMARK)
+        );
+        assert_eq!(duration_suffix(timed(false, Duration::from_millis(1500))), " in 1.50s");
     }
 }

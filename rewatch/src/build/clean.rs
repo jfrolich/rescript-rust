@@ -292,7 +292,16 @@ pub fn clean(path: &Path, show_progress: bool, plain_output: bool, prod: bool) -
     // `clean` always acts on the full set of source directories regardless of which features are
     // active. We explicitly pass `None` so every tagged source folder is included and its
     // artifacts can be removed, even for features the user hasn't enabled for this build.
-    let packages = packages::make(&None, &project_context, show_progress, prod, None)?;
+    // A dependency that cannot be used, such as one not installed yet, holds
+    // nothing a build wrote: it is skipped and the other packages cleaned.
+    let packages = packages::make_with(
+        &None,
+        &project_context,
+        show_progress,
+        prod,
+        None,
+        packages::UnusableDependencies::Skip,
+    )?;
 
     let timing_clean_compiler_assets = Instant::now();
     if !plain_output && show_progress {
