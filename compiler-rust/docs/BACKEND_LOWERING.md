@@ -1975,13 +1975,12 @@ Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
    handle installed by `simplif_alias`, demonstrated by the bridge regression
    `simplify_lets_creates_shared_constant_occurrences`.
 
-   Remaining integration gap: a shared `StaticCatch` without handler
-   parameters is binder-free by this policy, but the importer's global
-   catch-label table rejects its second occurrence as `reused static catch
-   label` (reproduced in `inline_map2_test.res`). This is not an allowed lower
-   fallback. Importing such occurrences requires scoped fresh labels, or an
-   explicit change to the policy to count catch labels as binders; that choice
-   must be settled before recording the lower-stage baseline.
+   A static-catch label is itself a binder, including catches without handler
+   parameters. Shared catches therefore use the binder fallback; labels are
+   never freshened per occurrence. This also covers distinct rebuilt catch
+   nodes that retain the same label identity. The lower-stage report separately counts
+   units blocked only by shared catch labels, in addition to the total binder
+   fallback count. A catch-only share above 5% of a corpus is reported prominently.
 2. **New side.** Lower to J; export the J program, not flattened, to a
    `JsArena` with plain constructors (`bridge_j::export_js`, added in S3.1a: no
    smart constructor, no `normalize`). The flattening of 1.3 is the legacy

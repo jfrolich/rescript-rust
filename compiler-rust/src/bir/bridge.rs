@@ -412,46 +412,75 @@ pub(super) fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
 
 /// Memoized bottom-up binder facts. Each reachable source node is decoded
 /// once; the expansion walk only reads these facts, never scans a subtree.
-fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<bool>, usize) {
+fn sharing_facts(arena: &LamArena, root: Lam) -> (Vec<u8>, usize, u8) {
     enum Work { Enter(Lam), Finish(Lam, L) }
     let mut state = vec![0u8; arena.node_count()];
-    let mut binder = vec![false; arena.node_count()];
+    let mut binder = vec![0u8; arena.node_count()];
+    let mut shared = 0u8;
+    let mut labels = crate::fast_hash::AHashSet::new();
     let mut reachable = 0;
     let mut work = vec![Work::Enter(root)];
     while let Some(task) = work.pop() {
         match task {
             Work::Enter(id) => {
-                if state[id.index()] == 2 { continue; }
+                if state[id.index()] == 2 { shared |= binder[id.index()]; continue; }
                 assert_eq!(state[id.index()], 0, "cyclic Lambda arena");
                 state[id.index()] = 1;
                 reachable += 1;
                 let node = arena.node(id);
+                if let L::StaticCatch { info, .. } = node {
+                    if !labels.insert(arena.catch_payload(info).label) { shared |= 4; }
+                }
                 work.push(Work::Finish(id, node));
                 work.extend(children(arena, node).into_iter().rev().map(Work::Enter));
             }
             Work::Finish(id, node) => {
                 let local = match node {
                     L::Let { .. } | L::LetRec { .. } | L::TryWith { .. }
-                    | L::For { .. } | L::ForOf { .. } | L::ForAwaitOf { .. } => true,
-                    L::Function { info, .. } => !arena.params(info).is_empty(),
-                    L::StaticCatch { info, .. } => !arena.idents(arena.catch_payload(info).params).is_empty(),
+                    | L::For { .. } | L::ForOf { .. } | L::ForAwaitOf { .. } => 1,
+                    L::Function { info, .. } => u8::from(!arena.params(info).is_empty()),
+                    L::StaticCatch { info, .. } => 2 | u8::from(!arena.idents(arena.catch_payload(info).params).is_empty()),
                     L::Var(_) | L::GlobalModule(_) | L::Const(_) | L::Break | L::Continue
                     | L::Apply { .. } | L::Prim { .. } | L::Switch { .. } | L::StringSwitch { .. }
                     | L::StaticRaise { .. } | L::TryFinally { .. } | L::If { .. }
-                    | L::Sequence(..) | L::While(..) | L::Assign { .. } => false,
+                    | L::Sequence(..) | L::While(..) | L::Assign { .. } => 0,
                 };
-                binder[id.index()] = local || children(arena, node).into_iter().any(|c| binder[c.index()]);
+                binder[id.index()] = children(arena, node).into_iter().fold(local, |bits, c| bits | binder[c.index()]);
                 state[id.index()] = 2;
             }
         }
     }
-    (binder, reachable)
+    (binder, reachable, shared)
 }
 
 /// Import occurrences, as the legacy lowering does. Binder-free shared
 /// subtrees are copied per edge, with a hard budget of four times the reachable
 /// source nodes. Repeated binder subtrees cannot retain unique Bir binders.
 pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupported> {
+    import_with_sharing(arena, root, false).0
+}
+
+/// Same import, with the subset of binder fallbacks due solely to catch labels.
+/// The binder analysis runs once, also when the import is unsupported.
+pub(crate) fn import_for_lowering(arena: &LamArena, root: Lam) -> (Result<Imported, Unsupported>, bool) {
+    import_with_sharing(arena, root, true)
+}
+
+fn import_with_sharing(arena: &LamArena, root: Lam, lowering: bool) -> (Result<Imported, Unsupported>, bool) {
+    let (binders, reachable, shared) = sharing_facts(arena, root);
+    let catch_only = shared != 0 && shared & 1 == 0;
+    let result = if shared == 4 && !lowering {
+        // Earlier round oracles retain their established label-shadowing reason.
+        Err(Unsupported("reused static catch label"))
+    } else if shared != 0 {
+        Err(Unsupported("shared Lambda subtree with binder"))
+    } else {
+        import_with_facts(arena, root, &binders, reachable)
+    };
+    (result, catch_only)
+}
+
+fn import_with_facts(arena: &LamArena, root: Lam, has_binder: &[u8], reachable: usize) -> Result<Imported, Unsupported> {
     enum Work {
         Enter(Lam),
         Finish(L, usize),
@@ -461,13 +490,12 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
     let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
     let mut seen = vec![false; arena.node_count()];
-    let (has_binder, reachable) = sharing_facts(arena, root);
     let budget = reachable.saturating_mul(4);
     let mut occurrences = 0;
     while let Some(task) = work.pop() {
         match task {
             Work::Enter(id) => {
-                if std::mem::replace(&mut seen[id.index()], true) && has_binder[id.index()] {
+                if std::mem::replace(&mut seen[id.index()], true) && has_binder[id.index()] != 0 {
                     return Err(Unsupported("shared Lambda subtree with binder"));
                 }
                 occurrences += 1;
@@ -581,7 +609,7 @@ mod tests {
         let c = a.const_(C::JsNull);
         let mut root = a.const_(C::JsNull);
         for _ in 0..10_000 { root = a.seq_raw(c, root); }
-        let (_, visits) = sharing_facts(&a, root);
+        let (_, visits, _) = sharing_facts(&a, root);
         assert_eq!(visits, 10_002);
         let imported = import_lambda(&a, root).unwrap();
         assert_eq!(imported.arena.nodes.len(), 20_001);
@@ -594,21 +622,39 @@ mod tests {
         let mut a = LamArena::new();
         let mut root = a.const_(C::JsNull);
         for _ in 0..30 { root = a.seq_raw(root, root); }
-        let (_, visits) = sharing_facts(&a, root);
+        let (_, visits, _) = sharing_facts(&a, root);
         assert_eq!(visits, 31);
         assert!(matches!(import_lambda(&a, root), Err(Unsupported("shared Lambda expansion"))));
     }
 
     #[test]
-    fn shared_parameterless_catch_exposes_label_scope_gap() {
+    fn shared_parameterless_catch_is_a_binder_fallback() {
         let mut a = LamArena::new();
         let body = a.static_raise(1, &[]);
         let handler = a.const_(C::JsNull);
         let catch = a.static_catch(body, 1, &[], handler);
         let root = a.seq_raw(catch, catch);
-        let (binders, _) = sharing_facts(&a, root);
-        assert!(!binders[catch.index()], "no handler parameters");
-        assert!(matches!(import_lambda(&a, root), Err(Unsupported("reused static catch label"))));
+        let (binders, _, shared) = sharing_facts(&a, root);
+        assert_eq!(binders[catch.index()], 2, "catch label, no handler parameters");
+        assert_eq!(shared, 2);
+        let (result, catch_only) = import_for_lowering(&a, root);
+        assert!(catch_only);
+        assert!(matches!(result, Err(Unsupported("shared Lambda subtree with binder"))));
+    }
+
+    #[test]
+    fn rebuilt_catches_sharing_a_label_are_catch_only_binders() {
+        let mut a = LamArena::new();
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let first = a.static_catch(body, 1, &[], handler);
+        let body = a.static_raise(1, &[]);
+        let handler = a.const_(C::JsNull);
+        let second = a.static_catch(body, 1, &[], handler);
+        let root = a.seq_raw(first, second);
+        let (result, catch_only) = import_for_lowering(&a, root);
+        assert!(catch_only);
+        assert!(matches!(result, Err(Unsupported("shared Lambda subtree with binder"))));
     }
 
     #[test]

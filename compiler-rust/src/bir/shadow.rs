@@ -40,6 +40,8 @@ struct UnitReport<'a> {
     /// `lambda-norm`: smart-constructor calls replayed and rows fired.
     #[serde(skip_serializing_if = "Option::is_none")]
     norm: Option<NormReport>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    shared_catch_only: bool,
 }
 
 #[derive(serde::Serialize)]
@@ -57,6 +59,13 @@ fn report(
     stage: &'static str,
     unsupported: Option<&'static str>,
     norm: Option<NormReport>,
+) -> anyhow::Result<()> {
+    report_with_sharing(unit, stage, unsupported, norm, false)
+}
+
+fn report_with_sharing(
+    unit: &str, stage: &'static str, unsupported: Option<&'static str>,
+    norm: Option<NormReport>, shared_catch_only: bool,
 ) -> anyhow::Result<()> {
     let Some(directory) = std::env::var_os("RESCRIPT_BACKEND_STATS") else {
         return Ok(());
@@ -92,6 +101,7 @@ fn report(
         identical: unsupported.is_none(),
         unsupported,
         norm,
+        shared_catch_only,
     })?;
     file.write_all(&data)?;
     Ok(())
@@ -370,7 +380,7 @@ mod tests {
 /// Failure classification is preserved through the compiler's infallible IR API.
 /// Only Unsupported becomes a fallback; export/validation failures remain errors.
 pub(crate) enum LowerFailure {
-    Unsupported(super::bridge::Unsupported),
+    Unsupported(super::bridge::Unsupported, bool),
     Error(anyhow::Error),
 }
 
@@ -396,11 +406,12 @@ pub(crate) fn prepare_lower(
     ),
     LowerFailure,
 > {
-    let input = import_lambda(arena, root).map_err(|reason| match reason.0 {
-        "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason),
+    let (input, catch_only) = super::bridge::import_for_lowering(arena, root);
+    let input = input.map_err(|reason| match reason.0 {
+        "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
         _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
     })?;
-    let lowered = super::lower::lower(input).map_err(LowerFailure::Unsupported)?;
+    let lowered = super::lower::lower(input).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
     lowered
         .program
         .arena
@@ -439,8 +450,8 @@ pub(crate) fn prepare_lower(
 /// source maps. A mismatch cannot enter the Unsupported reporting path.
 pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> anyhow::Result<()> {
     match check {
-        LowerCheck::Failed(LowerFailure::Unsupported(reason)) => {
-            report(unit, "lower", Some(reason.0), None)
+        LowerCheck::Failed(LowerFailure::Unsupported(reason, catch_only)) => {
+            report_with_sharing(unit, "lower", Some(reason.0), None, catch_only)
         }
         LowerCheck::Failed(LowerFailure::Error(error)) => {
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
@@ -528,7 +539,7 @@ mod lower_tests {
         let root = arena.seq_raw(binding, binding);
         let result = prepare_lower(&arena, root);
         assert!(matches!(result, Err(LowerFailure::Unsupported(
-            super::super::bridge::Unsupported("shared Lambda subtree with binder")
+            super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
         ))));
     }
     #[test]

@@ -83,5 +83,32 @@
       "units": 711,
       "unsupported": {}
     }
+  },
+  "lower": {
+    "fixtures": {
+      "identical": 0,
+      "shared_catch_only": 0,
+      "units": 480,
+      "unsupported": {
+        "lowering not implemented": 480
+      }
+    },
+    "runtime": {
+      "identical": 0,
+      "shared_catch_only": 0,
+      "units": 113,
+      "unsupported": {
+        "lowering not implemented": 113
+      }
+    },
+    "tests/tests": {
+      "identical": 0,
+      "shared_catch_only": 1,
+      "units": 711,
+      "unsupported": {
+        "lowering not implemented": 710,
+        "shared Lambda subtree with binder": 1
+      }
+    }
   }
 }
