@@ -5409,15 +5409,18 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 /// Make a constructor matching cell.
 /// Equivalent to OCaml's `make_constr_matching`.
 fn make_constr_matching<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    cp: &CtxPool<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
     ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_constr_matching"),
@@ -5539,8 +5542,14 @@ fn divide_constructor<'p, B: RawLambdaBuilder>(
     ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
+    let cx = MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    };
     divide(
-        |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, cp, arena, p, def, ctx_inner, args),
+        |p, def, ctx_inner, args| make_constr_matching(cx, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
         |p, rem| get_args_constr(pa, p, rem),
@@ -5632,15 +5641,14 @@ fn matcher_variant_nonconst<'p>(
 /// Make a variant matching cell for non-constant variants.
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
 fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
-    pa: &'p PatArena<'p>,
-    cp: &CtxPool<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
     ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
@@ -5699,11 +5707,8 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
         al: &MatchArgs,
     ) -> Vec<((String, bool), MatchCell<'p>)> {
         let MatchCx {
-        ctx_ref,
-        pa,
-        arena,
-        cp,
-    } = cx;
+            ctx_ref, pa, cp, ..
+        } = cx;
         match cases.split_first() {
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
@@ -5753,7 +5758,7 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
                                         add(
                                             |a| {
                                                 make_variant_matching_nonconst(
-                                                    pa, cp, arena, p, lab, def, ctx, a,
+                                                    cx, p, lab, def, ctx, a,
                                                 )
                                             },
                                             variants,
@@ -6080,15 +6085,18 @@ fn make_record_matching<'p, B: RawLambdaBuilder>(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    cp: &CtxPool<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
     ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     let num_fields = all_labels.len();
     divide_line(
@@ -7051,15 +7059,19 @@ fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos<'p, B: RawLambdaBuilder>(
-    b: &B,
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    cp: &CtxPool<'p>,
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     seen: &[&'p Pattern],
     ctx: CtxId,
     defs: &DefaultEnv<'p>,
 ) -> (Option<RawLambda>, Vec<ConstrCase>, Jumps<'p>) {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
+    let b = arena.b;
     let fail_pats = complete_pats_constrs(ctx_ref, pa, seen);
     if fail_pats.is_empty() {
         // `scan_def` with nothing to test: no case and no jump, and the
@@ -7507,12 +7519,13 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx {
-            ctx_ref,
-            pa,
-            arena,
-            cp,
-        },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7578,7 +7591,7 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
-            mk_failaction_pos(b, ctx_ref, pa, cp, partial, &pats, ctx, def)
+            mk_failaction_pos(site.cx, partial, &pats, ctx, def)
         };
 
         // OCaml shares the immutable list cells/actions here:
@@ -7932,12 +7945,13 @@ fn combine_variant<'p, B: RawLambdaBuilder>(
     c_div: CompiledCells<'p, (String, bool)>,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx {
-            ctx_ref,
-            pa,
-            arena,
-            cp,
-        },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -8022,12 +8036,13 @@ fn combine_array<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx {
-            ctx_ref,
-            pa,
-            arena,
-            cp,
-        },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -8135,9 +8150,7 @@ fn compile_list<'p, K: Clone>(
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
 fn compile_orhandlers<'p, B: RawLambdaBuilder>(
-    b: &B,
-    pa: &'p PatArena<'p>,
-    cp: &CtxPool<'p>,
+    cx: MatchCx<'p, '_, B>,
     compile_fun: &mut OrHandlerCompiler<'p, '_>,
     lambda1: RawLambda,
     total1: Jumps<'p>,
@@ -8162,22 +8175,22 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
     }
 
     fn do_rec<'p, B: RawLambdaBuilder>(
-        b: &B,
-        pa: &'p PatArena<'p>,
-        cp: &CtxPool<'p>,
+        cx: MatchCx<'p, '_, B>,
         compile_fun: &mut OrHandlerCompiler<'p, '_>,
         raised: &mut std::collections::HashSet<i32>,
         (r, total_r): Compiled<'p>,
         ctx: CtxId,
         to_catch: &[OrHandler<'p>],
     ) -> Compiled<'p> {
+        let MatchCx { pa, arena, cp, .. } = cx;
+        let b = arena.b;
         match to_catch.split_first() {
             None => (r, total_r),
             // The or-pattern is unreachable, e.g. after a wildcard. Its
             // handler is not compiled: with a guard and no default, its
             // failure has no exit.
             Some(((_, i, _, _), rem)) if !raised.contains(i) => {
-                do_rec(b, pa, cp, compile_fun, raised, (r, total_r), ctx, rem)
+                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
             }
             Some(((mat, i, vars, pm), rem)) => {
                 let ctx_i = cp.built(select_columns(pa, mat, &cp.get(pa, ctx)));
@@ -8194,9 +8207,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                         bind(b, LetKind::Alias, var, arg, body)
                                     });
                                 do_rec(
-                                    b,
-                                    pa,
-                                    cp,
+                                    cx,
                                     compile_fun,
                                     raised,
                                     (body, jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i)),
@@ -8209,12 +8220,10 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(b, pa, cp, compile_fun, raised, (r, total_r), ctx, rem)
+                                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
                             }
                             None => do_rec(
-                                b,
-                                pa,
-                                cp,
+                                cx,
                                 compile_fun,
                                 raised,
                                 (
@@ -8231,9 +8240,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                         }
                     }
                     Err(Unused) => do_rec(
-                        b,
-                        pa,
-                        cp,
+                        cx,
                         compile_fun,
                         raised,
                         (b.static_catch(r, *i, vars, lambda_unit(b)), total_r),
@@ -8247,11 +8254,9 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
 
     // The exits of the match and of the handlers compiled so far.
     let mut raised = std::collections::HashSet::new();
-    add_raised_exits(&*b.get(), &mut raised, lambda1);
+    add_raised_exits(&*cx.arena.b.get(), &mut raised, lambda1);
     do_rec(
-        b,
-        pa,
-        cp,
+        cx,
         compile_fun,
         &mut raised,
         (lambda1, total1),
@@ -8675,7 +8680,6 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
         arena,
         cp,
     } = cx;
-    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
@@ -8707,9 +8711,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         cx,
-                        &move |ctx, pm| {
-                            divide_record(ctx_ref, pa, cp, arena, &all_labels, norm_pat, ctx, pm)
-                        },
+                        &move |ctx, pm| divide_record(cx, &all_labels, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8851,8 +8853,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa, cp,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
@@ -8914,10 +8915,12 @@ fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
 
     // Step 3: combine
     let result = match &c_div {
-        (list, _, _) if list.is_empty() => match mk_failaction_neg(b, pa, cp, partial, ctx, &pm.default) {
-            (None, _) => Err(Unused),
-            (Some(l), total) => Ok((l, total)),
-        },
+        (list, _, _) if list.is_empty() => {
+            match mk_failaction_neg(b, pa, cp, partial, ctx, &pm.default) {
+                (None, _) => Err(Unused),
+                (Some(l), total) => Ok((l, total)),
+            }
+        }
         _ => {
             let mut next_raise = raise_counter.get();
             let result = combine_fn(ctx, &pm.default, c_div, &mut next_raise);
@@ -9440,7 +9443,13 @@ fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
         args: MatchArgs::new(paraml.iter().map(|id| (b.var(*id), LetKind::Strict))),
         default: vec![(omegas_row, raise_num)],
     };
-    match compile_match_owned(cx, &partial, cp.built(start_ctx(paraml.len())), pm, next_raise_count) {
+    match compile_match_owned(
+        cx,
+        &partial,
+        cp.built(start_ctx(paraml.len())),
+        pm,
+        next_raise_count,
+    ) {
         Ok((lambda, total)) => {
             let loc_clone = loc;
             check_total(b, &total, lambda, raise_num, || {
@@ -9598,8 +9607,6 @@ fn compile_flattened<'p, B: RawLambdaBuilder>(
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, cp, .. } = cx;
-    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => compile_match(cx, None, partial, ctx, pm, next_raise_count),
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
@@ -9609,8 +9616,7 @@ fn compile_flattened<'p, B: RawLambdaBuilder>(
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa, cp,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
