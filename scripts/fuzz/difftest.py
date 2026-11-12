@@ -34,7 +34,7 @@ subprocess.run(
     [ROOT / "scripts/rust_compiler_shims.sh", os.environ.get("RUST_TARGET", "release")],
     check=False,
 )
-BELT_LIB = ROOT / "packages/@rescript/belt/lib/ocaml"
+BELT_LIB = ROOT / "packages/@rescript/belt/lib/rescript"
 DEFAULT_FLAGS = ["-w", "+A", "-bs-jsx", "4", "-color", "never", "-I", str(BELT_LIB)]
 TIMEOUT = float(os.environ.get("FUZZ_TIMEOUT", "10"))
 

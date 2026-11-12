@@ -292,15 +292,15 @@ compare_outputs() {
     return 0
 }
 
-# A case compiled against a fixture package passes `-I <package>/lib/ocaml`.
+# A case compiled against a fixture package passes `-I <package>/lib/rescript`.
 # The OCaml compiler reads that package's compiled files, so build it once
 # with the OCaml compiler (`rescript build-reference`); `rescript bsc` compiles
 # the package in memory itself.
 prebuild_ocaml_packages() {
     local previous="" flag package prep_out
     for flag in "$@"; do
-        if [[ "$previous" == "-I" && "$flag" == tests/error_output_parity/*/lib/ocaml ]]; then
-            package=${flag%/lib/ocaml}
+        if [[ "$previous" == "-I" && "$flag" == tests/error_output_parity/*/lib/rescript ]]; then
+            package=${flag%/lib/rescript}
             if [[ "$built_packages" != *" $package "* ]]; then
                 prep_out="$CACHE_DIR/compiler/$(safe_name "prebuild_${package}").out"
                 if ! RESCRIPT_RUNTIME="$PROJECT_ROOT/packages/@rescript/runtime" \
