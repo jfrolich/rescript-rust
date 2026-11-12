@@ -7078,6 +7078,9 @@ fn compile_source_to_js_with_options_inner(
     );
     compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
+    if options.backend == crate::bir::shadow::BackendMode::Check {
+        compiler.set_shadow_unit(filename);
+    }
     let mut all_possible_required_modules =
         crate::lambda::lam_compile::collect_possible_required_modules_in_arena(
             &lowered_arena,
@@ -7091,6 +7094,9 @@ fn compile_source_to_js_with_options_inner(
     #[cfg(test)]
     if let Some(trace) = discriminator_trace {
         trace.js_program = format!("{program:#?}");
+    }
+    if let Some(error) = compiler.take_shadow_error() {
+        return Err(error);
     }
     if let Some(diagnostic) = compiler.take_diagnostic() {
         // A location-free compilation has no range to report: recompile
@@ -9992,6 +9998,9 @@ fn js_backend_compiler(
     );
     compiler.set_flat_make_paths(flat_make_paths);
     compiler.set_lam_locs(lam_locs);
+    if options.backend == crate::bir::shadow::BackendMode::Check {
+        compiler.set_shadow_unit(options.source_filename.as_deref().unwrap_or("_none_"));
+    }
     compiler
 }
 
@@ -10018,6 +10027,9 @@ fn finish_js_backend(
     program: DepsProgram,
     options: &CompilerOptions,
 ) -> Result<JsBackendOutput> {
+    if let Some(error) = compiler.take_shadow_error() {
+        return Err(error);
+    }
     // lam_compile_main.ml reports a primitive's Location error before the
     // fatal-warnings check, as the file compile does.
     if let Some(diagnostic) = compiler.take_diagnostic() {
