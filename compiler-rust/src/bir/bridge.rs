@@ -504,7 +504,7 @@ mod tests {
     }
 }
 
-fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
+pub(super) fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
     enum Work {
         Enter(ConstId),
         Finish(ConstId, usize),
