@@ -111,7 +111,7 @@ pub fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    jsx_preserve: bool,
+    _jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
@@ -119,7 +119,6 @@ pub fn emit(
         resolver,
         directives,
         debug,
-        jsx_preserve,
         header,
         None,
         None,
@@ -131,7 +130,7 @@ pub(crate) fn emit_audited(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    jsx_preserve: bool,
+    _jsx_preserve: bool,
     header: bool,
     audit: Option<&mut Vec<RawSegment>>,
 ) -> Result<(String, Option<String>), Unsupported> {
@@ -140,7 +139,6 @@ pub(crate) fn emit_audited(
         resolver,
         directives,
         debug,
-        jsx_preserve,
         header,
         None,
         audit,
@@ -151,14 +149,13 @@ pub(crate) fn emit_audited(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
     program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
-    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+    debug: bool, _jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
         program,
         resolver,
         directives,
         debug,
-        jsx_preserve,
         header,
         Some(options),
         None,

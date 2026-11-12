@@ -20,7 +20,6 @@ pub(super) fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
     header: bool,
     source_map: Option<&super::sourcemap::Options<'_>>,
     audit: Option<&mut Vec<super::RawSegment>>,
