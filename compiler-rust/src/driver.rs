@@ -10042,6 +10042,7 @@ fn in_process_type_check_context<'a>(
     let effective_options = file_config.apply(options);
     let options = &*effective_options;
     let mut tctx = TypeCheckContext::new(type_ctx, arena);
+    tctx.read_log = options.collect_unit_reads.then(Default::default);
     tctx.experimental_let_unwrap = options.experimental_let_unwrap || file_config.let_unwrap;
     tctx.transparent_modules = options.transparent_modules;
     apply_warning_options(&mut tctx, options);
@@ -10493,8 +10494,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::structure_reads(
             &type_ctx,
-            &tctx.typed,
-            &typed_structure,
+            tctx.read_log.as_mut().expect("unit read logging enabled"),
             &options.open_modules,
         )
     } else {
@@ -11352,13 +11352,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     let unit_reads = if options.collect_unit_reads {
         crate::types::unit_reads::signature_reads(
             &type_ctx,
-            &tctx.typed,
-            &typed_signature,
+            tctx.read_log.as_mut().expect("unit read logging enabled"),
             &options.open_modules,
         )
     } else {
         Vec::new()
     };
+
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(
