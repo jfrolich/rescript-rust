@@ -1,0 +1,1 @@
+- Replace frozen type-node overlays with one compilation-local exception table, preserving snapshot restoration and avoiding map probes when it is empty.

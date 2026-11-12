@@ -38,10 +38,6 @@ const PAGE_SIZE: u32 = 1 << PAGE_BITS;
 /// that does not fit falls back to worker-local internalization.
 const MAX_SHARED_INDEX: u32 = 1 << 26;
 
-/// Node ids of shared nodes: disjoint from compilation-local ids and from
-/// worker-store ids (`thread_store::STORE_TYPE_ID_BASE = 1 << 30`).
-const SHARED_TYPE_ID_BASE: i32 = 0x6000_0000;
-
 /// First synthetic longident component index owned by the pool. Worker
 /// stores use `0xE000_0000..`, compilation contexts `0xF000_0000..`.
 const SHARED_LONGIDENT_IDX_BASE: u32 = 0xD000_0000;
@@ -51,7 +47,6 @@ const SHARED_LONGIDENT_IDX_BASE: u32 = 0xD000_0000;
 pub(crate) struct SharedTypeNode {
     pub(crate) desc: TypeDesc,
     pub(crate) level: i32,
-    pub(crate) id: i32,
 }
 
 /// One published dependency graph: nodes and variant layouts at
@@ -141,12 +136,7 @@ impl SharedGraph {
             nodes: parts
                 .nodes
                 .into_iter()
-                .enumerate()
-                .map(|(offset, (desc, level))| SharedTypeNode {
-                    desc,
-                    level,
-                    id: SHARED_TYPE_ID_BASE + base as i32 + offset as i32,
-                })
+                .map(|(desc, level)| SharedTypeNode { desc, level })
                 .collect(),
             lists: parts.payloads.lists.into_boxed_slice(),
             args: parts.payloads.args.into_boxed_slice(),

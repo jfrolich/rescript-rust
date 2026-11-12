@@ -528,6 +528,13 @@ here. The call information is not printed, but the printer's eta reduction
 (`eta_reduce_function_body`, A.7) and J1 read it, so it is part of the J node
 and of the gate (8.1).
 
+**Reachable J rules.** The call, the function built for a partial application,
+and strict temporary declarations are plain constructors. Assignment conversion
+does not match J-E4 folding triggers. Calls make retained sequence heads effectful:
+J-M1 joins statement-free sequence values and J-M14 emits or splits discarded
+effects. J-M14 removes pure numeric/undefined leaves, so its emitted call leaves
+cannot trigger J-S1. These are the section-6 rows needed by the application slice.
+
 **Cross-module call** (`compile_external_field_apply` (C:1266)):
 
 - with cross-module inlining on, a callee that is a closed function of
@@ -1937,7 +1944,7 @@ positions.
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
 | `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
-| `runs_no_code` (A:90) | sequencing | a walk of a chain of member reads only: bounded by the chain |
+| `runs_no_code` (A:90) | sequencing | J flag `RUNS_NO_CODE` (the L `DEAD` bit): maintained from the receiver flag for known record fields; unknown property reads clear it. Variables read the final `JS_GLOBAL` fact |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |
 | the second and third lowering of a branch | 3.6 | `probe` |
 | the second lowering of a function | 5.1 | `triggered` |
@@ -1991,8 +1998,9 @@ of steps. Each slice adds the tests of its constructs on a 10,000-deep and a
 
 ### 8.1 The gate
 
-Stage name `lower` in `bir::shadow` (C.7 step 7), run in the `Check` and
-`New` modes (G.1) for every unit:
+Stage name `lower` in `bir::shadow` (C.7 step 7), run in `Check` mode
+(G.1) for every unit. `New` retains the legacy lowering until the complete
+backend can replace it; this slice does not activate application lowering there:
 
 1. **Input.** The simplified Lambda the legacy lowering receives: after
    `simplify_in_arena`, `add_flat_make_aliases` and

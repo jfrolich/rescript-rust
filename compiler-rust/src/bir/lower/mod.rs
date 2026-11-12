@@ -1,5 +1,7 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
+mod args;
+mod call;
 mod expr;
 mod konst;
 #[cfg(test)]
@@ -246,12 +248,24 @@ pub(crate) struct Lowered {
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
+#[cfg(test)]
 pub(crate) fn lower(
     input: super::bridge::Imported,
     locations: Option<&crate::lambda::LamLocTable>,
     direct: bool,
 ) -> Result<Lowered, Unsupported> {
-    unit::lower(input, locations, direct)
+    unit::lower(input, locations, direct, None, false)
+}
+
+/// H2: C:1266 compile_external_field_apply; summaries are read-only inputs.
+pub(crate) fn lower_with_resolver(
+    input: super::bridge::Imported,
+    locations: Option<&crate::lambda::LamLocTable>,
+    direct: bool,
+    resolver: Option<&crate::js_ir::ModulePathResolver>,
+    cross_module_inline: bool,
+) -> Result<Lowered, Unsupported> {
+    unit::lower(input, locations, direct, resolver, cross_module_inline)
 }
 
 struct State {
@@ -263,6 +277,11 @@ struct State {
     source_steps: usize,
     direct: bool,
     located_functions: Vec<bool>,
+    next_order: u32,
+    resolver: Option<crate::js_ir::ModulePathResolver>,
+    cross_module_inline: bool,
+    locations: Option<crate::lambda::LamLocTable>,
+    sequence_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -287,6 +306,9 @@ impl State {
                 dynamic_import: false,
             })
             .collect();
+        let next_order = (0..input.arena.vars.len())
+            .map(|i| input.arena.vars.order(VarId(i as u32)))
+            .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
             source: input.arena,
             arena,
@@ -296,6 +318,11 @@ impl State {
             source_steps: 0,
             direct: false,
             located_functions: Vec::new(),
+            next_order,
+            resolver: None,
+            cross_module_inline: false,
+            locations: None,
+            sequence_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -364,7 +391,17 @@ impl ProbeRules for State {
                 0,
             ),
             View::Const { value } => self.constant(value),
-            View::Apply { .. } => return Err(Unsupported("apply")),
+            View::Apply { callee, args, info } => {
+                // K7: C:4558 try_compile_self_tailcall_block. S3.6 owns the
+                // loop record and matching callee; no such record exists yet.
+                if matches!(cx.cont, Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))
+                    | Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+                    return Err(Unsupported("let rec"));
+                }
+                let args = args.to_vec();
+                let call = self.application(callee, &args, info)?;
+                return Ok(ProbePlan::Children(expr::Resume::Call(call)));
+            }
             View::Fun { body, header } => {
                 return Ok(ProbePlan::Children(expr::Resume::Fun { body, header }));
             }
@@ -384,7 +421,7 @@ impl ProbeRules for State {
                 }));
             }
             View::Seq { first, second } => {
-                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
+                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, .. } => {

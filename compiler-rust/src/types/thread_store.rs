@@ -363,11 +363,6 @@ impl ThreadTypeStore {
         self.types.level(r.store_index())
     }
 
-    #[inline]
-    pub(crate) fn id(&self, r: TypeExprRef) -> i32 {
-        self.types.id(r.store_index())
-    }
-
     /// Allocate a type list in the worker store.
     pub(crate) fn alloc_type_list(&self, items: &[TypeExprRef]) -> super::type_expr::TypeRefList {
         self.type_lists.alloc(items)
@@ -459,6 +454,11 @@ impl ThreadTypeStore {
     /// Write a store row-field cell that is still being built.
     pub(crate) fn set_row_field_backing(&self, rf: RowFieldRef, field: Option<RowField>) {
         self.row_fields.borrow_mut()[rf.store_index()] = field;
+    }
+
+    /// Write a memo cell owned by the active store build.
+    pub(crate) fn set_abbrev_backing(&self, memo: AbbrevMemoRef, value: AbbrevMemo) {
+        self.abbrevs.borrow_mut()[memo.store_index()] = value;
     }
 
     /// Apply `f` to a store memo cell without copying it.
@@ -584,61 +584,10 @@ pub(crate) fn current() -> StoreLease {
     )))
 }
 
-const OVERLAY_PAGE: usize = 256;
-
-/// Sparse, page-allocated map from store cell index to this compilation's
-/// value for that cell. Reads are two indexed loads; pages are allocated on
-/// first write, so a compilation that touches a handful of dependency memos
-/// pays for a handful of pages, not for the whole store.
-#[derive(Clone, Debug)]
-pub(crate) struct PagedOverlay<T> {
-    pages: Vec<Option<Box<[Option<T>]>>>,
-}
-
-impl<T: Clone> PagedOverlay<T> {
-    pub(crate) fn new() -> Self {
-        PagedOverlay { pages: Vec::new() }
-    }
-
-    #[inline]
-    pub(crate) fn get(&self, idx: usize) -> Option<&T> {
-        self.pages
-            .get(idx / OVERLAY_PAGE)?
-            .as_deref()?
-            .get(idx % OVERLAY_PAGE)?
-            .as_ref()
-    }
-
-    pub(crate) fn set(&mut self, idx: usize, value: T) {
-        let page = idx / OVERLAY_PAGE;
-        if page >= self.pages.len() {
-            self.pages.resize_with(page + 1, || None);
-        }
-        let slot =
-            self.pages[page].get_or_insert_with(|| vec![None; OVERLAY_PAGE].into_boxed_slice());
-        slot[idx % OVERLAY_PAGE] = Some(value);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::types::type_expr::GENERIC_LEVEL;
-
-    #[test]
-    fn overlay_pages_and_clones_are_independent() {
-        let mut overlay = PagedOverlay::new();
-        for index in [0, 255, 256, 4096] {
-            assert_eq!(overlay.get(index), None);
-            overlay.set(index, Some(index));
-        }
-        let snapshot = overlay.clone();
-        overlay.set(255, None);
-        assert_eq!(overlay.get(255), Some(&None));
-        assert_eq!(snapshot.get(255), Some(&Some(255)));
-        assert_eq!(overlay.get(257), None);
-        assert!(overlay.pages[2].is_none());
-    }
 
     #[test]
     fn store_lease_is_exclusive_and_reused() {
