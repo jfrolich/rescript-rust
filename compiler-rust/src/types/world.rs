@@ -86,9 +86,12 @@ pub(crate) struct World {
 /// the table grows, so a reader takes no lock and a writer never moves a
 /// cell another thread can see.
 struct LabelArrays {
-    chunks: Box<[OnceLock<Box<[OnceLock<Arc<Vec<LabelDescription>>>]>>]>,
+    chunks: Box<[OnceLock<Box<[LabelArrayCell]>>]>,
     next: AtomicU32,
 }
+
+/// One frozen label array, written once.
+type LabelArrayCell = OnceLock<Arc<Vec<LabelDescription>>>;
 
 const LABEL_CHUNK_BITS: u32 = 10;
 const LABEL_CHUNK_COUNT: usize = 4096;
@@ -110,7 +113,7 @@ impl LabelArrays {
         (end as usize <= LABEL_CHUNK_COUNT << LABEL_CHUNK_BITS).then_some(base)
     }
 
-    fn cell(&self, index: u32) -> &OnceLock<Arc<Vec<LabelDescription>>> {
+    fn cell(&self, index: u32) -> &LabelArrayCell {
         let chunk = self.chunks[(index >> LABEL_CHUNK_BITS) as usize].get_or_init(|| {
             (0..1usize << LABEL_CHUNK_BITS)
                 .map(|_| OnceLock::new())

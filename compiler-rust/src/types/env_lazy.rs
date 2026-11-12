@@ -2660,7 +2660,8 @@ pub(crate) enum Components<'a> {
     Local(&'a QualifiedModuleComponents),
 }
 
-const _: () = assert!(std::mem::size_of::<Components<'static>>() == 16);
+// Passed by value down every lookup: a tag and a pointer.
+const _: () = assert!(std::mem::size_of::<Components<'static>>() <= 16);
 
 impl<'a> Components<'a> {
     /// An owned hold on the same components, for a caller that keeps them
