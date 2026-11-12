@@ -199,6 +199,15 @@ pub struct PortablePersStruct {
     encoded: std::sync::OnceLock<EncodedSignatures>,
     published_generation: Option<u64>,
     publication_counter_id: usize,
+    path_rebase: Option<Box<StoredPathRebase>>,
+}
+
+/// Package-level path mapping retained by a decoded stored unit. Signatures
+/// apply it to filename side tables when decoded, not to their type graphs.
+#[derive(Clone, Debug)]
+struct StoredPathRebase {
+    from: std::path::PathBuf,
+    to: std::path::PathBuf,
 }
 
 /// Absence of a raw signature is different from storage having moved it to
@@ -256,7 +265,7 @@ struct StoredPersStruct {
 impl serde::Serialize for PortablePersStruct {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        let encoded = self.encoded();
+        let encoded = self.storage_encoded();
         let mut s = serializer.serialize_struct("PortablePersStruct", 8)?;
         s.serialize_field("ps_name", &self.ps_name)?;
         s.serialize_field("ps_filename", &self.ps_filename)?;
@@ -282,6 +291,7 @@ impl<'de> serde::Deserialize<'de> for PortablePersStruct {
             fingerprint: s.fingerprint,
             published_generation: None,
             publication_counter_id: 0,
+            path_rebase: None,
             summary: Default::default(),
             shared_item_hashes: None,
             decoded: Default::default(),
@@ -305,6 +315,7 @@ impl Clone for PortablePersStruct {
             fingerprint: self.fingerprint,
             published_generation: self.published_generation,
             publication_counter_id: self.publication_counter_id,
+            path_rebase: self.path_rebase.clone(),
             summary: self.summary.clone(),
             shared_item_hashes: None,
             decoded: Default::default(),
@@ -411,6 +422,7 @@ impl PortablePersStruct {
             fingerprint,
             published_generation: None,
             publication_counter_id: 0,
+            path_rebase: None,
             summary: Default::default(),
             shared_item_hashes: None,
             encoded: Default::default(),
@@ -421,26 +433,44 @@ impl PortablePersStruct {
         }
     }
 
-    /// Rebase the filename side tables of an exclusively owned stored unit.
-    /// Costs one signature decode plus O(filename bytes); no type-node walk.
+    /// O(path bytes), retain a package-prefix mapping without decoding either
+    /// signature. The first signature reader applies it during its existing
+    /// decode; an unused raw signature is never decoded just to rebase names.
     pub fn rebase_stored_paths(&mut self, from: &std::path::Path, to: &std::path::Path) {
-        let mut sig = self.signature();
-        let mut raw = self.raw_signature();
-        super::stored_module::rebase_filename(&mut self.ps_filename, from, to);
-        for (_, name) in &mut sig.cmi_longident_names {
-            super::stored_module::rebase_filename(name, from, to);
+        if self.path_rebase.is_some() {
+            // Multiple rebases of the same object are producer-only. Materialize
+            // the previous mapping before replacing it so arbitrary prefixes
+            // compose correctly, including paths outside the second prefix.
+            let encoded = self.storage_encoded().into_owned();
+            self.encoded = std::sync::OnceLock::from(encoded);
+            *self.decoded.get_mut().unwrap() = None;
         }
-        if let Some(raw) = &mut raw {
-            for (_, name) in &mut raw.cmi_longident_names {
-                super::stored_module::rebase_filename(name, from, to);
+        super::stored_module::rebase_filename(&mut self.ps_filename, from, to);
+        self.summary = Default::default();
+        self.path_rebase = Some(Box::new(StoredPathRebase { from: from.to_path_buf(), to: to.to_path_buf() }));
+    }
+
+    /// O(filename bytes), one pass over the side table, no type-node traversal.
+    fn rebase_names(&self, names: &mut [(u32, String)]) -> usize {
+        let mut steps = 0;
+        if let Some(paths) = &self.path_rebase {
+            for (_, name) in names {
+                super::stored_module::rebase_filename(name, &paths.from, &paths.to);
+                steps += 1;
             }
         }
-        self.encoded = Default::default();
-        self.summary = Default::default();
-        *self.decoded.get_mut().unwrap() = Some((
-            PublishedSignature::Portable(Box::new(sig)),
-            RawSignature::Decoded(raw.map(Box::new)),
-        ));
+        steps
+    }
+
+    /// Storage/producer only: O(signature bytes) when a mapped unit is encoded,
+    /// otherwise O(1) for existing bytes. Runtime imports never call this just
+    /// to obtain a decoded graph.
+    fn storage_encoded(&self) -> std::borrow::Cow<'_, EncodedSignatures> {
+        if self.path_rebase.is_none() { return std::borrow::Cow::Borrowed(self.encoded()); }
+        std::borrow::Cow::Owned(EncodedSignatures {
+            sig: crate::binser::Encoded::encode(&self.signature()),
+            raw: self.raw_signature().as_ref().map(crate::binser::Encoded::encode),
+        })
     }
 
     /// Finish a leaf publication after signature release. No dependent needs
@@ -520,7 +550,9 @@ impl PortablePersStruct {
         {
             crate::perf_counters::record_published_signature_decode();
         }
-        encoded.sig.decode()
+        let mut sig = encoded.sig.decode();
+        self.rebase_names(&mut sig.cmi_longident_names);
+        sig
     }
     /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
@@ -532,13 +564,20 @@ impl PortablePersStruct {
                 // GenType may read a dependency's raw signature while publishing
                 // the current unit. Do not encode either signature just to read
                 // this graph; byte production belongs to the storage reader.
-                return raw.as_deref().cloned();
+                return raw.as_deref().cloned().map(|mut raw| {
+                    self.rebase_names(&mut raw.cmi_longident_names);
+                    raw
+                });
             }
         }
         self.encoded()
             .raw
             .as_ref()
-            .map(crate::binser::Encoded::decode)
+            .map(|encoded| {
+                let mut raw = encoded.decode();
+                self.rebase_names(&mut raw.cmi_longident_names);
+                raw
+            })
     }
     /// Whether a raw signature exists, without encoding or decoding.
     pub fn has_raw_signature(&self) -> bool {
@@ -1934,6 +1973,7 @@ pub(crate) fn publish_signature(
         ))),
         encoded: Default::default(), published_generation: Some(crate::types::thread_store::build_generation()),
         publication_counter_id: crate::perf_counters::signature_publication_id(),
+        path_rebase: None,
     });
     pps.record_access(false);
     (pps, comparison)
@@ -2134,12 +2174,6 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
                     ps_deprecated: pps.ps_deprecated.clone(), ps_crcs: pps.ps_crcs.clone(),
                     ps_alias_rewrites: Default::default(),
                 }));
-            }
-            if let Some((PublishedSignature::Portable(portable), _)) = decoded.as_ref() {
-                // Snapshot path rebasing already decoded this graph. Publish it
-                // directly: encoding it just to decode it again adds a complete
-                // traversal and an eager summary hash to the first import.
-                return shared_pers_struct(&pps, portable, pool);
             }
             drop(decoded);
             let portable = pps.signature();
@@ -2857,6 +2891,28 @@ fn remap_module_type_refs(mt: &mut ModuleType, map: &impl SignatureRefMap) {
 
 #[cfg(test)]
 mod identity_tests {
+    #[test]
+    fn stored_rebase_visits_each_filename_once_without_forcing_raw_graphs() {
+        let mut unit = super::PortablePersStruct::new(
+            "Unit".into(), "producer/Unit.res".into(), None, Vec::new(),
+            super::PortableSignature {
+                ps_sig: Vec::new(), cmi_longident_names: Vec::new(),
+                type_graph: super::PortableTypeGraph { entries: Vec::new(), variant_layouts: Vec::new(), mutabilities: Vec::new() }, locations: Default::default(),
+            }, None, 0,
+        );
+        unit.rebase_stored_paths(std::path::Path::new("producer"), std::path::Path::new("installed"));
+        assert!(unit.encoded.get().is_none());
+        let mut names: Vec<_> = (0..10_000).map(|i| (i, format!("producer/M{i}.res"))).collect();
+        assert_eq!(unit.rebase_names(&mut names), 10_000);
+        assert!(names.iter().all(|(_, name)| name.starts_with("installed/")));
+    }
+
+    #[test]
+    fn stored_path_mapping_size() {
+        assert_eq!(std::mem::size_of::<super::StoredPathRebase>(), 48);
+        assert_eq!(std::mem::size_of::<Option<Box<super::StoredPathRebase>>>(), 8);
+    }
+
     use super::*;
     use crate::context::IdGenerator;
 
