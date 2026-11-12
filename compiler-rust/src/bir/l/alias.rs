@@ -155,6 +155,7 @@ fn may_be_inlined(b: &Bir, function: NodeId) -> bool {
                 || match b.view(body) {
                     View::Switch { scrutinee, .. } => on_param(scrutinee),
                     View::If { condition, .. } => on_param(condition),
+                    // `destruct_pattern` (lam_analysis.rs:684): `_ => false`.
                     _ => false,
                 }
         }
@@ -187,9 +188,11 @@ fn element(b: &Bir, n: NodeId) -> Elem {
             match b.view(*x) {
                 View::Global { module } => Elem::FieldOfGlobal(primitive, module),
                 View::Var { var } => Elem::FieldOfVar(primitive, var),
+                // lam_pass_collect.rs:28: `_ => Element::Na`.
                 _ => Elem::Na,
             }
         }
+        // lam_pass_collect.rs:30: `_ => Element::Na`.
         _ => Elem::Na,
     }
 }
@@ -249,30 +252,36 @@ impl Table {
             },
             Fact::Const(c) => Entry::Const(c),
             Fact::Module(m) => Entry::Module(ImportId(m)),
-            Fact::Block(node) => match b.view(node) {
-                View::Prim { args, .. } => {
-                    let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
-                    self.block(b, &args)
-                }
-                _ => Entry::Na,
-            },
+            Fact::Block(node) => {
+                // Level L: an immutable block is a `Pmakeblock`.
+                let View::Prim { args, .. } = b.view(node) else {
+                    return Entry::Na;
+                };
+                let args: smallvec::SmallVec<[NodeId; 8]> = args.into();
+                self.block(b, &args)
+            }
             Fact::Optional(x) => Entry::Optional(match element(b, x) {
                 simple @ (Elem::Var(_) | Elem::Const(_)) => simple,
                 _ => Elem::Na,
             }),
-            Fact::NullableOptional(x, kind) => match b.view(x) {
-                View::Var { var } => Entry::Nullable(var, kind),
-                _ => Entry::Na,
-            },
+            Fact::NullableOptional(x, kind) => {
+                if let View::Var { var } = b.view(x) {
+                    Entry::Nullable(var, kind)
+                } else {
+                    Entry::Na
+                }
+            }
             Fact::Function { node, rec } => Entry::Function {
                 node,
                 inlinable: may_be_inlined(b, node),
                 rec: match rec {
                     RecFlag::No => Rec::NonRec,
-                    RecFlag::Yes => match b.vars().binder(var).map(|n| b.view(n)) {
-                        Some(View::LetRec { values, .. }) if values.len() == 1 => Rec::SelfRec,
-                        _ => Rec::Rec,
-                    },
+                    RecFlag::Yes => {
+                        let alone = b.vars().binder(var).is_some_and(|n| {
+                            matches!(b.view(n), View::LetRec { values, .. } if values.len() == 1)
+                        });
+                        if alone { Rec::SelfRec } else { Rec::Rec }
+                    }
                 },
             },
         }
@@ -439,15 +448,19 @@ impl Pass {
             self.table.entry(e, var);
         }
         self.work.push(Work::Finish(n, self.revision));
-        let (values, body): (smallvec::SmallVec<[NodeId; 4]>, NodeId) = match e.bir().view(n) {
-            View::Let {
+        let (values, body): (smallvec::SmallVec<[NodeId; 4]>, NodeId) =
+            if let View::LetRec { values, body, .. } = e.bir().view(n) {
+                (values.into(), body)
+            } else if let View::Let {
                 value: Some(value),
                 body,
                 ..
-            } => (smallvec::smallvec![value], body),
-            View::LetRec { values, body, .. } => (values.into(), body),
-            _ => unreachable!("a binding"),
-        };
+            } = e.bir().view(n)
+            {
+                (smallvec::smallvec![value], body)
+            } else {
+                unreachable!("a binding")
+            };
         self.work.push(Work::Simpl(body));
         let binders = e.bir().binders(n);
         for (index, value) in values.into_iter().enumerate().rev() {
@@ -687,6 +700,8 @@ impl Pass {
                 Some(false) => Some(else_),
                 None => None,
             },
+            // lam_pass_remove_alias.rs:203: any other condition is
+            // `self.simpl_children(a, lam)`.
             _ => None,
         };
         match keep {
@@ -864,6 +879,7 @@ impl Pass {
             // `external_inline_args_are_allowed` (lam_pass_remove_alias.rs:100-105).
             let allowed = args.iter().all(|arg| match e.bir().view(*arg) {
                 View::Var { var } => self.table.entry(e, var) != Entry::Param,
+                // lam_pass_remove_alias.rs:103: `None => true`.
                 _ => true,
             });
             let inline = e.bir().function(header).params.len() == arity
@@ -898,6 +914,7 @@ impl Pass {
                 fired(e, "inline-applied-function");
                 self.work.push(Work::Simpl(n));
             }
+            // lam_pass_remove_alias.rs:424: `_ => self.simpl_children(a, lam)`.
             _ => self.shallow(e, n),
         }
         Ok(())
