@@ -2,7 +2,7 @@
 
 // Multi-file error fixtures. Each fixture directory is built as a small
 // project with `rescript build`, the way users compile, and the diagnostics the
-// build writes to `lib/bs/.compiler.log` are compared with the snapshot. The
+// build writes to `lib/rescript/.compiler.log` are compared with the snapshot. The
 // compiler resolves interfaces, namespaces and dependency order itself, so the
 // harness passes no per-file flags.
 //
@@ -52,11 +52,8 @@ if (useOcaml) {
     process.exit(1);
   }
   // The OCaml compiles read the runtime's .cmi files: build it with the
-  // OCaml bsc, after the in-process build that provides its lib/ocaml sources.
+  // OCaml bsc.
   const runtime = setup(repoRoot);
-  await runtime.execBin(rescript_exe, ["build", buildEnv.RESCRIPT_RUNTIME ?? ""], {
-    env: buildEnv,
-  });
   const reference = await runtime.execBin(
     rescript_exe,
     ["build-reference", "--bsc", ocamlBsc, buildEnv.RESCRIPT_RUNTIME ?? ""],
@@ -129,7 +126,7 @@ async function runFixture(fixtureName) {
     let log;
     try {
       log = await fs.readFile(
-        path.join(projectDir, "lib", "bs", ".compiler.log"),
+        path.join(projectDir, "lib", "rescript", ".compiler.log"),
         "utf-8",
       );
     } catch {

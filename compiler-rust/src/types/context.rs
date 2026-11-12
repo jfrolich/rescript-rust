@@ -135,6 +135,25 @@ impl TypeNodes {
     }
 }
 
+/// A compilation's own type nodes. With the compiler counters on, their
+/// number is reported when the compilation is dropped.
+struct OwnTypeNodes(TypeNodes);
+
+impl Deref for OwnTypeNodes {
+    type Target = TypeNodes;
+    fn deref(&self) -> &TypeNodes {
+        &self.0
+    }
+}
+
+impl Drop for OwnTypeNodes {
+    fn drop(&mut self) {
+        if crate::perf_counters::enabled() {
+            crate::perf_counters::record_local_type_nodes(self.0.len());
+        }
+    }
+}
+
 /// A type descriptor read by value. `TypeDesc` is `Copy`, so a reader never
 /// holds a borrow of the node store; the lifetime only ties the copy to the
 /// context it was read from.
@@ -558,7 +577,7 @@ pub struct TypeContext {
     current_abbreviations: Cell<AbbrevMemoRef>,
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
-    types: TypeNodes,
+    types: OwnTypeNodes,
 
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
@@ -651,7 +670,8 @@ pub struct TypeContext {
     /// handles.
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
-    next_parse_location_scope: Cell<u32>,
+    next_identity_scope: Cell<u32>,
+    location_namespace: Cell<Option<u64>>,
 
     /// Parser warnings of the snippets error reports re-parse
     /// (`Error_message_utils.Parser.parse_source`), printed before the error
@@ -677,6 +697,12 @@ pub struct TypeContext {
     /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
+    /// With the compiler counters on: the type nodes already counted as
+    /// copied for some cause (see `counted_copy`).
+    counted_copy_nodes: Cell<usize>,
+    /// With the compiler counters on: the next call of a counted function
+    /// is the counting code calling it again (see `counts_this_call`).
+    counted_call_reentered: Cell<bool>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
@@ -1126,7 +1152,7 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(0),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: TypeNodes::new(),
+            types: OwnTypeNodes(TypeNodes::new()),
             store,
             store_descs: TypeNodes::new(),
             type_lists: Default::default(),
@@ -1163,7 +1189,8 @@ impl TypeContext {
             usage: RefCell::new(super::usage::UsageTables::default()),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
-            next_parse_location_scope: Cell::new(1),
+            next_identity_scope: Cell::new(1),
+            location_namespace: Cell::new(None),
             reparse_warnings: RefCell::new(Vec::new()),
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
@@ -1171,6 +1198,8 @@ impl TypeContext {
             mutabilities: RefCell::new(Vec::new()),
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
+            counted_copy_nodes: Cell::new(0),
+            counted_call_reentered: Cell::new(false),
             resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -2322,18 +2351,43 @@ impl TypeContext {
         self.alloc_type(desc, GENERIC_LEVEL)
     }
 
+    /// Count a variable made by `new_var` and its variants. A variable made
+    /// inside a copy session belongs to the copy.
+    #[cold]
+    #[inline(never)]
+    fn count_fresh_var(&self, location: &'static std::panic::Location<'static>) {
+        if self.copy_sessions.borrow().is_empty() {
+            crate::perf_counters::record_fresh_var(location);
+        }
+    }
+
     /// Create a new type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_type(TypeDesc::Tvar(name))
     }
 
     /// Create a new type variable at the global level.
+    #[track_caller]
+    #[inline]
     pub fn new_global_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_generic_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_generic_type(TypeDesc::Tvar(name))
     }
 
@@ -3628,6 +3682,53 @@ impl TypeContext {
         f()
     }
 
+    /// For the compiler counters: whether the function asking should count
+    /// this call. A counted function starts with
+    ///
+    /// ```ignore
+    /// if ctx.counts_this_call() {
+    ///     return ctx.counted_copy(cause, || this_function(same arguments));
+    /// }
+    /// ```
+    ///
+    /// so that with the counters off it pays this one test and its body is
+    /// what it was. With them on, the counting code calls the function
+    /// again, and that second call, which must not count itself, gets
+    /// `false` here.
+    #[inline]
+    pub(crate) fn counts_this_call(&self) -> bool {
+        self.compiler_counters_enabled && !self.counted_call_reentered.replace(false)
+    }
+
+    /// See [`Self::counts_this_call`]: run `again`, the calling function
+    /// called again, and count the type nodes it allocates as copied for
+    /// `cause`. Nodes of a counted copy nested in it are counted once, for
+    /// the inner cause.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn counted_copy<R>(
+        &self,
+        cause: crate::perf_counters::CopyCause,
+        again: impl FnOnce() -> R,
+    ) -> R {
+        let allocated = self.allocated_type_nodes();
+        let counted = self.counted_copy_nodes.get();
+        self.counted_call_reentered.set(true);
+        let result = again();
+        self.counted_call_reentered.set(false);
+        let nested = self.counted_copy_nodes.get() - counted;
+        let own = self.allocated_type_nodes() - allocated - nested;
+        self.counted_copy_nodes.set(counted + nested + own);
+        crate::perf_counters::record_copy(cause, own);
+        result
+    }
+
+    /// The type nodes this compilation has allocated so far, in its own
+    /// pool and in the worker store.
+    fn allocated_type_nodes(&self) -> usize {
+        self.types.len() + self.store.type_count()
+    }
+
     /// btype.ml `begin_type_copy_session`.
     pub(crate) fn begin_copy_session(&self) {
         self.copy_sessions.borrow_mut().push(CopySession::default());
@@ -4139,13 +4240,32 @@ impl TypeContext {
         super::Path::pdot_pos(*f(&Arc::new(*prefix)), *text, *pos)
     }
 
-    /// A scope for one parser arena or decoded interface. Uses the existing
-    /// table-owner namespace and never reuses an ordinal.
+    /// Select the stable namespace before allocating this unit's locations,
+    /// shape blocks or private interface imports.
+    pub(crate) fn set_location_namespace(&self, unit: &str) {
+        use std::hash::{Hash, Hasher};
+        assert_eq!(self.next_identity_scope.get(), 1);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        ("source unit", unit).hash(&mut hash);
+        self.location_namespace.set(Some(hash.finish()));
+    }
+
+    /// A scope for one parser arena or decoded interface. Named compilations
+    /// use a unit-local ordinal, not the worker's table-owner counter. Anonymous
+    /// contexts (such as standalone identity tests) retain process uniqueness.
     pub(crate) fn fresh_location_scope(&self) -> u64 {
-        let next = self.next_parse_location_scope.get();
-        self.next_parse_location_scope
+        let next = self.next_identity_scope.get();
+        self.next_identity_scope
             .set(next.checked_add(1).expect("location scopes exhausted"));
-        ((self.decl_loc_owner as u64) << 32) | next as u64
+        if let Some(namespace) = self.location_namespace.get() {
+            super::variant_runtime::identity_in_namespace(namespace, next as u64)
+        } else {
+            ((self.decl_loc_owner as u64) << 32) | next as u64
+        }
+    }
+
+    pub(crate) fn fresh_shape_allocation(&self) -> super::ShapeAllocation {
+        super::ShapeAllocation::in_namespace(self.fresh_location_scope(), 0)
     }
 
     pub(crate) fn intern_loc_with_identity(
@@ -4263,7 +4383,10 @@ impl TypeContext {
         files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
     ) -> super::decl_loc::DeclLocImport<'a> {
         let mut table = table.clone();
-        let scopes = table.remap_for_import(files);
+        let namespace = self.fresh_location_scope();
+        let scopes = table.remap_for_import_with(files, |scope| {
+            super::variant_runtime::identity_in_namespace(namespace, scope)
+        });
         let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Local,
@@ -4272,6 +4395,7 @@ impl TypeContext {
             instances,
             files,
             scopes,
+            namespace: Some(namespace),
         }
     }
 
@@ -4288,6 +4412,7 @@ impl TypeContext {
             instances: Vec::new(),
             files,
             scopes: Default::default(),
+            namespace: None,
         }
     }
 
@@ -4524,6 +4649,11 @@ impl TypeContext {
         let result = build();
         self.store_build_depth.set(depth);
         super::thread_store::set_store_build_depth(depth);
+        if depth == 0 && self.compiler_counters_enabled {
+            crate::perf_counters::record_store_build_nodes(
+                self.store.type_count() - self.store_build_type_start.get(),
+            );
+        }
         let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
         let guards = std::mem::replace(&mut *self.store_build_guards.borrow_mut(), outer_guards);
         let mut poisoned = self.store_build_poisoned.replace(outer_poisoned);

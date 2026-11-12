@@ -309,11 +309,13 @@ fn get_cmt_file_for_typed_artifact_import(project_root: &str, cmt: &str) -> Stri
     // OCaml saves CMTs before GenType reads imports through
     // compiler/ml/typemod.ml:1763-1764 and compiler/ml/typemod.ml:1785-1787;
     // EmitJs then selects the artifact at compiler/gentype/EmitJs.ml:438-453
-    // using the path order in compiler/gentype/Paths.ml:61-86. Rewatch's
-    // in-process Rust path keeps those typed artifacts in memory and compiles
-    // from the workspace root, so use Config.project_root as the package cwd
-    // that compiler/gentype/GenTypeConfig.ml:124-131 gives OCaml GenType.
-    crate::gentype::paths::get_cmt_file_from_cwd_with_exists(Path::new(project_root), cmt, |path| {
+    // using the path order in compiler/gentype/paths.ml `get_cmt_file`.
+    // OCaml's bsc runs in the package's artifact directory, where
+    // Import_path.to_cmt names the file; Rewatch's in-process Rust path keeps
+    // those typed artifacts in memory under the same paths, below
+    // Config.project_root (compiler/gentype/GenTypeConfig.ml:124-131).
+    let artifact_dir = Path::new(project_root).join("lib").join("rescript");
+    crate::gentype::paths::get_cmt_file_from_cwd_with_exists(&artifact_dir, cmt, |path| {
         // In-process builds write no .cmt; ask the registry before the disk.
         has_in_process_type_declarations(path) || path.exists()
     })
@@ -1052,9 +1054,10 @@ fn cmt_file_for_typed_artifact(
 ) -> Option<String> {
     // OCaml passes outputprefix.cmt/cmt_file through compiler/gentype/Paths.ml:61-86
     // before GenTypeMain.ml:136-175. Rust starts from the source path, so rebuild
-    // the CMT-shaped path used by ImportPath.to_cmt at compiler/gentype/ImportPath.ml:24-32.
+    // the path Import_path.to_cmt names the module's typed tree by: flat in the
+    // package's artifact directory (lib/rescript) below the project root,
+    // where [`get_cmt_file_for_typed_artifact_import`] looks it up.
     let source_path = Path::new(source_file);
-    let parent = source_path.parent().unwrap_or_else(|| Path::new(""));
     let stem = source_path.file_stem()?.to_str()?;
     let namespace = config
         .namespace
@@ -1066,7 +1069,9 @@ fn cmt_file_for_typed_artifact(
         false => "cmt",
     };
     Some(
-        parent
+        Path::new(&config.project_root)
+            .join("lib")
+            .join("rescript")
             .join(format!("{stem}{namespace}.{extension}"))
             .to_string_lossy()
             .to_string(),
@@ -1247,7 +1252,13 @@ mod tests {
             gentype_with_bad_strings(&root, "EscDecls", declaring),
             Ok(())
         );
-        let config = crate::gentype::config::build_config_from_cli_args(None, &[]);
+        let config = crate::gentype::config::build_config_from_cli_args(
+            None,
+            &[
+                "-bs-project-root".to_string(),
+                root.to_string_lossy().into_owned(),
+            ],
+        );
         let cmt_file = cmt_file_for_typed_artifact(&config, "src/EscDecls.res", false).unwrap();
         let resolver =
             crate::gentype::module_resolver::create_lazy_resolver(&config, &[], |_| false);
@@ -1301,7 +1312,13 @@ mod tests {
         let declaring = "type t = {@genType.as(`y`) a: int}\n";
         let outcome = gentype_outcome(&root, "EscDeclNotes", declaring);
         assert!(outcome.notes.is_empty(), "{:?}", outcome.notes);
-        let config = crate::gentype::config::build_config_from_cli_args(None, &[]);
+        let config = crate::gentype::config::build_config_from_cli_args(
+            None,
+            &[
+                "-bs-project-root".to_string(),
+                root.to_string_lossy().into_owned(),
+            ],
+        );
         let cmt_file = cmt_file_for_typed_artifact(&config, "src/EscDeclNotes.res", false).unwrap();
         let resolver =
             crate::gentype::module_resolver::create_lazy_resolver(&config, &[], |_| false);

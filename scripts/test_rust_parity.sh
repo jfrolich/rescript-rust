@@ -327,7 +327,7 @@ run_js_compilation_tests() {
     # Expected snapshots there are checked-in .bs.js files next to sources.
     if [[ -d "$TELLA_DIR" ]]; then
         find "$TELLA_DIR" \
-            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
+            -type d \( -name .git -o -name target -o -name .next -o -name _build -o -path "*/lib/rescript" -o -path "*/lib/bs" -o -path "*/lib/ocaml" \) -prune \
             -o -type f -name "*.res" -print 2>/dev/null | \
             sort >> "$TEMP_DIR/js_files.txt"
     fi

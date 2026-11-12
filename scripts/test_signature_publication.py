@@ -80,7 +80,7 @@ for workers in (1, 8):
     assert compiled and int(compiled[-1]) > 0, output
     decodes = re.findall(r"published_signature_decodes=(\d+)", output)
     assert decodes and all(int(n) == 0 for n in decodes), output
-    with sqlite3.connect(project / "lib/bs/rescript.sqlite") as db:
+    with sqlite3.connect(project / "lib/rescript/rescript.sqlite") as db:
         snapshot = {name: portable_interface(data) for name, data in db.execute("SELECT module, data FROM interfaces")}
     assert snapshot, "build stored no interfaces"
     snapshots.append(snapshot)

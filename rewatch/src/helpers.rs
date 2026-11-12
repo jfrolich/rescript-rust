@@ -360,15 +360,13 @@ fn path_to_ast_extension(path: &Path) -> &str {
     if extension.ends_with("i") { ".iast" } else { ".ast" }
 }
 
+/// The AST of `source_file` in its package's flat artifact directory:
+/// `src/nested/A.res` and its interface parse to `A.ast` and `A.iast`
+/// (rewatch-ocaml's `Source.ast_path`).
 pub fn get_ast_path(source_file: &Path) -> PathBuf {
-    let source_path = source_file;
     let basename = file_path_to_compiler_asset_basename(source_file, &packages::Namespace::NoNamespace);
-    let extension = path_to_ast_extension(source_path);
-
-    source_path
-        .parent()
-        .unwrap()
-        .join(format!("{basename}{extension}"))
+    let extension = path_to_ast_extension(source_file);
+    PathBuf::from(format!("{basename}{extension}"))
 }
 
 pub fn get_system_time() -> u128 {
@@ -477,5 +475,23 @@ mod test {
             file_path_to_module_name(Path::new("src/foo.test.res"), &namespace),
             "Foo.test-MyNs"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn asts_are_flat_in_the_artifact_directory() {
+        assert_eq!(
+            get_ast_path(Path::new("src/nested/A.res")),
+            PathBuf::from("A.ast")
+        );
+        assert_eq!(
+            get_ast_path(Path::new("src/nested/A.resi")),
+            PathBuf::from("A.iast")
+        );
+        assert_eq!(get_ast_path(Path::new("A.res")), PathBuf::from("A.ast"));
     }
 }

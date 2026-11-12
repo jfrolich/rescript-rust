@@ -288,7 +288,7 @@ printf 'compiler work: %d parser and %d compiler calls per implementation\n' \
   "$runs" "$runs"
 
 for implementation in rust ocaml; do
-  rm -f "$work_root/$implementation/lib/watch.lock"
+  rm -f "$work_root/$implementation/lib/rescript/watch.lock"
   wait "${pids[$implementation]}"
   unset "pids[$implementation]"
 done
