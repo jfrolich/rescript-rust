@@ -1,6 +1,7 @@
 //! Continuations for the level-L to level-J lowering (BACKEND_LOWERING §1).
 //! Context references are indices, never references into growing state pools.
 mod args;
+mod assign;
 mod ffi_args;
 mod external;
 mod call;
@@ -635,7 +636,7 @@ impl ProbeRules for State {
             | View::ForAwaitOf { .. }
             | View::Break
             | View::Continue => return Err(Unsupported("loop")),
-            View::Assign { .. } => return Err(Unsupported("assign")),
+            View::Assign { var, value } => return Ok(ProbePlan::Children(expr::Resume::Assign { var, value })),
             View::JBin { .. }
             | View::JNot { .. }
             | View::JBnot { .. }

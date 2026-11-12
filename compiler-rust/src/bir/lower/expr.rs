@@ -4,6 +4,7 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    Assign { var: VarId, value: NodeId },
     Switch(super::switch::Switch),
     Variant(super::variant::Variant),
     Untagged(super::untagged::Untagged),
@@ -65,6 +66,7 @@ impl State {
             return;
         }
         match *resume {
+            Resume::Assign { value, .. } => into.push((Cx { cont: Cont::Value(Tail::No), ..cx }, value)),
             Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
             | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
@@ -146,6 +148,7 @@ impl State {
             Resume::If(_) | Resume::Switch(_) | Resume::Variant(_) | Resume::Untagged(_)
             | Resume::Catch(_) | Resume::Exit(_) => unreachable!("control handled above"),
             Resume::Call(_) | Resume::Prim(_) | Resume::Record(_) => unreachable!("arguments handled above"),
+            Resume::Assign { .. } => false,
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -164,6 +167,7 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::Assign { var, .. } => self.finish_assignment(cx, var, children.next().expect("assignment operand")),
             Resume::Switch(frame) => self.finish_switch(cx, frame),
             Resume::Variant(frame) => self.finish_variant(cx, frame),
             Resume::Untagged(frame) => self.finish_untagged(cx, frame),
