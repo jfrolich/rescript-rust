@@ -598,6 +598,9 @@ pub fn incremental_build_without_lock(
     // A fresh in-process build has nothing compiled in memory, so every
     // module compiles (in-process builds keep no artifacts on disk).
     let fresh_in_process = build_state.module_registry.lock().unwrap().is_empty();
+    snapshot::prepare_belt(build_state).map_err(|err| IncrementalBuildError {
+        kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())), plain_output,
+    })?;
     // A fresh in-process build compiles only what changed since the JavaScript
     // was written (see `incremental`). It still parses every module: the
     // dependency graph comes from the parse.
@@ -660,9 +663,6 @@ pub fn incremental_build_without_lock(
     if fresh_in_process {
         incremental::collect_source_mtimes(build_state);
     }
-    snapshot::prepare_belt(build_state).map_err(|err| IncrementalBuildError {
-        kind: IncrementalBuildErrorKind::CompileError(Some(err.to_string())), plain_output,
-    })?;
     if incremental {
         incremental::seed_recorded_deps(build_state);
     } else if fresh_in_process {

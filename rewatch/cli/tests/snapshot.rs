@@ -30,7 +30,7 @@ fn one_belt_array_reference_decodes_one_snapshot_module() {
         .arg("build").arg(project.path())
         .env("RESCRIPT_RUNTIME", checkout.join("packages/@rescript/runtime"))
         .env("RESCRIPT_COMPILER_COUNTERS", "1")
-        .env_remove("RESCRIPT_FULL_BUILD")
+        .env_remove("RESCRIPT_FULL_BUILD").env("RESCRIPT_SNAPSHOT", "require")
         .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait().unwrap().is_none() {
@@ -89,9 +89,9 @@ fn run_build(project: &Path, checkout: &Path, full: bool) {
     let mut command = Command::new(env!("CARGO_BIN_EXE_rescript"));
     command.arg("build").arg(project)
         .env("RESCRIPT_RUNTIME", checkout.join("packages/@rescript/runtime"))
-        .env_remove("RESCRIPT_COMPILER_COUNTERS").env_remove("RESCRIPT_FULL_BUILD")
+        .env_remove("RESCRIPT_COMPILER_COUNTERS").env_remove("RESCRIPT_FULL_BUILD").env("RESCRIPT_SNAPSHOT", "require")
         .stdout(Stdio::piped()).stderr(Stdio::piped());
-    if full { command.env("RESCRIPT_FULL_BUILD", "1"); }
+    command.env("RESCRIPT_SNAPSHOT", if full { "off" } else { "require" });
     let mut child = command.spawn().unwrap();
     let deadline = Instant::now() + Duration::from_secs(10);
     while child.try_wait().unwrap().is_none() {
@@ -100,4 +100,40 @@ fn run_build(project: &Path, checkout: &Path, full: bool) {
     }
     let output = child.wait_with_output().unwrap();
     assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+}
+
+#[test]
+fn snapshot_require_rejects_changed_sources_and_off_reports_its_reason() {
+    let checkout = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..").canonicalize().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let belt = project.path().join("node_modules/@rescript/belt");
+    copy_sources(&checkout.join("packages/@rescript/belt/src"), &belt.join("src"));
+    std::fs::copy(checkout.join("packages/@rescript/belt/rescript.json"), belt.join("rescript.json")).unwrap();
+    std::fs::create_dir(project.path().join("src")).unwrap();
+    std::fs::write(project.path().join("rescript.json"), r#"{
+        "name":"snapshot-switch-test", "sources":["src"], "dependencies":["@rescript/belt"],
+        "package-specs":{"module":"esmodule","suffix":".mjs","in-source":true}
+    }"#).unwrap();
+    std::fs::write(project.path().join("src/Main.res"), "let size = Belt_Array.length([1])\n").unwrap();
+    use std::io::Write;
+    std::fs::OpenOptions::new().append(true).open(belt.join("src/Belt_Array.res")).unwrap().write_all(b"\n// patched\n").unwrap();
+    for (mode, success, reason) in [
+        ("require", false, "sources differ"),
+        ("off", true, "disabled by RESCRIPT_SNAPSHOT=off"),
+    ] {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_rescript"))
+            .arg("-v").arg("build").arg(project.path())
+            .env("RESCRIPT_RUNTIME", checkout.join("packages/@rescript/runtime"))
+            .env("RESCRIPT_SNAPSHOT", mode).env_remove("RESCRIPT_FULL_BUILD")
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while child.try_wait().unwrap().is_none() {
+            if Instant::now() >= deadline { child.kill().unwrap(); panic!("switch fixture exceeded ten seconds"); }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let output = child.wait_with_output().unwrap();
+        let text = format!("{}{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        assert_eq!(output.status.success(), success, "{text}");
+        assert!(text.contains(reason), "{text}");
+    }
 }

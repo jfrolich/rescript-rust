@@ -97,6 +97,8 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
 /// suffixes and both layouts. Producer only: four package compiles plus linear
 /// template comparison and one core encoding per module.
 fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> Result<ProducedPackage> {
+    anyhow::ensure!(alternate_backend_option().is_none(),
+        "produce snapshots with the default JavaScript printer and backend");
     let config: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("rescript.json"))?)?;
     let mut baseline: Option<ProducedPackage> = None;
     for in_source in [false, true] {
@@ -157,6 +159,7 @@ fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> 
                 let (extras, core) = stored_module::split(&data).expect("encoded module");
                 anyhow::ensure!(stored_module::decode_extras(extras).expect("encoded extras").gentype_declarations.is_empty(),
                     "Belt module {name} has genType declarations");
+                let original_core = core;
                 let mut core = stored_module::decode_core(core).expect("encoded core");
                 core.rebase_paths(&package.path, Path::new("@rescript/belt"));
                 core.info.package_name = None;
@@ -168,6 +171,13 @@ fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> 
                 });
                 anyhow::ensure!(!contains_bytes(&core, package.path.to_string_lossy().as_bytes()),
                     "Belt module {name} retains a producer path");
+                let mut restored = stored_module::decode_core(&core).expect("normalized core");
+                restored.rebase_paths(Path::new("@rescript/belt"), &package.path);
+                compile::configure_snapshot_module(&mut restored.info, package, state.get_root_config());
+                let (_, restored) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+                    pers_struct: restored.pers_struct.as_ref(), info: &restored.info, gentype_declarations: &[],
+                });
+                anyhow::ensure!(restored == original_core, "Belt stored-core equivalence failed for {name}");
                 let source = PathBuf::from("src").join(format!("{name}.res"));
                 let targets = compile::js_output_targets_for_source(package, &source, state.get_root_config());
                 let mut javascript: [Vec<u8>; 2] = Default::default();
@@ -614,15 +624,40 @@ impl rescript_compiler::cmi::persistent_env::SnapshotModules for BeltPackage {
 /// and one registry attachment. No core is read or copied by this operation.
 pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) -> Result<()> {
     let Some(package) = state.packages.get("@rescript/belt") else { return Ok(()); };
-    if package.is_root || state.check_only || state.dump.is_some()
-        || state.source_map_command == crate::config::SourceMapCommand::Watch
-        || std::env::var_os("RESCRIPT_FULL_BUILD").is_some()
-        || !state.get_root_config().get_source_map_args(state.source_map_command).is_empty()
-    { return Ok(()); }
+    if package.is_root { return Ok(()); }
+    let mode = std::env::var("RESCRIPT_SNAPSHOT").unwrap_or_default();
+    anyhow::ensure!(matches!(mode.as_str(), "" | "off" | "require"),
+        "RESCRIPT_SNAPSHOT must be off or require (or unset)");
+    let mismatch = |reason: &str| -> Result<()> {
+        let message = format!("Not using the prebuilt @rescript/belt: {reason}. Compiling it from source.");
+        if mode == "require" { anyhow::bail!("{message}"); }
+        log::info!("{message}");
+        Ok(())
+    };
+    if mode == "off" { return mismatch("disabled by RESCRIPT_SNAPSHOT=off"); }
+    if state.check_only { return mismatch("check-only is not supported"); }
+    if state.dump.is_some() { return mismatch("dump flags are not supported"); }
+    if let Some(option) = alternate_backend_option() { return mismatch(option); }
+    if state.source_map_command == crate::config::SourceMapCommand::Watch {
+        return mismatch("watch mode is not supported by this snapshot stage");
+    }
+    if std::env::var_os("RESCRIPT_FULL_BUILD").is_some() {
+        return mismatch("RESCRIPT_FULL_BUILD is enabled");
+    }
+    if !state.get_root_config().get_source_map_args(state.source_map_command).is_empty() {
+        return mismatch("source maps are not supported");
+    }
     let Some(index) = EMBEDDED.get().and_then(Option::as_ref)
         .and_then(|packages| packages.iter().find(|p| p.name == "@rescript/belt"))
-    else { return Ok(()); };
-    if belt_sources_digest(&package.path)? != index.sources_digest { return Ok(()); }
+    else { return mismatch("the snapshot is absent"); };
+    if package.modules.as_ref().is_none_or(|modules| modules.len() != index.len()
+        || modules.iter().any(|name| index.lookup(name).is_none()))
+        || package.source_files.as_ref().is_none_or(|files|
+            files.keys().any(|path| path.parent() != Some(Path::new("src"))))
+    { return mismatch("its source layout differs from the snapshot"); }
+    if belt_sources_digest(&package.path)? != index.sources_digest {
+        return mismatch("its sources differ from the ones this compiler was built with");
+    }
     let provider = std::sync::Arc::new(BeltPackage {
         index, package: package.clone(), root_config: state.get_root_config().clone(),
     });
@@ -635,6 +670,7 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
 /// Clear scheduling flags after the normal incremental plan seeds them.
 /// O(module count), no core lookup, allocation or source-file access.
 pub(crate) fn suppress_prebuilt_parses(state: &mut super::build_types::BuildCommandState) {
+    if !state.packages.get("@rescript/belt").is_some_and(|package| package.prebuilt) { return; }
     for module in state.build_state.modules.values_mut() {
         if state.build_state.packages[&module.package_name].prebuilt {
             module.compile_dirty = false;
@@ -671,4 +707,13 @@ impl BeltPackage {
         }
         Ok(())
     }
+}
+
+/// O(1) option selection, once for a Belt package, not per module or lookup.
+fn alternate_backend_option() -> Option<&'static str> {
+    if std::env::var("RESCRIPT_JS_PRINTER").as_deref() == Ok("oxc") {
+        Some("RESCRIPT_JS_PRINTER=oxc is not supported")
+    } else if matches!(std::env::var("RESCRIPT_BACKEND").as_deref(), Ok("new" | "check")) {
+        Some("RESCRIPT_BACKEND is not supported")
+    } else { None }
 }

@@ -1,0 +1,1 @@
+- Embed verified Belt interfaces and JavaScript templates in the compiler so matching dependencies need no source compilation. Use `RESCRIPT_SNAPSHOT=off` to disable Belt snapshots or `require` to reject a mismatch.

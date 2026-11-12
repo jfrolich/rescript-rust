@@ -219,9 +219,11 @@ test-gentype: lib
 
 test-rewatch: lib
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-rewatch-rust: lib rewatch
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-all: test test-gentype test-analysis test-tools test-rewatch
 
