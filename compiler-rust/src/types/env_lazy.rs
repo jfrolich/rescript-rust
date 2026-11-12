@@ -2131,7 +2131,7 @@ fn build_local_module_components(
     // signature. Every child `comp_components` thunk should capture that
     // evolving environment, independent of typedtree output mode; env.ml:1579
     // stores the raw child module only after creating the thunk.
-    let mut working_env = Some(env.clone_preserve_id());
+    let mut working_env = Some(env.clone());
     let use_qualified_items_for_env = matches!(md.md_type, super::decl::ModuleType::MtyAlias(..));
     let qualified_sig_for_children = qualified_sig.clone();
     let mut child_components = HashMap::new();
@@ -2251,6 +2251,20 @@ pub(crate) struct StoredModuleComponents {
     functor_component_result: OnceCell<ModuleType>,
     functor_component_piece: OnceCell<Rc<super::context::StorePiece>>,
     functor_result_subst_cache: OnceCell<RefCell<HashMap<Path, FunctorResultSubst>>>,
+}
+
+#[cfg(test)]
+impl StoredModuleComponents {
+    /// The seed environment, access path and declaration, for the test that
+    /// compares the tables with the environment log.
+    pub(crate) fn test_parts(&self) -> (&super::env::Env, &Path, &ModuleDeclaration, bool) {
+        (
+            &self.seed_env,
+            &self.access_path,
+            &self.module_decl,
+            self.parent_context.is_some(),
+        )
+    }
 }
 
 impl StoredModuleComponents {

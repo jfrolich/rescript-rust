@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/checker_identity_06b_constructed.res[0m:[2m6:17-18[0m
+
+  4 [2m│[0m type r = {n: int, m: int}
+  5 [2m│[0m let mk = a => { let v = {n: a, m: 0}; takesMyInt(a); v }
+  [1;31m6[0m [2m│[0m let _: string = [1;31mmk[0m
+  7 [2m│[0m 
+
+  This has type: [1;31mmyint => r[0m
+  But it's expected to have type: [1;33mstring[0m

@@ -29,17 +29,25 @@ pub struct Imported {
     pub root: NodeId,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    #[cfg(test)]
+    identifier_lookups: usize,
 }
 
 #[derive(Default)]
-struct Importer {
-    bir: Bir,
+pub(super) struct Importer {
+    pub(super) bir: Bir,
     vars: AHashMap<Ident, VarId>,
     idents: Vec<Ident>,
     globals: Vec<Ident>,
+    #[cfg(test)]
+    identifier_lookups: usize,
 }
 impl Importer {
     fn var(&mut self, ident: Ident) -> VarId {
+        #[cfg(test)]
+        {
+            self.identifier_lookups += 1;
+        }
         *self.vars.entry(ident).or_insert_with(|| {
             let v = self.bir.new_var_id(ident.name_atom(), ident.stamp() as u32);
             self.idents.push(ident);
@@ -61,7 +69,18 @@ impl Importer {
             len: index(ids.len()),
         })
     }
-    fn binders(&mut self, arena: &LamArena, node: L) -> Result<(), Unsupported> {
+    /// The imported program once `root` is complete.
+    pub(super) fn finish(self, root: NodeId) -> Imported {
+        Imported {
+            arena: self.bir,
+            root,
+            idents: self.idents,
+            globals: self.globals,
+            #[cfg(test)]
+            identifier_lookups: self.identifier_lookups,
+        }
+    }
+    pub(super) fn binders(&mut self, arena: &LamArena, node: L) -> Result<(), Unsupported> {
         match node {
             L::Function { info, .. } => {
                 self.span(arena.params(info))?;
@@ -138,8 +157,12 @@ impl Importer {
                 C::String(s) => Constant::String(self.bir.intern_text(s)),
                 C::ImmString(s) => Constant::ImmString(self.bir.intern_text(s)),
                 C::Pointer(s) => Constant::Pointer(self.bir.intern_text(s)),
-                // Bir stores IEEE bits, whereas sexp_lambda preserves spelling.
-                C::Float(_) => return Err(Unsupported("float constant spelling")),
+                C::Float(spelling) => {
+                    let id = self.bir.intern_float(spelling)?;
+                    values.truncate(start);
+                    values.push(id);
+                    continue;
+                }
                 C::BigInt { negative, value } => Constant::BigInt(self.bir.intern_text(&format!(
                     "{}{}",
                     if *negative { "-" } else { "+" },
@@ -157,7 +180,12 @@ impl Importer {
         }
         Ok(values[0])
     }
-    fn node(&mut self, a: &LamArena, node: L, c: &[NodeId]) -> Result<NodeId, Unsupported> {
+    pub(super) fn node(
+        &mut self,
+        a: &LamArena,
+        node: L,
+        c: &[NodeId],
+    ) -> Result<NodeId, Unsupported> {
         let mut aux = 0;
         let view = match node {
             L::Var(id) => View::Var {
@@ -350,7 +378,7 @@ impl Importer {
     }
 }
 
-fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
+pub(super) fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
     match node {
         L::Var(_) | L::GlobalModule(_) | L::Const(_) | L::Break | L::Continue => SmallVec::new(),
         L::Apply { func, args, .. } => std::iter::once(func)
@@ -387,54 +415,26 @@ fn children(a: &LamArena, node: L) -> SmallVec<[Lam; 4]> {
 /// is looked up at most once, even on that fallback path.
 pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupported> {
     enum Work {
-        Enter(Lam, u32),
+        Enter(Lam),
         Finish(L, usize),
     }
     let mut importer = Importer::default();
     importer.bir.begin_bulk();
-    let mut work = vec![Work::Enter(root, 1)];
+    let mut work = vec![Work::Enter(root)];
     let mut values = Vec::new();
     let mut seen = vec![false; arena.node_count()];
-    let mut var_uses: AHashMap<Ident, u32> = AHashMap::default();
-    let mut exit_uses: AHashMap<i32, u32> = AHashMap::default();
     while let Some(task) = work.pop() {
         match task {
-            Work::Enter(id, weight) => {
+            Work::Enter(id) => {
                 if std::mem::replace(&mut seen[id.index()], true) {
                     return Err(Unsupported("shared Lambda node"));
                 }
                 let node = arena.node(id);
                 importer.binders(arena, node)?;
-                let uses = match node {
-                    L::Var(id) => Some(var_uses.entry(arena.ident(id)).or_default()),
-                    L::StaticRaise { label, .. } => Some(exit_uses.entry(label).or_default()),
-                    _ => None,
-                };
-                if let Some(uses) = uses {
-                    *uses = uses
-                        .checked_add(weight)
-                        .ok_or(Unsupported("use count outside u32"))?;
-                }
                 let children = children(arena, node);
-                let doubled_default = match node {
-                    L::Switch { info, .. } => {
-                        let h = arena.switch_payload(info);
-                        h.has_fail && !h.consts_full && !h.blocks_full
-                    }
-                    _ => false,
-                };
                 let count = children.len();
                 work.push(Work::Finish(node, count));
-                for (i, child) in children.into_iter().enumerate().rev() {
-                    let child_weight = if doubled_default && i + 1 == count {
-                        weight
-                            .checked_mul(2)
-                            .ok_or(Unsupported("use weight outside u32"))?
-                    } else {
-                        weight
-                    };
-                    work.push(Work::Enter(child, child_weight));
-                }
+                work.extend(children.into_iter().rev().map(Work::Enter));
             }
             Work::Finish(node, count) => {
                 let start = values.len() - count;
@@ -445,12 +445,14 @@ pub fn import_lambda(arena: &LamArena, root: Lam) -> Result<Imported, Unsupporte
         }
     }
     let root = values[0];
-    importer.bir.finish_bulk(root);
+    importer.bir.try_finish_bulk(root)?;
     Ok(Imported {
         arena: importer.bir,
         root,
         idents: importer.idents,
         globals: importer.globals,
+        #[cfg(test)]
+        identifier_lookups: importer.identifier_lookups,
     })
 }
 
@@ -480,6 +482,23 @@ mod tests {
     }
 
     #[test]
+    fn hundred_thousand_variable_uses_need_only_identifier_lookups() {
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let mut root = a.var(x);
+        for _ in 1..100_000 {
+            let value = a.var(x);
+            root = a.seq_raw(value, root);
+        }
+        let imported = import_lambda(&a, root).unwrap();
+        assert_eq!(imported.identifier_lookups, 100_000);
+        assert_eq!(imported.arena.vars.uses(VarId(0)), 100_000);
+        assert!(imported.arena.steps.get() < 40 * a.node_count() as u64);
+        // Count accumulation is indexed by VarId in try_adjust_direct; the
+        // only importer hash table touched per use is Importer::vars.
+    }
+
+    #[test]
     fn shared_nodes_fall_back_without_expansion() {
         let mut a = LamArena::new();
         let c = a.const_(C::JsNull);
@@ -491,17 +510,17 @@ mod tests {
     }
 
     #[test]
-    fn spelling_not_representable_falls_back() {
+    fn invalid_spelling_falls_back() {
         let mut a = LamArena::new();
-        let root = a.const_(C::Float("1.00".into()));
+        let root = a.const_(C::Float("not a float".into()));
         assert!(matches!(
             import_lambda(&a, root),
-            Err(Unsupported("float constant spelling"))
+            Err(Unsupported("invalid float constant spelling"))
         ));
     }
 }
 
-fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
+pub(super) fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
     enum Work {
         Enter(ConstId),
         Finish(ConstId, usize),
@@ -556,7 +575,7 @@ fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
             Constant::String(s) => C::String(b.text(*s).to_owned()),
             Constant::ImmString(s) => C::ImmString(b.text(*s).to_owned()),
             Constant::Pointer(s) => C::Pointer(b.text(*s).to_owned()),
-            Constant::Float(_) => return Err(Unsupported("float constant spelling")),
+            Constant::Float(f) => C::Float(b.text(f.spelling()).to_owned()),
             Constant::BigInt(s) => {
                 let s = b.text(*s);
                 let (sign, value) = s.split_at_checked(1).ok_or(Unsupported("bigint sign"))?;
@@ -582,6 +601,26 @@ fn export_constant(b: &Bir, root: ConstId) -> Result<C, Unsupported> {
 }
 
 impl Imported {
+    /// Register a round-created rename, in creation order. The variable's
+    /// explicit order is the stamp allocated from the round's private counter;
+    /// the imported source supplies its name and flags. Amortized O(1), with
+    /// no access to the legacy counter and no change to imported identities.
+    pub fn register_rename(&mut self, var: VarId, source: VarId) -> Result<(), Unsupported> {
+        if var.index() != self.idents.len() {
+            return Err(Unsupported("fresh identities registered out of order"));
+        }
+        let source = self.ident(source)?;
+        if self.arena.vars().name(var) != source.name_atom() {
+            return Err(Unsupported("fresh identity is not a rename"));
+        }
+        self.idents.push(Ident::new(
+            source.name_atom(),
+            self.arena.vars().order(var) as i32,
+            source.flags(),
+        ));
+        Ok(())
+    }
+
     fn ident(&self, var: VarId) -> Result<Ident, Unsupported> {
         self.idents
             .get(var.index())
@@ -771,6 +810,83 @@ mod roundtrip_tests {
     }
 
     #[test]
+    fn round_created_renames_preserve_names_flags_and_stamp_order() {
+        let source = Ident::new("temporary", 40, crate::ident::IdentFlags::NONE);
+        let mut a = LamArena::new();
+        let root = a.var(source);
+        let mut imported = import_lambda(&a, root).unwrap();
+        let View::Var { var: original } = imported.arena.view(imported.root) else {
+            panic!("expected variable");
+        };
+        let generator = crate::context::IdGenerator::new();
+        generator.set_current_stamp(100);
+        for stamp in [101, 102] {
+            let fresh = imported.arena.new_var_id(source.name_atom(), stamp);
+            assert!(imported.ident(fresh).is_err());
+            imported.register_rename(fresh, original).unwrap();
+            assert_eq!(imported.ident(fresh).unwrap(), source.rename(&generator));
+            assert_eq!(imported.ident(original).unwrap(), source);
+        }
+    }
+
+    #[test]
+    fn float_spellings_round_trip_including_nested_blocks() {
+        for spelling in [
+            "1.",
+            "1.0",
+            "1e0",
+            "0x1p0",
+            "1.00",
+            "-0.",
+            "-0.0",
+            "infinity",
+            "-infinity",
+            "nan",
+            "-nan",
+            "Infinity",
+            "-Infinity",
+            "NaN",
+            "1e999",
+            "-1e999",
+        ] {
+            let mut a = LamArena::new();
+            let root = a.const_(C::Float(spelling.into()));
+            identity(&a, root);
+            let nested = C::Block {
+                tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
+                elements: vec![C::Some(Box::new(C::Block {
+                    tag_info: Box::new(crate::lambda::lam_tag_info::TagInfo::Tuple),
+                    elements: vec![C::Float(spelling.into())],
+                }))],
+            };
+            let root = a.const_(nested);
+            identity(&a, root);
+        }
+    }
+
+    #[test]
+    fn equal_float_values_keep_distinct_pool_entries() {
+        let mut b = Bir::default();
+        let mut ids = Vec::new();
+        for spelling in ["1.", "1.0", "1e0", "0x1p0", "1.00"] {
+            let id = b.intern_float(spelling).unwrap();
+            assert!(!ids.contains(&id));
+            assert_eq!(id, b.intern_float(spelling).unwrap());
+            let Constant::Float(f) = b.constant(id) else {
+                panic!("not a float")
+            };
+            assert_eq!(f.value(), 1.0);
+            assert_eq!(b.text(f.spelling()), spelling);
+            ids.push(id);
+        }
+        let id = b.intern_float("-0.").unwrap();
+        let Constant::Float(f) = b.constant(id) else {
+            panic!("not a float")
+        };
+        assert_eq!(f.value().to_bits(), (-0.0f64).to_bits());
+    }
+
+    #[test]
     fn identity_retains_constants_and_binder_metadata() {
         for value in [
             C::JsNull,
@@ -868,6 +984,46 @@ mod fallback_tests {
         assert!(matches!(
             import_lambda(&a, root),
             Err(Unsupported("use weight outside u32"))
+        ));
+    }
+
+    #[test]
+    fn excessive_weighted_variable_count_is_unsupported_not_a_panic() {
+        let mut a = LamArena::new();
+        let x = Ident::create_local("x");
+        let left = a.var(x);
+        let right = a.var(x);
+        let mut root = a.seq_raw(left, right);
+        // Each use fits u32 (2^31), but their sum does not.
+        for _ in 0..31 {
+            let scrut = a.const_(C::int(0));
+            let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+            let actions = a.add_list(&[root]);
+            root = a.switch_raw(scrut, actions, info);
+        }
+        assert!(matches!(
+            import_lambda(&a, root),
+            Err(Unsupported("use count outside u32"))
+        ));
+    }
+
+    #[test]
+    fn excessive_weighted_exit_count_is_unsupported_not_a_panic() {
+        let mut a = LamArena::new();
+        let left = a.static_raise(7, &[]);
+        let right = a.static_raise(7, &[]);
+        let mut body = a.seq_raw(left, right);
+        for _ in 0..31 {
+            let scrut = a.const_(C::int(0));
+            let info = a.add_switch(false, [], false, [], true, SwitchDispatch::Direct);
+            let actions = a.add_list(&[body]);
+            body = a.switch_raw(scrut, actions, info);
+        }
+        let handler = a.const_(C::JsNull);
+        let root = a.static_catch(body, 7, &[], handler);
+        assert!(matches!(
+            import_lambda(&a, root),
+            Err(Unsupported("use count outside u32"))
         ));
     }
 

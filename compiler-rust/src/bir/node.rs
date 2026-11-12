@@ -22,6 +22,10 @@ impl NodeFlags {
     pub const VALUE_UNUSED: u8 = 16;
     /// A let's released, pure value is no longer evaluated.
     pub const DEAD: u8 = 32;
+    /// JS metadata distinguishes absent locations from an explicit NONE handle.
+    pub const JS_LOC_PRESENT: u8 = 64;
+    /// A JNumber carries an optional character decoration in its spare word.
+    pub const JS_CHAR_PRESENT: u8 = 128;
     /// Test a flag.
     pub fn contains(self, flag: u8) -> bool {
         self.0 & flag != 0
@@ -148,10 +152,10 @@ optional_payload!(StrId);
 optional_payload!(VarId);
 impl Operand<'_> for FieldPos {
     fn encode(self, _lists: &mut Lists) -> u32 {
-        self.get().map_or(u32::MAX, |n| n as u32)
+        self.get().unwrap_or(i32::MIN) as u32
     }
     fn decode(raw: u32, _lists: &Lists) -> Self {
-        Self::new((raw != u32::MAX).then_some(raw as i32))
+        Self::new((raw != i32::MIN as u32).then_some(raw as i32))
     }
 }
 impl<'a> Operand<'a> for &'a [NodeId] {
@@ -233,6 +237,15 @@ macro_rules! nodes {
 // the existing enum discriminant for LetKind/BinOp/direction/length kind,
 // a boolean for JBool/JUndefined/JOptional, or a function's arity.
 // JRaw's aux distinguishes expression (0) from statement (1).
+// J bridge encodings: SBlock 0=list/1=explicit statement; JDot 0=static
+// index/1=block tag; JNew 0=absent args/1=present; JTemplate 0=interpolated/
+// 1=literal; JJsx records children-list presence; SSwitch 0=int/1=string.
+// SDecl packs LetKind in bits 0..2 and UsedStats above it. Arrays/blocks use
+// 0=immutable, 1=mutable, 2=NA (the fact engine tests zero for immutable).
+// Imported SRest uses bit 15 when value is a retained JRecordRest descriptor.
+// JNumber's unused second word holds an optional char, flagged JS_CHAR_PRESENT.
+// JFun uses the existing method flag and FunctionAttribute for return-unit,
+// async and directives. JQualified's ImportId also indexes pools.j_modules.
 nodes! {
     Var { var: VarId },
     Global { module: ImportId },
@@ -296,6 +309,7 @@ nodes! {
     SExp { value: NodeId },
     SIf { condition: NodeId, then_: NodeId, else_: Option<NodeId> },
     SWhile { condition: NodeId, body: NodeId, label: Option<StrId> },
+    SForRangeExisting { variable: NodeId, parts: &'a [NodeId], label: Option<StrId> },
     SForRange { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
     SForOf { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
     SForAwaitOf { var: VarId, parts: &'a [NodeId], label: Option<StrId> },
@@ -329,6 +343,16 @@ impl Node {
     /// Operation-specific small payload (see the schema's encoding notes).
     pub fn aux(self) -> u16 {
         self.aux
+    }
+    /// Original integer character decoration; not necessarily the integer value.
+    pub fn js_char(self) -> Option<i32> {
+        (self.op == Op::JNumber && self.flags.contains(NodeFlags::JS_CHAR_PRESENT))
+            .then_some(self.words[1] as i32)
+    }
+    pub(super) fn set_js_char(&mut self, code: i32) {
+        assert_eq!(self.op, Op::JNumber);
+        self.flags.0 |= NodeFlags::JS_CHAR_PRESENT;
+        self.words[1] = code as u32;
     }
     pub(super) fn set_flags(&mut self, flags: NodeFlags) {
         self.flags = flags;

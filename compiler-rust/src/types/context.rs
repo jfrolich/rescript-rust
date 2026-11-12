@@ -632,9 +632,6 @@ pub struct TypeContext {
     store_build_guards: RefCell<Vec<(Path, bool)>>,
     /// Shared pieces whose effects this compilation has already applied.
     touched_store_pieces: RefCell<crate::fast_hash::AHashSet<u64>>,
-    /// The local stamp each store binder this compilation built or replayed
-    /// stands for (see [`StoreStampOrigins`]).
-    store_stamp_origins: RefCell<StoreStampOrigins>,
     /// Component tables of store-resident modules whose build read state
     /// private to this compilation, so they could not be published to the
     /// worker store. Keyed by `StoredModuleComponents` id; reused for the rest
@@ -815,11 +812,6 @@ pub struct TypeContext {
     pub(crate) renamed_module_sigs:
         RefCell<crate::fast_hash::AHashMap<String, Arc<DeferredRenamedSig>>>,
 
-    /// Reserved stamp cursor `(next, last)` used while materializing a
-    /// [`DeferredRenamedSig`], so its binders get the stamps reserved when the
-    /// rename was forced.
-    reserved_rename_stamps: Cell<Option<(i32, i32)>>,
-
     /// Raw (un-renamed) module signatures for persistent modules.
     /// Used by trigger_module_sig_rename to lazily rename on first access
     /// from normalize_path, matching OCaml's lazy ps_sig forcing.
@@ -915,13 +907,13 @@ pub struct TypeContext {
 
 /// Effect of building shared store data on the state of the compilation that
 /// built it. Another compilation that reuses the data replays these effects
-/// the first time it touches the data, so its own state (identifier stamps,
-/// forced pieces) evolves exactly as if it had built the data itself.
+/// the first time it touches the data, so its own tables (prepared units,
+/// forced renames, alias sources) hold what they would if it had built the
+/// data itself. Identifier stamps are not among the effects: binders of
+/// store data take stamps of the process-wide store range and leave the
+/// compilation's counter alone.
 #[derive(Debug, Clone)]
 pub(crate) enum StoreEffect {
-    /// Binders created: their store stamps, in creation order. Each consumed
-    /// one local identifier stamp.
-    Stamps(Vec<i32>),
     /// A shared piece forced while building this one.
     Piece(Rc<StorePiece>),
     /// A component view registered in this compilation's component cache.
@@ -932,8 +924,8 @@ pub(crate) enum StoreEffect {
     /// `PersistentEnv::find_pers_struct` for this unit, which prepares the
     /// module for the compilation on first use.
     PreparePers(smol_str::SmolStr),
-    /// `trigger_module_sig_rename`: forces the lazy rename of a persistent
-    /// signature (reserving its binder stamps) in this compilation.
+    /// `trigger_module_sig_rename`: registers the lazy rename of a persistent
+    /// signature in this compilation.
     TriggerRename(smol_str::SmolStr),
     /// Registrations in this compilation's declaration and alias tables.
     RegisterAliasSource(Path, Path),
@@ -957,29 +949,6 @@ pub(crate) struct StorePiece {
     /// the piece only when it gives the same answers
     /// (`TypeContext::store_guards_hold`).
     guards: Vec<(Path, bool)>,
-}
-
-/// Which local stamp each store binder of a compilation stands for.
-///
-/// A binder built into the worker store gets a stamp of the process-wide
-/// store range (`thread_store::next_store_stamp`), so it is never
-/// `Ident::same` as an identifier of another compilation sharing it, while
-/// the compilation's own stamp stream advances as if it had renamed the
-/// identifier itself, and so does the stream of every compilation that later
-/// uses the piece. In OCaml each compilation builds that data itself
-/// (`compiler/ml/env.ml:1513-1588`, `compiler/ml/subst.ml:310-345`), so the
-/// binder has the stamp the compilation's stream skipped. Which store stamp a
-/// binder got depends on the order in which worker threads built shared data;
-/// a signature a compilation publishes (which can mention store binders, e.g.
-/// a functor application's result) saves the local stamps instead
-/// (`TypeContext::saved_store_stamps`), as OCaml's `.cmi` would.
-#[derive(Default)]
-struct StoreStampOrigins {
-    /// `(store stamp, local stamp)` of binders this compilation built.
-    built: Vec<(i32, i32)>,
-    /// Runs of binders this compilation replayed: the piece, the index of
-    /// its `StoreEffect::Stamps` effect, and the local stamp of the first.
-    replayed: Vec<(Rc<StorePiece>, usize, i32)>,
 }
 
 pub(crate) fn store_debug_enabled() -> bool {
@@ -1018,34 +987,11 @@ impl PartialEq for SamePathKey {
 
 impl Eq for SamePathKey {}
 
-/// Hash consistent with `Path::same`: `Pdot` positions are ignored.
-fn hash_same_path<H: std::hash::Hasher>(path: &Path, state: &mut H) {
-    match path.view() {
-        PathView::Pident(id) => {
-            if id.stamp() != 0 {
-                state.write_u8(0);
-                state.write_i32(id.stamp());
-            } else {
-                state.write_u8(1);
-                std::hash::Hash::hash(&id.name_atom(), state);
-            }
-        }
-        PathView::Pdot(parent, name, _) => {
-            state.write_u8(2);
-            std::hash::Hash::hash(name, state);
-            hash_same_path(parent, state);
-        }
-        PathView::Papply(functor, argument) => {
-            state.write_u8(3);
-            hash_same_path(functor, state);
-            hash_same_path(argument, state);
-        }
-    }
-}
-
 impl std::hash::Hash for SamePathKey {
+    /// The hash every interned path carries for `Path::same` (`Pdot`
+    /// positions ignored): one word, no walk of the path.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        hash_same_path(&self.0, state);
+        state.write_u64(self.0.same_hash());
     }
 }
 
@@ -1137,8 +1083,6 @@ fn push_unique_path(paths: &mut AliasPaths, path: Path) {
 pub(crate) struct DeferredRenamedSig {
     kind: &'static str,
     source: Arc<super::decl::Signature>,
-    first_stamp: i32,
-    stamp_count: i32,
     renamed: std::sync::OnceLock<Arc<super::decl::Signature>>,
 }
 
@@ -1186,7 +1130,6 @@ impl TypeContext {
             store_build_effects: RefCell::new(Vec::new()),
             store_build_guards: RefCell::new(Vec::new()),
             touched_store_pieces: RefCell::new(crate::fast_hash::AHashSet::new()),
-            store_stamp_origins: RefCell::new(StoreStampOrigins::default()),
             local_stored_components: RefCell::new(crate::fast_hash::AHashMap::new()),
             mutation_journal: RefCell::new(TypeMutationJournal::default()),
             mutation_logging: TrailLogging::default(),
@@ -1236,7 +1179,6 @@ impl TypeContext {
             load_paths: RefCell::new(Arc::new(Vec::new())),
             persistent_env: RefCell::new(None),
             renamed_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
-            reserved_rename_stamps: Cell::new(None),
             raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
             gentype_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
             gentype_portable_raw_module_sigs: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1365,7 +1307,7 @@ impl TypeContext {
         let env_ref = {
             let mut typed_envs = self.typed_envs.borrow_mut();
             let env_ref = EnvRef::from_usize(typed_envs.len());
-            typed_envs.push(Rc::new(env.clone_preserve_id()));
+            typed_envs.push(Rc::new(env.clone()));
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
@@ -2878,6 +2820,7 @@ impl TypeContext {
         name: &str,
         shadowed: bool,
     ) {
+        self.assert_no_store_build("an open's use");
         self.open_slot_events
             .borrow_mut()
             .push(LookupEvent::OpenSlot(OpenSlotEvent {
@@ -2888,8 +2831,23 @@ impl TypeContext {
             }));
     }
 
+    /// Building shared store data never reports anything: the data is used
+    /// by compilations that did not build it, so what a build recorded would
+    /// be reported by one of them only, and which one would depend on
+    /// scheduling. Every sink of this context that feeds a diagnostic calls
+    /// this; lookups report from the consuming compilation instead.
+    #[inline]
+    #[track_caller]
+    fn assert_no_store_build(&self, what: &str) {
+        debug_assert!(
+            !self.in_store_build(),
+            "{what} was recorded while building shared store data"
+        );
+    }
+
     /// Record a `report_deprecated` call of a module lookup.
     pub(crate) fn record_module_deprecation(&self, deprecation: ModuleDeprecation) {
+        self.assert_no_store_build("a module deprecation");
         self.open_slot_events
             .borrow_mut()
             .push(LookupEvent::ModuleDeprecated(deprecation));
@@ -2897,6 +2855,7 @@ impl TypeContext {
 
     /// Queue parser warnings produced while re-parsing source.
     pub(crate) fn push_reparse_warnings(&self, warnings: &[crate::parser::ParserWarning]) {
+        self.assert_no_store_build("a parser warning");
         self.reparse_warnings
             .borrow_mut()
             .extend_from_slice(warnings);
@@ -2962,6 +2921,7 @@ impl TypeContext {
 
     /// `Cmt_format.record_deprecated_used`.
     pub(crate) fn record_deprecated_used(&self, used: DeprecatedUse) {
+        self.assert_no_store_build("a deprecated use");
         self.deprecated_used.borrow_mut().push(used);
     }
 
@@ -4214,22 +4174,16 @@ impl TypeContext {
 
 
 
-    /// Fresh binder for shared store data. The compilation's own stamp stream
-    /// advances exactly as it would have (and later users replay that), but
-    /// the binder gets a store stamp so it can never be `Ident::same` as an
-    /// identifier of another compilation.
+    /// Fresh binder for shared store data: a stamp of the process-wide store
+    /// range (`thread_store::next_store_stamp`), so it can never be
+    /// `Ident::same` as an identifier of a compilation. The compilation's own
+    /// stamp counter is not advanced, so its stamps do not depend on which
+    /// store data it built and which it found built. One atomic increment.
     fn store_binder(&self, id: &Ident) -> Ident {
-        let local = self.id_gen.next_stamp();
-        let stamp = super::thread_store::next_store_stamp();
-        let mut effects = self.store_build_effects.borrow_mut();
-        match effects.last_mut() {
-            Some(StoreEffect::Stamps(stamps)) => stamps.push(stamp),
-            _ => effects.push(StoreEffect::Stamps(vec![stamp])),
+        if self.compiler_counters_enabled {
+            crate::perf_counters::store_views::record_binder();
         }
-        self.store_stamp_origins
-            .borrow_mut()
-            .built
-            .push((stamp, local));
+        let stamp = super::thread_store::next_store_stamp();
         let mut fresh = id.with_stamp(stamp);
         if id.is_persistent() {
             fresh = Ident::new(id.name(), stamp, crate::ident::IdentFlags::NONE);
@@ -4709,6 +4663,12 @@ impl TypeContext {
             }
             poisoned = true;
         }
+        if self.compiler_counters_enabled {
+            crate::perf_counters::store_views::record_piece(
+                poisoned,
+                effects.is_empty() && guards.is_empty(),
+            );
+        }
         if poisoned {
             if depth > 0 {
                 // The enclosing build may hold this result.
@@ -4769,17 +4729,24 @@ impl TypeContext {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
         }
-        for (index, effect) in piece.effects.iter().enumerate() {
-            match effect {
-                StoreEffect::Stamps(stamps) => {
-                    let count = stamps.len() as i32;
-                    let last = self.id_gen.advance_stamp_by(count);
-                    self.store_stamp_origins.borrow_mut().replayed.push((
-                        piece.clone(),
-                        index,
-                        last - count + 1,
-                    ));
+        if self.compiler_counters_enabled {
+            use crate::perf_counters::store_views as counters;
+            counters::record_piece_replay();
+            for effect in &piece.effects {
+                match effect {
+                    StoreEffect::Piece(_) => {}
+                    StoreEffect::RegisterComponents(..) => counters::record_effect_replayed(0),
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(1),
+                    StoreEffect::TriggerRename(_) => counters::record_effect_replayed(2),
+                    StoreEffect::RegisterAliasSource(..) => counters::record_effect_replayed(3),
+                    StoreEffect::RegisterQualifiedModuleDecl(..) => {
+                        counters::record_effect_replayed(4)
+                    }
                 }
+            }
+        }
+        for effect in &piece.effects {
+            match effect {
                 StoreEffect::Piece(inner) => self.replay_store_piece(inner),
                 StoreEffect::RegisterComponents(key, components) => {
                     self.qualified_module_components_cache
@@ -4810,32 +4777,11 @@ impl TypeContext {
         }
     }
 
-    /// Whether there is any store binder to map when publishing a signature.
-    /// This avoids allocating the replay map just to decide whether to walk.
-    pub(crate) fn has_saved_store_stamps(&self) -> bool {
-        let origins = self.store_stamp_origins.borrow();
-        !origins.built.is_empty() || origins.replayed.iter().any(|(piece, index, _)| {
-            matches!(&piece.effects[*index], StoreEffect::Stamps(stamps) if !stamps.is_empty())
-        })
-    }
-
-    /// The local stamp of each store binder this compilation built or
-    /// replayed, by store stamp (see [`StoreStampOrigins`]).
-    pub(crate) fn saved_store_stamps(&self) -> crate::fast_hash::AHashMap<i32, i32> {
-        let origins = self.store_stamp_origins.borrow();
-        let mut stamps: crate::fast_hash::AHashMap<i32, i32> =
-            origins.built.iter().copied().collect();
-        for (piece, index, first) in &origins.replayed {
-            if let StoreEffect::Stamps(store) = &piece.effects[*index] {
-                stamps.extend(
-                    store
-                        .iter()
-                        .zip(*first..)
-                        .map(|(store, local)| (*store, local)),
-                );
-            }
-        }
-        stamps
+    /// A fresh stamp of this compilation's counter, for a store binder its
+    /// published signature mentions (see
+    /// `cmi::portable_types::serialize_pers_struct`).
+    pub(crate) fn published_binder_stamp(&self) -> i32 {
+        self.id_gen.next_stamp()
     }
 
     /// Record an effect of the current store build on this compilation.
@@ -4877,52 +4823,34 @@ impl TypeContext {
 
     fn rename_ident_stamp(&self, id: &Ident) -> Ident {
         if self.in_store_build() {
-            if self.reserved_rename_stamps.get().is_some() {
-                // A deferred rename uses stamps this compilation reserved.
-                self.poison_store_build();
-            } else {
-                return self.store_binder(id);
-            }
-        }
-        if let Some((next, last)) = self.reserved_rename_stamps.get() {
-            assert!(
-                next <= last,
-                "deferred signature rename used more stamps than it reserved"
-            );
-            self.reserved_rename_stamps.set(Some((next + 1, last)));
-            return id.with_stamp(next);
+            return self.store_binder(id);
         }
         // See `create_ident`: this mirrors compiler/ext/ident.ml:38-40.
         id.rename(&self.id_gen)
     }
 
-    /// Force a lazy `Subst.signature Subst.identity` rename of `source`.
+    /// Register a lazy `Subst.signature Subst.identity` rename of `source`.
     ///
     /// OCaml `ps_sig` (compiler/ml/env.ml:669-678) is forced by `find_module`
     /// (compiler/ml/env.ml:865-875), and most forces only come from
     /// `normalize_path` (compiler/ml/env.ml:903-914), which discards the
-    /// signature unless it is an alias. The only observable effect of the
-    /// force is the fresh binder stamps allocated by `Subst.signature`
-    /// (compiler/ml/subst.ml:358-364), so reserve exactly those stamps now and
-    /// copy the signature with them when its contents are first read.
+    /// signature unless it is an alias. The copy is therefore made when its
+    /// contents are first read, with the stamps current at that time.
     pub(crate) fn defer_renamed_sig(
         &self,
         kind: &'static str,
         source: Arc<super::decl::Signature>,
     ) -> Arc<DeferredRenamedSig> {
-        let stamp_count = crate::cmi::persistent_env::signature_freshen_stamp_count(&source);
-        let first_stamp = self.id_gen.current_stamp() + 1;
-        self.id_gen.advance_stamp_by(stamp_count);
         Arc::new(DeferredRenamedSig {
             kind,
             source,
-            first_stamp,
-            stamp_count,
             renamed: std::sync::OnceLock::new(),
         })
     }
 
-    /// Copy a deferred renamed signature, using its reserved stamps.
+    /// Copy a deferred renamed signature the first time it is read. The copy
+    /// belongs to this compilation: it is made outside any store build (which
+    /// it makes private), with this compilation's stamps and nodes.
     pub(crate) fn materialize_renamed_sig(
         &self,
         deferred: &DeferredRenamedSig,
@@ -4930,23 +4858,14 @@ impl TypeContext {
         deferred
             .renamed
             .get_or_init(|| {
-                let last = deferred.first_stamp + deferred.stamp_count - 1;
-                let saved = self
-                    .reserved_rename_stamps
-                    .replace(Some((deferred.first_stamp, last)));
-                let renamed =
+                self.poison_store_build_for("materialize-renamed-sig");
+                Arc::new(self.suspend_store_build(|| {
                     crate::cmi::persistent_env::freshened_signature_bound_idents_from_kind(
                         deferred.kind,
                         deferred.source.as_ref(),
                         self,
-                    );
-                let cursor = self.reserved_rename_stamps.replace(saved);
-                assert_eq!(
-                    cursor,
-                    Some((last + 1, last)),
-                    "deferred signature rename used fewer stamps than it reserved"
-                );
-                Arc::new(renamed)
+                    )
+                }))
             })
             .clone()
     }
@@ -5186,28 +5105,6 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
-    fn saved_stamp_presence_matches_built_and_replayed_maps() {
-        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
-        assert!(!ctx.has_saved_store_stamps());
-        let stamp = crate::ident::STORE_STAMP_BASE + 7;
-        ctx.store_stamp_origins.borrow_mut().built.push((stamp, 12));
-        assert!(ctx.has_saved_store_stamps());
-        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&12));
-        ctx.store_stamp_origins.borrow_mut().built.clear();
-        let piece = Rc::new(StorePiece {
-            id: 0,
-            effects: vec![StoreEffect::Stamps(vec![]), StoreEffect::Stamps(vec![stamp])],
-            guards: vec![],
-        });
-        ctx.store_stamp_origins.borrow_mut().replayed.push((piece.clone(), 0, 20));
-        assert!(!ctx.has_saved_store_stamps());
-        assert!(ctx.saved_store_stamps().is_empty());
-        ctx.store_stamp_origins.borrow_mut().replayed.push((piece, 1, 20));
-        assert!(ctx.has_saved_store_stamps());
-        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&20));
-    }
-
-    #[test]
     fn module_signature_cache_separates_scope_keys() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let env = Env::empty();
@@ -5234,8 +5131,9 @@ mod tests {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let env = Env::empty();
         let env_ref = ctx.store_typed_env(&env);
+        assert_eq!(ctx.store_typed_env(&env.clone()), env_ref);
         let first = ctx.get_typed_env(env_ref).expect("stored environment");
-        let other = Env::empty();
+        let other = env.implicit_coercion();
         ctx.store_typed_env(&other);
         assert_eq!(ctx.store_typed_env(&env), env_ref);
         let second = ctx.get_typed_env(env_ref).expect("same environment");
@@ -5336,7 +5234,7 @@ mod tests {
     }
 
     #[test]
-    fn store_build_allocates_shared_nodes_and_replays_stamps() {
+    fn store_build_allocates_shared_nodes_and_leaves_the_stamp_counter_alone() {
         let builder = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         let ((ty, binder), piece) = builder.build_in_store(|| {
             let var = builder.new_generic_var(Some("a".into()));
@@ -5346,19 +5244,20 @@ mod tests {
         });
         let piece = piece.expect("store build stays shareable");
         assert!(ty.is_store(), "store builds allocate in the worker store");
-        // The builder's own stamp stream advanced as for a local rename, but
-        // the binder is in the store range, disjoint from local stamps.
-        assert_eq!(builder.current_stamp(), 11);
+        // The binder is in the store range, disjoint from local stamps, and
+        // the builder's own counter did not move.
+        assert_eq!(builder.current_stamp(), 10);
         assert!(binder.stamp() > super::super::thread_store::next_store_stamp() - 1000);
         assert!(binder.stamp() >= 1 << 29);
         drop(builder);
 
-        // A later compilation on the worker reuses the node and replays the
-        // stamp once, on first touch.
+        // A later compilation on the worker reuses the node; using the piece
+        // does not move its counter either, so a compilation's stamps do not
+        // depend on whether it built the data or found it built.
         let user = TypeContext::new(Arc::new(IdGenerator::with_start_stamp(10)));
         user.touch_store_piece(&piece);
         user.touch_store_piece(&piece);
-        assert_eq!(user.current_stamp(), 11);
+        assert_eq!(user.current_stamp(), 10);
         match &*user.get_desc(ty) {
             TypeDesc::Ttuple(items) => assert_eq!(items.len(), 2),
             other => panic!("unexpected {other:?}"),

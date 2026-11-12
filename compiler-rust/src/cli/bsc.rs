@@ -496,6 +496,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
     let compiler_opts = CompilerOptions {
         ts_files: None,
         backend: crate::bir::shadow::BackendMode::from_env(),
+        signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
         js_printer: crate::emit::PrinterMode::from_env(),
         check_only: false,
         dump_lambda: opts.dump_lambda,
@@ -545,6 +546,7 @@ fn run(args: Vec<String>, registry: Option<RegistryProvider>) -> Result<()> {
         }),
         gentype_resolver: None,
         gentype_declarations_only: false,
+        gentype_declarations_needed: true,
         js_package_specs: Vec::new(),
         capture_intermediates: false,
         dumps: Vec::new(),

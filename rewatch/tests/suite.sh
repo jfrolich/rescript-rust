@@ -105,8 +105,13 @@ fi
 # GenType tests
 ./gentype/01-gentype-project-root.sh &&
 ./gentype/02-gentype-output-not-replayed.sh &&
+./gentype/03-declaration-closure.sh &&
+./gentype/04-file-inventory.sh clean &&
+./gentype/04-file-inventory.sh incremental &&
+./gentype/04-file-inventory.sh watch &&
 
 # Watch tests
+./watch/11-gentype-declaration-closure.sh &&
 ./watch/01-watch-recompile.sh &&
 ./watch/02-watch-warnings-persist.sh &&
 ./watch/18-incremental-start-parse-warnings.sh &&

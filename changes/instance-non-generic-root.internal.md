@@ -1,0 +1,1 @@
+- Avoid opening a type-copy session when ordinary instantiation returns a non-generic root; protect occurrence identity with diagnostic, genType, and JavaScript fixtures.

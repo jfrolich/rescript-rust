@@ -87,8 +87,8 @@ pub enum Constant {
     },
     /// Character code point.
     Char(u32),
-    /// IEEE-754 bits, retaining signed zero and NaN payloads.
-    Float(u64),
+    /// Source spelling and its once-parsed IEEE-754 value.
+    Float(FloatConstant),
     /// Big integer spelling, including sign.
     BigInt(StrId),
     /// Decoded bytes encoded using the compiler's string convention.
@@ -109,10 +109,26 @@ pub enum Constant {
     /// Module alias marker.
     ModuleAlias,
 }
-impl Constant {
-    /// A floating constant with bitwise equality and hashing, including NaNs.
-    pub fn float(value: f64) -> Self {
-        Self::Float(value.to_bits())
+/// A float is identified by its interned spelling, not its bits: `1.` and
+/// `1.00` occupy different constant entries. Future folding must compare values,
+/// while printing uses spelling. Folded results must use the legacy folder's
+/// spelling rules, not the spelling of an arbitrary equal operand. Today
+/// `LamArena::fold_prim` and `raw_lambda/lower.rs` only produce integer or
+/// boolean results from floats, not folded float arithmetic. For numeric
+/// rendering, see `ocaml_float::js_number_to_string` (12/15/18 digit rule).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct FloatConstant {
+    pub(super) spelling: StrId,
+    pub(super) bits: u64,
+}
+impl FloatConstant {
+    /// Parsed value, without parsing or a hash lookup.
+    pub fn value(&self) -> f64 {
+        f64::from_bits(self.bits)
+    }
+    /// Original spelling.
+    pub fn spelling(&self) -> StrId {
+        self.spelling
     }
 }
 /// Range in the constant-field pool.
@@ -208,8 +224,8 @@ pub struct ClauseMeta {
     pub should_break: bool,
     /// Case-label comment.
     pub comment: Option<StrId>,
-    /// Case-label source location.
-    pub loc: LamLoc,
+    /// Case-label source location, retaining an explicit NONE handle too.
+    pub loc: Option<LamLoc>,
 }
 /// Switch keys in their action order. Default, if present, is the final action.
 #[derive(Debug, Clone)]
@@ -320,6 +336,7 @@ pub(super) struct Pools {
     pub catch_labels: hashbrown::HashMap<u32, CatchId, ahash::RandomState>,
     pub next_label: u64,
     pub consts: Vec<Constant>,
+    pub floats: Vec<Option<ConstId>>,
     pub const_fields: Vec<ConstId>,
     pub const_fields_index: hashbrown::HashTable<(u64, ConstSpan)>,
     pub prims: Vec<PrimPayload>,
@@ -331,6 +348,9 @@ pub(super) struct Pools {
     pub js: Vec<JsPayload>,
     pub cold: Vec<Cold>,
     pub imports: Vec<Import>,
+    // J imports retain the complete module identity, including dynamic/default
+    // flags and ordered import attributes. Indexed by ImportId, like imports.
+    pub j_modules: Vec<crate::js_ir::ModuleId>,
     pub text: String,
     pub strings: Vec<(u32, u32)>,
 }

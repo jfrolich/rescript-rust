@@ -1,23 +1,87 @@
 {
-  "fixtures": {
-    "identical": 408,
-    "units": 480,
-    "unsupported": {
-      "float constant spelling": 72
+  "js-bridge": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
     }
   },
-  "runtime": {
-    "identical": 107,
-    "units": 113,
-    "unsupported": {
-      "float constant spelling": 6
+  "lambda-bridge": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
     }
   },
-  "tests/tests": {
-    "identical": 648,
-    "units": 705,
-    "unsupported": {
-      "float constant spelling": 57
+  "lambda-exits": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
+    }
+  },
+  "lambda-flatten": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
+    }
+  },
+  "lambda-norm": {
+    "fixtures": {
+      "identical": 480,
+      "units": 480,
+      "unsupported": {}
+    },
+    "runtime": {
+      "identical": 113,
+      "units": 113,
+      "unsupported": {}
+    },
+    "tests/tests": {
+      "identical": 711,
+      "units": 711,
+      "unsupported": {}
     }
   }
 }

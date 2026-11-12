@@ -2058,6 +2058,10 @@ pub(crate) fn build_compiler_options(
         }
     };
     let mut options = (*template).clone();
+    options.gentype_declarations_needed = build_command_state
+        .gentype_needed
+        .as_ref()
+        .is_none_or(|needed| needed.contains(module_name));
     if let Some(dump) = &build_command_state.dump {
         options.dumps = dump.kinds.clone();
     }
@@ -4413,7 +4417,7 @@ fn finish_in_process_js_inner(
     }
 
     // GenType runs once the JavaScript is written (js_implementation.ml:164-171).
-    let gentype = pre_js.gentype.take();
+    let mut gentype = pre_js.gentype.take();
     let _span = if tracing::enabled!(tracing::Level::INFO) {
         info_span!(
             parent: &parent_span,
@@ -4504,6 +4508,20 @@ fn finish_in_process_js_inner(
             gentype_output: None,
             registry_updates,
         });
+    }
+
+    // A configured JS suffix can share the genType path. That write can
+    // invalidate the discovery snapshot, so preserve the ordinary probe.
+    if let Some(outcome) = gentype.as_mut()
+        && let Ok(Some(output)) = &mut outcome.result
+        && let rescript_compiler::gentype::main::Output::NoMatch { output_file } = output
+        && !compile_result.js_outputs.is_empty()
+        && !compile_result.js_outputs.iter().any(|js| js.path == Path::new(output_file))
+        && package.gentype_output_absent(Path::new(output_file))
+    {
+        *output = rescript_compiler::gentype::main::Output::Absent {
+            output_file: std::mem::take(output_file),
+        };
     }
 
     let mut write_duration = Duration::default();
@@ -4798,6 +4816,7 @@ mod tests {
             path,
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }
@@ -4806,6 +4825,7 @@ mod tests {
     fn test_module(package_name: &str, implementation_warning: Option<&str>) -> Module {
         Module {
             source_type: SourceType::SourceFile(SourceFile {
+                gentype_annotations: [None; 2],
                 implementation: Implementation {
                     path: PathBuf::from("src/ModuleA.res"),
                     parse_state: ParseState::Success,

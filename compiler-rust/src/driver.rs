@@ -626,11 +626,37 @@ fn place_location_free_warnings(
     true
 }
 
+/// Publish the signature a compilation registered for `module_name`. In
+/// signature check mode the publication is also compared with the frozen
+/// shared graph and reported; a difference fails the compilation.
+fn publish_signature(
+    env: &PersistentEnv,
+    options: &CompilerOptions,
+    module_name: &str,
+    filename: &str,
+    type_ctx: &TypeContext,
+    arena: &ParseArena,
+    publication: SignaturePublicationMode,
+) -> Result<Option<std::sync::Arc<PortablePersStruct>>> {
+    let Some(check) = &options.signature_check else {
+        return Ok(env.extract_module_update(module_name, type_ctx, Some(arena), publication));
+    };
+    let Some((pers_struct, comparison)) =
+        env.extract_module_update_checked(module_name, type_ctx, Some(arena), publication)
+    else {
+        return Ok(None);
+    };
+    check.report(filename, &comparison)?;
+    Ok(Some(pers_struct))
+}
+
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
     /// Dormant backend migration mode, selected before compiling modules.
     pub backend: crate::bir::shadow::BackendMode,
+    /// Dormant publication equality oracle; configured once, not per unit.
+    pub signature_check: Option<crate::cmi::signature_check::SignatureCheck>,
     /// Experimental JavaScript printer, selected once when options are created.
     pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
@@ -731,6 +757,10 @@ pub struct CompilerOptions {
     /// Run GenType only to register the module's type declarations (for the
     /// modules that import its types), without generating output.
     pub gentype_declarations_only: bool,
+    /// The build's conservative dependency closure can prove this module's
+    /// declarations unreachable from every genType output. Standalone compiles
+    /// default to true because they have no whole-build dependency graph.
+    pub gentype_declarations_needed: bool,
     /// When true, `compile_source_in_process` captures the typed tree,
     /// raw lambda, and lambda sexps for display (used by the playground).
     pub capture_intermediates: bool,
@@ -879,6 +909,7 @@ impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
             backend: crate::bir::shadow::BackendMode::from_env(),
+            signature_check: crate::cmi::signature_check::SignatureCheck::from_env(),
             js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
             dump_lambda: false,
@@ -923,6 +954,7 @@ impl Default for CompilerOptions {
             gentype_config: None,
             gentype_resolver: None,
             gentype_declarations_only: false,
+            gentype_declarations_needed: true,
             capture_intermediates: false,
             dumps: Vec::new(),
             skip_js_render: false,
@@ -7005,6 +7037,7 @@ fn compile_source_to_js_with_options_inner(
 
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
 
     #[cfg(test)]
@@ -7100,6 +7133,13 @@ fn compile_source_to_js_with_options_inner(
         .take_module_path_resolver()
         .expect("lambda compiler retained module path resolver");
     check_module_path_resolution_errors(&program, &module_path_resolver, filename)?;
+
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_js(
+            &program, &module_path_resolver, &file_directives, debug, jsx_preserve,
+            !options.no_version_header, filename,
+        )?;
+    }
 
     // JS IR -> JS source. File-based compilation writes the companion map
     // here because its public return value remains the generated JS string;
@@ -9597,6 +9637,7 @@ fn with_gentype_artifact<R>(
                 file_name: crate::gentype::paths::get_module_name_from_source_path(filename),
                 is_interface,
                 declarations_only: options.gentype_declarations_only,
+                declarations_needed: options.gentype_declarations_needed,
                 render_escape: &render_escape,
             },
         )
@@ -9782,6 +9823,37 @@ struct JsFileSettings<'a> {
     jsx_preserve: bool,
 }
 
+// Keep opt-in source-map setup out of the default printer's register allocation.
+#[cold]
+#[inline(never)]
+fn render_oxc_source_map(
+    program: &DepsProgram,
+    resolver: &ModulePathResolver,
+    settings: JsFileSettings<'_>,
+    options: &CompilerOptions,
+    output_path: Option<&FsPath>,
+    lam_locs: std::sync::Arc<crate::lambda::LamLocTable>,
+) -> Result<(String, Option<String>), crate::emit::Unsupported> {
+    let source_path = options.source_filename.as_deref().map(FsPath::new);
+    let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
+        (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
+            let source = source_path.unwrap_or_else(|| FsPath::new("_none_.res"));
+            source.with_extension("js")
+        })
+    });
+    let (Some(target), Some(source)) = (source_map_target.as_deref(), source_path) else {
+        return Err(crate::emit::Unsupported("source map: missing output or source path"));
+    };
+    crate::emit::emit_with_source_map(
+        program, resolver, settings.file_directives, settings.debug, settings.jsx_preserve,
+        !options.no_version_header, &crate::emit::sourcemap::Options {
+            target, source, mode: options.source_map,
+            sources_content: options.source_map_sources_content,
+            source_root: &options.source_map_root, locations: lam_locs,
+        },
+    )
+}
+
 fn render_js_program(
     program: &DepsProgram,
     resolver: &ModulePathResolver,
@@ -9796,12 +9868,48 @@ fn render_js_program(
         jsx_preserve,
     } = settings;
     if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
-        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
-            Err(crate::emit::Unsupported("source maps (S1.2)"))
+        let mut raw_audit = stats.raw_audit_buffer();
+        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None
+            && std::env::var("RESCRIPT_JS_PRINTER_SOURCE_MAPS").as_deref() == Ok("legacy")
+        {
+            Err(crate::emit::Unsupported(
+                "source maps: parity legacy policy",
+            ))
+        } else if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
+            render_oxc_source_map(
+                program,
+                resolver,
+                JsFileSettings {
+                    file_directives,
+                    debug,
+                    jsx_preserve,
+                },
+                options,
+                output_path,
+                lam_locs.clone(),
+            )
         } else {
-            crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
+            crate::emit::emit_audited(
+                program,
+                resolver,
+                file_directives,
+                debug,
+                jsx_preserve,
+                !options.no_version_header,
+                raw_audit.as_mut(),
+            )
         };
         stats.record(&result);
+        if let Err(error) = stats.report_output(
+            &result,
+            options.source_filename.as_deref().map(FsPath::new),
+            output_path,
+        ) {
+            log::error!("oxc printer coverage report: {error}");
+        }
+        if result.is_ok() {
+            stats.record_raw(raw_audit);
+        }
         match result {
             Ok(output) => return output,
             Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),
@@ -10677,7 +10785,15 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let pers_struct = if options.publish_in_process_signature {
-            internal_env.extract_module_update(module_name, &type_ctx, Some(arena), publication)
+            publish_signature(
+                &internal_env,
+                options,
+                module_name,
+                filename,
+                &type_ctx,
+                arena,
+                publication,
+            )?
         } else {
             None
         };
@@ -11009,6 +11125,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     });
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
     let lowered_lambda = crate::lambda::arena::LamProgram {
         arena: lowered_arena,
@@ -11253,6 +11370,15 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         debug: pre_js.debug,
         jsx_preserve: pre_js.jsx_preserve,
     };
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        for (_, program, resolver, _) in &rendered_programs {
+            crate::bir::shadow::check_js(
+                program, resolver, js_settings.file_directives, js_settings.debug,
+                js_settings.jsx_preserve, !options.no_version_header,
+                options.source_filename.as_deref().unwrap_or("_none_"),
+            )?;
+        }
+    }
     let (js, js_outputs) = crate::timing::measure(crate::timing::Phase::Codegen, || {
         let _phase = info_span!(
             "compiler.js_print",
@@ -11601,12 +11727,15 @@ pub fn typecheck_preprocessed_signature_in_process(
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
     // The implementation reads its own interface even when the module is a leaf.
-    let pers_struct = internal_env.extract_module_update(
+    let pers_struct = publish_signature(
+        &internal_env,
+        options,
         module_name,
+        filename,
         &type_ctx,
-        Some(arena),
+        arena,
         SignaturePublicationMode::Eager,
-    );
+    )?;
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

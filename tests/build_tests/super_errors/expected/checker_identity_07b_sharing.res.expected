@@ -1,0 +1,12 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/checker_identity_07b_sharing.res[0m:[2m9:17-24[0m
+
+   7 [2m│[0m let k = q => { ignore(q == two); let (a, _) = q; takesMyInt(a); q }
+   8 [2m│[0m let observed = (h, k)
+   [1;31m9[0m [2m│[0m let _: string = [1;31mobserved[0m
+  10 [2m│[0m 
+
+  This has type:
+    [1;31m(((myint, myint)) => (myint, myint), ((myint, int)) => (myint, int))[0m
+  But it's expected to have type: [1;33mstring[0m

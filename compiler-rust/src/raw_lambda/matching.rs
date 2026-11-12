@@ -4,14 +4,13 @@
 //! It defines the core data structures (matrix, context, jumps, pattern_matching)
 //! and the operations on them used by the pattern matching compiler.
 
-use super::key_encode::{KeyEncode, KeyOut};
+use super::key_encode::{KeyBuf, KeyEncode, KeyOut, count_steps, key_hash};
 use crate::fast_hash::AHashMap as HashMap;
 use crate::raw_lambda::builder::{RawLambdaBuilder, RawLambdaRead};
 use crate::types::path::PathView;
 use std::borrow::{Borrow, Cow};
 use std::collections::BTreeSet;
 use std::collections::VecDeque;
-use std::fmt::Write as _;
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
@@ -49,14 +48,45 @@ use std::cell::RefCell;
 /// OCaml `compiler/ml/matching.ml:29-34,659-1090` keeps actions as immutable
 /// lambda values in lists, so copying case matrices shares those actions by
 /// pointer. Raw Lambda terms are arena handles, so an action is shared the
-/// same way; the action itself is shared so its `make_key` result is
-/// computed once.
+/// same way; the action itself is shared so its `make_key` result, the
+/// [`ActionKey`], is computed once.
 #[derive(Clone)]
 struct MatchAction(Arc<MatchActionData>);
 
 struct MatchActionData {
     kind: MatchActionKind,
-    normalized_key: OnceLock<Option<String>>,
+    normalized_key: OnceLock<Option<ActionKey>>,
+}
+
+/// An action's `Lambda.make_key` (`compiler/ml/lambda.ml:432-466`) as key
+/// bytes and their hash. Two actions have equal keys exactly when OCaml's
+/// normalized terms are structurally equal.
+///
+/// Cost: built once per action in one pass over the action, O(key bytes),
+/// at most `MAX_RAW` nodes. A comparison is O(1) when the hashes differ and
+/// one comparison of the bytes when they are equal.
+struct ActionKey {
+    hash: u64,
+    bytes: Box<[u8]>,
+}
+
+impl ActionKey {
+    fn new(bytes: &[u8]) -> Self {
+        ActionKey {
+            hash: key_hash(bytes),
+            bytes: bytes.into(),
+        }
+    }
+
+    fn same(&self, other: &ActionKey) -> bool {
+        self.hash == other.hash && same_key_bytes(&self.bytes, &other.bytes)
+    }
+}
+
+/// The comparison that confirms two keys of equal hash. O(key bytes).
+fn same_key_bytes(a: &[u8], b: &[u8]) -> bool {
+    count_steps(a.len().min(b.len()));
+    a == b
 }
 
 /// A case's right-hand side as translation hands it to matching
@@ -182,7 +212,7 @@ impl MatchAction {
         self.body_with(b, unit)
     }
 
-    fn normalized_key<B: RawLambdaBuilder>(&self, b: &B) -> Option<&str> {
+    fn normalized_key<B: RawLambdaBuilder>(&self, b: &B) -> Option<&ActionKey> {
         // OCaml `compiler/ml/lambda.ml:432-466` computes `Lambda.make_key`, and
         // `compiler/ml/matching.ml:489-500,708-846` compares those pure keys while
         // shuffling the same immutable actions through match matrices. Cache the
@@ -190,8 +220,18 @@ impl MatchAction {
         // materializing delayed `Llet` wrappers.
         self.0
             .normalized_key
-            .get_or_init(|| make_key_string_action(b, self))
-            .as_deref()
+            .get_or_init(|| action_key(b, self))
+            .as_ref()
+    }
+
+    /// Whether both actions have a key and the keys are equal
+    /// (`compiler/ml/matching.ml:522-528`). O(1) for one action against
+    /// itself or for different hashes, once both keys exist.
+    fn same_key<B: RawLambdaBuilder>(&self, b: &B, other: &MatchAction) -> bool {
+        match (self.normalized_key(b), other.normalized_key(b)) {
+            (Some(key1), Some(key2)) => Arc::ptr_eq(&self.0, &other.0) || key1.same(key2),
+            _ => false,
+        }
     }
 
     fn is_guarded(&self) -> bool {
@@ -1301,6 +1341,7 @@ fn small_enough(n: usize, slice: &[Ctx<'_>]) -> bool {
 
 /// Shift left for a list of contexts, with pruning when too large.
 pub fn ctx_lshift<'p>(pa: &PatArena<'p>, ctx: &[Ctx<'p>]) -> Vec<Ctx<'p>> {
+    count_contexts_built(ctx.len());
     if small_enough(31, ctx) {
         ctx.iter().map(lshift).collect()
     } else {
@@ -1706,6 +1747,7 @@ pub fn filter_ctx<'p>(
             None => crate::misc::fatal_error("Matching.filter_ctx"),
         }
     }
+    count_contexts_built(out.len());
     out
 }
 
@@ -1762,6 +1804,197 @@ pub fn ctx_lub<'p>(pa: &'p PatArena<'p>, p: &'p Pattern, ctx: &[Ctx<'p>]) -> Vec
 pub fn ctx_match(pa: &PatArena<'_>, ctx: &[Ctx<'_>], pss: &Matrix<'_>) -> bool {
     ctx.iter()
         .any(|c| pss.iter().any(|ps| may_compats(pa, &c.right, ps)))
+}
+
+// ============================================================================
+// Context pool — context lists built when read
+// ============================================================================
+
+/// A context list of the match being compiled: a handle into its
+/// [`CtxPool`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CtxId(u32);
+
+/// How a pooled context list is obtained.
+enum CtxRecipe<'p> {
+    /// Built.
+    Built(std::rc::Rc<[Ctx<'p>]>),
+    /// `filter_ctx q parent`, not built.
+    Filter { parent: CtxId, q: &'p Pattern },
+    /// `ctx_lshift parent`, not built.
+    Shift { parent: CtxId },
+}
+
+struct CtxEntry<'p> {
+    recipe: CtxRecipe<'p>,
+    /// `Some(n)` when the list is known to be one context whose right
+    /// columns are `n` wildcards; `None` otherwise.
+    wild: Option<u32>,
+}
+
+/// The context lists of one match compilation.
+///
+/// A context list says which values can reach a matching (`compiler/ml/
+/// matching.ml:54-230`). The compilation passes it down through every test
+/// (`filter_ctx`) and column shift (`ctx_lshift`) and reads it in few
+/// places: when an exit is taken (the list enters a jump summary), when
+/// the constructors a switch does not mention are sent to default matrices,
+/// when an or-pattern handler selects its columns, and when `compile_list`
+/// asks whether a cell's list is empty. Most matches reach none of the
+/// first three, so their lists are built for the emptiness question alone.
+///
+/// The pool answers that question without building, in the one case where
+/// the answer is known: the parent is a single context whose right columns
+/// are all wildcards (the starting context is one). Then `filter_ctx q`
+/// gives exactly one context, the pattern `q` normalized moved left and its
+/// wildcard arguments followed by the remaining wildcards on the right
+/// (every arm of `ctx_matcher` accepts a wildcard head, and
+/// `normalize_pat` makes every argument a wildcard), and `ctx_lshift` gives
+/// exactly one context with one wildcard moved left. Both results are
+/// again of that form and not empty. Such a list is stored as its recipe
+/// and built, by the same `filter_ctx` and `ctx_lshift`, when it is read.
+///
+/// Costs: `filter` and `lshift` on a wildcard parent are O(1) and build
+/// nothing; on another parent they build the list as before. `get` builds
+/// the unbuilt lists from the handle up to its nearest built ancestor, each
+/// once, and is O(1) afterwards. `is_empty` is O(1) and builds nothing.
+#[derive(Default)]
+pub struct CtxPool<'p> {
+    entries: RefCell<Vec<CtxEntry<'p>>>,
+}
+
+/// The number of right columns when `ctx` is one context whose right
+/// columns are all wildcards.
+fn wild_width(ctx: &[Ctx<'_>]) -> Option<u32> {
+    match ctx {
+        [c] if c
+            .right
+            .iter()
+            .all(|p| matches!(p.pat_desc, PatternDesc::Tpat_any)) =>
+        {
+            Some(c.right.len() as u32)
+        }
+        _ => None,
+    }
+}
+
+/// The number of arguments `ctx_matcher q` puts on the right for a wildcard
+/// head, after the checks `ctx_matcher` and `normalize_pat` make on `q`.
+fn ctx_matcher_arity(pa: &PatArena<'_>, q: &Pattern) -> usize {
+    match &q.pat_desc {
+        PatternDesc::Tpat_alias(q, _, _) => ctx_matcher_arity(pa, pa.pat(*q)),
+        PatternDesc::Tpat_construct(_, _, args)
+        | PatternDesc::Tpat_array(args)
+        | PatternDesc::Tpat_tuple(args) => args.len(),
+        PatternDesc::Tpat_interval(..) if int_range(q).is_none() => {
+            crate::misc::fatal_error("Matching.ctx_matcher")
+        }
+        PatternDesc::Tpat_constant(_) | PatternDesc::Tpat_interval(..) => 0,
+        PatternDesc::Tpat_variant(_, arg, _) => usize::from(arg.is_some()),
+        PatternDesc::Tpat_record(fields, _, _) if !fields.is_empty() => fields.len(),
+        PatternDesc::Tpat_or(..) => crate::misc::fatal_error("Parmatch.normalize_pat"),
+        PatternDesc::Tpat_dict(_) => {
+            crate::misc::fatal_error("Parmatch.normalize_pat: dict pattern")
+        }
+        PatternDesc::Tpat_any | PatternDesc::Tpat_var(..) | PatternDesc::Tpat_record(..) => {
+            crate::misc::fatal_error("Matching.ctx_matcher")
+        }
+    }
+}
+
+impl<'p> CtxPool<'p> {
+    fn push(&self, recipe: CtxRecipe<'p>, wild: Option<u32>) -> CtxId {
+        let mut entries = self.entries.borrow_mut();
+        let id = CtxId(entries.len() as u32);
+        entries.push(CtxEntry { recipe, wild });
+        id
+    }
+
+    /// A built list.
+    pub fn built(&self, ctx: Vec<Ctx<'p>>) -> CtxId {
+        let wild = wild_width(&ctx);
+        self.push(CtxRecipe::Built(ctx.into()), wild)
+    }
+
+    fn wild(&self, id: CtxId) -> Option<u32> {
+        self.entries.borrow()[id.0 as usize].wild
+    }
+
+    /// `filter_ctx q parent`. O(1) for a wildcard parent.
+    pub fn filter(
+        &self,
+        ctx_ref: Option<&TypeContext>,
+        pa: &'p PatArena<'p>,
+        q: &'p Pattern,
+        parent: CtxId,
+    ) -> CtxId {
+        match self.wild(parent) {
+            Some(width) => {
+                // The failures of `ctx_matcher`, then of `filter_ctx`.
+                let arity = ctx_matcher_arity(pa, q) as u32;
+                if width == 0 {
+                    crate::misc::fatal_error("Matching.filter_ctx")
+                }
+                self.push(CtxRecipe::Filter { parent, q }, Some(width - 1 + arity))
+            }
+            None => self.built(filter_ctx(ctx_ref, pa, q, &self.get(pa, parent))),
+        }
+    }
+
+    /// `ctx_lshift parent`. O(1) for a wildcard parent.
+    pub fn lshift(&self, pa: &'p PatArena<'p>, parent: CtxId) -> CtxId {
+        match self.wild(parent) {
+            Some(0) => panic!("lshift: empty right"),
+            Some(width) => self.push(CtxRecipe::Shift { parent }, Some(width - 1)),
+            None => self.built(ctx_lshift(pa, &self.get(pa, parent))),
+        }
+    }
+
+    /// Whether the list is empty, without building it.
+    pub fn is_empty(&self, id: CtxId) -> bool {
+        let entries = self.entries.borrow();
+        let entry = &entries[id.0 as usize];
+        match &entry.recipe {
+            CtxRecipe::Built(ctx) => ctx.is_empty(),
+            CtxRecipe::Filter { .. } | CtxRecipe::Shift { .. } => {
+                debug_assert!(entry.wild.is_some());
+                false
+            }
+        }
+    }
+
+    /// The list, built if it was not.
+    pub fn get(&self, pa: &'p PatArena<'p>, id: CtxId) -> std::rc::Rc<[Ctx<'p>]> {
+        let (parent, q) = match &self.entries.borrow()[id.0 as usize].recipe {
+            CtxRecipe::Built(ctx) => return ctx.clone(),
+            CtxRecipe::Filter { parent, q } => (*parent, Some(*q)),
+            CtxRecipe::Shift { parent } => (*parent, None),
+        };
+        let parent = self.get(pa, parent);
+        let ctx: std::rc::Rc<[Ctx<'p>]> = match q {
+            // The parent's head is a wildcard, and no arm of `ctx_matcher`
+            // reads the type context for a wildcard head.
+            Some(q) => filter_ctx(None, pa, q, &parent).into(),
+            None => ctx_lshift(pa, &parent).into(),
+        };
+        let entry = &mut self.entries.borrow_mut()[id.0 as usize];
+        debug_assert_eq!(wild_width(&ctx), entry.wild);
+        entry.recipe = CtxRecipe::Built(ctx.clone());
+        ctx
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Contexts built by `filter_ctx` and `ctx_lshift`, for the step-count
+    /// tests.
+    static CONTEXTS_BUILT: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_contexts_built(_n: usize) {
+    #[cfg(test)]
+    CONTEXTS_BUILT.with(|steps| steps.set(steps.get() + _n as u64));
 }
 
 // ============================================================================
@@ -1938,7 +2171,39 @@ pub struct PmOrCompiled<'p> {
     /// Handlers for or-patterns: (matrix, exit_number, idents, pattern_matching).
     pub handlers: Vec<OrHandler<'p>>,
     /// The or-pattern matrix.
-    pub or_matrix: Matrix<'p>,
+    or_matrix: OrMatrix<'p>,
+}
+
+/// The matrix of a [`PmOrCompiled`]: `as_matrix` of the rows it was split
+/// from. Nothing reads it unless the matching is consed onto a default
+/// environment or flattened, so it is kept as its rows until then.
+#[derive(Clone)]
+enum OrMatrix<'p> {
+    /// Not computed: the matrix of the first `plain` cases of the body
+    /// followed by `ors`, the or-pattern rows the handlers were made from.
+    Rows {
+        plain: usize,
+        ors: Vec<Clause<'p>>,
+    },
+    /// Computed and flattened (`flatten_precompiled`).
+    Flat(Matrix<'p>),
+}
+
+impl<'p> PmOrCompiled<'p> {
+    /// The or-pattern matrix. Cost: one [`as_matrix`] of the rows when it
+    /// was not flattened, a copy of the matrix when it was.
+    fn or_matrix(&self, pa: &PatArena<'p>) -> Matrix<'p> {
+        match &self.or_matrix {
+            OrMatrix::Rows { plain, ors } => as_matrix_rows(
+                pa,
+                self.body.cases[..*plain]
+                    .iter()
+                    .chain(ors)
+                    .map(|(row, _)| row.as_slice()),
+            ),
+            OrMatrix::Flat(matrix) => matrix.clone(),
+        }
+    }
 }
 
 /// Half-compiled pattern matching.
@@ -1962,11 +2227,15 @@ pub struct PmVarCompiled<'p> {
 }
 
 /// Half-compiled pattern matching with associated info.
+///
+/// OCaml's record also carries `matrix`, the matrix of `me`. It is a
+/// function of `me` (`rebuild_matrix`) and is read only when `me` becomes
+/// an entry of a default environment, that is when `me` is not the first
+/// group of its split. It is computed there and nowhere else: a split into
+/// one group, the common case, never compares its rows.
 pub struct PmHalfCompiledInfo<'p> {
     /// The half-compiled pattern matching.
     pub me: PmHalfCompiled<'p>,
-    /// The associated matrix.
-    pub matrix: Matrix<'p>,
     /// The top-level default environment.
     pub top_default: DefaultEnv<'p>,
 }
@@ -2201,16 +2470,13 @@ fn make_key<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<RawLambda> {
     tr_rec(b, &mut Vec::new(), e, &mut 0, &mut 0)
 }
 
-/// Convert a RawLambda to a string key for comparison purposes.
-/// Returns None if the lambda cannot be normalized.
-fn make_key_string<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<String> {
-    let mut writer = MakeKeyWriter::new(b);
-    let mut out = KeyOut::new(128);
-    writer.write_raw(&*b.get(), e, &mut out)?;
-    Some(out.buf)
+/// Writes `e`'s `Lambda.make_key` to `out`; `None` when the term has no key.
+/// One pass over at most `MAX_RAW` nodes.
+fn write_key<B: RawLambdaBuilder>(b: &B, e: RawLambda, out: &mut KeyOut<'_>) -> Option<()> {
+    MakeKeyWriter::new(b).write_raw(&*b.get(), e, out)
 }
 
-/// Convert a delayed match action to the same structural key as
+/// The key of a delayed match action: the same structural key as
 /// `Lambda.make_key` without first expanding the delayed `Llet` chain.
 ///
 /// OCaml actions are immutable lambda values, so `matching.ml:489-500` can pass
@@ -2218,25 +2484,59 @@ fn make_key_string<B: RawLambdaBuilder>(b: &B, e: RawLambda) -> Option<String> {
 /// action lets as `MatchActionKind::Bind` to preserve that sharing; this
 /// traverses those wrappers as if they were `Llet` nodes while keeping the
 /// `max_raw = 32` cutoff from `lambda.ml:434,438-440`.
-fn make_key_string_action<B: RawLambdaBuilder>(b: &B, action: &MatchAction) -> Option<String> {
+fn action_key<B: RawLambdaBuilder>(b: &B, action: &MatchAction) -> Option<ActionKey> {
     let mut writer = MakeKeyWriter::new(b);
-    let mut out = KeyOut::new(128);
+    let mut out = KeyOut::new();
     writer.write_action(action, &mut out)?;
-    Some(out.buf)
+    Some(ActionKey::new(&out.buf))
 }
 
 /// Whether `e`'s `Lambda.make_key` exists and equals `key`. Writes the key
 /// against `key` and stops at the first byte that differs, so unequal
-/// actions are rejected without normalizing them in full.
-fn make_key_equals<B: RawLambdaBuilder>(b: &B, e: RawLambda, key: &str) -> bool {
-    let mut writer = MakeKeyWriter::new(b);
+/// actions are rejected without normalizing them in full. O(common prefix).
+fn make_key_equals<B: RawLambdaBuilder>(b: &B, e: RawLambda, key: &[u8]) -> bool {
     let mut out = KeyOut::expecting(key);
-    writer.write_raw(&*b.get(), e, &mut out).is_some() && out.matches_all()
+    write_key(b, e, &mut out).is_some() && out.matches_all()
 }
 
 enum KeyBody<'a> {
     Raw(RawLambda),
     Action(&'a MatchAction),
+}
+
+/// What a bound variable is written as in a key.
+enum KeyBinding {
+    /// `Llet (Alias, x, ex, _)`: `x` is replaced by the key of `ex`
+    /// (`compiler/ml/lambda.ml:447-449`), these bytes of
+    /// [`MakeKeyWriter::alias_keys`].
+    Alias(std::ops::Range<usize>),
+    /// Any other kept `Llet`: `x` is renamed to its name with the stamp of
+    /// its position (`compiler/ml/lambda.ml:454-458`).
+    Renamed(i32),
+}
+
+/// The first byte of each node's key. A node's fields follow in a fixed
+/// order, each self-delimiting, and every list is preceded by its length,
+/// so the bytes of a term determine the term: two terms have equal keys
+/// exactly when they are structurally equal after normalization.
+mod key_tag {
+    pub(super) const VAR: u8 = 1;
+    pub(super) const CONST: u8 = 2;
+    pub(super) const GLOBAL_MODULE: u8 = 3;
+    pub(super) const APPLY: u8 = 4;
+    pub(super) const LET: u8 = 5;
+    pub(super) const PRIM: u8 = 6;
+    pub(super) const SWITCH: u8 = 7;
+    pub(super) const STRING_SWITCH: u8 = 8;
+    pub(super) const STATIC_RAISE: u8 = 9;
+    pub(super) const STATIC_CATCH: u8 = 10;
+    pub(super) const TRY_FINALLY: u8 = 11;
+    pub(super) const TRY_WITH: u8 = 12;
+    pub(super) const IF: u8 = 13;
+    pub(super) const SEQUENCE: u8 = 14;
+    pub(super) const ASSIGN: u8 = 15;
+    pub(super) const BREAK: u8 = 16;
+    pub(super) const CONTINUE: u8 = 17;
 }
 
 /// Writes `Lambda.make_key`. Reads hold the arena only inside
@@ -2246,7 +2546,10 @@ struct MakeKeyWriter<'b, B: RawLambdaBuilder> {
     b: &'b B,
     count: i32,
     next_id: i32,
-    env: Vec<(Ident, String)>,
+    /// The lets in scope, innermost last; rarely more than a few.
+    env: smallvec::SmallVec<[(Ident, KeyBinding); 4]>,
+    /// The keys of the aliases in scope, one after the other.
+    alias_keys: KeyBuf,
 }
 
 impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
@@ -2255,7 +2558,8 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             b,
             count: 0,
             next_id: 0,
-            env: Vec::new(),
+            env: smallvec::SmallVec::new(),
+            alias_keys: KeyBuf::new(),
         }
     }
 
@@ -2314,36 +2618,36 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
     ) -> Option<()> {
         match a.view(e) {
             View::Var(id) => {
-                if let Some((_, replacement)) = self.env.iter().rev().find(|(key, _)| key.same(&id))
-                {
-                    out.push_str(replacement);
-                } else {
-                    out.push_str("Lvar(");
-                    write_ident_key(out, &id);
-                    out.push(')');
+                match self.env.iter().rev().find(|(key, _)| key.same(&id)) {
+                    Some((_, KeyBinding::Alias(replacement))) => {
+                        out.bytes(&self.alias_keys[replacement.clone()])
+                    }
+                    Some((bound, KeyBinding::Renamed(stamp))) => {
+                        out.byte(key_tag::VAR);
+                        write_renamed_ident_key(out, bound.name_atom(), *stamp);
+                    }
+                    None => {
+                        out.byte(key_tag::VAR);
+                        write_ident_key(out, &id);
+                    }
                 }
                 Some(())
             }
             View::Const(c) => {
-                out.push_str("Lconst(");
+                out.byte(key_tag::CONST);
                 c.encode(out);
-                out.push(')');
                 Some(())
             }
             View::GlobalModule(id) => {
-                out.push_str("LglobalModule(");
+                out.byte(key_tag::GLOBAL_MODULE);
                 write_ident_key(out, &id);
-                out.push(')');
                 Some(())
             }
             View::Apply { func, args, info } => {
-                out.push_str("Lapply(");
+                out.byte(key_tag::APPLY);
                 self.write_raw(a, func, out)?;
-                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                out.push_str("],");
                 info.status.encode(out);
-                out.push(')');
                 Some(())
             }
             View::Let(kind, x, ex, body) => {
@@ -2351,127 +2655,96 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             }
             View::Prim(primitive, args, _) => {
                 charge_logical_record_fields(&mut self.count, primitive, args.len())?;
-                out.push_str("Lprim(");
+                out.byte(key_tag::PRIM);
                 primitive.encode(out);
-                out.push_str(",[");
                 self.write_raw_list(a, args, out)?;
-                out.push_str("])");
                 Some(())
             }
             View::Switch(scrut, sw) => {
-                out.push_str("Lswitch(");
+                out.byte(key_tag::SWITCH);
                 self.write_raw(a, scrut, out)?;
-                write!(out, ",fullc={},consts=[", sw.payload.consts_full).ok()?;
-                for (idx, (tag, act)) in sw.consts().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
-                    write!(out, "{tag}:").ok()?;
+                sw.payload.consts_full.encode(out);
+                out.int(sw.const_keys.len() as i128);
+                for (tag, act) in sw.consts() {
+                    write_switch_key(out, tag);
                     self.write_raw(a, act, out)?;
                 }
-                write!(out, "],fullb={},blocks=[", sw.payload.blocks_full).ok()?;
-                for (idx, (tag, act)) in sw.blocks().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
-                    write!(out, "{tag}:").ok()?;
+                sw.payload.blocks_full.encode(out);
+                out.int(sw.block_keys.len() as i128);
+                for (tag, act) in sw.blocks() {
+                    write_switch_key(out, tag);
                     self.write_raw(a, act, out)?;
                 }
-                out.push_str("],fail=");
                 self.write_raw_opt(a, sw.actions.fail, out)?;
-                out.push_str(",names=");
                 sw.payload.dispatch.encode(out);
-                out.push(')');
                 Some(())
             }
             View::StringSwitch(scrut, sw) => {
-                out.push_str("LstringSwitch(");
+                out.byte(key_tag::STRING_SWITCH);
                 self.write_raw(a, scrut, out)?;
-                out.push_str(",[");
-                for (idx, (label, act)) in sw.cases().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
+                out.int(sw.len() as i128);
+                for (label, act) in sw.cases() {
                     label.encode(out);
-                    out.push(':');
                     self.write_raw(a, act, out)?;
                 }
-                out.push_str("],");
                 self.write_raw_opt(a, sw.default, out)?;
-                out.push(')');
                 Some(())
             }
             View::StaticRaise(i, args) => {
-                write!(out, "LstaticRaise({i},[").ok()?;
+                out.byte(key_tag::STATIC_RAISE);
+                out.int(i128::from(i));
                 self.write_raw_list(a, args, out)?;
-                out.push_str("])");
                 Some(())
             }
             View::StaticCatch(e1, i, vars, e2) => {
-                write!(out, "LstaticCatch(").ok()?;
+                out.byte(key_tag::STATIC_CATCH);
                 self.write_raw(a, e1, out)?;
-                write!(out, ",({i},[").ok()?;
-                for (idx, var) in vars.iter().enumerate() {
-                    if idx > 0 {
-                        out.push(',');
-                    }
+                out.int(i128::from(i));
+                out.int(vars.len() as i128);
+                for var in vars {
                     write_ident_key(out, var);
                 }
-                out.push_str("]),");
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::TryFinally(e1, e2) => {
-                out.push_str("LtryFinally(");
+                out.byte(key_tag::TRY_FINALLY);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::TryWith(e1, x, e2) => {
-                out.push_str("LtryWith(");
+                out.byte(key_tag::TRY_WITH);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 write_ident_key(out, &x);
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::If(cond, ifso, ifnot) => {
-                out.push_str("LifThenElse(");
+                out.byte(key_tag::IF);
                 self.write_raw(a, cond, out)?;
-                out.push(',');
                 self.write_raw(a, ifso, out)?;
-                out.push(',');
                 self.write_raw(a, ifnot, out)?;
-                out.push(')');
                 Some(())
             }
             View::Sequence(e1, e2) => {
-                out.push_str("Lsequence(");
+                out.byte(key_tag::SEQUENCE);
                 self.write_raw(a, e1, out)?;
-                out.push(',');
                 self.write_raw(a, e2, out)?;
-                out.push(')');
                 Some(())
             }
             View::Assign(x, e) => {
-                out.push_str("Lassign(");
+                out.byte(key_tag::ASSIGN);
                 write_ident_key(out, &x);
-                out.push(',');
                 self.write_raw(a, e, out)?;
-                out.push(')');
                 Some(())
             }
             View::Break => {
-                out.push_str("Lbreak");
+                out.byte(key_tag::BREAK);
                 Some(())
             }
             View::Continue => {
-                out.push_str("Lcontinue");
+                out.byte(key_tag::CONTINUE);
                 Some(())
             }
             View::LetRec(..)
@@ -2495,13 +2768,22 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
         if kind == LetKind::Alias {
-            let ex_key = match a {
-                Some(a) => self.raw_to_string(a, ex)?,
-                None => self.raw_to_string(&*self.b.get(), ex)?,
-            };
-            self.env.push((*x, ex_key));
+            // The replacement is always written in full, also when `out`
+            // only compares.
+            let mut ex_key = KeyOut::new();
+            match a {
+                Some(a) => self.write_raw(a, ex, &mut ex_key)?,
+                None => self.write_raw(&*self.b.get(), ex, &mut ex_key)?,
+            }
+            // Aliases inside `ex` have left scope, and `alias_keys` with
+            // them, so the keys of the aliases in scope stay contiguous.
+            let start = self.alias_keys.len();
+            self.alias_keys.extend_from_slice(&ex_key.buf);
+            let replacement = start..self.alias_keys.len();
+            self.env.push((*x, KeyBinding::Alias(replacement)));
             let result = self.write_body(a, body, out);
             self.env.pop();
+            self.alias_keys.truncate(start);
             return result;
         }
 
@@ -2516,34 +2798,19 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
             };
         }
 
-        out.push_str("Llet(");
+        out.byte(key_tag::LET);
         kind.encode(out);
-        out.push(',');
-        let synthetic_stamp = self.next_id;
+        let renamed_stamp = self.next_id;
         self.next_id += 1;
-        write_synthetic_ident_key(out, x.name(), synthetic_stamp);
-        out.push(',');
+        write_renamed_ident_key(out, x.name_atom(), renamed_stamp);
         match a {
             Some(a) => self.write_raw(a, ex, out)?,
             None => self.write_raw(&*self.b.get(), ex, out)?,
         }
-        out.push(',');
-        let mut replacement = KeyOut::new(x.name().len() + 16);
-        replacement.push_str("Lvar(");
-        write_synthetic_ident_key(&mut replacement, x.name(), synthetic_stamp);
-        replacement.push(')');
-        self.env.push((*x, replacement.buf));
+        self.env.push((*x, KeyBinding::Renamed(renamed_stamp)));
         let result = self.write_body(a, body, out);
         self.env.pop();
-        result?;
-        out.push(')');
-        Some(())
-    }
-
-    fn raw_to_string(&mut self, a: &B::Reader, e: RawLambda) -> Option<String> {
-        let mut out = KeyOut::new(64);
-        self.write_raw(a, e, &mut out)?;
-        Some(out.buf)
+        result
     }
 
     fn write_raw_list(
@@ -2552,10 +2819,8 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         items: &[RawLambda],
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
-        for (idx, item) in items.iter().enumerate() {
-            if idx > 0 {
-                out.push(',');
-            }
+        out.int(items.len() as i128);
+        for item in items {
             self.write_raw(a, *item, out)?;
         }
         Some(())
@@ -2568,11 +2833,10 @@ impl<'b, B: RawLambdaBuilder> MakeKeyWriter<'b, B> {
         out: &mut KeyOut<'_>,
     ) -> Option<()> {
         match item {
-            None => out.push_str("None"),
+            None => out.push('N'),
             Some(item) => {
-                out.push_str("Some(");
+                out.push('S');
                 self.write_raw(a, item, out)?;
-                out.push(')');
             }
         }
         Some(())
@@ -2590,41 +2854,136 @@ fn same_var_body(a: &impl RawLambdaRead, body: &KeyBody<'_>, id: &Ident) -> bool
 }
 
 fn write_ident_key(out: &mut KeyOut<'_>, id: &Ident) {
-    match id.stamp() {
-        0 => {
-            out.push_str(id.name());
-            out.push('!');
-        }
-        -1 => {
-            out.push_str(id.name());
-            out.push('#');
-        }
-        stamp => write_synthetic_ident_key_with_global(out, id.name(), stamp, id.is_global()),
-    }
+    write_ident_key_parts(out, id.name_atom(), id.stamp(), id.is_global());
 }
 
-fn write_synthetic_ident_key(out: &mut KeyOut<'_>, name: &str, stamp: i32) {
-    write_synthetic_ident_key_with_global(out, name, stamp, false);
+/// The identifier a kept `Llet` renames its variable to
+/// (`compiler/ml/lambda.ml:456`): never global.
+fn write_renamed_ident_key(out: &mut KeyOut<'_>, name: crate::name::Name, stamp: i32) {
+    write_ident_key_parts(out, name, stamp, false);
 }
 
-fn write_synthetic_ident_key_with_global(
+/// An identifier by name and stamp, as `Ident.unique_toplevel_name` printed
+/// it in the first keys: the stamps 0 and -1 carry no global flag, so a
+/// global and a local identifier of that name and stamp key the same.
+/// Thirteen bytes: the name's identity, the stamp, the flag.
+fn write_ident_key_parts(
     out: &mut KeyOut<'_>,
-    name: &str,
+    name: crate::name::Name,
     stamp: i32,
     is_global: bool,
 ) {
-    if stamp == 0 {
-        out.push_str(name);
-        out.push('!');
-    } else if stamp == -1 {
-        out.push_str(name);
-        out.push('#');
-    } else {
-        out.push_str(name);
-        // Fails only when a comparing sink has already diverged.
-        if write!(out, "/{stamp}").is_ok() && is_global {
-            out.push('g');
+    let mut bytes = [0u8; 13];
+    bytes[..8].copy_from_slice(&(name.identity() as u64).to_ne_bytes());
+    bytes[8..12].copy_from_slice(&stamp.to_ne_bytes());
+    bytes[12] = u8::from(is_global && stamp != 0 && stamp != -1);
+    out.bytes(&bytes);
+}
+
+/// A switch case's key by what its `Display` shows, which the first keys
+/// were written with: an integer, or a constructor by its name alone.
+fn write_switch_key(out: &mut KeyOut<'_>, key: &crate::lambda::SwitchKey) {
+    use crate::types::VariantConstructorCase;
+    match key {
+        crate::lambda::SwitchKey::Int(value) => {
+            out.tag(0);
+            out.int(i128::from(*value));
         }
+        crate::lambda::SwitchKey::Constructor(case) => {
+            out.tag(1);
+            match case {
+                VariantConstructorCase::Constant(tag) => out.str(&tag.name),
+                VariantConstructorCase::Block(block) => out.str(&block.tag().name),
+            }
+        }
+    }
+}
+
+/// Distinct keys of one sharing decision, each with a value: the table
+/// behind [`StoreExp`] and the grouping of polymorphic variant cases.
+///
+/// Cost of [`KeyTable::get_or_insert`], for a key of `m` bytes among `n`
+/// stored keys: one hash of the key, O(m); then a probe that compares hashes
+/// only, a scan of at most [`KeyTable::SCAN_MAX`] entries or one hash-table
+/// lookup, O(1) expected; then one comparison of the bytes, O(m), for each
+/// stored key of equal hash, which is the equal key if there is one and
+/// otherwise a 64-bit collision. Storing `n` keys of `m` bytes is therefore
+/// O(n * m), where comparing every pair would be O(n * n * m).
+struct KeyTable {
+    /// The bytes of every stored key, in insertion order.
+    bytes: Vec<u8>,
+    entries: Vec<KeyEntry>,
+    /// Entry indices by hash, once there are more than `SCAN_MAX` entries.
+    index: Option<hashbrown::HashTable<u32>>,
+}
+
+struct KeyEntry {
+    hash: u64,
+    /// The key is `bytes[start..end]`.
+    start: u32,
+    end: u32,
+    value: usize,
+}
+
+impl KeyTable {
+    /// Up to this many keys are found by scanning their hashes; most
+    /// switches have fewer actions, and a scan needs no second allocation.
+    const SCAN_MAX: usize = 8;
+
+    fn new() -> Self {
+        KeyTable {
+            bytes: Vec::new(),
+            entries: Vec::new(),
+            index: None,
+        }
+    }
+
+    fn key_bytes(&self, entry: &KeyEntry) -> &[u8] {
+        &self.bytes[entry.start as usize..entry.end as usize]
+    }
+
+    /// The value stored with `key`, or `None` after storing `key` with
+    /// `value`.
+    fn get_or_insert(&mut self, key: &[u8], value: usize) -> Option<usize> {
+        let hash = key_hash(key);
+        let same =
+            |entry: &KeyEntry| entry.hash == hash && same_key_bytes(self.key_bytes(entry), key);
+        let found = match &self.index {
+            None => self.entries.iter().find(|entry| same(entry)),
+            Some(index) => index
+                .find(hash, |&i| same(&self.entries[i as usize]))
+                .map(|&i| &self.entries[i as usize]),
+        };
+        if let Some(entry) = found {
+            return Some(entry.value);
+        }
+
+        let start = self.bytes.len();
+        self.bytes.extend_from_slice(key);
+        let end = self.bytes.len();
+        let position = self.entries.len() as u32;
+        self.entries.push(KeyEntry {
+            hash,
+            start: u32::try_from(start).expect("action keys below 4 GiB"),
+            end: u32::try_from(end).expect("action keys below 4 GiB"),
+            value,
+        });
+        let entries = &self.entries;
+        let hash_of = |&i: &u32| entries[i as usize].hash;
+        match &mut self.index {
+            Some(index) => {
+                index.insert_unique(hash, position, hash_of);
+            }
+            None if entries.len() > Self::SCAN_MAX => {
+                let mut index = hashbrown::HashTable::with_capacity(entries.len() * 2);
+                for (i, entry) in entries.iter().enumerate() {
+                    index.insert_unique(entry.hash, i as u32, hash_of);
+                }
+                self.index = Some(index);
+            }
+            None => {}
+        }
+        None
     }
 }
 
@@ -2636,18 +2995,23 @@ fn write_synthetic_ident_key_with_global(
 /// Action store for deduplicating lambda actions.
 /// Equivalent to OCaml's `StoreExp` (Switch.Store specialized for lambda).
 ///
-/// Uses string keys (from `make_key` normalization) for comparison,
-/// since RawLambda doesn't implement PartialEq/Ord.
+/// Two actions share a slot when their `make_key` keys are equal; an action
+/// without a key gets a slot of its own.
+///
+/// Cost of storing an action: one pass over it to write its key, at most
+/// `MAX_RAW` nodes, then one `KeyTable::get_or_insert`. Storing `n` actions
+/// with keys of `m` bytes is O(n * m); no action is compared with every
+/// other.
 pub struct StoreExp<'b, B: RawLambdaBuilder> {
     b: &'b B,
-    /// Map from normalized key string -> action index.
+    /// Normalized key -> action index.
     ///
     /// OCaml uses `AMap` for lookup in `Switch.Store.store`
     /// (`compiler/ml/switch.ml:55-65`) and iterates it only to mark shared
     /// action slots (`compiler/ml/switch.ml:67-76`). That iteration order does
     /// not feed the generated lambda, so Rust records the shared flag directly
     /// on the action slot when a key hits and keeps the map for lookup only.
-    map: HashMap<String, usize>,
+    map: KeyTable,
     /// Accumulated actions in index order: (shared, action).
     acts: Vec<(bool, RawLambda)>,
 }
@@ -2658,7 +3022,7 @@ impl<'b, B: RawLambdaBuilder> StoreExp<'b, B> {
     pub fn mk_store(b: &'b B) -> Self {
         StoreExp {
             b,
-            map: HashMap::new(),
+            map: KeyTable::new(),
             acts: Vec::new(),
         }
     }
@@ -2671,16 +3035,14 @@ impl<'b, B: RawLambdaBuilder> StoreExp<'b, B> {
 
     /// Internal: store an action, deduplicating if possible.
     fn store(&mut self, must_share: bool, act: RawLambda) -> usize {
-        match make_key_string(self.b, act) {
-            Some(key) => {
-                if let Some(&i) = self.map.get(&key) {
-                    self.acts[i].0 = true;
-                    i
-                } else {
-                    let i = self.add(must_share, act);
-                    self.map.insert(key, i);
-                    i
-                }
+        let mut key = KeyOut::new();
+        if write_key(self.b, act, &mut key).is_none() {
+            return self.add(must_share, act);
+        }
+        match self.map.get_or_insert(&key.buf, self.acts.len()) {
+            Some(i) => {
+                self.acts[i].0 = true;
+                i
             }
             None => self.add(must_share, act),
         }
@@ -2846,10 +3208,7 @@ fn up_ok_action<B: RawLambdaBuilder>(
     if let Some(ctx) = ctx_ref {
         let _fail = ctx.create_ident("fallthrough");
     }
-    match (act1.normalized_key(b), act2.normalized_key(b)) {
-        (Some(raw1), Some(raw2)) => raw1 == raw2,
-        _ => false,
-    }
+    act1.same_key(b, act2)
 }
 
 // ============================================================================
@@ -3122,14 +3481,54 @@ fn what_is_cases<'p>(cases: &[Clause<'p>]) -> &'p Pattern {
 
 /// Convert cases to a pattern matrix (taking the minimal rows under le_pats).
 /// Equivalent to OCaml's `as_matrix`.
+///
+/// Cost: at most n(n-1) row comparisons for n rows (two passes of
+/// [`get_mins_indices`]), none for one row, and one row copy per kept row.
 fn as_matrix<'p>(pa: &PatArena<'p>, cases: &[Clause<'p>]) -> Matrix<'p> {
+    as_matrix_rows(pa, cases.iter().map(|(row, _)| row.as_slice()))
+}
+
+/// [`as_matrix`] over rows.
+fn as_matrix_rows<'a, 'p: 'a>(
+    pa: &PatArena<'p>,
+    rows: impl Iterator<Item = &'a [&'p Pattern]>,
+) -> Matrix<'p> {
+    let rows: smallvec::SmallVec<[&[&'p Pattern]; 8]> = rows.collect();
     get_mins_indices(
-        |a: &Clause<'p>, b: &Clause<'p>| le_pats(pa, &a.0, &b.0),
-        cases,
+        |a: &&[&'p Pattern], b: &&[&'p Pattern]| {
+            count_row_comparison();
+            le_pats(pa, a, b)
+        },
+        &rows,
     )
     .iter()
-    .map(|&i| cases[i].0.clone())
+    .map(|&i| rows[i].to_vec())
     .collect()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Steps of `do_split_or`'s loop over its work lists, for the step-count
+    /// tests: one per row and one to finish.
+    static WORK_LIST_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_work_list_row() {
+    #[cfg(test)]
+    WORK_LIST_STEPS.with(|steps| steps.set(steps.get() + 1));
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Row comparisons made by [`as_matrix`], for the step-count tests.
+    static ROW_COMPARISONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline(always)]
+fn count_row_comparison() {
+    #[cfg(test)]
+    ROW_COMPARISONS.with(|steps| steps.set(steps.get() + 1));
 }
 
 /// Prepend a matrix entry to the default environment, skipping empty matrices.
@@ -3742,11 +4141,19 @@ fn insert_or_append<'p>(
 // ============================================================================
 
 /// Reconstruct a matrix from a half-compiled pattern matching.
-/// Equivalent to OCaml's `rebuild_matrix`.
+/// Equivalent to OCaml's `rebuild_matrix`, and the `matrix` field of OCaml's
+/// `pm_half_compiled_info`: every split function builds that field as
+/// `as_matrix` of the cases of a `Pm`, as the or-pattern matrix of a `PmOr`,
+/// or by adding a wildcard column to the matrix of what a `PmVar` wraps,
+/// which is what this computes from the finished matching. `as_matrix` only
+/// reads patterns, so computing it here, later, gives the same matrix.
+///
+/// Cost: one [`as_matrix`] of the innermost matching's rows, plus one row
+/// copy per kept row and `PmVar` level.
 fn rebuild_matrix<'p>(pa: &PatArena<'p>, pmh: &PmHalfCompiled<'p>) -> Matrix<'p> {
     match pmh {
         PmHalfCompiled::Pm(pm) => as_matrix(pa, &pm.cases),
-        PmHalfCompiled::PmOr(por) => por.or_matrix.clone(),
+        PmHalfCompiled::PmOr(por) => por.or_matrix(pa),
         PmHalfCompiled::PmVar(x) => add_omega_column(&rebuild_matrix(pa, &x.inside)),
     }
 }
@@ -3825,6 +4232,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         } = *self;
         let cls = simplify_cases(ctx_ref, pa, arena, args, cls);
 
+        // One row that does not start with an or-pattern: `do_split_or`
+        // would find nothing to compare it with (`up_ok` over no rows makes
+        // no comparison and takes no identifier), put it in `before` and,
+        // with no or-pattern row and no row left, call `split_constr` on it
+        // with this default environment and no next matching. Call it
+        // directly: O(1), no work list, and the environment is not copied.
+        if let [(row, _)] = cls.as_slice()
+            && let Some((p, ps)) = row.split_first()
+            && !is_or(p, ps)
+        {
+            return self.split_constr(&cls, def, Vec::new());
+        }
         self.do_split_or(cls.into(), &def)
     }
 
@@ -3846,6 +4265,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // deep `do_split_or` stacks. Keep the exact branch order but run it as an
         // explicit loop.
         loop {
+            count_work_list_row();
             let Some(cl) = rest.pop_front() else {
                 let before = rev_deque_to_vec(before);
                 let ors = rev_deque_to_vec(ors);
@@ -3899,10 +4319,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             let idef = bump_raise_count(self.next_raise);
             let PmHalfCompiledInfo {
                 me: next,
-                matrix,
                 top_default,
             } = info;
-            let new_def = cons_default(matrix, idef, top_default);
+            let new_def = cons_default(rebuild_matrix(self.pa, &next), idef, top_default);
             let mut new_nexts = vec![(idef, next)];
             new_nexts.extend(nexts);
             self.precompile_or(yes, yesor, new_def, new_nexts)
@@ -3948,11 +4367,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             None => (
                 PmHalfCompiledInfo {
                     me: PmHalfCompiled::Pm(PatternMatching {
-                        cases: yes.clone(),
+                        cases: yes,
                         args: args.clone(),
                         default: def.clone(),
                     }),
-                    matrix: as_matrix(pa, &yes),
                     top_default: def,
                 },
                 k,
@@ -3970,20 +4388,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -3995,20 +4411,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
-                    let new_def = cons_default(matrix, idef, top_default);
+                    let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                     let mut new_nexts = vec![(idef, next)];
                     new_nexts.extend(nexts);
                     (
                         PmHalfCompiledInfo {
                             me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
+                                cases: yes,
                                 args: args.clone(),
                                 default: new_def.clone(),
                             }),
-                            matrix: as_matrix(pa, &yes),
                             top_default: new_def,
                         },
                         new_nexts,
@@ -4036,9 +4450,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(self.pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4109,11 +4523,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 None => (
                     PmHalfCompiledInfo {
                         me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
+                            cases: yes,
                             args: args.clone(),
                             default: def.clone(),
                         }),
-                        matrix: as_matrix(pa, &yes),
                         top_default: def,
                     },
                     k,
@@ -4134,20 +4547,18 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         let idef = bump_raise_count(self.next_raise);
                         let PmHalfCompiledInfo {
                             me: next,
-                            matrix,
                             top_default,
                         } = info;
-                        let new_def = cons_default(matrix, idef, top_default);
+                        let new_def = cons_default(rebuild_matrix(pa, &next), idef, top_default);
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
-                                matrix: as_matrix(pa, &yes),
                                 top_default: new_def,
                             },
                             new_nexts,
@@ -4199,9 +4610,9 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     let idef = bump_raise_count(self.next_raise);
                     let PmHalfCompiledInfo {
                         me: next,
-                        matrix,
                         top_default,
                     } = info;
+                    let matrix = rebuild_matrix(pa, &next);
                     self.precompile_var(yes, cons_default(matrix, idef, top_default), {
                         let mut new_nexts = vec![(idef, next)];
                         new_nexts.extend(nexts);
@@ -4271,7 +4682,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     Some(v) => {
                         if cls.len() == 1 {
                             // as split as it can
-                            dont_precompile_var(pa, args, cls, def, k)
+                            dont_precompile_var(args, cls, def, k)
                         } else {
                             // Precompile: strip first pattern from each case
                             let var_cls: Vec<Clause<'p>> = cls
@@ -4302,14 +4713,13 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             // Compute top information
                             if nexts.is_empty() {
                                 // If you need
-                                dont_precompile_var(pa, args, cls, def, k)
+                                dont_precompile_var(args, cls, def, k)
                             } else {
                                 let rfirst = PmHalfCompiledInfo {
                                     me: PmHalfCompiled::PmVar(PmVarCompiled {
                                         inside: Box::new(first_info.me),
                                         var_arg: av,
                                     }),
-                                    matrix: add_omega_column(&first_info.matrix),
                                     top_default: rebuild_default(pa, &nexts, def),
                                 };
                                 let rnexts = rebuild_nexts(&av, nexts, k);
@@ -4317,10 +4727,10 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                             }
                         }
                     }
-                    _ => dont_precompile_var(pa, args, cls, def, k),
+                    _ => dont_precompile_var(args, cls, def, k),
                 }
             }
-            _ => dont_precompile_var(pa, args, cls, def, k),
+            _ => dont_precompile_var(args, cls, def, k),
         }
     }
 
@@ -4333,7 +4743,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         def: DefaultEnv<'p>,
         k: Vec<(i32, PmHalfCompiled<'p>)>,
     ) -> (PmHalfCompiledInfo<'p>, Vec<(i32, PmHalfCompiled<'p>)>) {
-        let Split { pa, args, .. } = *self;
+        let Split { args, .. } = *self;
         if ors.is_empty() {
             return self.split_constr(&cls, def, k);
         }
@@ -4341,7 +4751,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
         // do_cases processes the or-pattern list
         let (end_body, handlers) = self.do_cases_or(&ors, &def);
 
-        let matrix = as_matrix(pa, &[cls.as_slice(), ors.as_slice()].concat());
+        let plain = cls.len();
         let body = PatternMatching {
             cases: [cls, end_body].concat(),
             args: args.clone(),
@@ -4352,9 +4762,8 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 me: PmHalfCompiled::PmOr(PmOrCompiled {
                     body,
                     handlers,
-                    or_matrix: matrix.clone(),
+                    or_matrix: OrMatrix::Rows { plain, ors },
                 }),
-                matrix,
                 top_default: def,
             },
             k,
@@ -4460,7 +4869,6 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
 /// Don't precompile: just wrap the cases in a PatternMatching.
 /// Equivalent to OCaml's `dont_precompile_var`.
 fn dont_precompile_var<'p>(
-    pa: &PatArena<'p>,
     args: &MatchArgs,
     cls: Vec<Clause<'p>>,
     def: DefaultEnv<'p>,
@@ -4469,11 +4877,10 @@ fn dont_precompile_var<'p>(
     (
         PmHalfCompiledInfo {
             me: PmHalfCompiled::Pm(PatternMatching {
-                cases: cls.clone(),
+                cases: cls,
                 args: args.clone(),
                 default: def.clone(),
             }),
-            matrix: as_matrix(pa, &cls),
             top_default: def,
         },
         k,
@@ -4519,7 +4926,7 @@ fn rev_deque_to_vec<T>(v: VecDeque<T>) -> Vec<T> {
 /// Equivalent to OCaml's `cell`.
 struct MatchCell<'p> {
     pm: PatternMatching<'p>,
-    ctx: Vec<Ctx<'p>>,
+    ctx: CtxId,
     pat: &'p Pattern,
 }
 
@@ -4551,11 +4958,11 @@ fn add<'p, K>(
 /// Iterating from the tail, pushing, and reversing once preserves the same
 /// group/case order without Rust `Vec::insert(0, ...)` shifting every element.
 fn divide<'p, K>(
-    make: impl Fn(&'p Pattern, &DefaultEnv<'p>, &[Ctx<'p>], &MatchArgs) -> MatchCell<'p>,
+    make: impl Fn(&'p Pattern, &DefaultEnv<'p>, CtxId, &MatchArgs) -> MatchCell<'p>,
     eq_key: impl Fn(&K, &K) -> bool,
     get_key: impl Fn(&'p Pattern) -> K,
     get_args: impl Fn(&'p Pattern, &[&'p Pattern]) -> Vec<&'p Pattern>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(K, MatchCell<'p>)> {
     let mut division: Vec<(K, MatchCell<'p>)> = Vec::new();
@@ -4590,11 +4997,11 @@ fn divide<'p, K>(
 /// consing shape as `divide`; use push + one suffix reverse to keep that order
 /// without shifting the whole Rust vector per case.
 fn divide_line<'p>(
-    make_ctx: impl Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
+    make_ctx: impl Fn(CtxId) -> CtxId,
     make: impl Fn(&DefaultEnv<'p>, &MatchArgs) -> PatternMatching<'p>,
     get_args: impl Fn(&'p Pattern, &[&'p Pattern]) -> Vec<&'p Pattern>,
     pat: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     let mut divided = make(&pm.default, &pm.args);
@@ -4702,9 +5109,10 @@ fn get_args_constant<'p>(_p: &'p Pattern, rem: &[&'p Pattern]) -> Vec<&'p Patter
 /// Equivalent to OCaml's `make_constant_matching`.
 fn make_constant_matching<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
@@ -4712,7 +5120,7 @@ fn make_constant_matching<'p>(
         Some(_) => {
             let key = get_key_constant("make", p);
             let def = make_default(pa, &|p2, rem| matcher_const(pa, &key, p2, rem), def);
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -4773,8 +5181,9 @@ fn column_int_ranges(pa: &PatArena<'_>, m: &PatternMatching<'_>) -> Option<Vec<(
 /// the ranges.
 fn divide_constant_ranges<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     ranges: &[(i64, i64)],
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Vec<(ConstantKey, MatchCell<'p>)> {
     let mut cuts: Vec<i64> = ranges.iter().flat_map(|&(lo, hi)| [lo, hi + 1]).collect();
@@ -4807,7 +5216,7 @@ fn divide_constant_ranges<'p>(
     for i in (0..n).rev() {
         if let Some(head) = heads[i] {
             let p = pa.alloc(make_int_range(head, cuts[i], cuts[i + 1] - 1));
-            let mut cell = make_constant_matching(pa, p, &m.default, ctx, &m.args);
+            let mut cell = make_constant_matching(pa, cp, p, &m.default, ctx, &m.args);
             cell.pm.cases = std::mem::take(&mut rows[i]);
             cells.push((get_key_constant("divide", p), cell));
         }
@@ -4820,13 +5229,14 @@ fn divide_constant_ranges<'p>(
 /// Equivalent to OCaml's `divide_constant`.
 fn divide_constant<'p>(
     pa: &'p PatArena<'p>,
-    ctx: &[Ctx<'p>],
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Vec<(ConstantKey, MatchCell<'p>)> {
     match column_int_ranges(pa, m) {
-        Some(ranges) => divide_constant_ranges(pa, &ranges, ctx, m),
+        Some(ranges) => divide_constant_ranges(pa, cp, &ranges, ctx, m),
         None => divide(
-            |p, d, c, a| make_constant_matching(pa, p, d, c, a),
+            |p, d, c, a| make_constant_matching(pa, cp, p, d, c, a),
             |(c, _), (d, _)| const_compare(c, d) == std::cmp::Ordering::Equal,
             |p| get_key_constant("divide", p),
             get_args_constant,
@@ -5025,14 +5435,18 @@ fn fld_record_extension(lbl: &LabelDescription) -> FieldDbgInfo {
 /// Make a constructor matching cell.
 /// Equivalent to OCaml's `make_constr_matching`.
 fn make_constr_matching<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_constr_matching"),
@@ -5137,7 +5551,7 @@ fn make_constr_matching<'p, B: RawLambdaBuilder>(
                         def,
                     ),
                 },
-                ctx: filter_ctx(Some(ctx_ref), pa, p, ctx),
+                ctx: cp.filter(Some(ctx_ref), pa, p, ctx),
                 pat: normalize_pat(pa, p),
             }
         }
@@ -5149,12 +5563,19 @@ fn make_constr_matching<'p, B: RawLambdaBuilder>(
 fn divide_constructor<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(std::sync::Arc<ConstructorDescription>, MatchCell<'p>)> {
+    let cx = MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    };
     divide(
-        |p, def, ctx_inner, args| make_constr_matching(ctx_ref, pa, arena, p, def, ctx_inner, args),
+        |p, def, ctx_inner, args| make_constr_matching(cx, p, def, ctx_inner, args),
         |left, right| same_constructor(left, right),
         get_key_constr,
         |p, rem| get_args_constr(pa, p, rem),
@@ -5189,10 +5610,11 @@ fn matcher_variant_const<'p>(
 /// Equivalent to OCaml's `make_variant_matching_constant`.
 fn make_variant_matching_constant<'p>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     match args.split_first() {
@@ -5204,7 +5626,7 @@ fn make_variant_matching_constant<'p>(
                 &|p2, rem| matcher_variant_const(pa, &lab_owned, p2, rem),
                 def,
             );
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -5245,14 +5667,14 @@ fn matcher_variant_nonconst<'p>(
 /// Make a variant matching cell for non-constant variants.
 /// Equivalent to OCaml's `make_variant_matching_nonconst`.
 fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     p: &'p Pattern,
     lab: &str,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     match args.split_first() {
         None => crate::misc::fatal_error("Matching.make_variant_matching_nonconst"),
@@ -5264,7 +5686,7 @@ fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
                 &|p2, rem| matcher_variant_nonconst(pa, &lab_owned, p2, rem),
                 def,
             );
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             let new_args = MatchArgs::cons(
                 (
                     b.prim(
@@ -5294,9 +5716,10 @@ fn make_variant_matching_nonconst<'p, B: RawLambdaBuilder>(
 fn divide_variant<'p, B: RawLambdaBuilder>(
     ctx_ref: &TypeContext,
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     row: &RowDesc,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<((String, bool), MatchCell<'p>)> {
     let row = btype::row_repr(ctx_ref, row);
@@ -5306,10 +5729,12 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
         row: &RowDesc,
         cases: &[Clause<'p>],
         def: &DefaultEnv<'p>,
-        ctx: &[Ctx<'p>],
+        ctx: CtxId,
         al: &MatchArgs,
     ) -> Vec<((String, bool), MatchCell<'p>)> {
-        let MatchCx { ctx_ref, pa, arena } = cx;
+        let MatchCx {
+            ctx_ref, pa, cp, ..
+        } = cx;
         match cases.split_first() {
             Some(((patl, action), rem)) => {
                 match patl.split_first() {
@@ -5342,7 +5767,7 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
                                         add(
                                             |a| {
                                                 make_variant_matching_constant(
-                                                    pa, p, lab, def, ctx, a,
+                                                    pa, cp, p, lab, def, ctx, a,
                                                 )
                                             },
                                             variants,
@@ -5359,7 +5784,7 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
                                         add(
                                             |a| {
                                                 make_variant_matching_nonconst(
-                                                    pa, arena, p, lab, def, ctx, a,
+                                                    cx, p, lab, def, ctx, a,
                                                 )
                                             },
                                             variants,
@@ -5382,7 +5807,12 @@ fn divide_variant<'p, B: RawLambdaBuilder>(
     }
 
     divide_rec(
-        MatchCx { ctx_ref, pa, arena },
+        MatchCx {
+            ctx_ref,
+            pa,
+            arena,
+            cp,
+        },
         &row,
         &pm.cases,
         &pm.default,
@@ -5428,11 +5858,12 @@ fn make_var_matching<'p>(
 /// Equivalent to OCaml's `divide_var`.
 fn divide_var<'p>(
     pa: &'p PatArena<'p>,
-    ctx: &[Ctx<'p>],
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     divide_line(
-        |c| ctx_lshift(pa, c),
+        |c| cp.lshift(pa, c),
         |def, args| make_var_matching(pa, def, args),
         get_args_var,
         omega(),
@@ -5524,15 +5955,16 @@ fn make_tuple_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `divide_tuple`.
 fn divide_tuple<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     arity: usize,
     p: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
     let b = arena.b;
     divide_line(
-        |c| filter_ctx(None, pa, p, c),
+        |c| cp.filter(None, pa, p, c),
         |def, args| make_tuple_matching(b, pa, arena.lam_loc(p.pat_loc), arity, def, args),
         |pat, rem| get_args_tuple(pa, arity, pat, rem),
         p,
@@ -5679,18 +6111,22 @@ fn make_record_matching<'p, B: RawLambdaBuilder>(
 /// Divide a pattern matching by record fields.
 /// Equivalent to OCaml's `divide_record`.
 fn divide_record<'p, B: RawLambdaBuilder>(
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
-    arena: &LocArena<'_, B>,
+    cx: MatchCx<'p, '_, B>,
     all_labels: &[LabelDescription],
     p: &'p Pattern,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> MatchCell<'p> {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     let num_fields = all_labels.len();
     divide_line(
-        |c| filter_ctx(Some(ctx_ref), pa, p, c),
+        |c| cp.filter(Some(ctx_ref), pa, p, c),
         |def, args| make_record_matching(b, pa, arena.lam_loc(p.pat_loc), all_labels, def, args),
         |pat, rem| get_args_record(pa, num_fields, pat, rem),
         p,
@@ -5746,10 +6182,11 @@ fn matcher_array<'p>(
 /// Equivalent to OCaml's `make_array_matching`.
 fn make_array_matching<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
     p: &'p Pattern,
     def: &DefaultEnv<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     args: &MatchArgs,
 ) -> MatchCell<'p> {
     let b = arena.b;
@@ -5777,7 +6214,7 @@ fn make_array_matching<'p, B: RawLambdaBuilder>(
             }
             new_args.extend(argl.iter().cloned());
             let def = make_default(pa, &|p2, rem| matcher_array(pa, len, p2, rem), def);
-            let ctx = filter_ctx(None, pa, p, ctx);
+            let ctx = cp.filter(None, pa, p, ctx);
             MatchCell {
                 pm: PatternMatching {
                     cases: Vec::new(),
@@ -5795,12 +6232,13 @@ fn make_array_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `divide_array`.
 fn divide_array<'p, B: RawLambdaBuilder>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     arena: &LocArena<'_, B>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
 ) -> Vec<(usize, MatchCell<'p>)> {
     divide(
-        |p, d, c, a| make_array_matching(pa, arena, p, d, c, a),
+        |p, d, c, a| make_array_matching(pa, cp, arena, p, d, c, a),
         |a, b| a == b,
         get_key_array,
         |p, rem| get_args_array(pa, p, rem),
@@ -6622,15 +7060,17 @@ fn get_variant_constructors_from_env(
 /// Equivalent to OCaml's `mk_failaction_neg`.
 fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
     b: &B,
+    pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     def: &DefaultEnv<'p>,
 ) -> (Option<RawLambda>, Jumps<'p>) {
     match partial {
         Partial::Partial => match def.first() {
             Some((_, idef)) => (
                 Some(b.static_raise(*idef, &[])),
-                jumps_singleton(*idef, ctx.to_vec()),
+                jumps_singleton(*idef, cp.get(pa, ctx).to_vec()),
             ),
             None => {
                 // Act as Total: if no default matrix exists, the switch cannot fail
@@ -6645,26 +7085,36 @@ fn mk_failaction_neg<'p, B: RawLambdaBuilder>(
 /// Returns (optional fail lambda, additional cases, jumps).
 /// Equivalent to OCaml's `mk_failaction_pos`.
 fn mk_failaction_pos<'p, B: RawLambdaBuilder>(
-    b: &B,
-    ctx_ref: &TypeContext,
-    pa: &'p PatArena<'p>,
+    cx: MatchCx<'p, '_, B>,
     partial: &Partial,
     seen: &[&'p Pattern],
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     defs: &DefaultEnv<'p>,
 ) -> (Option<RawLambda>, Vec<ConstrCase>, Jumps<'p>) {
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
+    let b = arena.b;
     let fail_pats = complete_pats_constrs(ctx_ref, pa, seen);
-    if fail_pats.len() < 32 {
+    if fail_pats.is_empty() {
+        // `scan_def` with nothing to test: no case and no jump, and the
+        // contexts are not read.
+        (None, Vec::new(), jumps_empty())
+    } else if fail_pats.len() < 32 {
+        let ctx = cp.get(pa, ctx);
         let to_test: Vec<(&'p Pattern, Vec<Ctx<'p>>)> = fail_pats
             .iter()
-            .map(|pat| (*pat, ctx_lub(pa, pat, ctx)))
+            .map(|pat| (*pat, ctx_lub(pa, pat, &ctx)))
             .collect();
 
-        let (fail, jmps) = scan_def(b, pa, ctx, Vec::new(), to_test, defs);
+        let (fail, jmps) = scan_def(b, pa, &ctx, Vec::new(), to_test, defs);
         (None, fail, jmps)
     } else {
         // Too many non-matched constructors -> reduced information
-        let (fail, jumps) = mk_failaction_neg(b, partial, ctx, defs);
+        let (fail, jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, defs);
         (fail, Vec::new(), jumps)
     }
 }
@@ -6727,11 +7177,12 @@ fn all_actions_same_tagged<K, B: RawLambdaBuilder>(b: &B, cases: &[(K, RawLambda
         [] => false,
         [_] => true,
         [(_, act0), rem @ ..] => {
-            let Some(raw_act0) = make_key_string(b, *act0) else {
+            let mut raw_act0 = KeyOut::new();
+            if write_key(b, *act0, &mut raw_act0).is_none() {
                 return false;
-            };
+            }
             for (_, act) in rem {
-                if !make_key_equals(b, *act, &raw_act0) {
+                if !make_key_equals(b, *act, &raw_act0.buf) {
                     return false;
                 }
             }
@@ -6792,7 +7243,7 @@ struct CombineSite<'p, 'a, B: RawLambdaBuilder> {
     loc: LamLoc,
     arg: RawLambda,
     partial: &'a Partial,
-    ctx: &'a [Ctx<'p>],
+    ctx: CtxId,
     def: &'a DefaultEnv<'p>,
 }
 
@@ -6812,7 +7263,7 @@ fn combine_constant<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { pa, arena, .. },
+        cx: MatchCx { pa, arena, cp, .. },
         loc,
         arg,
         partial,
@@ -6821,7 +7272,7 @@ fn combine_constant<'p, B: RawLambdaBuilder>(
     } = *site;
     let b = arena.b;
     let (const_lambda_list, total, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
     let lambda1 = match cst {
         // `char` is an alias of `int`, so a column can mix both. Its keys
         // are ranges. Match intervals use ReScript's int32 bounds.
@@ -7094,7 +7545,13 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7106,7 +7563,7 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
 
     if matches!(cstr.cstr_kind, crate::types::ConstructorKind::Extension(_)) {
         // Special cases for extensions
-        let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+        let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
         let lambda1 = {
             let extension_cases = get_extension_cases(tag_lambda_list);
             // OCaml compiler/ml/matching.ml:2118-2139 uses the first extension
@@ -7160,7 +7617,7 @@ fn combine_constructor<'p, B: RawLambdaBuilder>(
         let (fail_opt, fails, local_jumps) = if sig_complete {
             (None, Vec::new(), jumps_empty())
         } else {
-            mk_failaction_pos(b, ctx_ref, pa, partial, &pats, ctx, def)
+            mk_failaction_pos(site.cx, partial, &pats, ctx, def)
         };
 
         // OCaml shares the immutable list cells/actions here:
@@ -7382,17 +7839,16 @@ fn convert_polyvar_list<B: RawLambdaBuilder>(
     // Group by normalized action equality, matching OCaml's make_key-based
     // sharing. Groups are created in first-occurrence order.
     let mut groups: Vec<(Vec<(i32, String)>, RawLambda)> = Vec::new();
-    let mut group_of_key: HashMap<String, usize> = HashMap::new();
+    let mut group_of_key = KeyTable::new();
 
     for (hash, (name, act)) in xs {
-        match make_key_string(b, act) {
-            Some(key) => match group_of_key.get(&key) {
-                Some(&idx) => groups[idx].0.push((hash, name)),
-                None => {
-                    group_of_key.insert(key, groups.len());
-                    groups.push((vec![(hash, name)], act));
-                }
-            },
+        let mut key = KeyOut::new();
+        let group = match write_key(b, act, &mut key) {
+            Some(()) => group_of_key.get_or_insert(&key.buf, groups.len()),
+            None => None,
+        };
+        match group {
+            Some(idx) => groups[idx].0.push((hash, name)),
             None => groups.push((vec![(hash, name)], act)),
         }
     }
@@ -7515,7 +7971,13 @@ fn combine_variant<'p, B: RawLambdaBuilder>(
     c_div: CompiledCells<'p, (String, bool)>,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7555,7 +8017,7 @@ fn combine_variant<'p, B: RawLambdaBuilder>(
     let (fail, local_jumps) = if sig_complete || matches!(partial, Partial::Total) {
         (None, jumps_empty())
     } else {
-        mk_failaction_neg(b, partial, ctx, def)
+        mk_failaction_neg(b, pa, cp, partial, ctx, def)
     };
 
     let actions_all_same = fail.is_none() && all_actions_same_tagged(b, &tag_lambda_list);
@@ -7600,7 +8062,13 @@ fn combine_array<'p, B: RawLambdaBuilder>(
     next_raise_count: &mut i32,
 ) -> (RawLambda, Jumps<'p>) {
     let CombineSite {
-        cx: MatchCx { ctx_ref, pa, arena },
+        cx:
+            MatchCx {
+                ctx_ref,
+                pa,
+                arena,
+                cp,
+            },
         loc,
         arg,
         partial,
@@ -7609,7 +8077,7 @@ fn combine_array<'p, B: RawLambdaBuilder>(
     } = *site;
     let b = arena.b;
     let (len_lambda_list, total1, _pats) = c_div;
-    let (fail, local_jumps) = mk_failaction_neg(b, partial, ctx, def);
+    let (fail, local_jumps) = mk_failaction_neg(b, pa, cp, partial, ctx, def);
     let lambda1 = {
         let newvar = ctx_ref.create_ident("len");
         let int_lambda_list: Vec<(i32, RawLambda)> = len_lambda_list
@@ -7654,28 +8122,29 @@ type CompiledCells<'p, K> = (Vec<(K, RawLambda)>, Jumps<'p>, Vec<&'p Pattern>);
 
 /// Compiles one divided cell, given its contexts (`compile_list`).
 type CellCompiler<'p, 'f> =
-    dyn FnMut(&[Ctx<'p>], PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+    dyn FnMut(CtxId, PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
 
 /// Compiles an or-pattern handler's matching (`compile_orhandlers`).
 type OrHandlerCompiler<'p, 'f> =
-    dyn FnMut(&[Ctx<'p>], &PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
+    dyn FnMut(CtxId, &PatternMatching<'p>) -> Result<Compiled<'p>, Unused> + 'f;
 
 /// Compiles one half-compiled match (`comp_match_handlers`).
-type HalfCompiledCompiler<'p, 'f> = dyn FnMut(&Partial, &[Ctx<'p>], &RawLambda, &PmHalfCompiled<'p>) -> Result<Compiled<'p>, Unused>
+type HalfCompiledCompiler<'p, 'f> = dyn FnMut(&Partial, CtxId, &RawLambda, &PmHalfCompiled<'p>) -> Result<Compiled<'p>, Unused>
     + 'f;
 
 /// Divides a matching into cells by key (`compile_test`'s `divide`).
-type Divider<'p, 'f, K> = dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)> + 'f;
+type Divider<'p, 'f, K> = dyn Fn(CtxId, &PatternMatching<'p>) -> Vec<(K, MatchCell<'p>)> + 'f;
 
 /// Combines the compiled cells into one test (`compile_test`'s `combine`).
 type Combiner<'p, 'f, K> =
-    dyn Fn(&[Ctx<'p>], &DefaultEnv<'p>, CompiledCells<'p, K>, &mut i32) -> Compiled<'p> + 'f;
+    dyn Fn(CtxId, &DefaultEnv<'p>, CompiledCells<'p, K>, &mut i32) -> Compiled<'p> + 'f;
 
 /// Compile a list of divided cells.
 /// Returns (key-action list, total jumps, pattern list).
 /// Equivalent to OCaml's `compile_list`.
 fn compile_list<'p, K: Clone>(
     pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
     compile_fun: &mut CellCompiler<'p, '_>,
     division: Vec<(K, MatchCell<'p>)>,
 ) -> Result<CompiledCells<'p, K>, Unused> {
@@ -7684,10 +8153,10 @@ fn compile_list<'p, K: Clone>(
     let mut new_pats = Vec::new();
 
     for (key, cell) in division {
-        if cell.ctx.is_empty() {
+        if cp.is_empty(cell.ctx) {
             continue;
         }
-        if let Ok((lambda1, total1)) = compile_fun(&cell.ctx, cell.pm) {
+        if let Ok((lambda1, total1)) = compile_fun(cell.ctx, cell.pm) {
             // OCaml `compiler/ml/matching.ml:2358-2364` recurses on the
             // tail with `jumps_map ctx_combine total1 :: totals`, then
             // conses `(key, lambda1)` and `cell.pat` onto the returned
@@ -7707,12 +8176,11 @@ fn compile_list<'p, K: Clone>(
 /// Compile or-pattern handlers.
 /// Equivalent to OCaml's `compile_orhandlers`.
 fn compile_orhandlers<'p, B: RawLambdaBuilder>(
-    b: &B,
-    pa: &'p PatArena<'p>,
+    cx: MatchCx<'p, '_, B>,
     compile_fun: &mut OrHandlerCompiler<'p, '_>,
     lambda1: RawLambda,
     total1: Jumps<'p>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     to_catch: &[OrHandler<'p>],
 ) -> Compiled<'p> {
     /// `add_raised_exits raised lam`: adds the static exits `lam` jumps to.
@@ -7733,25 +8201,26 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
     }
 
     fn do_rec<'p, B: RawLambdaBuilder>(
-        b: &B,
-        pa: &'p PatArena<'p>,
+        cx: MatchCx<'p, '_, B>,
         compile_fun: &mut OrHandlerCompiler<'p, '_>,
         raised: &mut std::collections::HashSet<i32>,
         (r, total_r): Compiled<'p>,
-        ctx: &[Ctx<'p>],
+        ctx: CtxId,
         to_catch: &[OrHandler<'p>],
     ) -> Compiled<'p> {
+        let MatchCx { pa, arena, cp, .. } = cx;
+        let b = arena.b;
         match to_catch.split_first() {
             None => (r, total_r),
             // The or-pattern is unreachable, e.g. after a wildcard. Its
             // handler is not compiled: with a guard and no default, its
             // failure has no exit.
             Some(((_, i, _, _), rem)) if !raised.contains(i) => {
-                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
+                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
             }
             Some(((mat, i, vars, pm), rem)) => {
-                let ctx_i = select_columns(pa, mat, ctx);
-                match compile_fun(&ctx_i, pm) {
+                let ctx_i = cp.built(select_columns(pa, mat, &cp.get(pa, ctx)));
+                match compile_fun(ctx_i, pm) {
                     Ok((handler_i, total_i)) => {
                         add_raised_exits(&*b.get(), raised, handler_i);
                         match raw_static_raise(b, r) {
@@ -7764,8 +8233,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                         bind(b, LetKind::Alias, var, arg, body)
                                     });
                                 do_rec(
-                                    b,
-                                    pa,
+                                    cx,
                                     compile_fun,
                                     raised,
                                     (body, jumps_map(|c| ctx_rshift_num(ncols(mat), &c), total_i)),
@@ -7778,11 +8246,10 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                                 // skips a handler when `raw_action r` is a
                                 // different static raise.
                                 drop(args);
-                                do_rec(b, pa, compile_fun, raised, (r, total_r), ctx, rem)
+                                do_rec(cx, compile_fun, raised, (r, total_r), ctx, rem)
                             }
                             None => do_rec(
-                                b,
-                                pa,
+                                cx,
                                 compile_fun,
                                 raised,
                                 (
@@ -7799,8 +8266,7 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
                         }
                     }
                     Err(Unused) => do_rec(
-                        b,
-                        pa,
+                        cx,
                         compile_fun,
                         raised,
                         (b.static_catch(r, *i, vars, lambda_unit(b)), total_r),
@@ -7814,10 +8280,9 @@ fn compile_orhandlers<'p, B: RawLambdaBuilder>(
 
     // The exits of the match and of the handlers compiled so far.
     let mut raised = std::collections::HashSet::new();
-    add_raised_exits(&*b.get(), &mut raised, lambda1);
+    add_raised_exits(&*cx.arena.b.get(), &mut raised, lambda1);
     do_rec(
-        b,
-        pa,
+        cx,
         compile_fun,
         &mut raised,
         (lambda1, total1),
@@ -7928,11 +8393,16 @@ fn bind_check<B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `comp_exit`.
 fn comp_exit<'p, B: RawLambdaBuilder>(
     b: &B,
-    ctx: &[Ctx<'p>],
+    pa: &'p PatArena<'p>,
+    cp: &CtxPool<'p>,
+    ctx: CtxId,
     m: &PatternMatching<'p>,
 ) -> Result<Compiled<'p>, Unused> {
     match m.default.first() {
-        Some((_, i)) => Ok((b.static_raise(*i, &[]), jumps_singleton(*i, ctx.to_vec()))),
+        Some((_, i)) => Ok((
+            b.static_raise(*i, &[]),
+            jumps_singleton(*i, cp.get(pa, ctx).to_vec()),
+        )),
         None => crate::misc::fatal_error("Matching.comp_exit"),
     }
 }
@@ -7943,7 +8413,7 @@ fn comp_match_handlers<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     comp_fun: &mut HalfCompiledCompiler<'p, '_>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     arg: &RawLambda,
     first_match: &PmHalfCompiled<'p>,
     next_matchs: &[(i32, PmHalfCompiled<'p>)],
@@ -7975,7 +8445,7 @@ fn c_rec<'p, B: RawLambdaBuilder>(
     (body, total_body): Compiled<'p>,
     rest: &[(i32, PmHalfCompiled<'p>)],
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     match rest.split_first() {
         None => Ok((body, total_body)),
@@ -7993,7 +8463,7 @@ fn c_rec<'p, B: RawLambdaBuilder>(
                 } else {
                     Partial::Partial
                 };
-                match comp_fun(&this_partial, &ctx_i, arg, pm) {
+                match comp_fun(&this_partial, cp.built(ctx_i), arg, pm) {
                     Ok((li, total_i)) => c_rec(
                         cx,
                         comp_fun,
@@ -8108,7 +8578,7 @@ fn compile_match<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     _repr: Option<()>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
@@ -8120,7 +8590,7 @@ fn compile_match<'p, B: RawLambdaBuilder>(
 fn compile_match_owned<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
@@ -8130,14 +8600,19 @@ fn compile_match_owned<'p, B: RawLambdaBuilder>(
 fn compile_match_cow<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     m: Cow<'_, PatternMatching<'p>>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { ctx_ref, pa, arena } = cx;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     match (m.cases.as_slice(), m.args.as_slice()) {
-        ([], []) => comp_exit(b, ctx, &m),
+        ([], []) => comp_exit(b, pa, cp, ctx, &m),
         ([(pats, action), ..], _) if pats.is_empty() => {
             if action.is_guarded() {
                 let action = action.clone();
@@ -8182,7 +8657,7 @@ fn compile_match_cow<'p, B: RawLambdaBuilder>(
             let first_match = info.me;
 
             let mut comp_fn = |partial: &Partial,
-                               ctx: &[Ctx<'p>],
+                               ctx: CtxId,
                                arg: &RawLambda,
                                pmh: &PmHalfCompiled<'p>|
              -> Result<Compiled<'p>, Unused> {
@@ -8220,20 +8695,24 @@ fn compile_match_cow<'p, B: RawLambdaBuilder>(
 fn do_compile_matching<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { ctx_ref, pa, arena } = cx;
-    let b = arena.b;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     match pmh {
         PmHalfCompiled::Pm(pm) => {
             let pat = what_is_cases(&pm.cases);
             match &pat.pat_desc {
                 PatternDesc::Tpat_any => compile_no_test(
                     cx,
-                    &|ctx, pm| divide_var(pa, ctx, pm),
+                    &|ctx, pm| divide_var(pa, cp, ctx, pm),
                     &|ctx| ctx_rshift(ctx),
                     partial,
                     ctx,
@@ -8245,7 +8724,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         cx,
-                        &move |ctx, pm| divide_tuple(pa, arena, arity, norm_pat, ctx, pm),
+                        &move |ctx, pm| divide_tuple(pa, cp, arena, arity, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8258,9 +8737,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     let norm_pat = normalize_pat(pa, pat);
                     compile_no_test(
                         cx,
-                        &move |ctx, pm| {
-                            divide_record(ctx_ref, pa, arena, &all_labels, norm_pat, ctx, pm)
-                        },
+                        &move |ctx, pm| divide_record(cx, &all_labels, norm_pat, ctx, pm),
                         &|ctx| ctx_combine(pa, ctx),
                         partial,
                         ctx,
@@ -8275,7 +8752,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_constant(pa, ctx, pm),
+                        &|ctx, pm| divide_constant(pa, cp, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constant(
                                 &CombineSite {
@@ -8304,7 +8781,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_constructor(ctx_ref, pa, arena, ctx, pm),
+                        &|ctx, pm| divide_constructor(ctx_ref, pa, cp, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_constructor(
                                 &CombineSite {
@@ -8332,7 +8809,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &|ctx, pm| divide_array(pa, arena, ctx, pm),
+                        &|ctx, pm| divide_array(pa, cp, arena, ctx, pm),
                         &|ctx, def, c_div, nrc| {
                             combine_array(
                                 &CombineSite {
@@ -8361,7 +8838,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
                     compile_test_wrapper(
                         cx,
                         partial,
-                        &move |ctx, pm| divide_variant(ctx_ref, pa, arena, &row_desc, ctx, pm),
+                        &move |ctx, pm| divide_variant(ctx_ref, pa, cp, arena, &row_desc, ctx, pm),
                         &|ctx, def, c_div, _nrc| {
                             combine_variant(
                                 &CombineSite {
@@ -8388,7 +8865,7 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
             let (lam, total) = do_compile_matching(
                 cx,
                 partial,
-                &ctx_lshift(pa, ctx),
+                cp.lshift(pa, ctx),
                 var_arg,
                 inside,
                 next_raise_count,
@@ -8398,12 +8875,11 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
-                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                |ctx: CtxId, pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
@@ -8418,15 +8894,15 @@ fn do_compile_matching<'p, B: RawLambdaBuilder>(
 /// Equivalent to OCaml's `compile_no_test`.
 fn compile_no_test<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
-    divide_fn: &dyn Fn(&[Ctx<'p>], &PatternMatching<'p>) -> MatchCell<'p>,
+    divide_fn: &dyn Fn(CtxId, &PatternMatching<'p>) -> MatchCell<'p>,
     up_ctx: &dyn Fn(&[Ctx<'p>]) -> Vec<Ctx<'p>>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     to_match: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
     let cell = divide_fn(ctx, to_match);
-    let (lambda, total) = compile_match_owned(cx, partial, &cell.ctx, cell.pm, next_raise_count)?;
+    let (lambda, total) = compile_match_owned(cx, partial, cell.ctx, cell.pm, next_raise_count)?;
     Ok((lambda, jumps_map(|c| up_ctx(&c), total)))
 }
 
@@ -8440,11 +8916,11 @@ fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
     partial: &Partial,
     divide_fn: &Divider<'p, '_, K>,
     combine_fn: &Combiner<'p, '_, K>,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     pm: &PatternMatching<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let raise_counter = std::cell::Cell::new(*next_raise_count);
 
@@ -8454,21 +8930,23 @@ fn compile_test_wrapper<'p, K: Clone, B: RawLambdaBuilder>(
     // Step 2: compile_list
     let c_div = {
         let mut compile_fn =
-            |ctx: &[Ctx<'p>], pm: PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+            |ctx: CtxId, pm: PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                 let mut next_raise = raise_counter.get();
                 let result = compile_match_owned(cx, partial, ctx, pm, &mut next_raise);
                 raise_counter.set(next_raise);
                 result
             };
-        compile_list(pa, &mut compile_fn, division)?
+        compile_list(pa, cp, &mut compile_fn, division)?
     };
 
     // Step 3: combine
     let result = match &c_div {
-        (list, _, _) if list.is_empty() => match mk_failaction_neg(b, partial, ctx, &pm.default) {
-            (None, _) => Err(Unused),
-            (Some(l), total) => Ok((l, total)),
-        },
+        (list, _, _) if list.is_empty() => {
+            match mk_failaction_neg(b, pa, cp, partial, ctx, &pm.default) {
+                (None, _) => Err(Unused),
+                (Some(l), total) => Ok((l, total)),
+            }
+        }
         _ => {
             let mut next_raise = raise_counter.get();
             let result = combine_fn(ctx, &pm.default, c_div, &mut next_raise);
@@ -8705,6 +9183,8 @@ struct MatchCx<'p, 'a, B: RawLambdaBuilder> {
     ctx_ref: &'a TypeContext,
     pa: &'p PatArena<'p>,
     arena: &'a LocArena<'a, B>,
+    /// The context lists of this match.
+    cp: &'a CtxPool<'p>,
 }
 
 impl<'p, 'a, B: RawLambdaBuilder> Copy for MatchCx<'p, 'a, B> {}
@@ -8750,6 +9230,7 @@ pub fn compile_matching<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         handler_fun,
         arg,
@@ -8767,7 +9248,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     match partial {
@@ -8781,7 +9262,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: vec![(vec![vec![omega()]], raise_num)],
             };
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm, next_raise_count) {
                 Ok((lambda, total)) => check_total(b, &total, lambda, raise_num, handler_fun),
                 Err(Unused) => panic!("compile_matching: Unused"),
             }
@@ -8795,7 +9276,7 @@ fn compile_matching_unresolved<'p, B: RawLambdaBuilder>(
                 args: MatchArgs::new([(arg, LetKind::Strict)]),
                 default: Vec::new(),
             };
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm, next_raise_count) {
                 Ok((lambda, total)) => {
                     assert!(jumps_is_empty(&total));
                     lambda
@@ -8956,6 +9437,7 @@ pub fn for_tupled_function<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         loc,
         paraml,
@@ -8973,7 +9455,7 @@ fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { pa, arena, .. } = cx;
+    let MatchCx { pa, arena, cp, .. } = cx;
     let b = arena.b;
     let pats_act_list: Vec<Clause<'p>> = pats_act_list
         .into_iter()
@@ -8987,7 +9469,13 @@ fn for_tupled_function_unresolved<'p, B: RawLambdaBuilder>(
         args: MatchArgs::new(paraml.iter().map(|id| (b.var(*id), LetKind::Strict))),
         default: vec![(omegas_row, raise_num)],
     };
-    match compile_match_owned(cx, &partial, &start_ctx(paraml.len()), pm, next_raise_count) {
+    match compile_match_owned(
+        cx,
+        &partial,
+        cp.built(start_ctx(paraml.len())),
+        pm,
+        next_raise_count,
+    ) {
         Ok((lambda, total)) => {
             let loc_clone = loc;
             check_total(b, &total, lambda, raise_num, || {
@@ -9111,12 +9599,11 @@ fn flatten_precompiled<'p>(
 ) -> Result<PmHalfCompiled<'p>, CannotFlattenExn> {
     match pmh {
         PmHalfCompiled::Pm(pm) => Ok(PmHalfCompiled::Pm(flatten_pm(pa, size, args.clone(), &pm)?)),
-        PmHalfCompiled::PmOr(PmOrCompiled {
-            body,
-            handlers,
-            or_matrix,
-        }) => {
-            let flat_body = flatten_pm(pa, size, args.clone(), &body)?;
+        PmHalfCompiled::PmOr(por) => {
+            let flat_body = flatten_pm(pa, size, args.clone(), &por.body)?;
+            // Flattening the matrix can fail, so it is computed here.
+            let or_matrix = por.or_matrix(pa);
+            let handlers = por.handlers;
             let flat_handlers: Vec<_> = handlers
                 .into_iter()
                 .map(|(mat, i, vars, pm)| {
@@ -9128,7 +9615,7 @@ fn flatten_precompiled<'p>(
             Ok(PmHalfCompiled::PmOr(PmOrCompiled {
                 body: flat_body,
                 handlers: flat_handlers,
-                or_matrix: flat_or_matrix,
+                or_matrix: OrMatrix::Flat(flat_or_matrix),
             }))
         }
         PmHalfCompiled::PmVar(_) => panic!("flatten_precompiled: PmVar"),
@@ -9141,24 +9628,21 @@ fn flatten_precompiled<'p>(
 fn compile_flattened<'p, B: RawLambdaBuilder>(
     cx: MatchCx<'p, '_, B>,
     partial: &Partial,
-    ctx: &[Ctx<'p>],
+    ctx: CtxId,
     _arg: &RawLambda,
     pmh: &PmHalfCompiled<'p>,
     next_raise_count: &mut i32,
 ) -> Result<Compiled<'p>, Unused> {
-    let MatchCx { pa, arena, .. } = cx;
-    let b = arena.b;
     match pmh {
         PmHalfCompiled::Pm(pm) => compile_match(cx, None, partial, ctx, pm, next_raise_count),
         PmHalfCompiled::PmOr(PmOrCompiled { body, handlers, .. }) => {
             let (lam, total) = compile_match(cx, None, partial, ctx, body, next_raise_count)?;
             let mut compile_fn =
-                |ctx: &[Ctx<'p>], pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
+                |ctx: CtxId, pm: &PatternMatching<'p>| -> Result<Compiled<'p>, Unused> {
                     compile_match(cx, None, partial, ctx, pm, next_raise_count)
                 };
             Ok(compile_orhandlers(
-                b,
-                pa,
+                cx,
                 &mut compile_fn,
                 lam,
                 total,
@@ -9180,7 +9664,12 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
     partial: Partial,
     next_raise_count: &mut i32,
 ) -> RawLambda {
-    let MatchCx { ctx_ref, pa, arena } = cx;
+    let MatchCx {
+        ctx_ref,
+        pa,
+        arena,
+        cp,
+    } = cx;
     let b = arena.b;
     let partial = check_partial_single(pa, &pat_act_list, partial);
     // OCaml `compiler/ml/matching.ml:3846-3852` builds the matrix from the
@@ -9242,7 +9731,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
             .collect::<Result<_, CannotFlattenExn>>()?;
 
         let mut compile_fn = |partial: &Partial,
-                              ctx: &[Ctx<'p>],
+                              ctx: CtxId,
                               arg: &RawLambda,
                               pmh: &PmHalfCompiled<'p>|
          -> Result<Compiled<'p>, Unused> {
@@ -9254,7 +9743,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
             cx,
             &mut compile_fn,
             &partial,
-            &start_ctx(size),
+            cp.built(start_ctx(size)),
             &dummy_arg,
             &flat_next,
             &flat_nexts,
@@ -9283,7 +9772,7 @@ fn do_for_multiple_match<'p, B: RawLambdaBuilder>(
         Ok(lam) => lam,
         Err(CannotFlattenExn) => {
             // Fallback: compile without flattening
-            match compile_match_owned(cx, &partial, &start_ctx(1), pm1, next_raise_count) {
+            match compile_match_owned(cx, &partial, cp.built(start_ctx(1)), pm1, next_raise_count) {
                 Ok((lambda, total)) => match &partial {
                     Partial::Partial => {
                         let loc_clone = loc;
@@ -9357,6 +9846,7 @@ pub fn for_multiple_match<B: RawLambdaBuilder>(
             ctx_ref,
             pa: &pa,
             arena,
+            cp: &CtxPool::default(),
         },
         loc,
         new_paraml,
@@ -9486,13 +9976,541 @@ mod tests {
             )
         };
         let first = key_term(x, one());
-        let key = make_key_string(&b, first).expect("small term has a key");
+        let mut key = KeyOut::new();
+        write_key(&b, first, &mut key).expect("small term has a key");
+        let key = key.buf;
         // A let of another identifier with the same name keys the same.
         let same_name = Ident::create_local("x");
         assert!(make_key_equals(&b, key_term(same_name, one()), &key));
         assert!(!make_key_equals(&b, key_term(x, b.var(y)), &key));
         assert!(!make_key_equals(&b, one(), &key));
         assert!(!make_key_equals(&b, b.var(y), &key));
+    }
+
+    /// Key bytes written, hashed and compared while `run` runs.
+    fn key_steps(run: impl FnOnce()) -> u64 {
+        use crate::raw_lambda::key_encode::KEY_STEPS;
+        let before = KEY_STEPS.with(|steps| steps.get());
+        run();
+        KEY_STEPS.with(|steps| steps.get()) - before
+    }
+
+    fn row_comparisons(run: impl FnOnce()) -> u64 {
+        let before = super::ROW_COMPARISONS.with(|steps| steps.get());
+        run();
+        super::ROW_COMPARISONS.with(|steps| steps.get()) - before
+    }
+
+    /// The rows of a one-column matching: `groups` runs of distinct string
+    /// constants, of the given lengths, each followed by a wildcard row.
+    fn constant_runs<'p>(
+        pa: &'p PatArena<'p>,
+        b: &RawArena,
+        runs: &[usize],
+    ) -> PatternMatching<'p> {
+        use crate::lambda::lam_constant::Constant as LamConstant;
+        let mut cases = Vec::new();
+        for (run, &len) in runs.iter().enumerate() {
+            for i in 0..len {
+                let constant = Constant::String(format!("{run}-{i}"));
+                let pat = pa.alloc(make_pat(
+                    PatternDesc::Tpat_constant(constant),
+                    omega().pat_type,
+                    omega().pat_env,
+                ));
+                let action = b.const_(LamConstant::int(cases.len() as i32));
+                cases.push((vec![pat], MatchAction::new(action)));
+            }
+            let action = b.const_(LamConstant::int(cases.len() as i32));
+            cases.push((vec![omega()], MatchAction::new(action)));
+        }
+        PatternMatching {
+            cases,
+            args: MatchArgs::new([(b.var(Ident::create_local("x")), LetKind::Alias)]),
+            default: Vec::new(),
+        }
+    }
+
+    fn split_runs(runs: &[usize]) -> (u64, Vec<usize>) {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        let pm = constant_runs(&pa, &b, runs);
+        let mut next_raise = 0;
+        let mut default_rows = Vec::new();
+        let steps = row_comparisons(|| {
+            let (first, nexts) = split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("the first group is a plain matching");
+            };
+            default_rows = first.default.iter().map(|(rows, _)| rows.len()).collect();
+            assert_eq!(nexts.len(), first.default.len());
+        });
+        (steps, default_rows)
+    }
+
+    /// A matching that splits into one group never compares its rows: the
+    /// matrix of a group is computed only for a default environment, and
+    /// the first group of a split is in none.
+    #[test]
+    fn splitting_into_one_group_compares_no_rows() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        for n in [1, 4, 64, 512] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            // Drop the wildcard row: constants only, one group.
+            pm.cases.pop();
+            let mut next_raise = 0;
+            let steps = row_comparisons(|| {
+                let (first, nexts) =
+                    split_precompile(None, &pa, &arena, &None, &pm, &mut next_raise);
+                assert!(nexts.is_empty());
+                let PmHalfCompiled::Pm(first) = first else {
+                    panic!("one plain matching");
+                };
+                assert_eq!(first.cases.len(), n);
+            });
+            assert_eq!(steps, 0, "n = {n}");
+            // Asking for the matrix is what costs: n rows, none below another.
+            let steps = row_comparisons(|| assert_eq!(as_matrix(&pa, &pm.cases).len(), n));
+            assert_eq!(steps as usize, n * (n - 1), "n = {n}");
+        }
+    }
+
+    /// A matching of one row that does not start with an or-pattern is
+    /// split without `split_or`'s work lists; a matching of n rows takes
+    /// n + 1 steps of them. Both give the matching the lists would give.
+    #[test]
+    fn one_row_split_uses_no_work_list() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        let b = RawArena::new();
+        let arena = LocArena::new(&parse_arena, &locs, &b);
+        fn steps_of<'p>(
+            pa: &'p PatArena<'p>,
+            arena: &LocArena<'_, RawArena>,
+            pm: &PatternMatching<'p>,
+        ) -> u64 {
+            let before = WORK_LIST_STEPS.with(|steps| steps.get());
+            let mut next_raise = 0;
+            let (first, nexts) = split_precompile(None, pa, arena, &None, pm, &mut next_raise);
+            assert!(nexts.is_empty());
+            assert_eq!(next_raise, 0);
+            let PmHalfCompiled::Pm(first) = first else {
+                panic!("one plain matching");
+            };
+            assert_eq!(first.cases.len(), pm.cases.len());
+            for ((row, _), (given, _)) in first.cases.iter().zip(&pm.cases) {
+                assert!(std::ptr::eq(row[0], given[0]));
+            }
+            assert_eq!(first.default.len(), pm.default.len());
+            WORK_LIST_STEPS.with(|steps| steps.get()) - before
+        }
+        for n in [1usize, 2, 64] {
+            let mut pm = constant_runs(&pa, &b, &[n]);
+            pm.cases.pop();
+            pm.default = vec![(vec![vec![omega()]], 7)];
+            let expected = if n == 1 { 0 } else { n as u64 + 1 };
+            assert_eq!(steps_of(&pa, &arena, &pm), expected, "n = {n}");
+        }
+        // One wildcard row: the variable case of `split_constr`.
+        let mut pm = constant_runs(&pa, &b, &[0]);
+        pm.default = Vec::new();
+        assert_eq!(pm.cases.len(), 1);
+        assert_eq!(steps_of(&pa, &arena, &pm), 0);
+    }
+
+    /// Splitting costs the row comparisons of the groups that become default
+    /// environment entries, whatever the size of the first group: here the
+    /// entries are a wildcard row, `m` constants and a wildcard row, so at
+    /// most m(m-1) comparisons for any `n`.
+    #[test]
+    fn splitting_compares_only_rows_of_default_entries() {
+        for m in [2, 8] {
+            let mut steps_for_n = Vec::new();
+            for n in [1, 64, 512] {
+                let (steps, default_rows) = split_runs(&[n, m]);
+                assert_eq!(default_rows, vec![1, m, 1], "n = {n}, m = {m}");
+                assert!(steps as usize <= m * (m - 1), "n = {n}, m = {m}: {steps}");
+                steps_for_n.push(steps);
+            }
+            assert!(steps_for_n.iter().all(|steps| *steps == steps_for_n[0]));
+        }
+    }
+
+    fn contexts_built(run: impl FnOnce()) -> u64 {
+        let before = super::CONTEXTS_BUILT.with(|steps| steps.get());
+        run();
+        super::CONTEXTS_BUILT.with(|steps| steps.get()) - before
+    }
+
+    /// `(inner, _)` nested `depth` times around a wildcard.
+    fn nested_pairs<'p>(pa: &'p PatArena<'p>, depth: usize) -> &'p Pattern {
+        let mut pat = omega();
+        for _ in 0..depth {
+            let args = pa.push_list([pa.handle(pat), pa.omega_idx()]);
+            pat = pa.alloc(make_pat(
+                PatternDesc::Tpat_tuple(args),
+                omega().pat_type,
+                omega().pat_env,
+            ));
+        }
+        pat
+    }
+
+    fn same_contexts(a: &[Ctx<'_>], b: &[Ctx<'_>]) -> bool {
+        let same_row = |x: &[&Pattern], y: &[&Pattern]| {
+            x.len() == y.len()
+                && x.iter().zip(y).all(|(p, q)| {
+                    std::ptr::eq(*p, *q)
+                        || (matches!(p.pat_desc, PatternDesc::Tpat_any)
+                            && matches!(q.pat_desc, PatternDesc::Tpat_any))
+                        || matches!(
+                            (&p.pat_desc, &q.pat_desc),
+                            (PatternDesc::Tpat_tuple(x), PatternDesc::Tpat_tuple(y)) if x.len() == y.len()
+                        )
+                })
+        };
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(c, d)| same_row(&c.left, &d.left) && same_row(&c.right, &d.right))
+    }
+
+    /// A context list derived from an all-wildcard context by `depth` tests
+    /// and column shifts costs nothing until it is read; reading it builds
+    /// the `2 * depth` lists on the way once, the lists `filter_ctx` and
+    /// `ctx_lshift` build; reading again builds nothing.
+    #[test]
+    fn unread_contexts_are_not_built() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        for depth in [1usize, 8, 64, 512] {
+            let pool = CtxPool::default();
+            let pair = nested_pairs(&pa, 1);
+            let start = pool.built(start_ctx(1));
+            let mut ids = Vec::new();
+            let derive = contexts_built(|| {
+                let mut ctx = start;
+                for _ in 0..depth {
+                    // Test the pair, then step over its first component.
+                    ctx = pool.filter(None, &pa, pair, ctx);
+                    assert!(!pool.is_empty(ctx));
+                    ctx = pool.lshift(&pa, ctx);
+                    assert!(!pool.is_empty(ctx));
+                    ids.push(ctx);
+                }
+            });
+            assert_eq!(derive, 0, "depth = {depth}");
+
+            // What the eager functions build, one context per list.
+            let mut eager = start_ctx(1);
+            let eager_steps = contexts_built(|| {
+                for _ in 0..depth {
+                    eager = filter_ctx(None, &pa, pair, &eager);
+                    eager = ctx_lshift(&pa, &eager);
+                }
+            });
+            assert_eq!(eager_steps as usize, 2 * depth);
+
+            let last = *ids.last().expect("depth > 0");
+            let read = contexts_built(|| {
+                let ctx = pool.get(&pa, last);
+                assert!(same_contexts(&ctx, &eager), "depth = {depth}");
+                assert_eq!(ctx[0].left.len(), 2 * depth);
+                assert_eq!(ctx[0].right.len(), 1);
+            });
+            assert_eq!(read as usize, 2 * depth, "depth = {depth}");
+            let again = contexts_built(|| {
+                pool.get(&pa, last);
+                pool.get(&pa, ids[depth / 2]);
+            });
+            assert_eq!(again, 0, "depth = {depth}");
+        }
+    }
+
+    /// A list that is not one all-wildcard context is built when derived,
+    /// as before, so its emptiness is what `filter_ctx` finds.
+    #[test]
+    fn contexts_with_patterns_are_filtered_when_derived() {
+        let ta = crate::types::typedtree::TypedArena::new();
+        let store = PatStore::default();
+        let pa = PatArena::new(&ta, &store);
+        let constant = |text: &str| -> &Pattern {
+            pa.alloc(make_pat(
+                PatternDesc::Tpat_constant(Constant::String(text.to_string())),
+                omega().pat_type,
+                omega().pat_env,
+            ))
+        };
+        let (a, b) = (constant("a"), constant("b"));
+        let pool = CtxPool::default();
+        let known_a = pool.built(vec![Ctx {
+            left: Vec::new(),
+            right: vec![a],
+        }]);
+        let steps = contexts_built(|| {
+            let same = pool.filter(None, &pa, a, known_a);
+            assert!(!pool.is_empty(same));
+            let other = pool.filter(None, &pa, b, known_a);
+            assert!(pool.is_empty(other));
+            assert!(pool.get(&pa, other).is_empty());
+        });
+        assert_eq!(steps, 1);
+    }
+
+    /// Compiling a match that takes no exit reads no context: a total
+    /// match on pairs nested `depth` deep builds only the starting context.
+    #[test]
+    fn total_match_without_exits_builds_no_context() {
+        use crate::lambda::lam_constant::Constant as LamConstant;
+        let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let ta = crate::types::typedtree::TypedArena::new();
+        let parse_arena = crate::parse_arena::ParseArena::new();
+        let locs = crate::raw_lambda::loc::LamLocBuilder::new(&parse_arena);
+        for depth in [1usize, 4, 32] {
+            let store = PatStore::default();
+            let pa = PatArena::new(&ta, &store);
+            let b = RawArena::new();
+            let arena = LocArena::new(&parse_arena, &locs, &b);
+            let pool = CtxPool::default();
+            let cx = MatchCx {
+                ctx_ref: &ctx,
+                pa: &pa,
+                arena: &arena,
+                cp: &pool,
+            };
+            let pm = PatternMatching {
+                cases: vec![(
+                    vec![nested_pairs(&pa, depth)],
+                    MatchAction::new(b.const_(LamConstant::int(1))),
+                )],
+                args: MatchArgs::new([(b.var(Ident::create_local("x")), LetKind::Strict)]),
+                default: Vec::new(),
+            };
+            let start = pool.built(start_ctx(1));
+            let mut next_raise = 0;
+            let steps = contexts_built(|| {
+                let Ok((_, total)) =
+                    compile_match_owned(cx, &Partial::Total, start, pm, &mut next_raise)
+                else {
+                    panic!("the match compiles");
+                };
+                assert!(jumps_is_empty(&total));
+            });
+            assert_eq!(steps, 0, "depth = {depth}");
+            // The match made 2 * depth + 1 context lists; none was built.
+            assert!(pool.entries.borrow().len() > 2 * depth);
+        }
+    }
+
+    /// An action whose key is a little over `size` bytes; actions of
+    /// different `id` have different keys.
+    fn sized_action(b: &RawArena, size: usize, id: i32) -> RawLambda {
+        use crate::lambda::lam_constant::Constant;
+        b.seq(
+            b.const_(Constant::string("s".repeat(size))),
+            b.const_(Constant::int(id)),
+        )
+    }
+
+    fn switch_of(actions: Vec<RawLambda>) -> RawLambdaSwitch {
+        RawLambdaSwitch {
+            sw_consts_full: true,
+            sw_consts: actions
+                .into_iter()
+                .enumerate()
+                .map(|(i, act)| (crate::lambda::SwitchKey::Int(i as i32), act))
+                .collect(),
+            sw_blocks_full: true,
+            sw_blocks: Vec::new(),
+            sw_failaction: None,
+            sw_dispatch: crate::lambda::SwitchDispatch::Direct,
+        }
+    }
+
+    /// Sharing the actions of a switch of `n` cases with actions of `m` key
+    /// bytes costs O(n * m), whether the actions are all different or all
+    /// equal: each is written and hashed once and compared with at most the
+    /// one stored action of its hash, never with every other action.
+    #[test]
+    fn sharing_switch_actions_is_linear_in_cases() {
+        const SIZE: usize = 4096;
+        // Bytes a key adds to the string constant in it.
+        const OVERHEAD: usize = 64;
+        let b = RawArena::new();
+        for distinct in [true, false] {
+            let steps_for = |n: usize| {
+                let actions = (0..n)
+                    .map(|i| sized_action(&b, SIZE, if distinct { i as i32 } else { 0 }))
+                    .collect();
+                let mut next_raise_count = 0;
+                let mut shared = None;
+                let steps = key_steps(|| {
+                    shared = Some(share_actions_sw(
+                        &b,
+                        switch_of(actions),
+                        &mut next_raise_count,
+                    ));
+                });
+                let (handlers, _) = shared.expect("shared");
+                // The sharing itself: no exit when all differ, one when all
+                // are equal.
+                assert_eq!(handlers.len(), if distinct { 0 } else { 1 });
+                steps
+            };
+            for n in [4, 64, 512] {
+                let steps = steps_for(n) as usize;
+                // Written and hashed, and compared once when equal.
+                let per_action = if distinct { 2 } else { 3 };
+                assert!(
+                    steps <= per_action * n * (SIZE + OVERHEAD),
+                    "{n} actions, distinct: {distinct}: {steps} steps"
+                );
+                assert!(steps >= n * SIZE);
+            }
+            // Far below the n * n * m / 2 of comparing every pair.
+            assert!((steps_for(512) as usize) < 512 * 512 * SIZE / 64);
+        }
+    }
+
+    /// `up_ok` compares a clause's action with the action of every clause
+    /// before it. The key of an action is built once, and comparing two
+    /// actions of different keys reads no key bytes, so the n * n / 2
+    /// comparisons of `n` different actions of `m` key bytes cost O(n * m).
+    #[test]
+    fn comparing_every_pair_of_actions_builds_each_key_once() {
+        const SIZE: usize = 4096;
+        const OVERHEAD: usize = 64;
+        const N: usize = 128;
+        let b = RawArena::new();
+        let actions: Vec<MatchAction> = (0..N)
+            .map(|i| MatchAction::new(sized_action(&b, SIZE, i as i32)))
+            .collect();
+        let steps = key_steps(|| {
+            for (i, act) in actions.iter().enumerate() {
+                for (j, other) in actions.iter().enumerate() {
+                    // A clone is the same shared action, as when a clause
+                    // is copied into two matrices.
+                    assert_eq!(up_ok_action(&b, None, &act.clone(), other), i == j);
+                }
+            }
+        }) as usize;
+        assert!(steps <= 2 * N * (SIZE + OVERHEAD), "{steps} steps");
+        // Two separate actions of equal key are confirmed on their bytes.
+        let twin = MatchAction::new(sized_action(&b, SIZE, 0));
+        let confirm = key_steps(|| assert!(up_ok_action(&b, None, &actions[0], &twin))) as usize;
+        assert!(
+            (SIZE..=3 * (SIZE + OVERHEAD)).contains(&confirm),
+            "{confirm} steps"
+        );
+    }
+
+    #[test]
+    fn key_table_finds_keys_by_scan_and_by_index() {
+        let mut table = KeyTable::new();
+        let key = |i: usize| format!("key {i}").into_bytes();
+        let count = KeyTable::SCAN_MAX * 8;
+        for i in 0..count {
+            assert_eq!(table.get_or_insert(&key(i), i), None);
+            // Every key stored so far is found, before and after the index
+            // replaces the scan.
+            for j in 0..=i {
+                assert_eq!(table.get_or_insert(&key(j), usize::MAX), Some(j));
+            }
+        }
+        assert!(table.index.is_some());
+        assert_eq!(table.entries.len(), count);
+    }
+
+    /// The classes of `Lambda.make_key` (`compiler/ml/lambda.ml:432-466`).
+    #[test]
+    fn keys_follow_make_key_normalization() {
+        use crate::lambda::lam_constant::Constant;
+        let b = RawArena::new();
+        let key = |e: RawLambda| {
+            let mut out = KeyOut::new();
+            write_key(&b, e, &mut out).map(|()| out.buf.to_vec())
+        };
+        let x = Ident::create_local("x");
+        let y = Ident::create_local("y");
+        let z = Ident::create_local("z");
+        let w = Ident::create_local("w");
+        let int = |i: i32| b.const_(Constant::int(i));
+        let add = |l: RawLambda, r: RawLambda| b.prim(Primitive::Paddint, &[l, r], LamLoc::NONE);
+
+        // An alias is replaced by its definition.
+        let aliased = b.let_(
+            LetKind::Alias,
+            x,
+            add(b.var(y), int(1)),
+            add(b.var(x), b.var(x)),
+        );
+        let inlined = add(add(b.var(y), int(1)), add(b.var(y), int(1)));
+        assert_eq!(key(aliased), key(inlined));
+        assert!(key(aliased).is_some());
+        // An alias in scope is replaced inside a later alias's definition
+        // and after an alias nested in one.
+        let chained = b.let_(
+            LetKind::Alias,
+            x,
+            add(b.var(y), int(1)),
+            b.let_(
+                LetKind::Alias,
+                z,
+                b.let_(LetKind::Alias, w, int(2), add(b.var(x), b.var(w))),
+                add(b.var(z), b.var(x)),
+            ),
+        );
+        let chained_inlined = add(add(add(b.var(y), int(1)), int(2)), add(b.var(y), int(1)));
+        assert_eq!(key(chained), key(chained_inlined));
+        assert!(key(chained).is_some());
+        // A strict let of its own variable is its definition.
+        assert_eq!(
+            key(b.let_(LetKind::Strict, x, int(1), b.var(x))),
+            key(int(1))
+        );
+        // A kept let is renamed by position: the binder's stamp is dropped,
+        // its name and its kind are not.
+        let kept = |kind: LetKind, id: Ident| b.let_(kind, id, int(1), add(b.var(id), b.var(y)));
+        assert_eq!(
+            key(kept(LetKind::Strict, x)),
+            key(kept(LetKind::Strict, Ident::create_local("x")))
+        );
+        assert_ne!(key(kept(LetKind::Strict, x)), key(kept(LetKind::Strict, z)));
+        assert_ne!(
+            key(kept(LetKind::Strict, x)),
+            key(kept(LetKind::Variable, x))
+        );
+        // Free variables are compared by name and stamp.
+        assert_eq!(key(b.var(y)), key(b.var(y)));
+        assert_ne!(key(b.var(y)), key(b.var(Ident::create_local("y"))));
+        // Shapes that would run together without lengths and tags.
+        assert_ne!(
+            key(b.static_raise(1, &[int(2)])),
+            key(b.static_raise(1, &[]))
+        );
+        assert_ne!(key(b.seq(int(1), int(2))), key(add(int(1), int(2))));
+        assert_ne!(key(int(1)), key(b.const_(Constant::string("1"))));
+        // Locations are not part of a key.
+        let located = b.prim(Primitive::Paddint, &[int(1), int(2)], LamLoc::for_test(7));
+        assert_eq!(key(located), key(add(int(1), int(2))));
+        // A function has no key, and neither has a term above `MAX_RAW`.
+        let big = (0..MAX_RAW).fold(int(0), |acc, i| add(acc, int(i)));
+        assert_eq!(key(big), None);
     }
 
     #[test]

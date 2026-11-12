@@ -581,6 +581,15 @@ pub fn incremental_build_without_lock(
         rescript_compiler::perf_counters::reset();
     }
     logs::initialize(&build_state.packages);
+    if build_state.packages.values().any(|package| package.config.js_post_build.is_some()) {
+        // A command can create another module's output after discovery.
+        // Do not use a directory snapshot across arbitrary user code.
+        for package in build_state.build_state.packages.values_mut() {
+            package.gentype_outputs = None;
+        }
+    } else if !matches!(build_state.build_run, BuildRun::NotStarted) {
+        packages::refresh_gentype_outputs(&mut build_state.build_state.packages);
+    }
     build_state.build_run = BuildRun::Running {
         started_at: std::time::SystemTime::now(),
     };
@@ -725,6 +734,24 @@ pub fn incremental_build_without_lock(
     };
     let timing_ast_elapsed = timing_ast.elapsed();
 
+    let result_asts = result_asts.and_then(|mut warnings| {
+        // Incremental planning already computed the closure before choosing
+        // its second parse round. Other builds (including watch updates)
+        // plan it here, once their changed sources have been parsed.
+        if !incremental {
+            let deleted = build_state.deleted_modules.clone();
+            deps::get_deps(build_state, &deleted);
+            deps::plan_gentype(build_state);
+            if incremental::mark_missing_gentype_declarations(build_state) {
+                warnings.push_str(&parse::generate_asts(
+                    build_state,
+                    || pb.inc(1),
+                    parse::ParseWarningLog::Append,
+                )?);
+            }
+        }
+        Ok(warnings)
+    });
     let parse_warnings = match result_asts {
         Ok(warnings) => {
             pb.finish();
@@ -822,6 +849,8 @@ pub fn incremental_build_without_lock(
         || pb.inc(1),
         |size| pb.set_length(size),
     );
+    rescript_compiler::gentype::main::verify_skipped_declarations()
+        .expect("genType dependency-closure audit failed");
     // Workers request the retry while compiling. Consume the request even when
     // `compile` fails afterwards, so it cannot start a retry in a later build.
     let retry_with_locations = build_state

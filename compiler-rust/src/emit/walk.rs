@@ -62,6 +62,7 @@ pub(super) enum FunctionForm {
     Declaration,
     ArrowExpression(Expr),
     ArrowBlock,
+    Method,
     ArrowEmpty,
 }
 pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<FunctionForm, Unsupported> {
@@ -69,19 +70,24 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
         return Ok(FunctionForm::Eta(target));
     }
     let f = a.fun(f);
-    if f.is_method {
-        return Err(Unsupported("method function"));
-    }
-    if f.directive.is_some() {
-        return Err(Unsupported("function directive"));
+    if f.is_method && a.ident_slice(f.params).is_empty() {
+        return Err(Unsupported("method without this parameter"));
     }
     if top {
         return Ok(FunctionForm::Declaration);
     }
+    if f.is_method {
+        return Ok(FunctionForm::Method);
+    }
+    if f.directive.is_some() {
+        return Ok(FunctionForm::ArrowBlock);
+    }
     if let [stmt] = a.stmts(f.body) {
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
-            StmtKind::Return(e) | StmtKind::Exp(e) => return Ok(FunctionForm::ArrowExpression(e)),
+            StmtKind::Return(e) | StmtKind::Exp(e) => {
+                return Ok(FunctionForm::ArrowExpression(e));
+            }
             _ => {}
         }
     }
@@ -149,13 +155,41 @@ pub(super) fn negation_form(a: &JsArena, op: BinOp, left: Expr) -> bool {
         })
 }
 
-// Nullish rewriting relies on structural equality. Until that comparison is
-// available, don't emit a potentially different `||` tree for this shape.
-pub(super) fn possible_nullish(a: &JsArena, op: BinOp, l: Expr, r: Expr) -> bool {
-    op == BinOp::Or
-        && [l, r]
-            .iter()
-            .all(|e| matches!(a.ek(*e), ExprKind::Bin(BinOp::EqEqEq, _, _)))
+/// Legacy rewrites x === null || x === undefined to x == null when the
+/// rendered targets match. For identical variables/qualified paths this can
+/// be proven without rendering or allocating; other target comparisons remain
+/// a specific fallback. Only the retained left target is met by naming.
+pub(super) fn nullish_target(
+    a: &JsArena,
+    op: BinOp,
+    l: Expr,
+    r: Expr,
+) -> Result<Option<Expr>, Unsupported> {
+    if op != BinOp::Or {
+        return Ok(None);
+    }
+    let (ExprKind::Bin(BinOp::EqEqEq, x, lx), ExprKind::Bin(BinOp::EqEqEq, y, ly)) =
+        (a.ek(l), a.ek(r))
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        (a.ek(lx), a.ek(ly)),
+        (ExprKind::Null, ExprKind::Undefined { .. }) | (ExprKind::Undefined { .. }, ExprKind::Null)
+    ) {
+        return Ok(None);
+    }
+    let same = x == y
+        || match (a.ek(x), a.ek(y)) {
+            (ExprKind::Var(x), ExprKind::Var(y)) => a.ident(x).same(&a.ident(y)),
+            (ExprKind::Qualified(x), ExprKind::Qualified(y)) => a.qual(x) == a.qual(y),
+            _ => false,
+        };
+    if same {
+        Ok(Some(x))
+    } else {
+        Err(Unsupported("nullish comparison target equality"))
+    }
 }
 pub(super) fn member_form(name: &str) -> (&str, bool) {
     let name = name
@@ -166,4 +200,389 @@ pub(super) fn member_form(name: &str) -> (&str, bool) {
     let dot = matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_' || c == '$')
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$');
     (name, dot)
+}
+
+/// Validate block shapes before either assigning names or building AST nodes.
+/// Keep shape-specific fallbacks here so naming cannot accept a block the
+/// builder rejects (or reject a block the builder can emit).
+pub(super) fn block_supported(
+    elements: &[Expr],
+    tag: &crate::lambda::TagInfo,
+) -> Result<(), Unsupported> {
+    use crate::lambda::TagInfo;
+    let runtime = match tag {
+        TagInfo::Constructor(c) if c.name != "::" => Some(&*c.runtime),
+        TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => match &*r.runtime {
+            crate::types::VariantBlock::Tagged(t) => Some(t),
+            crate::types::VariantBlock::Untagged { .. } => None,
+        },
+        TagInfo::PolyVar(_) if elements.is_empty() => {
+            return Err(Unsupported("block literal: empty polymorphic variant"));
+        }
+        _ => None,
+    };
+    if let Some(t) = runtime
+        && let crate::types::VariantLiteralTag::Float(s) = &t.tag.literal
+    {
+        block_float_tag(s)?;
+    }
+    Ok(())
+}
+
+pub(super) fn block_float_tag(s: &str) -> Result<f64, Unsupported> {
+    s.parse::<f64>()
+        .map_err(|_| Unsupported("block literal: float tag"))
+}
+
+/// Children in legacy print order, with their original field indices.
+/// `print_caml_block` skips only literal Undefined optional fields: such a
+/// node cannot contain any identifiers. The legacy free-variable scan visits
+/// it, but that has no naming effect. PolyVar prints at most NAME and VAL.
+/// The analysis pass separately retains the legacy scan of extra polyvar
+/// elements, which can affect function-environment reservations in malformed IR.
+pub(super) fn block_elements<'a>(
+    a: &'a JsArena,
+    elements: &'a [Expr],
+    tag: &'a crate::lambda::TagInfo,
+) -> impl Iterator<Item = (usize, Expr)> + 'a {
+    use crate::lambda::TagInfo;
+    let optional_fields = match tag {
+        TagInfo::Record(r) if !r.array && r.fields.len() == elements.len() => Some(&r.fields),
+        TagInfo::RecordInlined(r) if r.fields.len() == elements.len() => Some(&r.fields),
+        _ => None,
+    };
+    elements.iter().copied().enumerate().filter(move |&(i, e)| {
+        (!matches!(tag, TagInfo::PolyVar(_)) || i < 2)
+            && !optional_fields.is_some_and(|fields| fields[i].1 && undefined(a, e))
+    })
+}
+
+/// Expression decorations precede the expression and introduce no identifiers.
+/// S0 drops block comments directly before numeric literals (also through
+/// parentheses); other comments must survive and remain a whole-file fallback.
+pub(super) fn expression_comment(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    if a.expr_comment(e).is_some() && !numeric_decoration(a, e) && !pure_call(a, e) {
+        return Err(Unsupported("non-decoration expression comment"));
+    }
+    Ok(())
+}
+
+/// Templates print the tag first, then substitutions from left to right. Raw
+/// quasi spelling is preserved; oxc supplies backticks, `${}`, and parentheses.
+/// A malformed segment/value count cannot be represented by a template AST.
+pub(super) fn template_supported(segments: usize, values: usize) -> Result<(), Unsupported> {
+    if segments != values + 1 {
+        return Err(Unsupported("template segment count"));
+    }
+    Ok(())
+}
+
+/// The exception-creation annotation is semantic, not a numeric decoration.
+/// It prints immediately before the call; callee and arguments retain their
+/// ordinary left-to-right naming order. Codegen owns its spelling and spacing.
+pub(super) fn pure_call(a: &JsArena, e: Expr) -> bool {
+    a.expr_comment(e) == Some("@__PURE__") && matches!(a.ek(e), ExprKind::Call(..))
+}
+
+fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
+    // A minus, Infinity, NaN, or bigint suffix is not the numeric-literal
+    // adjacency S0 removes. Be conservative rather than discarding a comment.
+    matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
+}
+
+/// Raw text meets no IR identifiers. Statements keep surrounding newlines and
+/// their trailing semicolon, except comment-only snippets. Expressions use the
+/// existing classifier's grouping rule; arrow bodies and expression statements
+/// add the legacy outer parentheses. No new parser is used by the emitter.
+#[derive(Clone, Copy)]
+pub(super) enum RawContext {
+    Expression,
+    Arrow,
+    Statement,
+}
+
+pub(super) fn raw_wrapping(
+    info: &crate::js_ir::JsRawInfo,
+    context: RawContext,
+) -> Result<(&'static str, &'static str, bool), Unsupported> {
+    use crate::binary_ast::ppx::{
+        JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+    };
+    if info.is_stmt {
+        if !matches!(context, RawContext::Statement) {
+            return Err(Unsupported("raw statement in expression position"));
+        }
+        return Ok(
+            if matches!(
+                classify_js_stmt(&info.code),
+                JsStmtClassification::JsStmtComment
+            ) {
+                ("", "", true)
+            } else {
+                ("\n", "\n", false)
+            },
+        );
+    }
+    let classification = classify_js_exp(&info.code);
+    // Legacy drops the literal and may keep only one leading comment. Keeping
+    // the entire payload would violate that rule, so retain a specific fallback.
+    if matches!(context, RawContext::Statement)
+        && matches!(classification, JsExpClassification::JsLiteral { .. })
+    {
+        return Err(Unsupported("raw literal expression statement elision"));
+    }
+    let grouped = crate::js_ir::printer::raw_js_expression_needs_paren_classified(
+        &info.code,
+        &classification,
+    );
+    Ok(
+        match (
+            grouped,
+            matches!(context, RawContext::Arrow | RawContext::Statement),
+        ) {
+            (false, false) => ("", "", false),
+            (true, true) => ("((", "))", false),
+            _ => ("(", ")", false),
+        },
+    )
+}
+
+/// `print_exp_statement_of`: only unit tails discard numbers/undefined and
+/// simplify sequences with a trivial side. Naming visits only the surviving
+/// expression; the builder supplies statement parentheses and semicolons.
+pub(super) fn tail_effect(a: &JsArena, e: Expr) -> Option<Expr> {
+    let trivial = |e| matches!(a.ek(e), ExprKind::Number(_) | ExprKind::Undefined { .. });
+    match a.ek(e) {
+        ExprKind::Seq(l, r) if trivial(l) => tail_effect(a, r),
+        ExprKind::Seq(l, r) if trivial(r) => tail_effect(a, l),
+        _ if trivial(e) || omitted_expression(a, e) => None,
+        _ => Some(e),
+    }
+}
+
+/// Range loops name their binder, then a synthetic finish binder, then visit
+/// start, finish and body. Only numbers and variable references avoid caching.
+pub(super) fn finish_binding(a: &JsArena, e: Expr) -> bool {
+    !matches!(
+        a.ek(e),
+        ExprKind::Number(_) | ExprKind::Var(_) | ExprKind::Qualified(_)
+    )
+}
+
+/// Assignment meets the target before the value. Only identifiers and member
+/// accesses are valid targets; codegen owns precedence and the final semicolon.
+pub(super) fn assignment_target(a: &JsArena, e: Expr) -> Result<(), Unsupported> {
+    match a.ek(e) {
+        ExprKind::Var(_)
+        | ExprKind::Qualified(_)
+        | ExprKind::StaticIndex(..)
+        | ExprKind::ArrayIndex(..)
+        | ExprKind::Length(..)
+        | ExprKind::CamlBlockTag(..) => Ok(()),
+        _ => Err(Unsupported("assignment target")),
+    }
+}
+
+pub(super) enum StatementChild {
+    Binder(crate::ident::Ident),
+    Finish(Stmt),
+    Expression(Expr),
+    Block(crate::js_ir::arena::StmtList),
+}
+
+/// Print-order traversal of control statements (printer::print_statement).
+/// Loops share the function scope. Catch binders precede the handler, after the
+/// try body. Switch tests precede cases, then default; `should_break` alone
+/// controls inserted breaks, including empty cases. While has a trailing empty
+/// statement; other loops do not. Throw visits exception fields in their stored
+/// order and appends `Error: new Error()` only for literal extension blocks.
+/// Braces, labels, parentheses and semicolons are represented by AST nodes.
+pub(super) fn statement_children(
+    a: &JsArena,
+    s: Stmt,
+    mut visit: impl FnMut(StatementChild) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    use StatementChild::*;
+    match a.sk(s) {
+        StmtKind::While(_, e, b) => {
+            visit(Expression(e))?;
+            visit(Block(b))?;
+        }
+        StmtKind::ForRange(id) => {
+            let f = a.for_range(id);
+            range_supported(a, f)?;
+            visit(Binder(a.ident(f.ident)))?;
+            if finish_binding(a, f.end) {
+                visit(Finish(s))?;
+            }
+            if let Some(e) = f.init {
+                visit(Expression(e))?;
+            }
+            visit(Expression(f.end))?;
+            visit(Block(f.body))?;
+        }
+        StmtKind::ForOf(id) | StmtKind::ForAwaitOf(id) => {
+            let f = a.for_of(id);
+            visit(Binder(a.ident(f.ident)))?;
+            visit(Expression(f.iterable))?;
+            visit(Block(f.body))?;
+        }
+        StmtKind::Try(id) => {
+            let t = a.try_info(id);
+            visit(Block(t.body))?;
+            if let Some((id, b)) = t.catch {
+                visit(Binder(a.ident(id)))?;
+                visit(Block(b))?;
+            }
+            if let Some(b) = t.finally {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::IntSwitch(e, id) => {
+            visit(Expression(e))?;
+            let t = a.int_switch(id);
+            for (_, c) in &t.clauses {
+                visit(Block(c.body))?;
+            }
+            if let Some(b) = t.default {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::StringSwitch(e, id) => {
+            visit(Expression(e))?;
+            let t = a.string_switch(id);
+            for c in &t.clauses {
+                switch_tag_supported(&c.tag_type)?;
+                visit(Block(c.clause.body))?;
+            }
+            if let Some(b) = t.default {
+                visit(Block(b))?;
+            }
+        }
+        StmtKind::Throw(e) => visit(Expression(e))?,
+        StmtKind::Break(_) | StmtKind::Continue(_) => {}
+        _ => unreachable!("ordinary statements have their own traversal"),
+    }
+    Ok(())
+}
+
+/// Decimal bigint case keys borrow their digits. Other spellings stay on the
+/// legacy path until radix normalization has reusable scratch storage.
+pub(super) fn switch_tag_supported(tag: &crate::lambda::SwitchCaseTag) -> Result<(), Unsupported> {
+    if let crate::lambda::SwitchCaseTag::BigInt(s) = tag {
+        let digits = s.trim_start_matches(['-', '+']);
+        if digits.is_empty() || !digits.bytes().all(|b| b.is_ascii_digit()) {
+            return Err(Unsupported("switch bigint radix"));
+        }
+    }
+    Ok(())
+}
+
+/// The legacy uncached header prints its initializer at precedence zero. A
+/// sequence there parses as additional declarators, not a sequence initializer.
+/// Keep that exceptional shape on the legacy path rather than changing tokens.
+pub(super) fn range_supported(
+    a: &JsArena,
+    f: crate::js_ir::arena::ForRangeInfo,
+) -> Result<(), Unsupported> {
+    if !finish_binding(a, f.end) && f.init.is_some_and(|e| matches!(a.ek(e), ExprKind::Seq(..))) {
+        return Err(Unsupported(
+            "range initializer sequence without cached bound",
+        ));
+    }
+    Ok(())
+}
+
+/// Legacy OptionalBlock(false) spells Primitive_option.some, a fixed global
+/// (not a named IR identifier), followed by the operand except synthetic unit.
+/// Calls supply the parentheses; no synthetic identifier enters naming.
+pub(super) fn optional_argument(a: &JsArena, e: Expr) -> Option<Expr> {
+    (!matches!(a.ek(e), ExprKind::Undefined { is_unit: true })).then_some(e)
+}
+
+/// Unlike logical operators, string + preserves right association: the legacy
+/// printer uses Plus's right precedence 12, above its own precedence 11.
+pub(super) fn string_children(a: &JsArena, e: Expr) -> Option<(Expr, Expr)> {
+    match a.ek(e) {
+        ExprKind::StringAppend(l, r) => Some((l, r)),
+        _ => None,
+    }
+}
+
+/// Traverse string leaves in printed order, without stack growth with depth.
+pub(super) fn string_leaves(
+    a: &JsArena,
+    root: Expr,
+    pending: &mut Vec<Expr>,
+    mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    pending.push(root);
+    while let Some(e) = pending.pop() {
+        expression_comment(a, e)?;
+        if let Some((l, r)) = string_children(a, e) {
+            pending.push(r);
+            pending.push(l);
+        } else {
+            visit(e)?;
+        }
+    }
+    Ok(())
+}
+
+/// Preserve-mode JSX needs a separate AST shape; runtime-mode JSX prints a
+/// normal call and never drops its tag, props or key, even when they are unit.
+pub(super) fn jsx_runtime(
+    a: &JsArena,
+    id: crate::js_ir::arena::JsxId,
+    preserve: bool,
+) -> Result<crate::js_ir::arena::JsxInfo, Unsupported> {
+    if preserve {
+        return Err(Unsupported("JSX preserve mode"));
+    }
+    let jsx = a.jsx(id);
+    if a.props(jsx.props)
+        .iter()
+        .any(|(key, _)| !matches!(key, crate::js_ir::arena::PropName::Lit(_)))
+    {
+        return Err(Unsupported("symbol JSX key"));
+    }
+    Ok(jsx)
+}
+
+/// Destructuring declarations meet excluded-field binders before the rest
+/// binder and source. Expression-position rest uses only synthetic binders.
+pub(super) fn rest_declaration(
+    a: &JsArena,
+    d: &VarDecl,
+) -> Option<(crate::js_ir::arena::RestId, Expr)> {
+    match a.ek(d.value?) {
+        ExprKind::RecordRest(fields, source) => Some((fields, source)),
+        _ => None,
+    }
+}
+
+/// Canonical integer property text is emitted as a numeric index by legacy.
+/// Keep the newly exposed member shape separate from record-rest support.
+pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
+    let (name, _) = member_form(name);
+    let digits = name.strip_prefix('-').unwrap_or(name);
+    let canonical = name == "0" || matches!(digits.as_bytes(), [b'1'..=b'9', ..]);
+    if canonical && name.parse::<i64>().is_ok() {
+        Err(Unsupported("numeric static member"))
+    } else {
+        Ok(())
+    }
+}
+
+/// A legacy call of the external `delete` parses as a unary operator, not a
+/// call. Raw support exposes this previously hidden shape; keep it on fallback
+/// until its separate AST rule is implemented rather than relaxing fixed points.
+pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupported> {
+    if let ExprKind::Var(id) = a.ek(callee) {
+        let id = a.ident(id);
+        if id.name() == "delete" && (id.stamp() == 0 || id.is_js()) {
+            return Err(Unsupported("delete call syntax"));
+        }
+    }
+    Ok(())
 }

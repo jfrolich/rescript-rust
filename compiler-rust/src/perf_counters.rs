@@ -22,6 +22,73 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
 
+struct GentypeCounts {
+    modules: AtomicU64,
+    declarations: AtomicU64,
+}
+
+impl GentypeCounts {
+    const fn new() -> Self {
+        Self {
+            modules: AtomicU64::new(0),
+            declarations: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, declarations: usize) {
+        self.modules.fetch_add(1, Ordering::Relaxed);
+        self.declarations
+            .fetch_add(declarations as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64) {
+        (
+            self.modules.load(Ordering::Relaxed),
+            self.declarations.load(Ordering::Relaxed),
+        )
+    }
+}
+
+static GENTYPE_COUNTS: [GentypeCounts; 2] = [GentypeCounts::new(), GentypeCounts::new()];
+
+#[cfg(test)]
+thread_local! {
+    static GENTYPE_TEST_COUNTS: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+}
+
+#[cfg(test)]
+pub(crate) fn gentype_counts_for_test() -> [u64; 4] {
+    GENTYPE_TEST_COUNTS.with(std::cell::Cell::get)
+}
+
+/// Successful declaration-cache translations and the declarations they produce.
+/// This excludes the separate translation for an annotated module's own output.
+pub(crate) fn record_gentype_translation(annotated: bool, declarations: usize) {
+    #[cfg(test)]
+    GENTYPE_TEST_COUNTS.with(|counts| {
+        let mut values = counts.get();
+        let offset = usize::from(annotated) * 2;
+        values[offset] += 1;
+        values[offset + 1] += declarations as u64;
+        counts.set(values);
+    });
+    if enabled() {
+        GENTYPE_COUNTS[usize::from(annotated)].record(declarations);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn gentype_counts_include_empty_translations_and_separate_annotation_classes() {
+    let counts = [GentypeCounts::new(), GentypeCounts::new()];
+    assert_eq!(counts[0].snapshot(), (0, 0));
+    counts[0].record(0);
+    counts[0].record(3);
+    counts[1].record(5);
+    assert_eq!(counts[0].snapshot(), (2, 3));
+    assert_eq!(counts[1].snapshot(), (1, 5));
+}
+
 /// A main-signature decode on loading a unit published in this build.
 pub fn record_published_signature_decode() {
     if enabled() {
@@ -343,6 +410,133 @@ impl LazyLookupKind {
     }
 }
 
+/// Counters of shared store data (stage P4 of `docs/CHECKER_REDESIGN.md`):
+/// how often persistent-rooted component views are built against how many
+/// distinct views exist, and what replaying their pieces costs.
+pub(crate) mod store_views {
+    use std::collections::HashSet;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static VIEW_BUILDS: AtomicU64 = AtomicU64::new(0);
+    static VIEW_BUILDS_PRIVATE: AtomicU64 = AtomicU64::new(0);
+    static VIEW_HITS: AtomicU64 = AtomicU64::new(0);
+    static VIEW_GUARD_MISSES: AtomicU64 = AtomicU64::new(0);
+    static DISTINCT_VIEWS: Mutex<Option<HashSet<String>>> = Mutex::new(None);
+    static PIECES_BUILT: AtomicU64 = AtomicU64::new(0);
+    static PIECES_EMPTY: AtomicU64 = AtomicU64::new(0);
+    static PIECES_POISONED: AtomicU64 = AtomicU64::new(0);
+    static BINDERS: AtomicU64 = AtomicU64::new(0);
+    static PIECES_REPLAYED: AtomicU64 = AtomicU64::new(0);
+    /// Replayed effects: components, prepare, rename,
+    /// alias source, module declaration.
+    static EFFECTS_REPLAYED: [AtomicU64; 5] = [const { AtomicU64::new(0) }; 5];
+
+    /// A view of a worker-shareable key was built; `published` is false when
+    /// the build read compilation state and stays private.
+    pub(crate) fn record_view_build(name: String, published: bool) {
+        VIEW_BUILDS.fetch_add(1, Ordering::Relaxed);
+        if !published {
+            VIEW_BUILDS_PRIVATE.fetch_add(1, Ordering::Relaxed);
+        }
+        DISTINCT_VIEWS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashSet::new)
+            .insert(name);
+    }
+
+    /// A compilation adopted a view its worker already built.
+    pub(crate) fn record_view_hit() {
+        VIEW_HITS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A worker's view failed the adopting compilation's guards.
+    pub(crate) fn record_view_guard_miss() {
+        VIEW_GUARD_MISSES.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A store build ended: with effects or guards, with none, or poisoned.
+    pub(crate) fn record_piece(poisoned: bool, empty: bool) {
+        let counter = if poisoned {
+            &PIECES_POISONED
+        } else if empty {
+            &PIECES_EMPTY
+        } else {
+            &PIECES_BUILT
+        };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A binder was created inside a store build.
+    pub(crate) fn record_binder() {
+        BINDERS.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A compilation replayed a piece for the first time.
+    pub(crate) fn record_piece_replay() {
+        PIECES_REPLAYED.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A replayed effect (index as in `EFFECTS_REPLAYED`).
+    pub(crate) fn record_effect_replayed(kind: usize) {
+        EFFECTS_REPLAYED[kind].fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub(super) fn reset() {
+        for counter in [
+            &VIEW_BUILDS,
+            &VIEW_BUILDS_PRIVATE,
+            &VIEW_HITS,
+            &VIEW_GUARD_MISSES,
+            &PIECES_BUILT,
+            &PIECES_EMPTY,
+            &PIECES_POISONED,
+            &BINDERS,
+            &PIECES_REPLAYED,
+        ]
+        .into_iter()
+        .chain(&EFFECTS_REPLAYED)
+        {
+            counter.store(0, Ordering::Relaxed);
+        }
+        *DISTINCT_VIEWS.lock().unwrap() = None;
+    }
+
+    pub(super) fn print_report() {
+        let load = |counter: &AtomicU64| counter.load(Ordering::Relaxed);
+        let distinct = DISTINCT_VIEWS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map_or(0, HashSet::len);
+        let builds = load(&VIEW_BUILDS);
+        eprintln!(
+            "[compiler-counter] store_views builds={builds} distinct={distinct} builds_per_view={:.2} private={} hits={} guard_misses={}",
+            if distinct == 0 { 0.0 } else { builds as f64 / distinct as f64 },
+            load(&VIEW_BUILDS_PRIVATE),
+            load(&VIEW_HITS),
+            load(&VIEW_GUARD_MISSES),
+        );
+        eprintln!(
+            "[compiler-counter] store_pieces with_effects={} empty={} poisoned={} binders={}",
+            load(&PIECES_BUILT),
+            load(&PIECES_EMPTY),
+            load(&PIECES_POISONED),
+            load(&BINDERS),
+        );
+        eprintln!(
+            "[compiler-counter] store_replay pieces={} components={} prepare_pers={} trigger_rename={} alias_source={} module_decl={}",
+            load(&PIECES_REPLAYED),
+            load(&EFFECTS_REPLAYED[0]),
+            load(&EFFECTS_REPLAYED[1]),
+            load(&EFFECTS_REPLAYED[2]),
+            load(&EFFECTS_REPLAYED[3]),
+            load(&EFFECTS_REPLAYED[4]),
+        );
+    }
+}
+
 /// Returns whether compiler counters are enabled.
 #[inline]
 pub fn enabled() -> bool {
@@ -360,6 +554,12 @@ pub fn enabled() -> bool {
 pub fn reset() {
     if !enabled() {
         return;
+    }
+
+    store_views::reset();
+    for counts in &GENTYPE_COUNTS {
+        counts.modules.store(0, Ordering::Relaxed);
+        counts.declarations.store(0, Ordering::Relaxed);
     }
 
     for counter in [
@@ -664,6 +864,12 @@ pub fn print_report() {
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
     );
+    for (index, annotated) in [false, true].into_iter().enumerate() {
+        let (modules, declarations) = GENTYPE_COUNTS[index].snapshot();
+        eprintln!(
+            "[compiler-counter] gentype annotated={annotated} modules={modules} declarations={declarations}",
+        );
+    }
     for kind in [
         LazyLookupKind::Value,
         LazyLookupKind::Type,
@@ -680,6 +886,7 @@ pub fn print_report() {
         QUALIFIED_COMPONENT_MISSES.load(Ordering::Relaxed),
         QUALIFIED_COMPONENT_REGISTERED.load(Ordering::Relaxed),
     );
+    store_views::print_report();
     eprintln!(
         "[compiler-counter] stored_components cached={} build_find_module={}",
         STORED_COMPONENT_CACHED.load(Ordering::Relaxed),
@@ -1711,5 +1918,53 @@ mod checker_tests {
         let (graph, roots) = Graph::of(&ctx, [open]);
         assert!(!graph.is_ground(roots[0]));
         assert_eq!(graph.recursive_ground(), 0);
+    }
+}
+
+#[cfg(all(test, debug_assertions))]
+mod publication_guard_tests {
+    use super::SignaturePublication;
+    use crate::binser::Encoded;
+    use crate::cmi::portable_types::{PortableRawSignature, PortableSignature, PortableTypeGraph};
+
+    fn signature() -> PortableSignature {
+        PortableSignature {
+            ps_sig: vec![],
+            cmi_longident_names: vec![],
+            type_graph: PortableTypeGraph {
+                entries: vec![],
+                variant_layouts: vec![],
+                mutabilities: vec![],
+            },
+            locations: Default::default(),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn main_signature_encoding_is_guarded() {
+        let _guard = SignaturePublication::begin();
+        Encoded::encode(&signature());
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn raw_signature_encoding_is_guarded() {
+        let sig = signature();
+        let raw = PortableRawSignature {
+            raw_ps_sig: sig.ps_sig,
+            cmi_longident_names: sig.cmi_longident_names,
+            raw_type_graph: sig.type_graph,
+            raw_locations: sig.locations,
+        };
+        let _guard = SignaturePublication::begin();
+        Encoded::encode(&raw);
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn summary_construction_is_guarded() {
+        let _guard = SignaturePublication::begin();
+        crate::cmi::item_deps::SignatureSummary::of("Guarded", &signature());
     }
 }

@@ -9996,7 +9996,7 @@ fn check_usage_of_path_of_substituted_item(
                 if let Some(param_type) = param_type {
                     check_module_type(tctx, env, paths, param_type, loc, lid)?;
                 }
-                let mut result_env = env.clone_preserve_id();
+                let mut result_env = env.clone();
                 result_env.add_module_arg(
                     *param,
                     empty_module_decl(default_module_type(param_type.as_deref().cloned())),
@@ -10010,7 +10010,7 @@ fn check_usage_of_path_of_substituted_item(
         }
     }
 
-    let mut iter_env = env.clone_preserve_id();
+    let mut iter_env = env.clone();
     for item in signature {
         crate::types::includemod::add_sig_item_to_env(tctx.type_ctx, item, &mut iter_env);
     }
@@ -12057,7 +12057,7 @@ fn translate_module_type_to_decl_with_typed_hint<'a>(
                         )
                         .is_none()
                         {
-                            let lookup_env = sig_env.clone_preserve_id();
+                            let lookup_env = sig_env.clone();
                             let _ = crate::types::typecore::open_module_lid_components_into_env(
                                 open_lid,
                                 arena,
@@ -12442,7 +12442,7 @@ fn approx_modtype_rec<'a>(
                         crate::types::env::OpenLookupKind::Module,
                         Some(od.popen_lid.loc),
                     );
-                    let lookup_env = sig_env.clone_preserve_id();
+                    let lookup_env = sig_env.clone();
                     let _ = crate::types::typecore::open_module_lid_components_into_env(
                         open_lid,
                         arena,
@@ -16033,7 +16033,7 @@ pub fn transl_signature<'a>(
                 ) {
                     path
                 } else if let Some(path) = {
-                    let lookup_env = sig_env.clone_preserve_id();
+                    let lookup_env = sig_env.clone();
                     crate::types::typecore::open_module_lid_components_into_env(
                         open_lid,
                         arena,
@@ -16154,7 +16154,7 @@ fn type_structure_unscoped<'a>(
 ) -> TypeModResult<(Structure, Env)> {
     let mut typed_items = Vec::new();
     let mut sig_items = Vec::new();
-    let mut current_env = env.clone_preserve_id();
+    let mut current_env = env.clone();
     let mut names = Names::default();
 
     for item in items {
@@ -16195,7 +16195,7 @@ fn closed_modtype(
         crate::types::decl::ModuleType::MtyIdent(_)
         | crate::types::decl::ModuleType::MtyAlias(_, _) => true,
         crate::types::decl::ModuleType::MtySignature(sig) => {
-            let mut sig_env = env.clone_preserve_id();
+            let mut sig_env = env.clone();
             for item in sig.iter() {
                 crate::types::includemod::add_sig_item_to_env(ctx, item, &mut sig_env);
             }
@@ -16207,7 +16207,7 @@ fn closed_modtype(
             param_type,
             result,
         } => {
-            let mut functor_env = env.clone_preserve_id();
+            let mut functor_env = env.clone();
             functor_env.add_module_arg(
                 *param,
                 crate::types::decl::ModuleDeclaration {
@@ -19378,7 +19378,7 @@ fn type_structure_item<'a>(
                 // table from env.ml:669-678.
                 path
             } else if let Some(path) = {
-                let lookup_env = env.clone_preserve_id();
+                let lookup_env = env.clone();
                 crate::types::typecore::open_module_lid_components_into_env(
                     open_lid,
                     arena,

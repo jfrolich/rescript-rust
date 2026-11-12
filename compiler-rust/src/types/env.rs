@@ -1417,7 +1417,7 @@ pub struct ScopeId(u64);
 /// The environment is immutable - extending it creates a new environment.
 #[derive(Debug)]
 pub struct Env {
-    /// Unique identity for this environment instance.
+    /// Identity of this environment version, shared by unchanged clones.
     /// Incremented when bindings are added, to detect env changes.
     id: u64,
 
@@ -1490,10 +1490,8 @@ struct EnvData {
 impl Clone for Env {
     fn clone(&self) -> Self {
         Env {
-            // Keep clone-induced env changes visible to abbreviation caching by
-            // default. Callers that are only snapshotting the same logical env
-            // must opt into `clone_preserve_id()`.
-            id: next_env_id(),
+            // A clone is the same version until either copy is extended.
+            id: self.id,
             scope_id: self.scope_id,
             data: self.data.clone(),
         }
@@ -1519,6 +1517,7 @@ impl Env {
     /// `Env.implicit_coercion env` (env.ml:502-503).
     pub fn implicit_coercion(&self) -> Env {
         let mut env = self.clone();
+        env.bump_id();
         env.data_mut().flags.implicit_coercion = true;
         env
     }
@@ -1535,9 +1534,7 @@ impl Env {
 
     /// Create an empty environment.
     pub fn empty() -> Self {
-        // Cloning shares the empty persistent-map roots and assigns a fresh
-        // env id, so it is equivalent to building a new empty env without
-        // allocating a root node per table.
+        // Cloning shares the empty version and its persistent-map roots.
         thread_local! {
             static EMPTY_ENV: Env = Env::build_empty();
         }
@@ -1624,20 +1621,9 @@ impl Env {
             .collect()
     }
 
-    /// Unique identifier for this environment instance.
+    /// Identity of this environment version.
     pub fn id(&self) -> EnvId {
         EnvId(self.id)
-    }
-
-    /// Clone an environment while preserving its current identity.
-    /// This is for storing a snapshot of the same logical env value rather
-    /// than creating a fresh env instance.
-    pub fn clone_preserve_id(&self) -> Self {
-        Env {
-            id: self.id,
-            scope_id: self.scope_id,
-            data: self.data.clone(),
-        }
     }
 
     /// Mark this environment as changed.
@@ -2117,6 +2103,7 @@ impl Env {
     /// Record that the labels installed for the record type `id` share the
     /// array `lbl_all` (the labels half of `store_type`, env.ml:1561-1569).
     pub fn add_type_label_family(&mut self, id: Ident, lbl_all: super::decl::LabelArrayRef) {
+        self.bump_id();
         self.data_mut().type_label_families.insert(id, lbl_all);
     }
 
@@ -2166,7 +2153,7 @@ impl Env {
         component_path: Path,
         parent_context: Option<(Path, Arc<Signature>)>,
     ) {
-        let seed_env = self.clone_preserve_id();
+        let seed_env = self.clone();
         let stored_components = Rc::new(
             super::env_lazy::StoredModuleComponents::new_with_parent_context(
                 seed_env,
@@ -2292,9 +2279,7 @@ impl Env {
 
     pub(crate) fn mark_implicit_open_root(&mut self, name: &str) {
         self.data_mut().implicit_open_roots.insert(name.to_string());
-        // Only path resolution reads this, so keep `id` unchanged.
-        self.scope_id = next_env_id();
-        self.data_mut().scope_caches = std::rc::Rc::default();
+        self.bump_scope();
     }
 
     pub(crate) fn path_starts_with_implicit_opened_component(&self, path: &Path) -> bool {
@@ -3114,6 +3099,12 @@ fn build_initial_env(ctx: &TypeContext) -> Env {
     env
 }
 
+/// The environment as a version log, built beside the tables and compared
+/// with them (docs/CHECKER_REDESIGN.md, H.2.8 step 4).
+#[cfg(test)]
+#[path = "env_log.rs"]
+mod env_log;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3121,10 +3112,10 @@ mod tests {
     #[test]
     fn identities_and_open_slots_remain_independent() {
         let mut env = Env::empty();
-        let snapshot = env.clone_preserve_id();
+        let snapshot = env.clone();
         let clone = env.clone();
         assert_eq!(env.id(), snapshot.id());
-        assert_ne!(env.id(), clone.id());
+        assert_eq!(env.id(), clone.id());
         assert_eq!(env.scope_id(), clone.scope_id());
         let id = Ident::create_persistent("x");
         let desc = ValueDescription {
@@ -3156,7 +3147,7 @@ mod tests {
                 shadowed: true
             })
         );
-        let opened = env.clone_preserve_id();
+        let opened = env.clone();
         env.add_prebuilt_open_layers(root, &layers, None);
         assert_eq!(env.open_slot_use(OpenLookupKind::Value, "x"), None);
         assert_eq!(
@@ -3167,6 +3158,107 @@ mod tests {
             7
         );
         assert!(snapshot.find_value("x").is_err());
+    }
+
+    #[test]
+    fn extending_retained_clones_changes_only_the_extended_version() {
+        use super::super::decl::{LabelArrayRef, ModuleType, ValueKind};
+        use crate::context::IdGenerator;
+
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let mut source = initial_env(&ctx);
+        let id = Ident::create_local("x");
+        let value = ValueDescription {
+            val_type: TypeExprRef(0),
+            val_kind: ValueKind::ValReg,
+            val_loc: crate::types::DeclLoc::none(),
+            val_attributes: Default::default(),
+            val_path: None,
+        };
+        source.add_value(id, value.clone());
+        let retained = source.clone();
+        let original_id = source.id();
+        let declaration = source.find_type("int").unwrap().clone();
+        let module = ModuleDeclaration {
+            md_type: ModuleType::MtySignature(Arc::new(vec![])),
+            md_attributes: vec![],
+            md_loc: crate::types::DeclLoc::none(),
+            md_path: None,
+        };
+        // Each operation starts from the same retained version, including
+        // after other branches have already extended it.
+        macro_rules! extends {
+            ($env:ident, $operation:expr) => {{
+                let mut $env = retained.clone();
+                assert_eq!($env.id(), original_id);
+                $operation;
+                assert_ne!($env.id(), original_id);
+                assert_eq!(retained.id(), original_id);
+                assert_eq!(source.id(), original_id);
+            }};
+        }
+        extends!(env, env.add_value(id, value.clone()));
+        extends!(
+            env,
+            assert!(env.update_value_type_by_name("x", TypeExprRef(1)))
+        );
+        extends!(env, env.add_type(id, declaration.clone()));
+        extends!(env, env.store_type(&ctx, id, declaration.clone()));
+        extends!(
+            env,
+            assert!(
+                env.update_type_variance(super::super::predef::ident_int(), vec![])
+                    .is_some()
+            )
+        );
+        extends!(env, env.add_type_label_family(id, LabelArrayRef(0)));
+        extends!(
+            env,
+            env.add_constructor(id, source.find_constructor("Some").unwrap().clone())
+        );
+        extends!(
+            env,
+            env.add_modtype(
+                id,
+                ModtypeDeclaration {
+                    mtd_type: None,
+                    mtd_attributes: vec![],
+                    mtd_loc: crate::types::DeclLoc::none(),
+                }
+            )
+        );
+        extends!(
+            env,
+            env.add_label(id, LabelDescription {
+                lbl_name: crate::name::Name::new("field"),
+                lbl_runtime_name: crate::name::Name::new("field"),
+                lbl_res: TypeExprRef(0),
+                lbl_arg: TypeExprRef(0),
+                lbl_mut: crate::types::MutableFlag::Immutable,
+                lbl_optional: false,
+                lbl_pos: 0,
+                lbl_all: LabelArrayRef::NONE,
+                lbl_repres: crate::types::RecordRepresentation::RecordRegular,
+                lbl_private: PrivateFlag::Public,
+                lbl_loc: crate::types::DeclLoc::none(),
+            })
+        );
+        extends!(env, env.add_module(id, module.clone()));
+        extends!(env, env.add_module_arg(id, module.clone()));
+        extends!(
+            env,
+            env.add_local_constraint(Path::pident(id), declaration.clone())
+        );
+        extends!(env, env.add_gadt_instance_level());
+        extends!(env, env.mark_implicit_open_root("Stdlib"));
+        let coerced = retained.implicit_coercion();
+        assert_ne!(coerced.id(), original_id);
+        assert!(!retained.is_implicit_coercion());
+        assert!(coerced.is_implicit_coercion());
+        assert_eq!(retained.find_value("x").unwrap().val_type, TypeExprRef(0));
+        assert!(retained.type_label_family(&id).is_none());
+        assert!(retained.find_module("x").is_err());
+        assert!(!retained.has_local_constraints());
     }
 
     #[test]

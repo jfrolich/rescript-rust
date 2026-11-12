@@ -395,6 +395,31 @@ impl<'a> ShapeImport<'a> {
         }
     }
 
+    /// An import whose allocations are given: the inverse of an earlier
+    /// import, built from [`Self::into_maps`] with keys and values swapped.
+    /// `scopes` then holds every scope the earlier import produced.
+    pub(crate) fn with_allocations(
+        scopes: &'a crate::fast_hash::AHashMap<u64, u64>,
+        allocations: crate::fast_hash::AHashMap<ShapeAllocation, ShapeAllocation>,
+    ) -> Self {
+        Self {
+            allocations,
+            ..Self::new(scopes)
+        }
+    }
+
+    /// What the import mapped, beyond the location table's scopes it was
+    /// given: the scopes of attribute strings outside that table, and the
+    /// allocations.
+    pub(crate) fn into_maps(
+        self,
+    ) -> (
+        crate::fast_hash::AHashMap<u64, u64>,
+        crate::fast_hash::AHashMap<ShapeAllocation, ShapeAllocation>,
+    ) {
+        (self.other_scopes, self.allocations)
+    }
+
     fn allocation(&mut self, allocation: ShapeAllocation) -> ShapeAllocation {
         if allocation.is_predef() {
             return allocation;

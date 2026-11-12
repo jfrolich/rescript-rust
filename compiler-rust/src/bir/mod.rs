@@ -13,6 +13,10 @@
 //! repair at the first unchanged ancestor, and walks the capture ancestor chain
 //! at most once when new uncaptured free uses require it.
 pub mod bridge;
+pub mod bridge_j;
+pub mod engine;
+pub mod l;
+pub mod replay;
 pub mod shadow;
 mod dump;
 mod edit;
@@ -39,6 +43,7 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     death_candidates: Vec<NodeId>,
+    deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
     capture_boundaries: usize,
     weighted_switches: usize,
@@ -182,8 +187,35 @@ impl Bir {
         let (start, len) = self.pools.strings[id.index()];
         &self.pools.text[start as usize..(start + len) as usize]
     }
+    /// Intern a float with one hash lookup of its spelling (text interning).
+    /// A dense string-indexed cache avoids a second constant hash lookup and
+    /// parses each spelling once. Reading its value is one constant-array read.
+    pub fn intern_float(&mut self, spelling: &str) -> Result<ConstId, bridge::Unsupported> {
+        let text = self.intern_text(spelling);
+        self.pools.floats.resize(self.pools.strings.len(), None);
+        if let Some(id) = self.pools.floats[text.index()] {
+            return Ok(id);
+        }
+        let value = crate::ocaml_float::float_of_string(spelling)
+            .ok_or(bridge::Unsupported("invalid float constant spelling"))?;
+        Ok(self.intern_const(Constant::Float(FloatConstant {
+            spelling: text,
+            bits: value.to_bits(),
+        })))
+    }
     /// Intern a constant. Compound fields must already exist.
     pub fn intern_const(&mut self, value: Constant) -> ConstId {
+        if let Constant::Float(ref float) = value {
+            self.pools.floats.resize(self.pools.strings.len(), None);
+            if let Some(id) = self.pools.floats[float.spelling.index()] {
+                return id;
+            }
+            let id = ConstId(index(self.pools.consts.len()));
+            self.pools.floats[float.spelling.index()] = Some(id);
+            self.pools.consts.push(value);
+            self.pools.const_keys.push(Vec::new());
+            return id;
+        }
         let key = value.key();
         let hash = self.pools.hash_builder.hash_one(&key);
         if let Some(&(_, id)) = self.pools.const_index.find(hash, |&(_, id)| {

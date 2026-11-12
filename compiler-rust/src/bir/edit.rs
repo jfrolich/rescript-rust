@@ -9,6 +9,14 @@ impl Bir {
     /// detached live roots. `aux` carries the operation's small enum/arity payload.
     /// No child handles may be shared, including through different list entries.
     pub fn new_node(&mut self, view: View<'_>, aux: u16) -> NodeId {
+        self.new_node_in(view, aux, 1)
+    }
+
+    /// [`Self::new_node`] for a root that will fill a slot of use weight
+    /// `weight` ([`Self::weight_of`] of the slot). Children that already carry
+    /// the weight the new node gives them (see [`Self::detach`]) are attached
+    /// without a walk; a child of another weight has its uses recounted.
+    pub fn new_node_in(&mut self, view: View<'_>, aux: u16, weight: u32) -> NodeId {
         if let View::Var { var } = view {
             assert!(
                 !self
@@ -40,13 +48,24 @@ impl Bir {
         self.bind(id);
         for child in children {
             debug_assert!(self.parents[child.index()].is_none(), "shared child");
-            self.parents[child.index()] = Some(id);
-            let multiplier = self.edge_weight(id, child);
-            if multiplier != 1 && !self.bulk {
-                self.adjust_counts(child, i64::from(multiplier) - 1);
+            if !self.bulk {
+                // Read before linking: a detached root reports the weight it carries.
+                let have = self.weight(child);
+                let want = weight
+                    .checked_mul(self.edge_weight(id, child))
+                    .expect("Bir use weight overflow");
+                if have != want {
+                    self.adjust_counts(child, i64::from(want) - i64::from(have));
+                }
             }
+            self.parents[child.index()] = Some(id);
         }
-        self.adjust_direct(id, 1);
+        if !self.bulk {
+            if weight != 1 {
+                self.weights[id.index()] = weight;
+            }
+            self.adjust_direct(id, i64::from(weight));
+        }
         self.repair(id);
         if !self.bulk {
             self.capture_created(id);
@@ -66,12 +85,19 @@ impl Bir {
     /// Finish bulk construction with one top-down capture analysis. Existing
     /// conservative flags are retained, just as in incremental construction.
     pub fn finish_bulk(&mut self, root: NodeId) {
-        assert!(self.bulk, "bulk construction not active");
-        self.mark_captures(root);
-        self.bulk = false;
+        self.try_finish_bulk(root).expect("Bir bulk count overflow");
     }
 
-    fn mark_captures(&mut self, root: NodeId) {
+    /// Finish an imported tree, reporting unrepresentable weighted counts.
+    /// On error the partially finalized arena must be discarded.
+    pub fn try_finish_bulk(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
+        assert!(self.bulk, "bulk construction not active");
+        self.mark_captures(root)?;
+        self.bulk = false;
+        Ok(())
+    }
+
+    fn mark_captures(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
         let epoch = self.next_capture_epoch();
         let mut stack = vec![(root, 0u32, 1u32)];
         while let Some((id, depth, weight)) = stack.pop() {
@@ -99,9 +125,7 @@ impl Bir {
                 }
             }
             self.weights[id.index()] = weight;
-            if weight != 1 {
-                self.adjust_direct(id, i64::from(weight) - 1);
-            }
+            self.try_adjust_direct(id, i64::from(weight))?;
             for child in children.into_iter().rev() {
                 let enters = match boundary {
                     Some(None) => true,
@@ -109,10 +133,11 @@ impl Bir {
                     None => false,
                 };
                 let child_weight = weight.checked_mul(self.edge_weight(id, child))
-                    .expect("Bir use weight overflow");
+                    .ok_or(bridge::Unsupported("use weight outside u32"))?;
                 stack.push((child, depth + u32::from(enters), child_weight));
             }
         }
+        Ok(())
     }
 
     fn allocate(&mut self, node: Node) -> NodeId {
@@ -403,7 +428,9 @@ impl Bir {
     }
     fn weight(&mut self, mut id: NodeId) -> u32 {
         // Ordinary modules need no ancestor walk, however deep their Let spine.
-        if self.weighted_switches == 0 {
+        // A cached weight still wins: a detached root may carry the weight of
+        // the slot it came from (`detach`).
+        if self.weighted_switches == 0 && self.weights[id.index()] == 0 {
             return 1;
         }
         let requested = id;
@@ -437,12 +464,16 @@ impl Bir {
         weight
     }
     fn adjust_direct(&mut self, id: NodeId, delta: i64) {
+        self.try_adjust_direct(id, delta)
+            .expect("Bir use count overflow/underflow");
+    }
+    fn try_adjust_direct(&mut self, id: NodeId, delta: i64) -> Result<(), bridge::Unsupported> {
         match self.view(id) {
             View::Var { var } => {
                 self.vars.uses[var.index()] =
                     u32::try_from(i64::from(self.vars.uses[var.index()]) + delta)
-                        .expect("Bir use count overflow/underflow");
-                if delta < 0 && self.vars.uses(var) == 0 {
+                        .map_err(|_| bridge::Unsupported("use count outside u32"))?;
+                if delta < 0 && self.vars.uses(var) == 0 && !self.deaths_deferred {
                     if let Some(binder) = self.vars.binder(var) {
                         self.death_candidates.push(binder);
                     }
@@ -457,10 +488,11 @@ impl Bir {
                     .expect("unknown static exit label");
                 let header = &mut self.pools.catches[header_id.index()];
                 header.uses = u32::try_from(i64::from(header.uses) + delta)
-                    .expect("Bir exit count overflow/underflow");
+                    .map_err(|_| bridge::Unsupported("use count outside u32"))?;
             }
             _ => {}
         }
+        Ok(())
     }
     fn adjust_counts(&mut self, root: NodeId, delta: i64) {
         let mut stack = std::mem::take(&mut self.count_stack);
@@ -759,6 +791,11 @@ impl Bir {
 
     /// Overwrite a live slot with a detached tree or a descendant of that slot.
     /// The replacement handle is invalid afterwards; the target handle survives.
+    ///
+    /// Cost: the removed nodes, plus the replacement's subtree when its use
+    /// weight changes (it enters or leaves a doubled switch default) or, for a
+    /// detached replacement in a unit with capture boundaries, one walk of it
+    /// for the capture flags. [`Self::replace_local`] avoids the second walk.
     pub fn replace(&mut self, target: NodeId, replacement: NodeId) {
         assert_ne!(target, replacement);
         self.node(target);
@@ -772,10 +809,38 @@ impl Bir {
                 || !self.is_descendant(target, replacement),
             "replacement creates a cycle"
         );
-        let target_weight = self.weight(target);
-        let replacement_weight = self.weight(replacement);
-        self.adjust_counts(replacement, -i64::from(replacement_weight));
+        self.replace_impl(target, replacement, false);
+    }
+
+    /// [`Self::replace`] for a rewrite that moves no variable use under a
+    /// function or loop it was not under before: the replacement is a
+    /// descendant of the target, or a detached tree built from nodes detached
+    /// from the target's subtree and from new nodes without variable uses.
+    /// Capture flags are then already right, so the cost is the removed nodes
+    /// only, unless the kept content changes use weight.
+    pub fn replace_local(&mut self, target: NodeId, replacement: NodeId) {
+        assert_ne!(target, replacement);
+        self.node(target);
+        self.node(replacement);
+        self.replace_impl(target, replacement, true);
+    }
+
+    fn replace_impl(&mut self, target: NodeId, replacement: NodeId, local: bool) {
+        let descendant = self.parents[replacement.index()].is_some();
+        let (target_weight, replacement_weight) = if self.bulk {
+            (1, 1)
+        } else {
+            (self.weight(target), self.weight(replacement))
+        };
+        // Content that keeps its weight keeps every count and cached weight
+        // below it: only a change of weight needs the two recounting walks.
+        let recount = target_weight != replacement_weight;
+        if recount {
+            self.adjust_counts(replacement, -i64::from(replacement_weight));
+        }
         let parent = self.parents[target.index()];
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC;
+        let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];
         let cold = self.cold.get(replacement.index()).copied().flatten();
@@ -795,16 +860,84 @@ impl Bir {
             self.cold[replacement.index()] = None;
         }
         self.bind(target);
-        self.adjust_counts(target, i64::from(target_weight));
-        // The slot keeps its parent edge and therefore its incoming weight,
-        // even when its contents change kind. Descendant caches were cleared
-        // above; no node outside the replaced subtree changed weight.
-        self.weights[target.index()] = target_weight;
+        if recount {
+            self.adjust_counts(target, i64::from(target_weight));
+        }
+        if !self.bulk {
+            // The slot keeps its parent edge and therefore its incoming weight,
+            // even when its contents change kind. Descendant caches were cleared
+            // by a recount; no node outside the replaced subtree changed weight.
+            self.weights[target.index()] = target_weight;
+        }
         self.repair(target);
         if let Some(parent) = parent {
-            self.repair(parent);
+            // The parent's effects read its children's two effect bits and,
+            // for a primitive, the constant in second position. When neither
+            // changed, only its binding facts can have: no scan of siblings.
+            let effects_changed =
+                self.nodes[target.index()].flags().0 & effect_bits != effects_before;
+            let second_operand = matches!(
+                self.view(parent),
+                View::Prim { args, .. } if args.get(1) == Some(&target)
+            );
+            if effects_changed || second_operand || self.update_facts(parent) {
+                self.repair(parent);
+            }
         }
-        self.capture_moved(target);
+        // Moving a subtree up to an ancestor's slot removes boundaries between
+        // its uses and their binders and adds none, so `CAPTURED` stays right.
+        if !self.bulk && !descendant && !local {
+            self.capture_moved(target);
+        }
+        self.drain_dead();
+    }
+
+    /// Detach an attached node so that new content can be built around it
+    /// with [`Self::new_node_in`]. Its old parent still names it and must be
+    /// released, or replaced, before the tree is read or validated again:
+    /// releasing skips children that were detached or adopted elsewhere. The
+    /// detached root keeps its use weight, so reattaching it in a slot of the
+    /// same weight costs no walk.
+    pub fn detach(&mut self, node: NodeId) {
+        self.node(node);
+        assert!(
+            self.parents[node.index()].is_some(),
+            "detach needs an attached node"
+        );
+        if !self.bulk {
+            // Pin the weight before the parent link that derives it is cut.
+            let weight = self.weight(node);
+            self.weights[node.index()] = weight;
+        }
+        self.parents[node.index()] = None;
+        self.tails_valid = false;
+    }
+
+    /// The use weight of a slot: 1, doubled for each switch default above it
+    /// that today's counts visit twice.
+    pub fn weight_of(&mut self, node: NodeId) -> u32 {
+        if self.bulk { 1 } else { self.weight(node) }
+    }
+
+    /// Stop marking unused pure bindings dead as their last use disappears.
+    /// Rounds that must see the tree as today's passes do (a dead binding
+    /// still has its size and its place) keep this on.
+    pub fn defer_deaths(&mut self) {
+        self.deaths_deferred = true;
+        self.death_candidates.clear();
+    }
+
+    /// Mark every unused pure binding dead, cascading, and resume marking
+    /// them as edits remove last uses. One scan of the variable table.
+    pub fn resume_deaths(&mut self) {
+        self.deaths_deferred = false;
+        for var in 0..self.vars.len() {
+            if self.vars.uses[var] == 0 {
+                if let Some(binder) = self.vars.binder[var] {
+                    self.death_candidates.push(binder);
+                }
+            }
+        }
         self.drain_dead();
     }
 
@@ -820,7 +953,7 @@ impl Bir {
     }
     fn release_nodes(&mut self, root: NodeId, keep: Option<NodeId>, free_root: bool) {
         self.tails_valid = false;
-        let root_weight = self.weight(root);
+        let root_weight = if self.bulk { 1 } else { self.weight(root) };
         let mut stack = std::mem::take(&mut self.release_stack);
         debug_assert!(stack.is_empty());
         stack.push((root, root_weight));
@@ -829,6 +962,11 @@ impl Bir {
                 continue;
             }
             for child in self.view(id).children() {
+                // A child detached from this node, or adopted by another,
+                // is no longer part of what is released (`detach`).
+                if self.parents[child.index()] != Some(id) {
+                    continue;
+                }
                 stack.push((
                     child,
                     weight
@@ -836,7 +974,9 @@ impl Bir {
                         .expect("Bir use weight overflow"),
                 ));
             }
-            self.adjust_direct(id, -i64::from(weight));
+            if !self.bulk {
+                self.adjust_direct(id, -i64::from(weight));
+            }
             self.unbind(id);
             self.register_kind(self.nodes[id.index()], false);
             self.weights[id.index()] = 0;
@@ -2844,24 +2984,24 @@ mod incremental_cost_tests {
     }
 
     #[test]
-    fn hashed_payloads_preserve_float_bits_and_primitive_identity() {
+    fn hashed_payloads_preserve_float_spelling_and_primitive_identity() {
         use std::hash::{Hash, Hasher};
         let mut b = Bir::default();
-        let pos = b.intern_const(Constant::float(0.0));
-        let neg = b.intern_const(Constant::float(-0.0));
+        let pos = b.intern_float("0.").unwrap();
+        let neg = b.intern_float("-0.").unwrap();
         assert_ne!(pos, neg);
-        let nan = Constant::float(f64::from_bits(0x7ff8_0000_0000_0001));
-        assert_eq!(nan, nan.clone());
-        let id = b.intern_const(nan.clone());
-        assert_eq!(id, b.intern_const(nan.clone()));
-        assert_ne!(
-            id,
-            b.intern_const(Constant::float(f64::from_bits(0x7ff8_0000_0000_0002)))
-        );
+        let id = b.intern_float("nan").unwrap();
+        assert_eq!(id, b.intern_float("nan").unwrap());
+        assert_ne!(id, b.intern_float("NaN").unwrap());
+        let nan = b.constant(id);
+        let Constant::Float(value) = nan else {
+            panic!("not a float")
+        };
+        assert!(value.value().is_nan());
         let mut h1 = std::collections::hash_map::DefaultHasher::new();
         let mut h2 = std::collections::hash_map::DefaultHasher::new();
         nan.hash(&mut h1);
-        nan.clone().hash(&mut h2);
+        nan.hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
         let prim = PrimPayload {
             primitive: Primitive::Paddint,
