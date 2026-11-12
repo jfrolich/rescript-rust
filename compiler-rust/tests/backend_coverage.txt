@@ -18,13 +18,13 @@
   },
   "lambda-alias": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
-      "identical": 113,
-      "units": 113,
+      "identical": 226,
+      "units": 226,
       "unsupported": {}
     },
     "tests/tests": {
@@ -35,8 +35,8 @@
   },
   "lambda-bridge": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -52,8 +52,8 @@
   },
   "lambda-exits": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -69,8 +69,8 @@
   },
   "lambda-flatten": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -86,8 +86,8 @@
   },
   "lambda-norm": {
     "fixtures": {
-      "identical": 480,
-      "units": 480,
+      "identical": 593,
+      "units": 593,
       "unsupported": {}
     },
     "runtime": {
@@ -103,26 +103,27 @@
   },
   "lower": {
     "fixtures": {
-      "identical": 120,
+      "identical": 195,
       "shared_catch_only": 0,
-      "units": 480,
+      "units": 593,
       "unsupported": {
-        "external": 312,
-        "let rec": 8,
-        "loop": 16,
-        "try": 24
+        "assign": 1,
+        "external": 334,
+        "let rec": 10,
+        "loop": 19,
+        "try": 34
       }
     },
     "runtime": {
-      "identical": 75,
+      "identical": 150,
       "shared_catch_only": 0,
-      "units": 113,
+      "units": 226,
       "unsupported": {
-        "assign": 1,
-        "external": 22,
-        "let rec": 2,
-        "loop": 3,
-        "try": 10
+        "assign": 2,
+        "external": 44,
+        "let rec": 4,
+        "loop": 6,
+        "try": 20
       }
     },
     "tests/tests": {
