@@ -15,7 +15,13 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::SystemTime;
 
+pub(super) enum PrepEvent {
+    Module(ReadInput),
+    Outputs { name: String, success: bool },
+}
+
 pub(super) struct ReadInput {
+    pub success: bool,
     pub name: String,
     pub loaded: Option<AHashSet<Name>>,
     pub pending: Option<PendingReads>,
@@ -41,7 +47,20 @@ struct Waiting {
     remaining: usize,
 }
 
+struct PackageWriter {
+    package: super::packages::Package,
+    seed: Option<(PackageState, Vec<(String, Vec<u8>)>)>,
+    record: Option<state_db::MemoryRecord>,
+    remaining: usize,
+    outputs_remaining: usize,
+    valid: bool,
+    previous_outputs: Option<AHashSet<String>>,
+    outputs: String,
+    publication: Option<std::thread::JoinHandle<bool>>,
+}
+
 pub(super) struct FreshRows {
+    writers: AHashMap<String, PackageWriter>,
     digests: UnitDigests,
     sources: AHashMap<String, Source>,
     module_packages: AHashMap<String, String>,
@@ -56,7 +75,7 @@ pub(super) struct FreshRows {
 }
 
 pub(super) struct FinishedRows {
-    pub packages: AHashMap<String, PackageState>,
+    pub packages: AHashSet<String>,
     pub deps: AHashMap<String, Dependencies>,
     pub inputs: Vec<ReadInput>,
 }
@@ -77,7 +96,7 @@ impl FreshRows {
         }
         let names = state.modules.keys().cloned().collect();
         let digests = UnitDigests::for_preparation(state.snapshot_module_registry(), &names);
-        let sources = state
+        let sources: AHashMap<String, Source> = state
             .modules
             .iter()
             .filter_map(|(name, module)| {
@@ -117,7 +136,34 @@ impl FreshRows {
                 .parse_warnings
                 .insert(key.clone(), warning.clone());
         }
+        let source_map_args = super::compiler_info::source_map_args(state);
+        let writers = packages.iter_mut().map(|(name, record)| {
+            // Snapshot only the metadata/runtime that whole-record replacement
+            // must preserve. This runs before compilation; the worker does no
+            // file IO until publication.
+            let package = &state.packages[name];
+            record.meta = state_db::read_meta(package).unwrap_or_default();
+            let runtime = record.meta.get(state_db::META_RUNTIME_KEY)
+                .and_then(|key| state_db::read_runtime_interfaces(&state_db::path(package), key))
+                .unwrap_or_default();
+            incremental::fill_record_metadata(state, name, record);
+            record.meta.insert(state_db::META_BUILD_OK.to_string(), "1".to_string());
+            if let Some(entries) = super::compiler_info::recorded_entries(state, package, &source_map_args) {
+                record.meta.extend(entries.into_iter().map(|(key, value)| (key.to_string(), value)));
+            }
+            let outputs = record.meta.get(state_db::META_OUTPUTS).cloned().unwrap_or_default();
+            let count = sources.values().filter(|source: &&Source| source.package == *name).count();
+            let seed = std::mem::take(record);
+            record.partial = true;
+            (name.clone(), PackageWriter {
+                package: package.clone(), seed: Some((seed, runtime)), record: None,
+                remaining: count, outputs_remaining: count, valid: true,
+                previous_outputs: state.recorded_outputs.get(name).cloned(), outputs,
+                publication: None,
+            })
+        }).collect();
         Some(Self {
+            writers,
             digests,
             sources,
             packages,
@@ -136,12 +182,74 @@ impl FreshRows {
         })
     }
 
+    /// Create schemas and start transactions on the preparation thread.
+    pub(super) fn start(&mut self) {
+        for writer in self.writers.values_mut() {
+            let (seed, runtime) = writer.seed.take().expect("unstarted writer");
+            match state_db::MemoryRecord::new(&seed, &runtime) {
+                Ok(record) => writer.record = Some(record),
+                Err(err) => {
+                    log::warn!("Could not prepare {}: {err}", writer.package.name);
+                    writer.valid = false;
+                }
+            }
+        }
+        let empty: Vec<_> = self.writers.iter().filter(|(_, writer)| writer.remaining == 0)
+            .map(|(name, _)| name.clone()).collect();
+        for name in empty { self.publish_if_ready(&name); }
+    }
+
+    fn flush(&mut self, package: &str) {
+        let rows = self.packages.get_mut(package).expect("known package");
+        let writer = self.writers.get_mut(package).expect("known writer");
+        if let Some(record) = &writer.record {
+            if let Err(err) = record.insert(rows) {
+                log::warn!("Could not prepare {package}: {err}");
+                writer.valid = false;
+                writer.record = None;
+            }
+        }
+        *rows = PackageState { partial: true, ..PackageState::default() };
+    }
+
+    pub(super) fn outputs_complete(&mut self, name: &str, success: bool) {
+        let Some(source) = self.sources.get(name) else { return };
+        let package = source.package.clone();
+        let writer = self.writers.get_mut(&package).expect("known writer");
+        writer.outputs_remaining -= 1;
+        writer.valid &= success;
+        self.publish_if_ready(&package);
+    }
+
+    fn publish_if_ready(&mut self, name: &str) {
+        let writer = self.writers.get_mut(name).expect("known writer");
+        if !writer.valid || writer.remaining != 0 || writer.outputs_remaining != 0 {
+            return;
+        }
+        let Some(record) = writer.record.take() else { return };
+        let package = writer.package.clone();
+        let previous = writer.previous_outputs.take();
+        let outputs = std::mem::take(&mut writer.outputs);
+        writer.publication = Some(std::thread::spawn(move || {
+            super::clean::remove_obsolete_outputs(&package, previous.as_ref(), &outputs.lines().collect());
+            match record.publish(&package) {
+                Ok(()) => true,
+                Err(err) => {
+                    log::warn!("Could not publish {}: {err}", package.name);
+                    false
+                }
+            }
+        }));
+    }
+
     pub(super) fn items(&self, name: &str) -> Option<Arc<state_db::ItemDigests>> {
         self.digests.get(name).map(|(_, items)| items)
     }
 
     pub(super) fn complete(&mut self, input: ReadInput, interface: Option<StoredInterface>) {
         let name = Name::new(&input.name);
+        let package = self.module_packages[&input.name].clone();
+        self.writers.get_mut(&package).expect("known writer").valid &= input.success;
         self.completed.insert(name);
         if let Some(interface) = interface {
             let package = &self.module_packages[&input.name];
@@ -175,12 +283,14 @@ impl FreshRows {
                     }
                 }
             });
+            self.flush(&package);
             self.advance(Waiting {
                 input,
                 stage: ReadStage::Direct,
                 remaining: 0,
             });
         } else {
+            self.flush(&package);
             self.inputs.push(input);
         }
         for dependent in self.waiters.remove(&name).unwrap_or_default() {
@@ -281,7 +391,14 @@ impl FreshRows {
                                 imports: Some(state_db::Imports::from_text(imports)),
                             },
                         );
+                    } else {
+                        let package = &self.sources[&job.input.name].package;
+                        self.writers.get_mut(package).expect("known writer").valid = false;
                     }
+                    let package = self.sources[&job.input.name].package.clone();
+                    self.flush(&package);
+                    self.writers.get_mut(&package).expect("known writer").remaining -= 1;
+                    self.publish_if_ready(&package);
                     self.inputs.push(job.input);
                     return;
                 }
@@ -290,17 +407,14 @@ impl FreshRows {
     }
 
     pub(super) fn finish(mut self) -> FinishedRows {
-        // Errors or unpublished inputs can leave waiting rows. Their raw reads
-        // are returned for the conservative final-state path; never publish an
-        // incomplete set of precomputed rows as a successful package record.
-        let count: usize = self.packages.values().map(|p| p.modules.len()).sum();
-        if !self.waiting.is_empty() || count != self.sources.len() {
-            self.packages.clear();
-        }
+        let packages = self.writers.into_iter().filter_map(|(name, writer)| {
+            writer.publication.and_then(|handle| handle.join().ok())
+                .filter(|success| *success).map(|_| name)
+        }).collect();
         self.inputs
             .extend(self.waiting.into_values().map(|job| job.input));
         FinishedRows {
-            packages: self.packages,
+            packages,
             deps: self.deps,
             inputs: self.inputs,
         }

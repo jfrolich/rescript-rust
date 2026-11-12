@@ -89,17 +89,12 @@ pub fn write_in_process_record(
         return;
     }
     let mut prepared = std::mem::take(&mut *build_state.prepared_packages.lock().unwrap());
-    if !build_state.build_run.succeeded() || prepared.values().any(|record|
-        record.modules.keys().any(|name| !build_state.written_modules.contains(name)
-            || build_state.modules.get(name).is_none_or(|m| m.compile_dirty))) {
-        prepared.clear();
-    }
+    if !build_state.build_run.succeeded() { prepared.clear(); }
     let packages: Vec<_> = build_state.packages.iter()
-        .map(|(name, package)| (name, package, prepared.remove(name))).collect();
+        .filter(|(name, _)| !prepared.contains(*name)).collect();
     crate::build::phase_mark("record-digests");
-    // of_compiled itself uses Rayon. Initializing it lazily inside the package
-    // loop can reenter the same OnceLock when Rayon steals another package job.
-    let digests = packages.iter().any(|(_, _, record)| record.is_none())
+    // Resolve before entering Rayon: nested work must not reenter its OnceLock.
+    let digests = (!packages.is_empty())
         .then(|| build::incremental::UnitDigests::of_compiled(build_state));
     let compiles = build::incremental::CompileRecords::lock(build_state);
     // A successful one-shot build records the compiler identity with it
@@ -107,15 +102,9 @@ pub fn write_in_process_record(
     let source_map_args = build::compiler_info::source_map_args(build_state);
     let with_compiler_info =
         compiler_info_write == build::CompilerInfoWrite::WithRecord && build_state.build_run.succeeded();
-    packages.into_par_iter().for_each(|(package_name, package, prepared)| {
-            let mut record = match prepared {
-                Some(mut record) => {
-                    build::incremental::fill_record_metadata(build_state, package_name, &mut record);
-                    record
-                }
-                None => build::incremental::current_record(build_state, &compiles, package_name,
-                    digests.as_ref().expect("unprepared packages need final-state digests")),
-            };
+    packages.into_par_iter().for_each(|(package_name, package)| {
+            let mut record = build::incremental::current_record(build_state, &compiles, package_name,
+                digests.as_ref().expect("unprepared packages need final-state digests"));
             if with_compiler_info
                 && let Some(entries) =
                     build::compiler_info::recorded_entries(build_state, package, &source_map_args)
@@ -191,7 +180,7 @@ pub fn recorded_outputs(
 /// current configuration no longer produces (another suffix or package spec,
 /// genType turned off, or a removed source). GenType files are removed only
 /// when genType wrote them.
-fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>>, current: &AHashSet<&str>) {
+pub(super) fn remove_obsolete_outputs(package: &Package, previous: Option<&AHashSet<String>>, current: &AHashSet<&str>) {
     let Some(previous) = previous else {
         return;
     };

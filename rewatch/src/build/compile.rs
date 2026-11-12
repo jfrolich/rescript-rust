@@ -1176,7 +1176,7 @@ pub fn compile(
                             );
 
                             // Its registration is final: compile is done with it.
-                            digest_prep.prepare(&msg, build_command_state_ref);
+                            digest_prep.prepare(&msg, build_command_state_ref, &js_writer);
                             let module_failed = msg.result.is_err()
                                 || msg.interface_result.as_ref().is_some_and(|r| r.is_err());
                             if module_failed {
@@ -2561,7 +2561,7 @@ fn write_js_output(
 /// otherwise recording a large build decodes and hashes every signature at
 /// the end, when nothing else runs.
 pub(crate) struct DigestPrep {
-    tx: mpsc::Sender<super::record_prep::ReadInput>,
+    tx: mpsc::Sender<super::record_prep::PrepEvent>,
     handle: std::thread::JoinHandle<PreparedBuild>,
     fresh: bool,
 }
@@ -2622,11 +2622,20 @@ impl DigestPrep {
         let registry = state.snapshot_module_registry();
         let mut fresh_rows = super::record_prep::FreshRows::new(state);
         let fresh = fresh_rows.is_some();
-        let (tx, rx) = mpsc::channel::<super::record_prep::ReadInput>();
+        let (tx, rx) = mpsc::channel::<super::record_prep::PrepEvent>();
         let handle = std::thread::Builder::new()
             .name("digest-prep".to_string())
             .spawn(move || {
-                let modules = rx.into_iter().map(|input| {
+                if let Some(fresh) = &mut fresh_rows { fresh.start(); }
+                let mut modules = Vec::new();
+                for event in rx {
+                    let input = match event {
+                        super::record_prep::PrepEvent::Module(input) => input,
+                        super::record_prep::PrepEvent::Outputs { name, success } => {
+                            if let Some(fresh) = &mut fresh_rows { fresh.outputs_complete(&name, success); }
+                            continue;
+                        }
+                    };
                     let module_name = input.name.clone();
                     let item_digests = rescript_compiler::timing::measure(
                         rescript_compiler::timing::Phase::RecordDigests, || match &fresh_rows {
@@ -2642,25 +2651,34 @@ impl DigestPrep {
                     if let Some(fresh) = &mut fresh_rows {
                         fresh.complete(input, interface.take());
                     }
-                    PreparedRecord { module_name, item_digests, interface }
-                }).collect();
+                    modules.push(PreparedRecord { module_name, item_digests, interface });
+                }
                 PreparedBuild { modules, fresh: fresh_rows.map(super::record_prep::FreshRows::finish) }
             })
             .expect("failed to spawn the digest thread");
         DigestPrep { tx, handle, fresh }
     }
 
-    fn prepare(&self, msg: &CompletionMsg, state: &BuildCommandState) {
+    fn prepare(&self, msg: &CompletionMsg, state: &BuildCommandState, writer: &JsWriter) {
         let (loaded, pending) = if self.fresh {
             (state.loaded_units.lock().unwrap().remove(&msg.module_name),
              state.unit_reads.lock().unwrap().remove(&msg.module_name))
         } else { (None, None) };
-        self.tx.send(super::record_prep::ReadInput {
+        self.tx.send(super::record_prep::PrepEvent::Module(super::record_prep::ReadInput {
+            success: msg.result.is_ok() && msg.interface_result.as_ref().is_none_or(|r| r.is_ok()),
             name: msg.module_name.clone(), loaded, pending,
             implementation_warnings: msg.result.as_ref().ok().and_then(|w| w.clone()),
             interface_warnings: msg.interface_result.as_ref().and_then(|r| r.as_ref().ok())
                 .and_then(|w| w.clone()),
-        }).expect("digest thread stopped");
+        })).expect("digest thread stopped");
+        if self.fresh {
+            // The module enqueued its JS before sending CompletionMsg. This
+            // FIFO barrier cannot acknowledge it before those writes finish.
+            writer.tx.send(JsWriteJob {
+                module_name: msg.module_name.clone(), outputs: Vec::new(),
+                record_ready: Some(self.tx.clone()),
+            }).expect("JS writer stopped");
+        }
     }
 
     /// What was prepared, later completions of a module after earlier ones.
@@ -2674,6 +2692,7 @@ impl DigestPrep {
 
 /// JS outputs of one module, queued for the writer thread.
 struct JsWriteJob {
+    record_ready: Option<mpsc::Sender<super::record_prep::PrepEvent>>,
     module_name: String,
     outputs: Vec<rescript_compiler::driver::JsOutput>,
 }
@@ -2696,6 +2715,12 @@ impl JsWriter {
             .spawn(move || {
                 let mut failures = Vec::new();
                 for job in rx {
+                    if let Some(tx) = job.record_ready {
+                        let success = !failures.iter().any(|(name, _)| name == &job.module_name);
+                        tx.send(super::record_prep::PrepEvent::Outputs { name: job.module_name, success })
+                            .expect("digest thread stopped before JS writer");
+                        continue;
+                    }
                     if let Err(err) = write_js_write_job(&job.outputs) {
                         failures.push((job.module_name, err));
                     }
@@ -4595,6 +4620,7 @@ fn finish_in_process_js_inner(
         } else {
             let outputs = std::mem::take(&mut compile_result.js_outputs);
             let job = JsWriteJob {
+                record_ready: None,
                 module_name: module_name.clone(),
                 outputs,
             };

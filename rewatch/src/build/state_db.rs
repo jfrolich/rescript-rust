@@ -663,7 +663,7 @@ fn read_stored_interface_hashes(conn: &Connection) -> rusqlite::Result<BTreeMap<
 
 /// The metadata key of the runtime interfaces' key (see
 /// [`read_runtime_interfaces`]).
-const META_RUNTIME_KEY: &str = "runtime_key";
+pub(super) const META_RUNTIME_KEY: &str = "runtime_key";
 
 /// The runtime's interfaces stored in the database at `db` (the root
 /// package's), by module, when they were stored under `key`: a digest of the
