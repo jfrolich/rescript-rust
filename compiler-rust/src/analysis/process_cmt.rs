@@ -842,9 +842,7 @@ impl Processor<'_> {
                     self.for_type_signature_item(&env, exported, item)
                 })
             }
-            tt::StructureItemDesc::Tstr_primitive(vd)
-                if !self.primitive_is_fragment(self.ctx.ta.value_description(*vd)) =>
-            {
+            tt::StructureItemDesc::Tstr_primitive(vd) => {
                 let stamps = &mut self.stamps;
                 let declared = add_declared(
                     self.ctx
@@ -899,19 +897,6 @@ impl Processor<'_> {
             self.ctx.raised,
         );
         module_item_of(&declared)
-    }
-
-    /// `Jsx_hacks.primitive_is_fragment`.
-    fn primitive_is_fragment(&self, vd: &tt::TypedValueDescription) -> bool {
-        vd.val_name.txt == "fragment" && {
-            let file = self
-                .ctx
-                .arena
-                .get_string(self.ctx.arena.loc_start(vd.val_loc).file_name);
-            std::path::Path::new(file)
-                .file_name()
-                .is_some_and(|name| name == "ReasonReact.res")
-        }
     }
 
     /// `for_module`.

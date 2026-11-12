@@ -561,7 +561,7 @@ impl BuildCommandState {
                 let resolver = Arc::new(rescript_compiler::gentype::module_resolver::create_lazy_resolver(
                     &config,
                     &[".res".to_string(), ".shim.ts".to_string()],
-                    |fname| fname == "React.res" || fname == "ReasonReact.res",
+                    |fname| fname == "React.res",
                 ));
                 Arc::new(GentypeCompileContext { config, resolver })
             })

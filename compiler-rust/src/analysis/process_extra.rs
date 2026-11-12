@@ -696,10 +696,7 @@ impl<'a> TastIterator<'a> for ExtraIterator<'a, '_> {
 
     fn expr(&mut self, expression: &tt::Expression) {
         match &expression.exp_desc {
-            // `Jsx_hacks.path_is_fragment`
-            tt::ExpressionDesc::Texp_ident(path, lid, _)
-                if path.name() != "ReasonReact.fragment" =>
-            {
+            tt::ExpressionDesc::Texp_ident(path, lid, _) => {
                 self.add_for_lident(Some((expression.exp_type, Tip::Value)), path, lid)
             }
             tt::ExpressionDesc::Texp_record { fields, .. } => {

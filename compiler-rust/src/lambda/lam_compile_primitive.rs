@@ -88,7 +88,7 @@ impl LambdaCompiler {
             ..
         } = self.compile_expr(a, obj);
         let expr = if prelude.is_empty()
-            || super::lam_compile_arguments::is_okay_to_duplicate(&self.j, obj)
+            || super::lam_compile_arguments::is_okay_to_duplicate(&self.j, obj, true)
         {
             self.static_index(obj, property)
         } else {
