@@ -1,0 +1,1 @@
+- Count genType declaration-cache translations and their output declarations separately for annotated and unannotated artifacts when compiler performance counters are enabled.

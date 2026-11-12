@@ -766,6 +766,20 @@ fn register_type_declarations(
         artifact,
     )
     .map(|translation| {
+        if crate::perf_counters::enabled() {
+            let ignore_interface = std::cell::Cell::new(false);
+            let annotated = typed_artifact_check_annotations(
+                &|arena, _loc, attributes| {
+                    read_input_check_annotation(&ignore_interface, arena, attributes)
+                },
+                artifact,
+            )
+            .unwrap_or(true);
+            crate::perf_counters::record_gentype_translation(
+                annotated,
+                translation.type_declarations.len(),
+            );
+        }
         crate::gentype::code_item::TypeDeclarations::portable(
             translation.type_declarations,
             artifact.ctx,

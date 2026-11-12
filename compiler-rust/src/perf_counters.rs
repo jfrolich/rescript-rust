@@ -22,6 +22,54 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
 
+struct GentypeCounts {
+    modules: AtomicU64,
+    declarations: AtomicU64,
+}
+
+impl GentypeCounts {
+    const fn new() -> Self {
+        Self {
+            modules: AtomicU64::new(0),
+            declarations: AtomicU64::new(0),
+        }
+    }
+
+    fn record(&self, declarations: usize) {
+        self.modules.fetch_add(1, Ordering::Relaxed);
+        self.declarations.fetch_add(declarations as u64, Ordering::Relaxed);
+    }
+
+    fn snapshot(&self) -> (u64, u64) {
+        (
+            self.modules.load(Ordering::Relaxed),
+            self.declarations.load(Ordering::Relaxed),
+        )
+    }
+}
+
+static GENTYPE_COUNTS: [GentypeCounts; 2] = [GentypeCounts::new(), GentypeCounts::new()];
+
+/// Successful declaration-cache translations and the declarations they produce.
+/// This excludes the separate translation for an annotated module's own output.
+pub(crate) fn record_gentype_translation(annotated: bool, declarations: usize) {
+    if enabled() {
+        GENTYPE_COUNTS[usize::from(annotated)].record(declarations);
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn gentype_counts_include_empty_translations_and_separate_annotation_classes() {
+    let counts = [GentypeCounts::new(), GentypeCounts::new()];
+    assert_eq!(counts[0].snapshot(), (0, 0));
+    counts[0].record(0);
+    counts[0].record(3);
+    counts[1].record(5);
+    assert_eq!(counts[0].snapshot(), (2, 3));
+    assert_eq!(counts[1].snapshot(), (1, 5));
+}
+
 /// A main-signature decode on loading a unit published in this build.
 pub fn record_published_signature_decode() {
     if enabled() {
@@ -664,6 +712,12 @@ pub fn print_report() {
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
     );
+    for (index, annotated) in [false, true].into_iter().enumerate() {
+        let (modules, declarations) = GENTYPE_COUNTS[index].snapshot();
+        eprintln!(
+            "[compiler-counter] gentype annotated={annotated} modules={modules} declarations={declarations}",
+        );
+    }
     for kind in [
         LazyLookupKind::Value,
         LazyLookupKind::Type,
