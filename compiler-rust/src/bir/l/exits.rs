@@ -249,7 +249,9 @@ fn substitute(e: &mut Engine<'_>, root: NodeId, params: &BTreeMap<VarId, VarId>)
             e.finish_candidate(n);
         } else if let View::Var { var } = e.bir().view(n) {
             if let Some(&var) = params.get(&var) {
-                e.put(n, View::Var { var }, 0);
+                let weight = e.weight(n);
+                let replacement = e.node(View::Var { var }, 0, weight);
+                e.replace(n, replacement);
                 revision += 1;
             }
         } else {
@@ -541,6 +543,27 @@ mod tests {
         let vy = a.var(y);
         let root = a.static_catch(inner, 1, &[y], vy);
         assert_eq!(compare(a, root).renames.len(), 2);
+    }
+
+    #[test]
+    fn handler_parameter_used_inside_a_function_is_captured_after_substitution() {
+        let mut a = LamArena::new();
+        let x = id("x", 1);
+        let y = id("y", 2);
+        let vx = a.var(x);
+        let vy = a.var(y);
+        let sum = prim(&mut a, Primitive::Paddint, &[vx, vy]);
+        let handler = a.function_(
+            1,
+            &[y],
+            sum,
+            Default::default(),
+            crate::lambda::LamLoc::NONE,
+        );
+        let one = a.const_(C::int(1));
+        let body = a.static_raise(1, &[one]);
+        let root = a.static_catch(body, 1, &[x], handler);
+        assert_eq!(compare(a, root).renames.len(), 1);
     }
 
     #[test]

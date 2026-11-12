@@ -105,6 +105,7 @@ pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<(
     // only: New still exercises the bridges without running rewrite rounds.
     if BackendMode::from_env() == BackendMode::Check {
         check_flatten(arena, root, unit)?;
+        check_exits(arena, root, unit)?;
     }
     let imported = match import_lambda(arena, root) {
         Ok(imported) => imported,
@@ -216,6 +217,74 @@ pub fn check_flatten(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<
             before.lines().nth(line - 1), after.lines().nth(line - 1));
     }
     report(unit, "lambda-flatten", None, Some(NormReport {
+        calls: stats.entered,
+        replayed: Default::default(),
+        renormalised: Default::default(),
+        compared: stats.compared,
+        rules: stats.rules,
+    }))
+}
+
+/// First exits cut: flatten then exits on each side, with one private counter.
+/// Compare the ordered count too; structural CatchHeader::uses is not this fact.
+#[cold]
+pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()> {
+    let mut imported = match import_lambda(arena, root) {
+        Ok(imported) => imported,
+        Err(reason) => return report(unit, "lambda-exits", Some(reason.0), None),
+    };
+    let stamp = arena.ident_stamp_bound();
+    let (stats, counts) = {
+        let mut engine = super::engine::Engine::new(&mut imported.arena);
+        engine.set_current_stamp(stamp as u32);
+        engine.run(&super::l::flatten::FLATTEN, imported.root);
+        let counts = super::l::exits::count(engine.bir(), imported.root);
+        // Report only this round's rules, retaining flatten's fresh identities.
+        engine.stats.rules.clear();
+        engine.stats.entered = 0;
+        engine.run(&super::l::exits::EXITS, imported.root);
+        (engine.stats, counts)
+    };
+    for (var, source) in stats.renames {
+        if let Err(reason) = imported.register_rename(var, source) {
+            return report(unit, "lambda-exits", Some(reason.0), None);
+        }
+    }
+    imported.arena.validate(Some(imported.root), false)
+        .map_err(|message| anyhow::anyhow!("{unit}: lambda-exits validation: {message}"))?;
+    let exported = match export_lambda(&imported) {
+        Ok(exported) => exported,
+        Err(reason) => return report(unit, "lambda-exits", Some(reason.0), None),
+    };
+    let generator = crate::context::IdGenerator::new();
+    generator.set_current_stamp(stamp);
+    let mut legacy = arena.clone();
+    let expected = crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
+    let legacy_counts: std::collections::BTreeMap<_, _> =
+        crate::lambda::lam_pass_exits::count_helper(&legacy, expected)
+            .into_iter().map(|(label, count)| (label as u32, count)).collect();
+    if counts != legacy_counts {
+        anyhow::bail!("{unit}: lambda-exits ordered count mismatch");
+    }
+    let expected = crate::lambda::lam_pass_exits::simplify_exits(&mut legacy, expected, &generator);
+    if super::l::flatten::identities(&legacy, expected)
+        != super::l::flatten::identities(&exported.arena, exported.root)
+    {
+        anyhow::bail!("{unit}: lambda-exits identifier mismatch (name, stamp or flags)");
+    }
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    crate::lambda::sexp_lambda::print_lambda(&legacy.export(expected), &mut before)?;
+    crate::lambda::sexp_lambda::print_lambda(&exported.to_tree(), &mut after)?;
+    if before != after {
+        let before = String::from_utf8_lossy(&before);
+        let after = String::from_utf8_lossy(&after);
+        let line = before.lines().zip(after.lines()).position(|(a,b)| a != b)
+            .unwrap_or_else(|| before.lines().count().min(after.lines().count())) + 1;
+        anyhow::bail!("{unit}: lambda-exits mismatch at line {line}: expected {:?}, got {:?}",
+            before.lines().nth(line - 1), after.lines().nth(line - 1));
+    }
+    report(unit, "lambda-exits", None, Some(NormReport {
         calls: stats.entered,
         replayed: Default::default(),
         renormalised: Default::default(),
