@@ -225,10 +225,6 @@ impl State {
         }
         self.catch_table[table..].reverse();
         let len = self.catch_table.len() - table;
-        if len > 1 {
-            // Several handlers in one dispatch: the next slice of this file.
-            return Err(Unsupported("static catch"));
-        }
 
         let start = self.statements.mark();
         // Step 2: the cheap form, the first arm of `compile_staticcatch`.
@@ -620,6 +616,7 @@ mod tests {
 
     /// The continuations this file lowers a catch in so far.
     const SUPPORTED: &[u8] = &[0, 1, 2, 3];
+    const ALL: &[u8] = &[0, 1, 2, 3, 4];
 
     fn id(name: &str, stamp: i32) -> Ident {
         Ident::new(name, stamp, IdentFlags::NONE)
@@ -758,5 +755,54 @@ mod tests {
         let other = effect(&mut a, 2);
         let root = one_handler(&mut a, other, handler);
         compare(a, root, &[4]);
+    }
+
+    /// Three nested catches whose handlers hold no exit: one table.
+    fn three_handlers(a: &mut LamArena, handlers: [Lam; 3], default: Lam) -> Lam {
+        let exits: Vec<Lam> = (1..=3).map(|label| a.static_raise(label, &[])).collect();
+        let mut root = switch(a, &exits, Some(default));
+        for (label, handler) in (1..=3).zip(handlers) {
+            root = a.static_catch(root, label, &[], handler);
+        }
+        root
+    }
+
+    #[test]
+    fn three_handlers_in_one_dispatch_in_every_continuation() {
+        // Distinct handlers; two equal handlers (one clause group); a
+        // handler that finishes; equal first and last handlers.
+        for case in 0..4 {
+            let mut a = LamArena::new();
+            let handlers = match case {
+                0 => [effect(&mut a, 11), effect(&mut a, 12), effect(&mut a, 13)],
+                1 => [effect(&mut a, 11), effect(&mut a, 11), effect(&mut a, 13)],
+                2 => [effect(&mut a, 11), raise(&mut a, 12), int(&mut a, 13)],
+                _ => [effect(&mut a, 11), effect(&mut a, 12), effect(&mut a, 11)],
+            };
+            let default = effect(&mut a, 9);
+            let root = three_handlers(&mut a, handlers, default);
+            compare(a, root, ALL);
+        }
+    }
+
+    /// `catch (catch (if x then exit 1 else e2) with (1) (if y then exit 2
+    /// else e3)) with (2) e4`: the inner handler exits to the outer label,
+    /// so the two do not share a table.
+    fn exit_to_outer(a: &mut LamArena) -> Lam {
+        let other = effect(a, 2);
+        let test = a.var(id("y", 11));
+        let out = a.static_raise(2, &[]);
+        let stay = effect(a, 3);
+        let handler = a.if_(test, out, stay);
+        let inner = one_handler(a, other, handler);
+        let outer = effect(a, 4);
+        a.static_catch(inner, 2, &[], outer)
+    }
+
+    #[test]
+    fn a_handler_that_exits_to_an_outer_handler_in_value_declaration_effect_and_assignment() {
+        let mut a = LamArena::new();
+        let root = exit_to_outer(&mut a);
+        compare(a, root, SUPPORTED);
     }
 }
