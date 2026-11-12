@@ -8904,7 +8904,6 @@ mod subst_map_hash_tests {
     /// instructions, and every substitution map becomes one bucket.
     #[test]
     fn subst_map_hashes_are_distinct() {
-        use std::hash::BuildHasher;
         let ints: std::collections::HashSet<u64> =
             (0..10_000i32).map(|n| super::SUBST_MAP_STATE.hash_one(n)).collect();
         assert!(ints.len() >= 9_990, "{} distinct hashes of 10,000 integers", ints.len());
