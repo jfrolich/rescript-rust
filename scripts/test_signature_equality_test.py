@@ -15,6 +15,7 @@ class SignatureEqualityTests(unittest.TestCase):
         self.directory = Path(self.temporary.name)
         self.report = {"unit": "/corpus/Unit.res", "stage": "signature-equality"}
         self.report.update({kind: {"status": "equal"} for kind in oracle.KINDS})
+        self.report.update({"shared_graph": "published", "carried": ["file names"]})
 
     def write(self, name="outcome", report=None):
         (self.directory / f"{name}.json").write_text(json.dumps(report or self.report))
@@ -64,6 +65,30 @@ class SignatureEqualityTests(unittest.TestCase):
         oracle.check(actual, {"corpus": 1})
         self.assertEqual(actual["corpus"]["bytes"]["not_applicable"], {"pool full": 1})
         self.assertEqual(actual["corpus"]["fingerprint"]["equal"], 1)
+
+    def test_shared_graph_origin_and_carried_data_are_counted_per_unit(self):
+        self.write()
+        forced = copy.deepcopy(self.report)
+        forced.update({"unit": "/corpus/Leaf.res", "shared_graph": "forced: no dependent in this build",
+                       "carried": []})
+        self.write("leaf", forced)
+        actual = self.result()["corpus"]
+        self.assertEqual(actual["shared_graph"],
+                         {"forced: no dependent in this build": 1, "published": 1})
+        self.assertEqual(actual["carried"], {"file names": 1})
+        self.assertEqual(actual["carried_nothing"], 1)
+
+    def test_report_without_shared_graph_origin_rejected(self):
+        del self.report["shared_graph"]
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, "where the shared graph came from"):
+            self.result()
+
+    def test_report_without_carried_list_rejected(self):
+        del self.report["carried"]
+        self.write()
+        with self.assertRaisesRegex(RuntimeError, "what the byte comparison carried"):
+            self.result()
 
     def test_missing_reason_rejected(self):
         self.report["bytes"] = {"status": "not_applicable"}

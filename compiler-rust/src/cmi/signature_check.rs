@@ -1,5 +1,8 @@
-//! Opt-in publication oracle infrastructure. No reader consumes its results.
-//! Missing comparison implementations are pending, never equality or fallback.
+//! The signature equality check (`RESCRIPT_SIGNATURE_CHECK=1`): for every
+//! published unit, what the frozen shared graph says of the signature
+//! against what its portable form says (`docs/CHECKER_REDESIGN.md`, H.1.7
+//! invariant 5). `portable_types::publish_pers_struct_checked` computes the
+//! comparison; this module reports it. No reader consumes the results.
 use std::hash::{Hash, Hasher};
 use std::io::Write;
 use std::path::PathBuf;
@@ -18,14 +21,11 @@ impl SignatureCheck {
         })
     }
 
-    /// Called only after publication. Later slices supply independent shared
-    /// graph computations here; do not substitute a portable self-comparison.
+    /// Write the report of one publication of `unit`; an error when a
+    /// comparison differs or no report directory is configured.
     #[cold]
-    pub fn after_publication(&self, unit: &str) -> anyhow::Result<()> {
-        self.report(unit, [Outcome::Pending, Outcome::Pending, Outcome::Pending])
-    }
-
-    fn report(&self, unit: &str, outcomes: [Outcome; 3]) -> anyhow::Result<()> {
+    pub fn report(&self, unit: &str, comparison: &Comparison) -> anyhow::Result<()> {
+        let outcomes = &comparison.outcomes;
         let directory = self.directory.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "{unit}: RESCRIPT_SIGNATURE_CHECK_REPORTS is required in signature check mode"
@@ -37,6 +37,8 @@ impl SignatureCheck {
             fingerprint: &outcomes[0],
             item_hashes: &outcomes[1],
             bytes: &outcomes[2],
+            shared_graph: comparison.shared_graph,
+            carried: &comparison.carried,
         };
         let data = serde_json::to_vec(&report)?;
         // Include the outcome in the key. A later successful attempt must not
@@ -59,10 +61,50 @@ impl SignatureCheck {
             .zip(outcomes)
         {
             if let Outcome::Different { detail } = outcome {
-                anyhow::bail!("{unit}: signature equality: {kind}: {detail}");
+                anyhow::bail!(
+                    "{unit}: signature equality: {kind}: {detail} (shared graph {})",
+                    comparison.shared_graph
+                );
             }
         }
         Ok(())
+    }
+}
+
+/// The comparison of one publication.
+#[derive(Debug, Clone)]
+pub struct Comparison {
+    /// Fingerprint, item digests and encoded bytes, in this order.
+    pub outcomes: [Outcome; 3],
+    /// Where the shared graph came from: `published` (the graph dependents
+    /// read), or `forced: <why>` when check mode built one that a normal
+    /// build would not have at publication.
+    pub shared_graph: &'static str,
+    /// Which data the frozen graph does not hold and the byte comparison
+    /// had to be given (`shared_reader::Carried`), by name.
+    pub carried: Vec<&'static str>,
+}
+
+impl Comparison {
+    /// No shared graph could be built for the unit.
+    pub fn not_applicable(shared_graph: &'static str, reason: &str) -> Self {
+        let outcome = || Outcome::NotApplicable {
+            reason: reason.to_string(),
+        };
+        Comparison {
+            outcomes: [outcome(), outcome(), outcome()],
+            shared_graph,
+            carried: Vec::new(),
+        }
+    }
+
+    #[cfg(test)]
+    fn of(outcomes: [Outcome; 3]) -> Self {
+        Comparison {
+            outcomes,
+            shared_graph: "published",
+            carried: Vec::new(),
+        }
     }
 }
 
@@ -77,13 +119,11 @@ pub enum Outcome {
         /// First differing value or byte offset.
         detail: String,
     },
-    /// A graph cannot be compared, for a recorded structural reason.
+    /// No shared graph exists to compare with, for a recorded reason.
     NotApplicable {
         /// Why this comparison cannot apply to the unit.
         reason: String,
     },
-    /// The independent computation has not been implemented.
-    Pending,
 }
 
 impl Outcome {
@@ -151,6 +191,8 @@ struct Report<'a> {
     fingerprint: &'a Outcome,
     item_hashes: &'a Outcome,
     bytes: &'a Outcome,
+    shared_graph: &'a str,
+    carried: &'a [&'static str],
 }
 
 #[cfg(test)]
@@ -197,7 +239,7 @@ mod tests {
         let error = check
             .report(
                 "Unit.res",
-                [Outcome::fingerprint(1, 2), Outcome::Equal, Outcome::Equal],
+                &Comparison::of([Outcome::fingerprint(1, 2), Outcome::Equal, Outcome::Equal]),
             )
             .unwrap_err();
         assert!(
@@ -206,10 +248,16 @@ mod tests {
                 .contains("Unit.res: signature equality: fingerprint")
         );
         check
-            .report("Unit.res", [Outcome::Equal, Outcome::Equal, Outcome::Equal])
+            .report(
+                "Unit.res",
+                &Comparison::of([Outcome::Equal, Outcome::Equal, Outcome::Equal]),
+            )
             .unwrap();
         check
-            .report("Unit.res", [Outcome::Equal, Outcome::Equal, Outcome::Equal])
+            .report(
+                "Unit.res",
+                &Comparison::of([Outcome::Equal, Outcome::Equal, Outcome::Equal]),
+            )
             .unwrap();
         let files: Vec<_> = std::fs::read_dir(&directory).unwrap().collect();
         assert_eq!(files.len(), 2);
@@ -262,7 +310,70 @@ mod tests {
             let path = file.unwrap().path();
             let report: serde_json::Value =
                 serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-            assert_eq!(report["fingerprint"]["status"], "pending");
+            for kind in ["fingerprint", "item_hashes", "bytes"] {
+                assert_eq!(report[kind]["status"], "equal", "{report}");
+            }
+            assert_eq!(report["shared_graph"], "published");
+            std::fs::remove_file(path).unwrap();
+        }
+        std::fs::remove_dir(directory).unwrap();
+    }
+
+    #[test]
+    fn every_kind_of_type_node_reads_back_equal_from_the_shared_graph() {
+        let directory =
+            std::env::temp_dir().join(format!("signature-kinds-check-{}", std::process::id()));
+        let options = crate::driver::CompilerOptions {
+            nopervasives: true,
+            signature_check: Some(SignatureCheck {
+                directory: Some(directory.clone()),
+            }),
+            ..Default::default()
+        };
+        // Variables shared between positions, rows, objects, a package
+        // type, labelled and optional parameters, a recursive type, inline
+        // and optional record fields, an unboxed variant, extensions and a
+        // nested signature.
+        crate::driver::typecheck_interface_source_in_process(
+            r#"
+type color = [#red | #green(int)]
+type openColor<'a> = [> #red | #blue(string)] as 'a
+type obj = {"x": int, "y": string}
+type rec tree<'a> = Leaf | Node(tree<'a>, 'a, tree<'a>)
+@unboxed type u = I(int) | S(string)
+type r = {mutable a: int, b?: string}
+type t = A({x: int}) | B
+module type S = {
+  type t
+  let x: t
+}
+let pack: module(S with type t = int)
+let f: (~a: int, ~b: string=?, 'c) => ('c, 'c)
+let g: 'a => 'a
+module M: {
+  type t
+  let make: unit => t
+  let pair: t => (t, t)
+}
+exception E(int)
+type ext = ..
+type ext += X(int)
+"#,
+            "Kinds.resi",
+            "Kinds",
+            &options,
+            &crate::cmi::persistent_env::ModuleRegistry::new(),
+        )
+        .unwrap();
+        let files: Vec<_> = std::fs::read_dir(&directory).unwrap().collect();
+        assert_eq!(files.len(), 1);
+        for file in files {
+            let path = file.unwrap().path();
+            let report: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            for kind in ["fingerprint", "item_hashes", "bytes"] {
+                assert_eq!(report[kind]["status"], "equal", "{report}");
+            }
             std::fs::remove_file(path).unwrap();
         }
         std::fs::remove_dir(directory).unwrap();
@@ -273,7 +384,10 @@ mod tests {
         let check = SignatureCheck { directory: None };
         assert!(
             check
-                .after_publication("Unit.res")
+                .report(
+                    "Unit.res",
+                    &Comparison::of([Outcome::Equal, Outcome::Equal, Outcome::Equal])
+                )
                 .unwrap_err()
                 .to_string()
                 .contains("RESCRIPT_SIGNATURE_CHECK_REPORTS")

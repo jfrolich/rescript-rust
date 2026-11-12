@@ -1713,29 +1713,144 @@ pub fn publish_pers_struct(
     pps
 }
 
+/// [`publish_pers_struct`] in signature check mode
+/// (`RESCRIPT_SIGNATURE_CHECK`): also compare what the frozen shared graph
+/// says of the signature with what its portable form says
+/// (`docs/CHECKER_REDESIGN.md`, H.1.7 invariant 5): the fingerprint, every
+/// item digest, and the encoded bytes.
+///
+/// Every unit is compared against a shared graph. A shareable signature is
+/// published whatever `mode` says, so a unit without a dependent in this
+/// build is covered; a signature that is not shareable is internalized into
+/// a graph of the pool that no reader is given. Only a full pool leaves a
+/// unit without a comparison.
+pub fn publish_pers_struct_checked(
+    mut pps: PortablePersStruct,
+    ctx: &TypeContext,
+    mode: SignaturePublicationMode,
+) -> (Arc<PortablePersStruct>, super::signature_check::Comparison) {
+    use super::shared_reader::{Carried, FrozenGraph, portable_signature};
+    use super::signature_check::{Comparison, Outcome};
+    pps.published_generation = Some(crate::types::thread_store::build_generation());
+    let pps = Arc::new(pps);
+    let store = ctx.thread_store();
+    let pool = store.shared_pool();
+    let decoded = pps.decoded.lock().unwrap();
+    let portable = &decoded.as_ref().expect("new publication").0;
+    let mut carried = Carried {
+        file_names: portable.cmi_longident_names.clone(),
+        ..Default::default()
+    };
+    let (shared_graph, shared) = if pps.shareable {
+        let mut base = None;
+        let ps = pool.pers_struct(&pps, || {
+            let (ps, at) = shared_pers_struct_at(&pps, portable, pool, Some(&mut carried))?;
+            base = Some(at);
+            Some(ps)
+        });
+        if let Some(ps) = &ps {
+            store.insert_pers_struct(pps.clone(), ps.clone());
+        }
+        let shared_graph = match mode {
+            SignaturePublicationMode::Eager => "published",
+            SignaturePublicationMode::OnDemand => "forced: no dependent in this build",
+        };
+        (
+            shared_graph,
+            ps.zip(base).map(|(ps, base)| (ps.ps_sig.clone(), base)),
+        )
+    } else {
+        let intern = |name: &str| pool.intern_longident_name(name);
+        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
+        let shared = internalize_signature_into_shared(
+            &portable.ps_sig,
+            &portable.type_graph,
+            &portable.locations,
+            &files,
+            pool,
+            Some(&pps.ps_filename),
+            Some(&mut carried),
+        );
+        (
+            "forced: not shareable",
+            shared.map(|(sig, base)| (Arc::new(sig), base)),
+        )
+    };
+    let comparison = match shared {
+        None => Comparison::not_applicable(shared_graph, "the shared pool is full"),
+        Some((sig, base)) => {
+            let pages = pool.pages();
+            let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+            let items = |hashes: Vec<(super::item_deps::Kind, crate::name::Name, u64)>| {
+                hashes
+                    .into_iter()
+                    .map(|(kind, name, hash)| ((kind, name), hash))
+                    .collect::<Vec<_>>()
+            };
+            let encode = |sig: &PortableSignature| {
+                crate::binser::to_vec(sig).expect("encoding to memory cannot fail")
+            };
+            Comparison {
+                shared_graph,
+                carried: carried.needed(),
+                outcomes: [
+                    Outcome::fingerprint(pps.fingerprint, signature_fingerprint(&frozen, &sig)),
+                    Outcome::item_hashes(
+                        &items(super::item_deps::item_declaration_hashes(
+                            &HashGraph::of(&portable.type_graph),
+                            &portable.ps_sig,
+                        )),
+                        &items(super::item_deps::item_declaration_hashes(&frozen, &sig)),
+                    ),
+                    Outcome::bytes(
+                        &encode(portable),
+                        &encode(&portable_signature(&frozen, &sig, &carried)),
+                    ),
+                ],
+            }
+        }
+    };
+    drop(decoded);
+    (pps, comparison)
+}
+
 fn shared_pers_struct(
     pps: &PortablePersStruct,
     portable: &PortableSignature,
     pool: &crate::types::shared_store::SharedTypePool,
 ) -> Option<Arc<PersStruct>> {
+    Some(shared_pers_struct_at(pps, portable, pool, None)?.0)
+}
+
+/// [`shared_pers_struct`], with the base index of the graph it published.
+/// `carried` receives what the published graph does not hold of `portable`
+/// (the signature equality check, `signature_check.rs`).
+fn shared_pers_struct_at(
+    pps: &PortablePersStruct,
+    portable: &PortableSignature,
+    pool: &crate::types::shared_store::SharedTypePool,
+    carried: Option<&mut super::shared_reader::Carried>,
+) -> Option<(Arc<PersStruct>, u32)> {
     let intern = |name: &str| pool.intern_longident_name(name);
     let files = FileRemap::new(&portable.cmi_longident_names, &intern);
-    let sig = internalize_signature_into_shared(
+    let (sig, base) = internalize_signature_into_shared(
         &portable.ps_sig,
         &portable.type_graph,
         &portable.locations,
         &files,
         pool,
         Some(&pps.ps_filename),
+        carried,
     )?;
-    Some(Arc::new(PersStruct {
+    let ps = PersStruct {
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
         ps_alias_rewrites: Default::default(),
-    }))
+    };
+    Some((Arc::new(ps), base))
 }
 
 /// Load a PortablePersStruct for the current compilation.
@@ -1842,7 +1957,13 @@ fn internalize_signature_into_store(
         })
         .collect();
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
     sig
@@ -1956,7 +2077,8 @@ fn internalize_signature_into_shared(
     files: &FileRemap<'_>,
     pool: &crate::types::shared_store::SharedTypePool,
     unit: Option<&str>,
-) -> Option<Signature> {
+    carried: Option<&mut super::shared_reader::Carried>,
+) -> Option<(Signature, u32)> {
     let mut remap = Vec::new();
     let mut sig = portable_sig.clone();
     let mut scopes = crate::fast_hash::AHashMap::default();
@@ -2012,6 +2134,9 @@ fn internalize_signature_into_shared(
             })
             .collect();
         shapes.signature(&mut sig);
+        if let Some(carried) = carried {
+            carried.record_import(graph, &scopes, shapes);
+        }
         crate::types::shared_store::SharedGraphParts {
             nodes,
             payloads: sink.payloads.into_inner(),
@@ -2022,9 +2147,15 @@ fn internalize_signature_into_shared(
     let layout_remap: Vec<_> = (0..graph.variant_layouts.len())
         .map(|i| crate::types::VariantLayoutRef::from_shared_index(base + i as u32))
         .collect();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, &shared_decl_locs(base, &map));
-    Some(sig)
+    Some((sig, base))
 }
 
 /// The handles of a graph published to the shared pool at `base`: portable
@@ -2162,7 +2293,13 @@ fn internalize_signature(
 
     // Phase 3: clone and remap the signature.
     let mut sig = portable_sig.clone();
-    remap_signature_refs(&mut sig, &remap, &layout_remap);
+    remap_signature_refs(
+        &mut sig,
+        &IndexedRefs {
+            types: &remap,
+            layouts: &layout_remap,
+        },
+    );
     import_signature_locations(&mut sig, locs);
     shapes.signature(&mut sig);
     sig
@@ -2299,61 +2436,73 @@ fn internalize_row_field<S: TypeNodeSink>(
 // Signature ref remapping (portable index -> real TypeExprRef)
 // ============================================================================
 
-fn remap_signature_refs(
-    sig: &mut Signature,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
-    for item in sig.iter_mut() {
-        remap_sig_item_refs(item, remap, layout_remap);
+/// How the type and variant layout references of a signature are renamed.
+pub(crate) trait SignatureRefMap {
+    /// The new name of a type reference.
+    fn ty(&self, r: TypeExprRef) -> TypeExprRef;
+    /// The new name of a variant layout reference.
+    fn layout(&self, r: crate::types::VariantLayoutRef) -> crate::types::VariantLayoutRef;
+}
+
+/// Portable index `i` becomes entry `i` of each table.
+struct IndexedRefs<'a> {
+    types: &'a [TypeExprRef],
+    layouts: &'a [crate::types::VariantLayoutRef],
+}
+
+impl SignatureRefMap for IndexedRefs<'_> {
+    #[inline]
+    fn ty(&self, r: TypeExprRef) -> TypeExprRef {
+        self.types[r.index()]
+    }
+
+    #[inline]
+    fn layout(&self, r: crate::types::VariantLayoutRef) -> crate::types::VariantLayoutRef {
+        self.layouts[r.0 as usize]
     }
 }
 
-fn remap_sig_item_refs(
-    item: &mut SignatureItem,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+pub(crate) fn remap_signature_refs(sig: &mut Signature, map: &impl SignatureRefMap) {
+    for item in sig.iter_mut() {
+        remap_sig_item_refs(item, map);
+    }
+}
+
+fn remap_sig_item_refs(item: &mut SignatureItem, map: &impl SignatureRefMap) {
     match item {
-        SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, remap),
-        SignatureItem::SigType(_, td, _) => {
-            remap_type_decl_refs(std::sync::Arc::make_mut(td), remap, layout_remap)
-        }
-        SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, remap),
-        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, remap, layout_remap),
-        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, remap, layout_remap),
+        SignatureItem::SigValue(_, vd) => remap_value_desc_refs(vd, map),
+        SignatureItem::SigType(_, td, _) => remap_type_decl_refs(std::sync::Arc::make_mut(td), map),
+        SignatureItem::SigTypext(_, ec, _) => remap_ext_ctor_refs(ec, map),
+        SignatureItem::SigModule(_, md, _) => remap_module_decl_refs(md, map),
+        SignatureItem::SigModtype(_, mtd) => remap_modtype_decl_refs(mtd, map),
         SignatureItem::SigClass | SignatureItem::SigClassType => {}
     }
 }
 
-fn remap_value_desc_refs(vd: &mut ValueDescription, remap: &[TypeExprRef]) {
-    vd.val_type = remap[vd.val_type.index()];
+fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
+    vd.val_type = map.ty(vd.val_type);
 }
 
-fn remap_type_decl_refs(
-    td: &mut TypeDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
     if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
-        *layout_ref = layout_remap[layout_ref.0 as usize];
+        *layout_ref = map.layout(*layout_ref);
     }
     for p in td.type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = map.ty(*p);
     }
     if let Some(ref mut m) = td.type_manifest {
-        *m = remap[m.index()];
+        *m = map.ty(*m);
     }
     match &mut td.type_kind {
         TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
         TypeKind::TypeRecord(labels, _) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
         TypeKind::TypeVariant(ctors, _) => {
             for ctor in ctors.iter_mut() {
-                remap_ctor_decl_refs(ctor, remap);
+                remap_ctor_decl_refs(ctor, map);
             }
         }
     }
@@ -2361,90 +2510,78 @@ fn remap_type_decl_refs(
         match inlined {
             crate::types::decl::TypeInlinedType::Record { labels, .. } => {
                 for label in labels.iter_mut() {
-                    remap_label_decl_refs(label, remap);
+                    remap_label_decl_refs(label, map);
                 }
             }
         }
     }
 }
 
-fn remap_label_decl_refs(ld: &mut LabelDeclaration, remap: &[TypeExprRef]) {
-    ld.ld_type = remap[ld.ld_type.index()];
+fn remap_label_decl_refs(ld: &mut LabelDeclaration, map: &impl SignatureRefMap) {
+    ld.ld_type = map.ty(ld.ld_type);
 }
 
-fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, remap: &[TypeExprRef]) {
+fn remap_ctor_decl_refs(cd: &mut ConstructorDeclaration, map: &impl SignatureRefMap) {
     match &mut cd.cd_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = map.ty(*t);
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
     }
     if let Some(ref mut res) = cd.cd_res {
-        *res = remap[res.index()];
+        *res = map.ty(*res);
     }
 }
 
-fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, remap: &[TypeExprRef]) {
+fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, map: &impl SignatureRefMap) {
     for p in ec.ext_type_params.iter_mut() {
-        *p = remap[p.index()];
+        *p = map.ty(*p);
     }
     match &mut ec.ext_args {
         ConstructorArguments::CstrTuple(types) => {
             for t in types.iter_mut() {
-                *t = remap[t.index()];
+                *t = map.ty(*t);
             }
         }
         ConstructorArguments::CstrRecord(labels) => {
             for label in labels.iter_mut() {
-                remap_label_decl_refs(label, remap);
+                remap_label_decl_refs(label, map);
             }
         }
     }
     if let Some(ref mut ret) = ec.ext_ret_type {
-        *ret = remap[ret.index()];
+        *ret = map.ty(*ret);
     }
 }
 
-fn remap_module_decl_refs(
-    md: &mut ModuleDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
-    remap_module_type_refs(&mut md.md_type, remap, layout_remap);
+fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
+    remap_module_type_refs(&mut md.md_type, map);
 }
 
-fn remap_modtype_decl_refs(
-    mtd: &mut ModtypeDeclaration,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_modtype_decl_refs(mtd: &mut ModtypeDeclaration, map: &impl SignatureRefMap) {
     if let Some(ref mut mt) = mtd.mtd_type {
-        remap_module_type_refs(mt, remap, layout_remap);
+        remap_module_type_refs(mt, map);
     }
 }
 
-fn remap_module_type_refs(
-    mt: &mut ModuleType,
-    remap: &[TypeExprRef],
-    layout_remap: &[crate::types::VariantLayoutRef],
-) {
+fn remap_module_type_refs(mt: &mut ModuleType, map: &impl SignatureRefMap) {
     match mt {
         ModuleType::MtySignature(sig) => {
-            remap_signature_refs(crate::types::decl::signature_mut(sig), remap, layout_remap)
+            remap_signature_refs(crate::types::decl::signature_mut(sig), map)
         }
         ModuleType::MtyFunctor {
             param_type, result, ..
         } => {
             if let Some(pt) = param_type.as_mut() {
-                remap_module_type_refs(pt, remap, layout_remap);
+                remap_module_type_refs(pt, map);
             }
-            remap_module_type_refs(result, remap, layout_remap);
+            remap_module_type_refs(result, map);
         }
         ModuleType::MtyIdent(_) | ModuleType::MtyAlias(_, _) => {}
     }
@@ -2605,6 +2742,71 @@ mod identity_tests {
     }
 
     #[test]
+    fn a_frozen_graph_reads_back_with_what_it_does_not_hold() {
+        use super::super::shared_reader::{Carried, FrozenGraph, portable_signature};
+        use crate::types::asttypes::MutableFlag;
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let pool = ctx.thread_store().shared_pool();
+        let entry = |desc, level| PortableTypeEntry { desc, level };
+        let field = |name: &str, mutability, rest| PortableTypeDesc::Tfield {
+            name: name.into(),
+            mutability,
+            typ: 1,
+            rest,
+        };
+        // A link below the generic level, and three object fields of which
+        // the first and the last share a mutability cell.
+        let portable = PortableSignature {
+            ps_sig: vec![],
+            cmi_longident_names: vec![],
+            type_graph: PortableTypeGraph {
+                entries: vec![
+                    entry(PortableTypeDesc::Tlink(1), 3),
+                    entry(PortableTypeDesc::Tvar(Some("a".into())), GENERIC_LEVEL),
+                    entry(field("x", 0, 3), GENERIC_LEVEL),
+                    entry(field("y", 1, 4), GENERIC_LEVEL),
+                    entry(field("z", 0, 5), GENERIC_LEVEL),
+                    entry(PortableTypeDesc::Tnil, GENERIC_LEVEL),
+                ],
+                variant_layouts: vec![],
+                mutabilities: vec![MutableFlag::Mutable, MutableFlag::Immutable],
+            },
+            locations: Default::default(),
+        };
+        let intern = |name: &str| pool.intern_longident_name(name);
+        let files = FileRemap::new(&portable.cmi_longident_names, &intern);
+        let mut carried = Carried::default();
+        let (sig, base) = internalize_signature_into_shared(
+            &portable.ps_sig,
+            &portable.type_graph,
+            &portable.locations,
+            &files,
+            pool,
+            Some("Unit.res"),
+            Some(&mut carried),
+        )
+        .unwrap();
+        let pages = pool.pages();
+        let frozen = FrozenGraph::new(pool, crate::types::shared_store::graph_at(&pages, base));
+        let bytes = |sig: &PortableSignature| crate::binser::to_vec(sig).unwrap();
+        assert_eq!(carried.needed(), ["link levels"]);
+        assert_eq!(
+            bytes(&portable_signature(&frozen, &sig, &carried)),
+            bytes(&portable)
+        );
+        // The pages alone hold the link at the generic level.
+        assert_ne!(
+            bytes(&portable_signature(&frozen, &sig, &Carried::default())),
+            bytes(&portable)
+        );
+        // Both forms hash alike.
+        assert_eq!(
+            signature_fingerprint(&frozen, &sig),
+            signature_fingerprint(&HashGraph::of(&portable.type_graph), &portable.ps_sig)
+        );
+    }
+
+    #[test]
     fn named_imports_are_reproducible_but_separate_loads_remain_distinct() {
         use crate::types::decl_loc::LocationIdentity;
         let mut table = DeclLocTable::default();
@@ -2738,8 +2940,10 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             None,
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         let shared_scope = verify(&target, &shared);
         assert_ne!(shared_scope, warm_scope);
         let roundtrip = load(&save(&target, &shared));
@@ -2766,8 +2970,10 @@ mod identity_tests {
             &files,
             target.thread_store().shared_pool(),
             Some(unit),
+            None,
         )
-        .unwrap();
+        .unwrap()
+        .0;
         assert_eq!(verify(&target, &stored), verify(&target, &shared));
         assert_eq!(
             crate::binser::to_vec(&save(&target, &stored)).unwrap(),

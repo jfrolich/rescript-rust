@@ -15,7 +15,7 @@ KINDS = ("fingerprint", "item_hashes", "bytes")
 
 def summarize(directory, prefix=None):
     """Keep every outcome: success never hides a failed/retried compilation."""
-    units = {}
+    units, graphs, carries = {}, {}, {}
     for path in sorted(directory.rglob("*.json")):
         report = json.loads(path.read_text())
         unit = report["unit"]
@@ -26,6 +26,13 @@ def summarize(directory, prefix=None):
         if report["stage"] != "signature-equality":
             raise RuntimeError(f"{unit}: unexpected report stage")
         outcomes = units.setdefault(unit, {kind: [] for kind in KINDS})
+        graph, carried = report.get("shared_graph"), report.get("carried")
+        if not isinstance(graph, str) or not graph:
+            raise RuntimeError(f"{unit}: report does not say where the shared graph came from")
+        if not isinstance(carried, list) or not all(isinstance(name, str) for name in carried):
+            raise RuntimeError(f"{unit}: report does not list what the byte comparison carried")
+        graphs.setdefault(unit, set()).add(graph)
+        carries.setdefault(unit, set()).update(carried)
         for kind in KINDS:
             outcome = report[kind]
             status = outcome["status"]
@@ -36,7 +43,14 @@ def summarize(directory, prefix=None):
             if status == "not_applicable" and not outcome.get("reason"):
                 raise RuntimeError(f"{unit}: {kind}: not applicable without reason")
             outcomes[kind].append(outcome)
-    result = {"units": len(units)}
+    # Where each unit's shared graph came from, and which data the frozen
+    # graph does not hold and the byte comparison was given: units per value.
+    result = {
+        "units": len(units),
+        "shared_graph": dict(sorted(Counter("; ".join(sorted(v)) for v in graphs.values()).items())),
+        "carried": dict(sorted(Counter(name for v in carries.values() for name in v).items())),
+        "carried_nothing": sum(not v for v in carries.values()),
+    }
     for kind in KINDS:
         counts = Counter()
         reasons = Counter()
@@ -97,13 +111,21 @@ def main():
             env["RESCRIPT_SIGNATURE_CHECK_REPORTS"] = str(reports)
             for command in ("clean", "build"):
                 run = subprocess.run([str(executable), command, str(ROOT / folder)],
-                                     cwd=ROOT, env=env, capture_output=True, text=True, timeout=60)
+                                     cwd=ROOT, env=env, capture_output=True, text=True, timeout=300)
                 if run.returncode:
                     print(run.stdout + run.stderr)
                     failed.append(f"{corpus}: {command} failed ({run.returncode})")
                     break
             results[corpus] = summarize(reports, ROOT / folder)
     print(json.dumps(results, indent=2, sort_keys=True), flush=True)
+    for corpus, result in results.items():
+        print(f"{corpus}: {result['units']} units; shared graph {result['shared_graph']}; "
+              f"byte comparison carried {result['carried']}, nothing for {result['carried_nothing']}")
+        for kind in KINDS:
+            outcome = result[kind]
+            print(f"  {kind}: compared {outcome['compared']}, equal {outcome['equal']}, "
+                  f"different {outcome['different']}, not applicable {outcome['not_applicable']}, "
+                  f"pending {outcome['pending']}")
     if failed:
         raise RuntimeError("; ".join(failed))
     check(results, json.loads(MINIMUM.read_text()))

@@ -1,73 +1,123 @@
-# Signature equality oracle: harness slice
+# The signature equality check
 
-`RESCRIPT_SIGNATURE_CHECK=1` selects the check when compiler options are
-constructed. `RESCRIPT_SIGNATURE_CHECK_REPORTS` must name a report directory.
-The two in-process publication paths call the oracle after extraction. The
-normal path does not walk, encode, inspect the environment, or write reports.
-No signature reader or stored interface format changes.
+Stage P3b of the checker redesign (`CHECKER_REDESIGN.md`, H.1.5) builds the
+shared graph of a published signature first and derives the fingerprint, the
+item digests and the stored bytes from it, where today they come from the
+portable form. H.1.7 invariant 5 asks that both give the same data. This
+check compares them, for every unit a build publishes.
 
-Each immutable JSON report identifies the source unit and has separate outcomes
-for `fingerprint`, `item_hashes`, and `bytes`. The states are `equal`, `different`
-(with detail), `not_applicable` (with a reason), and `pending`. Different outcomes
-for the same source produce different files; a successful retry cannot overwrite
-a mismatch. A mismatch writes its report and fails compilation naming the unit
-and comparison. Byte comparison reports the first differing zero-based offset,
-including when one encoding is a prefix of the other. Item comparison preserves
-order and duplicate names.
+`RESCRIPT_SIGNATURE_CHECK=1` turns it on when compiler options are created,
+and `RESCRIPT_SIGNATURE_CHECK_REPORTS` names the directory for the reports.
+With the switch off, publication tests one `Option` per unit and nothing
+else changes. No reader uses the results.
 
-Run:
+## What is compared
+
+For each published unit (an implementation without an interface, or an
+interface), `portable_types::publish_pers_struct_checked`:
+
+1. gets the unit's graph in the shared pool: the graph dependents read when
+   the unit is published eagerly, and a graph built for the check otherwise
+   (see "Which graph");
+2. computes the fingerprint and every item digest from the frozen graph, by
+   the walk that computes them from the portable graph (`graph_hash.rs`,
+   read through `shared_reader::FrozenGraph`), and compares them with the
+   portable ones;
+3. writes the portable signature back from the frozen graph
+   (`shared_reader::portable_signature`, the inverse of
+   `internalize_signature_into_shared`), encodes it with the encoder the
+   store uses, and compares the bytes with the encoding of the portable
+   signature the unit published.
+
+A difference writes its report and fails the compilation, naming the unit,
+the comparison and the first difference: both fingerprints, the first item
+whose kind, name or digest differs, or the first differing byte offset.
+
+Each report is a JSON file with the unit, the three outcomes (`equal`,
+`different` with a detail, `not_applicable` with a reason), `shared_graph`
+(where the graph came from) and `carried` (below). Different outcomes for
+one source are different files, so a later successful attempt cannot hide a
+difference.
+
+## The hash is over the graph
+
+Both sides hash the same thing because the hash is defined over the type
+graph and written once (`graph_hash.rs`): per hashed value (the whole
+signature for the fingerprint, one top-level item for its digest), nodes
+are numbered in first-visit order, a reference is hashed as its node's
+number, and each node's record is hashed once. The cost is one record per
+node and one number per reference reached; step-count tests pin a chain of
+10,000 nodes, a node with 10,000 parents and a cycle.
+
+The earlier hash was over the tree the graph unfolds to, which costs a
+quadratic number of comparisons on a chain and re-expands a shared subgraph
+once per parent. Measured before the change (expansions against distinct
+nodes hashed, per fingerprint and again per summary): 17,770 against 16,035
+on the runtime, 37,261 against 32,539 on `tests/tests`, 457,714 against
+370,327 on a 3,735-module application. So real signatures paid 11% to 24%
+more than once per node, and the hash functions were about 0.3% of a build's
+instructions. The change is about the bound and about one definition for
+both graph forms, not about build time.
+
+What the graph hash distinguishes that the tree hash did not: two different
+sharings of one unfolded type. That is part of an interface
+(`CHECKER_REDESIGN.md` I.2.1, I.3.3 rules 5 and 8): a dependent that links
+one position of a scheme changes every position that is the same node.
+What it no longer distinguishes: two variant layouts that differ only in
+the allocation identities of their shapes, which the tree hash read through
+`Debug`. No dependent reads those identities, `Layout`'s equality ignores
+them, and an import renumbers them, so the shared graph's differ from the
+portable form's.
+
+Not hashed by either algorithm: whether a node is at the generic level, and
+sharing between two top-level items in the item digests (the fingerprint
+covers it).
+
+## Which graph
+
+| `shared_graph` | When | Graph compared |
+|---|---|---|
+| `published` | the unit has a dependent in this build, or is an interface | the one dependents read |
+| `forced: no dependent in this build` | `SignaturePublicationMode::OnDemand` | check mode publishes it at once; a normal build builds the same graph from the decoded bytes when a later reader asks |
+| `forced: not shareable` | the graph holds a `Tsubst` | a graph of the pool that no reader is given |
+
+Only a full pool leaves a unit without a comparison (`not_applicable`, "the
+shared pool is full").
+
+The raw signature (`PortableRawSignature`) is not compared: it has no shared
+graph. P3b keeps writing it from the `TypeContext` (H.1.5, step 9).
+
+## What the frozen graph does not hold
+
+`internalize_signature_into_shared` drops or rewrites four things one way.
+The inverse is exact only when it is given them (`shared_reader::Carried`,
+recorded during the import in check mode). The comparison never changes
+either side to make them agree: it carries the missing data and lists, per
+unit, which of it was not empty.
+
+| `carried` | What the import does | What P3b must carry or change |
+|---|---|---|
+| `file names` | A location names its file by a pool index allocated at import. The portable signature holds `cmi_longident_names`: the names with their portable keys, in order of first use, including names only the raw signature uses | the `(key, name)` list of the publication |
+| `allocation scopes` | The scope of a location identity and of a shape's attribute string becomes a hash of the unit and the scope (`identity_in_namespace`) | the producer's scope of each imported scope, or an import that keeps the pair |
+| `shape allocations` | A shape allocation becomes a hash of the unit and the allocation | the producer's allocation of each imported one, likewise |
+| `link levels` | Every `Tlink` entry is stored at the generic level | the level of each link that is not generic, or portable bytes that store links at the generic level (a link's level is dead state) |
+
+Exact without carried data: node order and descriptors, type lists, arrow
+parameters with their labels, rows, package constraints, object-field
+mutability cells (numbered by first use in node order, as the serializer
+numbers them), the levels of nodes that are not links, variant layout
+references, and location handles.
+
+## Running it
 
 ```sh
 python3 -m unittest discover -s scripts -p 'test_signature_equality_test.py'
 python3 scripts/test_signature_equality.py --executable rewatch/target/release/rescript
 ```
 
-The script cleans and builds the runtime and `tests/tests` separately, filters
-out dependency reports, and prints per-comparison totals and not-applicable
-reasons. Zero reports, fewer units than the committed minimum, any difference,
-or any pending comparison fail. The committed minimum records the clean-build publication counts
-(113 runtime, 708 tests), including pending comparisons.
-Source interfaces and implementations are distinct publication units.
-
-## Incomplete: shared computations
-
-This slice deliberately reports `pending` for all three computations. It does
-not compare the portable representation against itself and does not describe
-missing implementations as not applicable. Consequently the corpus command
-must fail until the next slices are implemented. This is infrastructure, **not**
-the H.1.7 invariant-5 gate; it must not authorize P3b to land.
-
-### Next-slice constraint
-
-`portable_types::hash_type_ref` recursively expands a node on every incoming
-path, using `visiting.iter().position` to detect ancestors. It does not memoize
-completed nodes. Therefore:
-
-- A chain of N nodes does N(N-1)/2 ancestor comparisons and uses N stack frames.
-- A subgraph with N nodes referenced by N parents is expanded N times.
-- `compute_type_graph_fingerprint` and `SignatureSummary::of` separately repeat
-  traversal for signature items. Item hashing uses `DefaultHasher`; fingerprint
-  hashing uses `ahash`.
-
-Merely adding a graph-reader trait preserves these costs. Memoizing a node's
-hash and feeding that digest instead of its expanded hash stream changes the
-existing fingerprint and item hashes. The cycle marker also contains the
-ancestor's position, so cyclic subgraphs do not have a context-free hash stream.
-A linear, visit-once implementation that preserves these exact hashes needs a
-separate algorithmic solution before the trait/shared-reader slice can meet its
-stated cost gate. This slice does not change the portable algorithm or weaken
-that gate. No 10,000-node cost claim is made for the unimplemented walkers.
-
-### Differences from the H.1 inventory
-
-P3a's current `publish_pers_struct` accepts `SignaturePublicationMode`: only
-`Eager` shareable signatures are inserted into the shared pool; leaves can be
-`OnDemand`. H.1.6 describes unconditional publication. The future check must
-explicitly build a graph for on-demand units in check mode, rather than silently
-omit them from coverage. The existing code remains authoritative.
-
-The frozen serialization slice is also unimplemented. In particular, no corpus
-counts are yet available for information changed by `ShapeImport`, location
-scope remapping, file-name interning, or genericization of `Tlink` levels in
-`internalize_signature_into_shared`. These are not proven reversible and must
-not be normalized away in the byte comparison.
+The script cleans and builds the runtime and `tests/tests` in check mode and
+prints, per corpus, the units compared, equal, different and not applicable
+by reason for each comparison, where the shared graphs came from, and how
+many units needed each kind of carried data. It fails on a failed build, on
+zero reports, on fewer units than `tests/signature_equality_minimum.json`,
+on any difference and on a report that is missing a field.
