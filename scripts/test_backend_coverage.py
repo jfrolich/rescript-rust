@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """Run the backend shadow oracles and enforce their per-corpus coverage ratchet.
 
-Stages: `lambda-bridge` (S2.2, the Lambda/Bir bridge round trip) and
-`lambda-norm` (S4.1, the Bir normalising rules against LamArena's smart
-constructors). Each stage has its own entry in the ratchet file.
+Stages: `lambda-bridge` (S2.2), `lambda-norm` and `lambda-flatten` (S4),
+and `js-bridge` (S3.1a, the post-pass JS/Bir round trip). Each stage has
+its own entry in the ratchet file.
 """
 import argparse
 import collections
@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parent.parent
 RATCHET = ROOT / "compiler-rust/tests/backend_coverage.txt"
 
 
-STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits")
+STAGES = ("lambda-bridge", "lambda-norm", "lambda-flatten", "lambda-exits", "js-bridge")
 
 
 def summarize(directory, stage, prefix=None):
