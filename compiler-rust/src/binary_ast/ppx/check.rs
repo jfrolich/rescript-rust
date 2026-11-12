@@ -757,6 +757,9 @@ impl<'a> Checker<'a> {
     /// `Bs_builtin_ppx.expr_mapper` (bs_builtin_ppx.ml:394-430): map the
     /// expression, restore the async context, then check `await`.
     fn expr(&mut self, idx: ExprIdx) -> PpxResult<()> {
+        if self.arena.expr_needs_no_rewrite(idx) {
+            return Ok(());
+        }
         let expr = self.arena.get_expr(idx).clone();
         let async_saved = self.async_context;
         let result = self.expr_inner(&expr);
