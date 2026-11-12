@@ -876,7 +876,7 @@ Level L rounds replace `simplify_in_arena`. "Sweeps" compares with A.4.
 | Round | Rules (today's function) | Order | Skipped when |
 | ---: | --- | --- | --- |
 | 0 | alias collapse (`collapse`) | no sweep: when conversion builds `let[Alias] x = y`, later uses of `x` are built as `y`; the binding itself is built only if `x` is exported | |
-| 1 | `deep_flatten`; then exits (`subst_helper`) | `aux`'s recursion; then pre-order | exits: no `Catch` |
+| 1 | `deep_flatten`; then exits (`subst_helper`) | flatten: `Order::Stateful`, explicit `aux`/`flatten` continuations; exits: pre-order | flatten: no `Let` or `LetRec`; exits: no `Catch` |
 | 2 | `simplify_alias` | `simpl`'s recursion | |
 | 3 | `deep_flatten`, then `simplify_alias` | two sweeps | |
 | 4 | `deep_flatten`, then `alpha_conversion` | two sweeps | flatten: no `Let` whose value is a `Let`, `Seq`, `LetRec` or named block |
@@ -908,7 +908,7 @@ Level J rounds replace the JS passes:
 | `LamArena::if_`, `seq`, `switch_with`, `string_switch_with`, `apply` | rows N4 to N14 of C.5 (`bir/l/norm.rs`) | normalising, L |
 | `LamArena::let_` | none: it builds the node as given | |
 | `refine_let` | `refine_let` called by flatten and lets rules | pass rule (it is called explicitly today) |
-| `deep_flatten` (`flatten`, `eliminate_tuple`) | `flatten_let` | pass, rounds 1, 3, 4 |
+| `deep_flatten` (`flatten`, `eliminate_tuple`) | `bir/l/flatten.rs`: explicit continuations, binding groups, tuple projection elimination and `refine` | pass, rounds 1, 3, 4; first call checked in S4.2 |
 | `simplify_exits` | `inline_exit`, `drop_catch` | pass, rounds 1, 5, 7 |
 | `simplify_alias` field, option, boolean cases | `fold_field`, `fold_is_some`, `fold_if_var`, `fold_str_switch`, `unwrap_some` | pass, rounds 2, 3, 5 |
 | `simplify_alias` inlining, `lam_beta_reduce` | `inline_call`, `inline_external`, `beta` | pass, rounds 2, 3, 5 |
@@ -1005,6 +1005,16 @@ before child; an entry is therefore live when it is popped.
 
 **A round** is one sweep with one rule (C.1), pre- or post-order, with an
 explicit stack. A round whose mask misses the root's summary does nothing.
+`Order::Stateful` additionally lets a pass carry continuations and groups through
+its own explicit stack, using the same edit API. Its driver must call
+`enter_candidate` before aux descent and `finish_candidate` on return; the
+latter refreshes the summary in O(children). Snapshot guards are not yet
+supported for stateful drivers (the engine rejects them). The flatten driver
+precomputes beta-residue suffixes in one linear scan, then visits its input
+nodes once. Candidate scans (`hit`, `safe_alias`, and legacy purity) cost the
+candidate subtree, explicitly in addition to the sweep; these are not bounded
+pattern attempts. `rename_var` allocates and records provenance in amortized
+O(1); bridge registration is also amortized O(1).
 
 **Edits.** Rules edit through the engine: `promote(target, descendant)`,
 `put(target, new node)`, `fill`, `detach`, `node`, and `replace` for a
@@ -1051,12 +1061,12 @@ pass.
    ```rust
    pub static FLATTEN: Round = Round {
        name: "deep_flatten",
-       mask: OpMask::LET.or(OpMask::LETREC).or(OpMask::SEQ),  // what the rule matches
-       order: Order::Post,          // Pre when the pass decides before descending
-       renorm: OpMask::NONE,        // SHALLOW_MAP if the pass rebuilds through shallow_map
+       mask: OpMask::LET.or(OpMask::LETREC),
+       order: Order::Stateful(run), // deep_flatten threads binding groups
+       renorm: OpMask::SHALLOW_MAP.or(OpMask::IF).or(OpMask::SEQ),        // SHALLOW_MAP if the pass rebuilds through shallow_map
        facts: Facts::Current,       // Frozen if it reads ident_tbl
        guard: None,                 // which nodes to snapshot (inlining rounds)
-       rule: flatten_let,
+       rule: |_, _| Changed::No,     // Stateful runs its driver instead
    };
    ```
 
@@ -1074,6 +1084,20 @@ pass.
    state down the recursion that a sweep cannot carry, say so in the stage's
    pull request and extend `Round` there. This is the one part of the round
    interface S4.1 could not test against a real pass.
+   S4.2's answer: `deep_flatten` cannot use two whole-tree Pre/Post sweeps.
+   An ordinary let visits its body before its value; a regrouped let flattens
+   its value before its body and threads a group accumulator across both.
+   Nullable conversion allocates before visiting the argument. Use
+   `Order::Stateful` with an explicit continuation stack when a later pass
+   needs this interleaving; otherwise keep Pre/Post. Its driver owns the
+   ordering, calls `enter_candidate`/`finish_candidate`, edits only through
+   the engine, and documents any candidate scans. A stateful driver cannot
+   yet request snapshot guards: extend the guard-scope API and tests before
+   using this order for an inlining round that needs snapshots.
+   Code correction: `LamArena::shallow_map_impl` currently calls `if_` and
+   `seq` on changed children too, unlike C.1's S4.1 description. Flatten's
+   renorm mask includes IF and SEQ; other rounds must read their actual
+   rebuild code rather than copying the illustrative mask.
 5. Fresh identifiers: `Bir::new_var_id` in the order the pass creates them
    (C.2 row 9). A rule that copies a body uses `copy_subtree` and
    `engine.replace`, not `put`, because the copy may move uses under a
@@ -1836,7 +1860,8 @@ model with this document as its specification.
 | S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,000 to 3,000 each | S3.3 | yes, per slice of BACKEND_LOWERING.md 8.3, which regroups them (`let rec` of functions with tail loops, `Assign` with loops, export coercion as S3.9b); static catch (S3.5) goes to the strongest reviewer, tail loops (S3.6) and loop labels (in S3.7) to a strong one |
 | S3.10 | Default `New` for level J; then delete `lam_compile*.rs`, `js_pass_*.rs`, `js_shake.rs`, `js_exp_make.rs`, `js_ir/` except what emit's tests need | | fallback zero; instruction count falls by about 6.3% | −45,000 with tests | S3.9 | yes |
 | S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
-| S4.2 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
+| S4.2 | Deep flatten, explicit continuations, fresh-identity export and `lambda-flatten` diagnostic comparison | `bir/l/flatten.rs`, engine, bridge, shadow and coverage ratchet | see S4.2 results below | implemented | S4.1 | yes |
+| S4.3 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
@@ -1844,6 +1869,37 @@ model with this document as its specification.
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
+
+### S4.2: first deep-flatten round
+
+Implemented in `bir/l/flatten.rs`; opt-in `RESCRIPT_BACKEND=check` runs
+`lambda-flatten` from the existing shadow hook, before live simplification.
+Its legacy oracle clones the alias-collapsed lowered arena and runs precisely
+`simplify_in_arena`'s first `deep_flatten`, seeding both private counters with
+`ident_stamp_bound`. The pipeline still calls flatten three times; this stage
+checks only the first, not the later calls after alias rewriting.
+
+The existing s-expression diagnostic omits stamps, so flatten additionally
+compares every identifier occurrence and binder by **name, stamp and flags**.
+There is no alpha-renaming relaxation, including for round-created variables.
+`Imported::register_rename` records those identities in allocation order in
+amortized O(1), and imported identities are untouched. A mismatch is an error;
+only the bridge's explicit `Unsupported` reasons may skip a unit.
+
+| Corpus | Units | Identical | Unsupported |
+| --- | ---: | ---: | ---: |
+| runtime | 113 | 113 | 0 |
+| tests/tests | 711 | 711 | 0 |
+| fixtures | 480 | 480 | 0 |
+| 3,735-module application | 3,735 | 3,735 | 0 |
+
+The three repository corpora retain the S4.1 bridge and normalisation counts.
+Tests compare each arm and interactions with the legacy pass, including
+fresh-identifier order. The deep and wide tests use 10,000 bindings each,
+assert at most 90 steps per input node, and validate the resulting arena.
+The root-summary miss test asserts zero entered nodes. The round's syntactic
+beta-residue cache prunes subtrees without lets and clears entries for reused
+slots when it creates nodes; it is not a binding-fact recomputation.
 
 ### H.2 Stage S1 in full
 
