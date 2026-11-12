@@ -373,7 +373,7 @@ mod tests {
         assert_eq!(state.source_steps, 10_001);
         assert_eq!(state.primitive_steps, 40_000);
         let lowered = state.complete(Cx::value(), out);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 
     #[test]
@@ -391,7 +391,7 @@ mod tests {
         assert_eq!(state.source_steps, 1);
         assert_eq!(state.primitive_steps, 10_001);
         let lowered = state.complete(Cx::value(), out);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 
     #[test]
@@ -458,7 +458,7 @@ mod tests {
             output
                 .program
                 .arena
-                .validate(Some(output.program.root), false)
+                .validate(Some(output.program.root))
                 .unwrap();
         }
     }
@@ -507,7 +507,7 @@ mod dict_tests {
             output
                 .program
                 .arena
-                .validate(Some(output.program.root), false)
+                .validate(Some(output.program.root))
                 .unwrap();
         }
     }

@@ -15,6 +15,7 @@ mod prim_block;
 mod oracle_tests;
 pub mod out;
 mod unit;
+pub(crate) mod scope;
 
 use super::bridge::Unsupported;
 use super::{Bir, NodeId, VarId, View};
@@ -329,6 +330,7 @@ impl State {
             assert_eq!(made, var);
             arena.vars.flags[i] = input.arena.vars.flags[i];
         }
+        arena.js_scope = Some(scope::Scope::new(arena.vars.len()));
         arena.pools.j_modules = input
             .globals
             .iter()

@@ -970,7 +970,7 @@ mod await_tests {
         assert_eq!(state.sequence_steps, 10_000);
         assert_eq!(state.primitive_steps, 20_000);
         let lowered = state.complete(Cx::value(), out);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 
     #[test]

@@ -319,7 +319,7 @@ mod tests {
                     lowered
                         .program
                         .arena
-                        .validate(Some(lowered.program.root), false)
+                        .validate(Some(lowered.program.root))
                         .unwrap();
                     let actual = bridge_j::export_js(&lowered.program).unwrap();
                     let expected = legacy.bir_apply_arity_oracle(old_func, arity, old_args);

@@ -1,19 +1,33 @@
 //! Dynamic imports and the awaited-unit fact used by flat make reads.
 use super::*;
-use crate::bir::{ImportId, VarSpan};
 use crate::bir::j::plain;
-use crate::lambda::{LamLoc, lam_primitive::{ImportSource, Primitive}};
+use crate::bir::{ImportId, VarSpan};
+use crate::lambda::{
+    LamLoc,
+    lam_primitive::{ImportSource, Primitive},
+};
 use crate::types::external_ffi_types::{ExternalModuleName, ModuleBindName};
 
 impl State {
     /// M: is_awaited_unit / awaited_units. O(1), inspect two primitive headers
     /// at the binding on the existing walk; no second unit traversal.
     pub(super) fn record_awaited_unit(&mut self, var: VarId, value: NodeId) {
-        let View::Prim { primitive, args: [import] } = self.source.view(value) else { return };
-        if !matches!(self.arena.primitive(primitive).primitive, Primitive::Pawait) { return; }
-        let View::Prim { primitive, .. } = self.source.view(*import) else { return };
+        let View::Prim {
+            primitive,
+            args: [import],
+        } = self.source.view(value)
+        else {
+            return;
+        };
+        if !matches!(self.arena.primitive(primitive).primitive, Primitive::Pawait) {
+            return;
+        }
+        let View::Prim { primitive, .. } = self.source.view(*import) else {
+            return;
+        };
         if matches!(&self.arena.primitive(primitive).primitive, Primitive::Pimport(source)
-            if matches!(source.as_ref(), ImportSource::ImportModule { path, .. } if path.is_empty())) {
+            if matches!(source.as_ref(), ImportSource::ImportModule { path, .. } if path.is_empty()))
+        {
             self.awaited_units[var.index()] = true;
         }
     }
@@ -21,7 +35,15 @@ impl State {
     /// X: static_index. O(name bytes), one plain member node.
     pub(super) fn static_member(&mut self, object: NodeId, name: &str) -> NodeId {
         let property = self.arena.intern_text(name);
-        plain::node(&mut self.arena, View::JDot { object, property, position: crate::js_ir::arena::FieldPos::new(None) }, 0)
+        plain::node(
+            &mut self.arena,
+            View::JDot {
+                object,
+                property,
+                position: crate::js_ir::arena::FieldPos::new(None),
+            },
+            0,
+        )
     }
 
     /// X: import_of_path. O(path bytes), one global and one call.
@@ -46,7 +68,14 @@ impl State {
         }
         let ret = plain::node(&mut self.arena, View::SReturn { value }, 0);
         let body = plain::node(&mut self.arena, View::SBlock { statements: &[ret] }, 0);
-        let header = self.arena.function_header(VarSpan { start: param.0, len: 1 }, Default::default(), LamLoc::NONE);
+        let header = self.arena.function_header(
+            VarSpan {
+                start: param.0,
+                len: 1,
+            },
+            Default::default(),
+            LamLoc::NONE,
+        );
         let callback = self.pure_expression(View::JFun { body, header }, 0);
         let then = self.static_member(import, "then");
         self.call_node(then, &[callback], Default::default())
@@ -55,7 +84,12 @@ impl State {
     /// X: external_module_id. O(m + bundle/hint bytes) for m imports. No
     /// source index exists for external bundle/default pairs; reuse the first
     /// binding by scanning the small per-unit module inventory.
-    pub(super) fn external_module(&mut self, external: &ExternalModuleName, default: bool, dynamic: bool) -> ImportId {
+    pub(super) fn external_module(
+        &mut self,
+        external: &ExternalModuleName,
+        default: bool,
+        dynamic: bool,
+    ) -> ImportId {
         let existing = self.arena.pools.j_modules.iter().find(|module| matches!(&module.kind,
             crate::js_ir::Kind::External { name, default: d, .. } if name == &external.bundle && *d == default)).map(|m| m.id);
         let id = existing.unwrap_or_else(|| {
@@ -63,10 +97,18 @@ impl State {
             let var = self.fresh_variable(&name);
             self.idents[var.index()]
         });
-        let module = crate::js_ir::ModuleId { id, kind: crate::js_ir::Kind::External {
-            name: external.bundle.clone(), default,
-            import_attributes: external.import_attributes.clone().map(|entries| crate::js_ir::op::ImportAttributes { entries }),
-        }, dynamic_import: dynamic };
+        let module = crate::js_ir::ModuleId {
+            id,
+            kind: crate::js_ir::Kind::External {
+                name: external.bundle.clone(),
+                default,
+                import_attributes: external
+                    .import_attributes
+                    .clone()
+                    .map(|entries| crate::js_ir::op::ImportAttributes { entries }),
+            },
+            dynamic_import: dynamic,
+        };
         self.add_import_module(module)
     }
 
@@ -75,7 +117,10 @@ impl State {
     fn add_import_module(&mut self, module: crate::js_ir::ModuleId) -> ImportId {
         let id = ImportId(self.arena.pools.imports.len() as u32);
         let path = self.arena.intern_text(module.id.name());
-        self.arena.pools.imports.push(crate::bir::Import { name: module.id.name_atom(), path });
+        self.arena.pools.imports.push(crate::bir::Import {
+            name: module.id.name_atom(),
+            path,
+        });
         self.arena.pools.j_modules.push(module);
         self.module_constants.push(ModuleConstants::Unread);
         id
@@ -87,25 +132,47 @@ impl State {
     pub(super) fn compile_import(&mut self, source: &ImportSource) -> NodeId {
         match source {
             ImportSource::ImportModule { module_, path } => {
-                let module = crate::js_ir::ModuleId { id: *module_, kind: crate::js_ir::Kind::Ml, dynamic_import: true };
-                let resolved = self.resolver.as_ref().and_then(|r| r.resolve_module_path(&module));
+                let module = crate::js_ir::ModuleId {
+                    id: *module_,
+                    kind: crate::js_ir::Kind::Ml,
+                    dynamic_import: true,
+                };
+                let resolved = self
+                    .resolver
+                    .as_ref()
+                    .and_then(|r| r.resolve_module_path(&module));
                 self.dynamic_imports.push(module);
-                let Some(resolved) = resolved else { return plain::node(&mut self.arena, View::JUndefined, 0) };
+                let Some(resolved) = resolved else {
+                    return plain::node(&mut self.arena, View::JUndefined, 0);
+                };
                 let import = self.import_of_path(&resolved);
                 match path.as_slice() {
                     [] => import,
-                    [name] => self.wrap_then_path(import, &[crate::js_ir::printer::js_export_name(name)]),
-                    _ => match crate::lambda::flat_make_name(path) {
-                        Some(name) => self.wrap_then_path(import, &[crate::js_ir::printer::js_export_name(&name)]),
-                        None => { self.arena.release(import); plain::node(&mut self.arena, View::JUndefined, 0) }
+                    [name] => {
+                        self.wrap_then_path(import, &[crate::js_ir::printer::js_export_name(name)])
                     }
+                    _ => match crate::lambda::flat_make_name(path) {
+                        Some(name) => self.wrap_then_path(
+                            import,
+                            &[crate::js_ir::printer::js_export_name(&name)],
+                        ),
+                        None => {
+                            self.arena.release(import);
+                            plain::node(&mut self.arena, View::JUndefined, 0)
+                        }
+                    },
                 }
             }
             ImportSource::ImportExternal { module_, path } => {
                 let module = self.external_module(module_, path.as_slice() == ["default"], true);
-                self.dynamic_imports.push(self.arena.pools.j_modules[module.index()].clone());
+                self.dynamic_imports
+                    .push(self.arena.pools.j_modules[module.index()].clone());
                 let import = self.import_of_path(&module_.bundle);
-                if path.is_empty() { import } else { self.wrap_then_path(import, path) }
+                if path.is_empty() {
+                    import
+                } else {
+                    self.wrap_then_path(import, path)
+                }
             }
         }
     }
@@ -118,37 +185,76 @@ fn external_binding_name(module: &ExternalModuleName) -> String {
     fn capitalize(s: &str) -> String {
         let mut chars = s.chars();
         let mut result = String::with_capacity(s.len());
-        if let Some(c) = chars.next() { result.push(c.to_ascii_uppercase()); result.push_str(chars.as_str()); }
+        if let Some(c) = chars.next() {
+            result.push(c.to_ascii_uppercase());
+            result.push_str(chars.as_str());
+        }
         result
     }
-    if let ModuleBindName::PhintName(hint) = &module.module_bind_name { return capitalize(hint); }
+    if let ModuleBindName::PhintName(hint) = &module.module_bind_name {
+        return capitalize(hint);
+    }
     let name = &module.bundle;
     let offset = name.rfind('/').map_or(0, |i| i + 1);
     let suffix = &name[offset..];
-    if suffix.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
-        && suffix.bytes().skip(1).all(|c| c.is_ascii_alphanumeric() || c == b'_') { return capitalize(suffix); }
+    if suffix
+        .as_bytes()
+        .first()
+        .is_some_and(u8::is_ascii_alphabetic)
+        && suffix
+            .bytes()
+            .skip(1)
+            .all(|c| c.is_ascii_alphanumeric() || c == b'_')
+    {
+        return capitalize(suffix);
+    }
     let mut result = String::new();
     let mut start = true;
     for c in suffix.bytes() {
         if start {
-            if c.is_ascii_alphabetic() { result.push((c as char).to_ascii_uppercase()); start = false; }
-        } else if c.is_ascii_alphanumeric() || c == b'_' { result.push(c as char); }
-        else if c == b'.' || c == b'-' { start = true; }
+            if c.is_ascii_alphabetic() {
+                result.push((c as char).to_ascii_uppercase());
+                start = false;
+            }
+        } else if c.is_ascii_alphanumeric() || c == b'_' {
+            result.push(c as char);
+        } else if c == b'.' || c == b'-' {
+            start = true;
+        }
     }
-    if result.is_empty() { if offset == 0 { name.clone() } else { capitalize(name) } } else { result }
+    if result.is_empty() {
+        if offset == 0 {
+            name.clone()
+        } else {
+            capitalize(name)
+        }
+    } else {
+        result
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::lambda::{arena::LamArena, FieldDbgInfo};
     use crate::ident::IdentFlags;
+    use crate::lambda::{FieldDbgInfo, arena::LamArena};
 
     #[test]
     fn import_module_and_value_paths_all_continuations() {
-        for path in [vec![], vec!["value".into()], vec!["A".into(), "make".into()]] {
+        for path in [
+            vec![],
+            vec!["value".into()],
+            vec!["A".into(), "make".into()],
+        ] {
             let mut a = LamArena::new();
-            let source = ImportSource::ImportExternal { module_: ExternalModuleName { bundle: "example".into(), module_bind_name: ModuleBindName::PhintNothing, import_attributes: None }, path };
+            let source = ImportSource::ImportExternal {
+                module_: ExternalModuleName {
+                    bundle: "example".into(),
+                    module_bind_name: ModuleBindName::PhintNothing,
+                    import_attributes: None,
+                },
+                path,
+            };
             let root = a.prim_raw(Primitive::Pimport(Box::new(source)), &[], LamLoc::NONE);
             super::super::oracle_tests::compare(a, root);
         }
@@ -156,10 +262,20 @@ mod tests {
 
     #[test]
     fn resolved_module_and_flat_value_imports_match_legacy() {
-        let resolver = crate::js_ir::ModulePathResolver::from_compile_options(None, None, None, None, None, None, false);
-        for path in [vec![], vec!["default".into()], vec!["A".into(), "make".into()], vec!["A".into(), "invalid".into()]] {
+        let resolver = crate::js_ir::ModulePathResolver::from_compile_options(
+            None, None, None, None, None, None, false,
+        );
+        for path in [
+            vec![],
+            vec!["default".into()],
+            vec!["A".into(), "make".into()],
+            vec!["A".into(), "invalid".into()],
+        ] {
             let mut a = LamArena::new();
-            let source = ImportSource::ImportModule { module_: Ident::create_persistent("Other"), path };
+            let source = ImportSource::ImportModule {
+                module_: Ident::create_persistent("Other"),
+                path,
+            };
             let root = a.prim_raw(Primitive::Pimport(Box::new(source)), &[], LamLoc::NONE);
             super::super::oracle_tests::compare_with_resolver(a, root, Some(&resolver));
         }
@@ -168,7 +284,14 @@ mod tests {
     #[test]
     fn ten_thousand_import_path_segments_are_linear() {
         let mut a = LamArena::new();
-        let source = ImportSource::ImportExternal { module_: ExternalModuleName { bundle: "example".into(), module_bind_name: ModuleBindName::PhintNothing, import_attributes: None }, path: vec!["field".into(); 10_000] };
+        let source = ImportSource::ImportExternal {
+            module_: ExternalModuleName {
+                bundle: "example".into(),
+                module_bind_name: ModuleBindName::PhintNothing,
+                import_attributes: None,
+            },
+            path: vec!["field".into(); 10_000],
+        };
         let root = a.prim_raw(Primitive::Pimport(Box::new(source)), &[], LamLoc::NONE);
         let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
         let root = input.root;
@@ -178,7 +301,11 @@ mod tests {
         assert_eq!(state.primitive_steps, 10_001);
         let lowered = state.complete(Cx::value(), out);
         assert_eq!(lowered.dynamic_imports.len(), 1);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered
+            .program
+            .arena
+            .validate(Some(lowered.program.root))
+            .unwrap();
     }
 
     #[test]
@@ -188,12 +315,33 @@ mod tests {
         for field in ["make", "other"] {
             let mut a = LamArena::new();
             let id = Ident::new("unit", 10, IdentFlags::NONE);
-            let source = ImportSource::ImportModule { module_: Ident::create_persistent("Other"), path: vec![] };
+            let source = ImportSource::ImportModule {
+                module_: Ident::create_persistent("Other"),
+                path: vec![],
+            };
             let import = a.prim_raw(Primitive::Pimport(Box::new(source)), &[], LamLoc::NONE);
             let value = a.prim_raw(Primitive::Pawait, &[import], LamLoc::NONE);
             let base = a.var(id);
-            let inner = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new("Inner") }), &[base], LamLoc::NONE);
-            let body = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Module { name: crate::name::Name::new(field) }), &[inner], LamLoc::NONE);
+            let inner = a.prim_raw(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: crate::name::Name::new("Inner"),
+                    },
+                ),
+                &[base],
+                LamLoc::NONE,
+            );
+            let body = a.prim_raw(
+                Primitive::Pfield(
+                    0,
+                    FieldDbgInfo::Module {
+                        name: crate::name::Name::new(field),
+                    },
+                ),
+                &[inner],
+                LamLoc::NONE,
+            );
             let root = a.let_(LetKind::Strict, id, value, body);
             super::super::oracle_tests::compare(a, root);
         }

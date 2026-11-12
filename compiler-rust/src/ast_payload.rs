@@ -4,9 +4,16 @@ use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{Constant, Expression, ExpressionDesc, Payload, StructureItemDesc};
 
 /// OCaml `Ast_payload.unwrap_braces`: the expression under any explicit
-/// braces.
+/// braces, each read as the compiler reads it (`ParseArena::expanded`; the
+/// tree as written before the built-in rewrites have run).
+///
+/// Cost: one read and one bit test per brace level.
 pub fn unwrap_braces<'a>(arena: &'a ParseArena, expression: &'a Expression) -> &'a Expression {
-    crate::parser::parsetree_viewer::unwrap_braces(arena, expression)
+    let mut expression = expression;
+    while let ExpressionDesc::Pexp_braces(braces) = &expression.pexp_desc {
+        expression = arena.get_expr(arena.expanded(braces.expr));
+    }
+    expression
 }
 
 /// The expression of a single-expression payload `PStr [Pstr_eval (e, _)]`,

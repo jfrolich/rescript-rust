@@ -1154,7 +1154,7 @@ mod tests {
         )
         .unwrap()
         .unwrap();
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let actual = export_lambda(&imported).unwrap();
         assert_eq!(dump(&actual.arena, actual.root), dump(&a, expected));
         assert_eq!(
@@ -1757,7 +1757,7 @@ mod tests {
             (e.steps(), e.stats.clone())
         };
         assert_eq!(stats.unsupported, None);
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         (steps, stats)
     }
 
