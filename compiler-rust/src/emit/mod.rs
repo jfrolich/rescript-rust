@@ -160,15 +160,14 @@ pub fn emit(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
+    jsx_preserve: bool,
     header: bool,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         None,
     )
@@ -179,7 +178,7 @@ pub(crate) fn emit_audited(
     resolver: &ModulePathResolver,
     directives: &[String],
     debug: bool,
-    _jsx_preserve: bool,
+    jsx_preserve: bool,
     header: bool,
     audit: Option<&mut Vec<RawSegment>>,
 ) -> Result<(String, Option<String>), Unsupported> {
@@ -187,8 +186,7 @@ pub(crate) fn emit_audited(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         None,
         audit,
     )
@@ -198,14 +196,13 @@ pub(crate) fn emit_audited(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_with_source_map(
     program: &JsDepsProgram, resolver: &ModulePathResolver, directives: &[String],
-    debug: bool, _jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
+    debug: bool, jsx_preserve: bool, header: bool, options: &sourcemap::Options<'_>,
 ) -> Result<(String, Option<String>), Unsupported> {
     program::emit(
         program,
         resolver,
         directives,
-        debug,
-        header,
+        program::FileOptions { debug, jsx_preserve, header },
         Some(options),
         None,
     )
@@ -249,6 +246,10 @@ mod oracle_tests {
     fn oracle(source: &str, commonjs: bool) {
         let stats = Arc::new(PrinterStats::with_raw_audit());
         let mut options = CompilerOptions {
+            include_paths: vec![
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../packages/@rescript/runtime/lib/rescript"),
+            ],
             js_printer: PrinterMode::Legacy,
             output_module_format: Some(if commonjs {
                 crate::js_ir::ModuleFormat::CommonJs
@@ -302,6 +303,23 @@ mod oracle_tests {
             masked,
             "masked fixed point: {source}"
         );
+    }
+
+    #[test]
+    fn remaining_expressions_source_oracle() {
+        for source in [
+            "let f = @this self => self + 1",
+            "let f = @this (self: int) => 1",
+            "let f = x => y => z => x + y + z",
+            "let f = x => async y => x + y",
+            "type rest = {b: int}; type t = {a: int, b: int}; let f = (r: t) => {let {a, ...rest as other} = r; (a, other)}",
+            "let f = x => Some(x)",
+            "let f = x => x ++ (x ++ x)",
+        ] {
+            for commonjs in [false, true] {
+                oracle(source, commonjs);
+            }
+        }
     }
 
     #[test]
