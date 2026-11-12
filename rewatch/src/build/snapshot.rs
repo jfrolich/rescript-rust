@@ -8,11 +8,9 @@
 //! registers these interfaces, borrowed from the executable's memory and
 //! decoded on first lookup, instead of compiling the runtime.
 //!
-//! A runtime with other sources (one being edited, or another version) is
-//! compiled as before. The embedded interfaces record the source paths of the
-//! repository they were compiled in, as the `.cmi` files of a published
-//! runtime record those of the machine that built it; JavaScript imports of
-//! runtime modules do not depend on them.
+//! A runtime with other sources is compiled as before. Embedded paths use
+//! package-relative roots and the shared stored-core rebasing operation restores
+//! the installed source paths before the registry exposes a unit.
 
 use super::compile;
 use super::packages;
@@ -77,11 +75,25 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
             .ok_or_else(|| anyhow!("invalid stored extras for {name}"))?;
         anyhow::ensure!(extras.gentype_declarations.is_empty(),
             "snapshot module {name} has genType declarations");
-        Ok(ProducedModule { name, core: core.to_vec(), javascript: Default::default(), slots: Default::default() })
+        let mut normalized = stored_module::decode_core(core)
+            .ok_or_else(|| anyhow!("invalid runtime core {name}"))?;
+        normalized.rebase_paths(runtime_root, Path::new("@rescript/runtime"));
+        let (_, normalized) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+            pers_struct: normalized.pers_struct.as_ref(), info: &normalized.info, gentype_declarations: &[],
+        });
+        anyhow::ensure!(!contains_bytes(&normalized, runtime_root.to_string_lossy().as_bytes()),
+            "runtime module {name} retains a producer path");
+        let mut restored = stored_module::decode_core(&normalized).expect("normalized runtime core");
+        restored.rebase_paths(Path::new("@rescript/runtime"), runtime_root);
+        let (_, restored) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+            pers_struct: restored.pers_struct.as_ref(), info: &restored.info, gentype_declarations: &[],
+        });
+        anyhow::ensure!(restored == core, "runtime stored-core equivalence failed for {name}");
+        Ok(ProducedModule { name, core: normalized, javascript: Default::default(), slots: Default::default() })
     }).collect::<Result<Vec<_>>>()?;
     let runtime = ProducedPackage {
         name: "@rescript/runtime".into(),
-        recorded_root: runtime_root.to_string_lossy().into_owned(),
+        recorded_root: "@rescript/runtime".into(),
         sources_digest: digest,
         modules,
     };
@@ -154,7 +166,9 @@ fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> 
             {
                 let mut registry = state.module_registry.lock().unwrap();
                 for module in &runtime.modules {
-                    registry.register_stored_parts(&module.name, None, PendingCore::Bytes(module.core.clone().into()))
+                    registry.register_stored_parts(&module.name, None, PendingCore::Bytes(rebased_runtime_core(
+                        &module.core, Path::new(&runtime.recorded_root), runtime_root,
+                    ).ok_or_else(|| anyhow!("invalid runtime module {}", module.name))?.into()))
                         .ok_or_else(|| anyhow!("failed to register runtime module {}", module.name))?;
                 }
             }
@@ -323,8 +337,19 @@ pub(crate) fn register(
     let mut registry = registry.lock().unwrap();
     (0..embedded.len()).all(|slot| {
         let Some((name, core)) = embedded.module(slot) else { return false; };
+        let Some(core) = rebased_runtime_core(core, Path::new(embedded.recorded_root), runtime_root) else { return false; };
         registry.register_stored_parts(name, None, PendingCore::Bytes(core.into())).is_some()
     })
+}
+
+/// O(core bytes + filename bytes), one decode and encode per registered module.
+/// Runtime and Belt use the same stored-core path rebasing operation.
+fn rebased_runtime_core(bytes: &[u8], from: &Path, to: &Path) -> Option<Vec<u8>> {
+    let mut core = stored_module::decode_core(bytes)?;
+    core.rebase_paths(from, to);
+    Some(stored_module::encode_parts(&stored_module::StoredModuleRef {
+        pers_struct: core.pers_struct.as_ref(), info: &core.info, gentype_declarations: &[],
+    }).1)
 }
 
 /// A digest of the runtime's configuration and of every source's module name
@@ -572,10 +597,12 @@ mod tests {
     }
 
     #[test]
-    fn producer_is_deterministic_and_belt_has_no_build_paths() {
+    fn producer_is_deterministic_and_packages_have_no_build_paths() {
         let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
         let first = compile(&runtime).unwrap();
         assert_eq!(first, compile(&runtime).unwrap());
+        let checkout = runtime.parent().unwrap().parent().unwrap().parent().unwrap();
+        assert!(!contains_bytes(&first, checkout.to_string_lossy().as_bytes()));
         let packages = decode(leak(first)).unwrap();
         let belt = packages.iter().find(|p| p.name == "@rescript/belt").unwrap();
         assert_eq!(belt.recorded_root, "@rescript/belt");
