@@ -1826,7 +1826,8 @@ owns its JavaScript and optional source-map strings.
 
 The earlier 1,600-instructions/source-line estimate is not evidence of a win.
 See [PRINTER_INSTRUCTIONS.md](PRINTER_INSTRUCTIONS.md) for the same-binary
-three-way measurement procedure; final numbers are still pending. Named
+three-way measurements: both corpora cost more overall with oxc-bir, and the
+public-corpus rendering cost remains above legacy even without import. Named
 self instructions cannot assign shared allocation or inlined work exclusively
 to import or emission; subtracting only the import bucket is not a proof of the
 future lowering-to-Bir path's total cost.
@@ -2041,7 +2042,7 @@ model with this document as its specification.
 | S1.5 | Remove the legacy printer's layout code from release builds; it stays under `cfg(test)` while `lam_compile` tests print with it | `js_ir/printer.rs`, `js_ir/program_printer.rs` | suites | −3,000 | S1.4, two clean weeks | yes |
 | S2.1 | `Bir`: nodes, pools, views, constructors without rules, `validate`, text dump | `compiler-rust/src/bir/{mod,node,pools,vars,edit,validate,dump}.rs` | unit tests; size assertions; invariants of B.4 under random edits | 2,500 | none | yes, section B is the spec |
 | S2.2 | Bridges: import from `LamArena` and from `JsArena`, export to `LamArena`; `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `bir/bridge.rs`, `driver.rs`, `rewatch/src/build/compile.rs`, workflow | import then export is the identity on all corpora (compared with `sexp_lambda`) | 1,500 | S2.1 | yes |
-| S3.1 | Implemented opt-in `oxc-bir`: direct J view, shared construction, one naming traversal and dense VarId names; no export-back; measurements pending (PRINTER_INSTRUCTIONS.md) | `emit/*`, `bir/emit_view.rs`, bridge identity metadata | Exact oxc/Bir JavaScript and map bytes; no-export counter; 10,000-element naming step tests; existing coverage unchanged | implemented | S1.1, S3.1a J bridge | yes |
+| S3.1 | Implemented opt-in `oxc-bir`: direct J view, shared construction, one naming traversal and dense VarId names; no export-back; measured on both corpora; default-switch gate closed (PRINTER_INSTRUCTIONS.md) | `emit/*`, `bir/emit_view.rs`, bridge identity metadata | Exact oxc/Bir JavaScript and map bytes; no-export counter; 10,000-element naming step tests; existing coverage unchanged | implemented | S1.1, S3.1a J bridge | yes |
 | S3.2 | J normalising rules and rounds J1 to J4, fed by importing the JS IR before the JS passes | `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `Check` against the legacy JS passes | 3,000 | S3.1 | yes, each rule cites its function (C.4) |
 | S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs`, `bir/bridge.rs` | `Check`; coverage reported | 4,500 | S2.2 | yes, with [BACKEND_LOWERING.md](BACKEND_LOWERING.md) as the specification: it is the table this row asked for. Exports and their coercion move to S3.9b there, and the gate does not need S3.2 |
 | S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,000 to 3,000 each | S3.3 | yes, per slice of BACKEND_LOWERING.md 8.3, which regroups them (`let rec` of functions with tail loops, `Assign` with loops, export coercion as S3.9b); static catch (S3.5) goes to the strongest reviewer, tail loops (S3.6) and loop labels (in S3.7) to a strong one |

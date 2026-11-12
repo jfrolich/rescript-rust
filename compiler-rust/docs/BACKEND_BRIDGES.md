@@ -242,4 +242,4 @@ The public oracle has 941 emitted outputs and four existing fallbacks; the
 fallback. Naming computes exact function environments and print-order requests in
 one traversal; the missing maintained relations and edit costs are described in
 BACKEND_REDESIGN.md E.3. PRINTER_INSTRUCTIONS.md records the measurement
-procedure; final measured costs are still pending.
+procedure and completed three-way results; the default-switch gate remains closed.

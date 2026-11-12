@@ -3,8 +3,7 @@
 ## Status
 
 The direct Bir emitter and dense naming implementation are built and parity
-checked. The merged candidate is measured below on `tests/tests`; application
-profiles are still running. The default remains legacy: even excluding import,
+checked. Both `tests/tests` and the 3,735-module application are measured below. The default remains legacy: even excluding import,
 the current direct path does **not** meet the default-switch cost gate.
 
 ## Measurement setup
@@ -14,8 +13,13 @@ Binary SHA-256: `82ee4d462cfe8b7ebf0ca956dde621eff30e5d8c690329322ca9ed3667966f3
 Linux x86-64, Rust `1.102.0-nightly (ac8310ba6 2026-11-09)`, Valgrind 3.22.0.
 One release binary, fat LTO, line tables, one Rayon worker, full clean builds;
 runtime preparation outside each sample. No backend or printer stats enabled.
-Each profiler/mode has one successful sample. Native timing uses one warmup and
-five measured runs per mode. Profiler wall time is not native build time.
+The public corpus has one successful sample per profiler/mode; the application
+has one Cachegrind sample per mode. The additional public-corpus self breakdown
+is identified separately below. Native timing, for `tests/tests` only, uses one
+warmup and five measured runs per mode. Profiler wall time is not native build
+time. Subsequent trunk integration and documentation commits are not silently
+substituted for this pinned compiler revision; no emitter optimization followed
+the measurement.
 
 ## tests/tests
 
@@ -132,9 +136,43 @@ The timing distributions overlap; they do not establish a wall-time improvement.
 
 ## Application
 
-The 3,735-module application measurements are in progress. Its byte-equality
-gate already passes for all 3,980 generated files, with zero import fallback.
-Interrupted or failed profiles are not included in the results.
+One successful clean Cachegrind build per mode, using the same binary as the
+public-corpus table. All three compiled the 3,735-module application. Its
+byte-equality gate passes for all 3,980 generated files with zero import fallback.
+No interrupted profile contributes to these totals.
+
+| Mode | Instructions | Change from legacy |
+| --- | ---: | ---: |
+| legacy | 74,435,580,110 | +0.00% |
+| oxc | 76,277,299,207 | +2.47% |
+| oxc-bir | 82,975,332,012 | +11.47% |
+
+### Named self attribution (millions of instructions)
+
+These use the same substring buckets and limitations as the public corpus,
+including generic `Names` arguments in the Naming bucket. They are not inclusive
+phase costs; the unresolved work remains explicit.
+
+| Bucket | Legacy | JS-IR oxc | Bir oxc |
+| --- | ---: | ---: | ---: |
+| AST construction / oxc arena | 0.171 | 36.828 | 35.995 |
+| Bir support / import (named self) | 10.377 | 10.301 | 6092.259 |
+| Legacy printer | 1894.923 | 330.312 | 285.020 |
+| Naming | 0.000 | 1377.014 | 1126.670 |
+| Other compiler/runtime | 53554.245 | 53729.116 | 53650.651 |
+| Other emitter | 0.143 | 275.128 | 1373.300 |
+| Oxc codegen | 0.000 | 401.196 | 401.027 |
+| Oxc parser | 7.412 | 7.333 | 7.333 |
+| Shared allocation / containers | 18846.373 | 19429.723 | 19878.306 |
+| Stats and environment | 5.739 | 7.960 | 7.960 |
+| Unresolved | 116.197 | 672.388 | 116.813 |
+
+No inclusive application import measurement or repeated native timing is claimed.
+The separate import/rendering measurement above is from `tests/tests`; subtracting
+this application's Bir-support self bucket would not measure its emission-only
+cost. The successful three-way instruction samples complete the requested
+application comparison. The negative result is retained, not optimized away in
+this change.
 
 ## Reproduce
 
