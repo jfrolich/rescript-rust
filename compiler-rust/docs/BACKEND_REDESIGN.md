@@ -1135,9 +1135,11 @@ is visible (A.2). Three things change.
    specialisation writes new rows into a row pool instead of cloning
    `Pattern` values (`normalize_pat_owned`, `alloc_cow`, `with_desc` today).
    Contexts and jump summaries (`Ctx`, `Jumps`) keep their definitions but
-   are built lazily: they are needed only to decide whether a failure branch
-   can be reached below a split, and a match that the checker marked total
-   with no guard and no or-pattern under a constructor never asks.
+   are built lazily (done, below): they are read when an exit is taken,
+   when the constructors a switch does not mention are sent to default
+   matrices, when an or-pattern handler selects its columns, and by
+   `compile_list`, which does not compile a cell whose context list is
+   empty.
 
 A fast path is allowed only where it provably produces the general
 algorithm's tree: a single-column match on constructors or constants with no
@@ -1186,6 +1188,34 @@ read, almost all of one row (7,843 rows in 7,603 matrices), where
 without comparing every pair (rows whose first columns are different
 constructors or constants cannot be below one another) has a ceiling under
 0.03% of the build and is not done.
+
+S5.5, second part (done): **context lists are built when they are read.**
+They live in a pool with `u32` handles (`CtxPool`, `CtxId`), one per match.
+A list derived by `filter_ctx` or `ctx_lshift` from a single context whose
+right columns are all wildcards (the starting context is one) is stored as
+its recipe. For such a parent the result is known without building it:
+every arm of `ctx_matcher` accepts a wildcard head and `normalize_pat` makes
+every argument of the tested pattern a wildcard, so `filter_ctx` gives
+exactly one context, again with all-wildcard right columns, and `ctx_lshift`
+moves one wildcard left. The list is therefore not empty, which is all
+`compile_list` asks; a reader that needs the contexts (`comp_exit`,
+`mk_failaction_neg`, `mk_failaction_pos`, `compile_orhandlers`) gets them
+from `CtxPool::get`, which runs the same `filter_ctx` and `ctx_lshift` then,
+each list once. Any other list (one extracted from a jump summary, one
+selected for an or-pattern handler, anything derived from those that is not
+a single all-wildcard context) is built when derived, as before. Measured:
+-0.37% of the application build, -0.12% of `tests/tests`.
+
+S5.4, the row pool: not built. After the two parts of S5.5 the copies of
+case lists and rows are about 0.3% of the application build (the
+instantiations of `Vec` and `VecDeque` on clauses: collected 497,874 times,
+grown by one push 424,136 times, dropped 868,784 times). A pool makes a row
+a slice and removes the vector per row, about half of that; the other half
+is the lists themselves, most of them for the 75% of splits that have one
+row, which a pool does not remove. Its ceiling is therefore 0.15% to 0.2%,
+at the bar set for these stages, and the same cost is better taken by
+splitting a one-row matching without the three work lists of `split_or`
+(ceiling about 0.2%, not built either).
 
 ### D.2 Sharing the decision tree with exhaustiveness checking
 
@@ -1810,7 +1840,7 @@ model with this document as its specification.
 | S4.9 | Default `New` for level L; delete `lam_pass_*.rs`, `lam_beta_reduce.rs`, `lam_compile_main.rs` and the analyses only they use | | fallback zero; instruction count falls by about 5.4% | −8,000 | S4.8, S3.10 | yes |
 | S5.1 | Profile of conversion and match compilation on the application; a builder trait implemented by `RawArena`, with the converter and match compiler generic over it | `raw_lambda/*` | no output change, no instruction increase | 1,500 | none | yes |
 | S5.2 | `Bir` builder implementing the trait; `lower.rs`'s rewriting inside the constructors | `bir/build.rs` | `Check` from the typed tree | 2,500 | S5.1, S4.9 | yes |
-| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); row pool; lazy contexts and the single-column fast path | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
+| S5.3 to S5.5 | Match compiler: structural-hash action sharing (done, D.1); the matrix of a split group computed where it is read (done, D.1: -0.75% of the application build); context lists built when read (done, D.1: -0.37%); row pool and the one-row split (not built, D.1: ceilings of 0.15% to 0.2% each) | `raw_lambda/matching.rs` | generated JavaScript byte-identical on the suites and the application (these run on today's pipeline, before `Check` covers conversion); each shows its saving | 800 to 1,500 each | S5.1 | no: each needs the profile and an argument that the tree is unchanged |
 | S5.6 | Default `New` from the typed tree; delete `RawArena`, `lower.rs`, `LamArena`, the bridges. `key_encode.rs` stays: the match compiler's action keys use it for `Bir` as well (D.1) | | fallback zero; instruction count falls by about 5.1% | −15,000 | S5.5 | yes |
 | S6 | Summaries from facts; fragments for closed lambdas; stored format | `bir/summary.rs`, `cmi/persistent_env.rs`, `lambda/lam_loc.rs` | `Check` on summaries; a build with cross-module inlining on | 1,200 | S4.9 | yes, section F is the spec |
 | S7 | For modules whose typed tree nobody reads, the type checker calls the `Bir` builder directly | type checker | own design | | S5.6 and the type checker rewrite | no |
