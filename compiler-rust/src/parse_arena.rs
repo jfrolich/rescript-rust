@@ -588,6 +588,8 @@ pub struct ParseArena {
     /// locations marked as consumed by the builtin PPX, consulted by the
     /// unused-attribute sweep (`Bs_ast_invariant.warn_unused_attribute`).
     used_attributes: std::sync::Mutex<HashSet<LocIdx>>,
+    /// Conservative parser observation; speculative parses may leave this set.
+    has_gentype_annotations: bool,
     /// Arena of patterns (returns PatIdx).
     /// Replaces `Box<Pattern>` for recursive AST references.
     patterns: Arena<Pattern, PatIdx>,
@@ -1058,6 +1060,7 @@ impl Default for ParseArena {
             builtin_spice_disabled: false,
             experimental_let_unwrap: false,
             used_attributes: std::sync::Mutex::new(HashSet::new()),
+            has_gentype_annotations: false,
             patterns: Arena::default(),
             synthetic_patterns: SyntheticVec::default(),
             synthetic_pattern_base: u32::MAX,
@@ -1834,6 +1837,19 @@ impl ParseArena {
     // ========================================================================
     // String interning
     // ========================================================================
+
+    /// Record an attribute as it is parsed, without another AST traversal.
+    pub fn observe_gentype_attribute(&mut self, name: StrIdx) {
+        if !self.has_gentype_annotations {
+            let name = self.get_string(name);
+            self.has_gentype_annotations = name.starts_with("genType") || name.starts_with("gentype");
+        }
+    }
+
+    /// Any parsed genType-family attribute, including nested/file attributes.
+    pub fn has_gentype_annotations(&self) -> bool {
+        self.has_gentype_annotations
+    }
 
     /// Intern a string, returning its index.
     ///

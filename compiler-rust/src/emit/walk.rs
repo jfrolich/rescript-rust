@@ -62,6 +62,7 @@ pub(super) enum FunctionForm {
     Declaration,
     ArrowExpression(Expr),
     ArrowBlock,
+    Method,
     ArrowEmpty,
 }
 pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<FunctionForm, Unsupported> {
@@ -69,11 +70,14 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
         return Ok(FunctionForm::Eta(target));
     }
     let f = a.fun(f);
-    if f.is_method {
-        return Err(Unsupported("method function"));
+    if f.is_method && a.ident_slice(f.params).is_empty() {
+        return Err(Unsupported("method without this parameter"));
     }
     if top {
         return Ok(FunctionForm::Declaration);
+    }
+    if f.is_method {
+        return Ok(FunctionForm::Method);
     }
     if f.directive.is_some() {
         return Ok(FunctionForm::ArrowBlock);
@@ -82,12 +86,6 @@ pub(super) fn function_form(a: &JsArena, f: FunId, top: bool) -> Result<Function
         match a.sk(*stmt) {
             StmtKind::Return(e) if undefined(a, e) => return Ok(FunctionForm::ArrowEmpty),
             StmtKind::Return(e) | StmtKind::Exp(e) => {
-                // Newly reachable with scoped naming: the reference reformat
-                // retains parentheses around an arrow returned by an arrow.
-                // Leave that separate token-shape slice to its own change.
-                if matches!(a.ek(e), ExprKind::Fun(_)) {
-                    return Err(Unsupported("nested arrow expression body"));
-                }
                 return Ok(FunctionForm::ArrowExpression(e));
             }
             _ => {}
@@ -157,13 +155,41 @@ pub(super) fn negation_form(a: &JsArena, op: BinOp, left: Expr) -> bool {
         })
 }
 
-// Nullish rewriting relies on structural equality. Until that comparison is
-// available, don't emit a potentially different `||` tree for this shape.
-pub(super) fn possible_nullish(a: &JsArena, op: BinOp, l: Expr, r: Expr) -> bool {
-    op == BinOp::Or
-        && [l, r]
-            .iter()
-            .all(|e| matches!(a.ek(*e), ExprKind::Bin(BinOp::EqEqEq, _, _)))
+/// Legacy rewrites x === null || x === undefined to x == null when the
+/// rendered targets match. For identical variables/qualified paths this can
+/// be proven without rendering or allocating; other target comparisons remain
+/// a specific fallback. Only the retained left target is met by naming.
+pub(super) fn nullish_target(
+    a: &JsArena,
+    op: BinOp,
+    l: Expr,
+    r: Expr,
+) -> Result<Option<Expr>, Unsupported> {
+    if op != BinOp::Or {
+        return Ok(None);
+    }
+    let (ExprKind::Bin(BinOp::EqEqEq, x, lx), ExprKind::Bin(BinOp::EqEqEq, y, ly)) =
+        (a.ek(l), a.ek(r))
+    else {
+        return Ok(None);
+    };
+    if !matches!(
+        (a.ek(lx), a.ek(ly)),
+        (ExprKind::Null, ExprKind::Undefined { .. }) | (ExprKind::Undefined { .. }, ExprKind::Null)
+    ) {
+        return Ok(None);
+    }
+    let same = x == y
+        || match (a.ek(x), a.ek(y)) {
+            (ExprKind::Var(x), ExprKind::Var(y)) => a.ident(x).same(&a.ident(y)),
+            (ExprKind::Qualified(x), ExprKind::Qualified(y)) => a.qual(x) == a.qual(y),
+            _ => false,
+        };
+    if same {
+        Ok(Some(x))
+    } else {
+        Err(Unsupported("nullish comparison target equality"))
+    }
 }
 pub(super) fn member_form(name: &str) -> (&str, bool) {
     let name = name
@@ -264,14 +290,61 @@ fn numeric_decoration(a: &JsArena, e: Expr) -> bool {
     matches!(a.ek(e), ExprKind::Number(n) if matches!(a.number(n), Number::Int { i, .. } if *i >= 0))
 }
 
-/// Legacy raw expressions carry programmer text, with classification-dependent
-/// grouping; raw statements have surrounding newlines and a statement-level
-/// semicolon except for comment-only snippets. Neither introduces IR identifiers.
-/// The classifier discards its parsed AST today. Until verbatim assembly can
-/// satisfy the unchanged fixed-point oracle, retain the whole-file legacy path:
-/// reparsing and formatting here would not preserve the programmer's text.
-pub(super) fn raw_supported<T>() -> Result<T, Unsupported> {
-    Err(Unsupported("verbatim raw JavaScript"))
+/// Raw text meets no IR identifiers. Statements keep surrounding newlines and
+/// their trailing semicolon, except comment-only snippets. Expressions use the
+/// existing classifier's grouping rule; arrow bodies and expression statements
+/// add the legacy outer parentheses. No new parser is used by the emitter.
+#[derive(Clone, Copy)]
+pub(super) enum RawContext {
+    Expression,
+    Arrow,
+    Statement,
+}
+
+pub(super) fn raw_wrapping(
+    info: &crate::js_ir::JsRawInfo,
+    context: RawContext,
+) -> Result<(&'static str, &'static str, bool), Unsupported> {
+    use crate::binary_ast::ppx::{
+        JsExpClassification, JsStmtClassification, classify_js_exp, classify_js_stmt,
+    };
+    if info.is_stmt {
+        if !matches!(context, RawContext::Statement) {
+            return Err(Unsupported("raw statement in expression position"));
+        }
+        return Ok(
+            if matches!(
+                classify_js_stmt(&info.code),
+                JsStmtClassification::JsStmtComment
+            ) {
+                ("", "", true)
+            } else {
+                ("\n", "\n", false)
+            },
+        );
+    }
+    let classification = classify_js_exp(&info.code);
+    // Legacy drops the literal and may keep only one leading comment. Keeping
+    // the entire payload would violate that rule, so retain a specific fallback.
+    if matches!(context, RawContext::Statement)
+        && matches!(classification, JsExpClassification::JsLiteral { .. })
+    {
+        return Err(Unsupported("raw literal expression statement elision"));
+    }
+    let grouped = crate::js_ir::printer::raw_js_expression_needs_paren_classified(
+        &info.code,
+        &classification,
+    );
+    Ok(
+        match (
+            grouped,
+            matches!(context, RawContext::Arrow | RawContext::Statement),
+        ) {
+            (false, false) => ("", "", false),
+            (true, true) => ("((", "))", false),
+            _ => ("(", ")", false),
+        },
+    )
 }
 
 /// `print_exp_statement_of`: only unit tails discard numbers/undefined and
@@ -416,6 +489,100 @@ pub(super) fn range_supported(
         return Err(Unsupported(
             "range initializer sequence without cached bound",
         ));
+    }
+    Ok(())
+}
+
+/// Legacy OptionalBlock(false) spells Primitive_option.some, a fixed global
+/// (not a named IR identifier), followed by the operand except synthetic unit.
+/// Calls supply the parentheses; no synthetic identifier enters naming.
+pub(super) fn optional_argument(a: &JsArena, e: Expr) -> Option<Expr> {
+    (!matches!(a.ek(e), ExprKind::Undefined { is_unit: true })).then_some(e)
+}
+
+/// Unlike logical operators, string + preserves right association: the legacy
+/// printer uses Plus's right precedence 12, above its own precedence 11.
+pub(super) fn string_children(a: &JsArena, e: Expr) -> Option<(Expr, Expr)> {
+    match a.ek(e) {
+        ExprKind::StringAppend(l, r) => Some((l, r)),
+        _ => None,
+    }
+}
+
+/// Traverse string leaves in printed order, without stack growth with depth.
+pub(super) fn string_leaves(
+    a: &JsArena,
+    root: Expr,
+    pending: &mut Vec<Expr>,
+    mut visit: impl FnMut(Expr) -> Result<(), Unsupported>,
+) -> Result<(), Unsupported> {
+    pending.push(root);
+    while let Some(e) = pending.pop() {
+        expression_comment(a, e)?;
+        if let Some((l, r)) = string_children(a, e) {
+            pending.push(r);
+            pending.push(l);
+        } else {
+            visit(e)?;
+        }
+    }
+    Ok(())
+}
+
+/// Preserve-mode JSX needs a separate AST shape; runtime-mode JSX prints a
+/// normal call and never drops its tag, props or key, even when they are unit.
+pub(super) fn jsx_runtime(
+    a: &JsArena,
+    id: crate::js_ir::arena::JsxId,
+    preserve: bool,
+) -> Result<crate::js_ir::arena::JsxInfo, Unsupported> {
+    if preserve {
+        return Err(Unsupported("JSX preserve mode"));
+    }
+    let jsx = a.jsx(id);
+    if a.props(jsx.props)
+        .iter()
+        .any(|(key, _)| !matches!(key, crate::js_ir::arena::PropName::Lit(_)))
+    {
+        return Err(Unsupported("symbol JSX key"));
+    }
+    Ok(jsx)
+}
+
+/// Destructuring declarations meet excluded-field binders before the rest
+/// binder and source. Expression-position rest uses only synthetic binders.
+pub(super) fn rest_declaration(
+    a: &JsArena,
+    d: &VarDecl,
+) -> Option<(crate::js_ir::arena::RestId, Expr)> {
+    match a.ek(d.value?) {
+        ExprKind::RecordRest(fields, source) => Some((fields, source)),
+        _ => None,
+    }
+}
+
+/// Canonical integer property text is emitted as a numeric index by legacy.
+/// Keep the newly exposed member shape separate from record-rest support.
+pub(super) fn static_member_supported(name: &str) -> Result<(), Unsupported> {
+    let (name, _) = member_form(name);
+    let digits = name.strip_prefix('-').unwrap_or(name);
+    let canonical = name == "0" || matches!(digits.as_bytes(), [b'1'..=b'9', ..]);
+    if canonical && name.parse::<i64>().is_ok() {
+        Err(Unsupported("numeric static member"))
+    } else {
+        Ok(())
+    }
+}
+
+/// A legacy call of the external `delete` parses as a unary operator, not a
+/// call. Raw support exposes this previously hidden shape; keep it on fallback
+/// until its separate AST rule is implemented rather than relaxing fixed points.
+pub(super) fn call_supported(a: &JsArena, callee: Expr) -> Result<(), Unsupported> {
+    if let ExprKind::Var(id) = a.ek(callee) {
+        let id = a.ident(id);
+        if id.name() == "delete" && (id.stamp() == 0 || id.is_js()) {
+            return Err(Unsupported("delete call syntax"));
+        }
     }
     Ok(())
 }

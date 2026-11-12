@@ -75,10 +75,28 @@ pub(super) struct Names {
     raw: HashSet<Name>,
     converted: HashMap<Name, Name>,
     free: HashMap<FunId, Vec<Ident>>,
+    method_this: HashSet<FunId>,
+    string_tasks: Vec<Expr>,
     steps: usize,
     budget: usize,
 }
 impl Names {
+    pub(super) fn method_this_used(&self, f: FunId) -> bool {
+        self.method_this.contains(&f)
+    }
+
+    fn string_leaves(
+        &mut self,
+        a: &JsArena,
+        root: Expr,
+        mut visit: impl FnMut(&mut Self, Expr) -> Result<(), Unsupported>,
+    ) -> Result<(), Unsupported> {
+        let mut scratch = std::mem::take(&mut self.string_tasks);
+        let result = walk::string_leaves(a, root, &mut scratch, |e| visit(self, e));
+        scratch.clear();
+        self.string_tasks = scratch;
+        result
+    }
     fn charge(&mut self, n: usize) -> Result<(), Unsupported> {
         self.steps = self.steps.saturating_add(n);
         if self.steps > self.budget {
@@ -93,6 +111,18 @@ impl Names {
 
     pub(super) fn finish(&self, s: Stmt) -> &str {
         &self.finishes[&s]
+    }
+
+    /// A hole prefix longer than every printed name starting with the reserved
+    /// stem cannot collide with any local, global, import, or loop-finish name.
+    pub(super) fn raw_prefix_len(&self) -> usize {
+        self.printed
+            .values()
+            .chain(self.finishes.values())
+            .filter(|n| n.starts_with(super::raw::PREFIX))
+            .map(|n| n.len() + 1)
+            .max()
+            .unwrap_or(super::raw::PREFIX.len())
     }
 
     fn base(&mut self, id: Ident) -> Name {
@@ -232,8 +262,23 @@ impl Names {
         struct Input {
             count: usize,
             raw: HashSet<Name>,
+            strings: Vec<Expr>,
         }
         impl Visitor for Input {
+            fn visit_string_children(&mut self, a: &JsArena, left: Expr, right: Expr) -> bool {
+                let mut pending = std::mem::take(&mut self.strings);
+                pending.extend([right, left]);
+                while let Some(e) = pending.pop() {
+                    if let Some((l, r)) = walk::string_children(a, e) {
+                        self.visit_expression(a, e);
+                        pending.extend([r, l]);
+                    } else {
+                        crate::js_ir::walk::walk_expression(self, a, e);
+                    }
+                }
+                self.strings = pending;
+                true
+            }
             fn visit_expression(&mut self, a: &JsArena, e: Expr) {
                 self.count += 1;
                 if let ExprKind::Var(id) = a.ek(e)
@@ -304,11 +349,22 @@ impl Names {
             return Ok(());
         }
         let info = a.fun(f);
-        let mut defined: HashSet<_> = a.ident_slice(info.params).iter().copied().collect();
+        let params = a.ident_slice(info.params);
+        let mut defined: HashSet<_> = params
+            .iter()
+            .skip(usize::from(info.is_method))
+            .copied()
+            .collect();
         let mut used = HashSet::new();
         self.analyze_block(a, a.stmts(info.body), &mut defined, &mut used)?;
         self.charge(used.len() + defined.len())?;
         used.retain(|id| !defined.contains(id));
+        if info.is_method
+            && let Some(this) = params.first()
+            && used.remove(this)
+        {
+            self.method_this.insert(f);
+        }
         let ids = self.sorted(used)?;
         self.free.insert(f, ids);
         Ok(())
@@ -354,6 +410,9 @@ impl Names {
                     }
                 }
             }
+            ExprKind::StringAppend(..) => {
+                self.string_leaves(a, e, |this, e| this.analyze_expr(a, e, defined, used))?
+            }
             _ => children(a, e, |e| self.analyze_expr(a, e, defined, used))?,
         }
         Ok(())
@@ -371,6 +430,13 @@ impl Names {
                 StmtKind::Block(b) => self.analyze_block(a, a.stmts(b), defined, used)?,
                 StmtKind::Variable(v) => {
                     let d = a.var(v);
+                    if let Some((fields, _)) = walk::rest_declaration(a, d) {
+                        for field in a.rest(fields) {
+                            if let Some(id) = field.ident {
+                                defined.insert(id);
+                            }
+                        }
+                    }
                     defined.insert(d.ident);
                     if let Some(e) = d.value {
                         self.analyze_expr(a, e, defined, used)?;
@@ -429,7 +495,10 @@ impl Names {
         match form {
             walk::FunctionForm::Eta(e) => self.expr(a, e)?,
             _ => {
-                for id in a.ident_slice(info.params) {
+                for (i, id) in a.ident_slice(info.params).iter().enumerate() {
+                    if info.is_method && i == 0 && !self.method_this_used(f) {
+                        continue;
+                    }
                     self.add(*id, false)?;
                 }
                 match form {
@@ -454,6 +523,7 @@ impl Names {
             ExprKind::Var(id) => self.add(a.ident(id), false),
             ExprKind::Qualified(q) => self.add(a.qual(q).0.id, true),
             ExprKind::Fun(f) => self.function(a, f, None, false),
+            ExprKind::StringAppend(..) => self.string_leaves(a, e, |this, e| this.expr(a, e)),
             _ => children(a, e, |e| self.expr(a, e)),
         }
     }
@@ -496,6 +566,13 @@ impl Names {
                     && let ExprKind::Fun(f) = a.ek(e)
                 {
                     return self.function(a, f, Some(d.ident), top);
+                }
+                if let Some((fields, _)) = walk::rest_declaration(a, d) {
+                    for field in a.rest(fields) {
+                        if let Some(id) = field.ident {
+                            self.add(id, false)?;
+                        }
+                    }
                 }
                 self.add(d.ident, false)?;
                 if let Some(e) = d.value
@@ -581,20 +658,28 @@ fn children(
         | ExprKind::Typeof(e)
         | ExprKind::JsNot(e)
         | ExprKind::JsBnot(e)
-        | ExprKind::StaticIndex(e, _, _)
-        | ExprKind::OptionalBlock(e, _)
+        | ExprKind::OptionalBlock(e, true)
         | ExprKind::CamlBlockTag(e, _)
         | ExprKind::Await(e)
         | ExprKind::Spread(e) => visit(e)?,
+        ExprKind::StaticIndex(e, name, _) => {
+            walk::static_member_supported(a.text(name))?;
+            visit(e)?;
+        }
         ExprKind::Bin(crate::js_ir::op::BinOp::Eq, l, r) => {
             walk::assignment_target(a, l)?;
             visit(l)?;
             visit(r)?;
         }
-        ExprKind::Bin(_, l, r)
-        | ExprKind::In(l, r)
-        | ExprKind::Seq(l, r)
-        | ExprKind::ArrayIndex(l, r) => {
+        ExprKind::Bin(op, l, r) => {
+            if let Some(target) = walk::nullish_target(a, op, l, r)? {
+                visit(target)?;
+            } else {
+                visit(l)?;
+                visit(r)?;
+            }
+        }
+        ExprKind::In(l, r) | ExprKind::Seq(l, r) | ExprKind::ArrayIndex(l, r) => {
             visit(l)?;
             visit(r)?;
         }
@@ -604,6 +689,7 @@ fn children(
             visit(f)?;
         }
         ExprKind::Call(f, args, _) => {
+            walk::call_supported(a, f)?;
             visit(f)?;
             for e in a.exprs(args) {
                 visit(*e)?;
@@ -634,8 +720,26 @@ fn children(
                 visit(e)?;
             }
         }
-        ExprKind::RawJsCode(_) => return walk::raw_supported(),
-        ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
+        ExprKind::RawJsCode(_) => {}
+        ExprKind::Jsx(id) => {
+            let jsx = walk::jsx_runtime(a, id, false)?;
+            visit(jsx.callee)?;
+            visit(jsx.tag)?;
+            if let Some(spread) = jsx.spread {
+                visit(spread)?;
+            }
+            for (_, value) in a.props(jsx.props) {
+                visit(*value)?;
+            }
+            if let Some(children) = jsx.children {
+                for child in a.exprs(children) {
+                    visit(*child)?;
+                }
+            }
+            if let Some(key) = jsx.key {
+                visit(key)?;
+            }
+        }
         ExprKind::TemplateLiteral(_) | ExprKind::JsonLiteral(_) => {}
         ExprKind::InterpolatedTemplate(segments, values) => {
             walk::template_supported(a.segments(segments).len(), a.exprs(values).len())?;
@@ -650,9 +754,18 @@ fn children(
                 visit(*e)?;
             }
         }
-        ExprKind::FlatCall(..) => return Err(Unsupported("flat call")),
-        ExprKind::RecordRest(..) => return Err(Unsupported("record rest")),
-        ExprKind::StringAppend(..) => return Err(Unsupported("string concatenation association")),
+        // Legacy .apply meets the callee before the argument array.
+        ExprKind::FlatCall(func, args) => {
+            visit(func)?;
+            visit(args)?;
+        }
+        ExprKind::OptionalBlock(inner, false) => {
+            if let Some(inner) = walk::optional_argument(a, inner) {
+                visit(inner)?;
+            }
+        }
+        ExprKind::RecordRest(_, source) => visit(source)?,
+        ExprKind::StringAppend(..) => unreachable!("iterative string traversal in caller"),
     }
     Ok(())
 }

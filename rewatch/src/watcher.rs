@@ -950,6 +950,7 @@ mod tests {
             path: package_path,
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }
@@ -999,6 +1000,7 @@ mod tests {
 
         Module {
             source_type: SourceType::SourceFile(SourceFile {
+                gentype_annotations: [None; 2],
                 implementation: Implementation {
                     path: PathBuf::from(implementation_path),
                     parse_state: ParseState::Success,
