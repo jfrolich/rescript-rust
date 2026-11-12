@@ -303,6 +303,8 @@ pub(crate) struct SharedTypePool {
     generation: u64,
     pages: SharedPages,
     next_index: AtomicU32,
+    shuffle: Option<u64>,
+    reservations: AtomicU32,
     pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
     longident_names: RwLock<HashMap<u32, String>>,
     next_longident_idx: AtomicU32,
@@ -322,6 +324,13 @@ impl SharedTypePool {
 
 
     fn new(generation: u64) -> Self {
+        static SEED: OnceLock<Option<u64>> = OnceLock::new();
+        Self::with_seed(generation, *SEED.get_or_init(|| {
+            std::env::var("RESCRIPT_WORLD_SHUFFLE").ok()?.parse().ok()
+        }))
+    }
+
+    fn with_seed(generation: u64, shuffle: Option<u64>) -> Self {
         let pages = (0..MAX_SHARED_INDEX / PAGE_SIZE)
             .map(|_| OnceLock::new())
             .collect();
@@ -329,6 +338,8 @@ impl SharedTypePool {
             generation,
             pages,
             next_index: AtomicU32::new(0),
+            shuffle,
+            reservations: AtomicU32::new(0),
             pers: Mutex::new(HashMap::new()),
             longident_names: RwLock::new(HashMap::new()),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
@@ -364,7 +375,18 @@ impl SharedTypePool {
     fn reserve(&self, nodes: usize, layouts: usize) -> Option<(u32, u32)> {
         let len = u32::try_from(nodes.max(layouts).max(1)).ok()?;
         let reserved = len.checked_add(PAGE_SIZE - 1)? & !(PAGE_SIZE - 1);
-        let base = self.next_index.fetch_add(reserved, Ordering::Relaxed);
+        let base = if let Some(seed) = self.shuffle {
+            let n = self.reservations.fetch_add(1, Ordering::Relaxed);
+            // SplitMix64: a fixed mixer, independent of process hash seeds.
+            let mut hash = seed.wrapping_add(u64::from(n).wrapping_mul(0x9e3779b97f4a7c15));
+            hash = (hash ^ (hash >> 30)).wrapping_mul(0xbf58476d1ce4e5b9);
+            hash = (hash ^ (hash >> 27)).wrapping_mul(0x94d049bb133111eb);
+            hash ^= hash >> 31;
+            let skip = (hash % 4) as u32 * PAGE_SIZE;
+            self.next_index.fetch_add(reserved + skip, Ordering::Relaxed) + skip
+        } else {
+            self.next_index.fetch_add(reserved, Ordering::Relaxed)
+        };
         let end = base.checked_add(reserved)?;
         (end <= MAX_SHARED_INDEX).then_some((base, end))
     }
@@ -505,6 +527,47 @@ mod tests {
     use super::*;
 
 
+
+    #[test]
+    fn shuffled_graphs_keep_descriptors_and_levels() {
+        let pools = [
+            SharedTypePool::with_seed(1, Some(1)),
+            SharedTypePool::with_seed(1, Some(2)),
+        ];
+        let mut bases = [Vec::new(), Vec::new()];
+        for (index, pool) in pools.iter().enumerate() {
+            for graph in 0..3 {
+                let base = pool
+                    .publish(
+                        SharedGraphSizes {
+                            nodes: 2,
+                            ..Default::default()
+                        },
+                        |_| SharedGraphParts {
+                            nodes: vec![(TypeDesc::Tnil, graph), (TypeDesc::Tvar(None), graph + 1)],
+                            payloads: Default::default(),
+                            layouts: Vec::new(),
+                            locations: Default::default(),
+                        },
+                    )
+                    .unwrap();
+                bases[index].push(base);
+                assert!(matches!(page_node(&pool.pages, base).desc, TypeDesc::Tnil));
+                assert!(matches!(
+                    page_node(&pool.pages, base + 1).desc,
+                    TypeDesc::Tvar(None)
+                ));
+                assert_eq!(page_node(&pool.pages, base).level, graph);
+                assert_eq!(page_node(&pool.pages, base + 1).level, graph + 1);
+            }
+        }
+        assert_ne!(bases[0], bases[1]);
+        assert!(
+            bases
+                .iter()
+                .any(|bases| bases.windows(2).any(|pair| pair[1] - pair[0] > PAGE_SIZE))
+        );
+    }
 
     #[test]
     fn published_graphs_are_readable_from_other_threads() {
