@@ -495,6 +495,7 @@ mod tests {
         assert_eq!(size_of::<Free>(), 16);
         assert_eq!(size_of::<Probed>(), 20);
         assert_eq!(size_of::<StatementStack>(), 96);
+        assert_eq!(size_of::<Option<Slot>>(), 12);
         assert_eq!(size_of::<FreePool>(), 40);
     }
     #[test]

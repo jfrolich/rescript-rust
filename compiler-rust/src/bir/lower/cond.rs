@@ -6,8 +6,8 @@
 //! before both branches, so no statement is moved once per enclosing
 //! conditional. A run becomes a child list exactly once.
 use super::*;
-use crate::bir::{ListId, NodeFlags};
 use crate::bir::j::norm;
+use crate::bir::{ListId, NodeFlags};
 
 /// The construct a `Conditional` frame lowers.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -282,9 +282,7 @@ impl State {
         };
         match (cx.cont, target) {
             (Cont::Effect(Tail::No), _) => self.effect_conditional(cx, parts, test, yes, no),
-            (Cont::Effect(Tail::Return(_)), _) => {
-                self.return_conditional(cx, parts, test, yes, no)
-            }
+            (Cont::Effect(Tail::Return(_)), _) => self.return_conditional(cx, parts, test, yes, no),
             (_, Target::Result(target) | Target::Given(target)) => {
                 let assign = Cx {
                     cont: Cont::Assign(target),
@@ -294,7 +292,9 @@ impl State {
                 let no = self.run(assign, no);
                 self.assigning_conditional(cx.cont, parts, test, target, yes, no)
             }
-            (_, Target::None) => unreachable!("a value, declared or assigned conditional has a target"),
+            (_, Target::None) => {
+                unreachable!("a value, declared or assigned conditional has a target")
+            }
         }
     }
 
@@ -397,7 +397,10 @@ impl State {
     fn terminal(&self, statement: NodeId) -> bool {
         matches!(
             self.arena.view(statement),
-            View::SReturn { .. } | View::SThrow { .. } | View::SBreak { .. } | View::SContinue { .. }
+            View::SReturn { .. }
+                | View::SThrow { .. }
+                | View::SBreak { .. }
+                | View::SContinue { .. }
         )
     }
 
@@ -776,13 +779,9 @@ impl State {
     /// a free branch whose value has no effect (E:15). Constant.
     fn effect_run(&mut self, cx: Cx, branch: Probed) -> Option<Span> {
         match branch {
-            Probed::Out(out) => {
-                debug_assert!(
-                    !matches!(self.statements.only(out.stmts), Some((_, s)) if matches!(self.arena.view(s), View::SBlock { .. })),
-                    "every producer of an effect output unnests its block"
-                );
-                Some(out.stmts)
-            }
+            // B:1565 unnest_block has nothing to do here: no producer of an
+            // effect output leaves one block as its only statement.
+            Probed::Out(out) => Some(out.stmts),
             Probed::Free(free) => {
                 let value = self.free_value(cx, free);
                 if self.arena.node(value).flags().contains(NodeFlags::STRICT) {
@@ -920,7 +919,8 @@ impl State {
     /// accepts. One step per Let/Seq node of the spine, counted in
     /// `spine_steps`; purity is the node's cached flag.
     fn trivial_unit(&mut self, mut node: NodeId) -> bool {
-        let pure = |state: &Self, node: NodeId| state.source.node(node).flags().contains(NodeFlags::PURE);
+        let pure =
+            |state: &Self, node: NodeId| state.source.node(node).flags().contains(NodeFlags::PURE);
         loop {
             self.spine_steps += 1;
             match self.source.view(node) {
@@ -1390,7 +1390,10 @@ mod tests {
                 loop_: Some(LoopRef(0)),
                 in_catch: false,
             };
-            for cont in [Cont::Effect(Tail::Return(named)), Cont::Value(Tail::Return(named))] {
+            for cont in [
+                Cont::Effect(Tail::Return(named)),
+                Cont::Value(Tail::Return(named)),
+            ] {
                 assert!(matches!(
                     state.probe(Cx::new(cont), node),
                     Err(Unsupported("let rec"))
@@ -1554,7 +1557,12 @@ mod tests {
             }
         }
         fn var(&mut self, index: usize) -> NodeId {
-            self.state.pure_expression(View::Var { var: self.vars[index] }, 0)
+            self.state.pure_expression(
+                View::Var {
+                    var: self.vars[index],
+                },
+                0,
+            )
         }
         fn assign(&mut self, index: usize) -> NodeId {
             let one = crate::bir::j::plain::int(&mut self.state.arena, 1);
@@ -1598,13 +1606,20 @@ mod tests {
                     self.state.arena.new_node(View::SThrow { value }, 0)
                 }
                 'b' => self.state.arena.new_node(View::SBreak { label: None }, 0),
-                'k' => self.state.arena.new_node(View::SContinue { label: None }, 0),
+                'k' => self
+                    .state
+                    .arena
+                    .new_node(View::SContinue { label: None }, 0),
                 'o' => self.state.empty_block(),
                 'i' | 'j' => {
                     let test = self.var(1);
                     let yes = self.assign(2);
                     let yes = self.state.arena.lists.push(&[yes]);
-                    let no = if kind == 'j' { vec![self.assign(3)] } else { vec![] };
+                    let no = if kind == 'j' {
+                        vec![self.assign(3)]
+                    } else {
+                        vec![]
+                    };
                     let no = self.state.arena.lists.push(&no);
                     self.state.raw_if(test, yes, no)
                 }
@@ -1639,7 +1654,12 @@ mod tests {
                 .unwrap();
             let program = bridge_j::export_js(&lowered.program).unwrap();
             crate::js_ir::print_deps_program_with_directives_and_options(
-                &program, None, &[], false, false, false,
+                &program,
+                None,
+                &[],
+                false,
+                false,
+                false,
             )
         }
     }
@@ -1746,9 +1766,9 @@ mod tests {
         let (then_, else_) = (branch(&mut hand, 0, yes), branch(&mut hand, 1, no));
         let test = hand.test(0);
         let parts = Parts { start: 0, head };
-        let Probed::Out(out) = hand
-            .state
-            .effect_conditional(Cx::effect(), parts, test, then_, else_)
+        let Probed::Out(out) =
+            hand.state
+                .effect_conditional(Cx::effect(), parts, test, then_, else_)
         else {
             unreachable!()
         };
@@ -1871,7 +1891,8 @@ mod tests {
         // return continuation copied 50,035,000 statements at this depth
         // when each level rebuilt the list of the levels below it.
         let depth = DEPTH as usize;
-        let counts = [0, 1, 4].map(|cont| steps(cont, 3 * depth + 3, |a| chain(a, DEPTH, false, false)));
+        let counts =
+            [0, 1, 4].map(|cont| steps(cont, 3 * depth + 3, |a| chain(a, DEPTH, false, false)));
         let [value, assign, returning] = counts;
         // (written, copied to a list, holes and dead ranges skipped)
         assert_eq!(value, (2 * depth + 3, 2 * depth + 1, 0));

@@ -434,7 +434,7 @@ impl ProbeRules for State {
                 }));
             }
             View::Seq { first, second } => {
-                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
+                return Ok(ProbePlan::Children(expr::Resume::Seq { first, second }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
             View::Prim { primitive, args }

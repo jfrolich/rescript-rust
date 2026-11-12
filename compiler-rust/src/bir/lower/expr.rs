@@ -15,7 +15,6 @@ pub(super) enum Resume {
     Seq {
         first: NodeId,
         second: NodeId,
-        continuation: Cont,
     },
     Fun {
         body: NodeId,
@@ -95,11 +94,10 @@ impl State {
             out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
             return Probed::Out(out);
         }
-        if let Resume::Seq { continuation, .. } = resume {
+        if let Resume::Seq { .. } = resume {
             if index == 0 {
                 // The head's value is held in every continuation: whether it
                 // becomes a statement depends on the tail (1.5).
-                let _ = continuation;
                 let mut out = self.realize(cx, child);
                 self.statements.reserve();
                 out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
