@@ -8262,7 +8262,7 @@ fn moregen_link(
 /// file flag mutates the same request-local `Clflags`/`Js_config` state the
 /// command line set, after it: file flags win for the rest of that compile.
 /// This records the flags whose effect a later phase can observe; see
-/// [`run_file_level_flags`] for the ones that have none.
+/// `run_file_level_flags` for the ones that have none.
 #[derive(Debug, Default, Clone)]
 pub struct FileConfigOverrides {
     /// `-enable-experimental LetUnwrap`.
