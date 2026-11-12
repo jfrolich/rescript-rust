@@ -393,12 +393,14 @@ pub(crate) enum LowerCheck {
 pub(crate) struct LowerPair {
     pub before: [crate::js_ir::arena::JsDepsProgram; 2],
     pub after: [crate::js_ir::arena::JsDepsProgram; 2],
+    pub locations: Option<std::sync::Arc<crate::lambda::LamLocTable>>,
 }
 
 /// Import exactly the simplified root about to enter legacy compile_expr.
 pub(crate) fn prepare_lower(
     arena: &LamArena,
     root: Lam,
+    locations: Option<&crate::lambda::LamLocTable>,
 ) -> Result<
     (
         crate::js_ir::arena::JsArena,
@@ -411,7 +413,7 @@ pub(crate) fn prepare_lower(
         "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason, catch_only),
         _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
     })?;
-    let lowered = super::lower::lower(input).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
+    let lowered = super::lower::lower(input, locations, false).map_err(|reason| LowerFailure::Unsupported(reason, false))?;
     lowered
         .program
         .arena
@@ -421,6 +423,18 @@ pub(crate) fn prepare_lower(
     // smart constructor and no normalize. The last SExp transports Out::value.
     let mut exported = super::bridge_j::export_js(&lowered.program)
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower export: {error}")))?;
+    #[cfg(debug_assertions)]
+    if arena.node_count() <= 128 {
+        let (direct, _) = super::bridge::import_for_lowering(arena, root);
+        let direct = direct.map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct import: {e}")))?;
+        let direct = super::lower::lower(direct, locations, true)
+            .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct lower: {e}")))?;
+        let direct = super::bridge_j::export_js(&direct.program)
+            .map_err(|e| LowerFailure::Error(anyhow::anyhow!("direct export: {e}")))?;
+        let print = |p| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+        compare_lower_text("P1", "probe vs direct", &print(&direct), &print(&exported))
+            .map_err(LowerFailure::Error)?;
+    }
     let value =
         exported.program.block.pop().ok_or_else(|| {
             LowerFailure::Error(anyhow::anyhow!("lower export lacks output value"))
@@ -446,8 +460,8 @@ pub(crate) fn prepare_lower(
     ))
 }
 
-/// Two independent texts, both through the legacy ES module printer without
-/// source maps. A mismatch cannot enter the Unsupported reporting path.
+/// Two independent texts through the legacy ES module printer; when requested,
+/// also compare source-map mappings. Mismatches never become Unsupported.
 pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> anyhow::Result<()> {
     match check {
         LowerCheck::Failed(LowerFailure::Unsupported(reason, catch_only)) => {
@@ -457,7 +471,7 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
         }
         LowerCheck::Supported(pair) => {
-            let LowerPair { before, after } = *pair;
+            let LowerPair { before, after, locations } = *pair;
             for (text, pair) in [("lower", before), ("lower+passes", after)] {
                 let print = |p| {
                     crate::js_ir::print_deps_program_with_directives_and_options(
@@ -470,6 +484,17 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
                     )
                 };
                 compare_lower_text(unit, text, &print(&pair[0]), &print(&pair[1]))?;
+                if let Some(locations) = &locations {
+                    let mapped = |p| crate::js_ir::print_deps_program_with_source_map(
+                        p, None, &[], false, jsx_preserve, false,
+                        std::path::Path::new("lower.js"), std::path::Path::new(unit),
+                        crate::js_ir::source_map::SourceMapMode::Hidden, false, "", locations.clone()
+                    );
+                    let (left_text, left_map) = mapped(&pair[0]);
+                    let (right_text, right_map) = mapped(&pair[1]);
+                    compare_lower_text(unit, text, &left_text, &right_text)?;
+                    compare_lower_text(unit, &format!("{text} mappings"), &left_map.unwrap_or_default(), &right_map.unwrap_or_default())?;
+                }
             }
             report(unit, "lower", None, None)
         }
@@ -520,9 +545,9 @@ mod lower_tests {
             let same = [empty.clone(), empty.clone()];
             let different = [empty.clone(), changed.clone()];
             let check = if after_changed {
-                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different }))
+                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different, locations: None }))
             } else {
-                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same }))
+                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same, locations: None }))
             };
             let text = if after_changed { "lower+passes" } else { "lower" };
             let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();
@@ -537,7 +562,7 @@ mod lower_tests {
         let body = arena.var(id);
         let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
         let root = arena.seq_raw(binding, binding);
-        let result = prepare_lower(&arena, root);
+        let result = prepare_lower(&arena, root, None);
         assert!(matches!(result, Err(LowerFailure::Unsupported(
             super::super::bridge::Unsupported("shared Lambda subtree with binder"), false
         ))));

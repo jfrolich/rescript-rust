@@ -784,7 +784,7 @@ impl LambdaCompiler {
         self.id_gen.set_current_stamp(js_lowering_start_stamp);
         crate::ident::Ident::set_current_time(js_lowering_start_stamp);
         let candidate = if CHECK {
-            Some(crate::bir::shadow::prepare_lower(&a, root))
+            Some(crate::bir::shadow::prepare_lower(&a, root, self.source_map_enabled.then_some(&self.lam_locs)))
         } else { None };
         crate::timing::measure(crate::timing::Phase::Codegen, || {
             let compiled = {
@@ -809,6 +809,7 @@ impl LambdaCompiler {
                     crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         before: [before.expect("check capture"), new_before],
                         after: [deps.clone(), new_after],
+                        locations: self.source_map_enabled.then(|| std::sync::Arc::new(self.lam_locs.clone())),
                     }))
                 }
                 Err(failure) => crate::bir::shadow::LowerCheck::Failed(failure),

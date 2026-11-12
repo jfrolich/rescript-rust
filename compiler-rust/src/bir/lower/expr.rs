@@ -131,6 +131,12 @@ impl State {
                 assert!(body.value.is_none());
                 let list = self.statements.take_list(&mut self.arena, body.stmts);
                 let body = self.arena.block_from_list(list);
+                let source_loc = self
+                    .located_functions
+                    .get(header.index())
+                    .copied()
+                    .unwrap_or(false)
+                    .then_some(self.arena.function(header).loc);
                 let attr = self.arena.function_attributes(header);
                 let header = if attr.one_unit_arg {
                     let attr = attr.clone();
@@ -140,7 +146,14 @@ impl State {
                     header
                 };
                 let value = self.pure_expression(View::JFun { body, header }, 0);
-                Probed::Free(self.free.push(Free::Leaf(value)))
+                if let Some(loc) = source_loc {
+                    self.arena
+                        .set_cold(value, crate::bir::Cold { loc, comment: None });
+                    let mut flags = self.arena.node(value).flags();
+                    flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+                    self.arena.nodes[value.index()].set_flags(flags);
+                }
+                self.probe_leaf(cx, value)
             }
         }
     }

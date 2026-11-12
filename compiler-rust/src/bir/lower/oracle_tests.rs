@@ -8,50 +8,60 @@ use crate::lambda::lam_constant::{Constant as C, PointerInfo};
 
 pub(super) fn compare(mut arena: LamArena, root: Lam) {
     let target = Ident::new("result", arena.ident_stamp_bound() + 1, IdentFlags::NONE);
-    for context in 0..5 {
-        let mut input = bridge::import_lambda(&arena, root).unwrap();
-        let var = input
-            .arena
-            .new_var_id(target.name_atom(), target.stamp() as u32);
-        input.idents.push(target);
-        let cx = match context {
-            0 => Cx::value(),
-            1 => Cx::effect(),
-            2 => Cx::declare(LetKind::Strict, var),
-            3 => Cx::assign(var),
-            4 => Cx::returning(),
-            _ => unreachable!(),
-        };
-        let source_root = input.root;
-        let mut state = State::new(input);
-        let probed = state.probe(cx, source_root).unwrap();
-        let lowered = state.complete(cx, probed);
-        lowered
-            .program
-            .arena
-            .validate(Some(lowered.program.root), false)
-            .unwrap();
-        let actual = bridge_j::export_js(&lowered.program).unwrap();
-        let mut compiler = LambdaCompiler::new();
-        let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
-        let mut block = compiled.prelude;
-        block.push(compiler.j.stmt(StmtKind::Exp(compiled.expr)));
-        let expected = JsDepsProgram {
-            program: JsProgram::new_in(block, vec![], compiler.j),
-            modules: vec![],
-            side_effect: None,
-        };
-        let print = |p: &JsDepsProgram| {
-            crate::js_ir::print_deps_program_with_directives_and_options(
-                p,
-                None,
-                &[],
-                false,
-                false,
-                false,
-            )
-        };
-        assert_eq!(print(&actual), print(&expected), "context {cx:?}");
+    for direct in [false, true] {
+        for context in 0..5 {
+            let mut input = bridge::import_lambda(&arena, root).unwrap();
+            let var = input
+                .arena
+                .new_var_id(target.name_atom(), target.stamp() as u32);
+            input.idents.push(target);
+            let cx = match context {
+                0 => Cx::value(),
+                1 => Cx::effect(),
+                2 => Cx::declare(LetKind::Strict, var),
+                3 => Cx::assign(var),
+                4 => Cx::returning(),
+                _ => unreachable!(),
+            };
+            let source_root = input.root;
+            let mut state = State::new(input);
+            state.direct = direct;
+            let probed = state.probe(cx, source_root).unwrap();
+            let lowered = state.complete(cx, probed);
+            lowered
+                .program
+                .arena
+                .validate(Some(lowered.program.root), false)
+                .unwrap();
+            let actual = bridge_j::export_js(&lowered.program).unwrap();
+            let mut compiler = LambdaCompiler::new();
+            let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
+            use crate::lambda::lam_compile::OutputFinished;
+            let expected_finished = match compiled.finished {
+                OutputFinished::True => Finished::True,
+                OutputFinished::False => Finished::False,
+                OutputFinished::Dummy => Finished::Dummy,
+            };
+            assert_eq!(lowered.finished, expected_finished);
+            let mut block = compiled.prelude;
+            block.push(compiler.j.stmt(StmtKind::Exp(compiled.expr)));
+            let expected = JsDepsProgram {
+                program: JsProgram::new_in(block, vec![], compiler.j),
+                modules: vec![],
+                side_effect: None,
+            };
+            let print = |p: &JsDepsProgram| {
+                crate::js_ir::print_deps_program_with_directives_and_options(
+                    p,
+                    None,
+                    &[],
+                    false,
+                    false,
+                    false,
+                )
+            };
+            assert_eq!(print(&actual), print(&expected), "context {cx:?}");
+        }
     }
 }
 
@@ -287,4 +297,105 @@ fn supported_constructs_preserve_identities_without_touching_the_legacy_counter(
     assert_eq!(state.arena.vars.order(VarId(0)), 50_000);
     state.complete(Cx::value(), probed);
     assert_eq!(Ident::current_local_stamp(), stamp);
+}
+
+#[test]
+fn ten_thousand_deep_supported_nodes_use_linear_work() {
+    for shape in 0..4 {
+        let mut source = LamArena::new();
+        let mut root = source.const_(C::JsNull);
+        let mut nodes = 1;
+        for i in 0..10_000 {
+            root = if shape == 3 {
+                nodes += 1;
+                source.function_(
+                    0,
+                    &[],
+                    root,
+                    Default::default(),
+                    crate::lambda::LamLoc::NONE,
+                )
+            } else {
+                let leaf = source.const_(C::JsTrue);
+                nodes += 2;
+                match shape {
+                    0 => source.seq_raw(leaf, root),
+                    1 => source.seq_raw(root, leaf),
+                    2 => source.let_(
+                        LetKind::Strict,
+                        Ident::new("binding", i + 1, IdentFlags::NONE),
+                        leaf,
+                        root,
+                    ),
+                    _ => unreachable!(),
+                }
+            };
+        }
+        let input = bridge::import_lambda(&source, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(Cx::value(), root).unwrap();
+        let out = state.realize(Cx::value(), probed);
+        assert_eq!(state.source_steps, nodes);
+        assert!(state.free.realized <= nodes);
+        assert!(state.statements.copied <= state.statements.pushed);
+        let lowered = state.complete(Cx::value(), Probed::Out(out));
+        lowered
+            .program
+            .arena
+            .validate(Some(lowered.program.root), false)
+            .unwrap();
+    }
+}
+
+#[test]
+fn located_functions_match_mapping_sequences() {
+    use crate::js_ir::source_map::SourceMapMode;
+    use crate::lambda::{FunctionAttribute, LamLocTable};
+    use std::sync::Arc;
+    let mut locations = LamLocTable::located(Default::default());
+    let loc = locations.intern(crate::location::Location::new(Default::default(), 1, 8));
+    let mut source = LamArena::new();
+    let body = source.const_(C::JsTrue);
+    let root = source.function_(0, &[], body, FunctionAttribute::default(), loc);
+    let input = bridge::import_lambda(&source, root).unwrap();
+    let lowered = super::lower(input, Some(&locations), false).unwrap();
+    let actual = bridge_j::export_js(&lowered.program).unwrap();
+    let mut compiler = LambdaCompiler::new();
+    compiler.set_source_map_enabled(true);
+    compiler.set_lam_locs(locations.clone());
+    let compiled = compiler.bir_lower_oracle(
+        &mut source,
+        root,
+        Cx::value().cont,
+        Ident::new("unused", 1, IdentFlags::NONE),
+    );
+    let stmt = compiler.j.stmt(StmtKind::Exp(compiled.expr));
+    let expected = JsDepsProgram {
+        program: JsProgram::new_in(vec![stmt], vec![], compiler.j),
+        modules: vec![],
+        side_effect: None,
+    };
+    let locations = Arc::new(locations);
+    let print = |p| {
+        crate::js_ir::print_deps_program_with_source_map(
+            p,
+            None,
+            &[],
+            false,
+            false,
+            false,
+            std::path::Path::new("Mapping.js"),
+            std::path::Path::new("Mapping.res"),
+            SourceMapMode::Hidden,
+            false,
+            "",
+            locations.clone(),
+        )
+    };
+    let expected = print(&expected);
+    let actual = print(&actual);
+    assert_eq!(actual, expected);
+    let map: serde_json::Value = serde_json::from_str(actual.1.as_ref().unwrap()).unwrap();
+    assert_ne!(map["mappings"], "");
 }

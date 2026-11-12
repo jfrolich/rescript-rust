@@ -246,8 +246,12 @@ pub(crate) struct Lowered {
 }
 
 /// N1: C:663 compile_deps_program_in_arena; one fresh J arena for this migration cut.
-pub(crate) fn lower(input: super::bridge::Imported) -> Result<Lowered, Unsupported> {
-    unit::lower(input)
+pub(crate) fn lower(
+    input: super::bridge::Imported,
+    locations: Option<&crate::lambda::LamLocTable>,
+    direct: bool,
+) -> Result<Lowered, Unsupported> {
+    unit::lower(input, locations, direct)
 }
 
 struct State {
@@ -257,6 +261,8 @@ struct State {
     statements: StatementStack,
     free: FreePool,
     source_steps: usize,
+    direct: bool,
+    located_functions: Vec<bool>,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -288,6 +294,17 @@ impl State {
             statements: StatementStack::default(),
             free: FreePool::default(),
             source_steps: 0,
+            direct: false,
+            located_functions: Vec::new(),
+        }
+    }
+    /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
+    /// leaves immediately instead of allocating deferred expression records.
+    fn probe_leaf(&mut self, cx: Cx, value: NodeId) -> Probed {
+        if self.direct {
+            Probed::Out(self.leaf(cx, value))
+        } else {
+            Probed::Free(self.free.push(Free::Leaf(value)))
         }
     }
     /// H13: A:28 delay_safe; K1: C:1529 compile_expr. The supported literal,
@@ -336,7 +353,7 @@ impl State {
 impl ProbeRules for State {
     type Resume = expr::Resume;
     /// K1/H12: C:1529 compile_expr and K:60 compile_constant.
-    fn enter(&mut self, _cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
+    fn enter(&mut self, cx: Cx, node: NodeId) -> Result<ProbePlan<Self::Resume>, Unsupported> {
         let value = match self.source.view(node) {
             View::Var { var } => self.pure_expression(View::Var { var }, 0),
             View::Global { module } => self.pure_expression(
@@ -453,9 +470,7 @@ impl ProbeRules for State {
             | View::SDebugger
             | View::SRest { .. } => unreachable!("expected level-L source"),
         };
-        Ok(ProbePlan::Ready(Probed::Free(
-            self.free.push(Free::Leaf(value)),
-        )))
+        Ok(ProbePlan::Ready(self.probe_leaf(cx, value)))
     }
     /// K4/K2/K10: C:2411 compile_let_binding_output / C:4603 compile_effect_output / C:1997 with_function_scope.
     fn children(&self, cx: Cx, resume: &Self::Resume, into: &mut Vec<(Cx, NodeId)>) {
