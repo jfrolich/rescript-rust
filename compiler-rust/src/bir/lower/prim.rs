@@ -812,6 +812,11 @@ mod tests {
         assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
     }
 
+    fn named_case(primitive: &Primitive, check: impl FnOnce()) {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(check));
+        assert!(result.is_ok(), "primitive {primitive:?} failed its oracle case");
+    }
+
     #[test]
     fn option_arms_match_legacy() {
         use Primitive::*;
@@ -855,7 +860,7 @@ mod tests {
                     arg
                 };
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -927,7 +932,7 @@ mod tests {
                             })
                             .collect();
                         let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
-                        super::super::oracle_tests::compare_with_checks(a, root, checks);
+                        named_case(&primitive, || super::super::oracle_tests::compare_with_checks(a, root, checks));
                     }
                 }
             }
@@ -974,7 +979,7 @@ mod tests {
                     })
                     .collect();
                 let root = a.prim_raw(primitive.clone(), &args, LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -990,7 +995,7 @@ mod tests {
                     a.var(Ident::new("value", 10, crate::ident::IdentFlags::NONE))
                 };
                 let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
-                super::super::oracle_tests::compare(a, root);
+                named_case(&primitive, || super::super::oracle_tests::compare(a, root));
             }
         }
     }
@@ -1030,5 +1035,196 @@ mod await_tests {
             } else { awaited };
             super::super::oracle_tests::compare(a, root);
         }
+    }
+}
+
+#[cfg(test)]
+mod inventory_tests {
+    use super::*;
+    use Primitive::*;
+    use crate::lambda::{LamLoc, arena::LamArena};
+
+    // One table generates both the individually named oracle tests and the
+    // exhaustive inventory. Adding a Primitive variant cannot compile until
+    // it has a test row or an explicit unsupported dispatch classification.
+    macro_rules! primitive_cases {
+        (cases { $($pattern:pat => $name:ident($value:expr, $arity:expr);)* }
+         unsupported { $($unsupported:pat),* $(,)? }) => {
+            fn inventory(primitive: &Primitive) -> Option<&'static str> {
+                match primitive {
+                    $($pattern => Some(stringify!($name)),)*
+                    $($unsupported => None,)*
+                }
+            }
+            $(
+                #[test]
+                fn $name() {
+                    let primitive = $value;
+                    assert_eq!(inventory(&primitive), Some(stringify!($name)));
+                    let mut arena = LamArena::new();
+                    let args: Vec<_> = (0..$arity).map(|i| {
+                        arena.var(Ident::new(format!("arg{i}"), 10 + i, crate::ident::IdentFlags::NONE))
+                    }).collect();
+                    let root = arena.prim_raw(primitive, &args, LamLoc::NONE);
+                    super::super::oracle_tests::compare(arena, root);
+                }
+            )*
+        };
+    }
+
+    fn minimal_jsx() -> crate::lambda::lam_primitive::JsxElement {
+        use crate::lambda::lam_primitive::{JsxElement, ExternalDecl, DeclKind};
+        JsxElement {
+            jsx_name: "jsx".into(),
+            jsx_ffi: ExternalDecl {
+                kind: DeclKind::DeclVal { name: "jsx".into() },
+                module_: None,
+                scopes: vec!["React".into()],
+                variadic: false,
+                effective_arity: 3,
+            },
+            jsx_multi: false,
+            jsx_fragment: false,
+            jsx_spread: false,
+            jsx_props: vec![],
+            jsx_children: None,
+            jsx_key: false,
+        }
+    }
+
+    fn minimal_import() -> crate::lambda::lam_primitive::ImportSource {
+        use crate::lambda::lam_primitive::{ImportSource, ExternalModuleName, ModuleBindName};
+        ImportSource::ImportExternal {
+            module_: ExternalModuleName {
+                bundle: "example".into(),
+                module_bind_name: ModuleBindName::PhintNothing,
+                import_attributes: None,
+            },
+            path: vec![],
+        }
+    }
+
+    primitive_cases! { cases {
+        Pmakeblock(..) => pmakeblock(Pmakeblock(crate::lambda::TagInfo::Tuple, crate::lambda::lam_primitive::Mutable::Immutable), 2);
+        Pfield(..) => pfield(Pfield(0, crate::lambda::FieldDbgInfo::Tuple), 1);
+        Psetfield(..) => psetfield(Psetfield(0, crate::lambda::SetFieldDbgInfo::RecordSet(crate::name::Name::new("field"))), 2);
+        Pduprecord => pduprecord(Pduprecord, 1);
+        PrecordRest(..) => precord_rest(PrecordRest(vec!["field".into()]), 1);
+        PtaggedTemplate(..) => ptagged_template(PtaggedTemplate(vec!["segment".into()]), 1);
+        Ptemplate(..) => ptemplate(Ptemplate(vec![crate::string_literal::template_from_semantic("segment")]), 0);
+        Pjsx(..) => pjsx(Pjsx(Box::new(minimal_jsx())), 1);
+        Praise => praise(Praise, 1);
+        Pobjcomp(..) => pobjcomp(Pobjcomp(crate::lambda::Comparison::Eq), 2);
+        Pobjorder => pobjorder(Pobjorder, 2);
+        Pobjmin => pobjmin(Pobjmin, 2);
+        Pobjmax => pobjmax(Pobjmax, 2);
+        Pobjtag => pobjtag(Pobjtag, 1);
+        Pobjsize => pobjsize(Pobjsize, 1);
+        Psequand => psequand(Psequand, 2);
+        Psequor => psequor(Psequor, 2);
+        Pnot => pnot(Pnot, 1);
+        Pboolcomp(..) => pboolcomp(Pboolcomp(crate::lambda::Comparison::Eq), 2);
+        Pboolorder => pboolorder(Pboolorder, 2);
+        Pboolmin => pboolmin(Pboolmin, 2);
+        Pboolmax => pboolmax(Pboolmax, 2);
+        Pnegint => pnegint(Pnegint, 1);
+        Paddint => paddint(Paddint, 2);
+        Psubint => psubint(Psubint, 2);
+        Pmulint => pmulint(Pmulint, 2);
+        Pdivint => pdivint(Pdivint, 2);
+        Pmodint => pmodint(Pmodint, 2);
+        Ppowint => ppowint(Ppowint, 2);
+        Pandint => pandint(Pandint, 2);
+        Porint => porint(Porint, 2);
+        Pxorint => pxorint(Pxorint, 2);
+        Pnotint => pnotint(Pnotint, 1);
+        Plslint => plslint(Plslint, 2);
+        Plsrint => plsrint(Plsrint, 2);
+        Pasrint => pasrint(Pasrint, 2);
+        Pintcomp(..) => pintcomp(Pintcomp(crate::lambda::Comparison::Eq), 2);
+        Pintorder => pintorder(Pintorder, 2);
+        Pintmin => pintmin(Pintmin, 2);
+        Pintmax => pintmax(Pintmax, 2);
+        Pintoffloat => pintoffloat(Pintoffloat, 1);
+        Pfloatofint => pfloatofint(Pfloatofint, 1);
+        Pnegfloat => pnegfloat(Pnegfloat, 1);
+        Paddfloat => paddfloat(Paddfloat, 2);
+        Psubfloat => psubfloat(Psubfloat, 2);
+        Pmulfloat => pmulfloat(Pmulfloat, 2);
+        Pdivfloat => pdivfloat(Pdivfloat, 2);
+        Pmodfloat => pmodfloat(Pmodfloat, 2);
+        Ppowfloat => ppowfloat(Ppowfloat, 2);
+        Pfloatcomp(..) => pfloatcomp(Pfloatcomp(crate::lambda::Comparison::Eq), 2);
+        Pfloatorder => pfloatorder(Pfloatorder, 2);
+        Pfloatmin => pfloatmin(Pfloatmin, 2);
+        Pfloatmax => pfloatmax(Pfloatmax, 2);
+        Pnegbigint => pnegbigint(Pnegbigint, 1);
+        Paddbigint => paddbigint(Paddbigint, 2);
+        Psubbigint => psubbigint(Psubbigint, 2);
+        Pmulbigint => pmulbigint(Pmulbigint, 2);
+        Pdivbigint => pdivbigint(Pdivbigint, 2);
+        Pmodbigint => pmodbigint(Pmodbigint, 2);
+        Ppowbigint => ppowbigint(Ppowbigint, 2);
+        Pandbigint => pandbigint(Pandbigint, 2);
+        Porbigint => porbigint(Porbigint, 2);
+        Pxorbigint => pxorbigint(Pxorbigint, 2);
+        Pnotbigint => pnotbigint(Pnotbigint, 1);
+        Plslbigint => plslbigint(Plslbigint, 2);
+        Pasrbigint => pasrbigint(Pasrbigint, 2);
+        Pbigintcomp(..) => pbigintcomp(Pbigintcomp(crate::lambda::Comparison::Eq), 2);
+        Pbigintorder => pbigintorder(Pbigintorder, 2);
+        Pbigintmin => pbigintmin(Pbigintmin, 2);
+        Pbigintmax => pbigintmax(Pbigintmax, 2);
+        Pstringlength => pstringlength(Pstringlength, 1);
+        Pstringrefu => pstringrefu(Pstringrefu, 2);
+        Pstringrefs => pstringrefs(Pstringrefs, 2);
+        Pstringadd => pstringadd(Pstringadd, 2);
+        Pstringcomp(..) => pstringcomp(Pstringcomp(crate::lambda::Comparison::Eq), 2);
+        Pstringorder => pstringorder(Pstringorder, 2);
+        Pstringmin => pstringmin(Pstringmin, 2);
+        Pstringmax => pstringmax(Pstringmax, 2);
+        Pmakearray => pmakearray(Pmakearray, 2);
+        Parraylength => parraylength(Parraylength, 1);
+        Parrayrefu => parrayrefu(Parrayrefu, 2);
+        Parraysetu => parraysetu(Parraysetu, 3);
+        Parrayrefs => parrayrefs(Parrayrefs, 2);
+        Pmakelist => pmakelist(Pmakelist, 2);
+        Pmakedict => pmakedict(Pmakedict, 1);
+        PdictSpread => pdict_spread(PdictSpread, 1);
+        ParraySpread => parray_spread(ParraySpread, 1);
+        PlistSpread => plist_spread(PlistSpread, 1);
+        PdictHas => pdict_has(PdictHas, 2);
+        Pawait => pawait(Pawait, 1);
+        Pidentity => pidentity(Pidentity, 1);
+        Pignore => pignore(Pignore, 1);
+        PisPolyVarBlock => pis_poly_var_block(PisPolyVarBlock, 1);
+        Pjscomp(..) => pjscomp(Pjscomp(crate::lambda::Comparison::Eq), 2);
+        Pdebugger => pdebugger(Pdebugger, 1);
+        PinitMod => pinit_mod(PinitMod, 2);
+        PupdateMod => pupdate_mod(PupdateMod, 3);
+        PrawJsCode(..) => praw_js_code(PrawJsCode(crate::lambda::lam_primitive::JsRawInfo { code: "value()".into(), is_stmt: false }), 0);
+        PnullToOpt => pnull_to_opt(PnullToOpt, 1);
+        PnullUndefinedToOpt => pnull_undefined_to_opt(PnullUndefinedToOpt, 1);
+        PisNull => pis_null(PisNull, 1);
+        PisUndefined => pis_undefined(PisUndefined, 1);
+        PisNullUndefined => pis_null_undefined(PisNullUndefined, 1);
+        Pimport(..) => pimport(Pimport(Box::new(minimal_import())), 0);
+        Ptypeof => ptypeof(Ptypeof, 1);
+        PfnArity => pfn_arity(PfnArity, 1);
+        PcreateExtension(..) => pcreate_extension(PcreateExtension("Example".into()), 0);
+        PisNotNone => pis_not_none(PisNotNone, 1);
+        PvalFromOption => pval_from_option(PvalFromOption, 1);
+        PvalFromOptionNotNest => pval_from_option_not_nest(PvalFromOptionNotNest, 1);
+        Psome => psome(Psome, 1);
+        PsomeNotNest => psome_not_nest(PsomeNotNest, 1);
+        Phash => phash(Phash, 1);
+        PhashMixstring => phash_mixstring(PhashMixstring, 2);
+        PhashMixint => phash_mixint(PhashMixint, 2);
+        PhashFinalmix => phash_finalmix(PhashFinalmix, 1);
+    }
+        // These do not reach finish_primitive_payload on this dispatch:
+        // external forms are unsupported; extension-slot equality is lowered
+        // before Bir import. Short circuits have test rows above.
+        unsupported { PjsCall(..), PjsObjectCreate(..), PjsApply, PjsObjectGet(..), PjsObjectSet(..), PjsFnMethod, PextensionSlotEq }
     }
 }
