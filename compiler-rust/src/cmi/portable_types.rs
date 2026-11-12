@@ -340,7 +340,34 @@ pub struct PortableRawSignature {
     pub raw_locations: DeclLocTable,
 }
 
+// A deterministic schedule point: storage runs after a reader observes that
+// bytes are absent, but before it acquires the decoded-signature lock.
+#[cfg(test)]
+thread_local! {
+    static RAW_READ_STORAGE: std::cell::RefCell<Option<(&'static str, bool)>> = const {
+        std::cell::RefCell::new(None)
+    };
+}
+
 impl PortablePersStruct {
+    #[cfg(test)]
+    fn run_raw_read_storage(&self, presence: bool) {
+        let run = RAW_READ_STORAGE.with(|hook| {
+            let mut hook = hook.borrow_mut();
+            if hook.as_ref().is_some_and(|(name, kind)| *name == self.ps_name && *kind == presence) {
+                hook.take();
+                true
+            } else {
+                false
+            }
+        });
+        if run {
+            std::thread::scope(|scope| {
+                scope.spawn(|| self.encoded()).join().unwrap();
+            });
+        }
+    }
+
     fn record_access(&self, imported: bool) {
         if let Some(generation) = self.published_generation {
             crate::perf_counters::record_signature_access(
@@ -459,6 +486,8 @@ impl PortablePersStruct {
     /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
         if self.encoded.get().is_none() {
+            #[cfg(test)]
+            self.run_raw_read_storage(false);
             let decoded = self.decoded.lock().unwrap();
             if let Some((_, raw)) = decoded.as_ref() {
                 // GenType may read a dependency's raw signature while publishing
@@ -477,6 +506,8 @@ impl PortablePersStruct {
         if let Some(encoded) = self.encoded.get() {
             return encoded.raw.is_some();
         }
+        #[cfg(test)]
+        self.run_raw_read_storage(true);
         let decoded = self.decoded.lock().unwrap();
         match decoded.as_ref() {
             Some((_, raw)) => raw.is_some(),
@@ -2856,6 +2887,54 @@ mod identity_tests {
         });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
         assert!(matches!(&sig[0], SignatureItem::SigModule(id, ..) if id.same(&mapped)));
+    }
+
+    #[test]
+    fn gentype_alias_declarations_ignore_storage_schedule() {
+        use crate::cmi::persistent_env::{InMemoryModuleInfo, ModuleRegistry};
+        use crate::driver::{CompilerOptions, compile_source_in_process};
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("src")).unwrap();
+        let options = CompilerOptions {
+            open_modules: vec!["Schedule".into()],
+            gentype_config: Some(Arc::new(crate::gentype::config::build_config_from_cli_args(
+                None, &["-bs-project-root".into(), root.path().to_string_lossy().into_owned(),
+                    "-bs-gentype".into()],
+            ))),
+            ..Default::default()
+        };
+        let run = |schedule| {
+            let mut registry = ModuleRegistry::new();
+            registry.register_namespace("Schedule", &[
+                ("Dependency".into(), "Dependency-Schedule".into()),
+                ("Aliases".into(), "Aliases-Schedule".into()),
+                ("Use".into(), "Use-Schedule".into()),
+            ]);
+            for (name, source) in [
+                ("Dependency", include_str!("../../tests/fixtures/gentype-storage/Dependency.res")),
+                ("Aliases", include_str!("../../tests/fixtures/gentype-storage/Aliases.res")),
+                ("Use", include_str!("../../tests/fixtures/gentype-storage/Use.res")),
+                ("Output", include_str!("../../tests/fixtures/gentype-storage/Output.res")),
+            ] {
+                let module = format!("{name}-Schedule");
+                let filename = root.path().join("src").join(format!("{name}.res"));
+                std::fs::write(&filename, source).unwrap();
+                if name == "Aliases" {
+                    RAW_READ_STORAGE.with(|hook| *hook.borrow_mut() = schedule);
+                }
+                let result = compile_source_in_process(source, filename.to_str().unwrap(),
+                    &module, &options, &registry, false, None).unwrap();
+                registry.register_module_arc(&module, result.pers_struct.unwrap(),
+                    InMemoryModuleInfo::new(filename, result.is_pure,
+                        result.cmj_export_constants, false));
+            }
+            RAW_READ_STORAGE.with(|hook| assert!(hook.borrow().is_none(), "schedule point was not reached"));
+            crate::gentype::main::type_declarations_of_module("Aliases-Schedule")
+                .into_iter().map(|(_, data)| crate::binser::to_vec(&data).unwrap()).collect::<Vec<_>>()
+        };
+        let expected = run(None);
+        assert!(expected == run(Some(("Dependency-Schedule", true))), "presence read raced with storage");
+        assert!(expected == run(Some(("Dependency-Schedule", false))), "raw read raced with storage");
     }
 
     #[test]
