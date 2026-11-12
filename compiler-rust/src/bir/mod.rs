@@ -12,6 +12,8 @@
 //! counts. Replacement visits removed/replacement subtrees, stops effect/fact
 //! repair at the first unchanged ancestor, and walks the capture ancestor chain
 //! at most once when new uncaptured free uses require it.
+pub mod bridge;
+pub mod shadow;
 mod dump;
 mod edit;
 mod node;
@@ -52,6 +54,8 @@ pub struct Bir {
     capture_stack: Vec<NodeId>,
     capture_uses: Vec<VarId>,
     tails_valid: bool,
+    bulk: bool,
+    bulk_binders: Vec<(u64, u32)>,
     #[cfg(test)]
     steps: std::cell::Cell<u64>,
     #[cfg(test)]
@@ -116,6 +120,7 @@ impl Bir {
     pub fn new_var_id(&mut self, name: Name, order: u32) -> VarId {
         let id = VarId(index(self.vars.len()));
         self.capture_binders.push(0);
+        self.bulk_binders.push((0, 0));
         self.vars.name.push(name);
         self.vars.order.push(order);
         self.vars.flags.push(VarFlags::default());

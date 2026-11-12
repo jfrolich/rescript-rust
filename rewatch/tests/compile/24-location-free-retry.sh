@@ -29,6 +29,9 @@ const nameOnly = unitNames +
   "let shadowed = {\n  let __LINE__ = 7\n  let __LOC__ = \"mine\"\n  (__LINE__, __LOC__)\n}\n" +
   "module P = {\n  let __POS__ = 1\n}\nlet viaModule = P.__POS__\n";
 const cases = [
+  ["private relative external in functor", {
+    "A.res": '@@warning("+32")\nmodule H = () => {\n %%private(@module("./x") external x: int => int = "x")\n}\n',
+  }, 0],
   ["clean", {"A.res": "let f = x => x + 1\n", "B.res": "let answer = A.f(41)\n"}, 0],
   ["location constants and assertions", {
     "A.res": "let file = __FILE__\nlet line = __LINE__\nlet loc = __LOC__\nlet pos = __POS__\nlet check = x => assert(x > 0)\n",
@@ -71,6 +74,7 @@ try {
     assert.equal(fast.stderr, located.stderr, `${name}: diagnostic mismatch`);
     assert.deepEqual(fastOutputs, outputs(), `${name}: JavaScript mismatch`);
     assert.ok(!fast.stderr.includes("requires source locations"), name);
+    if (name === "private relative external in functor") assert.doesNotMatch(fast.stderr, /unused value x/);
     if (name === "shadowed unused binding") assert.match(fast.stderr, /unused/i);
   }
   // `-vv` logs each located parse or retry; unit names alone must not cause

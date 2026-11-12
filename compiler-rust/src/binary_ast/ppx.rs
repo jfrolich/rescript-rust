@@ -10445,7 +10445,12 @@ fn rewrite_structure_item_no_spice(
                     let sig_mod_type_idx = arena.push_mod_type(ModuleType {
                         pmty_desc: ModuleTypeDesc::Pmty_signature(Box::new(vec![SignatureItem {
                             psig_desc: SignatureItemDesc::Psig_value(Box::new(sig_value)),
-                            psig_loc: loc,
+                            // This signature describes the same declaration as the
+                            // implementation, not a second unused value. Preserve
+                            // its identity even when source spans are not retained.
+                            // compiler/frontend/ast_external.ml:78-98 gives both
+                            // declarations the same source span.
+                            psig_loc: item.pstr_loc,
                         }])),
                         pmty_loc: loc,
                         pmty_attributes: Attributes::new(),
