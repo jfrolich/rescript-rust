@@ -1,4 +1,4 @@
-//! Per-package build state, in `lib/bs/rescript.sqlite`.
+//! Per-package build state, in `lib/rescript/rescript.sqlite`.
 //!
 //! The only things a build keeps on disk besides its JavaScript and the
 //! editor's `.compiler.log`:
@@ -12,8 +12,8 @@
 //! - in the root package's database, the runtime's interfaces as the last
 //!   build compiled them (see [`read_runtime_interfaces`]).
 //!
-//! The database lives in the package's build directory, so cleaning a package
-//! removes its record with everything else. Any error reading it is treated
+//! The database lives in the package's artifact directory, so cleaning a
+//! package removes its record with everything else. Any error reading it is treated
 //! as "no previous build", which only costs a full rebuild; the writes are
 //! not synced to disk for the same reason.
 
@@ -28,8 +28,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 pub const DB_FILE: &str = "rescript.sqlite";
 
 /// Bump when the schema changes; an older database is then discarded.
-// PortableRawSignature now carries its own file names.
-const SCHEMA_VERSION: i64 = 19;
+// 19: the database moved from lib/bs to lib/rescript, whose build records
+// name no lib/bs or lib/ocaml artifacts.
+// 20: PortableRawSignature carries its own file names.
+const SCHEMA_VERSION: i64 = 20;
 
 const SCHEMA: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
@@ -50,10 +52,6 @@ CREATE TABLE interfaces (module TEXT PRIMARY KEY, hash INTEGER NOT NULL, data BL
 CREATE TABLE interface_extras (module TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
 CREATE TABLE runtime_interfaces (module TEXT PRIMARY KEY, data BLOB NOT NULL) WITHOUT ROWID;
 ";
-
-/// Files that earlier builds wrote instead of the database.
-const LEGACY_BS_FILES: [&str; 3] = ["compiler-info.json", "build.ninja", ".sourcedirs.json"];
-const LEGACY_OCAML_FILES: [&str; 2] = ["in-process-sources.txt", "in-process-warnings.json"];
 
 pub fn path(package: &Package) -> PathBuf {
     package.get_build_path().join(DB_FILE)
@@ -414,16 +412,6 @@ fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
     // and are written again on commit.
     conn.pragma_update(None, "cache_size", -262_144)?;
     Ok(conn)
-}
-
-/// Remove the files earlier builds wrote instead of the database.
-pub fn remove_legacy_files(package: &Package) {
-    for file in LEGACY_BS_FILES {
-        let _ = std::fs::remove_file(package.get_build_path().join(file));
-    }
-    for file in LEGACY_OCAML_FILES {
-        let _ = std::fs::remove_file(package.get_ocaml_build_path().join(file));
-    }
 }
 
 /// The package's metadata (compiler identity and build record), `None` when
@@ -957,12 +945,13 @@ mod tests {
     }
 
     #[test]
-    fn obsolete_portable_identity_schema_is_rebuilt() {
+    fn obsolete_schema_is_rebuilt() {
         let dir = TempDir::new().unwrap();
         let package = test_package(dir.path());
         write_record(&package, None, &state(1, None));
         let conn = Connection::open(path(&package)).unwrap();
-        conn.pragma_update(None, "user_version", 17).unwrap();
+        conn.pragma_update(None, "user_version", SCHEMA_VERSION - 1)
+            .unwrap();
         drop(conn);
         assert!(read(&package).is_none());
         assert!(read_meta(&package).is_none());

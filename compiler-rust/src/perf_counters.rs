@@ -11,6 +11,12 @@ use std::sync::{Mutex, OnceLock};
 
 use crate::types::typecore::ComponentLookupApi;
 
+pub(crate) use checker::{
+    CopyCause, ExpectedVar, census_exported_signature, census_generalize, census_instance,
+    census_unify, census_update_level, record_copy, record_expected_var, record_fresh_var,
+    record_local_type_nodes, record_store_build_nodes,
+};
+
 #[cfg(not(target_arch = "wasm32"))]
 static ENABLED: OnceLock<bool> = OnceLock::new();
 
@@ -442,6 +448,7 @@ pub fn reset() {
     if let Some(modules) = MODULE_SIGNATURE_FRESHENS.get() {
         modules.lock().unwrap().clear();
     }
+    checker::reset();
 }
 
 /// Record a cached lazy-signature lookup.
@@ -722,6 +729,7 @@ pub fn print_report() {
         REGISTRY_LOCAL_ALIASES_TOTAL.load(Ordering::Relaxed),
         REGISTRY_LOCAL_FALLBACKS_TOTAL.load(Ordering::Relaxed),
     );
+    checker::print_report();
 }
 
 fn print_module_signature_copies() {
@@ -798,4 +806,910 @@ fn print_lazy(kind: LazyLookupKind) {
         counters.scanned_items.load(Ordering::Relaxed),
         counters.results.load(Ordering::Relaxed),
     );
+}
+
+/// Counters for the type checker redesign
+/// (`compiler-rust/docs/CHECKER_REDESIGN.md`, section F.2): where type nodes
+/// come from, how much of the instantiation, generalisation and level work
+/// is on variable-free types, what the two sides of a unification are, why
+/// fresh variables are made, and how large a unit's exported type graph is.
+///
+/// A type is *ground* here when no type variable and no universal variable
+/// is reachable from it (the design's `HAS_VAR` and `HAS_UNIVAR` both
+/// clear). The design also keeps a constructor bound inside an expression
+/// out of its ground tier (`HAS_SCOPED`); these counters do not look at
+/// binding times, so they count such a type as ground.
+///
+/// Every function here is called only when [`enabled`] is true, from the
+/// entry of an operation, never from its per-node loop. The censuses walk
+/// the type on the side and write nothing: they follow links without
+/// compressing them.
+mod checker {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use crate::fast_hash::AHashMap;
+    use crate::types::btype;
+    use crate::types::context::TypeContext;
+    use crate::types::decl::SignatureItem;
+    use crate::types::type_expr::{GENERIC_LEVEL, RowField, TypeDesc, TypeExprRef};
+
+    /// What a copy of types is made for.
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub(crate) enum CopyCause {
+        /// `instance` and its variants (`copy_type_cached`).
+        #[default]
+        Instance,
+        /// `Subst.type_expr Subst.identity` (`subst_identity_copy`).
+        SubstIdentity,
+        /// The copy of a looked-up or saved signature item
+        /// (`copy_lookup_type_expr_with_paths`).
+        Lookup,
+        /// `nondep_type`.
+        Nondep,
+    }
+
+    impl CopyCause {
+        const ALL: [CopyCause; 4] = [
+            CopyCause::Instance,
+            CopyCause::SubstIdentity,
+            CopyCause::Lookup,
+            CopyCause::Nondep,
+        ];
+
+        fn name(self) -> &'static str {
+            match self {
+                CopyCause::Instance => "instance",
+                CopyCause::SubstIdentity => "subst_identity",
+                CopyCause::Lookup => "lookup_copy",
+                CopyCause::Nondep => "nondep",
+            }
+        }
+    }
+
+    /// The expression a fresh variable is made the expected type of, by the
+    /// case of the design's section C.9.
+    #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+    pub(crate) struct ExpectedVar {
+        /// The construct, as the parse tree names it.
+        pub construct: &'static str,
+        /// The C.9 case, 1 to 5.
+        pub case: u8,
+    }
+
+    static COPY_SESSIONS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static COPY_NODES: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    static TYPE_CONTEXTS: AtomicU64 = AtomicU64::new(0);
+    static LOCAL_NODES: AtomicU64 = AtomicU64::new(0);
+    static STORE_BUILDS: AtomicU64 = AtomicU64::new(0);
+    static STORE_BUILD_NODES: AtomicU64 = AtomicU64::new(0);
+
+    static FRESH_VARS: AtomicU64 = AtomicU64::new(0);
+    static FRESH_VAR_SITES: Mutex<Option<HashMap<(&'static str, u32), u64>>> = Mutex::new(None);
+    static EXPECTED_VARS: Mutex<Option<HashMap<ExpectedVar, u64>>> = Mutex::new(None);
+
+    /// Calls, calls whose every root is ground, visited nodes, ground
+    /// visited nodes.
+    struct WalkCounters {
+        calls: AtomicU64,
+        ground_calls: AtomicU64,
+        visits: AtomicU64,
+        ground_visits: AtomicU64,
+    }
+
+    impl WalkCounters {
+        const fn new() -> Self {
+            WalkCounters {
+                calls: AtomicU64::new(0),
+                ground_calls: AtomicU64::new(0),
+                visits: AtomicU64::new(0),
+                ground_visits: AtomicU64::new(0),
+            }
+        }
+
+        fn all(&self) -> [&AtomicU64; 4] {
+            [
+                &self.calls,
+                &self.ground_calls,
+                &self.visits,
+                &self.ground_visits,
+            ]
+        }
+
+        fn print(&self, name: &str, visit: &str) {
+            let calls = self.calls.load(Ordering::Relaxed);
+            let ground_calls = self.ground_calls.load(Ordering::Relaxed);
+            let visits = self.visits.load(Ordering::Relaxed);
+            let ground_visits = self.ground_visits.load(Ordering::Relaxed);
+            eprintln!(
+                "[compiler-counter] {name} calls={calls} ground_calls={ground_calls} ({}) {visit}={visits} ground_{visit}={ground_visits} ({})",
+                percent(ground_calls, calls),
+                percent(ground_visits, visits),
+            );
+        }
+    }
+
+    static INSTANCE: WalkCounters = WalkCounters::new();
+    static GENERALIZE: WalkCounters = WalkCounters::new();
+    static UPDATE_LEVEL: WalkCounters = WalkCounters::new();
+
+    const UNIFY_SHAPES: usize = 8;
+    const UNIFY_SHAPE_NAMES: [&str; UNIFY_SHAPES] = [
+        "same_node",
+        "identical_ground",
+        "different_ground",
+        "var_ground",
+        "var_nonground",
+        "var_var",
+        "structure_one_ground",
+        "structure_nonground",
+    ];
+    static UNIFY: [AtomicU64; UNIFY_SHAPES] = [const { AtomicU64::new(0) }; UNIFY_SHAPES];
+    /// Top-level unifications by the two head constructors.
+    static UNIFY_HEADS: Mutex<Option<HashMap<(&'static str, &'static str), u64>>> =
+        Mutex::new(None);
+
+    static EXPORT_UNITS: AtomicU64 = AtomicU64::new(0);
+    static EXPORT_NODES: AtomicU64 = AtomicU64::new(0);
+    static EXPORT_NONGROUND_NODES: AtomicU64 = AtomicU64::new(0);
+    static EXPORT_MAX_NONGROUND_NODES: AtomicU64 = AtomicU64::new(0);
+    static EXPORT_RECURSIVE_GROUND: AtomicU64 = AtomicU64::new(0);
+    /// Non-ground and all exported nodes per unit.
+    static EXPORT_BY_UNIT: Mutex<Vec<(String, u64, u64)>> = Mutex::new(Vec::new());
+
+    fn percent(part: u64, whole: u64) -> String {
+        if whole == 0 {
+            "-".to_string()
+        } else {
+            format!("{:.1}%", 100.0 * part as f64 / whole as f64)
+        }
+    }
+
+    pub(super) fn reset() {
+        let walks = [&INSTANCE, &GENERALIZE, &UPDATE_LEVEL];
+        for counter in COPY_SESSIONS
+            .iter()
+            .chain(&COPY_NODES)
+            .chain(&UNIFY)
+            .chain(walks.iter().flat_map(|walk| walk.all()))
+            .chain([
+                &TYPE_CONTEXTS,
+                &LOCAL_NODES,
+                &STORE_BUILDS,
+                &STORE_BUILD_NODES,
+                &FRESH_VARS,
+                &EXPORT_UNITS,
+                &EXPORT_NODES,
+                &EXPORT_NONGROUND_NODES,
+                &EXPORT_MAX_NONGROUND_NODES,
+                &EXPORT_RECURSIVE_GROUND,
+            ])
+        {
+            counter.store(0, Ordering::Relaxed);
+        }
+        *FRESH_VAR_SITES.lock().unwrap() = None;
+        *EXPECTED_VARS.lock().unwrap() = None;
+        *UNIFY_HEADS.lock().unwrap() = None;
+        EXPORT_BY_UNIT.lock().unwrap().clear();
+    }
+
+    /// A copy for `cause` allocated `nodes` type nodes, not counting the
+    /// copies nested in it.
+    pub(crate) fn record_copy(cause: CopyCause, nodes: usize) {
+        let index = cause as usize;
+        COPY_SESSIONS[index].fetch_add(1, Ordering::Relaxed);
+        COPY_NODES[index].fetch_add(nodes as u64, Ordering::Relaxed);
+    }
+
+    /// A compilation's own node pool is dropped holding `nodes` nodes.
+    pub(crate) fn record_local_type_nodes(nodes: usize) {
+        TYPE_CONTEXTS.fetch_add(1, Ordering::Relaxed);
+        LOCAL_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+    }
+
+    /// An outermost store build allocated `nodes` nodes in the worker store.
+    pub(crate) fn record_store_build_nodes(nodes: usize) {
+        STORE_BUILDS.fetch_add(1, Ordering::Relaxed);
+        STORE_BUILD_NODES.fetch_add(nodes as u64, Ordering::Relaxed);
+    }
+
+    /// `new_var` and its variants, called from `location` outside a copy
+    /// session.
+    pub(crate) fn record_fresh_var(location: &'static std::panic::Location<'static>) {
+        FRESH_VARS.fetch_add(1, Ordering::Relaxed);
+        *FRESH_VAR_SITES
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry((location.file(), location.line()))
+            .or_default() += 1;
+    }
+
+    /// A fresh variable was made only to be the expected type of an
+    /// expression.
+    pub(crate) fn record_expected_var(var: ExpectedVar) {
+        *EXPECTED_VARS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry(var)
+            .or_default() += 1;
+    }
+
+    /// The representative of `ty`, without compressing the links.
+    fn resolve(ctx: &TypeContext, mut ty: TypeExprRef) -> TypeExprRef {
+        loop {
+            match &*ctx.borrow_desc(ty) {
+                TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => ty = *next,
+                _ => return ty,
+            }
+        }
+    }
+
+    fn head_name(desc: &TypeDesc) -> &'static str {
+        match desc {
+            TypeDesc::Tvar(_) => "var",
+            TypeDesc::Tarrow { .. } => "arrow",
+            TypeDesc::Ttuple(_) => "tuple",
+            TypeDesc::Tconstr { .. } => "constr",
+            TypeDesc::Tobject { .. } => "object",
+            TypeDesc::Tfield { .. } => "field",
+            TypeDesc::Tnil => "nil",
+            TypeDesc::Tlink(_) | TypeDesc::Tsubst(_) => "link",
+            TypeDesc::Tvariant(_) => "variant",
+            TypeDesc::Tunivar(_) => "univar",
+            TypeDesc::Tpoly { .. } => "poly",
+            TypeDesc::Tpackage { .. } => "package",
+        }
+    }
+
+    /// The resolved children of the representative `ty`.
+    fn children(ctx: &TypeContext, ty: TypeExprRef, out: &mut Vec<TypeExprRef>) {
+        let start = out.len();
+        match ctx.get_desc(ty).into_desc() {
+            TypeDesc::Tvar(_) | TypeDesc::Tunivar(_) | TypeDesc::Tnil => {}
+            TypeDesc::Tarrow { args, ret } => {
+                out.extend(ctx.type_args(args).iter().map(|arg| arg.typ));
+                out.push(ret);
+            }
+            TypeDesc::Ttuple(types) => out.extend(ctx.type_list(types).iter()),
+            TypeDesc::Tconstr { args, .. } | TypeDesc::Tpackage { args, .. } => {
+                out.extend(ctx.type_list(args).iter());
+            }
+            TypeDesc::Tobject { fields } => out.push(fields),
+            TypeDesc::Tfield { typ, rest, .. } => {
+                out.push(typ);
+                out.push(rest);
+            }
+            TypeDesc::Tlink(next) | TypeDesc::Tsubst(next) => out.push(next),
+            TypeDesc::Tvariant(row) => {
+                let row = ctx.row_desc(row);
+                for (_, field) in row.row_fields.iter() {
+                    match btype::row_field_repr(ctx, field) {
+                        RowField::Rpresent(ty) => out.extend(ty),
+                        RowField::Reither { types, .. } => out.extend(types),
+                        RowField::Rabsent => {}
+                    }
+                }
+                out.push(row.row_more);
+                if let Some((_, args)) = &row.row_name {
+                    out.extend(args.iter().copied());
+                }
+            }
+            TypeDesc::Tpoly { body, vars } => {
+                out.push(body);
+                out.extend(ctx.type_list(vars).iter());
+            }
+        }
+        for child in &mut out[start..] {
+            *child = resolve(ctx, *child);
+        }
+    }
+
+    /// The type graph reachable from some roots, with which of its nodes
+    /// are ground.
+    #[derive(Default)]
+    pub(super) struct Graph {
+        index: AHashMap<TypeExprRef, u32>,
+        nodes: Vec<TypeExprRef>,
+        /// `edges[edge_start[n]..edge_start[n + 1]]` are node `n`'s children.
+        edge_start: Vec<u32>,
+        edges: Vec<u32>,
+        /// A variable is reachable from the node.
+        nonground: Vec<bool>,
+        /// The node contains itself.
+        recursive: Vec<bool>,
+    }
+
+    impl Graph {
+        pub(super) fn of(
+            ctx: &TypeContext,
+            roots: impl IntoIterator<Item = TypeExprRef>,
+        ) -> (Graph, Vec<u32>) {
+            let mut graph = Graph::default();
+            let mut root_nodes = Vec::new();
+            for root in roots {
+                let root = resolve(ctx, root);
+                root_nodes.push(graph.node(root));
+            }
+            // Nodes get their index when first seen and their edges in index
+            // order, so `edge_start` is filled front to back.
+            let mut scratch = Vec::new();
+            let mut next = 0;
+            while next < graph.nodes.len() {
+                let ty = graph.nodes[next];
+                scratch.clear();
+                children(ctx, ty, &mut scratch);
+                graph.edge_start.push(graph.edges.len() as u32);
+                for child in &scratch {
+                    let child = graph.node(*child);
+                    graph.edges.push(child);
+                }
+                let is_var = matches!(
+                    &*ctx.borrow_desc(ty),
+                    TypeDesc::Tvar(_) | TypeDesc::Tunivar(_)
+                );
+                graph.nonground.push(is_var);
+                next += 1;
+            }
+            graph.edge_start.push(graph.edges.len() as u32);
+            graph.propagate_nonground();
+            graph.mark_recursive();
+            (graph, root_nodes)
+        }
+
+        fn node(&mut self, ty: TypeExprRef) -> u32 {
+            let next = self.nodes.len() as u32;
+            let index = *self.index.entry(ty).or_insert(next);
+            if index == next {
+                self.nodes.push(ty);
+            }
+            index
+        }
+
+        /// The number of distinct types reached.
+        pub(super) fn len(&self) -> usize {
+            self.nodes.len()
+        }
+
+        pub(super) fn is_ground(&self, node: u32) -> bool {
+            !self.nonground[node as usize]
+        }
+
+        /// The ground types that contain themselves.
+        pub(super) fn recursive_ground(&self) -> usize {
+            self.recursive
+                .iter()
+                .zip(&self.nonground)
+                .filter(|(recursive, nonground)| **recursive && !**nonground)
+                .count()
+        }
+
+        fn children_of(&self, node: u32) -> &[u32] {
+            let node = node as usize;
+            &self.edges[self.edge_start[node] as usize..self.edge_start[node + 1] as usize]
+        }
+
+        /// A node is not ground when a variable is reachable from it: walk
+        /// the edges backwards from the variables.
+        fn propagate_nonground(&mut self) {
+            let count = self.nodes.len();
+            let mut parent_start = vec![0u32; count + 1];
+            for &child in &self.edges {
+                parent_start[child as usize + 1] += 1;
+            }
+            for node in 0..count {
+                parent_start[node + 1] += parent_start[node];
+            }
+            let mut fill = parent_start.clone();
+            let mut parents = vec![0u32; self.edges.len()];
+            for node in 0..count as u32 {
+                for &child in self.children_of(node) {
+                    parents[fill[child as usize] as usize] = node;
+                    fill[child as usize] += 1;
+                }
+            }
+            let mut work: Vec<u32> = (0..count as u32)
+                .filter(|node| self.nonground[*node as usize])
+                .collect();
+            while let Some(node) = work.pop() {
+                let node = node as usize;
+                for &parent in
+                    &parents[parent_start[node] as usize..parent_start[node + 1] as usize]
+                {
+                    if !self.nonground[parent as usize] {
+                        self.nonground[parent as usize] = true;
+                        work.push(parent);
+                    }
+                }
+            }
+        }
+
+        /// Mark the nodes a depth-first walk reaches again while they are
+        /// still open: each is the head of a cycle.
+        fn mark_recursive(&mut self) {
+            let count = self.nodes.len();
+            self.recursive = vec![false; count];
+            // 0: not seen, 1: open, 2: done.
+            let mut state = vec![0u8; count];
+            let mut stack: Vec<(u32, u32)> = Vec::new();
+            for start in 0..count as u32 {
+                if state[start as usize] != 0 {
+                    continue;
+                }
+                state[start as usize] = 1;
+                stack.push((start, 0));
+                while let Some((node, position)) = stack.last_mut() {
+                    let node = *node;
+                    let edges = self.children_of(node);
+                    if let Some(&child) = edges.get(*position as usize) {
+                        *position += 1;
+                        match state[child as usize] {
+                            0 => {
+                                state[child as usize] = 1;
+                                stack.push((child, 0));
+                            }
+                            1 => self.recursive[child as usize] = true,
+                            _ => {}
+                        }
+                    } else {
+                        state[node as usize] = 2;
+                        stack.pop();
+                    }
+                }
+            }
+        }
+
+        /// The nodes a walk from `roots` visits when it enters a node only
+        /// if `enters` holds for it: how many, and how many of them ground.
+        pub(super) fn visit(
+            &self,
+            roots: &[u32],
+            mut enters: impl FnMut(TypeExprRef) -> bool,
+        ) -> (u64, u64) {
+            let mut seen = vec![false; self.nodes.len()];
+            let mut work: Vec<u32> = Vec::new();
+            let (mut visits, mut ground) = (0, 0);
+            for &root in roots {
+                work.push(root);
+                while let Some(node) = work.pop() {
+                    if std::mem::replace(&mut seen[node as usize], true)
+                        || !enters(self.nodes[node as usize])
+                    {
+                        continue;
+                    }
+                    visits += 1;
+                    if self.is_ground(node) {
+                        ground += 1;
+                    }
+                    work.extend_from_slice(self.children_of(node));
+                }
+            }
+            (visits, ground)
+        }
+    }
+
+    fn census_walk(
+        ctx: &TypeContext,
+        counters: &WalkCounters,
+        roots: impl IntoIterator<Item = TypeExprRef>,
+        enters: impl FnMut(TypeExprRef) -> bool,
+    ) {
+        let (graph, roots) = Graph::of(ctx, roots);
+        let (visits, ground_visits) = graph.visit(&roots, enters);
+        counters.calls.fetch_add(1, Ordering::Relaxed);
+        if roots.iter().all(|root| graph.is_ground(*root)) {
+            counters.ground_calls.fetch_add(1, Ordering::Relaxed);
+        }
+        counters.visits.fetch_add(visits, Ordering::Relaxed);
+        counters
+            .ground_visits
+            .fetch_add(ground_visits, Ordering::Relaxed);
+    }
+
+    /// An instantiation of `roots` in one copy session is about to run: it
+    /// copies the nodes at the generic level it reaches through such nodes.
+    pub(crate) fn census_instance(ctx: &TypeContext, roots: impl IntoIterator<Item = TypeExprRef>) {
+        census_walk(ctx, &INSTANCE, roots, |ty| {
+            ctx.get_level(ty) == GENERIC_LEVEL
+        });
+    }
+
+    /// A generalisation of `ty` is about to run: it visits the nodes above
+    /// `level` that are not generic yet.
+    pub(crate) fn census_generalize(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
+        census_walk(ctx, &GENERALIZE, [ty], |ty| {
+            let node_level = ctx.get_level(ty);
+            node_level > level && node_level != GENERIC_LEVEL
+        });
+    }
+
+    /// `ty` is about to be lowered to `level`: the walk visits the nodes
+    /// above it.
+    pub(crate) fn census_update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
+        census_walk(ctx, &UPDATE_LEVEL, [ty], |ty| ctx.get_level(ty) > level);
+    }
+
+    /// Whether two ground types are the same type without expanding
+    /// anything: the same constructors and paths all the way down.
+    fn identical(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef, budget: &mut u32) -> bool {
+        let (t1, t2) = (resolve(ctx, t1), resolve(ctx, t2));
+        if t1 == t2 {
+            return true;
+        }
+        if *budget == 0 {
+            return false;
+        }
+        *budget -= 1;
+        let (d1, d2) = (ctx.get_desc(t1).into_desc(), ctx.get_desc(t2).into_desc());
+        let same_head = match (&d1, &d2) {
+            (TypeDesc::Tconstr { path: p1, .. }, TypeDesc::Tconstr { path: p2, .. }) => p1.same(p2),
+            (TypeDesc::Tarrow { args: a1, .. }, TypeDesc::Tarrow { args: a2, .. }) => {
+                let (a1, a2) = (ctx.type_args(*a1), ctx.type_args(*a2));
+                a1.len() == a2.len()
+                    && a1.iter().zip(a2.iter()).all(|(x, y)| {
+                        x.label().label_name() == y.label().label_name()
+                            && x.label().is_optional() == y.label().is_optional()
+                    })
+            }
+            (TypeDesc::Ttuple(_), TypeDesc::Ttuple(_)) | (TypeDesc::Tnil, TypeDesc::Tnil) => true,
+            // Rows, objects and packages are compared by the unifier's own
+            // rules; they are not counted as identical here.
+            _ => false,
+        };
+        if !same_head {
+            return false;
+        }
+        let (mut c1, mut c2) = (Vec::new(), Vec::new());
+        children(ctx, t1, &mut c1);
+        children(ctx, t2, &mut c2);
+        c1.len() == c2.len()
+            && c1
+                .iter()
+                .zip(&c2)
+                .all(|(x, y)| identical(ctx, *x, *y, budget))
+    }
+
+    /// A top-level unification of `t1` and `t2` is about to run.
+    pub(crate) fn census_unify(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
+        let (t1, t2) = (resolve(ctx, t1), resolve(ctx, t2));
+        let (d1, d2) = (ctx.get_desc(t1).into_desc(), ctx.get_desc(t2).into_desc());
+        *UNIFY_HEADS
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .entry((head_name(&d1), head_name(&d2)))
+            .or_default() += 1;
+        let shape = if t1 == t2 {
+            0
+        } else {
+            let (graph, roots) = Graph::of(ctx, [t1, t2]);
+            let ground1 = graph.is_ground(roots[0]);
+            let ground2 = graph.is_ground(roots[1]);
+            let var1 = matches!(d1, TypeDesc::Tvar(_));
+            let var2 = matches!(d2, TypeDesc::Tvar(_));
+            match (var1, var2) {
+                (true, true) => 5,
+                (true, false) if ground2 => 3,
+                (false, true) if ground1 => 3,
+                (true, false) | (false, true) => 4,
+                (false, false) if ground1 && ground2 => {
+                    if identical(ctx, t1, t2, &mut 10_000) {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                (false, false) if ground1 || ground2 => 6,
+                (false, false) => 7,
+            }
+        };
+        UNIFY[shape].fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn signature_types(sig: &[SignatureItem], out: &mut Vec<TypeExprRef>) {
+        use crate::types::decl::{ConstructorArguments, ModuleType, TypeInlinedType, TypeKind};
+        fn module_type(mty: &ModuleType, out: &mut Vec<TypeExprRef>) {
+            match mty {
+                ModuleType::MtyIdent(_) | ModuleType::MtyAlias(..) => {}
+                ModuleType::MtySignature(sig) => signature_types(sig, out),
+                ModuleType::MtyFunctor {
+                    param_type, result, ..
+                } => {
+                    if let Some(param_type) = param_type {
+                        module_type(param_type, out);
+                    }
+                    module_type(result, out);
+                }
+            }
+        }
+        fn arguments(args: &ConstructorArguments, out: &mut Vec<TypeExprRef>) {
+            match args {
+                ConstructorArguments::CstrTuple(types) => out.extend(types.iter().copied()),
+                ConstructorArguments::CstrRecord(labels) => {
+                    out.extend(labels.iter().map(|label| label.ld_type));
+                }
+            }
+        }
+        for item in sig {
+            match item {
+                SignatureItem::SigValue(_, decl) => out.push(decl.val_type),
+                SignatureItem::SigType(_, decl, _) => {
+                    out.extend(decl.type_params.iter().copied());
+                    out.extend(decl.type_manifest);
+                    match &decl.type_kind {
+                        TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
+                        TypeKind::TypeRecord(labels, _) => {
+                            out.extend(labels.iter().map(|label| label.ld_type));
+                        }
+                        TypeKind::TypeVariant(constructors, _) => {
+                            for constructor in constructors.iter() {
+                                arguments(&constructor.cd_args, out);
+                                out.extend(constructor.cd_res);
+                            }
+                        }
+                    }
+                    for inlined in &decl.type_inlined_types {
+                        match inlined {
+                            TypeInlinedType::Record { labels, .. } => {
+                                out.extend(labels.iter().map(|label| label.ld_type));
+                            }
+                        }
+                    }
+                }
+                SignatureItem::SigTypext(_, ext, _) => {
+                    out.extend(ext.ext_type_params.iter().copied());
+                    arguments(&ext.ext_args, out);
+                    out.extend(ext.ext_ret_type);
+                }
+                SignatureItem::SigModule(_, decl, _) => module_type(&decl.md_type, out),
+                SignatureItem::SigModtype(_, decl) => {
+                    if let Some(mty) = &decl.mtd_type {
+                        module_type(mty, out);
+                    }
+                }
+                SignatureItem::SigClass | SignatureItem::SigClassType => {}
+            }
+        }
+    }
+
+    /// The signature `sig` of `unit` is exported: count the distinct type
+    /// nodes it reaches, those that are not ground (what the design's
+    /// export copy would visit), and the ground types that contain
+    /// themselves (which its ground tier would not intern).
+    pub(crate) fn census_exported_signature(ctx: &TypeContext, unit: &str, sig: &[SignatureItem]) {
+        let mut roots = Vec::new();
+        signature_types(sig, &mut roots);
+        let (graph, _) = Graph::of(ctx, roots);
+        let nodes = graph.len() as u64;
+        let nonground = graph
+            .nonground
+            .iter()
+            .filter(|nonground| **nonground)
+            .count() as u64;
+        let recursive_ground = graph.recursive_ground() as u64;
+        EXPORT_UNITS.fetch_add(1, Ordering::Relaxed);
+        EXPORT_NODES.fetch_add(nodes, Ordering::Relaxed);
+        EXPORT_NONGROUND_NODES.fetch_add(nonground, Ordering::Relaxed);
+        EXPORT_MAX_NONGROUND_NODES.fetch_max(nonground, Ordering::Relaxed);
+        EXPORT_RECURSIVE_GROUND.fetch_add(recursive_ground, Ordering::Relaxed);
+        EXPORT_BY_UNIT
+            .lock()
+            .unwrap()
+            .push((unit.to_string(), nonground, nodes));
+    }
+
+    /// The `limit` largest entries, ties broken by key so that the report
+    /// does not depend on hash order.
+    fn largest<K: Ord + Clone>(map: &Option<HashMap<K, u64>>, limit: usize) -> Vec<(K, u64)> {
+        let mut entries: Vec<(K, u64)> = map
+            .iter()
+            .flatten()
+            .map(|(key, count)| (key.clone(), *count))
+            .collect();
+        entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        entries.truncate(limit);
+        entries
+    }
+
+    pub(super) fn print_report() {
+        let local = LOCAL_NODES.load(Ordering::Relaxed);
+        let store = STORE_BUILD_NODES.load(Ordering::Relaxed);
+        let fresh = FRESH_VARS.load(Ordering::Relaxed);
+        let copied: u64 = COPY_NODES
+            .iter()
+            .map(|nodes| nodes.load(Ordering::Relaxed))
+            .sum();
+        let total = local + store;
+        eprintln!(
+            "[compiler-counter] type_nodes total={total} local={local} store_builds={store} type_contexts={} store_build_count={}",
+            TYPE_CONTEXTS.load(Ordering::Relaxed),
+            STORE_BUILDS.load(Ordering::Relaxed),
+        );
+        for cause in CopyCause::ALL {
+            let nodes = COPY_NODES[cause as usize].load(Ordering::Relaxed);
+            eprintln!(
+                "[compiler-counter] type_nodes_by_cause cause={} nodes={nodes} ({}) copies={}",
+                cause.name(),
+                percent(nodes, total),
+                COPY_SESSIONS[cause as usize].load(Ordering::Relaxed),
+            );
+        }
+        eprintln!(
+            "[compiler-counter] type_nodes_by_cause cause=fresh_variable nodes={fresh} ({})",
+            percent(fresh, total),
+        );
+        let direct = total.saturating_sub(copied + fresh);
+        eprintln!(
+            "[compiler-counter] type_nodes_by_cause cause=direct nodes={direct} ({})",
+            percent(direct, total),
+        );
+
+        INSTANCE.print("instance", "copied_nodes");
+        GENERALIZE.print("generalize", "visits");
+        UPDATE_LEVEL.print("update_level", "visits");
+
+        let unify_total: u64 = UNIFY
+            .iter()
+            .map(|count| count.load(Ordering::Relaxed))
+            .sum();
+        let mut line = format!("[compiler-counter] unify_top_level total={unify_total}");
+        for (name, count) in UNIFY_SHAPE_NAMES.iter().zip(&UNIFY) {
+            let count = count.load(Ordering::Relaxed);
+            line.push_str(&format!(
+                " {name}={count} ({})",
+                percent(count, unify_total)
+            ));
+        }
+        eprintln!("{line}");
+        for ((left, right), count) in largest(&UNIFY_HEADS.lock().unwrap(), 20) {
+            eprintln!(
+                "[compiler-counter] unify_top_level_heads left={left} right={right} count={count} ({})",
+                percent(count, unify_total),
+            );
+        }
+
+        let expected = EXPECTED_VARS.lock().unwrap();
+        let expected_total: u64 = expected.iter().flatten().map(|(_, count)| *count).sum();
+        let mut by_case = [0u64; 6];
+        for (var, count) in expected.iter().flatten() {
+            by_case[usize::from(var.case).min(5)] += count;
+        }
+        eprintln!(
+            "[compiler-counter] fresh_variables total={fresh} as_expected_type={expected_total} ({}) case1={} case2={} case3={} case4={} case5={}",
+            percent(expected_total, fresh),
+            by_case[1],
+            by_case[2],
+            by_case[3],
+            by_case[4],
+            by_case[5],
+        );
+        let mut constructs: Vec<(ExpectedVar, u64)> = expected
+            .iter()
+            .flatten()
+            .map(|(var, count)| (*var, *count))
+            .collect();
+        constructs.sort_by(|a, b| {
+            b.1.cmp(&a.1)
+                .then_with(|| a.0.construct.cmp(b.0.construct))
+                .then_with(|| a.0.case.cmp(&b.0.case))
+        });
+        for (var, count) in constructs {
+            eprintln!(
+                "[compiler-counter] fresh_variable_as_expected_type construct={} case={} count={count} ({})",
+                var.construct,
+                var.case,
+                percent(count, fresh),
+            );
+        }
+        drop(expected);
+        for ((file, line), count) in largest(&FRESH_VAR_SITES.lock().unwrap(), 40) {
+            // The path as the compiler was built with; print it from the
+            // crate's directory.
+            let file = file
+                .rsplit_once("compiler-rust/")
+                .map_or(file, |(_, file)| file);
+            eprintln!(
+                "[compiler-counter] fresh_variable_site file={file} line={line} count={count} ({})",
+                percent(count, fresh),
+            );
+        }
+
+        let export_nodes = EXPORT_NODES.load(Ordering::Relaxed);
+        let export_nonground = EXPORT_NONGROUND_NODES.load(Ordering::Relaxed);
+        eprintln!(
+            "[compiler-counter] exported_signatures units={} nodes={export_nodes} nonground_nodes={export_nonground} ({}) max_nonground_nodes_per_unit={} recursive_ground_types={}",
+            EXPORT_UNITS.load(Ordering::Relaxed),
+            percent(export_nonground, export_nodes),
+            EXPORT_MAX_NONGROUND_NODES.load(Ordering::Relaxed),
+            EXPORT_RECURSIVE_GROUND.load(Ordering::Relaxed),
+        );
+        let mut units = EXPORT_BY_UNIT.lock().unwrap().clone();
+        units.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        for (unit, nonground, nodes) in units.into_iter().take(10) {
+            eprintln!(
+                "[compiler-counter] exported_signature unit={unit} nonground_nodes={nonground} nodes={nodes}",
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod checker_tests {
+    use std::sync::Arc;
+
+    use crate::context::IdGenerator;
+    use crate::ident::Ident;
+    use crate::types::context::TypeContext;
+    use crate::types::path::Path;
+    use crate::types::type_expr::{AbbrevMemoRef, TypeArg, TypeDesc, TypeExprRef};
+
+    use super::checker::Graph;
+
+    fn constr(ctx: &TypeContext, name: &str, args: &[TypeExprRef]) -> TypeExprRef {
+        ctx.new_type(TypeDesc::Tconstr {
+            path: Path::pident(Ident::create_persistent(name)),
+            args: ctx.new_type_list(args),
+            abbrev: AbbrevMemoRef::nil(),
+        })
+    }
+
+    fn arrow(ctx: &TypeContext, arg: TypeExprRef, ret: TypeExprRef) -> TypeExprRef {
+        ctx.new_type(TypeDesc::Tarrow {
+            args: ctx.new_type_args(&[TypeArg::unlabeled(arg)]),
+            ret,
+        })
+    }
+
+    /// A type is ground when no variable is reachable from it, through
+    /// links and through cycles.
+    #[test]
+    fn ground_is_no_reachable_variable() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int = constr(&ctx, "int", &[]);
+        let var = ctx.new_var(None);
+        let linked = ctx.new_var(None);
+        ctx.set_desc(linked, TypeDesc::Tlink(int));
+        let ground = arrow(&ctx, int, constr(&ctx, "array", &[linked]));
+        let open = arrow(&ctx, ground, constr(&ctx, "array", &[var]));
+
+        let (graph, roots) = Graph::of(&ctx, [ground, open, var]);
+        assert!(graph.is_ground(roots[0]));
+        assert!(!graph.is_ground(roots[1]));
+        assert!(!graph.is_ground(roots[2]));
+        // `int`, the two arrays and the two arrows, and the variable; the
+        // linked variable is `int`.
+        assert_eq!(graph.len(), 6);
+        assert_eq!(graph.recursive_ground(), 0);
+
+        // The walk from `open` that does not enter `ground` visits the
+        // arrow, the open array and the variable.
+        let (visits, ground_visits) = graph.visit(&roots[1..2], |ty| ty != ground);
+        assert_eq!((visits, ground_visits), (3, 0));
+        let (visits, ground_visits) = graph.visit(&roots[1..2], |_| true);
+        assert_eq!((visits, ground_visits), (6, 3));
+    }
+
+    /// A type that contains itself and no variable is ground, and is
+    /// reported as recursive; with a variable in the cycle it is not ground.
+    #[test]
+    fn a_cycle_without_a_variable_is_ground_and_recursive() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let int = constr(&ctx, "int", &[]);
+        let knot = ctx.new_var(None);
+        let list = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[int, knot])));
+        ctx.set_desc(knot, TypeDesc::Tlink(list));
+        let (graph, roots) = Graph::of(&ctx, [list]);
+        assert!(graph.is_ground(roots[0]));
+        assert_eq!(graph.recursive_ground(), 1);
+
+        let var = ctx.new_var(None);
+        let knot = ctx.new_var(None);
+        let open = ctx.new_type(TypeDesc::Ttuple(ctx.new_type_list(&[var, knot])));
+        ctx.set_desc(knot, TypeDesc::Tlink(open));
+        let (graph, roots) = Graph::of(&ctx, [open]);
+        assert!(!graph.is_ground(roots[0]));
+        assert_eq!(graph.recursive_ground(), 0);
+    }
 }

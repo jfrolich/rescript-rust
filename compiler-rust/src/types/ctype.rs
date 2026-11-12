@@ -2479,16 +2479,23 @@ pub fn link_type(ctx: &TypeContext, t1: TypeExprRef, t2: TypeExprRef) {
 /// Update the level of a type and its children.
 pub fn update_level(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
     let ty = ctx.repr(ty);
-    let current = ctx.get_level(ty);
-
-    if level < current {
-        ctx.set_level(ty, level);
-
-        // Recursively update children
-        iter_type_expr(ctx, ty, |child| {
-            update_level(ctx, level, child);
-        });
+    if level < ctx.get_level(ty) {
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_update_level(ctx, level, ty);
+        }
+        update_level_rec(ctx, level, ty);
     }
+}
+
+/// `ty` is a representative above `level`.
+fn update_level_rec(ctx: &TypeContext, level: i32, ty: TypeExprRef) {
+    ctx.set_level(ty, level);
+    iter_type_expr(ctx, ty, |child| {
+        let child = ctx.repr(child);
+        if level < ctx.get_level(child) {
+            update_level_rec(ctx, level, child);
+        }
+    });
 }
 
 /// Environment-aware update_level matching OCaml ctype.ml:652-676.
@@ -2539,6 +2546,19 @@ pub(crate) fn update_level_checked(
     if ctx.get_level(ty) <= level {
         return Ok(());
     }
+    update_level_checked_above(ctx, env, level, ty)
+}
+
+/// [`update_level_checked`] of a representative above `level`.
+fn update_level_checked_above(
+    ctx: &TypeContext,
+    env: &Env,
+    level: i32,
+    ty: TypeExprRef,
+) -> Result<(), TypeError> {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_update_level(ctx, level, ty);
+    }
     let snapshot = ctx.snapshot_type_state();
     if update_level_pass(ctx, env, level, false, ty).is_ok() {
         return Ok(());
@@ -2549,6 +2569,7 @@ pub(crate) fn update_level_checked(
 }
 
 /// OCaml `newvar2 level`.
+#[track_caller]
 fn new_var_at_level(ctx: &TypeContext, level: i32) -> TypeExprRef {
     let var = ctx.new_var(None);
     ctx.set_level(var, level);
@@ -4681,6 +4702,11 @@ pub(crate) fn instance_declaration(
     ctx: &crate::types::context::TypeContext,
     decl: &crate::types::decl::TypeDeclaration,
 ) -> crate::types::decl::TypeDeclaration {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Instance, || {
+            instance_declaration(ctx, decl)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     let mut copy = |ty: TypeExprRef| copy_type_cached(ctx, ty, &mut cache);
     let type_kind = match &decl.type_kind {
@@ -7332,8 +7358,12 @@ pub fn unify(
     }
     // OCaml's outer `unify` (ctype.ml:2589-2594) takes a snapshot so a
     // failure can `undo_compress` before expanding the trace.
-    let top_snapshot =
-        (state.recursion_depth == 1).then(|| ctx.snapshot_type_state_for_undo_compress());
+    let top_snapshot = (state.recursion_depth == 1).then(|| {
+        if ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_unify(ctx, t1, t2);
+        }
+        ctx.snapshot_type_state_for_undo_compress()
+    });
 
     // Fast path: same reference
     let t1 = ctx.repr(t1);
@@ -10021,6 +10051,9 @@ fn generalize_rec(ctx: &TypeContext, ty: TypeExprRef) {
 /// OCaml `Ctype.generalize`: raise to the generic level every node of `ty`
 /// above the current level.
 pub fn generalize(ctx: &TypeContext, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.current_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_rec(ctx, ty);
@@ -10356,6 +10389,9 @@ fn generalize_structure_rec(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) 
 /// OCaml `Ctype.generalize_structure`: generalize the nodes above
 /// `var_level`, but leave type variables at their level.
 pub fn generalize_structure(ctx: &TypeContext, var_level: i32, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.current_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     generalize_structure_rec(ctx, var_level, ty);
@@ -10454,6 +10490,9 @@ fn generalize_expansive_rec(
 /// appears in an expansive position (contravariant or under a mutable
 /// constructor), which is lowered to the non-generalizable level.
 pub fn generalize_expansive(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
+    if ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_generalize(ctx, ctx.nongen_level(), ty);
+    }
     // OCaml: simple_abbrevs := Mnil
     ctx.clear_simple_abbrevs();
     let mut visited = TypeExprRefSet::new();
@@ -11476,8 +11515,25 @@ pub fn lower_args(ctx: &TypeContext, env: &Env, ty: TypeExprRef) {
 /// This replaces all generic type variables with fresh ones,
 /// creating a new instance of a polymorphic type.
 pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || instance(ctx, ty));
+    }
     let mut cache = CopyCache::new(ctx);
     copy_type_cached(ctx, ty, &mut cache)
+}
+
+/// For the compiler counters (see `TypeContext::counts_this_call`): count
+/// the instantiation of `roots` that `again`, the caller called again,
+/// runs.
+#[cold]
+#[inline(never)]
+fn counted_instance<R>(
+    ctx: &TypeContext,
+    roots: impl IntoIterator<Item = TypeExprRef>,
+    again: impl FnOnce() -> R,
+) -> R {
+    crate::perf_counters::census_instance(ctx, roots);
+    ctx.counted_copy(crate::perf_counters::CopyCause::Instance, again)
 }
 
 /// Create an instance using OCaml `Ctype.instance ~partial`.
@@ -11486,6 +11542,9 @@ pub fn instance(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// are forgotten as fresh variables at the current level instead of being
 /// copied structurally. This is used by polymorphic variant pattern typing.
 pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || instance_partial(ctx, ty, keep));
+    }
     let mut cache = CopyCache::new_partial(ctx, ty, keep);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -11494,6 +11553,9 @@ pub fn instance_partial(ctx: &TypeContext, ty: TypeExprRef, keep: bool) -> TypeE
 /// Instantiate a list of types, sharing variable substitutions across all of them.
 /// Matches OCaml's Ctype.instance_list.
 pub fn instance_list(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, types.iter().copied(), || instance_list(ctx, types));
+    }
     let mut cache = CopyCache::new(ctx);
     types
         .iter()
@@ -11513,6 +11575,11 @@ pub fn instance_parameterized_type(
     params: &[TypeExprRef],
     body: TypeExprRef,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, params.iter().copied().chain([body]), || {
+            instance_parameterized_type(ctx, params, body)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     let fresh_params: Vec<TypeExprRef> = params
         .iter()
@@ -11974,6 +12041,11 @@ pub fn instance_poly(
     univars: crate::types::type_expr::TypeSlice<'_>,
     sch: TypeExprRef,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, univars.iter().chain([sch]), || {
+            instance_poly(ctx, keep_names, fixed, univars, sch)
+        });
+    }
     let univars = univars.to_smallvec::<4>();
     ctx.with_copy_session(|| instance_poly_in_session(ctx, keep_names, fixed, &univars, sch))
 }
@@ -12047,6 +12119,10 @@ pub fn instance_constructor(
     ctx: &TypeContext,
     cstr: &super::ConstructorDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        let roots = cstr.cstr_args.iter().copied().chain([cstr.cstr_res]);
+        return counted_instance(ctx, roots, || instance_constructor(ctx, cstr));
+    }
     let mut cache = CopyCache::new(ctx);
     let ty_res = copy_type_cached(ctx, cstr.cstr_res, &mut cache);
     let ty_args: Vec<TypeExprRef> = cstr
@@ -12068,6 +12144,12 @@ pub fn instance_constructor_in_pattern(
     newtype_lev: i32,
     cstr: &super::ConstructorDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef) {
+    if ctx.counts_this_call() {
+        let roots = cstr.cstr_args.iter().copied().chain([cstr.cstr_res]);
+        return counted_instance(ctx, roots, || {
+            instance_constructor_in_pattern(ctx, env, newtype_lev, cstr)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
 
     // Process existential type variables before copying cstr_res/cstr_args.
@@ -12217,6 +12299,11 @@ pub fn instance_label(
     fixed: bool,
     lbl: &super::LabelDescription,
 ) -> (Vec<TypeExprRef>, TypeExprRef, TypeExprRef) {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [lbl.lbl_res, lbl.lbl_arg], || {
+            instance_label(ctx, fixed, lbl)
+        });
+    }
     // Match OCaml ctype.ml instance_label:
     //   let ty_res = copy lbl.lbl_res
     //   let vars, ty_arg = match repr lbl.lbl_arg with
@@ -12384,6 +12471,11 @@ pub(crate) fn instance_label_arg_at(
     lbl_arg: TypeExprRef,
     subst: &LabelParamSubst,
 ) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [lbl_arg], || {
+            instance_label_arg_at(ctx, lbl_arg, subst)
+        });
+    }
     let mut cache = CopyCache::new(ctx);
     cache.param_subst = Some(subst);
     copy_type_cached(ctx, lbl_arg, &mut cache)
@@ -12711,6 +12803,9 @@ struct CopyRowMoreMarker {
 
 /// Copy a type, creating fresh type variables for generic ones.
 pub fn copy_type(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return counted_instance(ctx, [ty], || copy_type(ctx, ty));
+    }
     let mut cache = CopyCache::new(ctx);
     copy_type_cached(ctx, ty, &mut cache)
 }
@@ -12727,6 +12822,11 @@ pub fn subst_identity_copy(ctx: &TypeContext, ty: TypeExprRef) -> TypeExprRef {
 /// [`subst_identity_copy`] of several types in one copy session, so nodes
 /// they share stay shared in the copies.
 pub fn subst_identity_copy_many(ctx: &TypeContext, types: &[TypeExprRef]) -> Vec<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::SubstIdentity, || {
+            subst_identity_copy_many(ctx, types)
+        });
+    }
     let mut seen = super::type_marks::ref_table();
     // OCaml compiler/ml/subst.ml:273-301 calls `typexp` for every type slot
     // in a declaration before the single `cleanup_types` call, so temporary
@@ -12810,6 +12910,11 @@ fn subst_identity_copy_with_mode(
     ty: TypeExprRef,
     mode: SubstCopyMode,
 ) -> TypeExprRef {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::SubstIdentity, || {
+            subst_identity_copy_with_mode(ctx, ty, mode)
+        });
+    }
     let mut seen = super::type_marks::ref_table();
     // OCaml Subst.typexp uses a temporary `row_more.desc <- Tsubst(Ttuple [...])`
     // marker window to preserve recursive row sharing while copying.
@@ -12862,7 +12967,7 @@ fn subst_identity_copy_rec(
             // OCaml Subst.typexp creates a generic-level stub (`newgenvar`) for
             // every non-variable node. Keeping this at current_level allows the
             // copied manifest to be reused and mutated by later unification.
-            let placeholder = ctx.new_generic_var(None);
+            let placeholder = ctx.new_generic_type(TypeDesc::Tvar(None));
             seen.insert(ty, placeholder);
 
             let desc = ctx.borrow_desc(ty);
@@ -13362,7 +13467,7 @@ pub(crate) fn copy_type_cached(
         // Generic structural nodes must be registered before recursion so
         // recursive references can reuse the same node.
         structural => {
-            let placeholder = ctx.new_var(None);
+            let placeholder = ctx.new_type(TypeDesc::Tvar(None));
             if level != GENERIC_LEVEL {
                 ctx.set_level(placeholder, level);
             }
@@ -13977,6 +14082,11 @@ pub fn nondep_type(
     mid: &Ident,
     ty: TypeExprRef,
 ) -> Option<TypeExprRef> {
+    if ctx.counts_this_call() {
+        return ctx.counted_copy(crate::perf_counters::CopyCause::Nondep, || {
+            nondep_type(ctx, env, mid, ty)
+        });
+    }
     let mut cache: HashMap<TypeExprRef, TypeExprRef> = HashMap::new();
     // ctype.ml `with_nondep_copy_session`.
     ctx.with_copy_session(|| nondep_type_rec(ctx, env, mid, ty, &mut cache))

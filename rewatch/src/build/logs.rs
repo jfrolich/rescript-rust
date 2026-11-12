@@ -12,22 +12,8 @@ use std::sync::LazyLock;
 
 use super::packages;
 
-enum Location {
-    Bs,
-    Ocaml,
-}
-
-fn get_log_file_path(package: &packages::Package, subfolder: Location) -> PathBuf {
-    let build_folder = match subfolder {
-        Location::Bs => package.get_build_path(),
-        Location::Ocaml => package.get_ocaml_build_path(),
-    };
-
-    build_folder.join(".compiler.log")
-}
-
-pub fn does_ocaml_build_compiler_log_exist(package: &packages::Package) -> bool {
-    get_log_file_path(package, Location::Ocaml).exists()
+fn get_log_file_path(package: &packages::Package) -> PathBuf {
+    package.get_build_path().join(".compiler.log")
 }
 
 static ANSI_ESCAPE: LazyLock<Regex> = LazyLock::new(|| {
@@ -53,7 +39,7 @@ pub fn initialize(packages: &AHashMap<String, Package>) {
         if package.check_only {
             return;
         }
-        let log_path = get_log_file_path(package, Location::Bs);
+        let log_path = get_log_file_path(package);
         if let Some(parent) = log_path.parent()
             && let Err(error) = fs::create_dir_all(parent)
         {
@@ -74,7 +60,7 @@ pub fn append(package: &packages::Package, str: &str) {
     if package.check_only {
         return;
     }
-    let log_path = get_log_file_path(package, Location::Bs);
+    let log_path = get_log_file_path(package);
     if let Some(parent) = log_path.parent()
         && let Err(error) = fs::create_dir_all(parent)
     {
@@ -95,17 +81,10 @@ pub fn finalize(packages: &AHashMap<String, Package>) {
         if package.check_only {
             return;
         }
-        let bs_log_path = get_log_file_path(package, Location::Bs);
-        let ocaml_log_path = get_log_file_path(package, Location::Ocaml);
         let _ = File::options()
             .append(true)
             .create(true)
-            .open(&bs_log_path)
+            .open(get_log_file_path(package))
             .map(|file| write_to_log_file(file, name, &format!("#Done({})\n", helpers::get_system_time())));
-
-        if let Some(parent) = ocaml_log_path.parent() {
-            let _ = fs::create_dir_all(parent);
-        }
-        let _ = std::fs::copy(bs_log_path, ocaml_log_path);
     })
 }

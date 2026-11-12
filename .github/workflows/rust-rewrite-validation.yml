@@ -339,6 +339,7 @@ jobs:
               python3 scripts/test_bsc_output_filenames.py
               python3 scripts/test_marshal_debug_flags.py
               ./scripts/test_js_output_parity.sh --release
+              python3 scripts/test_stored_interface_determinism.py
           - suite: diagnostics
             # Compare normal user-facing errors, not runtime-specific backtraces.
             run: env -u OCAMLRUNPARAM -u RUST_BACKTRACE ./scripts/test_error_output_parity.sh --release
