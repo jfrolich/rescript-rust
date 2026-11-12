@@ -13,6 +13,8 @@
 //! repair at the first unchanged ancestor, and walks the capture ancestor chain
 //! at most once when new uncaptured free uses require it.
 pub mod bridge;
+pub mod engine;
+pub mod l;
 pub mod shadow;
 mod dump;
 mod edit;
