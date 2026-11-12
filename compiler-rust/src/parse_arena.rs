@@ -756,10 +756,13 @@ pub struct ParseArena {
     /// This lets marshal distinguish mapper-rebuilt expression attributes
     /// (fresh payload wrappers) from parser-preserved ones.
     rewritten_expr_locs: HashSet<LocIdx>,
-    /// Two bits per expression, proved bottom-up at allocation: no builtin
+    /// Three bits per expression: two proofs computed bottom-up at allocation (no builtin
     /// rewrite/checker targets (bit 0), and no unused-attribute sweep targets
-    /// (bit 1). Unknown kinds and mutable slots are never certified.
+    /// (bit 1)), and an expansion-present flag (bit 2). Unknown kinds and
+    /// mutable slots are never certified.
     rewrite_free_exprs: Vec<u64>,
+    /// Built-in expansions leave the original syntax nodes intact.
+    expansions: HashMap<ExprIdx, ExprIdx>,
     /// Pre-allocated dummy location (line 0, _none_) used by internal PPX.
     dummy_loc: LocIdx,
     /// Spice PPX local caches for generated location/string/lident nodes.
@@ -1120,6 +1123,7 @@ impl Default for ParseArena {
             local_module_counter: 0,
             rewritten_expr_locs: HashSet::new(),
             rewrite_free_exprs: Vec::new(),
+            expansions: HashMap::new(),
             dummy_loc: LocIdx::default(),
             spice_cache: SpiceCache::new(),
             shareable_literal_strs: HashSet::new(),
@@ -2677,9 +2681,9 @@ impl ParseArena {
         let certificates = self.expression_certificates(&expr);
         let idx = self.expressions.push(expr);
         if certificates != 0 {
-            let word = idx.0 as usize / 32;
-            self.rewrite_free_exprs.resize(word + 1, 0);
-            self.rewrite_free_exprs[word] |= certificates << (2 * (idx.0 % 32));
+            let word = idx.0 as usize / 21;
+            self.rewrite_free_exprs.resize(self.rewrite_free_exprs.len().max(word + 1), 0);
+            self.rewrite_free_exprs[word] |= certificates << (3 * (idx.0 % 21));
         }
         idx
     }
@@ -2740,8 +2744,30 @@ impl ParseArena {
     #[inline]
     fn expr_certificates(&self, idx: ExprIdx) -> u64 {
         self.rewrite_free_exprs
-            .get(idx.0 as usize / 32)
-            .map_or(0, |word| (word >> (2 * (idx.0 % 32))) & 3)
+            .get(idx.0 as usize / 21)
+            .map_or(0, |word| (word >> (3 * (idx.0 % 21))) & 3)
+    }
+
+    /// Record a completed built-in expansion without overwriting source syntax.
+    pub fn set_expansion(&mut self, original: ExprIdx, expanded: ExprIdx) {
+        assert_ne!(original, expanded, "an expansion must be a new node");
+        self.invalidate_rewrite_free_exprs(original);
+        self.expansions.insert(original, expanded);
+        let word = original.0 as usize / 21;
+        self.rewrite_free_exprs.resize(self.rewrite_free_exprs.len().max(word + 1), 0);
+        self.rewrite_free_exprs[word] |= 4 << (3 * (original.0 % 21));
+    }
+
+    /// Resolve an expression at a consumer entry; ordinary nodes need no hash lookup.
+    #[inline]
+    pub fn expanded(&self, idx: ExprIdx) -> ExprIdx {
+        if self.rewrite_free_exprs.get(idx.0 as usize / 21)
+            .is_some_and(|word| word & (4 << (3 * (idx.0 % 21))) != 0)
+        {
+            self.expansions[&idx]
+        } else {
+            idx
+        }
     }
 
     /// No builtin rewrite, Checker diagnostic, or nested external can occur.
@@ -2760,10 +2786,15 @@ impl ParseArena {
     /// proofs for the node and all possible parents, without a reverse-edge
     /// table or tree walk. Reserved slots are never certified.
     fn invalidate_rewrite_free_exprs(&mut self, idx: ExprIdx) {
-        let word = idx.0 as usize / 32;
+        let word = idx.0 as usize / 21;
         if word < self.rewrite_free_exprs.len() {
-            self.rewrite_free_exprs.truncate(word + 1);
-            self.rewrite_free_exprs[word] &= (1u64 << (2 * (idx.0 % 32))) - 1;
+            // Invalidate proofs, not expansions: their original nodes still exist.
+            const EXPANSION_BITS: u64 = 0x4924924924924924;
+            self.rewrite_free_exprs[word] &=
+                ((1u64 << (3 * (idx.0 % 21))) - 1) | EXPANSION_BITS;
+            for bits in &mut self.rewrite_free_exprs[word + 1..] {
+                *bits &= EXPANSION_BITS;
+            }
         }
     }
     /// Reserve an expression index using a placeholder node.
@@ -4294,6 +4325,36 @@ mod tests {
         assert_eq!(firsts, vec![a, b]);
         let seconds: Vec<_> = arena.apply_args(second).iter().map(|(_, e)| *e).collect();
         assert_eq!(seconds, vec![c]);
+    }
+
+    #[test]
+    fn expansion_preserves_original_syntax_and_unexpanded_identity() {
+        let mut arena = ParseArena::new();
+        let original = arena.push_expr(ParseArena::placeholder_expr());
+        assert_eq!(arena.expanded(original), original);
+        let expanded = arena.push_expr(Expression {
+            pexp_desc: ExpressionDesc::Pexp_await(original),
+            ..ParseArena::placeholder_expr()
+        });
+        arena.set_expansion(original, expanded);
+        assert_eq!(arena.expanded(original), expanded);
+        assert!(matches!(arena.get_expr(original).pexp_desc, ExpressionDesc::Pexp_ident(_)));
+        assert!(!arena.expr_needs_no_rewrite(original));
+        assert!(!arena.expr_needs_no_attribute_sweep(original));
+    }
+
+    #[test]
+    fn expansion_bits_survive_certificate_invalidation_across_words() {
+        let mut arena = ParseArena::new();
+        let nodes: Vec<_> = (0..70).map(|_| arena.push_expr(ParseArena::placeholder_expr())).collect();
+        for &idx in &[nodes[20], nodes[21], nodes[42], nodes[69]] {
+            arena.set_expansion(idx, nodes[0]);
+        }
+        arena.get_expr_mut(nodes[0]).pexp_desc = ExpressionDesc::Pexp_break;
+        for &idx in &[nodes[20], nodes[21], nodes[42], nodes[69]] {
+            assert_eq!(arena.expanded(idx), nodes[0]);
+        }
+        assert_eq!(arena.expanded(nodes[22]), nodes[22]);
     }
 
     #[test]
