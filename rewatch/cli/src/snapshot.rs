@@ -4,10 +4,11 @@ use rescript::{build, project_context::ProjectContext};
 
 /// One producer invocation and one file write, proportional to snapshot bytes.
 pub fn run(args: Vec<String>) -> Result<()> {
-    let [flag, file] = args.as_slice() else {
-        bail!("usage: rescript snapshot --write <file>");
+    let write = match args.as_slice() {
+        [flag, file] if flag == "--write" => Some(file),
+        [flag] if flag == "--check" => None,
+        _ => bail!("usage: rescript snapshot --write <file> | --check"),
     };
-    if flag != "--write" { bail!("usage: rescript snapshot --write <file>"); }
     let runtime = match std::env::var_os("RESCRIPT_RUNTIME") {
         Some(path) => path.into(),
         None => {
@@ -15,6 +16,9 @@ pub fn run(args: Vec<String>) -> Result<()> {
             build::compile::get_runtime_path(&context.current_config, &context)?
         }
     };
-    std::fs::write(file, build::snapshot::produce(&runtime)?)?;
+    match write {
+        Some(file) => std::fs::write(file, build::snapshot::produce(&runtime)?)?,
+        None => build::snapshot::check(&runtime, include_bytes!(concat!(env!("OUT_DIR"), "/runtime.bin")))?,
+    }
     Ok(())
 }

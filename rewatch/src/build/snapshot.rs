@@ -25,15 +25,15 @@ const MAGIC: &[u8; 8] = b"RESSNAP1";
 const RECORD_BYTES: usize = 48;
 
 /// Borrowed package header and fixed-width module index. No module is decoded.
-struct PackageIndex {
-    bytes: &'static [u8],
-    name: &'static str,
-    recorded_root: &'static str,
+struct PackageIndex<'a> {
+    bytes: &'a [u8],
+    name: &'a str,
+    recorded_root: &'a str,
     sources_digest: blake3::Hash,
-    records: &'static [u8],
+    records: &'a [u8],
 }
 
-static EMBEDDED: OnceLock<Option<Vec<PackageIndex>>> = OnceLock::new();
+static EMBEDDED: OnceLock<Option<Vec<PackageIndex<'static>>>> = OnceLock::new();
 
 /// Install the package headers in O(package count), allocating only the package
 /// table. Module records and blobs remain borrowed and untouched.
@@ -50,10 +50,112 @@ pub fn produce(runtime_root: &Path) -> Result<Vec<u8>> {
     std::thread::Builder::new()
         .name("rescript-embed-runtime".to_string())
         .stack_size(256 * 1024 * 1024)
-        .spawn(move || compile_on_this_thread(&runtime_root))
+        .spawn(move || {
+            let mut bytes = compile_on_this_thread(&runtime_root)?;
+            append_source_manifest(&mut bytes, &runtime_root)?;
+            Ok(bytes)
+        })
         .context("failed to spawn the runtime compile thread")?
         .join()
         .map_err(|_| anyhow!("compiling the runtime panicked"))?
+}
+
+/// Developer-only freshness gate: produce once, compare bytes once, and on
+/// mismatch inspect borrowed index/blob slices in O(snapshot bytes + modules).
+/// No stored core is decoded and no per-module object is allocated.
+pub fn check(runtime_root: &Path, embedded: &[u8]) -> Result<()> {
+    anyhow::ensure!(!embedded.is_empty(), "embedded snapshot is absent");
+    let fresh = produce(runtime_root)?;
+    if fresh == embedded { return Ok(()); }
+    compare_source_manifests(&fresh, embedded)?;
+    let old = decode(embedded).context("embedded snapshot is invalid")?;
+    let new = decode(&fresh).context("produced snapshot is invalid")?;
+    for (package_index, package) in new.iter().enumerate() {
+        let Some(previous) = old.get(package_index).filter(|p| p.name == package.name) else {
+            anyhow::bail!("snapshot differs: {} package added", package.name);
+        };
+        for slot in 0..package.len().max(previous.len()) {
+            let current = package.module(slot);
+            let prior = previous.module(slot);
+            let name = match (current, prior) {
+                (Some((a, _)), Some((b, _))) => a.min(b),
+                (Some((a, _)), None) | (None, Some((a, _))) => a,
+                (None, None) => unreachable!(),
+            };
+            if current != prior || [16, 24, 32, 40].into_iter().any(|field| {
+                let width = if field >= 32 { 4 } else { 1 };
+                package.blob(slot, field, width) != previous.blob(slot, field, width)
+            }) {
+                anyhow::bail!("snapshot differs: {} module {name}", package.name);
+            }
+        }
+        if package.sources_digest != previous.sources_digest {
+            anyhow::bail!("snapshot differs: {} sources/options digest (module bytes unchanged)", package.name);
+        }
+    }
+    anyhow::bail!("snapshot differs: package headers or container bytes")
+}
+
+/// Producer only: O(source bytes + files log files), one sorted directory list
+/// per package and one source buffer at a time. The cold trailer is never read
+/// by normal builds; it identifies edits that leave all compiled cores equal.
+fn append_source_manifest(bytes: &mut Vec<u8>, runtime: &Path) -> Result<()> {
+    let start = bytes.len();
+    let belt = runtime.parent().context("runtime package parent")?.join("belt");
+    for (name, root) in [("@rescript/runtime", runtime.to_path_buf()), ("@rescript/belt", belt.join("src"))] {
+        if !root.is_dir() { continue; }
+        let mut paths = std::fs::read_dir(&root)?.map(|e| e.map(|e| e.path()))
+            .collect::<std::io::Result<Vec<_>>>()?;
+        paths.sort();
+        for path in paths {
+            if !path.extension().is_some_and(|ext| ext == "res" || ext == "resi") { continue; }
+            for value in [name, path.file_name().context("source filename")?.to_str().context("UTF-8 source filename")?] {
+                push_u32(bytes, value.len())?;
+                bytes.extend_from_slice(value.as_bytes());
+            }
+            bytes.extend_from_slice(blake3::hash(&std::fs::read(path)?).as_bytes());
+        }
+    }
+    let len = bytes.len() - start;
+    push_u32(bytes, len)?;
+    Ok(())
+}
+
+/// Developer only: O(1), borrow the cold source manifest using its footer.
+fn source_manifest(bytes: &[u8]) -> Result<&[u8]> {
+    let end = bytes.len().checked_sub(4).context("missing source manifest")?;
+    let len = u32::from_le_bytes(bytes[end..].try_into()?) as usize;
+    bytes.get(end.checked_sub(len).context("invalid source manifest")?..end)
+        .context("invalid source manifest")
+}
+
+/// Developer only: O(source count), borrowed names and fixed-size digests,
+/// without core decoding, hashing, or per-source allocation.
+fn compare_source_manifests(fresh: &[u8], embedded: &[u8]) -> Result<usize> {
+    let mut new = Reader(source_manifest(fresh)?);
+    let mut old = Reader(source_manifest(embedded)?);
+    let mut steps = 0;
+    while !new.0.is_empty() || !old.0.is_empty() {
+        steps += 1;
+        let a = source_record(&mut new);
+        let b = source_record(&mut old);
+        if a != b {
+            let (package, file, _) = match (a, b) {
+                (Some(a), Some(b)) => if (a.0, a.1) < (b.0, b.1) { a } else { b },
+                (Some(a), None) | (None, Some(a)) => a,
+                (None, None) => anyhow::bail!("invalid source manifest record"),
+            };
+            anyhow::bail!("snapshot differs: {} module {} (source {})",
+                std::str::from_utf8(package)?, Path::new(std::str::from_utf8(file)?)
+                    .file_stem().context("module name")?.to_string_lossy(), std::str::from_utf8(file)?);
+        }
+    }
+    Ok(steps)
+}
+
+/// Developer only: O(1), three borrowed slices, no allocations.
+fn source_record<'a>(reader: &mut Reader<'a>) -> Option<(&'a [u8], &'a [u8], &'a [u8])> {
+    Some((reader.part()?, reader.part()?, reader.take(32)?))
 }
 
 fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
@@ -555,13 +657,13 @@ fn append_blob(bytes: &mut Vec<u8>, record: usize, data: &[u8], count: usize) ->
     Ok(())
 }
 
-impl PackageIndex {
+impl<'a> PackageIndex<'a> {
     /// O(1), no allocation.
     fn len(&self) -> usize { self.records.len() / RECORD_BYTES }
 
     /// O(1), borrowing one indexed blob with checked bounds. Slot counts use
     /// four-byte elements; names, cores and JavaScript use one-byte elements.
-    fn blob(&self, slot: usize, field: usize, element_bytes: usize) -> Option<&'static [u8]> {
+    fn blob(&self, slot: usize, field: usize, element_bytes: usize) -> Option<&'a [u8]> {
         let start = slot.checked_mul(RECORD_BYTES)?.checked_add(field)?;
         let record = self.records.get(start..start.checked_add(8)?)?;
         let offset = u32::from_le_bytes(record[..4].try_into().ok()?) as usize;
@@ -570,7 +672,7 @@ impl PackageIndex {
     }
 
     /// O(name bytes) UTF-8 validation and O(1) core borrowing; no allocation.
-    fn module(&self, slot: usize) -> Option<(&'static str, &'static [u8])> {
+    fn module(&self, slot: usize) -> Option<(&'a str, &'a [u8])> {
         Some((std::str::from_utf8(self.blob(slot, 0, 1)?).ok()?, self.blob(slot, 8, 1)?))
     }
 
@@ -599,7 +701,7 @@ impl PackageIndex {
 
 /// O(package count), checking only headers/index bounds. Individual blob
 /// bounds are checked on lookup, so unreferenced modules touch no pages.
-fn decode(bytes: &'static [u8]) -> Option<Vec<PackageIndex>> {
+fn decode(bytes: &[u8]) -> Option<Vec<PackageIndex<'_>>> {
     let mut reader = Reader(bytes.strip_prefix(MAGIC.as_slice())?);
     if reader.take(32)? != [0; 32] { return None; }
     let count = reader.u32()? as usize;
@@ -618,11 +720,11 @@ fn decode(bytes: &'static [u8]) -> Option<Vec<PackageIndex>> {
 }
 
 /// Borrowed cursor, passed by mutable reference rather than copied per field.
-struct Reader(&'static [u8]);
+struct Reader<'a>(&'a [u8]);
 
-impl Reader {
+impl<'a> Reader<'a> {
     /// O(1), checked slice split, no allocation.
-    fn take(&mut self, len: usize) -> Option<&'static [u8]> {
+    fn take(&mut self, len: usize) -> Option<&'a [u8]> {
         let (head, rest) = self.0.split_at_checked(len)?;
         self.0 = rest;
         Some(head)
@@ -632,7 +734,7 @@ impl Reader {
         Some(u32::from_le_bytes(self.take(4)?.try_into().ok()?))
     }
     /// O(1), borrow a length-prefixed byte string without copying.
-    fn part(&mut self) -> Option<&'static [u8]> {
+    fn part(&mut self) -> Option<&'a [u8]> {
         let len = self.u32()? as usize;
         self.take(len)
     }
@@ -705,6 +807,23 @@ mod tests {
         let changed = render_template(&text, slots.iter().copied(), b".js").unwrap();
         assert_eq!(changed, b"import * as M from \"./M.js\";\n".repeat(10_000));
         assert!(render_template(b"a", [2].into_iter(), b".js").is_err());
+    }
+
+    #[test]
+    fn source_manifest_comparison_is_linear_and_absence_is_explicit() {
+        let mut bytes = Vec::new();
+        for _ in 0..10_000 {
+            for value in [b"@rescript/runtime".as_slice(), b"Module.res"] {
+                push_u32(&mut bytes, value.len()).unwrap();
+                bytes.extend_from_slice(value);
+            }
+            bytes.extend_from_slice(&[0; 32]);
+        }
+        let len = bytes.len();
+        push_u32(&mut bytes, len).unwrap();
+        assert_eq!(compare_source_manifests(&bytes, &bytes).unwrap(), 10_000);
+        assert_eq!(std::mem::size_of::<Reader<'_>>(), 16);
+        assert!(check(Path::new("missing"), &[]).unwrap_err().to_string().contains("embedded snapshot is absent"));
     }
 
     #[test]
@@ -874,7 +993,7 @@ mod tests {
 
 /// One runtime package attachment, not one entry per module.
 struct RuntimePackage {
-    index: &'static PackageIndex,
+    index: &'static PackageIndex<'static>,
     root: PathBuf,
 }
 
@@ -899,7 +1018,7 @@ impl rescript_compiler::cmi::persistent_env::SnapshotModules for RuntimePackage 
 /// Build-specific package fields. One allocation per selected package; module
 /// names and cores remain in the executable until a lookup requests a slot.
 struct BeltPackage {
-    index: &'static PackageIndex,
+    index: &'static PackageIndex<'static>,
     package: packages::Package,
     root_config: crate::config::Config,
 }
