@@ -1596,7 +1596,7 @@ stated reason). Only additions are listed per stage.
 | P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | P3a (encode and summarise after dependents are released): yes, from H.1. P3b (build the graph and the digests without the portable form): yes, once the equality test of H.1.7 is in CI |
 | P4 | Process-wide views; delete stamp replay | P3 | 2,500, mostly deletions | 2.5-3.5% | no |
 | P5 | Absolute paths in exports; no lookup copies | P4 | 2,000 | 3-4% | no |
-| P6 | Environment as a binding log | P0 | 2,500 | 3-4% | steps 1 to 5 of H.2.8: yes. The switch (step 6 on): yes with the corrected design of H.2.7, not with C.10 as written; first confirm the cost of path moves on the benchmark |
+| P6 | Environment as a binding log | P0 | 2,500 | none; switch predicts 2-4% more instructions | steps 6 onward dropped after the real-build measurement (H.2.11); the log stays test-only |
 | P7 | Term store, closed waist, core switch | P1 | 2,000 | 0 | ~~yes~~ dropped: do not build |
 | P8 | New core operations | P7 | 7,000 | ~~4-6% once on~~ 0 | ~~split: simple types yes; rows, univars, GADT no~~ dropped: do not build |
 | P9 | Switch on | P8 | 500 plus fixes | 0 | ~~no (triage)~~ dropped |
@@ -1790,32 +1790,26 @@ build (I.5), with no long-lived branch.
 
 ### F.8 P6: environment as a binding log
 
-- **Changes.** C.10 behind the existing `Env` API. `IdTbl`, `TycompTbl`,
-  `LayerMap`, `Recent`, `IdOpened` and the `im-rc` dependency go.
-  `typed_envs` stores 16-byte values.
-- **Files.** `types/env.rs`, `types/context.rs`, `types/typedtree.rs`
-  (`EnvRef`), call sites of `Env::clone`.
-- **Invariants.** Visibility as defined in C.10. A lookup returns the
-  binding today's tables return, including candidate order for constructors
-  and labels and the "hidden by an open" information.
-- **Gate.** A property test: random sequences of scope entry and exit,
-  binding, open and lookup run against the old tables and the log, kept in
-  the test suite with the old tables moved under `#[cfg(test)]` until P12.
-  The warning fixtures for unused opens and shadowing.
-- **Saving, 3-4%.** Environment lookups are 9% of checking (3.6% of the
-  build), dropping environment snapshots 0.98%, persistent maps 1.5%
-  build-wide. *Amended (H.2.10): measured on the log built in step 4,
-  binding and cloning are five times cheaper but a lookup is not cheaper
-  than today's. Count on the snapshots and the persistent maps, at most
-  2.5%, not on the lookups.*
-- **Hand-off.** The inventory is H.2. It found that the scope tree of C.10
-  cannot be built behind the existing API: environments are extended
-  without any scope entry or exit, old environments are extended (1.3% of
-  extensions on the test project), and environments cross compilations on
-  a worker (H.2.6). H.2.7 replaces the scope tree by a tree of versions
-  with one current path; H.2.8 gives the migration order and H.2.9 the
-  invariants. `im-rc` stays, because `typemod.rs` uses it elsewhere, and
-  `typed_envs` holds 16-byte values, not 8-byte ones, until P10.
+> **Amended (H.2.11).** Steps 6 onward of H.2.8 are dropped. The log stays
+> test-only; today's tables remain the production `Env`. The real-build
+> measurement predicts 2-4% **more** instructions for the switch, not a
+> saving. This supersedes the synthetic workload's estimate in H.2.10.
+
+- **Result.** Paired operations cost 2.653 billion instructions on the
+  tables and 5.049 billion on the log. Most binds improve, but the more
+  frequent lookups and identity/scope queries outweigh those savings.
+- **Correctness evidence.** The application shadow build reported zero
+  differences; exported signatures, diagnostics and generated files also
+  matched. This establishes agreement on that workload, not a performance
+  case for switching or exhaustive independent component-forcing coverage.
+- **Disposition.** Do not replace `Env`, its component seeds or typed-tree
+  snapshots with the log. Retain the test-only log and its property tests.
+  Do not land the experimental production shadow instrumentation: its
+  default-mode application cost was +0.147%. No P6 saving is credited to
+  the plan, and later work must not require the cancelled switch.
+- **Record.** H.2.1-H.2.10 preserve the API inventory, candidate design and
+  synthetic measurements. H.2.11 records the real-build method, costs and
+  decision and takes precedence over their proposals for step 6 onward.
 
 ### F.9 P7: term store, closed waist, core switch
 
@@ -3048,6 +3042,151 @@ counters and the fault switch of the tests go behind `cfg(test)`.
 12. Nothing stored in a log owns that log: dropping every `LogEnv` of a log
     frees it, with modules bound (`a_component_seed_..._owns_nothing`).
 13. A frozen log binds no modules, and a base is always frozen.
+
+#### H.2.11 Step 5: real-build measurement and decision not to switch
+
+**Decision.** Steps 6 onward of H.2.8 are dropped. The log stays test-only;
+production keeps the table-based `Env`. The switch predicts 2-4% more
+instructions, so the binding-log redesign contributes no saving to the
+plan. This supersedes the estimates and proposed switch in F.8 and
+H.2.5-H.2.10, and the later savings tables that still carry a P6 saving.
+The production shadow instrumentation was an experiment, not a change to
+land.
+
+**Method.** A clean, single-worker build of the 3,735-module application
+ran with the tables authoritative and a shadow log. Primitive writes were
+mirrored once. Reads compared successes and failures, returned bindings,
+paths, constructor/label candidates and marking, open slots and identities.
+Ordinary release Cachegrind self-symbol costs could not separate the two
+representations: inlining and shared helpers obscure their inclusive cost.
+The experiment therefore used measurement-only `#[inline(never)]` table
+and log entry points and Callgrind instruction counts (`Ir`), with cache
+and branch simulation disabled.
+
+Inside each entry, nested shadow comparisons were suppressed: a table
+entry measured table work, and its separate log entry measured log work.
+The entries could not nest, so their inclusive costs could be summed
+without counting a shared callee twice. Copies made only to feed both
+representations, equality checks and reporting stayed outside the entries.
+Table copy-on-write preparation and module-seed capture were separate
+chunks charged to the binding operation. Empty entries calibrated the
+boundary overhead at 10 instructions each, subtracted below. LLVM folded
+the identical empty table/log entries into one symbol; its combined call
+count accounted for both calibrations, not a missing log measurement.
+
+The operation profile was taken at experimental commit `390350388`.
+The uninstrumented reference was trunk `da56e056f`. These are a recorded
+experiment, not measurements of every later trunk revision. The complete
+instrumented build executed 126,233,366,695 instructions, including the
+comparison machinery; that total is **not** a forecast for a log-only
+compiler. The following costs isolate the paired operations. Every paired
+API operation had exactly matching table/log call counts. COW chunks add
+cost but are not counted as extra API calls.
+
+| Operation kind | Calls per side | Tables instructions | Log instructions | Log / tables |
+|---|---:|---:|---:|---:|
+| Clone | 1,640,668 | 9,844,008 | 11,484,676 | 1.17 |
+| Bind value | 263,680 | 245,701,715 | 135,203,043 | 0.55 |
+| Bind type | 47,149 | 79,900,488 | 48,578,762 | 0.61 |
+| Bind constructor | 5,406 | 8,634,036 | 3,082,216 | 0.36 |
+| Bind label | 102,291 | 97,975,262 | 44,522,972 | 0.45 |
+| Bind label family | 23,935 | 3,212,438 | 8,485,470 | 2.64 |
+| Bind module | 11,082 | 21,380,257 | 16,833,747 | 0.79 |
+| Bind module type | 76 | 41,058 | 72,979 | 1.78 |
+| Bind constraint / GADT level | 20,338 | 13,048,073 | 14,130,290 | 1.08 |
+| Lookup by name | 2,017,342 | 603,497,282 | 994,603,073 | 1.65 |
+| Lookup by identifier / local components | 6,487,233 | 683,681,418 | 1,684,532,659 | 2.46 |
+| Lookup / normalize by path | 521,329 | 291,820,463 | 562,890,937 | 1.93 |
+| Open layer | 13,386 | 16,495,020 | 15,804,296 | 0.96 |
+| Open-slot metadata | 1,000,905 | 137,910,520 | 324,889,737 | 2.36 |
+| Replace value / type variance | 9,355 | 10,620,504 | 16,899,167 | 1.59 |
+| Environment identity | 15,717,858 | 47,153,574 | 188,614,296 | 4.00 |
+| Scope identity | 4,230,236 | 12,690,708 | 186,128,866 | 14.67 |
+| Other flags / constraints / alias-cache queries | 12,001,915 | 369,656,761 | 791,775,604 | 2.14 |
+| **Total** | **44,114,184** | **2,653,263,585** | **5,048,532,790** | **1.90** |
+
+Name lookups include all-candidate walks; path lookups include normalization
+and path-root queries. The last row of operations groups coercion/flag
+queries and changes, constraint presence/find, implicit-root and functor
+marking, and the module alias-cache query. Two unpaired iterator operations
+had 1,621,909 measured log instructions (0.0022% of the reference build);
+they are excluded from both totals rather than assigned zero table cost.
+
+**Where the log wins and loses.** Value, type, constructor, label and module
+bindings are cheaper: appending an entry and payload avoids copying table
+state and persistent-map nodes. Opening a layer is slightly cheaper.
+That advantage is not universal: label-family and module-type bindings
+are dearer. A cheap table update can cost less than creating a log entry
+and maintaining its index/version metadata; those bind cases must not be
+extrapolated from the synthetic value-binding loop.
+
+The aggregate name, identifier and path lookups are all dearer on the log.
+They read the index, entry and address-stable payload pools, with path/base
+and open handling, where a table can often use its recent-binding fast
+path or a direct probe. Open-slot metadata can require another log lookup
+at the version before the open. Identity, scope and flag queries are
+especially unfavorable: the tables read fields, while the log resolves
+identity/version metadata and sometimes the frozen base. The ratios count
+instructions, not just the abstract probes of H.2.10; the extra accesses
+and checks matter even when a lookup does not move the path.
+
+There are exceptions within the groups. `find_value_arc_with_path` costs
+148,472,805 table instructions against 136,349,855 log instructions;
+`update_value_type_by_name` costs 57,531 against 20,751. Conversely,
+`update_type_variance` costs 10,562,973 against 16,878,416, making the combined
+replacement/variance row worse. Real-build clones are slightly dearer on
+the log, not five times cheaper: both handles update a reference count.
+The synthetic binding-and-cloning advantage does not describe the much
+more read-heavy real build.
+
+**Estimate for step 6.** The uninstrumented reference build executed
+75,258,693,562 instructions. Substituting the paired operation costs gives:
+
+```text
+75.259 - 2.653 + 5.049 = 77.654 billion instructions (+3.18%)
+```
+
+Other costs must be considered without subtracting them twice:
+
+- Outermost `Rc<EnvData>::drop_slow` cost 243,661,167 inclusive instructions,
+  including persistent-table/node teardown and allocator callees. Recursive
+  contexts and `drop_glue<EnvData>` are already inside it. Crediting removal
+  of the entire cost is optimistic: some drops can already be in measured
+  table operations, and a log-only compiler still has teardown costs.
+- Persistent-map node cloning and its reference-count work are already in
+  the table bind/COW entries. A separate `clone_from_ref_in` symbol sum is
+  not an additional saving; that routine allocates and clones a node, not
+  merely a reference-count increment.
+- `TypeContext::store_typed_env` cost 178,952,579 inclusive instructions over
+  4,272,845 calls. It includes identity/clone work already counted above.
+  Switching `Env` alone does not remove the snapshot store; do not credit
+  the whole store as a saving from step 6.
+
+Even crediting the entire outer EnvData teardown gives 77.410 billion
+instructions, **+2.86%**. These substitutions are not precision predictions:
+non-inlined boundaries change code generation, black-box result shapes
+differ, table COW copies contain the shadow handle, and a log-only compiler
+has different destruction and snapshot behavior. A broad allowance for
+those uncertainties gives **2-4% more instructions**, a negative performance
+gain, not a near-zero saving. A switched implementation would need its own
+measurement, but these results do not justify building that switch.
+
+**Correctness and limits.** The application build exited successfully with
+3,845 shadow reports and zero differences. A separate comparison matched
+all 3,735 exported signatures, 33 diagnostics in 19 files, and 3,980
+generated files byte-for-byte. Exported-thunk lifetime and independent
+forcing were exercised in fixtures. Production shadow mode checked the
+environment operations during forcing; it did not independently rebuild
+every production component table twice. Zero observed differences is not
+an exhaustive proof of that stronger condition.
+
+The instrumentation itself was not free when disabled. Before a later
+trunk merge, the final experimental implementation (`3050ae31b`) against
+`da56e056f` added 0.060% instructions on `tests/tests`, but **0.147%** on the
+application, above a strict +0.1% budget there. Thus neither the switch nor
+the production shadow tooling is retained. The test-only log, its property
+tests and this measurement record remain useful; the production tables,
+component seeds and typed-environment snapshot representation stay in place.
 
 ## I. P1 findings and their consequences
 
