@@ -599,7 +599,7 @@ fn eligible_cross_module_inline_has_its_named_fallback() {
 
 #[test]
 fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
-    // T1 boundary regression: the old tailcall pass counts the original tree.
+    // THREE_TREES.md T1/T4 boundary: the old tailcall pass counts the original tree.
     // Substituting pair[0] and physically dropping pair first removes a use of
     // pair_0, so rerunning the unchanged counter enables an additional inline.
     // This is a pass-order probe, not a replacement for the byte-exact gate.
