@@ -33,6 +33,10 @@
     {
       "label": "use the macro",
       "source": "%Twice.run(Math.sqrt(price))"
+    },
+    {
+      "label": "a query checked against schema.sql",
+      "source": "module Vips = %Sql.query(\"select name, city from customers where vip = :vip\")"
     }
   ]
 }
