@@ -1981,9 +1981,8 @@ fn prepare_publication(
     let pps = Arc::new(pps);
     pps.record_access(false);
     if pps.shareable && let Some((ps, _)) = &shared {
-        let cached = pool.pers_struct(&pps, || Some(ps.clone()))
+        store.world().unit(&pps, || Some(ps.clone()))
             .expect("a prepared shared graph is registered once");
-        store.insert_pers_struct(pps.clone(), cached);
     }
     (pps, shared)
 }
@@ -2100,10 +2099,11 @@ fn shared_pers_struct_at(
 
 /// Load a PortablePersStruct for the current compilation.
 ///
-/// The dependency graph is internalized once per worker thread into the
-/// store (`compiler/ml/env.ml:669-678`: one `persistent_structures` entry per
-/// process) and shared by every later compilation on that thread; per-unit
-/// side tables (`cmi_longident_names`, GenType raw signatures) are still
+/// The dependency graph is internalized once per build into the world's
+/// unit table (`compiler/ml/env.ml:669-678`: one `persistent_structures`
+/// entry per process) and shared by every compilation of the build. A graph
+/// the pool has no room for is internalized again by each compilation that
+/// loads it; nothing retains it. Per-unit side tables (`cmi_longident_names`, GenType raw signatures) are still
 /// filled for each compilation.
 pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) -> Arc<PersStruct> {
     if pps.has_raw_signature() {
@@ -2111,17 +2111,12 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
     }
 
     let store = ctx.thread_store();
-    if let Some(ps) = store.pers_struct(&pps) {
-        pps.record_access(true);
-        return ps;
-    }
-
     let shareable = pps.shareable;
     if shareable {
-        // Internalize once per build for every worker; the worker store
-        // keeps the result so later units on this worker skip the pool map.
+        // Internalize once per build for every worker: the world's unit
+        // table holds the result.
         let pool = store.shared_pool();
-        let shared = pool.pers_struct(&pps, || {
+        let shared = store.world().unit(&pps, || {
             let mut decoded = pps.decoded.lock().unwrap();
             if let Some((PublishedSignature::Shared(graph), _)) = decoded.as_mut() {
                 if !std::ptr::eq(graph.names.as_ref(), pool.names_ref()) {
@@ -2146,7 +2141,6 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         });
         if let Some(ps) = shared {
             pps.record_access(true);
-            store.insert_pers_struct(pps, ps.clone());
             return ps;
         }
     }
@@ -2169,18 +2163,14 @@ pub fn internalize_pers_struct(pps: Arc<PortablePersStruct>, ctx: &TypeContext) 
         let locs = ctx.import_portable_decl_locs(&portable.locations, &map);
         internalize_signature(&portable.ps_sig, &portable.type_graph, &locs, ctx)
     };
-    let ps = Arc::new(PersStruct {
+    Arc::new(PersStruct {
         ps_name: pps.ps_name.clone(),
         ps_sig: Arc::new(sig),
         ps_filename: pps.ps_filename.clone(),
         ps_deprecated: pps.ps_deprecated.clone(),
         ps_crcs: pps.ps_crcs.clone(),
         ps_alias_rewrites: Default::default(),
-    });
-    if shareable {
-        store.insert_pers_struct(pps, ps.clone());
-    }
-    ps
+    })
 }
 
 /// Internalize a graph into the worker store. Store nodes are complete on
@@ -2749,11 +2739,11 @@ fn remap_sig_item_refs(item: &mut SignatureItem, map: &impl SignatureRefMap) {
     }
 }
 
-fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
+pub(crate) fn remap_value_desc_refs(vd: &mut ValueDescription, map: &impl SignatureRefMap) {
     vd.val_type = map.ty(vd.val_type);
 }
 
-fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
+pub(crate) fn remap_type_decl_refs(td: &mut TypeDeclaration, map: &impl SignatureRefMap) {
     if let TypeKind::TypeVariant(_, layout_ref) = &mut td.type_kind {
         *layout_ref = map.layout(*layout_ref);
     }
@@ -2830,7 +2820,7 @@ fn remap_ext_ctor_refs(ec: &mut ExtensionConstructor, map: &impl SignatureRefMap
     }
 }
 
-fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
+pub(crate) fn remap_module_decl_refs(md: &mut ModuleDeclaration, map: &impl SignatureRefMap) {
     remap_module_type_refs(&mut md.md_type, map);
 }
 
@@ -3113,7 +3103,6 @@ mod identity_tests {
             let _release = crate::perf_counters::SignaturePublication::begin();
             publish_signature(&ps, &ctx, None, SignaturePublicationMode::Eager, true).0
         };
-        assert!(ctx.thread_store().pers_struct(&published).is_none());
         let leaf = publish_signature(&ps, &ctx, None, SignaturePublicationMode::OnDemand, false).0;
         drop(ps);
         drop(ctx);
@@ -3178,16 +3167,13 @@ mod identity_tests {
         assert_eq!(published.fingerprint, expected_fingerprint);
         assert!(published.shared_item_hashes.is_some());
         assert!(published.has_decoded_signatures());
-        let pool = ctx.thread_store().shared_pool();
-        let shared = pool
-            .pers_struct(&published.clone(), || {
+        let shared = ctx
+            .world()
+            .unit(&published.clone(), || {
                 panic!("dependent rebuilt the published graph")
             })
             .unwrap();
-        assert!(Arc::ptr_eq(
-            &shared,
-            &ctx.thread_store().pers_struct(&published).unwrap()
-        ));
+        assert!(ctx.world().is_unit_signature(&shared.ps_sig));
         assert!(published.has_decoded_signatures());
     }
 
@@ -3211,14 +3197,14 @@ mod identity_tests {
             publish_pers_struct(portable, &ctx, SignaturePublicationMode::OnDemand)
         };
         assert!(published.has_decoded_signatures());
-        assert!(ctx.thread_store().pers_struct(&published).is_some());
         published.prepare_for_storage();
         assert!(!published.has_decoded_signatures());
 
         let built = std::cell::Cell::new(false);
         let pool = ctx.thread_store().shared_pool();
-        let shared = pool
-            .pers_struct(&published, || {
+        let shared = ctx
+            .world()
+            .unit(&published, || {
                 built.set(true);
                 shared_pers_struct(&published, &published.signature(), pool)
             })
@@ -3226,10 +3212,6 @@ mod identity_tests {
         assert!(!built.get(), "leaf rebuilt the graph used for hashing");
         let loaded = internalize_pers_struct(published.clone(), &ctx);
         assert!(Arc::ptr_eq(&shared, &loaded));
-        assert!(Arc::ptr_eq(
-            &loaded,
-            &ctx.thread_store().pers_struct(&published).unwrap()
-        ));
     }
 
     #[test]

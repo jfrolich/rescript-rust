@@ -3013,7 +3013,7 @@ impl PersistentEnv {
                 // process), so it is built as a store build and shared.
                 let shareable = alias_source.is_none()
                     && self.in_process_mode
-                    && ctx.thread_store().owns_signature(&ps.ps_sig)
+                    && ctx.world().is_unit_signature(&ps.ps_sig)
                     && crate::types::typecore::shared_components_enabled();
                 if shareable
                     && let Some((components, piece)) =
