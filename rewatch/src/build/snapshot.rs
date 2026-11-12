@@ -320,6 +320,7 @@ pub(crate) fn register(
     registry: &Mutex<ModuleRegistry>,
     runtime_root: &Path,
     runtime_paths: &[(String, PathBuf)],
+    store: Option<&compile::RuntimeStore>,
 ) -> bool {
     let Some(Some(embedded)) = EMBEDDED.get() else {
         return false;
@@ -328,7 +329,7 @@ pub(crate) fn register(
         return false;
     };
     if embedded.len() != runtime_paths.len()
-        || sources_digest(runtime_root, runtime_paths).ok() != Some(embedded.sources_digest)
+        || !verify_runtime(embedded.sources_digest, runtime_root, runtime_paths, store).unwrap_or(false)
     {
         log::debug!(
             "The runtime at {} is not the embedded one",
@@ -340,6 +341,84 @@ pub(crate) fn register(
         index: embedded, root: runtime_root.to_path_buf(),
     }));
     true
+}
+
+/// O(file count + path bytes), one stat per path and no source reads. Missing
+/// optional interfaces/configuration have a distinct marker. This follows the
+/// incremental planner's assumption: edits change size or modification time,
+/// and sources do not change during a build. It is not a tamper-proof cache.
+fn verification_key<'a>(
+    expected: blake3::Hash,
+    compiler: &str,
+    paths: impl Iterator<Item = &'a Path>,
+    mut metadata: impl FnMut(&Path) -> std::io::Result<std::fs::Metadata>,
+) -> std::io::Result<blake3::Hash> {
+    let mut hash = blake3::Hasher::new();
+    hash.update(expected.as_bytes());
+    hash.update(compiler.as_bytes());
+    for path in paths {
+        let name = path.as_os_str().as_encoded_bytes();
+        hash.update(&(name.len() as u64).to_le_bytes());
+        hash.update(name);
+        match metadata(path) {
+            Ok(meta) => {
+                hash.update(&[1]);
+                hash.update(&meta.len().to_le_bytes());
+                hash.update(&super::state_db::nanos_from_time(meta.modified()?).to_le_bytes());
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => { hash.update(&[0]); }
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(hash.finalize())
+}
+
+/// O(file count + path bytes) on a hit, no source reads; otherwise `digest`'s
+/// source-byte cost. The small memo lives beside the build DB and is removed by
+/// clean. Atomic replacement prevents a concurrent reader accepting a partial key.
+fn verified(
+    expected: blake3::Hash,
+    paths: &[PathBuf],
+    store: Option<&compile::RuntimeStore>,
+    package: &str,
+    digest: impl FnOnce() -> Result<blake3::Hash>,
+) -> Result<bool> {
+    let memo = store.and_then(|store| {
+        let key = verification_key(expected, &store.compiler_hash,
+            paths.iter().map(PathBuf::as_path), |path| std::fs::metadata(path)).ok()?;
+        Some((store.db.with_file_name(format!("snapshot-{package}.verified")), key))
+    });
+    if let Some((path, key)) = &memo {
+        if std::fs::read(path).ok().as_deref() == Some(key.as_bytes()) { return Ok(true); }
+    }
+    if digest()? != expected { return Ok(false); }
+    if let Some((path, key)) = memo {
+        // Persistence is an optimization; an unwritable build directory must not
+        // change whether an otherwise valid snapshot can be used.
+        let persist = || -> Result<()> {
+            use std::io::Write;
+            let parent = path.parent().expect("memo parent");
+            std::fs::create_dir_all(parent)?;
+            let mut file = tempfile::NamedTempFile::new_in(parent)?;
+            file.write_all(key.as_bytes())?;
+            file.persist(path)?;
+            Ok(())
+        };
+        if let Err(error) = persist() { log::debug!("Snapshot verification memo not saved: {error}"); }
+    }
+    Ok(true)
+}
+
+/// O(module count) path preparation plus `verified`'s cost. No module core access.
+fn verify_runtime(expected: blake3::Hash, root: &Path, sources: &[(String, PathBuf)], store: Option<&compile::RuntimeStore>) -> Result<bool> {
+    let mut paths = Vec::with_capacity(sources.len() * 2 + 2);
+    paths.push(root.join("rescript.json"));
+    paths.push(root.join("bsconfig.json"));
+    for (_, source) in sources {
+        paths.push(source.clone());
+        paths.push(source.with_extension("resi"));
+    }
+    verified(expected, &paths, store, "runtime", || sources_digest(root, sources))
 }
 
 /// Producer only: O(core bytes + filename bytes), one decode and encode per module.
@@ -636,6 +715,43 @@ mod tests {
     }
 
     #[test]
+    fn memo_stats_each_of_ten_thousand_paths_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("source.res");
+        std::fs::write(&file, "let x = 1").unwrap();
+        let meta = std::fs::metadata(&file).unwrap();
+        let mut steps = 0;
+        verification_key(blake3::hash(b"expected"), "compiler",
+            std::iter::repeat_n(file.as_path(), 10_000), |_| {
+                steps += 1;
+                Ok(meta.clone())
+            }).unwrap();
+        assert_eq!(steps, 10_000);
+    }
+
+    #[test]
+    fn verification_memo_reads_sources_only_on_miss() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("Source.res");
+        std::fs::write(&source, "let x = 1").unwrap();
+        let paths = vec![source.clone()];
+        let expected = blake3::hash(b"let x = 1");
+        let store = compile::RuntimeStore { db: dir.path().join("build/rescript.sqlite"), compiler_hash: "compiler".into() };
+        let reads = std::cell::Cell::new(0);
+        let digest = || { reads.set(reads.get() + 1); Ok(blake3::hash(&std::fs::read(&source)?)) };
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 1);
+        std::fs::write(&source, "let x = 100").unwrap();
+        assert!(!verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 2);
+        std::fs::write(&source, "let x = 1").unwrap();
+        std::fs::remove_file(store.db.with_file_name("snapshot-runtime.verified")).unwrap();
+        assert!(verified(expected, &paths, Some(&store), "runtime", digest).unwrap());
+        assert_eq!(reads.get(), 3);
+    }
+
+    #[test]
     fn runtime_provider_is_one_package_handle() {
         assert_eq!(std::mem::size_of::<RuntimePackage>(), 32);
     }
@@ -773,7 +889,13 @@ pub(crate) fn prepare_belt(state: &mut super::build_types::BuildCommandState) ->
         || package.source_files.as_ref().is_none_or(|files|
             files.keys().any(|path| path.parent() != Some(Path::new("src"))))
     { return mismatch("its source layout differs from the snapshot"); }
-    if belt_sources_digest(&package.path)? != index.sources_digest {
+    let mut paths: Vec<_> = package.source_files.as_ref().expect("validated source files")
+        .keys().map(|path| package.path.join(path)).collect();
+    paths.sort_unstable();
+    paths.push(package.path.join("rescript.json"));
+    paths.push(package.path.join("bsconfig.json"));
+    if !verified(index.sources_digest, &paths, compile::RuntimeStore::of_build(state).as_ref(),
+        "belt", || belt_sources_digest(&package.path))? {
         return mismatch("its sources differ from the ones this compiler was built with");
     }
     let provider = std::sync::Arc::new(BeltPackage {

@@ -3104,7 +3104,7 @@ pub(crate) fn pre_compile_runtime_modules_with_mode(
     // The interfaces the last build compiled stand in for compiling the
     // runtime again while its sources and the compiler are the same.
     // The runtime compiled into this executable, when these are its sources.
-    if super::snapshot::register(registry, runtime_root, &runtime_paths) {
+    if super::snapshot::register(registry, runtime_root, &runtime_paths, store) {
         debug!("Registered {} embedded runtime interfaces", runtime_paths.len());
         return Ok(());
     }
