@@ -1157,6 +1157,11 @@ pub fn build(
                     clean::cleanup_after_build(&build_state, CompilerInfoWrite::WithRecord);
                 }
                 phase_mark("cleanup-end");
+                if std::env::var_os("RESCRIPT_JS_PRINTER_STATS").is_some()
+                    && let Some(report) = printer_coverage_report(&build_state.js_printer)
+                {
+                    eprintln!("OXC_PRINTER_STATS {report}");
+                }
                 Ok(build_state)
             }
             Err(e) => {
@@ -1174,6 +1179,18 @@ pub fn build(
     }
 }
 
+/// One opt-in summary of project outputs (not bootstrap runtime compilation).
+/// Default legacy builds neither collect these counters nor format a report.
+fn printer_coverage_report(mode: &rescript_compiler::emit::PrinterMode) -> Option<String> {
+    let rescript_compiler::emit::PrinterMode::Oxc(stats) = mode else { return None; };
+    let counts = stats.snapshot();
+    Some(serde_json::json!({
+        "emitted": counts.supported,
+        "fallbacks": counts.unsupported,
+        "outputs": counts.supported + counts.unsupported.values().sum::<usize>(),
+    }).to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1184,6 +1201,20 @@ mod tests {
     use std::sync::mpsc;
     use std::thread;
     use tempfile::TempDir;
+
+    #[test]
+    fn printer_report_is_opt_in_and_accounts_for_each_output() {
+        use rescript_compiler::emit::{PrinterMode, PrinterStats, Unsupported};
+        assert!(printer_coverage_report(&PrinterMode::Legacy).is_none());
+        let stats = std::sync::Arc::new(PrinterStats::default());
+        stats.record(&Ok((String::new(), None)));
+        stats.record(&Err(Unsupported("test shape")));
+        let value: serde_json::Value = serde_json::from_str(
+            &printer_coverage_report(&PrinterMode::Oxc(stats)).unwrap()).unwrap();
+        assert_eq!(value["emitted"], 1);
+        assert_eq!(value["outputs"], 2);
+        assert_eq!(value["fallbacks"]["test shape"], 1);
+    }
 
     #[test]
     fn with_build_lock_holds_lock_while_running_work() {
