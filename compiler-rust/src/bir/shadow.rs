@@ -1,5 +1,7 @@
-//! Stage S2.2 oracle. It checks the bridge, not a replacement lowering pipeline.
-//! Both opt-in modes retain the legacy output until a later stage takes over.
+//! Shadow oracles. `lambda-bridge` (S2.2) checks the bridge; `lambda-norm`
+//! (S4.1) checks the normalising rules against `LamArena`'s constructors.
+//! Neither replaces a pipeline stage: both opt-in modes retain the legacy
+//! output until a later stage takes over.
 use super::bridge::{export_lambda, import_lambda};
 use crate::lambda::arena::{Lam, LamArena};
 use std::hash::{Hash, Hasher};
@@ -35,9 +37,25 @@ struct UnitReport<'a> {
     stage: &'static str,
     identical: bool,
     unsupported: Option<&'static str>,
+    /// `lambda-norm`: smart-constructor calls replayed and rows fired.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    norm: Option<NormReport>,
 }
 
-fn report(unit: &str, unsupported: Option<&'static str>) -> anyhow::Result<()> {
+#[derive(serde::Serialize)]
+struct NormReport {
+    calls: u64,
+    replayed: std::collections::BTreeMap<&'static str, u32>,
+    renormalised: std::collections::BTreeMap<&'static str, u32>,
+    compared: u64,
+}
+
+fn report(
+    unit: &str,
+    stage: &'static str,
+    unsupported: Option<&'static str>,
+    norm: Option<NormReport>,
+) -> anyhow::Result<()> {
     let Some(directory) = std::env::var_os("RESCRIPT_BACKEND_STATS") else {
         return Ok(());
     };
@@ -51,7 +69,12 @@ fn report(unit: &str, unsupported: Option<&'static str>) -> anyhow::Result<()> {
     // fallback with success. The collector groups them by source unit and
     // keeps a fallback if any invocation was unsupported.
     let outcome = unsupported.unwrap_or("identical").replace(' ', "_");
-    let path = directory.join(format!("{outcome}.json"));
+    // The bridge stage keeps its file names; later stages prefix theirs.
+    let path = if stage == "lambda-bridge" {
+        directory.join(format!("{outcome}.json"))
+    } else {
+        directory.join(format!("{stage}.{outcome}.json"))
+    };
     let mut file = match std::fs::OpenOptions::new()
         .write(true)
         .create_new(true)
@@ -63,9 +86,10 @@ fn report(unit: &str, unsupported: Option<&'static str>) -> anyhow::Result<()> {
     };
     let data = serde_json::to_vec(&UnitReport {
         unit,
-        stage: "lambda-bridge",
+        stage,
         identical: unsupported.is_none(),
         unsupported,
+        norm,
     })?;
     file.write_all(&data)?;
     Ok(())
@@ -77,7 +101,7 @@ fn report(unit: &str, unsupported: Option<&'static str>) -> anyhow::Result<()> {
 pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()> {
     let imported = match import_lambda(arena, root) {
         Ok(imported) => imported,
-        Err(reason) => return report(unit, Some(reason.0)),
+        Err(reason) => return report(unit, "lambda-bridge", Some(reason.0), None),
     };
     imported
         .arena
@@ -85,7 +109,7 @@ pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<(
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-bridge validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
-        Err(reason) => return report(unit, Some(reason.0)),
+        Err(reason) => return report(unit, "lambda-bridge", Some(reason.0), None),
     };
     let mut before = Vec::new();
     let mut after = Vec::new();
@@ -102,7 +126,36 @@ pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<(
             + 1;
         anyhow::bail!("{unit}: lambda-bridge mismatch at line {line}");
     }
-    report(unit, None)
+    report(unit, "lambda-bridge", None, None)
+}
+
+/// Stage `lambda-norm`: replay the unit's lowering through the Bir
+/// normalising rules and renormalise the lowered unit, each compared with
+/// `LamArena`'s smart constructors (`bir::replay`). `raw` is the unit's raw
+/// Lambda root, still present in the arena lowering returned.
+#[cold]
+pub fn check_norm(arena: &LamArena, raw: Lam, unit: &str) -> anyhow::Result<()> {
+    let rows = |fired: [u32; super::l::norm::ROWS]| {
+        super::l::norm::ROW_NAMES
+            .into_iter()
+            .zip(fired)
+            .filter(|(_, count)| *count != 0)
+            .collect()
+    };
+    match super::replay::compare(arena, raw, unit)? {
+        Ok(stats) => report(
+            unit,
+            "lambda-norm",
+            None,
+            Some(NormReport {
+                calls: stats.calls,
+                replayed: rows(stats.replayed),
+                renormalised: rows(stats.renormalised),
+                compared: stats.compared,
+            }),
+        ),
+        Err(reason) => report(unit, "lambda-norm", Some(reason.0), None),
+    }
 }
 
 #[cfg(test)]

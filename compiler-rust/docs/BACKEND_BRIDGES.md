@@ -35,6 +35,38 @@ runtime and tests/tests totals. Fixture units include the fixture harness's
 compilation inputs, across its output modes; a source compiled in several modes
 is counted once, with a fallback if any mode was unsupported.
 
+## Normalising rules oracle (S4.1, stage `lambda-norm`)
+
+In the same opt-in modes every unit is also checked against `LamArena`'s
+smart constructors (`bir::shadow::check_norm`, `bir::replay`). The report
+files of this stage are named `lambda-norm.<outcome>.json` beside the
+bridge's; the harness counts each stage on its own and the ratchet file has
+one entry per stage.
+
+1. Replay. The arguments a smart constructor saw exist only inside
+   `raw_lambda::lower::Lowering`. Raw nodes stay in the arena lowering
+   returns, so the shadow lowers the raw root again on a copy of the arena
+   with a recording hook (`lower_traced`; the default lowering is the same
+   code with a hook that compiles to nothing) and gets every call lowering
+   made to `if_`, `seq`, `prim`, `prim_with_id` and `make_apply`, with its
+   arguments and result. It then builds the unit in a fresh `Bir` during
+   bulk construction: nodes lowering built plainly are imported as they
+   are; for a recorded call the arguments are built into a plain node and
+   offered to the engine. The export must print like the lowered Lambda,
+   before `collapse`.
+2. Renormalisation. Lowering never calls `switch_with` or
+   `string_switch_with` and builds some nodes plainly on purpose. The
+   lowered unit is therefore also rebuilt bottom-up through every legacy
+   smart constructor (`legacy_renormalise`) and compared with one
+   normalising pass of the engine over the imported unit. This is what a
+   pass that rebuilds a spine does to the nodes on it.
+
+A difference in either is an error naming the unit, the comparison and the
+first differing line. An unsupported shape is a counted fallback with the
+bridge's reasons. The report records how many calls were replayed and which
+rows of the rule table (BACKEND_REDESIGN.md C.5) fired; the harness prints
+the totals per corpus. They are not part of the ratchet.
+
 ## Representation limits
 
 Lambda import preserves all node kinds but can return these static reasons:

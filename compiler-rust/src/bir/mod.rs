@@ -13,6 +13,9 @@
 //! repair at the first unchanged ancestor, and walks the capture ancestor chain
 //! at most once when new uncaptured free uses require it.
 pub mod bridge;
+pub mod engine;
+pub mod l;
+pub mod replay;
 pub mod shadow;
 mod dump;
 mod edit;
@@ -39,6 +42,7 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     death_candidates: Vec<NodeId>,
+    deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
     capture_boundaries: usize,
     weighted_switches: usize,

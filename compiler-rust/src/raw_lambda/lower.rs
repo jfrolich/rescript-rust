@@ -18,16 +18,133 @@ use crate::raw_lambda::RawLambda;
 
 const EXCEPTION_ID_FIELD: &str = "RE_EXN_ID";
 
+/// One call of a `LamArena` smart constructor made by lowering: what it was
+/// given and what it returned. The backend shadow mode replays these through
+/// the Bir normalising rules (`bir::replay`).
+#[derive(Debug, Clone)]
+pub enum Built {
+    /// `LamArena::if_`.
+    If {
+        /// Condition.
+        cond: Lam,
+        /// Branch taken when true.
+        then_: Lam,
+        /// Branch taken when false.
+        else_: Lam,
+        /// What the constructor returned.
+        result: Lam,
+    },
+    /// `LamArena::seq`.
+    Seq {
+        /// First expression.
+        first: Lam,
+        /// Second expression.
+        second: Lam,
+        /// What the constructor returned.
+        result: Lam,
+    },
+    /// `LamArena::prim` or `prim_with_id`.
+    Prim {
+        /// The primitive.
+        primitive: Primitive,
+        /// Its location.
+        loc: LamLoc,
+        /// Arguments.
+        args: SmallVec<[Lam; 4]>,
+        /// What the constructor returned.
+        result: Lam,
+    },
+    /// `make_apply`, lowering's copy of `LamArena::apply`.
+    Apply {
+        /// Callee.
+        func: Lam,
+        /// Arguments.
+        args: SmallVec<[Lam; 4]>,
+        /// Application metadata.
+        info: ApInfo,
+        /// What the constructor returned.
+        result: Lam,
+    },
+}
+
+/// Receives the smart-constructor calls of a lowering. The default,
+/// [`NoTrace`], compiles to nothing.
+pub trait ConstructorTrace {
+    /// Whether calls are recorded; `false` removes the recording code.
+    const ON: bool;
+    /// Record one call.
+    fn built(&mut self, call: Built);
+}
+
+/// No recording.
+pub struct NoTrace;
+impl ConstructorTrace for NoTrace {
+    const ON: bool = false;
+    #[inline(always)]
+    fn built(&mut self, _call: Built) {}
+}
+impl ConstructorTrace for Vec<Built> {
+    const ON: bool = true;
+    fn built(&mut self, call: Built) {
+        self.push(call);
+    }
+}
+
+/// `LamArena::prim`, recorded.
+#[inline(always)]
+fn traced_prim<T: ConstructorTrace>(
+    a: &mut LamArena,
+    trace: &mut T,
+    primitive: Primitive,
+    args: &[Lam],
+    loc: LamLoc,
+) -> Lam {
+    if T::ON {
+        let result = a.prim(primitive.clone(), args, loc);
+        trace.built(Built::Prim {
+            primitive,
+            loc,
+            args: SmallVec::from_slice(args),
+            result,
+        });
+        result
+    } else {
+        a.prim(primitive, args, loc)
+    }
+}
+
+/// `LamArena::prim_with_id`, recorded.
+#[inline(always)]
+fn traced_prim_with_id<T: ConstructorTrace>(
+    a: &mut LamArena,
+    trace: &mut T,
+    info: PrimId,
+    args: &[Lam],
+) -> Lam {
+    let result = a.prim_with_id(info, args);
+    if T::ON {
+        let payload = a.prim_payload(info);
+        trace.built(Built::Prim {
+            primitive: payload.primitive.clone(),
+            loc: payload.loc,
+            args: SmallVec::from_slice(args),
+            result,
+        });
+    }
+    result
+}
+
 /// Lowers raw Lambda into an arena. It holds no other state: raw and
 /// lowered expressions share their identifiers.
-struct Lowering<'a> {
+struct Lowering<'a, T> {
     a: &'a mut LamArena,
+    trace: T,
 }
 
 use crate::lambda::arena::{ApplyId, ConstId, LamList, PrimId, SwitchId};
 use smallvec::SmallVec;
 
-impl Lowering<'_> {
+impl<T: ConstructorTrace> Lowering<'_, T> {
     /// A lowered constant: the raw payload when lowering leaves it as is.
     fn lower_const(&mut self, c: ConstId) -> Lam {
         let raw = self.a.constant(c);
@@ -132,12 +249,29 @@ impl Lowering<'_> {
                 let else_ = self.lower(else_);
                 let then_ = self.lower(then_);
                 let cond = self.lower(cond);
-                self.a.if_(cond, then_, else_)
+                let result = self.a.if_(cond, then_, else_);
+                if T::ON {
+                    self.trace.built(Built::If {
+                        cond,
+                        then_,
+                        else_,
+                        result,
+                    });
+                }
+                result
             }
             Node::Sequence(first, second) => {
                 let second = self.lower(second);
                 let first = self.lower(first);
-                self.a.seq(first, second)
+                let result = self.a.seq(first, second);
+                if T::ON {
+                    self.trace.built(Built::Seq {
+                        first,
+                        second,
+                        result,
+                    });
+                }
+                result
             }
             Node::While(cond, body) => {
                 let body = self.lower(body);
@@ -178,7 +312,18 @@ impl Lowering<'_> {
             loc: payload.info.loc,
             status: ApplyStatus::Uncurry,
         };
-        make_apply(self.a, func, &args, ap_info)
+        if T::ON {
+            let result = make_apply(self.a, func, &args, ap_info.clone());
+            self.trace.built(Built::Apply {
+                func,
+                args: SmallVec::from_slice(&args),
+                info: ap_info,
+                result,
+            });
+            result
+        } else {
+            make_apply(self.a, func, &args, ap_info)
+        }
     }
 
     fn lower_primitive(&mut self, info: PrimId, raw_args: LamList) -> Lam {
@@ -198,12 +343,13 @@ impl Lowering<'_> {
                 if let Some(s) = code_arg {
                     code.code = s;
                 }
-                return self.a.prim(Primitive::PrawJsCode(code), &[], loc);
+                return traced_prim(self.a, &mut self.trace, Primitive::PrawJsCode(code), &[], loc);
             }
         }
 
         let args = self.lower_list(raw_args);
         let a = &mut *self.a;
+        let trace = &mut self.trace;
         match &a.prim_payload(info).primitive {
             Primitive::Pidentity => match args.first() {
                 Some(arg) => *arg,
@@ -213,7 +359,9 @@ impl Lowering<'_> {
                 let [lhs, rhs] = args[..] else {
                     unreachable!("PextensionSlotEq expects exactly two arguments")
                 };
-                let id = a.prim(
+                let id = traced_prim(
+                    a,
+                    trace,
                     Primitive::Pfield(
                         0,
                         FieldDbgInfo::Record {
@@ -223,7 +371,7 @@ impl Lowering<'_> {
                     &[lhs],
                     loc,
                 );
-                a.prim(Primitive::Pstringcomp(Comparison::Eq), &[id, rhs], loc)
+                traced_prim(a, trace, Primitive::Pstringcomp(Comparison::Eq), &[id, rhs], loc)
             }
             // lambda.ml `mk_builtin`: `Lsequence (arg, lambda_unit)`, not the
             // folding `Lambda.seq`.
@@ -241,14 +389,16 @@ impl Lowering<'_> {
                 };
                 let tag = polyvar_block_tag_constant(name);
                 let tag = a.const_(tag);
-                a.prim_with_id(info, &[tag, value])
+                traced_prim_with_id(a, trace, info, &[tag, value])
             }
             Primitive::Pmakeblock(TagInfo::SomeNotNested, _) => {
-                a.prim(Primitive::PsomeNotNest, &args, loc)
+                traced_prim(a, trace, Primitive::PsomeNotNest, &args, loc)
             }
-            Primitive::Pmakeblock(TagInfo::Some, _) => a.prim(Primitive::Psome, &args, loc),
-            Primitive::PinitMod => a.prim_with_id(info, &args),
-            _ => lower_primitive_default(a, info, &args),
+            Primitive::Pmakeblock(TagInfo::Some, _) => {
+                traced_prim(a, trace, Primitive::Psome, &args, loc)
+            }
+            Primitive::PinitMod => traced_prim_with_id(a, trace, info, &args),
+            _ => lower_primitive_default(a, trace, info, &args),
         }
     }
 
@@ -715,7 +865,12 @@ enum Folded {
     Unfolded,
 }
 
-fn lower_primitive_default(a: &mut LamArena, info: PrimId, args: &[Lam]) -> Lam {
+fn lower_primitive_default<T: ConstructorTrace>(
+    a: &mut LamArena,
+    trace: &mut T,
+    info: PrimId,
+    args: &[Lam],
+) -> Lam {
     let folded = {
         let primitive = &a.prim_payload(info).primitive;
         let constants: smallvec::SmallVec<[&Constant; 2]> =
@@ -729,7 +884,7 @@ fn lower_primitive_default(a: &mut LamArena, info: PrimId, args: &[Lam]) -> Lam 
         Some(Folded::Bool(value)) => return bool_const(a, value),
         Some(Folded::String(s)) => return a.const_(Constant::String(s)),
         Some(Folded::Char(c)) => return a.const_(Constant::Char(c)),
-        Some(Folded::Unfolded) => return a.prim_with_id(info, args),
+        Some(Folded::Unfolded) => return traced_prim_with_id(a, trace, info, args),
         None => {}
     }
     if let Primitive::Pmakeblock(TagInfo::Module(fields), _) = &a.prim_payload(info).primitive
@@ -737,7 +892,7 @@ fn lower_primitive_default(a: &mut LamArena, info: PrimId, args: &[Lam]) -> Lam 
     {
         return module_alias;
     }
-    a.prim_with_id(info, args)
+    traced_prim_with_id(a, trace, info, args)
 }
 
 /// A module block whose fields are, in order, all fields of one module:
@@ -843,8 +998,27 @@ pub fn lower_to_translmod_lambda(
 ) -> (LamArena, Lam, HashSet<Ident>) {
     let mut exported_idents = HashSet::new();
     collect_exported_idents(&arena, raw, &mut exported_idents);
-    let lam = Lowering { a: &mut arena }.lower(raw);
+    let lam = Lowering {
+        a: &mut arena,
+        trace: NoTrace,
+    }
+    .lower(raw);
     (arena, lam, exported_idents)
+}
+
+/// [`lower_to_translmod_lambda`] on a copy of the arena, also returning
+/// every smart-constructor call lowering made, in call order. Raw nodes stay
+/// in the arena a lowering returns, so the backend shadow mode calls this
+/// with that arena and the raw root after the unit was lowered.
+pub fn lower_traced(arena: &LamArena, raw: RawLambda) -> (LamArena, Lam, Vec<Built>) {
+    let mut arena = arena.clone();
+    let mut lowering = Lowering {
+        a: &mut arena,
+        trace: Vec::new(),
+    };
+    let lam = lowering.lower(raw);
+    let trace = lowering.trace;
+    (arena, lam, trace)
 }
 
 /// The lowered Lambda after `Lam_pass_collapse_var_aliases`, the first pass

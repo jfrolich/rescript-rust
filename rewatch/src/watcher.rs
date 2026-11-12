@@ -999,6 +999,7 @@ mod tests {
 
         Module {
             source_type: SourceType::SourceFile(SourceFile {
+                gentype_annotations: [None; 2],
                 implementation: Implementation {
                     path: PathBuf::from(implementation_path),
                     parse_state: ParseState::Success,
