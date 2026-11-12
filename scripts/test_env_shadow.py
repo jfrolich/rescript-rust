@@ -61,7 +61,7 @@ def main():
         output = ""
         for command in ("clean", "build"):
             run = subprocess.run([str(executable), command, str(project.resolve())],
-                                 cwd=ROOT, env=env, capture_output=True, text=True,
+                                 cwd=project.resolve(), env=env, capture_output=True, text=True,
                                  timeout=args.timeout)
             if command == "build":
                 output = run.stderr + run.stdout
