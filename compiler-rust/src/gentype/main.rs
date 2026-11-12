@@ -1353,7 +1353,7 @@ mod tests {
     fn skipped_artifact_lookup_fails_with_importer_and_owner() {
         let root = project("closure-error");
         let path = root.join("Missing.cmt").to_string_lossy().into_owned();
-        skip_type_declarations("Missing", &[path.clone()]);
+        skip_type_declarations("Missing", std::slice::from_ref(&path));
         assert!(has_in_process_type_declarations(Path::new(&path)));
         let error = skipped_declaration_error(&path, "Importer").unwrap();
         assert!(error.contains("module Importer"), "{error}");
