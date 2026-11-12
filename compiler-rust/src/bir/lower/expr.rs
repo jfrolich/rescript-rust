@@ -4,6 +4,7 @@ use crate::bir::{FuncId, VarSpan};
 
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
+    If(super::cond::Conditional),
     Call(super::call::Call),
     Let {
         var: VarId,
@@ -34,7 +35,12 @@ impl State {
             into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
             return;
         }
+        if let Resume::If(conditional) = resume {
+            self.conditional_children(cx, conditional, into);
+            return;
+        }
         match *resume {
+            Resume::If(_) => unreachable!("conditional handled above"),
             Resume::Call(_) => unreachable!("call handled above"),
             Resume::Let {
                 var,
@@ -80,6 +86,9 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
+        if let Resume::If(conditional) = resume {
+            return self.conditional_child(cx, conditional, index, child);
+        }
         if let Resume::Call(_) = resume {
             let mut out = self.realize(cx, child);
             self.statements.reserve();
@@ -100,6 +109,7 @@ impl State {
             }
         }
         let force = match resume {
+            Resume::If(_) => unreachable!("conditional handled above"),
             Resume::Call(_) => unreachable!("call handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
@@ -119,6 +129,7 @@ impl State {
         mut children: impl Iterator<Item = Probed>,
     ) -> Probed {
         match resume {
+            Resume::If(conditional) => self.finish_conditional(cx, conditional),
             Resume::Call(call) => self.finish_application(cx, call, children),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {

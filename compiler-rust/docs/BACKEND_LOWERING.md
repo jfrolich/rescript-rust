@@ -770,8 +770,12 @@ Incidental, all three stay in the lowering:
 
 - which branch is negated or swapped depends on the order in which the rules
   of `if_` and of rows R2 to R4 are tried; the rule lists are normative;
-- row R5 step 3 wraps its result in one block so that an enclosing `if_` does
-  not see the trailing `return` (1.3);
+- row R5 step 3 constructs one block, but `compile_return_output`
+  (`compiler-rust/src/lambda/lam_compile.rs:3179`) subsequently calls
+  `unnest_block` on the whole output. When there is no condition prelude,
+  that singleton wrapper is removed. With a condition prelude, the wrapper
+  remains one of several statements. The distinction affects the pre-pass
+  printed text and must not be inferred from the inner rule alone;
 - the result temporary is `Strict` in **V** and the declaration precedes the
   `if` but follows the statements of the test.
 
@@ -2078,6 +2082,24 @@ positions.
 | `source_loc_of_lam` (source maps only) | a descent along first children | the depth of the case body, once per clause |
 | label numbers (4.5) | five integers per output that has labels; one prefix sum per group | linear in the labels and conditionals of a group that has labels |
 | `realize` | each node of a `Free` once | a `Free` is realized once |
+
+### Return-list materialization regression
+
+The conditional lowering's source traversal is iterative, but a return-position
+else spine still exposes a quadratic statement-list path. The minimal shape is:
+
+```text
+If(c1, 1, If(c2, 2, Let(Strict, x, null, 3)))
+```
+
+J-S3 rule 6 prepends a guard to the else list; the R5 outer `output_as_block`
+then unnests that list. Repeating both operations materializes a growing list
+at each ancestor. The mandatory 10,000-deep regression currently fails its
+linear copying bound: 30,003 source reads, 50,035,000 statement copies in R,
+versus 20,001 copies in V and A. This is not repeated Lambda probing. Resolving
+it requires retaining the statement-list composition until final materialization
+while preserving the wrapper distinction above; increasing the bound or omitting
+R is not a valid fix.
 
 ### 7.4 Step-count tests each stage adds
 

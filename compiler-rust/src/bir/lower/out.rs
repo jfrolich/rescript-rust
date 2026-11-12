@@ -245,19 +245,19 @@ impl FreePool {
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
     pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
         enum Work {
-            Enter(FreeId),
-            Seq(NodeId),
-            Cond(NodeId),
+            Enter(FreeId, Cx),
+            Seq(NodeId, Cx),
+            Cond(NodeId, Cx),
         }
         let root = match probed {
             Probed::Out(out) => return out,
             Probed::Free(root) => root,
         };
-        let mut work = vec![Work::Enter(root)];
+        let mut work = vec![Work::Enter(root, cx)];
         let mut outputs = Vec::new();
         while let Some(task) = work.pop() {
             match task {
-                Work::Enter(id) => {
+                Work::Enter(id, cx) => {
                     self.realized += 1;
                     match self.nodes[id.0 as usize]
                         .take()
@@ -265,21 +265,22 @@ impl FreePool {
                     {
                         Free::Leaf(value) => outputs.push(emit.leaf(cx, value)),
                         Free::Seq { first, second } => {
-                            work.push(Work::Seq(first));
-                            work.push(Work::Enter(second));
+                            work.push(Work::Seq(first, cx));
+                            work.push(Work::Enter(second, cx));
                         }
                         Free::Cond { test, then_, else_ } => {
-                            work.push(Work::Cond(test));
-                            work.push(Work::Enter(else_));
-                            work.push(Work::Enter(then_));
+                            work.push(Work::Cond(test, cx));
+                            let value_cx = Cx { cont: super::Cont::Value(super::Tail::No), ..cx };
+                            work.push(Work::Enter(else_, value_cx));
+                            work.push(Work::Enter(then_, value_cx));
                         }
                     }
                 }
-                Work::Seq(first) => {
+                Work::Seq(first, cx) => {
                     let second = outputs.pop().expect("sequence child");
                     outputs.push(emit.seq(cx, first, second));
                 }
-                Work::Cond(test) => {
+                Work::Cond(test, cx) => {
                     let else_ = outputs.pop().expect("else child");
                     let then_ = outputs.pop().expect("then child");
                     outputs.push(emit.cond(cx, test, then_, else_));

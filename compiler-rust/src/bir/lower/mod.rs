@@ -446,20 +446,9 @@ impl ProbeRules for State {
                 };
                 return Err(Unsupported(reason));
             }
-            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Value(Tail::No)) => {
-                return self.conditional_value(cx, condition, then_, else_).map(ProbePlan::Ready);
-            }
-            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Assign(_)) => {
-                return self.conditional_assignment(cx, condition, then_, else_).map(ProbePlan::Ready);
-            }
-            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Declare(..)) => {
-                return self.conditional_declaration(cx, condition, then_, else_).map(ProbePlan::Ready);
-            }
-            View::If { condition, then_, else_ } if matches!(cx.cont, Cont::Effect(Tail::No)) => {
-                return self.conditional_effect(cx, condition, then_, else_).map(ProbePlan::Ready);
-            }
             View::If { condition, then_, else_ } => {
-                return self.conditional_return(cx, condition, then_, else_).map(ProbePlan::Ready);
+                let conditional = self.conditional(cx, condition, then_, else_)?;
+                return Ok(ProbePlan::Children(expr::Resume::If(conditional)));
             }
             View::Switch { .. } => return Err(Unsupported("switch")),
             View::StrSwitch { .. } => return Err(Unsupported("string switch")),
@@ -583,9 +572,9 @@ impl Realizer for State {
         self.drop_pure_effect(first);
         second
     }
-    /// K6: C:5144 compile_if_return_output; If remains explicitly unsupported.
-    fn cond(&mut self, _: Cx, _: NodeId, _: Out, _: Out) -> Out {
-        unreachable!("conditional is unsupported")
+    /// R1–R5: realize a deferred conditional from its value operands.
+    fn cond(&mut self, cx: Cx, test: NodeId, yes: Out, no: Out) -> Out {
+        self.realize_conditional(cx, test, yes, no)
     }
 }
 

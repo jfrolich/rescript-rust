@@ -513,13 +513,12 @@ fn unsupported_arguments_keep_their_own_reason_and_loops_wait_for_rec() {
     let f = source.var(Ident::new("f", 1, IdentFlags::NONE));
     let a = source.const_(C::JsNull);
     let b = source.const_(C::JsTrue);
-    let c = source.const_(C::JsFalse);
-    let arg = source.if_raw(a, b, c);
+    let arg = source.prim_raw(crate::lambda::lam_primitive::Primitive::Pawait, &[a, b], LamLoc::NONE);
     let root = source.apply_raw(f, &[arg], ApInfo { status: ApplyStatus::Na, loc: LamLoc::NONE });
     let input = bridge::import_lambda(&source, root).unwrap();
     let root = input.root;
     let mut state = State::new(input);
-    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("if"))));
+    assert!(matches!(state.probe(Cx::value(), root), Err(Unsupported("await"))));
     let cx = Cx::new(Cont::Effect(Tail::Return(Ret::Named { loop_: Some(LoopRef(0)), in_catch: false })));
     assert!(matches!(state.probe(cx, root), Err(Unsupported("let rec"))));
 }
