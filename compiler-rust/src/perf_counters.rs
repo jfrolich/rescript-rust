@@ -1713,3 +1713,51 @@ mod checker_tests {
         assert_eq!(graph.recursive_ground(), 0);
     }
 }
+
+#[cfg(all(test, debug_assertions))]
+mod publication_guard_tests {
+    use super::SignaturePublication;
+    use crate::binser::Encoded;
+    use crate::cmi::portable_types::{PortableRawSignature, PortableSignature, PortableTypeGraph};
+
+    fn signature() -> PortableSignature {
+        PortableSignature {
+            ps_sig: vec![],
+            cmi_longident_names: vec![],
+            type_graph: PortableTypeGraph {
+                entries: vec![],
+                variant_layouts: vec![],
+                mutabilities: vec![],
+            },
+            locations: Default::default(),
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn main_signature_encoding_is_guarded() {
+        let _guard = SignaturePublication::begin();
+        Encoded::encode(&signature());
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn raw_signature_encoding_is_guarded() {
+        let sig = signature();
+        let raw = PortableRawSignature {
+            raw_ps_sig: sig.ps_sig,
+            cmi_longident_names: sig.cmi_longident_names,
+            raw_type_graph: sig.type_graph,
+            raw_locations: sig.locations,
+        };
+        let _guard = SignaturePublication::begin();
+        Encoded::encode(&raw);
+    }
+
+    #[test]
+    #[should_panic(expected = "encoding or summary before signature release")]
+    fn summary_construction_is_guarded() {
+        let _guard = SignaturePublication::begin();
+        crate::cmi::item_deps::SignatureSummary::of("Guarded", &signature());
+    }
+}
