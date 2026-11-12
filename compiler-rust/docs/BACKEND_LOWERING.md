@@ -739,6 +739,145 @@ Incidental: `fold_prim` at level L (C.5 N1, N2) and the J folds of section 6
 overlap (integer arithmetic on two literals is folded by both). The lowering
 does not depend on which one fires; both stay.
 
+### 3.5.1 Externals
+
+This table specifies S3.8 against X (`lam_compile_external.rs`), P
+(`lam_compile_primitive.rs`) and C (`lam_compile.rs`). Line numbers here are
+those at revision `73a1901ea0`; C's earlier index predates intervening ports.
+These are lowering policies, not additional J normalisation rules.
+
+**Continuations and order.** Let `b; e` be the prelude and expression in the
+following table. Every row produces **V** `b; e`, **D** `b; let id = e`,
+**A** `b; id = e`, **E** `b` with `e` retained for the effect consumer, and
+**R** `b; return e` (finished), through the conversions of 1.4. The normal
+unit-return and pure-effect rules still apply. Primitive arguments are lowered
+left to right in **V**, then held as specified below, then sequenced by 3.3.
+Only object creation and the special object-get path add their own statements.
+
+| Row | Primitive | Expression and prelude | Legacy |
+| --- | --- | --- | --- |
+| X1 | `PjsCall` | The declaration-kind table below, with removed argument effects sequenced before the expression | `compile_js_call` (X:1202), `add_external_effect` (X:755) |
+| X2 | `PjsApply` | Plain default-info call of the first value with the rest; no values gives non-unit undefined. No FFI argument conversion or variadic assembly | P:229; unlike `compile_js_call` (X:1202) |
+| X3 | `PjsObjectCreate` | Object literal, possibly a variable object followed by conditional optional-field assignments; result is the object variable | `compile_js_object_create` (X:972) |
+| X4 | `PjsObjectGet(name)` | Static member read. With exactly one receiver, lower it first; if its prelude is nonempty and it cannot be duplicated (with record fields allowed), append a strict `tmp` binding and read its member. Otherwise read directly | P:84; `static_index` (X:1441) |
+| X5 | `PjsObjectSet(name)` | Exactly receiver and value: plain sequence `(receiver.name = value, unit undefined)`. Other arities give non-unit undefined | P:827; member construction `static_index` (X:1441) |
+| X6 | `PjsFnMethod` | First value, marking an actual function `is_method = true` without changing its location; non-function unchanged, missing value non-unit undefined | P:813; ordinary function aliases are separate (`compile_eta_wrapped_runtime_alias`, X:443) |
+
+**Holding precedes sequencing.** A hold goes after that argument's own
+statements, before the generic right-to-left sequencing pass. Thus an argument
+needing a statement also forces earlier unsafe argument values to be evaluated
+before it. Do not first flatten all argument preludes and then add FFI holds.
+
+| Row | Decision | Result | Legacy |
+| --- | --- | --- | --- |
+| X7 | Call argument/spec pairing | Constants consume no runtime argument; hold other arguments in source order, retaining unmatched remaining arguments | `hold_external_args` (X:254) |
+| X8 | Event variant can be read in place | A literal polyvariant block, or a duplicable value, needs no hold. Duplicable means undefined, bool, number, string, template, qualified read, non-global variable, positioned field of a duplicable value, index of two duplicable values, or conditional of three duplicable values | `literal_polyvar_block` (X:30), `polyvar_event_in_place` (X:59), nested `duplicable` (X:60) |
+| X9 | String/int dispatch can run in place | Strictly side-effect-free value needs no hold; otherwise bind `tmp` before the dispatch function, including awaited values | `polyvar_dispatch_in_place` (X:50), `hold_external_arg` (X:213) |
+| X10 | Optional known `Some` needs a variant hold | Hold only its payload, reconstruct the optional wrapper preserving identity and cold metadata; other argument kinds never request a variant hold | `hold_external_arg` (X:213) |
+| X11 | Object argument holding | Skip constants on labelled/empty fields; empty fields do not variant-hold. Labelled and optional fields use X8–X10. An unknown optional value additionally holds if not delay-safe and a later literal-evaluated argument is neither delay-safe nor mutually strictly pure with it | `presence_unknown` (X:173), `hold_external_obj_args` (X:278) |
+
+X11's legacy suffix search is quadratic. Preserve its predicate with a reverse
+summary of later literal-evaluated values: whether any is not delay-safe, and
+whether any such value is not strictly pure. Test the first bit for an impure
+current value and the second for a pure current value. Compute argument facts
+on construction, not by repeated subtree walks. This is a specified algorithm
+change, not a change in which values are held.
+
+**Argument values and effects.** Optional conversion precedes the attribute
+case, except constant specs never consume a runtime argument. The result of
+one argument is zero, one or two values plus an optional effect; use an inline
+bounded result, not a heap vector per argument.
+
+| Row | Kind | Values and effects | Legacy |
+| --- | --- | --- | --- |
+| X12 | Optional label | Undefined becomes non-unit undefined; known optional block becomes payload. Duplicable unknown becomes `isNotNone(arg) ? valFromOption(arg) : undefined`; otherwise one runtime `valFromOption(arg)` call | `external_optional_to_undefined_expr` (X:181), `is_not_none_expr` (X:730), `val_from_option_expr` (X:723) |
+| X13 | `Nothing` | One converted value, no extra effect | `lower_external_arg_values_and_effect` (X:782) |
+| X14 | `ExternUnit` | Preserve effect if not pure; no value for an empty label, unit undefined for a labelled/optional argument | `lower_external_arg_values_and_effect` (X:782), `external_arg_effect` (X:741) |
+| X15 | `Ignore` | No values; preserve effect if not pure | `lower_external_arg_values_and_effect` (X:782), `external_arg_effect` (X:741) |
+| X16 | `ArgCst` | No runtime argument; int literal cast to i32, string literal, or raw JSON literal | `assemble_external_args_no_splice` (X:834); `compile_external_arg_const` (C:6120) |
+| X17 | `PolyVarString` | Undefined stays undefined; literal string dispatches to its mapped string; otherwise a string-switch IIFE | `external_polyvar_string_expr` (X:344) |
+| X18 | `PolyVar` (event) | Two values: tag and payload. A literal two-field polyvariant block supplies both directly; otherwise project NAME and VAL. Map the tag through string dispatch when supplied | `external_polyvar_event_exprs` (X:374), `literal_polyvar_block` (X:370) |
+| X19 | `Int` | Undefined stays undefined; literal tag dispatches to mapped i32; otherwise a string-switch IIFE returning i32 values | `external_polyvar_int_expr` (X:400) |
+| X20 | `Unwrap`, nonoptional | Two-field block with numeric first field yields its second field; otherwise project VAL | `external_polyvar_unwrap_expr` (X:421) |
+| X21 | `Unwrap`, optional | Uses the original raw argument, not the optional-converted value: undefined, unwrap known payload, or runtime `unwrapPolyVar` | `external_option_unwrap_expr` (X:197), `lower_external_arg_values_and_effect` (X:782) |
+| X22 | No splice | Walk specs once; constants insert values; missing runtime arguments become non-unit undefined; concatenate converted values, collect effects in argument order. Remove the trailing optional-undefined suffix, then prefix fused effects | `assemble_external_args_no_splice` (X:834), `keep_non_undefined_external_args` (X:872), `fuse_external_effects` (X:749), `add_external_effect` (X:755) |
+| X23 | Splice/variadic | Last **runtime** argument that is an array expands its elements without attribute conversion. Otherwise convert it and mark that spread is needed. After all specs, wrap the final assembled value in spread. Constants can follow the last runtime argument. No trailing-undefined trimming | `assemble_external_args_with_splice` (X:894), `assemble_external_args` (X:959) |
+
+X22's suffix trimming zips reversed specs with reversed **assembled values**;
+keep this exact rule even where an attribute expands or removes an argument.
+`external_arg_effect` uses ordinary purity, not strict purity. Effects are
+folded with J-M1 and prefixed with J-M1, not inserted at their original argument
+positions; the holding/sequencing phase preserves the necessary evaluations.
+
+**Calls and access.** All calls use default call information. Scoped access
+uses ordinary static members, not record-field positions.
+
+| Row | Declaration/access | J form | Legacy |
+| --- | --- | --- | --- |
+| X24 | Named module value/function | With no scopes, qualify the named member; with scopes, qualify the first scope, then member-access the remaining scopes and name. First scope `default` (or unscoped name `default`) selects default import | `translate_scoped_module_value` (X:621) |
+| X25 | Global value/function | Global variable is first scope, or name when unscoped; append remaining scopes and name | `translate_scoped_global_value` (X:1417) |
+| X26 | Module itself | Bundle is primitive name with no hint/attributes. Zero-arity value returns binding; positive-arity value calls binding with assembled args. Constructor uses **no-splice** assembly, even for variadic declaration | `external_module_binding` (X:609), `compile_js_call` (X:1202) |
+| X27 | Named/global `DeclVal` | Zero effective arity returns target if args empty, otherwise calls target with raw sequenced args. Positive arity uses X22/X23 | `compile_js_call` (X:1202) |
+| X28 | Named/global `DeclNew` | `new target(assembled args)` with X22/X23 | `compile_js_call` (X:1202) |
+| X29 | `DeclSend` | Consume receiver first; assemble remaining args against specs after the first. Apply scopes to receiver, then call its named member (retain receiver binding) | `compile_js_call` (X:1202), `apply_scoped_access` (X:1434) |
+| X30 | `DeclGet`, `DeclSet` | No-splice assembly, exactly one/two values. Scoped receiver's member read or assignment. `DeclSet` does **not** append unit undefined, unlike X5 | `compile_js_call` (X:1202), `static_index` (X:1441) |
+| X31 | `DeclGetIndex`, `DeclSetIndex` | No-splice assembly, exactly two/three values. Scoped receiver indexed by second value, optionally assigned third | `compile_js_call` (X:1202), `apply_scoped_access` (X:1434) |
+| X32 | Tagged templates | Not handled by X: the separate `PtaggedTemplate` primitive retains the existing template lowering | `compile_js_call` (X:1202) is exhaustive over declaration kinds; P's template arm |
+
+**Object fields.** In X3, empty fields consume a runtime argument unless
+constant and preserve its effect only. Labelled constants insert their value;
+other labelled fields require exactly one converted value (X:762). Optional
+undefined fields are omitted; known `Some` payloads are converted as labelled
+values directly into the literal. Unknown optional fields are queued in source
+order. Fuse discarded effects before the literal. If the queue is nonempty,
+bind the object with kind `Variable`; for each queued field, bind a strict
+`tmp` if its value cannot be duplicated, test `value !== undefined`, and assign
+the converted value. Skip `valFromOption` when `for_sure_no_nested_option` is
+set. Convert that field with an empty label; prefix any field effect to its
+assignment value. Result is the object variable (`compile_js_object_create`,
+X:972; `lower_object_external_arg_value_and_effect`, X:762).
+
+**External identifiers.** Identity is `(bundle, default)`, not hint, import
+attributes or dynamic/static use. First encounter creates the binding and its
+name; later encounters reuse it (`external_module_id`, X:581). Each reference
+still carries its own import attributes and dynamic-import bit (X:79, X:581).
+Reuse `import.rs`'s per-unit module inventory and naming implementation rather
+than inventing a second identity scheme. Its current string scan per lookup
+must be replaced by indexed bindings before repeated-call cost is claimed.
+No source handle currently identifies the bundle/default pair: intern it once
+and retain an indexed lookup for subsequent source-primitive uses.
+
+An explicit hint capitalizes its first ASCII character. Without a hint, take
+the final slash-separated component; an ASCII-letter start followed by ASCII
+letters/digits/underscores is capitalized directly. Otherwise collect letters,
+digits and underscores, starting at a letter and capitalizing the next letter
+after dot/hyphen. If collection is empty, use the original bundle (capitalized
+when a slash existed). Sources: `external_module_ident_name` (X:86),
+`capitalize_ascii_first` (X:93), `good_hint_name` (X:106), `collect_start`
+(X:115), `collect_next` (X:133), `js_id_name_of_hint_name` (X:149).
+
+**Cross-module inline attempt (3.3).** Before lowering call arguments, recognize
+a module field of a global. With cross-module inlining enabled, obtain the
+exported Lambda function; require equal parameter/argument counts and
+`attr_can_be_inlined`. Import its body, compute the closed parameter map,
+beta-reduce with `propagate_beta_reduce_with_map`, extend assignable facts for
+the reduced tree, and lower that result. Legacy
+`compile_external_field_apply` (C:1377) returns a value output which callers
+convert to their continuation: do not silently substitute a different
+return-specific lowering. Restore temporary assignable state afterwards.
+No eligible export means the existing arity-aware call, not an unsupported
+result. An eligible body containing an unsupported construct returns that
+construct's reason. This function is in C, not X; X's similarly named
+`external_module_id` (X:581) handles JavaScript imports, not `.cmj` inlining.
+
+**Cost obligations.** One source visit per argument, one linear spec assembly,
+one reverse summary for X11 and one generic sequencing pass. Count holds and
+argument steps at 10,000 call arguments and 10,000 labelled object fields.
+String dispatch construction additionally costs its case count and spelling
+bytes; scoped access costs its segments and spelling bytes. Unknown optional
+fields use one pending list per object, not one allocation per field. This
+specification is not a claim that these costs have already been measured.
+
 ### 3.6 `If`
 
 `If(c, t, e)`. Always first: `V(c)`. Its statements come first in the output
