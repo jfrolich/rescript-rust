@@ -46,7 +46,9 @@ impl Bir {
                 self.adjust_counts(child, i64::from(multiplier) - 1);
             }
         }
-        self.adjust_direct(id, 1);
+        if !self.bulk {
+            self.adjust_direct(id, 1);
+        }
         self.repair(id);
         if !self.bulk {
             self.capture_created(id);
@@ -66,12 +68,19 @@ impl Bir {
     /// Finish bulk construction with one top-down capture analysis. Existing
     /// conservative flags are retained, just as in incremental construction.
     pub fn finish_bulk(&mut self, root: NodeId) {
-        assert!(self.bulk, "bulk construction not active");
-        self.mark_captures(root);
-        self.bulk = false;
+        self.try_finish_bulk(root).expect("Bir bulk count overflow");
     }
 
-    fn mark_captures(&mut self, root: NodeId) {
+    /// Finish an imported tree, reporting unrepresentable weighted counts.
+    /// On error the partially finalized arena must be discarded.
+    pub fn try_finish_bulk(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
+        assert!(self.bulk, "bulk construction not active");
+        self.mark_captures(root)?;
+        self.bulk = false;
+        Ok(())
+    }
+
+    fn mark_captures(&mut self, root: NodeId) -> Result<(), bridge::Unsupported> {
         let epoch = self.next_capture_epoch();
         let mut stack = vec![(root, 0u32, 1u32)];
         while let Some((id, depth, weight)) = stack.pop() {
@@ -99,9 +108,7 @@ impl Bir {
                 }
             }
             self.weights[id.index()] = weight;
-            if weight != 1 {
-                self.adjust_direct(id, i64::from(weight) - 1);
-            }
+            self.try_adjust_direct(id, i64::from(weight))?;
             for child in children.into_iter().rev() {
                 let enters = match boundary {
                     Some(None) => true,
@@ -109,10 +116,11 @@ impl Bir {
                     None => false,
                 };
                 let child_weight = weight.checked_mul(self.edge_weight(id, child))
-                    .expect("Bir use weight overflow");
+                    .ok_or(bridge::Unsupported("use weight outside u32"))?;
                 stack.push((child, depth + u32::from(enters), child_weight));
             }
         }
+        Ok(())
     }
 
     fn allocate(&mut self, node: Node) -> NodeId {
@@ -437,11 +445,15 @@ impl Bir {
         weight
     }
     fn adjust_direct(&mut self, id: NodeId, delta: i64) {
+        self.try_adjust_direct(id, delta)
+            .expect("Bir use count overflow/underflow");
+    }
+    fn try_adjust_direct(&mut self, id: NodeId, delta: i64) -> Result<(), bridge::Unsupported> {
         match self.view(id) {
             View::Var { var } => {
                 self.vars.uses[var.index()] =
                     u32::try_from(i64::from(self.vars.uses[var.index()]) + delta)
-                        .expect("Bir use count overflow/underflow");
+                        .map_err(|_| bridge::Unsupported("use count outside u32"))?;
                 if delta < 0 && self.vars.uses(var) == 0 {
                     if let Some(binder) = self.vars.binder(var) {
                         self.death_candidates.push(binder);
@@ -457,10 +469,11 @@ impl Bir {
                     .expect("unknown static exit label");
                 let header = &mut self.pools.catches[header_id.index()];
                 header.uses = u32::try_from(i64::from(header.uses) + delta)
-                    .expect("Bir exit count overflow/underflow");
+                    .map_err(|_| bridge::Unsupported("use count outside u32"))?;
             }
             _ => {}
         }
+        Ok(())
     }
     fn adjust_counts(&mut self, root: NodeId, delta: i64) {
         let mut stack = std::mem::take(&mut self.count_stack);
@@ -2844,24 +2857,24 @@ mod incremental_cost_tests {
     }
 
     #[test]
-    fn hashed_payloads_preserve_float_bits_and_primitive_identity() {
+    fn hashed_payloads_preserve_float_spelling_and_primitive_identity() {
         use std::hash::{Hash, Hasher};
         let mut b = Bir::default();
-        let pos = b.intern_const(Constant::float(0.0));
-        let neg = b.intern_const(Constant::float(-0.0));
+        let pos = b.intern_float("0.").unwrap();
+        let neg = b.intern_float("-0.").unwrap();
         assert_ne!(pos, neg);
-        let nan = Constant::float(f64::from_bits(0x7ff8_0000_0000_0001));
-        assert_eq!(nan, nan.clone());
-        let id = b.intern_const(nan.clone());
-        assert_eq!(id, b.intern_const(nan.clone()));
-        assert_ne!(
-            id,
-            b.intern_const(Constant::float(f64::from_bits(0x7ff8_0000_0000_0002)))
-        );
+        let id = b.intern_float("nan").unwrap();
+        assert_eq!(id, b.intern_float("nan").unwrap());
+        assert_ne!(id, b.intern_float("NaN").unwrap());
+        let nan = b.constant(id);
+        let Constant::Float(value) = nan else {
+            panic!("not a float")
+        };
+        assert!(value.value().is_nan());
         let mut h1 = std::collections::hash_map::DefaultHasher::new();
         let mut h2 = std::collections::hash_map::DefaultHasher::new();
         nan.hash(&mut h1);
-        nan.clone().hash(&mut h2);
+        nan.hash(&mut h2);
         assert_eq!(h1.finish(), h2.finish());
         let prim = PrimPayload {
             primitive: Primitive::Paddint,
