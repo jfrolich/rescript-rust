@@ -18,6 +18,7 @@ pub(super) struct Build<'a, 'r> {
     pub debug: bool,
     pub jsx_preserve: bool,
     rest_name: std::cell::RefCell<String>,
+    chain_tasks: std::cell::RefCell<Vec<Expr>>,
     string_tasks: std::cell::RefCell<Vec<(Expr, bool)>>,
     string_values: std::cell::RefCell<Vec<Expression<'a>>>,
     pub raw_prefix: &'a str,
@@ -41,6 +42,7 @@ impl<'a, 'r> Build<'a, 'r> {
             debug: false,
             jsx_preserve: false,
             rest_name: Default::default(),
+            chain_tasks: Default::default(),
             string_tasks: Default::default(),
             string_values: Default::default(),
             source_map: None,
@@ -362,17 +364,6 @@ impl<'a, 'r> Build<'a, 'r> {
         }
         Ok(())
     }
-    // The legacy printer omits parentheses on either side of these chains.
-    fn chain(&self, op: BinOp, e: Expr, out: &mut Vec<Expr>) {
-        if let ExprKind::Bin(child, l, r) = self.arena.ek(e)
-            && child == op
-        {
-            self.chain(op, l, out);
-            self.chain(op, r, out);
-        } else {
-            out.push(e);
-        }
-    }
     fn bin(&self, op: BinOp, l: Expr, r: Expr) -> Result<Expression<'a>, Unsupported> {
         if walk::negation_form(self.arena, op, l) {
             return Ok(self.unary(U::UnaryNegation, self.expr(r)?));
@@ -385,27 +376,30 @@ impl<'a, 'r> Build<'a, 'r> {
             ));
         }
         if matches!(op, BinOp::And | BinOp::Or | BinOp::Bor) {
-            let mut operands = Vec::new();
-            self.chain(op, l, &mut operands);
-            self.chain(op, r, &mut operands);
-            let mut iter = operands.into_iter();
-            let mut expr = self.expr(iter.next().expect("two operands"))?;
-            for e in iter {
-                let right = self.expr(e)?;
-                expr = if op == BinOp::Bor {
-                    self.binary(B::BitwiseOR, expr, right)
-                } else {
-                    Expression::new_logical_expression(
-                        SPAN,
-                        expr,
-                        if op == BinOp::And { L::And } else { L::Or },
-                        right,
-                        &self.b,
-                    )
-                };
-            }
-            return Ok(expr);
+            let mut pending = self.chain_tasks.take();
+            pending.extend([r, l]);
+            let result = (|| {
+                let mut value = None;
+                while let Some(e) = pending.pop() {
+                    if let Some((l, r)) = walk::chain_children(self.arena, op, e)? {
+                        pending.extend([r, l]);
+                        continue;
+                    }
+                    let right = self.expr(e)?;
+                    value = Some(match value {
+                        None => right,
+                        Some(left) if op == BinOp::Bor => self.binary(B::BitwiseOR, left, right),
+                        Some(left) => Expression::new_logical_expression(
+                            SPAN, left, if op == BinOp::And { L::And } else { L::Or }, right, &self.b),
+                    });
+                }
+                Ok(value.expect("binary chain has operands"))
+            })();
+            pending.clear();
+            self.chain_tasks.replace(pending);
+            return result;
         }
+
         let operator = match op {
             BinOp::Eq => {
                 walk::assignment_target(self.arena, l)?;
@@ -1008,7 +1002,7 @@ impl<'a, 'r> Build<'a, 'r> {
                 // Legacy groups Fun bodies. oxc records parenthesized functions
                 // as PIFEs even with preserve_parens=false; a ParenthesizedExpression
                 // alone is ignored by codegen and does not reproduce these tokens.
-                if matches!(self.arena.ek(e), ExprKind::Fun(_)) {
+                if walk::arrow_function_body(self.arena, e) {
                     match &mut value {
                         Expression::ArrowFunctionExpression(f) => f.pife = true,
                         Expression::FunctionExpression(f) => f.pife = true,
