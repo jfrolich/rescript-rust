@@ -6,6 +6,8 @@ use crate::lambda::lam_compat::FieldDbgInfo;
 
 impl State {
     /// K: resolve_cmj_module_field_constant / compile_field_access.
+    /// O(record arity + discarded nodes + field-name bytes) for literal
+    /// projection; otherwise O(field-name bytes) and one summary lookup.
     pub(super) fn primitive_field(
         &mut self,
         idx: i32,
@@ -19,11 +21,20 @@ impl State {
             } = self.arena.view(target)
             {
                 let module_name = self.arena.pools.j_modules[module.index()].id.name();
-                let constant = self
-                    .resolver
-                    .as_ref()
-                    .and_then(|r| r.module_cmj_export_constants(module_name))
-                    .and_then(|t| t.get(name.as_str()).copied());
+                // Acquire each immutable summary once per compilation, indexed
+                // by ImportId. Fields have names but no export handles yet.
+                if matches!(self.module_constants[module.index()], ModuleConstants::Unread) {
+                    self.module_constants[module.index()] = match self.resolver.as_ref()
+                        .and_then(|r| r.module_cmj_export_constants(module_name)) {
+                        Some(table) => ModuleConstants::Present(table),
+                        None => ModuleConstants::Missing,
+                    };
+                }
+                let constant = match &self.module_constants[module.index()] {
+                    ModuleConstants::Present(table) => table.get(name.as_str()).copied(),
+                    ModuleConstants::Missing => None,
+                    ModuleConstants::Unread => unreachable!("summary acquisition completed"),
+                };
                 self.arena.release(target);
                 if let Some(constant) = constant {
                     use crate::cmi::persistent_env::CmjExportConstant as C;
@@ -107,6 +118,7 @@ impl State {
     }
 
     /// K: compile_set_field, including the pure literal receiver rule.
+    /// O(field-name bytes + discarded receiver nodes); constant shape checks.
     pub(super) fn primitive_set_field(
         &mut self,
         idx: i32,
@@ -382,6 +394,44 @@ mod dict_tests {
         lam_constant::Constant as C,
         lam_primitive::{Mutable, Primitive as P},
     };
+
+    #[test]
+    fn ten_thousand_dictionary_entries_take_linear_work() {
+        for spread in [false, true] {
+            let mut a = LamArena::new();
+            let entries: Vec<_> = (0..10_000)
+                .map(|_| {
+                    let key = a.const_(C::String("key".into()));
+                    let value = a.const_(C::JsNull);
+                    a.prim_raw(
+                        P::Pmakeblock(TagInfo::Tuple, Mutable::Immutable),
+                        &[key, value],
+                        LamLoc::NONE,
+                    )
+                })
+                .collect();
+            let array = a.prim_raw(P::Pmakearray, &entries, LamLoc::NONE);
+            let dict = a.prim_raw(P::Pmakedict, &[array], LamLoc::NONE);
+            let root = if spread {
+                a.prim_raw(P::PdictSpread, &[dict], LamLoc::NONE)
+            } else {
+                dict
+            };
+            let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+            let root = input.root;
+            let mut state = State::new(input);
+            let result = state.probe(Cx::value(), root).unwrap();
+            assert_eq!(state.source_steps, 30_002 + usize::from(spread));
+            assert_eq!(state.sequence_steps, 30_001 + usize::from(spread));
+            assert_eq!(state.primitive_steps, 50_003 + 3 * usize::from(spread));
+            let output = state.complete(Cx::value(), result);
+            output
+                .program
+                .arena
+                .validate(Some(output.program.root), false)
+                .unwrap();
+        }
+    }
 
     #[test]
     fn dict_spread_and_hash_arms_match_legacy() {

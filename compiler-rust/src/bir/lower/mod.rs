@@ -272,6 +272,13 @@ pub(crate) fn lower_with_resolver(
     unit::lower(input, locations, direct, resolver, cross_module_inline, check_div_by_zero)
 }
 
+/// One immutable summary acquisition per imported module; indexed by ImportId.
+enum ModuleConstants {
+    Unread,
+    Missing,
+    Present(std::sync::Arc<ahash::AHashMap<String, crate::cmi::persistent_env::CmjExportConstant>>),
+}
+
 struct State {
     source: Bir,
     arena: Bir,
@@ -280,6 +287,7 @@ struct State {
     free: FreePool,
     source_steps: usize,
     module_paths: Vec<bool>,
+    module_constants: Vec<ModuleConstants>,
     direct: bool,
     located_functions: Vec<bool>,
     next_order: u32,
@@ -288,6 +296,7 @@ struct State {
     check_div_by_zero: bool,
     locations: Option<crate::lambda::LamLocTable>,
     sequence_steps: usize,
+    primitive_steps: usize,
 }
 impl State {
     /// N1: C:481 new. Transfer cold pools, while source hot nodes/list operands
@@ -317,6 +326,7 @@ impl State {
             .max().unwrap_or(0).checked_add(1).expect("identifier order capacity");
         Self {
             module_paths: vec![false; input.arena.nodes.len()],
+            module_constants: (0..arena.pools.j_modules.len()).map(|_| ModuleConstants::Unread).collect(),
             source: input.arena,
             arena,
             idents: input.idents,
@@ -331,6 +341,7 @@ impl State {
             check_div_by_zero: true,
             locations: None,
             sequence_steps: 0,
+            primitive_steps: 0,
         }
     }
     /// K1: C:1529 compile_expr. Direct mode is the bounded P1 oracle: convert
@@ -363,11 +374,11 @@ impl State {
         out
     }
     /// K0: append_output drops the tail of finished output. Release its J
-    /// ownership as well as truncating its statement run.
+    /// ownership as well as truncating its statement run. O(s + released nodes)
+    /// for a discarded suffix; O(1) otherwise. No temporary statement vector.
     fn append_outputs(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         if first.finished == Finished::True {
-            let discarded: Vec<_> = self.statements.statements(second.stmts).collect();
-            for statement in discarded { self.arena.release(statement); }
+            for statement in self.statements.statements(second.stmts) { self.arena.release(statement); }
             if let Some(value) = second.value { self.arena.release(value); }
         }
         self.statements.append(first, second, value)
@@ -443,7 +454,7 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
-            View::Prim { primitive, args } => {
+            View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
                     Primitive::Psequand | Primitive::Psequor => "if",
@@ -459,7 +470,7 @@ impl ProbeRules for State {
                     Primitive::Pduprecord => "record copy",
                     Primitive::PrecordRest(_) => "record rest",
                     _ => return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim {
-                        source: node, primitive, operands: args.to_vec(),
+                        source: node, primitive, operands: self.source.node(node).primitive_arguments(),
                     }))),
                 };
                 return Err(Unsupported(reason));

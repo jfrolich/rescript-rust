@@ -35,7 +35,7 @@ impl State {
             let cont = if matches!(self.arena.primitive(prim.primitive).primitive, crate::lambda::lam_primitive::Primitive::Pdebugger) {
                 Cont::Effect(Tail::No)
             } else { Cont::Value(Tail::No) };
-            into.extend(prim.operands.iter().map(|&node| (Cx { cont, ..cx }, node)));
+            into.extend(self.source.lists.get(prim.operands).iter().map(|&node| (Cx { cont, ..cx }, node)));
             return;
         }
         if let Resume::Call(call) = resume {

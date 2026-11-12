@@ -5,6 +5,7 @@ use crate::bir::j::{norm, plain};
 use crate::js_ir::BinOp;
 use crate::lambda::lam_compat::Comparison;
 
+/// O(1): map one comparison tag without inspecting operands.
 pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
     use Comparison::*;
     match (cmp, float) {
@@ -21,9 +22,11 @@ pub(super) fn comparison_op(cmp: Comparison, float: bool) -> BinOp {
     }
 }
 impl State {
+    /// O(1): read a boolean leaf tag.
     pub(super) fn primitive_bool(&self, node: NodeId) -> Option<bool> {
         matches!(self.arena.view(node), View::JBool).then(|| self.arena.node(node).aux() != 0)
     }
+    /// O(1): borrow semantic literal text; no allocation or decoding.
     pub(super) fn primitive_string(&self, node: NodeId) -> Option<&str> {
         match self.arena.view(node) {
             View::JStr { text } => Some(self.arena.text(text)),
@@ -36,6 +39,7 @@ impl State {
             _ => None,
         }
     }
+    /// O(1): borrow interned signed digits.
     fn primitive_bigint(&self, node: NodeId) -> Option<&str> {
         if let View::JNumber { value } = self.arena.view(node) {
             if let crate::bir::Constant::BigInt(s) = self.arena.constant(value) {
@@ -44,6 +48,7 @@ impl State {
         }
         None
     }
+    /// O(released operand nodes): consume both trees and build one boolean.
     pub(super) fn comparison_constant(
         &mut self,
         left: NodeId,
@@ -55,6 +60,8 @@ impl State {
         plain::boolean(&mut self.arena, value)
     }
     /// P: compile_bool_comparison, including one-sided folds preserving effects.
+    /// O(1) shape decisions, plus discarded-node release and J-rule work.
+    /// O(1): read a boolean leaf tag.
     pub(super) fn primitive_bool_comparison(
         &mut self,
         cmp: Comparison,
@@ -100,6 +107,7 @@ impl State {
         norm::je4_bin(&mut self.arena, comparison_op(cmp, false), left, right)
     }
     /// P: compile_int_comparison; compare-call stripping consumes shells once.
+    /// O(compare-call spine length + discarded nodes), plus J-rule work.
     pub(super) fn primitive_int_comparison(
         &mut self,
         cmp: Comparison,
@@ -108,6 +116,7 @@ impl State {
     ) -> NodeId {
         use Comparison::*;
         loop {
+            self.primitive_steps += 1;
             if let (Some(l), Some(r)) = (self.primitive_int(left), self.primitive_int(right)) {
                 return self.comparison_constant(left, right, cmp.cmp_int32(l, r));
             }
@@ -172,6 +181,7 @@ impl State {
         }
     }
     /// P: compile_string_comparison / compile_bigint_comparison.
+    /// O(literal bytes + discarded nodes), otherwise the J-E4 constructor cost.
     pub(super) fn primitive_literal_comparison(
         &mut self,
         cmp: Comparison,
@@ -206,6 +216,7 @@ impl State {
         norm::je4_bin(&mut self.arena, comparison_op(cmp, false), left, right)
     }
     /// P: compile_object_comparison. Only nullish equality bypasses the runtime.
+    /// O(1) shape decisions, then J-M2 or runtime-constructor work.
     pub(super) fn primitive_object_comparison(
         &mut self,
         cmp: Comparison,
@@ -230,8 +241,35 @@ impl State {
         };
         self.primitive_runtime("Primitive_object", member, &[left, right])
     }
+    /// O(1): copy a literal leaf using existing payload handles, preserving cold
+    /// decoration. No generic subtree copier, hash table or variable-use repair.
+    fn primitive_literal_copy(&mut self, node: NodeId) -> NodeId {
+        let view = match self.arena.view(node) {
+            View::JNumber { value } => View::JNumber { value },
+            View::JBool => View::JBool,
+            View::JStr { text } => View::JStr { text },
+            View::JTemplate { info, values: [] } => View::JTemplate { info, values: &[] },
+            _ => unreachable!("min/max only duplicates literal leaves"),
+        };
+        let aux = self.arena.node(node).aux();
+        let copy = plain::node(&mut self.arena, view, aux);
+        if let Some(cold) = self.arena.cold(node) {
+            self.arena.set_cold(copy, cold);
+        }
+        if let Some(code) = self.arena.node(node).js_char() {
+            self.arena.nodes[copy.index()].set_js_char(code);
+        }
+        if self.arena.node(node).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT) {
+            let mut flags = self.arena.node(copy).flags();
+            flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+            self.arena.nodes[copy.index()].set_flags(flags);
+        }
+        copy
+    }
+
     /// P: compile_typed_min_max. Only literal leaves are copied for the test;
     /// operands that may execute code use a runtime call instead.
+    /// O(1) leaf tests/copies, then J-E4/J-E7 or runtime-constructor work.
     pub(super) fn primitive_min_max(
         &mut self,
         kind: &str,
@@ -249,8 +287,8 @@ impl State {
             _ => unreachable!("comparison type"),
         };
         if literals {
-            let l = self.arena.copy_subtree(left, &[]);
-            let r = self.arena.copy_subtree(right, &[]);
+            let l = self.primitive_literal_copy(left);
+            let r = self.primitive_literal_copy(right);
             let op = comparison_op(
                 if max { Comparison::Gt } else { Comparison::Lt },
                 kind != "bigint",
@@ -259,7 +297,15 @@ impl State {
             norm::je7_cond(&mut self.arena, test, left, right)
         } else {
             self.primitive_runtime(
-                &format!("Primitive_{kind}"),
+                match kind {
+                    "bool" => "Primitive_bool",
+                    "int" => "Primitive_int",
+                    "float" => "Primitive_float",
+                    "bigint" => "Primitive_bigint",
+                    "string" => "Primitive_string",
+                    "object" => "Primitive_object",
+                    _ => unreachable!("comparison type"),
+                },
                 if max { "max" } else { "min" },
                 &[left, right],
             )
@@ -314,6 +360,39 @@ mod tests {
                 elements: vec![C::JsTrue],
             },
         ]
+    }
+
+    #[test]
+    fn ten_thousand_compare_shells_are_consumed_once() {
+        let mut a = LamArena::new();
+        let mut root = a.var(Ident::new("left", 10, crate::ident::IdentFlags::NONE));
+        for _ in 0..10_000 {
+            let zero = a.const_(C::Int {
+                i: 0,
+                comment: None,
+            });
+            root = a.prim_raw(P::Pintorder, &[root, zero], LamLoc::NONE);
+        }
+        let zero = a.const_(C::Int {
+            i: 0,
+            comment: None,
+        });
+        let root = a.prim_raw(P::Pintcomp(Comparison::Lt), &[root, zero], LamLoc::NONE);
+        let input = crate::bir::bridge::import_lambda(&a, root).unwrap();
+        let root = input.root;
+        let mut state = State::new(input);
+        let result = state.probe(Cx::value(), root).unwrap();
+        assert_eq!(state.source_steps, 20_003);
+        assert_eq!(state.sequence_steps, 20_002);
+        // Three units per two-operand primitive, and one per stripped shell
+        // plus the final comparison iteration: four per nested compare.
+        assert_eq!(state.primitive_steps, 40_004);
+        let output = state.complete(Cx::value(), result);
+        output
+            .program
+            .arena
+            .validate(Some(output.program.root), false)
+            .unwrap();
     }
 
     #[test]

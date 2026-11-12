@@ -9,10 +9,11 @@ use crate::lambda::lam_primitive::Primitive;
 pub(super) struct Prim {
     pub primitive: PrimId,
     pub source: NodeId,
-    pub operands: Vec<NodeId>,
+    pub operands: crate::bir::ListId,
 }
 
 impl State {
+    /// O(1): inspect a numeric leaf and its interned constant.
     pub(super) fn primitive_int(&self, node: NodeId) -> Option<i32> {
         if let View::JNumber { value } = self.arena.view(node) {
             match self.arena.constant(value) {
@@ -27,6 +28,8 @@ impl State {
 
     /// C: runtime_call_expr / X: pure_runtime_call_expr. Runtime imports retain
     /// encounter order; purity annotations are comments, not purity facts.
+    /// O(r + a + text bytes), with r runtime modules (bounded by the primitive
+    /// runtime inventory) and a operands; no expression subtree is walked.
     pub(super) fn primitive_runtime(
         &mut self,
         name: &str,
@@ -69,6 +72,7 @@ impl State {
     }
 
     /// P: compile_primitive_js / compile_debugger source locations on statements.
+    /// O(1): one location lookup and one statement push.
     fn primitive_statement(&mut self, statement: NodeId, loc: crate::lambda::LamLoc) {
         if self
             .locations
@@ -85,7 +89,10 @@ impl State {
         self.statements.push(statement);
     }
 
-    /// P: compile_primitive_js, length arms. J-E2 owns literal folding.
+    /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
+    /// holds and the named J-rule costs. Arguments are decoded once; dictionary
+    /// extraction visits each immediate entry once. Payload cloning copies cold
+    /// tag/template data, not expression trees.
     pub(super) fn finish_primitive(
         &mut self,
         cx: Cx,
@@ -99,12 +106,13 @@ impl State {
             })
             .collect();
         let (statements, values) = self.sequence_arguments(false, outputs);
+        self.primitive_steps += values.len() + 1;
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
         // P: compile_flat_make_field. Cache module-path membership per source
         // occurrence, so a deep chain is inspected once, not walked per field.
         if let Primitive::Pfield(_, crate::lambda::FieldDbgInfo::Module { name }) = &primitive {
-            if let [arg] = prim.operands.as_slice() {
+            if let [arg] = self.source.lists.get(prim.operands) {
                 let nested = self.module_paths[arg.index()];
                 if nested && name.as_str() == "make" {
                     return Err(Unsupported("flat make"));
@@ -123,6 +131,7 @@ impl State {
                             items
                                 .iter()
                                 .filter_map(|&item| {
+                                    self.primitive_steps += 1;
                                     if let View::JBlockLit {
                                         values: [key, value],
                                         ..
@@ -171,6 +180,7 @@ impl State {
                 let mut keys = Vec::new();
                 let mut kept = Vec::new();
                 for arg in values {
+                    self.primitive_steps += 1;
                     let entries = if let View::JObject { info, values } = self.arena.view(arg) {
                         let crate::bir::JsPayload::Object(props) = self.arena.javascript(info)
                         else {
@@ -342,7 +352,7 @@ impl State {
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments, values)
+                norm::jm12_interpolated_template(&mut self.arena, segments, values.into_vec())
             }
             Primitive::PtaggedTemplate(segments) => {
                 let parts = segments
@@ -739,6 +749,7 @@ impl State {
     }
 
     /// C: declare_compiled, assign_compiled, return_compiled: conv after sequencing.
+    /// O(s) to inspect the s statement slots, then O(1) conversion.
     fn primitive_result(&mut self, cx: Cx, statements: Span, value: NodeId) -> Probed {
         if !self.statements.has_statements(statements) {
             self.statements.remove_empty(statements);
@@ -760,6 +771,13 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant};
+
+    #[test]
+    fn primitive_resume_is_three_handles() {
+        assert_eq!(std::mem::size_of::<Prim>(), 12);
+        assert_eq!(std::mem::size_of::<ModuleConstants>(), 16);
+        assert_eq!(std::mem::size_of::<crate::bir::ListId>(), 4);
+    }
 
     #[test]
     fn option_arms_match_legacy() {
