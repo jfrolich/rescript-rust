@@ -11,7 +11,7 @@ impl State {
     pub(super) fn primitive_field(
         &mut self,
         idx: i32,
-        info: FieldDbgInfo,
+        info: &FieldDbgInfo,
         target: NodeId,
     ) -> NodeId {
         if let FieldDbgInfo::Module { name } = info {
