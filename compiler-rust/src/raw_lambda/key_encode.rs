@@ -1,55 +1,95 @@
 //! Exact key encoding for `Lambda.make_key` (`compiler/ml/lambda.ml:432-466`).
 //!
 //! OCaml compares normalized terms with structural equality. Rust writes
-//! each normalized term as a string, and two terms are equal when their
-//! strings are. Payloads (constants, primitives, apply and switch metadata)
-//! are written with [`KeyEncode`], a self-delimiting encoding: integers end
-//! in `;`, strings are length-prefixed, enums write their variant index and
-//! then their fields, `Option`s are tagged and sequences counted. A
-//! concatenation of self-delimiting codes is injective, so two payloads
-//! encode equally exactly when they are equal. None of these types holds a
-//! float, so that is also exactly when their derived `Debug` text, which the
-//! keys used before, is equal. A type with a hand-written `Debug` keeps that
-//! text, length-prefixed, so its equality classes do not change.
+//! each normalized term as a byte string, its key, and two terms are equal
+//! when their keys are. A key is compared through its 64-bit hash first
+//! ([`key_hash`]); the bytes are compared only when the hashes are equal, so
+//! a hash collision costs a comparison and never changes an answer.
+//!
+//! Payloads (constants, primitives, apply and switch metadata) are written
+//! with [`KeyEncode`], a self-delimiting encoding: integers are
+//! variable-length with a continuation bit, strings are length-prefixed,
+//! enums write their variant index and then their fields, `Option`s are
+//! tagged and sequences counted. A concatenation of self-delimiting codes
+//! is injective, so two payloads encode equally exactly when they are
+//! equal. None of these types holds a float, so that is also exactly when
+//! their derived `Debug` text, which the keys used at first, is equal. A
+//! type with a hand-written `Debug` keeps that text, length-prefixed, so its
+//! equality classes do not change.
 //!
 //! The `impl`s below follow the type definitions field by field and match
 //! every variant, so a new field or variant is a compile error here.
+//!
+//! Cost: writing a key is one pass over the term, O(bytes written), with no
+//! formatting and no allocation while the key fits [`KeyBuf`] inline.
+
+use std::hash::BuildHasher;
+
+/// Key bytes; most keys fit inline.
+pub(super) type KeyBuf = smallvec::SmallVec<[u8; 120]>;
+
+/// The hash keys are compared by first. O(key length), computed once per
+/// key. Only equality of hashes is ever observed, and equal hashes are
+/// confirmed on the bytes, so the function can change without changing
+/// output.
+pub(super) fn key_hash(key: &[u8]) -> u64 {
+    count_steps(key.len());
+    crate::fast_hash::FastState.hash_one(key)
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Key bytes written, hashed and compared on this thread.
+    pub(super) static KEY_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Counts `n` key bytes of work, for the tests that pin the cost of action
+/// sharing. Compiles to nothing outside tests.
+#[inline(always)]
+pub(super) fn count_steps(n: usize) {
+    #[cfg(test)]
+    KEY_STEPS.with(|steps| steps.set(steps.get() + n as u64));
+    #[cfg(not(test))]
+    let _ = n;
+}
 
 /// Sink for `MakeKeyWriter`: builds the key, or compares it with an
 /// expected key as it is written.
 pub(super) struct KeyOut<'e> {
-    pub(super) buf: String,
-    expect: Option<&'e str>,
+    pub(super) buf: KeyBuf,
+    expect: Option<&'e [u8]>,
     pos: usize,
     pub(super) diverged: bool,
 }
 
 impl<'e> KeyOut<'e> {
-    pub(super) fn new(capacity: usize) -> Self {
+    pub(super) fn new() -> Self {
         KeyOut {
-            buf: String::with_capacity(capacity),
+            buf: KeyBuf::new(),
             expect: None,
             pos: 0,
             diverged: false,
         }
     }
 
-    pub(super) fn expecting(key: &'e str) -> Self {
+    /// A sink that compares what is written with `key` and records the
+    /// first difference in `diverged`; nothing is stored.
+    pub(super) fn expecting(key: &'e [u8]) -> Self {
         KeyOut {
-            buf: String::new(),
+            buf: KeyBuf::new(),
             expect: Some(key),
             pos: 0,
             diverged: false,
         }
     }
 
-    pub(super) fn push_str(&mut self, s: &str) {
+    /// Raw bytes. Callers keep the whole key self-delimiting.
+    pub(super) fn bytes(&mut self, s: &[u8]) {
+        count_steps(s.len());
         match self.expect {
-            None => self.buf.push_str(s),
+            None => self.buf.extend_from_slice(s),
             Some(key) => {
-                if !self.diverged
-                    && key.as_bytes().get(self.pos..self.pos + s.len()) == Some(s.as_bytes())
-                {
+                if !self.diverged && key.get(self.pos..self.pos + s.len()) == Some(s) {
                     self.pos += s.len();
                 } else {
                     self.diverged = true;
@@ -58,33 +98,53 @@ impl<'e> KeyOut<'e> {
         }
     }
 
+    /// One byte: a node tag, a flag or an `Option` marker.
+    #[inline]
+    pub(super) fn byte(&mut self, b: u8) {
+        count_steps(1);
+        match self.expect {
+            None => self.buf.push(b),
+            Some(key) => {
+                if !self.diverged && key.get(self.pos) == Some(&b) {
+                    self.pos += 1;
+                } else {
+                    self.diverged = true;
+                }
+            }
+        }
+    }
+
     pub(super) fn push(&mut self, c: char) {
-        self.push_str(c.encode_utf8(&mut [0; 4]));
+        debug_assert!(c.is_ascii());
+        self.byte(c as u8);
     }
 
     pub(super) fn matches_all(&self) -> bool {
         !self.diverged && self.expect.is_some_and(|key| key.len() == self.pos)
     }
 
-    /// A signed integer in decimal, ended by `;`.
+    /// A signed integer: zigzag, then seven bits per byte, low bits first,
+    /// the high bit set on every byte but the last. No code is a prefix of
+    /// another, so an integer needs no terminator.
     pub(super) fn int(&mut self, value: i128) {
-        let mut buf = [0u8; 41];
-        let mut i = buf.len() - 1;
-        buf[i] = b';';
-        let mut n = value.unsigned_abs();
+        let mut n = ((value << 1) ^ (value >> 127)) as u128;
+        if n < 0x80 {
+            return self.byte(n as u8);
+        }
+        let mut buf = [0u8; 19];
+        let mut len = 0;
         loop {
-            i -= 1;
-            buf[i] = b'0' + (n % 10) as u8;
-            n /= 10;
+            let low = (n & 0x7f) as u8;
+            n >>= 7;
             if n == 0 {
+                buf[len] = low;
+                len += 1;
                 break;
             }
+            buf[len] = low | 0x80;
+            len += 1;
         }
-        if value < 0 {
-            i -= 1;
-            buf[i] = b'-';
-        }
-        self.push_str(std::str::from_utf8(&buf[i..]).expect("ASCII digits"));
+        self.bytes(&buf[..len]);
     }
 
     /// An enum variant index.
@@ -95,23 +155,12 @@ impl<'e> KeyOut<'e> {
     /// A string, prefixed by its byte length.
     pub(super) fn str(&mut self, s: &str) {
         self.int(s.len() as i128);
-        self.push_str(s);
+        self.bytes(s.as_bytes());
     }
 
     /// A value whose `Debug` impl is hand-written, by its `Debug` text.
     pub(super) fn debug(&mut self, value: &impl std::fmt::Debug) {
         self.str(&format!("{value:?}"));
-    }
-}
-
-impl std::fmt::Write for KeyOut<'_> {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        self.push_str(s);
-        if self.diverged {
-            Err(std::fmt::Error)
-        } else {
-            Ok(())
-        }
     }
 }
 
@@ -1059,10 +1108,10 @@ mod tests {
     use crate::lambda::lam_primitive::{Mutable, Primitive};
     use crate::lambda::lam_tag_info::TagInfo;
 
-    fn key(value: &impl KeyEncode) -> String {
-        let mut out = KeyOut::new(16);
+    fn key(value: &impl KeyEncode) -> Vec<u8> {
+        let mut out = KeyOut::new();
         value.encode(&mut out);
-        out.buf
+        out.buf.to_vec()
     }
 
     #[test]
@@ -1076,7 +1125,7 @@ mod tests {
             vec!["1;a".to_string()],
             vec!["1".to_string(), "a".to_string()],
         ];
-        let keys: Vec<String> = strings.iter().map(key).collect();
+        let keys: Vec<Vec<u8>> = strings.iter().map(key).collect();
         for (i, a) in keys.iter().enumerate() {
             for b in &keys[i + 1..] {
                 assert_ne!(a, b);
@@ -1085,7 +1134,35 @@ mod tests {
         assert_ne!(key(&None::<String>), key(&Some(String::new())));
         assert_ne!(key(&(-1i32)), key(&1i32));
         assert_ne!(key(&(12i32, 3i32)), key(&(1i32, 23i32)));
-        assert_eq!(key(&i64::MIN), format!("{};", i64::MIN));
+        // No integer code is a prefix of another, across every length.
+        let ints: Vec<i128> = [0i128, 1, 63, 64, 127, 128, 8191, 8192, 1 << 40]
+            .into_iter()
+            .flat_map(|n| [n, -n, -n - 1])
+            .chain([i64::MIN.into(), i64::MAX.into(), u64::MAX.into()])
+            .chain([i128::MIN, i128::MAX])
+            .collect();
+        let codes: Vec<Vec<u8>> = ints
+            .iter()
+            .map(|n| {
+                let mut out = KeyOut::new();
+                out.int(*n);
+                out.buf.to_vec()
+            })
+            .collect();
+        for (i, a) in codes.iter().enumerate() {
+            for (j, b) in codes.iter().enumerate() {
+                assert_eq!(
+                    b.starts_with(a),
+                    ints[i] == ints[j],
+                    "{} vs {}",
+                    ints[i],
+                    ints[j]
+                );
+            }
+        }
+        assert_eq!(key(&0i32), [0]);
+        assert_eq!(key(&-1i32), [1]);
+        assert_eq!(key(&64i32), [0x80, 0x01]);
     }
 
     /// Equal keys exactly when the derived `Debug` texts, which `make_key`
