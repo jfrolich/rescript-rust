@@ -120,3 +120,11 @@ fn committed_regressions() {
         options,
     );
 }
+
+#[test]
+fn indentation_is_two_spaces_and_a_fixed_point() {
+    let options = js_reformat::ReformatOptions::default();
+    let output = js_reformat::reformat("function f() { return 1; }", options).unwrap();
+    assert_eq!(output, "function f() {\n  return 1;\n}\n");
+    assert_eq!(js_reformat::reformat(&output, options).unwrap(), output);
+}

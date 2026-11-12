@@ -17,11 +17,10 @@
     }
   },
   "tests/tests": {
-    "emitted": 705,
-    "outputs": 711,
+    "emitted": 714,
+    "outputs": 716,
     "unsupported": {
-      "JSX preserve mode": 4,
-      "numeric static member": 1,
+      "JSX sequence container": 1,
       "raw literal expression statement elision": 1
     }
   }
