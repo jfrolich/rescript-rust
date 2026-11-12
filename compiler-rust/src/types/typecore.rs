@@ -8360,6 +8360,22 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_let(inner) => {
             let (ref rec_flag, ref bindings, ref body_idx) = *inner;
+            let arena = tctx.arena;
+            if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *rec_flag, *bindings) {
+                let case = crate::parser::ast::Case {
+                    pc_bar: None,
+                    pc_lhs: binding.pvb_pat,
+                    pc_guard: None,
+                    pc_rhs: *body_idx,
+                };
+                return crate::types::typemod::with_warning_scope(
+                    tctx, arena, &binding.pvb_attributes, true, |tctx| {
+                        type_match(tctx, env, loc, &expr.pexp_attributes,
+                            &binding.pvb_attributes, arena.get_expanded_expr(binding.pvb_expr),
+                            std::slice::from_ref(&case), expected_ty, match_context)
+                    },
+                );
+            }
             // typecore.ml:2648-2673: a non-recursive let of one binding
             // without a type constraint whose pattern contains a GADT
             // constructor is typed as a one-case match, without the caller's
@@ -8818,7 +8834,9 @@ fn type_expect_with_recarg_unscoped<'a>(
             type_match(
                 tctx,
                 env,
-                expr,
+                expr.pexp_loc,
+                &expr.pexp_attributes,
+                &[],
                 scrutinee,
                 tctx.arena.case_list(*cases),
                 expected_ty,
@@ -11593,14 +11611,14 @@ fn type_conditional(
 fn type_match(
     tctx: &mut TypeCheckContext<'_>,
     env: &Env,
-    sexp: &ParsedExpression,
+    loc: LocIdx,
+    attributes: &[crate::parser::ast::Attribute],
+    binding_attributes: &[crate::parser::ast::Attribute],
     scrutinee: &ParsedExpression,
     cases: &[crate::parser::ast::Case],
     expected_ty: TypeExprRef,
     match_context: Option<MatchContext>,
 ) -> TypeCoreResult<Expression> {
-    let loc = sexp.pexp_loc;
-    let attributes: &[crate::parser::ast::Attribute] = &sexp.pexp_attributes;
     let ctx = tctx.type_ctx;
     // typecore.ml:2855-2864: a match the type checker synthesized says what it
     // stands for; otherwise only the parsed `let?` is marked, by
@@ -11610,6 +11628,7 @@ fn type_match(
         None => {
             if attributes
                 .iter()
+                .chain(binding_attributes)
                 .any(|attr| tctx.arena.get_string(attr.0.txt) == "let.unwrap")
             {
                 Some(ClashSite::LetUnwrapReturn)
@@ -11917,7 +11936,7 @@ fn type_match(
             tctx.type_ctx.store_typed_env(env),
         );
         tctx.typed
-            .with_exp_attributes(typed_node, attributes.to_vec().into())
+            .with_exp_attributes(typed_node, attributes.iter().chain(binding_attributes).cloned().collect::<Vec<_>>().into())
     })
 }
 

@@ -1344,6 +1344,17 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
                     self.attributes(arena, expr.pexp_attributes.as_slice());
                 }
             }
+            ExpressionDesc::Pexp_let((flag, bindings, body)) => {
+                if let Some(binding) = crate::parser::parsetree_viewer::single_record_binding(arena, *flag, *bindings) {
+                    self.attributes(arena, expr.pexp_attributes.as_slice());
+                    self.attributes(arena, binding.pvb_attributes.as_slice());
+                    self.expr(arena, binding.pvb_expr);
+                    self.pat(arena, binding.pvb_pat);
+                    self.expr(arena, *body);
+                } else {
+                    super::ast_iter::walk_expr(self, arena, idx);
+                }
+            }
             ExpressionDesc::Pexp_match((scrutinee, cases)) => {
                 if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(arena, *cases) {
                     // The old conditional expansion discarded the patterns and
@@ -7310,7 +7321,7 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
             let (rec_flag, bindings, body) = *inner;
             if rec_flag == RecFlag::Nonrecursive
                 && bindings.len() == 1
-                && rewrite_single_binding_let(idx, bindings, body, arena)
+                && rewrite_unwrap_binding_let(idx, bindings, body, arena)
             {
                 return;
             }
@@ -7704,13 +7715,12 @@ fn rewrite_expr_list(list: ExprList, arena: &mut ParseArena) {
 /// Cost: constant.
 /// The rewrites of `let pattern = e; body` with one non-recursive binding
 /// (bs_builtin_ppx.ml lines 295-319): a supported `let?` is a match with an
-/// early-return case and a continuation case, and a record or dictionary
-/// pattern is a one-case match. Returns false, having done nothing, for any
-/// other binding.
+/// early-return case and a continuation case. Returns false, having done
+/// nothing, for any other binding.
 ///
 /// Cost: constant beside the visits of the binding's pattern, expression
 /// and body.
-fn rewrite_single_binding_let(
+fn rewrite_unwrap_binding_let(
     idx: ExprIdx,
     bindings: VbList,
     body: ExprIdx,
@@ -7809,39 +7819,7 @@ fn rewrite_single_binding_let(
         arena.set_expansion(idx, unwrapped);
         return true;
     }
-    let is_record_pat = match &arena.get_pat(vb_pat).ppat_desc {
-        PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_) => true,
-        PatternDesc::Ppat_alias(inner, _) => {
-            matches!(
-                &arena.get_pat(*inner).ppat_desc,
-                PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_)
-            )
-        }
-        _ => false,
-    };
-    if !is_record_pat {
-        return false;
-    }
-    // The attributes of the expression, then those of the binding.
-    let mut attrs = arena.get_expr(idx).pexp_attributes.clone();
-    attrs.extend(arena.vb_list(bindings)[0].pvb_attributes.iter().cloned());
-    rewrite_expr(vb_expr, arena);
-    let pat = rewrite_pat_idx(vb_pat, arena);
-    rewrite_expr(body, arena);
-    let attrs = rewrite_attributes(&attrs, arena);
-    let case = Case {
-        pc_bar: None,
-        pc_lhs: pat,
-        pc_guard: None,
-        pc_rhs: body,
-    };
-    let expanded = Expression {
-        pexp_desc: ExpressionDesc::Pexp_match((vb_expr, arena.push_case_list(&[case]))),
-        pexp_loc: loc,
-        pexp_attributes: attrs.into(),
-    };
-    expand(arena, idx, expanded);
-    true
+    false
 }
 
 /// The built-in rewrites of a function: `@this` makes a method callback, an
@@ -11501,6 +11479,15 @@ let e = () =>
         assert_eq!(arena.expanded(root), root);
         assert_eq!(arena.expanded(items[1]), items[1]);
         assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_record_lets_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"{let {a} = b; a}, ".repeat(10_000));
+        source.push_str("]\n");
+        // Array, and per element: braces, let, record pattern and variable.
+        assert_eq!(mapper_cost(&source), (40_001, 0));
     }
 
     #[test]

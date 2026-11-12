@@ -1225,3 +1225,27 @@ pub(crate) fn boolean_match_arms(arena: &ParseArena, cases: crate::parse_arena::
     }
 }
 
+/// The local binding typed as one match case by the built-in record rule.
+/// Cost: one binding and at most two pattern reads, plus one read per RHS
+/// brace (the existing `unwrap_braces` walk); no allocation or stored state.
+pub(crate) fn single_record_binding(
+    arena: &ParseArena,
+    flag: RecFlag,
+    bindings: crate::parse_arena::VbList,
+) -> Option<&ValueBinding> {
+    if flag != RecFlag::Nonrecursive {
+        return None;
+    }
+    let [binding] = arena.vb_list(bindings) else { return None; };
+    let pattern = match &arena.get_pat(binding.pvb_pat).ppat_desc {
+        PatternDesc::Ppat_alias(inner, _) => &arena.get_pat(*inner).ppat_desc,
+        pattern => pattern,
+    };
+    if !matches!(pattern, PatternDesc::Ppat_record(..) | PatternDesc::Ppat_dict(_))
+        || matches!(unwrap_braces(arena, arena.get_expr(binding.pvb_expr)).pexp_desc,
+            ExpressionDesc::Pexp_pack(_))
+    {
+        return None;
+    }
+    Some(binding)
+}
