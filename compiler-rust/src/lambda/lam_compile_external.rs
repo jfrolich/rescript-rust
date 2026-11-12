@@ -9,7 +9,7 @@ use super::js_exp_make::{
     runtime_member_for_eta_wrapped_primitive, string_switch_iife,
 };
 use super::lam_compile::{ExternalModuleCacheKey, LambdaCompiler};
-use super::lam_compile_arguments::HeldArgs;
+use super::lam_compile_arguments::{HeldArgs, delay_safe, is_okay_to_duplicate};
 use crate::ident::Ident;
 use crate::js_ir::arena::{Block, Expr, ExprKind, JsArena, JsxInfo, PropName, VarDecl};
 use crate::js_ir::build::{exp as JE, expression_has_no_side_effects, stmt as JS};
@@ -166,20 +166,30 @@ pub(crate) fn js_id_name_of_hint_name(module_name: &str) -> String {
     }
 }
 
+/// lam_compile_external_obj.ml `presence_unknown`: whether
+/// `compile_js_object_create` assigns the optional argument `arg` after the
+/// object literal, since it is neither statically `None` nor `Some`
+/// (`Js_of_lam_option.destruct_optional`).
+fn presence_unknown(j: &JsArena, arg: Expr) -> bool {
+    !matches!(
+        j.ek(arg),
+        ExprKind::Undefined { .. } | ExprKind::OptionalBlock(..)
+    )
+}
+
 impl LambdaCompiler {
     pub(crate) fn external_optional_to_undefined_expr(&mut self, arg: Expr) -> Expr {
         match self.j.ek(arg) {
             ExprKind::Undefined { .. } => JE::undefined(false, &mut self.j),
             ExprKind::OptionalBlock(inner, _) => inner,
-            _ if expression_has_no_side_effects(&self.j, arg) => {
+            _ if is_okay_to_duplicate(&self.j, arg, false) => {
                 let test = self.is_not_none_expr(arg);
                 let value = self.val_from_option_expr(arg);
                 let undefined = JE::undefined(false, &mut self.j);
                 JE::cond(test, value, undefined, &mut self.j)
             }
-            // `Js_of_lam_option.get_default_undefined_from_optional`: a
-            // non-duplicable option is already represented so that the
-            // ordinary option unboxer yields `undefined` for `None`.
+            // `Js_of_lam_option.get_default_undefined_from_optional`:
+            // `valFromOption` returns `undefined` for `None` as well.
             _ => self.runtime_call_expr("Primitive_option", "valFromOption", vec![arg]),
         }
     }
@@ -257,32 +267,77 @@ impl LambdaCompiler {
 
     /// lam_compile_external_obj.ml `hold_obj_args`: `hold_external_arg` for
     /// the compiled arguments of an object-creating external, paired with
-    /// the labels as in `compile_js_object_create`.
+    /// the labels as in `compile_js_object_create`. That function assigns an
+    /// optional argument whose presence is not known after the object
+    /// literal, so it evaluates the argument after the arguments that follow
+    /// it. Unless that gives the same values and effects, the argument is
+    /// bound to a temporary after its statements, which keeps it in its
+    /// place. It does when the argument is `delay_safe`, and when each
+    /// argument that the literal evaluates after it is `delay_safe` or
+    /// neither of the two has side effects.
     pub(crate) fn hold_external_obj_args(
         &mut self,
         obj_params: &[ObjParam],
         args: HeldArgs,
     ) -> HeldArgs {
-        let mut args = args.into_iter();
+        // The parameters that take an argument, paired with it.
+        let params: smallvec::SmallVec<[&ObjParam; 4]> = obj_params
+            .iter()
+            .filter(|param| {
+                !matches!(
+                    (&param.obj_arg_label, &param.obj_arg_type),
+                    (Label::ObjLabel { .. } | Label::ObjEmpty, Attr::ArgCst(_))
+                )
+            })
+            .collect();
+        // The values `compile_js_object_create` evaluates in the object
+        // literal or before it: all but the optional ones whose presence is
+        // not known (lam_compile_external_obj.ml `literal_args`).
+        let in_literal: smallvec::SmallVec<[bool; 4]> = params
+            .iter()
+            .zip(&args)
+            .map(|(param, (_, value))| {
+                !matches!(param.obj_arg_label, Label::ObjOptional { .. })
+                    || !presence_unknown(&self.j, *value)
+            })
+            .collect();
+        let values: smallvec::SmallVec<[Expr; 4]> = args.iter().map(|(_, value)| *value).collect();
         let mut held = HeldArgs::with_capacity(args.len());
-        for param in obj_params {
+        for (i, arg) in args.into_iter().enumerate() {
+            let Some(param) = params.get(i) else {
+                held.push(arg);
+                continue;
+            };
             let arg_label = match &param.obj_arg_label {
-                Label::ObjLabel { .. } | Label::ObjEmpty
-                    if matches!(param.obj_arg_type, Attr::ArgCst(_)) =>
-                {
+                Label::ObjEmpty => {
+                    held.push(arg);
                     continue;
                 }
-                Label::ObjEmpty => None,
-                Label::ObjLabel { .. } => Some(LabelNoname::ArgLabel),
-                Label::ObjOptional { .. } => Some(LabelNoname::ArgOptional),
+                Label::ObjLabel { .. } => LabelNoname::ArgLabel,
+                Label::ObjOptional { .. } => LabelNoname::ArgOptional,
             };
-            let Some(arg) = args.next() else { break };
-            held.push(match arg_label {
-                Some(label) => self.hold_external_arg(label, &param.obj_arg_type, arg),
-                None => arg,
-            });
+            let (mut block, value) = self.hold_external_arg(arg_label, &param.obj_arg_type, arg);
+            let order_matters = |later: Expr| {
+                !(delay_safe(&self.j, &self.assignable, later)
+                    || js_expr_no_side_effects(&self.j, value)
+                        && js_expr_no_side_effects(&self.j, later))
+            };
+            if matches!(arg_label, LabelNoname::ArgOptional)
+                && presence_unknown(&self.j, value)
+                && !delay_safe(&self.j, &self.assignable, value)
+                && (i + 1..values.len()).any(|k| in_literal[k] && order_matters(values[k]))
+            {
+                let tmp = self.fresh_tmp_ident();
+                block.push(super::lam_compile_arguments::define_strict_variable(
+                    tmp,
+                    value,
+                    &mut self.j,
+                ));
+                held.push((block, JE::var(tmp, &mut self.j)));
+            } else {
+                held.push((block, value));
+            }
         }
-        held.extend(args);
         held
     }
 
@@ -1032,7 +1087,10 @@ impl LambdaCompiler {
         ));
 
         for pending in optional_assignments {
-            let prepared = if self.expr_is_simple(pending.arg) {
+            // `arg` is read for its presence and for its value, so it is
+            // bound to a temporary unless reading it twice gives the same
+            // value twice.
+            let prepared = if is_okay_to_duplicate(&self.j, pending.arg, false) {
                 pending.arg
             } else {
                 let tmp = self.fresh_tmp_ident();
@@ -1077,18 +1135,6 @@ impl LambdaCompiler {
         }
 
         JE::var(obj, &mut self.j)
-    }
-
-    pub(crate) fn expr_is_simple(&self, expr: Expr) -> bool {
-        matches!(
-            self.j.ek(expr),
-            ExprKind::Var(_)
-                | ExprKind::Undefined { .. }
-                | ExprKind::Null
-                | ExprKind::Bool(_)
-                | ExprKind::Number(_)
-                | ExprKind::Str(_)
-        )
     }
 
     /// `Lam_compile_external_call.jsx_callee`: the function a JSX external

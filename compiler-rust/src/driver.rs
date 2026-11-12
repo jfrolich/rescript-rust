@@ -629,6 +629,10 @@ fn place_location_free_warnings(
 /// Compiler options that can be passed to the driver.
 #[derive(Clone)]
 pub struct CompilerOptions {
+    /// Dormant backend migration mode, selected before compiling modules.
+    pub backend: crate::bir::shadow::BackendMode,
+    /// Experimental JavaScript printer, selected once when options are created.
+    pub js_printer: crate::emit::PrinterMode,
     /// Stop after typing and publish the interface without generating code.
     pub check_only: bool,
     /// Print the Lambda IR to stderr (like OCaml's -drawlambda)
@@ -871,6 +875,8 @@ fn parse_diagnostics_report(parser: &Parser<'_>, source: &str, filename: &str) -
 impl Default for CompilerOptions {
     fn default() -> Self {
         Self {
+            backend: crate::bir::shadow::BackendMode::from_env(),
+            js_printer: crate::emit::PrinterMode::from_env(),
             check_only: false,
             dump_lambda: false,
             dump_typed_sexp: false,
@@ -6982,6 +6988,10 @@ fn compile_source_to_js_with_options_inner(
         &export_idents,
     );
 
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+    }
+
     #[cfg(test)]
     if let Some(trace) = discriminator_trace.as_deref_mut() {
         trace.lowered_lambda = format!("{:#?}", lowered_arena.export(lowered_root));
@@ -9770,6 +9780,18 @@ fn render_js_program(
         debug,
         jsx_preserve,
     } = settings;
+    if let crate::emit::PrinterMode::Oxc(stats) = &options.js_printer {
+        let result = if options.source_map != crate::js_ir::source_map::SourceMapMode::None {
+            Err(crate::emit::Unsupported("source maps (S1.2)"))
+        } else {
+            crate::emit::emit(program, resolver, file_directives, debug, jsx_preserve, !options.no_version_header)
+        };
+        stats.record(&result);
+        match result {
+            Ok(output) => return output,
+            Err(reason) => log::debug!("oxc printer fallback: {}", reason.0),
+        }
+    }
     let source_path = options.source_filename.as_deref().map(FsPath::new);
     let source_map_target = output_path.map(FsPath::to_path_buf).or_else(|| {
         (options.source_map == crate::js_ir::source_map::SourceMapMode::Inline).then(|| {
@@ -10970,6 +10992,9 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             &export_idents,
         )
     });
+    if options.backend != crate::bir::shadow::BackendMode::Legacy {
+        crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+    }
     let lowered_lambda = crate::lambda::arena::LamProgram {
         arena: lowered_arena,
         root: lowered_root,

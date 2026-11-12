@@ -1691,6 +1691,15 @@ impl<'r> JsPrinter<'r> {
         }
     }
 
+    /// `e == null`, which binds like `===` (js_dump.ml `Is_null_or_undefined`).
+    fn print_null_check(&mut self, e: Expr, level: u8) {
+        let (out, lft, _) = op_precedence(BinOp::EqEqEq);
+        self.paren_if(level > out, |this| {
+            this.print_expression(e, lft);
+            this.write(" == null");
+        });
+    }
+
     /// Print an expression description
     fn print_expression_desc(&mut self, desc: ExprKind, level: u8) {
         let a = self.a;
@@ -1817,10 +1826,7 @@ impl<'r> JsPrinter<'r> {
                 if op == BinOp::Or
                     && let Some(target) = self.nullish_or_target(left, right)
                 {
-                    self.paren_if(level > 0, |this| {
-                        this.print_expression(target, 1);
-                        this.write(" == null");
-                    });
+                    self.print_null_check(target, level);
                     return;
                 }
 
@@ -1988,12 +1994,7 @@ impl<'r> JsPrinter<'r> {
                 });
             }
 
-            ExprKind::IsNullOrUndefined(e) => {
-                self.paren_if(level > 0, |this| {
-                    this.print_expression(e, 1);
-                    this.write(" == null");
-                });
-            }
+            ExprKind::IsNullOrUndefined(e) => self.print_null_check(e, level),
 
             ExprKind::StringAppend(e1, e2) => {
                 let (out, lft, rght) = op_precedence(BinOp::Plus);
@@ -2986,7 +2987,7 @@ fn format_char_comment(codepoint: i32) -> String {
     format!("'{escaped}'")
 }
 
-fn normalize_float_literal_for_js(float_str: &str) -> String {
+pub(crate) fn normalize_float_literal_for_js(float_str: &str) -> String {
     if is_hex_float_literal(float_str) {
         normalize_hex_float_literal(float_str).unwrap_or_else(|| transform_float_literal(float_str))
     } else {
@@ -4170,6 +4171,23 @@ mod tests {
         );
 
         assert_eq!(print_expr(&j, expr), "x == null");
+    }
+
+    #[test]
+    fn test_print_null_check_with_the_precedence_of_eqeqeq() {
+        let mut j = JsArena::new();
+        let a = JE::var(Ident::create_local("a"), &mut j);
+        let b = JE::var(Ident::create_local("b"), &mut j);
+        let either = JE::bin(BinOp::Or, a, b, &mut j);
+        let check = j.expr(ExprKind::IsNullOrUndefined(either));
+        assert_eq!(print_expr(&j, check), "(a || b) == null");
+
+        let check = j.expr(ExprKind::IsNullOrUndefined(a));
+        let expr = JE::bin(BinOp::Or, check, b, &mut j);
+        assert_eq!(print_expr(&j, expr), "a == null || b");
+
+        let not = j.expr(ExprKind::JsNot(check));
+        assert_eq!(print_expr(&j, not), "!(a == null)");
     }
 
     #[test]

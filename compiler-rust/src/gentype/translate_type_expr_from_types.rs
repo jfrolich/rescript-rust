@@ -279,20 +279,12 @@ pub fn translate_constr(
             tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref())
         }
         (["ReactDOM", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
-        (["ReactDOMRe", "domRef"], []) => {
-            tr(crate::gentype::emit_type::type_react_d_o_m_re_dom_ref())
-        }
-        (["ReactDOMRe", "Ref", "currentDomRef"], []) => tr(crate::gentype::emit_type::type_any()),
         (["ReactEvent", "Mouse", "t"], []) => {
             tr(crate::gentype::emit_type::type_react_event_mouse_t())
         }
-        (
-            ["React", "element"]
-            | ["ReasonReact", "reactElement"]
-            | ["Pervasives", "Jsx", "element"]
-            | ["Jsx", "element"],
-            [],
-        ) => tr(crate::gentype::emit_type::type_react_element()),
+        (["React", "element"] | ["Pervasives", "Jsx", "element"] | ["Jsx", "element"], []) => {
+            tr(crate::gentype::emit_type::type_react_element())
+        }
         (["option"], [param]) => with_type(param, Type::Option(Box::new(param.type_.clone()))),
         (["Stdlib", "undefined"], [param]) => {
             with_type(param, Type::Option(Box::new(param.type_.clone())))
