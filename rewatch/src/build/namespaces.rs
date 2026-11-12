@@ -18,17 +18,21 @@ use std::path::PathBuf;
 // constructing the AST, so these modules are hidden from compilation.
 // in the top namespace however, we alias with the proper names
 
+/// Where the namespace's map is written: the package's artifact directory.
+pub fn mlmap_path(package: &packages::Package, namespace: &str) -> PathBuf {
+    package.get_build_path().join(format!("{namespace}.mlmap"))
+}
+
 pub fn gen_mlmap(
     package: &packages::Package,
     namespace: &str,
     depending_modules: &AHashSet<String>,
 ) -> Result<PathBuf> {
-    let build_path_abs = package.get_build_path();
     // we don't really need to create a digest, because we track if we need to
     // recompile in a different way but we need to put it in the file for it to
     // be readable.
 
-    let path = build_path_abs.join(format!("{namespace}.mlmap"));
+    let path = mlmap_path(package, namespace);
     let mut modules: Vec<&String> = depending_modules.iter().collect();
     modules.sort();
     let mut contents = String::from("randjbuildsystem\n");

@@ -225,10 +225,6 @@ async function removeGeneratedMapFiles() {
     await fs.rm(path.join(import.meta.dirname, "src", `${filename}.map`), {
       force: true,
     });
-    await fs.rm(
-      path.join(import.meta.dirname, "lib", "bs", "src", `${filename}.map`),
-      { force: true },
-    );
   }
 }
 

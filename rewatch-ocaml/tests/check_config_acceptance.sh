@@ -11,7 +11,7 @@ ocaml=$(realpath "$ocaml")
 mkdir -p "$root/tmp"
 work=$(mktemp -d "$root/tmp/rewatch-config-acceptance-XXXXXX")
 trap 'rm -rf "$work"' EXIT
-mkdir -p "$work/src" "$work/node_modules/dep/lib/ocaml" "$work/node_modules/ppx"
+mkdir -p "$work/src" "$work/node_modules/dep/lib/rescript" "$work/node_modules/ppx"
 printf 'let value = 1\n' >"$work/src/A.res"
 
 default_bsc=$root/_build/default/compiler/bsc/rescript_compiler_main.exe

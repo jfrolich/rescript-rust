@@ -79,9 +79,9 @@ fn run() {
                 js_printer: PrinterMode::Legacy,
                 runtime_path: Some(runtime.clone()),
                 include_paths: [
-                    root.join("tests/tests/lib/ocaml"),
-                    root.join("tests/dependencies/rescript-react/lib/ocaml"),
-                    runtime.join("lib/ocaml"),
+                    root.join("tests/tests/lib/rescript"),
+                    root.join("tests/dependencies/rescript-react/lib/rescript"),
+                    runtime.join("lib/rescript"),
                 ]
                 .into_iter()
                 .chain(source_dirs.iter().cloned())

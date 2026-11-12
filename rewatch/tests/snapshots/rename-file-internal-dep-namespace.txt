@@ -1,7 +1,7 @@
-Cleaned 1/512
+Cleaned 1/507
 Parsed 2 source files
-Parsed 472 source files
-Compiled 468 modules
+Parsed 467 source files
+Compiled 463 modules
 
   [1;33mWarning number 32[0m
   [36m/packages/watch-warnings/src/ModuleA.res[0m:[2m1:5-15[0m

@@ -54,7 +54,7 @@ function run(args, threads) {
 // Every table of the record, leaving out times (when the build started, when
 // each module's JavaScript was confirmed, source modification times).
 function dump() {
-  const db = new DatabaseSync(path.join(root, "lib", "bs", "rescript.sqlite"), {readOnly: true});
+  const db = new DatabaseSync(path.join(root, "lib", "rescript", "rescript.sqlite"), {readOnly: true});
   try {
     const rows = {};
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all();

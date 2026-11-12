@@ -92,8 +92,9 @@ pub fn get_module_name_from_source_path(source_path: &str) -> crate::gentype::mo
 }
 
 /// The typed artifact gentype reads for `cmt` (resolved against `cwd`):
-/// the first that `exists` of the `.cmti` and `.cmt` files, with the
-/// module name uncapitalized or not; empty when there is none.
+/// the first that `exists` of the `.cmti` and `.cmt` files, each in the
+/// compiler's spelling before the uncapitalized one; empty when there is
+/// none.
 pub fn get_cmt_file_from_cwd_with_exists(
     cwd: &Path,
     cmt: &str,
@@ -125,14 +126,17 @@ pub fn get_cmt_file_from_cwd_with_exists(
             chop_extension(path_cmt_lower_case.to_string_lossy().as_ref())
         ));
 
-        if exists(&path_cmti_lower_case) {
-            path_cmti_lower_case
-        } else if exists(&path_cmti) {
+        // The compiler's spelling first: on a case-insensitive file system
+        // the lowercase one exists too (compiler/gentype/paths.ml
+        // `get_cmt_file`).
+        if exists(&path_cmti) {
             path_cmti
-        } else if exists(&path_cmt_lower_case) {
-            path_cmt_lower_case
+        } else if exists(&path_cmti_lower_case) {
+            path_cmti_lower_case
         } else if exists(&path_cmt) {
             path_cmt
+        } else if exists(&path_cmt_lower_case) {
+            path_cmt_lower_case
         } else {
             PathBuf::new()
         }

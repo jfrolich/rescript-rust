@@ -440,10 +440,10 @@ impl ModulePathResolver {
         let Some(runtime_path) = &self.runtime_path else {
             return false;
         };
-        let ocaml_dir = runtime_path.join("lib").join("ocaml");
-        ocaml_dir.join(format!("{module_name}.cmi")).exists()
-            || ocaml_dir.join(format!("{module_name}.ast")).exists()
-            || ocaml_dir.join(format!("{module_name}.iast")).exists()
+        let artifact_dir = runtime_path.join("lib").join("rescript");
+        artifact_dir.join(format!("{module_name}.cmi")).exists()
+            || artifact_dir.join(format!("{module_name}.ast")).exists()
+            || artifact_dir.join(format!("{module_name}.iast")).exists()
     }
 
     fn is_pure_module(&self, module: &ModuleId) -> bool {
