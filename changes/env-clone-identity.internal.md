@@ -1,0 +1,1 @@
+- Keep environment identity when cloning an unchanged type-checking environment, reusing cached answers and typed-tree snapshots.
