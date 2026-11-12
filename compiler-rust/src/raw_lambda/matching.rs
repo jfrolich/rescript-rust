@@ -4148,7 +4148,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
             None => (
                 PmHalfCompiledInfo {
                     me: PmHalfCompiled::Pm(PatternMatching {
-                        cases: yes.clone(),
+                        cases: yes,
                         args: args.clone(),
                         default: def.clone(),
                     }),
@@ -4177,7 +4177,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
@@ -4200,7 +4200,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                     (
                         PmHalfCompiledInfo {
                             me: PmHalfCompiled::Pm(PatternMatching {
-                                cases: yes.clone(),
+                                cases: yes,
                                 args: args.clone(),
                                 default: new_def.clone(),
                             }),
@@ -4304,7 +4304,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                 None => (
                     PmHalfCompiledInfo {
                         me: PmHalfCompiled::Pm(PatternMatching {
-                            cases: yes.clone(),
+                            cases: yes,
                             args: args.clone(),
                             default: def.clone(),
                         }),
@@ -4336,7 +4336,7 @@ impl<'p, B: RawLambdaBuilder> Split<'p, '_, B> {
                         (
                             PmHalfCompiledInfo {
                                 me: PmHalfCompiled::Pm(PatternMatching {
-                                    cases: yes.clone(),
+                                    cases: yes,
                                     args: args.clone(),
                                     default: new_def.clone(),
                                 }),
@@ -4658,7 +4658,7 @@ fn dont_precompile_var<'p>(
     (
         PmHalfCompiledInfo {
             me: PmHalfCompiled::Pm(PatternMatching {
-                cases: cls.clone(),
+                cases: cls,
                 args: args.clone(),
                 default: def.clone(),
             }),
