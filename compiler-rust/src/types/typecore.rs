@@ -7562,6 +7562,7 @@ pub(crate) fn type_exp<'a>(
     if matches!(
         expr.pexp_desc,
         crate::parser::ast::ExpressionDesc::Pexp_constant(_)
+            | crate::parser::ast::ExpressionDesc::Pexp_ident(_)
     ) {
         return type_expect_full(
             tctx,
@@ -8014,6 +8015,95 @@ fn type_expect_with_recarg_unscoped<'a>(
         );
         return Ok(tctx.typed.with_exp_attributes(node, expr.pexp_attributes.clone()));
     }
+    if let ED::Pexp_ident(lid) = &expr.pexp_desc {
+        let longident = tctx.arena.get_longident(lid.txt);
+
+        // Normal identifier expression. typetexp.ml `find_value`:
+        // `Env.check_value_name (Longident.last lid) loc` before lookup.
+        {
+            let last = tctx.arena.get_string(longident.last_idx());
+            if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
+                .is_err()
+            {
+                return Err(TypeCoreError::IllegalValueName {
+                    loc: lid.loc,
+                    name: last.to_string(),
+                });
+            }
+        }
+        mark_open_lid_use(
+            ctx,
+            env,
+            tctx.arena,
+            longident,
+            crate::types::env::OpenLookupKind::Value,
+            Some(lid.loc),
+        );
+        let (path, desc) = match env.lookup_value_by_lid(
+            longident,
+            tctx.arena,
+            &mut tctx.persistent_env,
+            tctx.type_ctx,
+        ) {
+            Some(result) => result,
+            None => {
+                if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
+                    return Err(err);
+                }
+                // typecore.ml Pexp_ident: `<Button />` refers to
+                // `Button.make`. The module exists (otherwise the lookup
+                // reports it as unbound), but it defines no component.
+                if let Longident::Ldot(module_lid, last) = longident
+                    && matches!(context, Some(TypeClashContext::JsxComponent))
+                    && tctx.arena.get_string(*last) == "make"
+                {
+                    let module_lid = tctx.longident_to_string(module_lid);
+                    let alternatives = unbound_value_alternatives(tctx, env, longident);
+                    return Err(TypeCoreError::JsxComponentWithoutMake {
+                        loc: lid.loc,
+                        module_lid,
+                        alternatives,
+                    });
+                }
+                return Err(unbound_value_error(tctx, env, lid.loc, longident));
+            }
+        };
+        // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
+        let used_name = tctx.arena.name(longident.last_idx());
+        tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
+        // typetexp.ml:117-123 via typecore.ml:2381-2388.
+        let deprecated_context = if deprecated_function_call {
+            crate::types::context::DeprecatedContext::FunctionCall
+        } else {
+            crate::types::context::DeprecatedContext::Reference
+        };
+        record_deprecated_used(
+            tctx,
+            lid.loc,
+            &desc.val_attributes,
+            Some(deprecated_context),
+        )?;
+        if let Some(warning) = deprecated_warning_for_value(&path, &desc)
+            .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
+        {
+            tctx.report_warning(lid.loc, warning);
+        }
+        check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
+
+        let ty = crate::types::instance(ctx, desc.val_type);
+        finish_expected(tctx, expr, ty, expected_ty, context)?;
+
+        return Ok({
+            let typed_node = Expression::new(
+                ExpressionDesc::Texp_ident(path, *lid, desc),
+                loc,
+                ty,
+                tctx.type_ctx.store_typed_env(env),
+            );
+            tctx.typed
+                .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+        });
+    }
     let expected_ty = match expected_ty {
         Expected::Known(ty) => ty,
         Expected::Infer { level } => {
@@ -8035,95 +8125,7 @@ fn type_expect_with_recarg_unscoped<'a>(
             Ok(tctx.typed.with_exp_attributes(exp, attrs))
         }
         ED::Pexp_regexp(_) => unreachable!("Lowered by the built-in frontend mapper."),
-        ED::Pexp_ident(lid) => {
-            let longident = tctx.arena.get_longident(lid.txt);
-
-            // Normal identifier expression. typetexp.ml `find_value`:
-            // `Env.check_value_name (Longident.last lid) loc` before lookup.
-            {
-                let last = tctx.arena.get_string(longident.last_idx());
-                if crate::types::env::check_value_name(last, tctx.arena.to_location(lid.loc))
-                    .is_err()
-                {
-                    return Err(TypeCoreError::IllegalValueName {
-                        loc: lid.loc,
-                        name: last.to_string(),
-                    });
-                }
-            }
-            mark_open_lid_use(
-                ctx,
-                env,
-                tctx.arena,
-                longident,
-                crate::types::env::OpenLookupKind::Value,
-                Some(lid.loc),
-            );
-            let (path, desc) = match env.lookup_value_by_lid(
-                longident,
-                tctx.arena,
-                &mut tctx.persistent_env,
-                tctx.type_ctx,
-            ) {
-                Some(result) => result,
-                None => {
-                    if let Some(err) = unbound_module_prefix_error(tctx, env, lid.loc, longident) {
-                        return Err(err);
-                    }
-                    // typecore.ml Pexp_ident: `<Button />` refers to
-                    // `Button.make`. The module exists (otherwise the lookup
-                    // reports it as unbound), but it defines no component.
-                    if let Longident::Ldot(module_lid, last) = longident
-                        && matches!(context, Some(TypeClashContext::JsxComponent))
-                        && tctx.arena.get_string(*last) == "make"
-                    {
-                        let module_lid = tctx.longident_to_string(module_lid);
-                        let alternatives = unbound_value_alternatives(tctx, env, longident);
-                        return Err(TypeCoreError::JsxComponentWithoutMake {
-                            loc: lid.loc,
-                            module_lid,
-                            alternatives,
-                        });
-                    }
-                    return Err(unbound_value_error(tctx, env, lid.loc, longident));
-                }
-            };
-            // `Env.lookup_value` marks the declaration used (env.ml:1169-1172).
-            let used_name = tctx.arena.name(longident.last_idx());
-            tctx.mark_value_used(env, used_name, tctx.resolve_loc(desc.val_loc));
-            // typetexp.ml:117-123 via typecore.ml:2381-2388.
-            let deprecated_context = if deprecated_function_call {
-                crate::types::context::DeprecatedContext::FunctionCall
-            } else {
-                crate::types::context::DeprecatedContext::Reference
-            };
-            record_deprecated_used(
-                tctx,
-                lid.loc,
-                &desc.val_attributes,
-                Some(deprecated_context),
-            )?;
-            if let Some(warning) = deprecated_warning_for_value(&path, &desc)
-                .map_err(|loc| invalid_escape_at(tctx.type_ctx, loc))?
-            {
-                tctx.report_warning(lid.loc, warning);
-            }
-            check_inlined_record_escape(ctx, loc, desc.val_type, recarg)?;
-
-            let ty = crate::types::instance(ctx, desc.val_type);
-            rue_unify(tctx, loc, ty, expected_ty, context)?;
-
-            Ok({
-                let typed_node = Expression::new(
-                    ExpressionDesc::Texp_ident(path, *lid, desc),
-                    loc,
-                    ty,
-                    tctx.type_ctx.store_typed_env(env),
-                );
-                tctx.typed
-                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-            })
-        }
+        ED::Pexp_ident(_) => unreachable!("identifiers were typed above"),
 
         ED::Pexp_constant(_) => unreachable!("constants were typed above"),
 
@@ -9081,6 +9083,33 @@ fn type_expect_with_recarg_unscoped<'a>(
             Err(TypeCoreError::JsxNotEnabled { loc })
         }
     }
+}
+
+/// Finish a case-1 expression. Materialise when unification would do more
+/// than link the unobservable expected variable, retaining the original
+/// representative choice, level updates and error traces in those cases.
+fn finish_expected(
+    tctx: &mut TypeCheckContext<'_>,
+    expr: &ParsedExpression,
+    ty: TypeExprRef,
+    expected: Expected,
+    context: Option<TypeClashContext>,
+) -> TypeCoreResult<()> {
+    let expected = match expected {
+        Expected::Known(expected) => expected,
+        Expected::Infer { level } => {
+            if crate::types::ctype::fresh_expected_only_links(tctx.type_ctx, ty, level) {
+                return Ok(());
+            }
+            if tctx.type_ctx.compiler_counters_enabled() {
+                crate::perf_counters::record_expected_var(expected_var_use(expr));
+            }
+            let expected = tctx.type_ctx.new_var(None);
+            tctx.type_ctx.set_level(expected, level);
+            expected
+        }
+    };
+    rue_unify(tctx, expr.pexp_loc, ty, expected, context)
 }
 
 /// Unify expression types, raising ExprTypeClash on error.
