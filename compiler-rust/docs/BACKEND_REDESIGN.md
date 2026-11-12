@@ -9,6 +9,13 @@ Scope: everything between the typed tree and the JavaScript file in
 (`src/lambda/`), the JS IR, its passes and its printer (`src/js_ir/`), and the
 per-module summaries a dependent module reads.
 
+The lowering from level L to level J (stages S3.3 to S3.9) is specified in
+[BACKEND_LOWERING.md](BACKEND_LOWERING.md): the continuation each context
+function of `lam_compile.rs` maps to, every construct in every context, the J
+normalising rules, and the slices. Its section 9 lists corrections to A.5,
+A.7, B.3, C.2, C.4 and H.1 of this document; they are marked "Amended (S3
+specification)" below.
+
 Conventions: code is cited by file and function, never by line. "Measured"
 means a number from a profile or an experiment; "estimated" means derived
 arithmetic or judgement; "unknown" means the code does not answer the question
@@ -331,7 +338,7 @@ Order dependence of the passes is the subject of section C.2.
 `lam_compile_primitive.rs`, `lam_compile_external.rs`,
 `lam_compile_arguments.rs`, `lam_compile_const.rs`, `lam_compile_variant.rs`,
 `untagged_dispatch.rs`, `js_exp_make.rs`, `js_stmt_make.rs`,
-`lam_coercion.rs` (about 15,000 lines) are the counterpart of OCaml's
+`lam_coercion.rs` (about 16,000 lines) are the counterpart of OCaml's
 `lam_compile.ml` and `js_exp_make.ml`. One recursive walk of the simplified
 Lambda that builds a `JsArena`. Unlike OCaml, which threads a continuation
 value, the Rust code has one function per context
@@ -342,6 +349,18 @@ value, the Rust code has one function per context
 `BlockOutput { block, finished }`, where `finished` is OCaml's
 `Js_output.output_finished` (control has left: `return`, `throw`, `break`,
 `continue`).
+
+Amended (S3 specification). There are seven such families, not five, three
+stacks for static exits and four more pieces of context state; BACKEND_LOWERING.md
+section 2 lists every function. The inline handler form of a static catch
+(`with_static_handler`) is entered only when the body has no exit to the
+label, so there are two forms in practice, as in OCaml. A branch of a
+conditional is compiled two or three times and a recursive function up to
+twice; identifiers and loop label numbers are consumed by the compilations
+whose output is discarded, and the label numbers are visible in the output
+(BACKEND_LOWERING.md 3.6, 4.5). Two purity predicates are in use at level J
+(`js_ir::build::expression_has_no_side_effects` and
+`js_exp_make::js_expr_no_side_effects`).
 
 Before `compile_expr`, on the simplified Lambda:
 `drop_toplevel_pure_sequence_heads`, `lambda_traverse::arena_assigned_variables`
@@ -425,8 +444,11 @@ Naming (`NameScope`, `add_ident`, `ident_name`, `module_ident_name`,
 
 So names depend on (a) print order, (b) per-function free-variable sets, and
 (c) the relative stamp order of same-named identifiers that are named for the
-first time by one reservation. Point (c) is the only place where stamp
-*order* reaches the output; section E.3 deals with it.
+first time by one reservation. Point (c) is the only place in the printer
+where stamp *order* reaches the output; section E.3 deals with it. Amended
+(S3 specification): the lowering has a second one, the order of the `let x =
+_x` declarations at the top of a self tail call loop
+(`compile_recursive_function_expr`, `ext_ident_cmp`; BACKEND_LOWERING.md 5.1).
 
 Other printer decisions (each a function in `printer.rs`):
 
@@ -617,12 +639,22 @@ What lowering needs is carried as follows:
   what `Compiled` and `BlockOutput` carry today: a statement list, an
   optional value node and the `finished` flag. These are values on the stack
   of the lowering, not stored in nodes. A J statement list is a `ListId`.
+  Amended (S3 specification): the continuation is OCaml's in full, `Effect`
+  and `Value` each with a tail that is "not tail", "return in a `try` body"
+  or "return, with the function's loop record and an `in_catch` bit";
+  statements are built on a stack and block statements stay real nodes until
+  a unit is lowered (BACKEND_LOWERING.md 1.2, 1.3).
 - **Return and tail context.** The `TAIL` flag is set on L nodes in tail
   position of a function when the function body is built (cheap: it follows
   `Let` body, `If` branches, `Switch` actions, `Catch` body and handler,
   `Seq` second). `function_has_self_tailcall` becomes a flag on `FuncHeader`
   set when a `TAIL` `Apply` of the function's own variable is created or
-  rewritten.
+  rewritten. Amended (S3 specification): the lowering needs neither flag. It
+  lowers a recursive function once with a loop record in the continuation
+  and looks at whether a self call triggered it, as OCaml does. The rule in
+  parentheses also differs from the legacy one, which follows the right
+  operand of `&&` and `||` and a `try` handler, and not a `LetRec` body
+  (BACKEND_LOWERING.md 5.1, section 9).
 - **Declared names.** Every binder is a `VarId`; `SDecl` refers to it. Name
   and number are assigned in the naming step (E.3) and stored in
   `VarTable::printed`.
@@ -831,8 +863,8 @@ later).
 | 7 | `alpha_conversion` runs once, after the second inlining sweep, with arities as known then. | R. Round 4. |
 | 8 | `sroa` after `simplify_lets`, `guard_raises` last, `handle_exports` after everything. | R. Rounds 6 and 7. |
 | 9 | Fresh identifiers are numbered in the order passes create them, and the number orders same-named identifiers in the printer's reservation (A.7, point c). | S. See E.3: `order` is assigned at creation, and because rounds sweep in today's traversal order the creation order within a round is today's. A measurement in S1 decides whether the dependence can be replaced by a canonical order. |
-| 10 | Level J: flatten, shadow renaming, tail-call inline, record rest, substitution and dead marks, shake, in that order. | R for tail-call inline before block-field substitution before dead marks before shake. P for flatten: it is a normalising rule (statement lists are built flat). P for dead marks: `uses == 0` and `PURE` are maintained, and `mark_dead_code` is their fixpoint. Shadow renaming moves to naming. |
-| 11 | Lowering creates temporaries, `exit` variables and loop labels in traversal order. | R. Lowering is one recursive walk in today's order. |
+| 10 | Level J: flatten, shadow renaming, tail-call inline, record rest, substitution and dead marks, shake, in that order. | R for tail-call inline before block-field substitution before dead marks before shake. P for flatten: it is a normalising rule (statement lists are built flat); amended (S3 specification): not during lowering, where a block statement hides a trailing `return` from the rules of `S.if_`; lists are flattened once a unit is lowered (BACKEND_LOWERING.md 1.3). P for dead marks: `uses == 0` and `PURE` are maintained, and `mark_dead_code` is their fixpoint. Shadow renaming moves to naming. |
+| 11 | Lowering creates temporaries, `exit` variables and loop labels in traversal order. | R. Lowering is one recursive walk in today's order. Amended (S3 specification): "today's order" is that of the legacy pass whose output is kept, and loop label numbers follow the schedule of BACKEND_LOWERING.md 4.5. |
 | 12 | Match compilation numbers exits in creation order; negative labels are not inlined. | R. The algorithm is unchanged (section D). |
 | 13 | Printer: names are chosen in print order. | R. The naming step walks in print order (E.3). |
 | 14 | Import order: emulated OCaml hash table order, then heap sort. | R. `OcamlModuleSet` and `ocaml_sort_modules` are kept as they are and move to the emit step. |
@@ -886,7 +918,7 @@ Level J rounds replace the JS passes:
 | `guard_raises` | `guard_raise` | pass, round 7 |
 | `handle_exports`, `add_flat_make_aliases` | `bind_exports`, `flat_make_aliases` | round 7, spine only |
 | `js_ir/build.rs`, `js_exp_make.rs` constructors | `jnorm_*` | normalising, J |
-| `flatten_block` | flat statement lists by construction | normalising, J |
+| `flatten_block` | one rule applied when a unit's lowering is done (BACKEND_LOWERING.md 1.3) | normalising, J |
 | `apply_js_tailcall_inline_pass` | `inline_return_call` | pass, J1 |
 | `apply_js_record_rest_pass` | `materialise_rest` | pass, J2 |
 | `Substitute` | `subst_block_field` | pass, J3 |
@@ -1770,8 +1802,8 @@ model with this document as its specification.
 | S2.2 | Bridges: import from `LamArena` and from `JsArena`, export to `LamArena`; `BackendMode`, `Unsupported`, the report, the ratchet file, the CI job | `bir/bridge.rs`, `driver.rs`, `rewatch/src/build/compile.rs`, workflow | import then export is the identity on all corpora (compared with `sexp_lambda`) | 1,500 | S2.1 | yes |
 | S3.1 | Emit reads J-level `Bir` (the emit walk is written against a view trait implemented by `JsArena` and `Bir`); naming on `VarId` | `emit/*` | `JsArena` to `Bir` to text equals `JsArena` to text on all corpora | 800 | S1.4, S2.2 | yes |
 | S3.2 | J normalising rules and rounds J1 to J4, fed by importing the JS IR before the JS passes | `bir/j/{norm,inline_return,rest,subst,shake}.rs` | `Check` against the legacy JS passes | 3,000 | S3.1 | yes, each rule cites its function (C.4) |
-| S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,expr,prim,call,export}.rs` | `Check`; coverage reported | 4,000 | S3.2 | partly: needs a table mapping each context function of `lam_compile.rs` (A.5) to a continuation case, written by whoever starts the stage |
-| S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,500 to 3,000 each | S3.3 | partly, as S3.3; static catch is the hardest and should go to the strongest reviewer |
+| S3.3 | Lowering L to J, first set: constants, variables, primitives, calls by arity, functions, `let`, `if` and short circuits, sequences, exports and their coercion; everything else `Unsupported` | `bir/lower/{mod,out,expr,cond,call,args,prim,konst,unit}.rs`, `bir/bridge.rs` | `Check`; coverage reported | 4,500 | S2.2 | yes, with [BACKEND_LOWERING.md](BACKEND_LOWERING.md) as the specification: it is the table this row asked for. Exports and their coercion move to S3.9b there, and the gate does not need S3.2 |
+| S3.4 to S3.9 | One construct group each: switches and variants; static catch and exits; tail loops; loops, `try`, `let rec`; externals and FFI arguments; JSX, record spread, `await`, dynamic import | `bir/lower/*` | `Check`; the ratchet falls | 1,000 to 3,000 each | S3.3 | yes, per slice of BACKEND_LOWERING.md 8.3, which regroups them (`let rec` of functions with tail loops, `Assign` with loops, export coercion as S3.9b); static catch (S3.5) goes to the strongest reviewer, tail loops (S3.6) and loop labels (in S3.7) to a strong one |
 | S3.10 | Default `New` for level J; then delete `lam_compile*.rs`, `js_pass_*.rs`, `js_shake.rs`, `js_exp_make.rs`, `js_ir/` except what emit's tests need | | fallback zero; instruction count falls by about 6.3% | −45,000 with tests | S3.9 | yes |
 | S4.1 | Engine: rounds, summaries, worklist, snapshots; L normalising rules (built: C.5 to C.7) | `bir/engine.rs`, `bir/l/norm.rs`, `bir/replay.rs` | building through the rules equals `LamArena`'s constructors on all corpora: shadow stage `lambda-norm` | 2,000 | S2.2 | no: C.1 and C.2 rows 1, 3, 5 need design judgement while building |
 | S4.2 to S4.8 | One round each, in pipeline order (C.3), each with the diagnostic comparison of G.3 | `bir/l/{flatten,exits,alias,beta,alpha,lets,sroa,exports}.rs` | diagnostic comparison clean on all corpora; `Check` once all rounds exist | 600 to 2,000 each | S4.1 | yes for the rules; `alias` and `beta` need a strong reviewer |
