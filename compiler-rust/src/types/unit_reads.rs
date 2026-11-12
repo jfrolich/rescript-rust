@@ -58,7 +58,7 @@ pub struct ReadLog {
 impl ReadLog {
     /// Record a resolved path in its namespace.
     pub fn path(&mut self, path: &Path, kind: Kind) {
-        self.paths.entry((path.node_addr(), kind)).or_insert_with(|| path.clone());
+        self.paths.entry((path.node_addr(), kind)).or_insert(*path);
     }
 
     /// Record a type root without observing its still-mutable descendants.
@@ -149,6 +149,56 @@ impl Collector<'_> {
     fn label(&mut self, ld: &LabelDescription) {
         self.ty(ld.lbl_res);
         self.ty(ld.lbl_arg);
+    }
+}
+
+impl ReadLog {
+    fn resolve(&self, ctx: &TypeContext, ta: &TypedArena, opens: &[String]) -> Vec<UnitRead> {
+        let mut reader = Collector {
+            ctx,
+            ta,
+            seen: SeenTypes::default(),
+            stack: Vec::new(),
+            paths: ahash::AHashSet::new(),
+            out: opened(opens).collect(),
+        };
+        for ((_, kind), path) in &self.paths {
+            reader.path(path, *kind);
+        }
+        for ty in &self.types {
+            reader.ty(*ty);
+        }
+        reader.out
+    }
+
+    /// Compare raw reads as sets, before alias resolution or dependency closure.
+    /// Debug builds always check; optimized corpus runs opt in with
+    /// `RESCRIPT_CHECK_UNIT_READS=1`.
+    pub fn check(
+        &self,
+        ctx: &TypeContext,
+        ta: &TypedArena,
+        opens: &[String],
+        walked: &[UnitRead],
+        unit: &str,
+    ) {
+        if !cfg!(debug_assertions) && std::env::var_os("RESCRIPT_CHECK_UNIT_READS").is_none() {
+            return;
+        }
+        let logged: ahash::AHashSet<_> = self.resolve(ctx, ta, opens).into_iter().collect();
+        let walked: ahash::AHashSet<_> = walked.iter().cloned().collect();
+        let extra: Vec<_> = logged.difference(&walked).collect();
+        let missing: Vec<_> = walked.difference(&logged).collect();
+        assert!(
+            extra.is_empty() && missing.is_empty(),
+            "unit read mismatch in {unit}: logged-only {extra:?}; walked-only {missing:?}"
+        );
+        if std::env::var_os("RESCRIPT_CHECK_UNIT_READS").is_some() {
+            eprintln!(
+                "unit-read-check: {unit}: {} reads, zero differences",
+                walked.len()
+            );
+        }
     }
 }
 
@@ -464,6 +514,34 @@ pub fn signature_reads(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn read_log_observes_unification_after_recording_a_root() {
+        let ctx = TypeContext::new(std::sync::Arc::new(crate::IdGenerator::new()));
+        let ta = TypedArena::new();
+        let root = ctx.new_var(None);
+        let mut log = ReadLog::default();
+        log.ty(root);
+        let path = Path::pdot(
+            Path::pident(crate::ident::Ident::create_persistent("Dependency")),
+            "t",
+        );
+        let target = ctx.new_constr(path, vec![]);
+        ctx.set_desc(root, TypeDesc::Tlink(target));
+        log.path(&path, Kind::Value);
+        log.path(&path, Kind::Value);
+        assert_eq!(log.paths.len(), 1);
+        let reads: ahash::AHashSet<_> = log.resolve(&ctx, &ta, &[]).into_iter().collect();
+        let expected: ahash::AHashSet<_> = [Kind::Type, Kind::Value]
+            .into_iter()
+            .map(|kind| UnitRead {
+                unit: Name::new("Dependency"),
+                segs: [Name::new("t")].into_iter().collect(),
+                kind,
+            })
+            .collect();
+        assert_eq!(reads, expected);
+    }
 
     #[test]
     fn read_log_deduplicates_each_type_reference_space() {

@@ -10702,6 +10702,10 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         Vec::new()
     };
 
+    if let Some(log) = &tctx.read_log {
+        log.check(&type_ctx, &tctx.typed, &options.open_modules, &unit_reads, filename);
+    }
+
     // OCaml saves the inferred `.cmi` only in the no-interface branch before
     // Lambda translation mutates any shared type nodes
     // (compiler/ml/typemod.ml:1768-1788; translmod.ml:267). With a `.resi`,
@@ -11556,6 +11560,11 @@ pub fn typecheck_preprocessed_signature_in_process(
     } else {
         Vec::new()
     };
+
+    if let Some(log) = &tctx.read_log {
+        log.check(&type_ctx, &tctx.typed, &options.open_modules, &unit_reads, filename);
+    }
+
     // js_implementation.ml:62: `ignore (Includemod.signatures initial_env sg
     // sg)`, which marks the declarations of the interface used.
     let sig_type = crate::types::typemod::decl_signature_from_typed_signature(

@@ -4858,15 +4858,16 @@ struct SpreadConstructor {
 /// for a qualified source, like `Subst.type_declaration`), and the typed tree
 /// gets `Ttyp_any`-style placeholders carrying the real types.
 fn build_spread_constructor(
-    read_log: &mut Option<super::unit_reads::ReadLog>,
-    ta: &mut TypedArena,
-    ctx: &crate::types::context::TypeContext,
+    tctx: &mut TypeCheckContext<'_>,
     arena: &ParseArena,
     cstr: &crate::parser::ast::ConstructorDeclaration,
     source_cstr: &crate::types::ConstructorDeclaration,
     is_pdot_source: bool,
     tag_attrs: &[crate::parser::ast::Attribute],
 ) -> SpreadConstructor {
+    let ctx = tctx.type_ctx;
+    let ta = &mut tctx.typed;
+    let read_log = &mut tctx.read_log;
     let sc_name = source_cstr.cd_id.name().to_string();
     let sc_id = ctx.create_ident(&sc_name);
     let spread_constructor_attr = (
@@ -17370,9 +17371,7 @@ fn type_structure_item<'a>(
                                         internal,
                                         typed,
                                     } = build_spread_constructor(
-                                        &mut tctx.read_log,
-                                        &mut tctx.typed,
-                                        ctx,
+                                        tctx,
                                         arena,
                                         cstr,
                                         source_cstr,
@@ -20277,9 +20276,7 @@ fn transl_sig_type_declarations_with_ids_and_originals<'a>(
                             }
                             for source_cstr in source_cstrs {
                                 let spread = build_spread_constructor(
-                                    &mut tctx.read_log,
-                                    &mut tctx.typed,
-                                    ctx,
+                                    tctx,
                                     arena,
                                     cstr,
                                     source_cstr,
