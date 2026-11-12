@@ -27,6 +27,22 @@ class DerivedCensusSummaryTest(unittest.TestCase):
         self.assertIn("node-weighted estimate", text)
         self.assertIn("Counter availability: 0/1", text)
 
+    def test_shape_columns_and_exact_template_identity(self):
+        item = row()
+        item.update(shape_classes=["record"] * 3, shape_nodes=[10, 20, 100],
+                    shape_parameterised=[False, True, False], shape_recursive=[False] * 3,
+                    templates=[[1, 2], [1, 2], [1, 3]])
+        result = summarize([item])
+        self.assertEqual(result["distinct_templates"], 2)
+        self.assertEqual(result["duplicate_bindings"], 1)
+        self.assertEqual(result["shapes"]["record"]["p50"], 20)
+        self.assertEqual(result["shapes"]["parameterised (overlap)"]["count"], 1)
+        item["templates"][0] = None
+        self.assertIsNone(summarize([item])["distinct_templates"])
+        item["shape_nodes"].pop()
+        with self.assertRaises(ValueError):
+            summarize([item])
+
     def test_counter_sides(self):
         item = row()
         item["checker_counters"] = [[1, 2, 3, 4], [10, 20, 30, 40]]

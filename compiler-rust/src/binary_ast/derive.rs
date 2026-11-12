@@ -3,6 +3,8 @@
 
 /// Optional derived-code measurement, owned by one compilation.
 pub mod census;
+mod shape;
+pub(super) use shape::record as record_shapes;
 
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{SignatureItem, StructureItem};
@@ -24,9 +26,10 @@ pub fn expand_structure_item_with_mapper(
     active: bool,
 ) -> Result<Vec<StructureItem>, String> {
     let start = census::start(arena.derived_census.is_some());
+    let observer_before = arena.derived_census.as_ref().map_or(0, |c| c.observer_ns);
     let result = super::spice_ppx::expand_structure_item_with_mapper(item, arena, active);
     if let (Some(start), Some(census)) = (start, arena.derived_census.as_mut()) {
-        census.generation.add(active, census::nanos(start.elapsed()));
+        census.generation.add(active, census::nanos(start.elapsed()).saturating_sub(census.observer_ns - observer_before));
     }
     result
 }

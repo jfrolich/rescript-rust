@@ -75,6 +75,18 @@ pub struct Census {
     /// copied nodes, lazy environment hits+misses. Null unless counters are
     /// enabled and RAYON_NUM_THREADS=1; counters are process-global.
     pub checker_counters: Option<[[u64; 4]; 2]>,
+    /// Base shape class per generated binding, in generation order.
+    pub shape_classes: Vec<&'static str>,
+    /// Body node occurrences per binding.
+    pub shape_nodes: Vec<u64>,
+    /// Orthogonal parameterisation flag per binding.
+    pub shape_parameterised: Vec<bool>,
+    /// Orthogonal recursive-group flag per binding.
+    pub shape_recursive: Vec<bool>,
+    /// Canonical structural bytes per binding; null means unsupported syntax.
+    pub templates: Vec<Option<Vec<u8>>>,
+    #[serde(skip)]
+    pub(crate) observer_ns: u64,
     #[serde(skip)]
     pub(crate) output: PathBuf,
     #[serde(skip)]
@@ -91,7 +103,8 @@ impl Census {
             js_bytes: Pair::default(), js_lines: Pair::default(), checker_counters: (crate::perf_counters::enabled()
                 && std::env::var("RAYON_NUM_THREADS").as_deref() == Ok("1"))
                 .then_some([[0; 4]; 2]),
-            typed_groups: Vec::new() }
+            typed_groups: Vec::new(), shape_classes: Vec::new(), shape_nodes: Vec::new(),
+            shape_parameterised: Vec::new(), shape_recursive: Vec::new(), templates: Vec::new(), observer_ns: 0 }
     }
     /// O(new words) on growth, O(1) otherwise; one bit per typed binding-pool slot.
     pub fn mark_typed_group(&mut self, start: u32) {
@@ -173,7 +186,7 @@ impl Census {
     /// O(1): remove measured generation from the frontend interval and partition
     /// the remaining module-wide walk time by node count.
     pub fn account_frontend(&mut self, elapsed: u64) {
-        self.frontend = Pair::estimate(elapsed.saturating_sub(self.generation.total()), self.syntax_nodes);
+        self.frontend = Pair::estimate(elapsed.saturating_sub(self.generation.total() + self.observer_ns), self.syntax_nodes);
     }
 }
 

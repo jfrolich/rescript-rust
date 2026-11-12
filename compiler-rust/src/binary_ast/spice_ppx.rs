@@ -5640,7 +5640,11 @@ fn map_structure_item_spice(
             let (ref rec_flag, ref decls) = **inner;
             let mut vbs = Vec::new();
             for decl in decls {
-                vbs.extend(map_type_decl_structure(decl, arena)?);
+                let generated = map_type_decl_structure(decl, arena)?;
+                if arena.derived_census.is_some() {
+                    super::derive::record_shapes(decl, decls, *rec_flag == RecFlag::Recursive, &generated, arena);
+                }
+                vbs.extend(generated);
             }
 
             if vbs.is_empty() {

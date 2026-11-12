@@ -3,6 +3,8 @@
 import argparse
 import json
 import sys
+import collections
+import math
 
 PHASES = (
     "parse_other", "generation", "frontend", "environment", "typecheck",
@@ -16,6 +18,8 @@ def summarize(rows):
               for key in (*PHASES, "js_bytes", "js_lines")}
     result.update(modules=0, bindings=[0, 0], syntax_nodes=[0, 0],
                   checker_counters=[[0] * 4, [0] * 4], counter_modules=0)
+    shapes = collections.defaultdict(list)
+    templates = []
     for row in rows:
         if row.get("version") != 1:
             raise ValueError(f"Unsupported census version: {row.get('version')!r}")
@@ -30,11 +34,36 @@ def summarize(rows):
         for key in ("bindings", "syntax_nodes"):
             for side in range(2):
                 result[key][side] += row[key][side]
+        classes = row.get("shape_classes", [])
+        sizes = row.get("shape_nodes", [])
+        parameterised = row.get("shape_parameterised", [])
+        recursive = row.get("shape_recursive", [])
+        keys = row.get("templates", [])
+        if len({len(classes), len(sizes), len(parameterised), len(recursive), len(keys)}) != 1:
+            raise ValueError("Mismatched per-binding shape columns")
+        for shape, size, parameter, rec in zip(classes, sizes, parameterised, recursive):
+            shapes[shape].append(size)
+            if parameter:
+                shapes["parameterised (overlap)"].append(size)
+            if rec:
+                shapes["recursive group (overlap)"].append(size)
+        templates.extend(None if key is None else bytes(key) for key in keys)
         if row["checker_counters"] is not None:
             result["counter_modules"] += 1
             for side in range(2):
                 for counter in range(4):
                     result["checker_counters"][side][counter] += row["checker_counters"][side][counter]
+    result["shapes"] = {}
+    for shape, sizes in sorted(shapes.items()):
+        sizes.sort()
+        quantile = lambda p: sizes[max(0, math.ceil(len(sizes) * p) - 1)]
+        result["shapes"][shape] = dict(count=len(sizes), min=sizes[0], p50=quantile(.5),
+                                       p90=quantile(.9), p99=quantile(.99), max=sizes[-1])
+    result["template_bindings"] = len(templates)
+    result["unsupported_templates"] = templates.count(None)
+    # Compare complete structural byte strings, not a lossy hash fingerprint.
+    result["distinct_templates"] = None if None in templates else len(set(templates))
+    result["duplicate_bindings"] = (None if None in templates else len(templates) - len(set(templates)))
     return result
 
 
@@ -56,6 +85,12 @@ def markdown(summary):
         lines += ["", "| Checker counter | Derived | Other |", "|---|---:|---:|"]
         for i, name in enumerate(("Fresh variables", "Top-level unifications", "Instance copied nodes", "Lazy environment lookups")):
             lines.append(f"| {name} | {summary['checker_counters'][0][i]} | {summary['checker_counters'][1][i]} |")
+    if summary["shapes"]:
+        lines += ["", "| Shape | Bindings | Min nodes | P50 | P90 | P99 | Max |",
+                  "|---|---:|---:|---:|---:|---:|---:|"]
+        for shape, stats in summary["shapes"].items():
+            lines.append("| " + shape + " | " + " | ".join(str(stats[k]) for k in ("count", "min", "p50", "p90", "p99", "max")) + " |")
+        lines += ["", f"Distinct templates: {summary['distinct_templates']}; duplicate bindings: {summary['duplicate_bindings']}; unsupported templates: {summary['unsupported_templates']}."]
     return "\n".join(lines)
 
 
