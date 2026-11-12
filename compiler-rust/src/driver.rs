@@ -12510,6 +12510,9 @@ pub struct InProcessCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// What the file defines, as JSON (`repl::describe_signature`); with
+    /// `CompilerOptions::capture_intermediates`.
+    pub signature_description: String,
     /// The intermediate representations requested by `CompilerOptions::dumps`.
     pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
@@ -12545,6 +12548,9 @@ pub struct InProcessPreJsCompileResult {
     pub typed_tree_sexp: String,
     pub raw_lambda_sexp: String,
     pub lambda_sexp: String,
+    /// What the file defines, as JSON (`repl::describe_signature`); with
+    /// `CompilerOptions::capture_intermediates`.
+    pub signature_description: String,
     /// The intermediate representations requested by `CompilerOptions::dumps`.
     pub dumps: Vec<(DumpKind, String)>,
     /// The warning reports the file compile prints to stderr.
@@ -13670,6 +13676,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     } else {
         String::new()
     };
+    let signature_description = if options.capture_intermediates {
+        let signature = crate::types::includemod::simplify_signature(&typed_structure.str_type);
+        crate::repl::describe_signature(&type_ctx, &final_env, &signature).to_string()
+    } else {
+        String::new()
+    };
 
     if !has_interface || gentype_ignore_interface {
         // With a `.resi`, compiler/gentype/Paths.ml:61-86 makes the
@@ -13958,6 +13970,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         loaded_modules,
         lam_locs,
         typed_tree_sexp,
+        signature_description,
         raw_lambda_sexp,
         lambda_sexp,
         dumps,
@@ -14192,6 +14205,7 @@ pub fn finish_preprocessed_structure_in_process_from_js_boundary_with_metadata_h
         cmj_export_lambdas,
         hoisted_exports: pre_js.hoisted_exports,
         typed_tree_sexp: pre_js.typed_tree_sexp,
+        signature_description: pre_js.signature_description,
         raw_lambda_sexp: pre_js.raw_lambda_sexp,
         lambda_sexp: pre_js.lambda_sexp,
         dumps: pre_js.dumps,

@@ -121,7 +121,7 @@ fn tag_text(tag: &LiteralTag) -> String {
 
 /// The type of a declaration's member (a field, a constructor argument) at
 /// the instance `args` of the declaration's parameters.
-fn member_type(
+pub(crate) fn member_type(
     ctx: &TypeContext,
     params: &[TypeExprRef],
     args: &[TypeExprRef],
