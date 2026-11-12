@@ -322,18 +322,35 @@ pub struct DependencyError {
 
 impl fmt::Display for DependencyError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "Could not build package tree {} '{}' at path '{}'. Error",
-            if self.package_path.is_some() {
-                "for"
-            } else {
-                "reading dependency"
-            },
-            self.package_name,
-            self.root_path.display()
-        )
+        match &self.package_path {
+            // rewatch-ocaml's `Project_context.require_dependency_directory`.
+            None => write!(
+                f,
+                "Could not resolve dependency {} of the package at '{}'. Is it installed?",
+                self.package_name,
+                self.root_path.display()
+            ),
+            Some(_) => write!(
+                f,
+                "Could not build package tree for '{}' at path '{}'. Error",
+                self.package_name,
+                self.root_path.display()
+            ),
+        }
     }
+}
+
+impl error::Error for DependencyError {}
+
+/// What reading the package tree does with a dependency it cannot use: one
+/// that is not installed, or has no or an invalid configuration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnusableDependencies {
+    /// Fail: a build needs every dependency.
+    Fail,
+    /// Report and skip it: such a dependency holds nothing a build wrote, so
+    /// `rescript clean` still cleans the other packages.
+    Skip,
 }
 
 /// Given a config, recursively finds all dependencies.
@@ -349,6 +366,7 @@ fn read_dependencies(
     package_config: &Config,
     is_local_dep: bool,
     prod: bool,
+    unusable: UnusableDependencies,
 ) -> Result<Vec<Dependency>> {
     let mut dependencies: Vec<String> = package_config.get_dependency_names();
 
@@ -382,7 +400,7 @@ fn read_dependencies(
                         .unwrap_or(&current_package_path);
 
                     eprintln!(
-                        "Duplicated package: {} ./{} (chosen) vs ./{} in ./{}",
+                        "warning: duplicated package: {} ./{} (chosen) vs ./{} in ./{}",
                         package_name,
                         chosen_relative.to_string_lossy(),
                         duplicate_relative.to_string_lossy(),
@@ -398,16 +416,31 @@ fn read_dependencies(
         .collect::<Vec<String>>()
         // Read all config files in parallel instead of blocking
         .par_iter()
-        .map(|package_name| -> Result<Dependency> {
+        .map(|package_name| -> Result<Option<Dependency>> {
             let dependency_error = |package_path| DependencyError {
                 package_path,
                 package_name: package_name.clone(),
                 root_path: project_context.get_root_path().to_path_buf(),
             };
-            let canonical_path = read_dependency(package_name, package_config, project_context)
-                .with_context(|| dependency_error(None))?;
-            let config = read_config(&canonical_path)
-                .with_context(|| dependency_error(Some(canonical_path.clone())))?;
+            // The error names the dependency and where it is required; the
+            // lookup's own failure adds nothing to it.
+            let canonical_path = match read_dependency(package_name, package_config, project_context) {
+                Ok(path) => Ok(path),
+                Err(_) => Err(anyhow::Error::new(dependency_error(None))),
+            };
+            let resolved = canonical_path.and_then(|canonical_path| {
+                read_config(&canonical_path)
+                    .with_context(|| dependency_error(Some(canonical_path.clone())))
+                    .map(|config| (canonical_path, config))
+            });
+            let (canonical_path, config) = match (resolved, unusable) {
+                (Ok(resolved), _) => resolved,
+                (Err(error), UnusableDependencies::Fail) => return Err(error),
+                (Err(error), UnusableDependencies::Skip) => {
+                    eprintln!("Skipping a dependency: {error:#}");
+                    return Ok(None);
+                }
+            };
 
             let is_local_dep = is_local_dependency(project_context, package_name, &canonical_path);
 
@@ -417,18 +450,20 @@ fn read_dependencies(
                 &config,
                 is_local_dep,
                 prod,
+                unusable,
             )
             .with_context(|| format!("Could not read dependencies of '{package_name}'"))?;
 
-            Ok(Dependency {
+            Ok(Some(Dependency {
                 name: package_name.to_owned(),
                 config,
                 path: canonical_path,
                 dependencies,
                 is_local_dep,
-            })
+            }))
         })
-        .collect()
+        .collect::<Result<Vec<_>>>()
+        .map(|dependencies| dependencies.into_iter().flatten().collect())
 }
 
 fn is_local_dependency(project_context: &ProjectContext, package_name: &str, canonical_path: &Path) -> bool {
@@ -543,10 +578,9 @@ fn make_package(
         None => {
             if !is_root {
                 let package_path_str = package_path.to_string_lossy();
-                log::warn!(
-                    "Package '{}' has not defined any sources, but is not the root package. This is likely a mistake. It is located: {}",
-                    config.name,
-                    package_path_str
+                eprintln!(
+                    "warning: package '{}' has not defined any sources, but is not the root package. This is likely a mistake. It is located: {}",
+                    config.name, package_path_str
                 );
             }
 
@@ -586,7 +620,11 @@ This inconsistency will cause issues with package resolution.\n",
     })
 }
 
-fn read_packages(project_context: &ProjectContext, prod: bool) -> Result<AHashMap<String, Package>> {
+fn read_packages(
+    project_context: &ProjectContext,
+    prod: bool,
+    unusable: UnusableDependencies,
+) -> Result<AHashMap<String, Package>> {
     // Store all packages and completely deduplicate them
     let mut map: AHashMap<String, Package> = AHashMap::new();
 
@@ -608,6 +646,7 @@ fn read_packages(project_context: &ProjectContext, prod: bool) -> Result<AHashMa
         &project_context.current_config,
         /* is local dep */ true,
         prod,
+        unusable,
     )?);
 
     for d in dependencies.iter() {
@@ -923,7 +962,26 @@ pub fn make(
     prod: bool,
     cli_features: Option<&Vec<String>>,
 ) -> Result<AHashMap<String, Package>> {
-    let mut map = read_packages(project_context, prod).inspect_err(|_| {
+    make_with(
+        filter,
+        project_context,
+        show_progress,
+        prod,
+        cli_features,
+        UnusableDependencies::Fail,
+    )
+}
+
+/// [`make`], doing with unusable dependencies what `unusable` says.
+pub fn make_with(
+    filter: &Option<regex::Regex>,
+    project_context: &ProjectContext,
+    show_progress: bool,
+    prod: bool,
+    cli_features: Option<&Vec<String>>,
+    unusable: UnusableDependencies,
+) -> Result<AHashMap<String, Package>> {
+    let mut map = read_packages(project_context, prod, unusable).inspect_err(|_| {
         if show_progress {
             println!(
                 "{} {} Error building package tree.",
@@ -1161,9 +1219,8 @@ fn parse_packages_inner(build_state: &mut BuildState, packages: &AHashMap<String
                                     interface_display
                                 ));
                             }
-                            println!(
-                                "{} No implementation file found for interface file (skipping): {}",
-                                LINE_CLEAR,
+                            eprintln!(
+                                "warning: no implementation file found for interface file (skipping): {}",
                                 file.to_string_lossy()
                             )
                         }

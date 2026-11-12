@@ -128,7 +128,7 @@ capture() {
   fi
   tr '\r' '\n' <"$transcript" \
     | normalize_output \
-    | grep -E '^\[[123]/3\] .* (Cleaned|Parsed|Compiled) |^✅ Finished compilation in ' \
+    | grep -E '^\[[123]/3\] .* (Cleaned|Parsed|Compiled) |^✅ Finished compilation' \
     >"$work/$implementation.phases"
 }
 
@@ -170,10 +170,10 @@ if ! cmp -s "$work/rust.phases" "$work/ocaml.phases"; then
 fi
 
 cat >"$work/expected" <<'EOF'
-[1/3] 🧹 Cleaned 0/0 in 0.00s
-[2/3] 🧱 Parsed 1 source files in 0.00s
-[3/3] 🤺 Compiled 1 modules in 0.00s
-✅ Finished compilation in 0.00s
+[1/3] 🧹 Cleaned 0 stale modules
+[2/3] 🧱 Parsed 1 source file
+[3/3] 🤺 Compiled 1 module
+✅ Finished compilation
 EOF
 
 if ! cmp -s "$work/expected" "$work/ocaml.phases"; then
@@ -205,8 +205,7 @@ capture_after_build_order() {
   fi
   tr '\r' '\n' <"$transcript" \
     | normalize_output \
-    | grep -E '^(✅ Finished compilation in |AFTER_BUILD_MARKER$)' \
-    | sed -E 's/in [0-9]+\.[0-9]+s$/in 0.00s/' \
+    | grep -E '^(✅ Finished compilation|AFTER_BUILD_MARKER)$' \
     >"$work/$implementation-after-build.order"
 }
 
@@ -215,7 +214,7 @@ capture_after_build_order rust "$rust"
 capture_after_build_order ocaml "$ocaml"
 
 cat >"$work/expected-after-build-order" <<'EOF'
-✅ Finished compilation in 0.00s
+✅ Finished compilation
 AFTER_BUILD_MARKER
 EOF
 
@@ -260,10 +259,10 @@ capture_quiet_build() {
       "CLICOLOR_FORCE=0" \
       "RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE" \
       "RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME" \
-      "$executable" -q build "$work/$implementation" >/dev/null
+      "$executable" build -q "$work/$implementation" >/dev/null
   else
     script -qefc \
-      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME $command_executable -q build $command_project" \
+      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 RESCRIPT_BSC_EXE=$RESCRIPT_BSC_EXE RESCRIPT_RUNTIME=$RESCRIPT_RUNTIME $command_executable build -q $command_project" \
       "$transcript" >/dev/null
   fi
   if tr '\r' '\n' <"$transcript" \
@@ -342,10 +341,10 @@ capture_quiet_clean() {
       "TERM=xterm" \
       "CLICOLOR=1" \
       "CLICOLOR_FORCE=0" \
-      "$executable" -q clean "$work/$implementation" >/dev/null
+      "$executable" clean -q "$work/$implementation" >/dev/null
   else
     script -qefc \
-      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 $command_executable -q clean $command_project" \
+      "env -u NO_COLOR TERM=xterm CLICOLOR=1 CLICOLOR_FORCE=0 $command_executable clean -q $command_project" \
       "$transcript" >/dev/null
   fi
   if tr '\r' '\n' <"$transcript" | grep -E '(Cleaning|Cleaned)' >/dev/null; then
@@ -493,9 +492,9 @@ if $compare_rust_watch_output && \
 fi
 
 cat >"$work/expected-watch-initial" <<'EOF'
-[1/3] 🧹 Cleaned 0/0 in <TIME>
-[2/3] 🧱 Parsed 1 source files in <TIME>
-[3/3] 🤺 Compiled 1 modules in <TIME>
+[1/3] 🧹 Cleaned 0 stale modules in <TIME>
+[2/3] 🧱 Parsed 1 source file in <TIME>
+[3/3] 🤺 Compiled 1 module in <TIME>
 ✅ Finished initial compilation in <TIME>
 EOF
 
@@ -517,8 +516,8 @@ if $compare_rust_watch_output && \
 fi
 
 cat >"$work/expected-watch" <<'EOF'
-[1/2] 🧱 Parsed 1 source files in <TIME>
-[2/2] 🤺 Compiled 1 modules in <TIME>
+[1/2] 🧱 Parsed 1 source file in <TIME>
+[2/2] 🤺 Compiled 1 module in <TIME>
 ✅ Finished incremental compilation in <TIME>
 EOF
 
@@ -587,8 +586,8 @@ fi
 
 cat >"$work/expected-initial-failure-recovery" <<'EOF'
 Change detected. Rebuilding...
-[1/2] 🧱 Parsed 1 source files in <TIME>
-[2/2] 🤺 Compiled 1 modules in <TIME>
+[1/2] 🧱 Parsed 1 source file in <TIME>
+[2/2] 🤺 Compiled 1 module in <TIME>
 ✅ Finished incremental compilation in <TIME>
 EOF
 

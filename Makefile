@@ -186,9 +186,6 @@ artifacts: lib
 
 # Tests
 
-bench: compiler
-	$(DUNE_BIN_DIR)/syntax_benchmarks
-
 test: lib
 	node scripts/test.js -all
 
@@ -197,6 +194,11 @@ test-analysis: lib
 
 test-reanalyze: lib
 	make -C tests/analysis_tests/tests-reanalyze/deadcode test
+
+# Dead code analysis of the OCaml sources (REANALYZE=path/to/reanalyze.exe)
+.PHONY: dead-code
+dead-code:
+	./scripts/dead_code.sh
 
 # Benchmark reanalyze on larger codebase (COPIES=N for more files)
 benchmark-reanalyze: lib
@@ -415,4 +417,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts bench test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
