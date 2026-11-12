@@ -299,7 +299,7 @@ fn exported(
 ) -> anyhow::Result<Result<Vec<u8>, Unsupported>> {
     imported
         .arena
-        .validate(Some(imported.root), false)
+        .validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-norm {what} validation: {message}"))?;
     Ok(match export_lambda(imported) {
         Ok(program) => Ok(dump(&program.arena, program.root)?),

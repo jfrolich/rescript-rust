@@ -53,7 +53,7 @@ fn check(a: JsArena, expressions: &[Expr]) {
             );
         }
     }
-    imported.arena.validate(Some(imported.root), false).unwrap();
+    imported.arena.validate(Some(imported.root)).unwrap();
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn replacing_divisor_repairs_strict_ancestors() {
     let new = b.new_node(View::JNumber { value: zero }, 0);
     b.replace_local(rhs, new);
     assert!(!facts::strictly_pure(&b, root));
-    b.validate(Some(root), false).unwrap();
+    b.validate(Some(root)).unwrap();
 }
 
 #[test]

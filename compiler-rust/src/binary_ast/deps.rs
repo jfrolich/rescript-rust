@@ -134,7 +134,7 @@ impl<'a> DependencyCollector<'a> {
 
     fn add_expr_idx(&mut self, idx: ExprIdx) {
         let arena = self.arena;
-        let expr = arena.get_expr(idx);
+        let expr = arena.get_expr(arena.expanded(idx));
         self.add_expression(expr);
     }
 

@@ -29,6 +29,7 @@ use super::path::Path;
 use crate::parser::longident::Longident;
 use std::cell::{Cell, RefCell};
 use std::hash::{Hash, Hasher};
+use std::rc::Rc;
 
 /// The generic level for fully polymorphic types.
 pub const GENERIC_LEVEL: i32 = 100_000_000;
@@ -309,8 +310,13 @@ impl<S, const FIRST_BITS: u32> PayloadChunks<S, FIRST_BITS> {
     /// chunk's slots (allocated with `init` on first use) and the offset of
     /// the first reserved slot. A run that does not fit in the current chunk
     /// starts the next chunk large enough for it; the skipped tail stays
-    /// unused.
-    fn reserve(&self, n: usize, init: impl FnOnce(usize) -> Box<[S]>) -> (usize, &[S], usize) {
+    /// unused. O(log n) chunk-size probes; allocation initializes one chunk.
+    /// BASE is the handle offset and is included in the tag-range check.
+    fn reserve<const BASE: usize>(
+        &self,
+        n: usize,
+        init: impl FnOnce(usize) -> Box<[S]>,
+    ) -> (usize, &[S], usize) {
         let mut start = self.len.get();
         let (mut chunk, mut offset) = Self::locate(start);
         if offset + n > Self::chunk_size(chunk) {
@@ -322,7 +328,10 @@ impl<S, const FIRST_BITS: u32> PayloadChunks<S, FIRST_BITS> {
             offset = 0;
         }
         assert!(
-            u32::try_from(start + n).is_ok_and(|end| end & SHARED_REF_BITS == 0),
+            start.checked_add(BASE)
+                .and_then(|start| start.checked_add(n))
+                .and_then(|end| u32::try_from(end).ok())
+                .is_some_and(|end| end & SHARED_REF_BITS == 0),
             "type payload pool index exceeds the tag range"
         );
         let slots = self.chunks[chunk].get_or_init(|| init(Self::chunk_size(chunk)));
@@ -340,19 +349,105 @@ impl<S, const FIRST_BITS: u32> PayloadChunks<S, FIRST_BITS> {
     }
 }
 
-/// Lists of `Copy` elements (type lists, arrow parameters).
-type ListChunks<T> = PayloadChunks<Cell<T>, 8>;
+/// Elements with independently leased first arrays. Acquired once per pool.
+pub(crate) trait ListElem: Copy + 'static {
+    const FILL: Self;
+    /// One thread-local acquisition, then O(retained arrays) lease probes;
+    /// a fresh allocation initializes LIST_FIRST_LEN elements, reuse none.
+    fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]>;
+}
 
-impl<T: Copy> ListChunks<T> {
-    /// Append `items` (not empty) and return their untagged start.
+// Smallest measured size within 0.2% of 65,536 slots on both workloads.
+const LIST_FIRST_LEN: usize = 1 << 13;
+
+thread_local! {
+    static FIRST_TYPE_LISTS: RefCell<Vec<Rc<[Cell<TypeExprRef>; LIST_FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+    static FIRST_ARG_LISTS: RefCell<Vec<Rc<[Cell<TypeArg>; LIST_FIRST_LEN]>>> = const { RefCell::new(Vec::new()) };
+    #[cfg(test)]
+    static LIST_WRITES: Cell<usize> = const { Cell::new(0) };
+}
+
+impl ListElem for TypeExprRef {
+    const FILL: Self = TypeExprRef(0);
+    /// One acquisition and a linear lease scan; initializes only a fresh array.
+    fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_TYPE_LISTS
+            .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+}
+
+impl ListElem for TypeArg {
+    const FILL: Self = TypeArg {
+        name: None,
+        loc: DeclLoc::none(),
+        typ: TypeExprRef(0),
+        optional: false,
+    };
+    /// One acquisition and a linear lease scan; initializes only a fresh array.
+    fn first_chunk() -> Rc<[Cell<Self>; LIST_FIRST_LEN]> {
+        FIRST_ARG_LISTS
+            .with(|arrays| super::context::lease_first_array(arrays, || Cell::new(Self::FILL)))
+    }
+}
+
+/// Immutable lists, wholly in the leased first array or wholly in the ladder.
+struct ListChunks<T: ListElem> {
+    first: Rc<[Cell<T>; LIST_FIRST_LEN]>,
+    far: PayloadChunks<Cell<T>, 8>,
+    len: Cell<usize>,
+}
+
+impl<T: ListElem> Default for ListChunks<T> {
+    /// One lease acquisition and constant-sized ladder metadata initialization.
+    fn default() -> Self {
+        Self {
+            first: T::first_chunk(),
+            far: PayloadChunks::default(),
+            len: Cell::new(0),
+        }
+    }
+}
+
+impl<T: ListElem> ListChunks<T> {
+    /// Append a nonempty list: exactly items.len() writes, with no allocation
+    /// in the first array. The ladder may scan O(log n) chunk sizes and
+    /// initialize a new chunk (O(chunk size)); lists never cross boundaries.
     fn append(&self, items: &[T]) -> usize {
-        let first = items[0];
-        let (start, slots, offset) =
-            self.reserve(items.len(), |size| vec![Cell::new(first); size].into_boxed_slice());
-        for (slot, &item) in slots[offset..offset + items.len()].iter().zip(items) {
+        let start = self.len.get();
+        let n = items.len();
+        let (start, slots) = if n <= LIST_FIRST_LEN - start {
+            self.len.set(start + n);
+            (start, &self.first[start..start + n])
+        } else {
+            self.len.set(LIST_FIRST_LEN);
+            let (start, slots, offset) = self.far.reserve::<LIST_FIRST_LEN>(n, |size| {
+                vec![Cell::new(T::FILL); size].into_boxed_slice()
+            });
+            (start + LIST_FIRST_LEN, &slots[offset..offset + n])
+        };
+        for (slot, &item) in slots.iter().zip(items) {
             slot.set(item);
+            #[cfg(test)]
+            LIST_WRITES.with(|count| count.set(count.get() + 1));
         }
         start
+    }
+
+    /// O(1): one first-array comparison and a borrowed slice, no element walk.
+    #[inline(always)]
+    fn slots(&self, start: usize, n: usize) -> &[Cell<T>] {
+        if start < LIST_FIRST_LEN {
+            &self.first[start..start + n]
+        } else {
+            self.far_slots(start, n)
+        }
+    }
+
+    /// O(1): locate one ladder chunk and borrow a slice without copying.
+    #[cold]
+    #[inline(never)]
+    fn far_slots(&self, start: usize, n: usize) -> &[Cell<T>] {
+        self.far.slots(start - LIST_FIRST_LEN, n)
     }
 }
 
@@ -362,7 +457,7 @@ type OnceChunks<T> = PayloadChunks<std::cell::OnceCell<T>, 4>;
 impl<T> OnceChunks<T> {
     /// Append `item` and return its untagged index.
     fn push(&self, item: T) -> usize {
-        let (index, slots, offset) = self.reserve(1, |size| {
+        let (index, slots, offset) = self.reserve::<0>(1, |size| {
             (0..size).map(|_| std::cell::OnceCell::new()).collect()
         });
         if slots[offset].set(item).is_err() {
@@ -1738,6 +1833,149 @@ mod tests {
     use super::*;
 
 
+
+    #[test]
+    fn first_list_layout_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<TypeExprRef>(), 4);
+        assert_eq!(size_of::<TypeArg>(), 24);
+        assert_eq!(size_of::<TypeRefList>(), 8);
+        assert_eq!(size_of::<TypeArgList>(), 8);
+        assert_eq!(size_of::<ListChunks<TypeExprRef>>(), 408);
+        assert_eq!(size_of::<ListChunks<TypeArg>>(), 408);
+        assert_eq!(size_of::<TypePayloadPool>(), 1608);
+    }
+
+    #[test]
+    fn first_lists_cross_boundary_whole_and_read_back() {
+        let pool = TypePayloadPool::default();
+        let mut lists = Vec::new();
+        let mut args = Vec::new();
+        // Leave fewer than three slots: the next list goes wholly to the ladder.
+        for i in 0..(LIST_FIRST_LEN / 3 + 1000) {
+            let items = [TypeExprRef(i as u32); 3];
+            lists.push(pool.alloc(&items));
+            args.push(pool.alloc_args(&items.map(TypeArg::unlabeled)));
+        }
+        let crossing = LIST_FIRST_LEN / 3;
+        assert_eq!(lists[crossing].raw_start() as usize, LIST_FIRST_LEN);
+        assert_eq!(args[crossing].raw_start() as usize, LIST_FIRST_LEN);
+        assert!(pool.alloc(&[TypeExprRef(99)]).raw_start() as usize > LIST_FIRST_LEN);
+        for (i, (list, arg)) in lists.into_iter().zip(args).enumerate() {
+            assert_eq!(
+                pool.get(list).iter().collect::<Vec<_>>(),
+                vec![TypeExprRef(i as u32); 3]
+            );
+            assert_eq!(pool.get_at(list, 2), TypeExprRef(i as u32));
+            assert_eq!(
+                pool.get_args(arg)
+                    .iter()
+                    .map(|arg| arg.typ)
+                    .collect::<Vec<_>>(),
+                vec![TypeExprRef(i as u32); 3]
+            );
+        }
+    }
+
+    #[test]
+    fn first_lists_keep_tags_in_both_regions() {
+        for tag in [0, STORE_REF_TAG, SHARED_REF_BITS] {
+            let pool = TypePayloadPool::with_tag(tag);
+            let first = pool.alloc(&vec![TypeExprRef(7); LIST_FIRST_LEN]);
+            let far = pool.alloc(&[TypeExprRef(8); 3]);
+            assert_eq!(first.raw_start(), tag);
+            assert_eq!(far.raw_start(), tag | LIST_FIRST_LEN as u32);
+            assert_eq!(far.len(), 3);
+            assert_eq!(pool.get_at(first, LIST_FIRST_LEN - 1), TypeExprRef(7));
+            assert_eq!(pool.get_at(far, 2), TypeExprRef(8));
+            let arg = TypeArg::unlabeled(TypeExprRef(9));
+            let first = pool.alloc_args(&vec![arg; LIST_FIRST_LEN]);
+            let far = pool.alloc_args(&[arg; 3]);
+            assert_eq!(first.raw_start(), tag);
+            assert_eq!(far.raw_start(), tag | LIST_FIRST_LEN as u32);
+            assert_eq!(far.len(), 3);
+            assert_eq!(pool.get_args(far).iter().nth(2).unwrap().typ, arg.typ);
+            assert_eq!(pool.alloc(&[]).raw_start(), 0);
+            assert_eq!(pool.alloc_args(&[]).raw_start(), 0);
+        }
+    }
+
+    #[test]
+    fn first_lists_exact_fit_and_oversized_list() {
+        let pool = ListChunks::<TypeExprRef>::default();
+        let items = vec![TypeExprRef(7); LIST_FIRST_LEN];
+        assert_eq!(pool.append(&items), 0);
+        assert_eq!(pool.append(&[TypeExprRef(8)]), LIST_FIRST_LEN);
+        assert!(
+            pool.slots(0, LIST_FIRST_LEN)
+                .iter()
+                .all(|slot| slot.get() == TypeExprRef(7))
+        );
+        let pool = ListChunks::<TypeExprRef>::default();
+        let items = vec![TypeExprRef(9); LIST_FIRST_LEN + 1];
+        let start = pool.append(&items);
+        assert!(start >= LIST_FIRST_LEN);
+        assert!(
+            pool.slots(start, items.len())
+                .iter()
+                .all(|slot| slot.get() == TypeExprRef(9))
+        );
+        assert!(pool.append(&[TypeExprRef(10)]) > start);
+    }
+
+    #[test]
+    fn first_lists_write_once_per_element_at_10000() {
+        let pool = ListChunks::<TypeExprRef>::default();
+        let other = ListChunks::<TypeExprRef>::default();
+        let items = vec![TypeExprRef(7); 10_000];
+        LIST_WRITES.with(|count| count.set(0));
+        // Count 10,000 writes in first arrays even when each holds 8,192 slots.
+        pool.append(&items[..5_000]);
+        other.append(&items[5_000..]);
+        assert_eq!(pool.len.get(), 5_000);
+        assert_eq!(other.len.get(), 5_000);
+        LIST_WRITES.with(|count| assert_eq!(count.get(), 10_000));
+        // Force the far path, then verify the same linear write count there.
+        pool.append(&vec![TypeExprRef(8); LIST_FIRST_LEN]);
+        LIST_WRITES.with(|count| count.set(0));
+        pool.append(&items);
+        LIST_WRITES.with(|count| assert_eq!(count.get(), 10_000));
+    }
+
+    #[test]
+    #[should_panic(expected = "type payload pool index exceeds the tag range")]
+    fn first_lists_tag_limit_includes_first_array_offset() {
+        let pool = PayloadChunks::<Cell<TypeExprRef>, 8>::default();
+        pool.len.set((1 << 30) - LIST_FIRST_LEN);
+        pool.reserve::<LIST_FIRST_LEN>(1, |_| panic!("range check must precede allocation"));
+    }
+
+    #[test]
+    fn first_lists_lease_exclusively_and_reuse_without_clearing() {
+        std::thread::spawn(|| {
+            let a = ListChunks::<TypeExprRef>::default();
+            a.append(&[TypeExprRef(123)]);
+            let address = Rc::as_ptr(&a.first);
+            let b = ListChunks::<TypeExprRef>::default();
+            assert_ne!(address, Rc::as_ptr(&b.first));
+            drop(a);
+            let c = ListChunks::<TypeExprRef>::default();
+            assert_eq!(address, Rc::as_ptr(&c.first));
+            assert_eq!(c.len.get(), 0);
+            assert_eq!(c.first[0].get(), TypeExprRef(123));
+            let a = ListChunks::<TypeArg>::default();
+            a.append(&[TypeArg::unlabeled(TypeExprRef(456))]);
+            let address = Rc::as_ptr(&a.first);
+            let b = ListChunks::<TypeArg>::default();
+            assert_ne!(address, Rc::as_ptr(&b.first));
+            drop(a);
+            let c = ListChunks::<TypeArg>::default();
+            assert_eq!(address, Rc::as_ptr(&c.first));
+            assert_eq!(c.first[0].get().typ, TypeExprRef(456));
+        })
+        .join()
+        .unwrap();
+    }
 
     #[test]
     fn compact_type_node_sizes() {

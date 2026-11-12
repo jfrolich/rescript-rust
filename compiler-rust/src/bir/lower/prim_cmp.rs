@@ -391,7 +391,7 @@ mod tests {
         output
             .program
             .arena
-            .validate(Some(output.program.root), false)
+            .validate(Some(output.program.root))
             .unwrap();
     }
 
