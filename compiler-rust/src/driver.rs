@@ -7017,6 +7017,7 @@ fn compile_source_to_js_with_options_inner(
 
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
 
     #[cfg(test)]
@@ -11062,6 +11063,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     });
     if options.backend != crate::bir::shadow::BackendMode::Legacy {
         crate::bir::shadow::check_lambda(&lowered_arena, lowered_root, filename)?;
+        crate::bir::shadow::check_norm(&lowered_arena, raw_lambda, filename)?;
     }
     let lowered_lambda = crate::lambda::arena::LamProgram {
         arena: lowered_arena,
