@@ -401,8 +401,17 @@ impl PortablePersStruct {
         }
         encoded.sig.decode()
     }
-    /// The raw signature, decoded after ensuring bytes exist.
+    /// The raw signature, using the retained graph until storage encodes it.
     pub fn raw_signature(&self) -> Option<PortableRawSignature> {
+        if self.encoded.get().is_none() {
+            let decoded = self.decoded.lock().unwrap();
+            if let Some((_, raw)) = decoded.as_ref() {
+                // GenType may read a dependency's raw signature while publishing
+                // the current unit. Do not encode either signature just to read
+                // this graph; byte production belongs to the storage reader.
+                return raw.clone();
+            }
+        }
         self.encoded()
             .raw
             .as_ref()
@@ -2647,6 +2656,49 @@ mod identity_tests {
             panic!("ordinary binder requested store stamps")
         });
         assert_eq!(crate::binser::to_vec(&(&sig, &graph)).unwrap(), expected);
+    }
+
+    #[test]
+    fn dependency_raw_read_does_not_encode_during_publication() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let portable = serialize_pers_struct(
+            &PersStruct {
+                ps_name: "Provider".into(),
+                ps_sig: Arc::new(vec![]),
+                ps_filename: "Provider.res".into(),
+                ps_deprecated: None,
+                ps_crcs: vec![],
+                ps_alias_rewrites: Default::default(),
+            },
+            &ctx,
+            None,
+        );
+        {
+            let mut decoded = portable.decoded.lock().unwrap();
+            let (sig, raw) = decoded.as_mut().unwrap();
+            *raw = Some(PortableRawSignature {
+                raw_ps_sig: sig.ps_sig.clone(),
+                cmi_longident_names: sig.cmi_longident_names.clone(),
+                raw_type_graph: sig.type_graph.clone(),
+                raw_locations: sig.locations.clone(),
+            });
+        }
+        assert!(portable.has_raw_signature());
+        assert!(portable.encoded.get().is_none());
+        // The provider has been released but no storage reader has encoded it.
+        // A dependent's GenType alias lookup is its first raw-signature reader.
+        let before = {
+            let _dependent = crate::perf_counters::SignaturePublication::begin();
+            crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
+        };
+        assert!(portable.encoded.get().is_none());
+        assert!(portable.summary.get().is_none());
+        portable.prepare_for_storage();
+        let after = {
+            let _dependent = crate::perf_counters::SignaturePublication::begin();
+            crate::binser::to_vec(&portable.raw_signature().unwrap()).unwrap()
+        };
+        assert_eq!(before, after);
     }
 
     #[test]

@@ -334,6 +334,20 @@ impl Names {
                 self.charge(self.free[&f].len())?;
                 used.extend(self.free[&f].iter().copied());
             }
+            ExprKind::CamlBlock(items, _, tag) => {
+                let (items, tag) = (a.exprs(items), a.tag(tag));
+                walk::block_supported(items, tag)?;
+                for (_, e) in walk::block_elements(a, items, tag) {
+                    self.analyze_expr(a, e, defined, used)?;
+                }
+                // printer::collect_expression_idents visits even malformed
+                // PolyVar payloads beyond the printed NAME/VAL pair.
+                if matches!(tag, crate::lambda::TagInfo::PolyVar(_)) {
+                    for &e in items.iter().skip(2) {
+                        self.analyze_expr(a, e, defined, used)?;
+                    }
+                }
+            }
             _ => children(a, e, |e| self.analyze_expr(a, e, defined, used))?,
         }
         Ok(())
@@ -576,7 +590,13 @@ fn children(
                 visit(*e)?;
             }
         }
-        ExprKind::CamlBlock(..) => return Err(Unsupported("block literal shape")),
+        ExprKind::CamlBlock(items, _, tag) => {
+            let (items, tag) = (a.exprs(items), a.tag(tag));
+            walk::block_supported(items, tag)?;
+            for (_, e) in walk::block_elements(a, items, tag) {
+                visit(e)?;
+            }
+        }
         ExprKind::RawJsCode(_) => return Err(Unsupported("raw JavaScript")),
         ExprKind::Jsx(_) => return Err(Unsupported("JSX")),
         ExprKind::TemplateLiteral(_)
@@ -607,6 +627,39 @@ mod tests {
         }
     }
 
+    #[test]
+    fn block_shape_rejections_match_builder() {
+        use crate::js_ir::op::MutableFlag;
+        use crate::lambda::TagInfo;
+        let TagInfo::Constructor(mut constructor) = TagInfo::constructor("A", 1) else {
+            unreachable!()
+        };
+        constructor.runtime.tag.literal = crate::types::VariantLiteralTag::Float("0x1p0".into());
+        for (tag, reason) in [
+            (
+                TagInfo::poly_var("empty"),
+                "block literal: empty polymorphic variant",
+            ),
+            (
+                TagInfo::Constructor(constructor),
+                "block literal: float tag",
+            ),
+        ] {
+            let mut a = JsArena::new();
+            let items = a.expr_list(&[]);
+            let tag = a.tag_id(tag);
+            let e = a.expr(ExprKind::CamlBlock(items, MutableFlag::Immutable, tag));
+            let mut n = names();
+            assert_eq!(
+                n.analyze_expr(&a, e, &mut HashSet::new(), &mut HashSet::new()),
+                Err(Unsupported(reason))
+            );
+            assert_eq!(n.expr(&a, e), Err(Unsupported(reason)));
+            let allocator = oxc_allocator::Allocator::default();
+            let builder = super::super::build::Build::new(&allocator, &a, &n);
+            assert_eq!(builder.expr(e).err(), Some(Unsupported(reason)));
+        }
+    }
     #[test]
     fn suffixes_respect_other_bases_and_raw_globals() {
         let mut n = names();

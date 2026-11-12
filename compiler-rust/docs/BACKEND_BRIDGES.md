@@ -40,8 +40,9 @@ is counted once, with a fallback if any mode was unsupported.
 Lambda import preserves all node kinds but can return these static reasons:
 
 - `shared Lambda node`: Bir is a tree; expanding a DAG can be exponential.
-- `float constant spelling`: Bir stores bits, but the identity oracle preserves
-  the legacy spelling (including noncanonical and hexadecimal spellings).
+- `invalid float constant spelling`: the spelling cannot be parsed by the
+  OCaml-compatible float parser. Valid spellings, including hexadecimal floats,
+  infinities, NaNs and signed zero, are retained verbatim.
 - `non-contiguous binder run`, `multiply bound identifier`,
   `distinct global identities with one name`: incompatible identity layout.
 - `function arity outside u16`, `empty recursive binding group`: packed layout.
@@ -64,3 +65,30 @@ each reachable source node once; explicit work stacks avoid Rust recursion.
 for the whole JS program. No J-level conversion or J-level coverage is claimed
 by the Lambda ratchet. This is the outstanding part of S2.2, not a completed
 replacement backend or an S3 emitter.
+
+## Float identity and folding
+
+Float constants use an interned spelling and a cached IEEE-754 value. Different
+spellings of the same value have different constant IDs. Interning performs one
+text hash lookup followed by a dense string-indexed constant-cache access;
+reading the value needs one constant-array read, not another parse. Recursive
+constant blocks and options use the same pool. Lambda array elements are normal
+constant nodes. Constructor/pointer decorations and switch keys already retain
+their float spelling in their legacy metadata; they do not pass through the
+numeric constant pool.
+
+Future folding compares values, but printing preserves spelling. The current
+legacy folders (`lambda/arena.rs::fold_prim`, `raw_lambda/lower.rs`) fold
+float comparisons to booleans and float-to-int conversions to integers; they do
+not synthesize float arithmetic results. OCaml's `js_exp_make.ml:1613-1637`
+only folds integer operands in `float_add`/`float_minus`. Thus there is no current
+float-result spelling rule to port. If a future fold synthesizes such a result,
+it must reproduce the corresponding legacy operation, not reuse an arbitrary
+equal operand's spelling. The existing numeric rendering rule (not arithmetic
+folding) is `compiler/core/js_number.ml:42-57`: Infinity/-Infinity/NaN, an exact
+integer if possible, otherwise the first round-tripping precision of 12, 15,
+or 18 significant digits (`ocaml_float::js_number_to_string` in Rust).
+
+Bulk import accumulates weighted uses once in the arena, indexed by variable
+ID. `try_finish_bulk` reports weight/count overflow as `Unsupported`; a failed
+partially finalized arena is discarded. No importer use-count maps are needed.
