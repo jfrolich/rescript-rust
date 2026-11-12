@@ -632,8 +632,8 @@ impl ProbeRules for State {
                 let args = self.source.node(node).exit_arguments();
                 return Ok(ProbePlan::Children(expr::Resume::Exit(self.exit(label, args))));
             }
-            View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, exception, handler)?))),
-            View::TryFinally { .. } => return Err(Unsupported("try")),
+            View::Try { body, exception, handler } => return Ok(ProbePlan::Children(expr::Resume::Try(self.try_statement(cx, body, Some(exception), Some(handler), None)))),
+            View::TryFinally { body, finaliser } => return Ok(ProbePlan::Children(expr::Resume::Try(self.compile_try_finally(cx, body, finaliser)))),
             View::While { .. }
             | View::For { .. }
             | View::ForOf { .. }

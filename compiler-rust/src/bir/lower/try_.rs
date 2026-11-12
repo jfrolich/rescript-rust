@@ -17,7 +17,7 @@ pub(super) struct Plan {
 impl State {
     /// C:1503 try_statement / C:3129 compile_return_output. O(1), with no
     /// inspection of the body or handler to select their form.
-    pub(super) fn try_statement(&mut self, cx: Cx, body: NodeId, exception: VarId, handler: NodeId) -> Result<Try, Unsupported> {
+    pub(super) fn try_statement(&mut self, cx: Cx, body: NodeId, exception: Option<VarId>, handler: Option<NodeId>, finaliser: Option<NodeId>) -> Try {
         let start = self.statements.mark();
         let target = match cx.cont {
             Cont::Value(_) => Some((LetKind::Variable, self.fresh_variable("tmp"))),
@@ -27,10 +27,20 @@ impl State {
         if let Some((kind, var)) = target { self.declare_empty(kind, var); }
         let frame = Try(self.tries.len() as u32);
         self.tries.push(Plan {
-            nodes: [Some(body), Some(handler), None],
-            blocks: [None; 3], exception: Some(exception), start, target: target.map(|(_, var)| var),
+            nodes: [Some(body), handler, finaliser],
+            blocks: [None; 3], exception, start, target: target.map(|(_, var)| var),
         });
-        Ok(frame)
+        frame
+    }
+
+    /// C:1512 compile_try_finally. O(1): inspect only the immediate body tag
+    /// to fuse try/catch/finally, never walk a body to decide the form.
+    pub(super) fn compile_try_finally(&mut self, cx: Cx, body: NodeId, finaliser: NodeId) -> Try {
+        let (body, exception, handler) = match self.source.view(body) {
+            View::Try { body, exception, handler } => (body, Some(exception), Some(handler)),
+            _ => (body, None, None),
+        };
+        self.try_statement(cx, body, exception, handler, Some(finaliser))
     }
 
     /// C:3543 with_try_body_context. O(1); keep the handler's return policy.
@@ -38,7 +48,9 @@ impl State {
         let plan = &self.tries[frame.0 as usize];
         for (index, node) in plan.nodes.iter().enumerate() {
             if let Some(node) = node {
-                let cont = if index == 0 && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
+                let cont = if index == 2 {
+                    Cont::Effect(Tail::No)
+                } else if (index == 0 || plan.nodes[2].is_some()) && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
                     Cont::Effect(Tail::Return(Ret::InTry))
                 } else { plan.target.map(Cont::Assign).unwrap_or(cx.cont) };
                 into.push((Cx { cont, ..cx }, *node));
@@ -63,8 +75,9 @@ impl State {
         let plan = &self.tries[frame.0 as usize];
         let start = plan.start;
         let target = plan.target;
-        let parts = [plan.blocks[0].unwrap(), plan.blocks[1].unwrap()];
-        let statement = self.arena.new_node(View::STry { parts: &parts, exception: plan.exception }, 0);
+        let parts = [plan.blocks[0].unwrap(), plan.blocks[1].unwrap(), plan.blocks[2].unwrap_or(plan.blocks[0].unwrap())];
+        let len = if plan.blocks[2].is_some() { 3 } else { 2 };
+        let statement = self.arena.new_node(View::STry { parts: &parts[..len], exception: plan.exception }, 0);
         self.statements.push(statement);
         let value = if matches!(cx.cont, Cont::Value(_)) {
             Some(self.pure_expression(View::Var { var: target.expect("value temporary") }, 0))
@@ -89,6 +102,21 @@ mod tests {
         let handler = a.const_(Constant::Int { i: 2, comment: None });
         let root = a.try_(body, Ident::new("exn", 10, IdentFlags::NONE), handler);
         super::super::oracle_tests::compare_in_contexts(a, root, None, true, &[0, 1, 2, 3, 4]);
+    }
+
+    #[test]
+    fn finally_all_continuations() {
+        for catches in [false, true] {
+            let mut a = LamArena::new();
+            let mut body = a.const_(Constant::Int { i: 1, comment: None });
+            if catches {
+                let handler = a.const_(Constant::Int { i: 2, comment: None });
+                body = a.try_(body, Ident::new("exn", 10, IdentFlags::NONE), handler);
+            }
+            let fin = a.var(Ident::new("cleanup", 11, IdentFlags::NONE));
+            let root = a.try_finally(body, fin);
+            super::super::oracle_tests::compare(a, root);
+        }
     }
 
     #[test]
