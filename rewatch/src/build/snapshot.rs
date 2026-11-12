@@ -78,12 +78,197 @@ fn compile_on_this_thread(runtime_root: &Path) -> Result<Vec<u8>> {
             "snapshot module {name} has genType declarations");
         Ok(ProducedModule { name, core: core.to_vec(), javascript: Default::default(), slots: Default::default() })
     }).collect::<Result<Vec<_>>>()?;
-    encode(&[ProducedPackage {
+    let runtime = ProducedPackage {
         name: "@rescript/runtime".into(),
         recorded_root: runtime_root.to_string_lossy().into_owned(),
         sources_digest: digest,
         modules,
-    }])
+    };
+    let belt_root = runtime_root.parent().expect("runtime package parent").join("belt");
+    if belt_root.join("rescript.json").is_file() {
+        let belt = produce_belt(&belt_root, runtime_root, &runtime)?;
+        encode(&[runtime, belt])
+    } else {
+        encode(&[runtime])
+    }
+}
+
+/// Compile Belt through the ordinary package pipeline for both formats, two
+/// suffixes and both layouts. Producer only: four package compiles plus linear
+/// template comparison and one core encoding per module.
+fn produce_belt(root: &Path, runtime_root: &Path, runtime: &ProducedPackage) -> Result<ProducedPackage> {
+    let config: serde_json::Value = serde_json::from_slice(&std::fs::read(root.join("rescript.json"))?)?;
+    let mut baseline: Option<ProducedPackage> = None;
+    for in_source in [false, true] {
+        for suffix in [".js", ".res.mjs"] {
+            let dir = tempfile::tempdir()?;
+            let source_dir = dir.path().join("src");
+            std::fs::create_dir(&source_dir)?;
+            for entry in std::fs::read_dir(root.join("src"))? {
+                let entry = entry?;
+                if entry.path().extension().is_some_and(|ext| ext == "res" || ext == "resi") {
+                    std::fs::copy(entry.path(), source_dir.join(entry.file_name()))?;
+                }
+            }
+            let mut config = config.clone();
+            config["package-specs"] = serde_json::json!([
+                {"module":"esmodule", "suffix":suffix, "in-source":in_source},
+                {"module":"commonjs", "suffix":if suffix == ".js" { ".cjs" } else { ".res.cjs" }, "in-source":in_source}
+            ]);
+            // The configuration parser rejects duplicate suffixes even when
+            // output directories differ; use distinct suffixes for the formats.
+            if in_source {
+                config["jsx"] = serde_json::json!({"version":4,"module":"SnapshotJsx","preserve":true});
+                config["experimental-features"] = serde_json::json!({"LetUnwrap":true});
+            }
+            std::fs::write(dir.path().join("rescript.json"), serde_json::to_vec(&config)?)?;
+            let context = crate::project_context::ProjectContext::new(dir.path())?;
+            let packages = packages::make(&None, &context, false, false, None)?;
+            let compiler = super::build_types::CompilerInfo {
+                bsc_path: std::env::current_exe()?, bsc_hash: blake3::hash(b"snapshot-producer"),
+                runtime_path: runtime_root.to_path_buf(),
+            };
+            let mut state = super::build_types::BuildCommandState::new(
+                dir.path().to_path_buf(), context, packages, compiler, None, None,
+                crate::config::SourceMapCommand::Build,
+            );
+            packages::parse_packages(&mut state)?;
+            {
+                let mut registry = state.module_registry.lock().unwrap();
+                for module in &runtime.modules {
+                    registry.register_stored_parts(&module.name, None, PendingCore::Bytes(module.core.clone().into()))
+                        .ok_or_else(|| anyhow!("failed to register runtime module {}", module.name))?;
+                }
+            }
+            let warnings = super::parse::generate_asts(&mut state, || (), super::parse::ParseWarningLog::Append)?;
+            anyhow::ensure!(warnings.trim().is_empty(), "Belt snapshot parse warnings: {warnings}");
+            super::deps::get_deps(&mut state, &Default::default());
+            super::deps::plan_gentype(&mut state);
+            let (errors, warnings, _) = compile::compile(&mut state, false, || (), |_| ())?;
+            anyhow::ensure!(errors.trim().is_empty() && warnings.trim().is_empty(),
+                "Belt snapshot diagnostics: {errors}{warnings}");
+            let package = state.packages.get("@rescript/belt").expect("Belt package");
+            let mut modules = Vec::with_capacity(state.modules.len());
+            let registry = state.module_registry.lock().unwrap();
+            let mut names: Vec<_> = state.modules.keys().collect();
+            names.sort_unstable();
+            for name in names {
+                let data = registry.encode_stored_module(name).ok_or_else(|| anyhow!("missing Belt module {name}"))?;
+                let (extras, core) = stored_module::split(&data).expect("encoded module");
+                anyhow::ensure!(stored_module::decode_extras(extras).expect("encoded extras").gentype_declarations.is_empty(),
+                    "Belt module {name} has genType declarations");
+                let mut core = stored_module::decode_core(core).expect("encoded core");
+                core.rebase_paths(&package.path, Path::new("@rescript/belt"));
+                core.info.package_name = None;
+                core.info.package_root = None;
+                core.info.js_output_suffix = None;
+                core.info.package_outputs = Default::default();
+                let (_, core) = stored_module::encode_parts(&stored_module::StoredModuleRef {
+                    pers_struct: core.pers_struct.as_ref(), info: &core.info, gentype_declarations: &[],
+                });
+                anyhow::ensure!(!contains_bytes(&core, package.path.to_string_lossy().as_bytes()),
+                    "Belt module {name} retains a producer path");
+                let source = PathBuf::from("src").join(format!("{name}.res"));
+                let targets = compile::js_output_targets_for_source(package, &source, state.get_root_config());
+                let mut javascript: [Vec<u8>; 2] = Default::default();
+                let mut slots: [Vec<u32>; 2] = Default::default();
+                for (format, target) in targets.iter().enumerate() {
+                    let output = std::fs::read(&target.path)?;
+                    let suffix = if format == 1 { if suffix == ".js" { ".cjs" } else { ".res.cjs" } } else { suffix };
+                    let (text, positions) = template(&output, suffix.as_bytes())?;
+                    anyhow::ensure!(render_template(&text, &positions, suffix.as_bytes())? == output,
+                        "Belt template reconstruction failed for {name}");
+                    javascript[format] = text;
+                    slots[format] = positions;
+                }
+                modules.push(ProducedModule { name: name.clone(), core, javascript, slots });
+            }
+            if let Some(baseline) = &baseline {
+                anyhow::ensure!(baseline.modules.len() == modules.len(), "Belt module count changed across proof builds");
+                for (first, next) in baseline.modules.iter().zip(&modules) {
+                    anyhow::ensure!(first.name == next.name && first.javascript == next.javascript && first.slots == next.slots,
+                        "Belt template proof failed for {}", next.name);
+                    anyhow::ensure!(first.core == next.core, "Belt core proof failed for {}", next.name);
+                }
+            } else {
+                baseline = Some(ProducedPackage {
+                    name: "@rescript/belt".into(), recorded_root: "@rescript/belt".into(),
+                    sources_digest: belt_sources_digest(root)?, modules,
+                });
+            }
+        }
+    }
+    Ok(baseline.expect("four proof configurations"))
+}
+
+/// O(haystack bytes * needle bytes), producer-only path-leak assertion.
+fn contains_bytes(haystack: &[u8], needle: &[u8]) -> bool {
+    !needle.is_empty() && haystack.windows(needle.len()).any(|bytes| bytes == needle)
+}
+
+/// O(JavaScript bytes), strip only sibling-import suffixes. Producer proof
+/// builds must produce exactly the same text and slots; literals elsewhere
+/// are retained and therefore cannot accidentally become template slots.
+fn template(output: &[u8], suffix: &[u8]) -> Result<(Vec<u8>, Vec<u32>)> {
+    let mut text = Vec::with_capacity(output.len());
+    let mut slots = Vec::new();
+    let mut cursor = 0;
+    while cursor < output.len() {
+        let rest = &output[cursor..];
+        let prefix = if rest.starts_with(b"from \"./") { 6 } else if rest.starts_with(b"require(\"./") { 9 } else { 0 };
+        if prefix != 0 {
+            let start = cursor + prefix;
+            if let Some(end) = output[start..].iter().position(|&byte| byte == b'"') {
+                let end = start + end;
+                if output[start..end].ends_with(suffix) {
+                    text.extend_from_slice(&output[cursor..end - suffix.len()]);
+                    slots.push(u32::try_from(text.len())?);
+                    cursor = end;
+                    continue;
+                }
+            }
+        }
+        text.push(output[cursor]);
+        cursor += 1;
+    }
+    Ok((text, slots))
+}
+
+/// O(text bytes + slot count * suffix bytes), with one output allocation and
+/// one forward pass. Slots are offsets into the suffix-free text.
+fn render_template(text: &[u8], slots: &[u32], suffix: &[u8]) -> Result<Vec<u8>> {
+    let mut output = Vec::with_capacity(text.len() + slots.len() * suffix.len());
+    let mut previous = 0;
+    for &slot in slots {
+        let slot = slot as usize;
+        anyhow::ensure!(slot >= previous && slot <= text.len(), "invalid template slot");
+        output.extend_from_slice(&text[previous..slot]);
+        output.extend_from_slice(suffix);
+        previous = slot;
+    }
+    output.extend_from_slice(&text[previous..]);
+    Ok(output)
+}
+
+/// O(source bytes + module count log module count), once per package per build.
+/// Only parsed package flags and features enter the options part of the key.
+fn belt_sources_digest(root: &Path) -> Result<blake3::Hash> {
+    let config = packages::read_config(root)?;
+    let mut flags = config.get_experimental_features_args();
+    flags.sort();
+    let mut hasher = blake3::Hasher::new();
+    let mut add = |bytes: &[u8]| { hasher.update(&(bytes.len() as u64).to_le_bytes()); hasher.update(bytes); };
+    for flag in crate::config::flatten_flags(&config.compiler_flags).iter().chain(&flags) { add(flag.as_bytes()); }
+    let mut paths = std::fs::read_dir(root.join("src"))?.map(|entry| entry.map(|entry| entry.path()))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    paths.sort();
+    for path in paths {
+        if path.extension().is_some_and(|ext| ext == "res" || ext == "resi") {
+            add(path.file_name().expect("source filename").to_string_lossy().as_bytes());
+            add(&std::fs::read(path)?);
+        }
+    }
+    Ok(hasher.finalize())
 }
 
 /// Register the embedded runtime in `registry` if `runtime_paths` (module
@@ -345,6 +530,37 @@ mod tests {
         let mut bad = bytes;
         bad[8] = 1; // Embedded snapshots must have a zero producer identity.
         assert!(decode(leak(bad)).is_none());
+    }
+
+    #[test]
+    fn ten_thousand_import_slots_roundtrip() {
+        let source = b"import * as M from \"./M.res.mjs\";\n".repeat(10_000);
+        let (text, slots) = template(&source, b".res.mjs").unwrap();
+        assert_eq!(slots.len(), 10_000);
+        assert_eq!(render_template(&text, &slots, b".res.mjs").unwrap(), source);
+        let changed = render_template(&text, &slots, b".js").unwrap();
+        assert_eq!(changed, b"import * as M from \"./M.js\";\n".repeat(10_000));
+        assert!(render_template(b"a", &[2], b".js").is_err());
+    }
+
+    #[test]
+    fn producer_is_deterministic_and_belt_has_no_build_paths() {
+        let runtime = Path::new(env!("CARGO_MANIFEST_DIR")).join("../packages/@rescript/runtime").canonicalize().unwrap();
+        let first = compile(&runtime).unwrap();
+        assert_eq!(first, compile(&runtime).unwrap());
+        let packages = decode(leak(first)).unwrap();
+        let belt = packages.iter().find(|p| p.name == "@rescript/belt").unwrap();
+        assert_eq!(belt.recorded_root, "@rescript/belt");
+        assert_eq!(belt.len(), 43);
+        let checkout = runtime.parent().unwrap().parent().unwrap().parent().unwrap();
+        for slot in 0..belt.len() {
+            let (_, core) = belt.module(slot).unwrap();
+            assert!(!contains_bytes(core, checkout.to_string_lossy().as_bytes()));
+            let core = stored_module::decode_core(core).unwrap();
+            assert!(core.info.source_path.starts_with("@rescript/belt/src"));
+            assert!(core.pers_struct.unwrap().ps_filename.starts_with("@rescript/belt/src"));
+            assert!(core.info.package_root.is_none());
+        }
     }
 
     #[test]

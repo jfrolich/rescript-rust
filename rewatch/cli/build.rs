@@ -16,10 +16,12 @@ fn main() {
     let bytes = match runtime_root.filter(|root| root.join("rescript.json").is_file()) {
         Some(root) => {
             watch_sources(&root);
-            rescript::build::snapshot::compile(&root).unwrap_or_else(|err| {
-                println!("cargo:warning=not embedding the runtime, which failed to compile: {err:#}");
-                Vec::new()
-            })
+            let belt = root.parent().expect("package parent").join("belt");
+            if belt.join("rescript.json").is_file() {
+                println!("cargo:rerun-if-changed={}", belt.join("rescript.json").display());
+                println!("cargo:rerun-if-changed={}", belt.join("src").display());
+            }
+            rescript::build::snapshot::compile(&root).expect("snapshot production and proof builds")
         }
         None => {
             println!("cargo:warning=not embedding the runtime: packages/@rescript/runtime not found");
