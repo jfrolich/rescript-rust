@@ -940,6 +940,7 @@ mod tests {
             path: root.to_path_buf(),
             dirs: None,
             gentype_dirs: None,
+            gentype_outputs: None,
             is_local_dep: true,
             is_root: true,
         }

@@ -722,6 +722,11 @@ pub enum Output {
         /// The generated file's path.
         output_file: String,
     },
+    /// No annotations and the build's directory inventory proves no file exists.
+    Absent {
+        /// The generated file's path, retained for the normal NoMatch debug log.
+        output_file: String,
+    },
     /// No annotations: log and remove the file.
     NoMatch {
         /// The generated file's path.
@@ -735,7 +740,9 @@ impl Output {
             Output::Write {
                 output_file,
                 contents,
-            } => crate::gentype::generated_files::write_file_if_required(&output_file, &contents),
+            } => crate::timing::measure(crate::timing::Phase::GentypeFileWrite, || {
+                crate::gentype::generated_files::write_file_if_required(&output_file, &contents)
+            }),
             Output::TypeError { output_file } => {
                 crate::gentype::generated_files::log_file_action(
                     crate::gentype::generated_files::FileAction::TypeError,
@@ -743,15 +750,24 @@ impl Output {
                 );
                 Ok(())
             }
-            Output::NoMatch { output_file } => {
+            Output::Absent { output_file } => {
                 crate::gentype::generated_files::log_file_action(
                     crate::gentype::generated_files::FileAction::NoMatch,
                     &output_file,
                 );
-                if Path::new(&output_file).exists() {
-                    std::fs::remove_file(&output_file)?;
-                }
                 Ok(())
+            }
+            Output::NoMatch { output_file } => {
+                crate::timing::measure(crate::timing::Phase::GentypeFileNoMatch, || {
+                    crate::gentype::generated_files::log_file_action(
+                        crate::gentype::generated_files::FileAction::NoMatch,
+                        &output_file,
+                    );
+                    if crate::gentype::generated_files::file_exists(&output_file) {
+                        crate::gentype::generated_files::remove_file(&output_file)?;
+                    }
+                    Ok(())
+                })
             }
         }
     }
@@ -1597,5 +1613,59 @@ mod tests {
                 );
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod file_inventory_tests {
+    use super::Output;
+    use crate::gentype::generated_files::take_file_operations;
+
+    #[test]
+    fn absent_outputs_perform_zero_file_operations() {
+        take_file_operations();
+        for module in 0..512 {
+            Output::Absent {
+                output_file: format!("not-created/M{module}.gen.tsx"),
+            }
+            .apply()
+            .unwrap();
+        }
+        assert_eq!(take_file_operations(), 0);
+    }
+
+    #[test]
+    fn unknown_and_existing_outputs_keep_the_original_operations() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("M.gen.tsx").to_string_lossy().into_owned();
+        take_file_operations();
+        Output::NoMatch {
+            output_file: file.clone(),
+        }
+        .apply()
+        .unwrap();
+        assert_eq!(take_file_operations(), 1);
+        std::fs::write(&file, "handwritten").unwrap();
+        Output::NoMatch {
+            output_file: file.clone(),
+        }
+        .apply()
+        .unwrap();
+        assert_eq!(take_file_operations(), 2);
+        assert!(!std::path::Path::new(&file).exists());
+        Output::Write {
+            output_file: file.clone(),
+            contents: "new".to_string(),
+        }
+        .apply()
+        .unwrap();
+        assert_eq!(take_file_operations(), 2);
+        Output::Write {
+            output_file: file,
+            contents: "new".to_string(),
+        }
+        .apply()
+        .unwrap();
+        assert_eq!(take_file_operations(), 2); // exists + read, no rewrite
     }
 }
