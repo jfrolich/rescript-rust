@@ -5594,6 +5594,10 @@ fn check_structure_item_names(
                 arena.get_string(constructor.pext_name.txt),
             )?;
         }
+        // `module ${name} = ...` outside a macro quote: reported as a hole
+        // when the item is typed, not as a name.
+        ParsedStructureItemDesc::Pstr_module(mb)
+            if arena.get_string(mb.pmb_name.txt) == crate::parser::module::HOLE_MODULE_NAME => {}
         ParsedStructureItemDesc::Pstr_module(mb) => {
             check_name(
                 &mut names.modules,
@@ -16792,7 +16796,7 @@ fn type_structure_item_with_macros<'a>(
     if let Some(error) = crate::macros::discover::value_item(tctx, env, item) {
         return Err(TypeModError::CoreError(error));
     }
-    if let Some(error) = crate::macros::discover::type_item_requires_expansion(tctx, item) {
+    if let Some(error) = crate::macros::discover::item_stops_typing(tctx, item) {
         return Err(TypeModError::CoreError(error));
     }
     let mut typed = type_structure_item(tctx, env, arena, item)?;

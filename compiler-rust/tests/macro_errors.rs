@@ -268,3 +268,35 @@ fn splice_holes_and_optional_fields() {
         );
     });
 }
+
+const NAMED: &str = r#"open Macro
+
+@macro
+let unit = (name: string): decls =>
+  %code(
+    module ${name} = {
+      type t = float
+    }
+  )
+"#;
+
+#[test]
+fn the_name_of_a_module() {
+    on_a_big_stack(|| {
+        let mut project = Project::new();
+        project.compile("Named.res", NAMED).unwrap();
+        // The hole takes a string that can be the name of a module.
+        check(&mut project, "moduleNameNotOne", "%%Named.unit(\"feet\")\n");
+        check(
+            &mut project,
+            "moduleNameType",
+            "open Macro\n@macro\nlet f = (n: int): decls => %code(module ${n} = { let x = 1 })\n",
+        );
+        // A hole is the name of a module in a quote, and nowhere else.
+        check(
+            &mut project,
+            "moduleNameOutsideAQuote",
+            "let name = \"Feet\"\nmodule ${name} = {\n  let x = 1\n}\nmodule ${name} = {\n  let y = 2\n}\n",
+        );
+    });
+}

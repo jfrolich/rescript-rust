@@ -1,0 +1,13 @@
+%%Named.unit("feet")
+----
+
+  We've found a bug for you!
+  ModuleNameNotOne.res:1:1-20
+
+  1 │ %%Named.unit("feet")
+  2 │
+
+  The name of a module starts with a capital letter, with letters, digits and `_` after it: "feet" cannot be one.
+
+  This is reported by the macro `Named.unit`.
+

@@ -116,6 +116,21 @@ let __holeItem = (value: code<'a>): hole => ofNode({...toNode(value), raw: true}
    type cannot be written in parentheses. */
 let __holeTypeBody = (value: typ): hole => ofNode({...toNode(value), raw: true})
 
+let isModuleName: string => bool = %raw(`function (text) {
+  return /^[A-Z][A-Za-z0-9_]*$/.test(text)
+}`)
+/* The name of a module, `module ${name} = ...`: a string. */
+let __holeModuleName = (name: string): hole =>
+  if isModuleName(name) {
+    ofNode({c: name, raw: true})
+  } else {
+    host->fail(
+      "The name of a module starts with a capital letter, with letters, digits and `_` after it: " ++
+      JSON.stringify(JSON.Encode.string(name)) ++ " cannot be one.",
+      None,
+    )
+  }
+
 /* A piece is the text between two holes: parts of the macro's file, each
    with its line and column there (line 0: text that is not from the file). */
 type piece = array<(string, int, int)>
@@ -475,10 +490,6 @@ module Code = {
 
   /** Several declarations, one after the other. */
   let decls = (items: array<decls>): decls => build([join(items->Array.map(toNode), "\n")])
-
-  /** `module Name = { items }`, for a module whose name is computed. */
-  let module_ = (name: string, items: decls): decls =>
-    build([text("module " ++ name ++ " = {\n"), toNode(items), text("\n}")])
 }
 
 module Pat = {

@@ -3686,21 +3686,31 @@ fn parse_module_definition(
 /// OCaml `parse_module_binding` (compiler/syntax/src/res_core.ml:7046-7060).
 fn parse_module_binding(
     p: &mut Parser<'_>,
-    attrs: Attributes,
+    mut attrs: Attributes,
     start_pos_idx: PosIdx,
 ) -> ModuleBinding {
-    let name = match &p.token {
-        Token::Uident(n) => {
-            let n = n.clone();
-            let loc = p.mk_loc_current();
-            p.next();
-            let n_idx = p.arena_mut().push_interned_string(&n);
-            with_loc(n_idx, loc)
-        }
-        _ => {
-            p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
-            let error_idx = p.arena_mut().intern("_");
-            mknoloc(error_idx)
+    // `module ${name} = ...` in a macro quote: the name is a hole. The
+    // module is named [`HOLE_MODULE_NAME`] and the hole is kept as an
+    // attribute of it, so no parsetree node kind is added.
+    let name = if p.token == Token::DollarLbrace && !at_splice_hole(p) {
+        let hole = parse_hole_extension(p);
+        let loc = hole.0.loc;
+        attrs.push(hole);
+        with_loc(p.arena_mut().intern(HOLE_MODULE_NAME), loc)
+    } else {
+        match &p.token {
+            Token::Uident(n) => {
+                let n = n.clone();
+                let loc = p.mk_loc_current();
+                p.next();
+                let n_idx = p.arena_mut().push_interned_string(&n);
+                with_loc(n_idx, loc)
+            }
+            _ => {
+                p.err(DiagnosticCategory::Uident(p.token.clone().into_owned()));
+                let error_idx = p.arena_mut().intern("_");
+                mknoloc(error_idx)
+            }
         }
     };
     let body = parse_module_binding_body(p);
@@ -4111,6 +4121,11 @@ pub fn parse_extension_id(p: &mut Parser<'_>, start_pos_idx: PosIdx) -> Located<
 
 /// Name of the extension a macro quote hole `${expr}` is kept as.
 pub const HOLE_EXTENSION: &str = "res.hole";
+
+/// The name of a module whose name is a hole, `module ${name} = ...`: one
+/// that cannot be written. The hole is the attribute [`HOLE_EXTENSION`] of
+/// the module.
+pub const HOLE_MODULE_NAME: &str = "$hole";
 
 /// Name of the extension a splice hole `${...expr}` is kept as.
 pub const SPLICE_HOLE_EXTENSION: &str = "res.hole.splice";

@@ -19,11 +19,11 @@ use serde_json::{Value, json};
 
 use crate::parse_arena::{ExprIdx, LocIdx, ParseArena};
 use crate::parser::ast::{
-    ArgLabel, Constant, ExpressionDesc, Extension, PatternDesc, Payload, RecFlag,
+    ArgLabel, Constant, ExpressionDesc, Extension, ModuleBinding, PatternDesc, Payload, RecFlag,
     StructureItem as ParsedStructureItem, StructureItemDesc as ParsedStructureItemDesc,
 };
 use crate::parser::longident::Longident;
-use crate::parser::module::{HOLE_EXTENSION, SPLICE_HOLE_EXTENSION};
+use crate::parser::module::{HOLE_EXTENSION, HOLE_MODULE_NAME, SPLICE_HOLE_EXTENSION};
 use crate::types::context::TypeContext;
 use crate::types::decl::ValueDescription;
 use crate::types::env::Env;
@@ -2011,9 +2011,38 @@ pub(crate) fn value_item(
     Some(pending(tctx, loc))
 }
 
+/// What stops the typing of an item before it starts: a type item with a
+/// macro in an ordinary compilation, and a module whose name is a hole.
+pub(crate) fn item_stops_typing(
+    tctx: &mut TypeCheckContext<'_>,
+    item: &ParsedStructureItem,
+) -> Option<TypeCoreError> {
+    match &item.pstr_desc {
+        ParsedStructureItemDesc::Pstr_type(_) => type_item_requires_expansion(tctx, item),
+        ParsedStructureItemDesc::Pstr_module(binding) => module_name_hole(tctx, binding),
+        _ => None,
+    }
+}
+
+/// `module ${name} = ...` outside a quote: the hole is the module's name.
+fn module_name_hole(
+    tctx: &mut TypeCheckContext<'_>,
+    binding: &ModuleBinding,
+) -> Option<TypeCoreError> {
+    if tctx.arena.get_string(binding.pmb_name.txt) != HOLE_MODULE_NAME {
+        return None;
+    }
+    let loc = binding.pmb_name.loc;
+    Some(if matches!(tctx.macro_mode, MacroMode::Off) {
+        required(tctx, loc)
+    } else {
+        fail(tctx, loc, HOLE_OUTSIDE_QUOTE)
+    })
+}
+
 /// Whether a type item carries a macro, for an ordinary compilation to
 /// stop at.
-pub(crate) fn type_item_requires_expansion(
+fn type_item_requires_expansion(
     tctx: &mut TypeCheckContext<'_>,
     item: &ParsedStructureItem,
 ) -> Option<TypeCoreError> {

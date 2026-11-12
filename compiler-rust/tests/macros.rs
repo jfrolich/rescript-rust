@@ -969,17 +969,16 @@ open Macro
 // A module whose name is an argument of the macro.
 @macro
 let unit = (name: string, factor: float): decls =>
-  Code.module_(
-    name,
-    %code(
+  %code(
+    module ${name} = {
       type t = float
       let toBase = (value: t) => value *. ${Code.float(factor)}
-    ),
+    }
   )
 "#;
 
 #[test]
-fn a_module_with_a_computed_name() {
+fn a_hole_is_the_name_of_a_module() {
     let mut project = Project::new();
     compile_ok(&mut project, "Named.res", NAMED);
     let js = compile_ok(

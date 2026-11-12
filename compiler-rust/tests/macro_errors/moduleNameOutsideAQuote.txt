@@ -1,0 +1,19 @@
+let name = "Feet"
+module ${name} = {
+  let x = 1
+}
+module ${name} = {
+  let y = 2
+}
+----
+
+  We've found a bug for you!
+  ModuleNameOutsideAQuote.res:2:8-14
+
+  1 │ let name = "Feet"
+  2 │ module ${name} = {
+  3 │   let x = 1
+  4 │ }
+
+  A hole `${...}` can only be used inside a quote: %code(...), %type(...) or %pat(...).
+

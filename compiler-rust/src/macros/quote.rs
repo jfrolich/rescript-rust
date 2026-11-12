@@ -34,8 +34,8 @@ use std::collections::{HashMap, HashSet};
 use crate::binary_ast::ast_iter::{self, AstIter};
 use crate::parse_arena::{CoreTypeIdx, ExprIdx, LocIdx, ParseArena, PatIdx};
 use crate::parser::ast::{
-    ArgLabel, CoreTypeDesc, ExpressionDesc, Extension, PatternDesc, Payload, StructureItem,
-    StructureItemDesc, TypeDeclaration,
+    ArgLabel, CoreTypeDesc, ExpressionDesc, Extension, ModuleBinding, PatternDesc, Payload,
+    StructureItem, StructureItemDesc, TypeDeclaration,
 };
 use crate::parser::longident::Longident;
 use crate::parser::module::{HOLE_EXTENSION, SPLICE_HOLE_EXTENSION};
@@ -160,6 +160,8 @@ enum HoleKind {
     /// The body of a type declaration, `type t = ${body}`. It is not put in
     /// parentheses: a record or a variant type cannot be.
     TypeBody,
+    /// The name of a module, `module ${name} = ...`: a string.
+    ModuleName,
     Pat,
     Item,
     Splice(SplicePlace),
@@ -389,6 +391,22 @@ impl AstIter for QuoteScan<'_> {
         }
         ast_iter::walk_type_declaration(self, arena, td);
     }
+
+    fn module_binding(&mut self, arena: &ParseArena, mb: &ModuleBinding) {
+        for attribute in mb.pmb_attributes.iter() {
+            // `module ${name} = ...`: the parser keeps the hole as an
+            // attribute of the module.
+            match hole_inner(arena, attribute) {
+                Some(inner) if !is_splice(arena, attribute) => self.holes.push(Hole {
+                    outer: range(arena, attribute.0.loc),
+                    inner,
+                    kind: HoleKind::ModuleName,
+                }),
+                _ => self.attribute(arena, attribute),
+            }
+        }
+        self.module_expr(arena, mb.pmb_expr);
+    }
 }
 
 /// Finds the quotes of a file that are not inside another quote.
@@ -548,6 +566,7 @@ impl QuoteFinder<'_> {
                 HoleKind::Code | HoleKind::SpliceOutOfPlace => "__holeCode",
                 HoleKind::Type => "__holeType",
                 HoleKind::TypeBody => "__holeTypeBody",
+                HoleKind::ModuleName => "__holeModuleName",
                 HoleKind::Pat => "__holePat",
                 HoleKind::Item => "__holeItem",
                 HoleKind::Splice(SplicePlace::Items) => "__spliceItems",

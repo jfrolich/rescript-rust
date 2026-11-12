@@ -99,6 +99,21 @@ function __holeTypeBody(value) {
   };
 }
 
+let isModuleName = (function (text) {
+  return /^[A-Z][A-Za-z0-9_]*$/.test(text)
+});
+
+function __holeModuleName(name) {
+  if (isModuleName(name)) {
+    return {
+      c: name,
+      raw: true
+    };
+  } else {
+    return __rescript_macro.fail("The name of a module starts with a capital letter, with letters, digits and `_` after it: " + JSON.stringify(name) + " cannot be one.", undefined);
+  }
+}
+
 let quote = (function (pieces, holes, file) {
   var parts = [];
   function add(piece) {
@@ -558,16 +573,6 @@ function decls(items) {
   return cat([join(items.map(prim => prim), "\n")]);
 }
 
-function module_(name, items) {
-  return cat([
-    text("module " + name + " = {\n"),
-    items,
-    {
-      c: "\n}"
-    }
-  ]);
-}
-
 let Code = {
   string: string$1,
   int: int,
@@ -590,8 +595,7 @@ let Code = {
   param: param,
   labelled: labelled,
   fn: fn,
-  decls: decls,
-  module_: module_
+  decls: decls
 };
 
 let $$var = make;
@@ -660,6 +664,8 @@ export {
   env,
   __holeItem,
   __holeTypeBody,
+  isModuleName,
+  __holeModuleName,
   quote,
   __quoteCode,
   __quoteDecls,
