@@ -18,6 +18,7 @@ impl State {
             | Primitive::Pignore | Primitive::Ptypeof | Primitive::PrawJsCode(_)
             | Primitive::PcreateExtension(_) | Primitive::PinitMod | Primitive::PupdateMod
             | Primitive::Praise | Primitive::Pdebugger
+            | Primitive::Psome | Primitive::PsomeNotNest | Primitive::PvalFromOption | Primitive::PvalFromOptionNotNest | Primitive::PisNotNone | Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt | Primitive::PisNull | Primitive::PisUndefined | Primitive::PisNullUndefined
             | Primitive::Pintcomp(_) | Primitive::Pboolcomp(_) | Primitive::Pstringcomp(_) | Primitive::Pbigintcomp(_) | Primitive::Pobjcomp(_) | Primitive::Pfloatcomp(_) | Primitive::Pjscomp(_) | Primitive::Pobjorder | Primitive::Pobjmin | Primitive::Pobjmax | Primitive::Pboolorder | Primitive::Pboolmin | Primitive::Pboolmax | Primitive::Pintorder | Primitive::Pintmin | Primitive::Pintmax | Primitive::Pfloatorder | Primitive::Pfloatmin | Primitive::Pfloatmax | Primitive::Pbigintorder | Primitive::Pbigintmin | Primitive::Pbigintmax | Primitive::Pstringorder | Primitive::Pstringmin | Primitive::Pstringmax
             | Primitive::Paddint | Primitive::Psubint | Primitive::Pmulint | Primitive::Pdivint | Primitive::Pmodint | Primitive::Ppowint | Primitive::Pandint | Primitive::Porint | Primitive::Pxorint | Primitive::Plslint | Primitive::Paddfloat | Primitive::Psubfloat | Primitive::Pmulfloat | Primitive::Pdivfloat | Primitive::Pmodfloat | Primitive::Ppowfloat | Primitive::Paddbigint | Primitive::Psubbigint | Primitive::Pmulbigint | Primitive::Ppowbigint | Primitive::Pandbigint | Primitive::Porbigint | Primitive::Pxorbigint | Primitive::Plslbigint | Primitive::Pasrbigint | Primitive::Pasrint | Primitive::Pnotint | Primitive::Pnotbigint | Primitive::Pintoffloat | Primitive::Pnegint | Primitive::Pnegfloat | Primitive::Pnegbigint | Primitive::Plsrint | Primitive::Pdivbigint | Primitive::Pmodbigint)
     }
@@ -83,6 +84,57 @@ impl State {
         let payload = self.arena.primitive(prim.primitive).clone();
         let primitive = payload.primitive;
         let value = match primitive {
+            // X: some_expr / optional_block. Identity is a shape test, not purity.
+            Primitive::Psome | Primitive::PsomeNotNest => {
+                let value = values[0];
+                let identity = matches!(primitive, Primitive::PsomeNotNest)
+                    || matches!(self.arena.view(value), View::JNull | View::JObject { .. } | View::JNumber { .. }
+                        | View::JBlockLit { .. } | View::JArray { .. } | View::JStr { .. })
+                    || matches!(self.arena.view(value), View::JTemplate { .. }) && self.arena.node(value).aux() == 1;
+                plain::node(&mut self.arena, View::JOptional { value }, u16::from(identity))
+            }
+            // X: val_from_option_expr.
+            Primitive::PvalFromOption => {
+                if let View::JOptional { value } = self.arena.view(values[0]) {
+                    self.arena.detach(value); self.arena.release(values[0]); value
+                } else { self.primitive_runtime("Primitive_option", "valFromOption", &values) }
+            }
+            Primitive::PvalFromOptionNotNest => values[0],
+            // X: is_not_none_expr, intentionally drops even effectful Some payloads.
+            Primitive::PisNotNone => match self.arena.view(values[0]) {
+                View::JUndefined => { self.arena.release(values[0]); plain::boolean(&mut self.arena, false) }
+                View::JOptional { .. } => { self.arena.release(values[0]); plain::boolean(&mut self.arena, true) }
+                _ => {
+                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
+                    norm::je4_bin(&mut self.arena, BinOp::NotEqEq, values[0], undefined)
+                }
+            },
+            // X: is_null_expr / is_undefined_expr / is_null_or_undefined_expr.
+            Primitive::PisNull | Primitive::PisUndefined => {
+                let nullish = plain::node(&mut self.arena, if matches!(primitive, Primitive::PisNull) { View::JNull } else { View::JUndefined }, 0);
+                norm::je4_bin(&mut self.arena, BinOp::EqEqEq, values[0], nullish)
+            }
+            Primitive::PisNullUndefined => norm::je3_is_null_or_undefined(&mut self.arena, values[0]),
+            // X: null_to_opt_expr / null_undefined_to_opt_expr. Only leaf operands
+            // are duplicated, so this costs constant work per primitive.
+            Primitive::PnullToOpt | Primitive::PnullUndefinedToOpt => {
+                let nullable = matches!(primitive, Primitive::PnullUndefinedToOpt);
+                if matches!(self.arena.view(values[0]), View::Var { .. } | View::JUndefined | View::JNull) {
+                    let copy = match self.arena.view(values[0]) {
+                        View::Var { var } => plain::node(&mut self.arena, View::Var { var }, 0),
+                        View::JUndefined => { let aux = self.arena.node(values[0]).aux(); plain::node(&mut self.arena, View::JUndefined, aux) },
+                        View::JNull => plain::node(&mut self.arena, View::JNull, 0),
+                        _ => unreachable!("inline option operand is a leaf"),
+                    };
+                    let test = if nullable { norm::je3_is_null_or_undefined(&mut self.arena, copy) } else {
+                        let null = plain::node(&mut self.arena, View::JNull, 0);
+                        norm::je4_bin(&mut self.arena, BinOp::EqEqEq, copy, null)
+                    };
+                    let undefined = plain::node(&mut self.arena, View::JUndefined, 0);
+                    let some = plain::node(&mut self.arena, View::JOptional { value: values[0] }, 0);
+                    norm::je7_cond(&mut self.arena, test, undefined, some)
+                } else { self.primitive_runtime("Primitive_option", if nullable { "fromNullable" } else { "fromNull" }, &values) }
+            }
             // P: compile_primitive_js, comparison arms.
             Primitive::Pintcomp(cmp) => self.primitive_int_comparison(cmp, values[0], values[1]),
             Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(cmp, values[0], values[1]),
@@ -228,6 +280,29 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{arena::LamArena, lam_constant::Constant, LamLoc};
+
+    #[test]
+    fn option_arms_match_legacy() {
+        use Primitive::*;
+        for primitive in [Psome, PsomeNotNest, PvalFromOption, PvalFromOptionNotNest, PisNotNone, PnullToOpt, PnullUndefinedToOpt, PisNull, PisUndefined, PisNullUndefined] {
+            for shape in 0..9 {
+                let mut a = LamArena::new();
+                let arg = match shape {
+                    0 => a.const_(Constant::JsNull),
+                    1 => a.const_(Constant::JsUndefined { is_unit: false }),
+                    2 => a.const_(Constant::JsTrue),
+                    3 => a.const_(Constant::String("text".into())),
+                    4 => a.const_(Constant::Int { i: 3, comment: None }),
+                    5 => a.const_(Constant::Block { tag_info: Box::new(crate::lambda::TagInfo::Tuple), elements: vec![] }),
+                    _ => a.var(Ident::new("value", 10, crate::ident::IdentFlags::NONE)),
+                };
+                let arg = if shape >= 7 { a.prim_raw(PinitMod, &[arg], LamLoc::NONE) } else { arg };
+                let arg = if shape == 8 { a.prim_raw(Psome, &[arg], LamLoc::NONE) } else { arg };
+                let root = a.prim_raw(primitive.clone(), &[arg], LamLoc::NONE);
+                super::super::oracle_tests::compare(a, root);
+            }
+        }
+    }
 
     #[test]
     fn arithmetic_arms_match_legacy_with_and_without_checks() {
