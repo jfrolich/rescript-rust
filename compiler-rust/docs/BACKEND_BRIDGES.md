@@ -91,12 +91,25 @@ Bulk construction requires a fresh Bir. `finish_bulk` computes captures and
 weighted uses before the tree is validated or edited. Import and export decode
 each reachable source node once; explicit work stacks avoid Rust recursion.
 
-## Unfinished JS bridge
+## Post-pass JS bridge (S3.1a)
 
-`bridge::import_js` returns `Unsupported("JS arena import not implemented")`
-for the whole JS program. No J-level conversion or J-level coverage is claimed
-by the Lambda ratchet. This is the outstanding part of S2.2, not a completed
-replacement backend or an S3 emitter.
+`bridge_j::import_js` and `bridge_j::export_js` convert the post-pass dependency
+program to J-level Bir and back into a fresh JsArena. The old S2.2 stub is not
+this API. Every expression and statement kind is matched exhaustively; lists
+and expression chains use explicit postorder stacks. Legacy identifiers,
+ordered exports, the export set, name reservations, required modules and the
+side-effect reason are preserved without allocating new stamps. File-level
+directives and resolver settings are printer inputs, not JsArena fields; the
+shadow comparison must supply the same inputs to both printers.
+
+The bridge does not run optimizations or change the emitter. No J-level
+coverage is implied by the existing Lambda-stage ratchet. Representation limits
+are explicit `Unsupported` values: shared non-leaf nodes, repeated binders,
+non-contiguous parameter runs, explicit empty location handles, inconsistent
+integer/character decorations, and a try without either handler or finaliser.
+These are never silently changed into another shape. Full module metadata is
+stored in the J import pool; the remaining printer metadata fits the existing
+J payloads and auxiliary words (BACKEND_REDESIGN.md B.3/B.5).
 
 ## Float identity and folding
 

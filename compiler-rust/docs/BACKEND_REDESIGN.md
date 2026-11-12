@@ -630,6 +630,21 @@ Level J opcodes (the content of `js_ir::arena::ExprKind` and `StmtKind`):
 | Expressions | `JBin` (operator in `aux`), `JNot`, `JBnot`, `JTypeof`, `JIn`, `JCond`, `JSeq`, `JCall`, `JNew`, `JIndex`, `JDot` (property `StrId`), `JLength`, `JIsNullish`, `JStrAppend`, `JFun`, `JObject`, `JArray`, `JBlockLit` (the runtime shape is fixed here, see E.2), `JOptional`, `JJsx`, `JTemplate`, `JTagged`, `JRaw`, `JAwait`, `JSpread`, `JQualified` (module member), `JNumber`, `JStr`, `JBool`, `JNull`, `JUndefined`; `Var` and `Const` are shared with level L |
 | Statements | `SBlock`, `SDecl` (`VarId`, optional value), `SExp`, `SIf`, `SWhile` (label), `SForRange`, `SForOf`, `SForAwaitOf`, `SSwitch`, `SReturn`, `SThrow`, `STry`, `SBreak` (label), `SContinue` (label), `SDebugger`, `SRest` (record rest destructuring) |
 
+The post-pass JS bridge (`bir/bridge_j.rs`, S3.1a) uses the existing packed
+schema, including `JFlatCall`, `JJson` and `JRecordRest` already present in code.
+It distinguishes list wrappers from explicit `SBlock` statements, static index
+from block-tag access, absent from empty `new` arguments and JSX children,
+non-interpolated from interpolated templates, and integer from string switches
+in `aux`. `SDecl` packs the four binding properties below the eight `UsedStats`
+values. Array/block mutability is 0 immutable, 1 mutable, 2 not-applicable.
+Functions retain method/return-unit/async/directive metadata in existing headers
+and attributes. Template parts retain both source and semantic spelling, with
+absent semantic text representing `InvalidSource`. Raw statement/expression
+classification is retained. Module identities (including default/dynamic flags
+and ordered import attributes) are a J-only cold `Vec<ModuleId>` addressed by
+`ImportId`, parallel to the ordinary import rows. No legacy child handles or
+copy of the source arena is retained.
+
 What lowering needs is carried as follows:
 
 - **Statement or expression position.** At level L every node is an
@@ -759,6 +774,12 @@ Queries that walk today and do not in `Bir`:
 | `free_variables_with_stats`, `size_upto` | remain bounded walks of the candidate body |
 
 ### B.5 Size
+
+S3.1a adds only the cold J module identity pool: a `ModuleId` is 80 bytes on
+64-bit targets, one per distinct qualified module, addressed by a 4-byte
+`ImportId`. Its strings and attribute entries are owned metadata, not nodes.
+The packed node remains 16 bytes, function header 20, and template part 12;
+bridge tests assert these sizes. No per-node header or new opcode is added.
 
 Measured today: `lambda::arena::Node` is 16 bytes, `js_ir::arena::ExprNode`
 and `StmtNode` are 20. `Bir::Node` is 16 with flags included; locations and

@@ -233,6 +233,13 @@ macro_rules! nodes {
 // the existing enum discriminant for LetKind/BinOp/direction/length kind,
 // a boolean for JBool/JUndefined/JOptional, or a function's arity.
 // JRaw's aux distinguishes expression (0) from statement (1).
+// J bridge encodings: SBlock 0=list/1=explicit statement; JDot 0=static
+// index/1=block tag; JNew 0=absent args/1=present; JTemplate 0=interpolated/
+// 1=literal; JJsx records children-list presence; SSwitch 0=int/1=string.
+// SDecl packs LetKind in bits 0..2 and UsedStats above it. Arrays/blocks use
+// 0=immutable, 1=mutable, 2=NA (the fact engine tests zero for immutable).
+// JFun uses the existing method flag and FunctionAttribute for return-unit,
+// async and directives. JQualified's ImportId also indexes pools.j_modules.
 nodes! {
     Var { var: VarId },
     Global { module: ImportId },
