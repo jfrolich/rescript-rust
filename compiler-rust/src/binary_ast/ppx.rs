@@ -3928,7 +3928,7 @@ fn validate_module_import_attributes_payload(
         return Ok(false);
     };
     let (expr_idx, _) = &**eval_inner;
-    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(arena.expanded(*expr_idx)));
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return Ok(false);
     };
@@ -3943,13 +3943,13 @@ fn validate_module_import_attributes_payload(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                if expr_semantic_string(arena.get_expr(field.expr), arena)?.is_some() {
+                if expr_semantic_string(arena.get_expr(arena.expanded(field.expr)), arena)?.is_some() {
                     from_name = true;
                 }
             }
             "with" => {
                 let field_expr =
-                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr));
+                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(arena.expanded(field.expr)));
                 if let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc {
                     let (import_fields, _) = with_inner;
                     with_fields = Some(arena.expr_field_list(*import_fields));
@@ -3975,7 +3975,7 @@ fn validate_module_import_attributes_payload(
 
     for field in with_fields {
         // OCaml checks the value shape before the key (ast_external_process.ml:283-293).
-        let field_expr = arena.get_expr(field.expr);
+        let field_expr = arena.get_expr(arena.expanded(field.expr));
         let is_string = expr_semantic_string(field_expr, arena)?.is_some();
         if !is_string {
             return Err(PpxError::at_loc(
@@ -4010,7 +4010,7 @@ fn get_module_import_attributes(
         return Ok(None);
     };
     let (expr_idx, _) = &**eval_inner;
-    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(*expr_idx));
+    let expr = crate::ast_payload::unwrap_braces(arena, arena.get_expr(arena.expanded(*expr_idx)));
     let ExpressionDesc::Pexp_record(record_inner) = &expr.pexp_desc else {
         return Ok(None);
     };
@@ -4025,13 +4025,13 @@ fn get_module_import_attributes(
         };
         match arena.get_string(*field_name_idx) {
             "from" => {
-                if let Some(name) = expr_semantic_string(arena.get_expr(field.expr), arena)? {
+                if let Some(name) = expr_semantic_string(arena.get_expr(arena.expanded(field.expr)), arena)? {
                     from_name = Some(name);
                 }
             }
             "with" => {
                 let field_expr =
-                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(field.expr));
+                    crate::ast_payload::unwrap_braces(arena, arena.get_expr(arena.expanded(field.expr)));
                 let ExpressionDesc::Pexp_record(with_inner) = &field_expr.pexp_desc else {
                     continue;
                 };
@@ -4044,7 +4044,7 @@ fn get_module_import_attributes(
                         continue;
                     };
                     let Some(value) =
-                        expr_semantic_string(arena.get_expr(import_field.expr), arena)?
+                        expr_semantic_string(arena.get_expr(arena.expanded(import_field.expr)), arena)?
                     else {
                         continue;
                     };
@@ -7077,7 +7077,11 @@ fn rewrite_child(idx: ExprIdx, arena: &mut ParseArena) -> Rewritten {
     let expr = arena.get_expr(idx);
     let expr = expr.clone();
     let rewritten = rewrite_expression(&expr, arena);
-    if matches!(expr.pexp_desc, ExpressionDesc::Pexp_regexp(_)) {
+    if matches!(expr.pexp_desc,
+        ExpressionDesc::Pexp_regexp(_)
+        | ExpressionDesc::Pexp_raw(_)
+        | ExpressionDesc::Pexp_todo(_)
+    ) {
         let expanded = arena.push_expr(rewritten);
         arena.set_expansion(idx, expanded);
         return Rewritten::Same(idx);
@@ -11556,6 +11560,26 @@ let e = () =>
         let expanded = arena.expanded(original);
         assert_ne!(expanded, original);
         assert!(matches!(arena.get_expr(expanded).pexp_desc, ExpressionDesc::Pexp_constraint(_)));
+    }
+
+    #[test]
+    fn raw_and_todo_expansions_keep_the_original_child_handles() {
+        for source in ["let x = (a, %raw(`1`))\n", "let x = (a, %todo)\n"] {
+            let (mut arena, structure) = parse_structure(source);
+            let StructureItemDesc::Pstr_value((_, bindings)) = &structure[0].pstr_desc else {
+                panic!("expected binding");
+            };
+            let root = arena.vb_list(*bindings)[0].pvb_expr;
+            let ExpressionDesc::Pexp_tuple(items) = arena.get_expr(root).pexp_desc else {
+                panic!("expected tuple");
+            };
+            let original = arena.expr_list(items)[1];
+            let before = arena.get_expr(original).clone();
+            assert!(matches!(before.pexp_desc, ExpressionDesc::Pexp_raw(_) | ExpressionDesc::Pexp_todo(_)));
+            assert!(matches!(rewrite_child(original, &mut arena), Rewritten::Same(idx) if idx == original));
+            assert_eq!(arena.get_expr(original), &before);
+            assert_ne!(arena.expanded(original), original);
+        }
     }
 
     #[test]
