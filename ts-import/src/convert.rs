@@ -490,6 +490,10 @@ pub(crate) struct Converter<'a> {
     alias_index: HashMap<P<Symbol>, HashMap<Vec<usize>, P<Symbol>>>,
     /// [`object_groups`] of the plain object members of a union, by members.
     object_groups: HashMap<Vec<P<Type>>, Option<Vec<Vec<usize>>>>,
+    /// The fields of a case of a tagged union without its tag, by its
+    /// members (several when merged) and the tag property, from a tagged
+    /// union that was kept: the members of a syntax tree are in many unions.
+    tagged_fields: HashMap<CaseKey, Vec<Field>>,
 }
 
 const MAX_DEPTH: usize = 48;
@@ -539,6 +543,7 @@ impl<'a> Converter<'a> {
             declared_parents: HashMap::new(),
             declared_classes: HashSet::new(),
             object_groups: HashMap::new(),
+            tagged_fields: HashMap::new(),
             alias_index: HashMap::new(),
         }
     }
@@ -1972,6 +1977,9 @@ impl<'a> Converter<'a> {
         if !members.iter().all(|&member| is_plain_object(self, member)) {
             return None;
         }
+        // Tuples are tagged by an element only when each has its own
+        // literal there, as before tags could be shared.
+        let tuples = members.iter().any(|&member| self.c.is_array_or_tuple_type(member));
         // For each candidate property, each member with each of its tags,
         // and whether the member has several.
         type Entries = Vec<(P<Type>, Tag, bool)>;
@@ -1992,12 +2000,13 @@ impl<'a> Converter<'a> {
                 let property_type = self.c.get_type_of_symbol(property);
                 let tags: Option<Vec<Tag>> = match literal_tag(property_type) {
                     Some(tag) => Some(vec![tag]),
-                    // `"a" | "b"`, not `boolean`.
-                    None if property_type.flags().intersects(TypeFlags::Union)
-                        && !property_type.flags().intersects(TypeFlags::Boolean) =>
-                    {
-                        property_type.types().iter().map(|&member| literal_tag(member)).collect()
-                    }
+                    // `"a" | "b"`: strings and numbers only, so a field such
+                    // as `hidden: boolean | "until-found"` is no tag.
+                    None if property_type.flags().intersects(TypeFlags::Union) => property_type
+                        .types()
+                        .iter()
+                        .map(|&member| literal_tag(member).filter(|tag| matches!(tag, Tag::Str(_) | Tag::Num(_))))
+                        .collect(),
                     None => None,
                 };
                 let Some(tags) = tags else {
@@ -2005,6 +2014,10 @@ impl<'a> Converter<'a> {
                     break;
                 };
                 let split = tags.len() > 1;
+                if tuples && (split || entries.iter().any(|(_, known, _)| *known == tags[0])) {
+                    complete = false;
+                    break;
+                }
                 for tag in tags {
                     if entries.iter().any(|(other, known, _)| *other == member && *known == tag) {
                         continue;
@@ -2074,6 +2087,8 @@ impl<'a> Converter<'a> {
             }
         }
         let mut ctors: Vec<Ctor> = Vec::new();
+        // The fields converted here, kept for other unions if this one is.
+        let mut converted: Vec<(CaseKey, Vec<Field>)> = Vec::new();
         for (index, (member, tag, split)) in entries.iter().enumerate() {
             let group = &group_of[index];
             if group[0] != index {
@@ -2101,18 +2116,26 @@ impl<'a> Converter<'a> {
                 interface.or_else(own_field).unwrap_or_else(|| tag_base(tag))
             };
             let ctor_name = unique_ctor(&ctors, &base);
-            self.path.push(ctor_name.clone());
-            let records: Vec<Vec<Field>> = group
-                .iter()
-                .map(|&at| {
-                    let properties = self.visible_properties(entries[at].0);
-                    self.fields(&properties, Some(name))
-                })
-                .collect();
-            self.path.pop();
-            let fields = match records.as_slice() {
-                [one] => one.clone(),
-                _ => self.merge_fields(&ctor_name, &records),
+            let key: CaseKey = (group.iter().map(|&at| entries[at].0).collect(), name.to_string());
+            let fields = match self.tagged_fields.get(&key) {
+                Some(fields) => fields.clone(),
+                None => {
+                    self.path.push(ctor_name.clone());
+                    let records: Vec<Vec<Field>> = group
+                        .iter()
+                        .map(|&at| {
+                            let properties = self.visible_properties(entries[at].0);
+                            self.fields(&properties, Some(name))
+                        })
+                        .collect();
+                    self.path.pop();
+                    let fields = match records.as_slice() {
+                        [one] => one.clone(),
+                        _ => self.merge_fields(&ctor_name, &records),
+                    };
+                    converted.push((key, fields.clone()));
+                    fields
+                }
             };
             ctors.push(Ctor {
                 name: ctor_name,
@@ -2143,6 +2166,9 @@ impl<'a> Converter<'a> {
                 self.state.rollback(mark);
                 return None;
             }
+        }
+        for (key, fields) in converted {
+            self.tagged_fields.insert(key, fields);
         }
         Some(DeclKind::Variant { tag: Some(name.to_string()), ctors })
     }
@@ -3188,6 +3214,9 @@ enum ObjectShape {
     Closed(Vec<FieldShape>),
     Open,
 }
+
+/// A case of a tagged union: its members and the tag property.
+type CaseKey = (Vec<P<Type>>, String);
 
 /// One check on a field: presence, literals or kind.
 #[derive(Clone, Debug)]
