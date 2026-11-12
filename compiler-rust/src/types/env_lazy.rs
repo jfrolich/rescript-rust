@@ -32,7 +32,11 @@ use super::path::Path;
 pub(crate) struct SignatureIndex {
     values: HashMap<smol_str::SmolStr, (usize, usize)>,
     types: HashMap<smol_str::SmolStr, usize>,
-    modules: HashMap<smol_str::SmolStr, (usize, usize)>,
+    /// By name: item index, runtime position, and ordinal among the module
+    /// items (the index of the module's cell in a view's child table).
+    modules: HashMap<smol_str::SmolStr, (usize, usize, u32)>,
+    /// Number of module items.
+    module_count: u32,
     /// Alias/ident module items, as (item index, runtime position), in order.
     alias_modules: Vec<(usize, usize)>,
     /// Module type items, in order.
@@ -57,7 +61,24 @@ impl SignatureIndex {
     /// reaches. One hash probe.
     #[inline]
     pub(crate) fn module(&self, name: &str) -> Option<(usize, usize)> {
-        self.modules.get(name).copied()
+        self.modules
+            .get(name)
+            .map(|&(idx, runtime_pos, _)| (idx, runtime_pos))
+    }
+
+    /// (item index, runtime position, ordinal among the module items) of the
+    /// module a lookup of `name` reaches. One hash probe.
+    #[inline]
+    pub(crate) fn module_cell(&self, name: &str) -> Option<(usize, usize, usize)> {
+        self.modules
+            .get(name)
+            .map(|&(idx, runtime_pos, ordinal)| (idx, runtime_pos, ordinal as usize))
+    }
+
+    /// Number of module items, shadowed ones included.
+    #[inline]
+    pub(crate) fn module_count(&self) -> usize {
+        self.module_count as usize
     }
 
     /// Number of child modules whose type is a path.
@@ -110,9 +131,11 @@ impl SignatureIndex {
                     ) {
                         index.alias_modules.push((idx, runtime_pos));
                     }
-                    index
-                        .modules
-                        .insert(smol_str::SmolStr::new_static(id.name()), (idx, runtime_pos));
+                    index.modules.insert(
+                        smol_str::SmolStr::new_static(id.name()),
+                        (idx, runtime_pos, index.module_count),
+                    );
+                    index.module_count += 1;
                     runtime_pos += 1;
                 }
                 SignatureItem::SigModtype(_, _) => index.modtypes.push(idx),
@@ -1271,7 +1294,7 @@ impl QualifiedModuleComponents {
         if self.compiler_counters_enabled {
             crate::perf_counters::record_lazy_hit(crate::perf_counters::LazyLookupKind::Module);
         }
-        self.tables.index.modules.get(name).copied()
+        self.tables.index.module(name)
     }
 
     pub(crate) fn lookup_value(&self, name: &str) -> Option<(usize, &Ident, &ValueDescription)> {

@@ -5296,6 +5296,22 @@ impl ComponentSubst {
         }
     }
 
+    /// [`freshen_component_module_declaration_bound_idents`] without
+    /// building the substitution again: one copy of the declaration's
+    /// module type (`Subst.modtype sub md.md_type`, env.ml:475-477), none
+    /// for an alias of a persistent unit, which names no item of the
+    /// signature and binds nothing.
+    pub(crate) fn freshen_module_declaration(&self, md: &mut ModuleDeclaration, ctx: &TypeContext) {
+        if let ModuleType::MtyAlias(_, target) = &md.md_type
+            && let PathView::Pident(target) = target.view()
+            && target.is_persistent()
+        {
+            return;
+        }
+        md.md_type = crate::types::typecore::copy_lookup_module_type_for_subst(&md.md_type, ctx);
+        freshen_module_type_bound_idents_with_maps(&mut md.md_type, &self.0, ctx);
+    }
+
     /// [`substitute_component_module_type_path`]: one walk of the target.
     pub(crate) fn module_type_path(
         &self,

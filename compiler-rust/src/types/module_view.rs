@@ -48,15 +48,22 @@ impl ViewId {
     }
 }
 
-/// Where the view of one module path is published. The cell of a unit's own
-/// path lives in the unit (`PersStruct::ps_view`), so a holder of the unit
-/// reaches it without a table.
+/// Where what the world knows of one module path is published. The cell of
+/// a unit's own path lives in the unit (`PersStruct::ps_view`), and the cell
+/// of a child path in its parent's view (`ModuleView::children`, by the
+/// child's ordinal among the module items), so a holder of the unit or of
+/// the parent view reaches it without a table.
 #[derive(Default)]
 pub(crate) struct ViewCell {
     /// `None` inside: the pool had no room for the view. Every compilation
     /// then builds the unit's components for itself, as it does for a unit
     /// the world does not own.
     view: OnceLock<Option<Arc<ModuleView>>>,
+    /// The forced declaration of the module at this path, a child of its
+    /// parent's view (`comp_modules`, env.ml:1568), built by the first
+    /// worker that looks the child up with `find_module`; `None` inside
+    /// when the pool had no room for it. Never set for a unit's own path.
+    decl: OnceLock<Option<Arc<ViewModule>>>,
     /// Builds of this cell's view.
     #[cfg(test)]
     builds: AtomicU32,
@@ -175,10 +182,11 @@ pub(crate) struct OpenedItems {
     pub(crate) modtypes: Vec<(Ident, Arc<ModtypeDeclaration>)>,
 }
 
-/// The forced declaration of one child module (`comp_modules`, env.ml:1568),
-/// built by the first worker that looks the child up with `find_module`;
-/// `None` inside when the pool had no room for it.
-type ForcedChild = OnceLock<ForcedDeclaration>;
+/// A forced child declaration: frozen, with the child's identifier.
+pub(crate) struct ViewModule {
+    pub(crate) id: Ident,
+    pub(crate) decl: Arc<ModuleDeclaration>,
+}
 
 /// A forced child declaration with its identifier; `None` when the pool had
 /// no room for it.
@@ -210,8 +218,13 @@ pub(crate) struct ModuleView {
     /// The substituted target of each child whose type is a path, and
     /// whether it is an alias (`Mty_alias`) or a module type (`Mty_ident`).
     alias_targets: AHashMap<SmolStr, (bool, Arc<Path>)>,
-    /// By signature item: the forced declaration of a child module.
-    forced_children: Box<[ForcedChild]>,
+    /// The cell of each child module, by its ordinal among the module
+    /// items (`SignatureIndex::module_cell`).
+    children: Box<[ViewCell]>,
+    /// The component substitution of this view (`prefix_idents`,
+    /// env.ml:1530): built once, by the build when an item needs it or by
+    /// the first forced child, and read by every later force.
+    subst: OnceLock<crate::cmi::persistent_env::ComponentSubst>,
     /// (component path, alias source) of every child that is a path
     /// (env.ml:1517 `scrape_alias`): what adopting the view registers.
     alias_sources: Box<[(Path, Path)]>,
@@ -487,7 +500,10 @@ fn describe_view(world: &World, scratch: &ViewScratch, key: &ViewKey<'_>) -> Opt
         // Numbered when it is published.
         id: ViewId(u32::MAX),
         access_path,
-        forced_children: (0..signature.len()).map(|_| OnceLock::new()).collect(),
+        children: (0..index.module_count())
+            .map(|_| ViewCell::default())
+            .collect(),
+        subst: subst.map(OnceLock::from).unwrap_or_default(),
         signature,
         index,
         values: values.into_boxed_slice(),
@@ -623,13 +639,13 @@ impl ModuleView {
     /// env.ml:865-882, forcing the `comp_modules` thunk of env.ml:1568):
     /// `Subst.modtype` under the component substitution, which renames the
     /// bound identifiers of a child signature. Forced once per build, on a
-    /// scratch context of the first worker that asks.
+    /// scratch context of the first worker that asks, into the child's
+    /// cell ([`ViewCell`]).
     ///
     /// Forced already: one probe of the name index and one load of a
-    /// write-once cell. Forcing: one pass over this view's signature (the
-    /// component substitution is built for each force, as before this
-    /// view existed) and one copy of the child's module type, so forcing
-    /// every child of a view is quadratic in the signature.
+    /// write-once cell. Forcing: one copy of the child's module type. The
+    /// component substitution is this view's, built once (one pass over the
+    /// signature) whatever the number of children forced.
     /// Returns the child's signature item, runtime position, and its
     /// identifier and declaration; `None` for those when the pool had no
     /// room for the declaration (the caller then forces it for itself).
@@ -638,25 +654,29 @@ impl ModuleView {
         world: &World,
         name: &str,
     ) -> Option<(usize, usize, ForcedDeclaration)> {
-        let (idx, runtime_pos) = self.index.module(name)?;
+        let (idx, runtime_pos, ordinal) = self.index.module_cell(name)?;
         let SignatureItem::SigModule(id, md, _) = &self.signature[idx] else {
             return None;
         };
-        let forced = self.forced_children[idx].get_or_init(|| {
+        let forced = self.children[ordinal].decl.get_or_init(|| {
             let scratch = ViewScratch::fresh();
-            let (id, md) = super::env_lazy::force_component_module_declaration_thunk(
-                &self.access_path,
-                name,
-                &self.access_path,
-                &self.signature,
-                *id,
-                md.clone(),
-                scratch.ctx(),
-            );
-            match freeze(world, &scratch, md) {
+            let ctx = scratch.ctx();
+            let subst = self.subst.get_or_init(|| {
+                crate::cmi::persistent_env::ComponentSubst::new(
+                    &self.signature,
+                    &self.access_path,
+                    ctx,
+                )
+            });
+            let mut md = md.clone();
+            subst.freshen_module_declaration(&mut md, ctx);
+            match freeze(world, &scratch, Arc::new(md)) {
                 Ok(frozen) => {
                     crate::perf_counters::world::record_forced_child(frozen.nodes);
-                    Some((id, frozen.value))
+                    Some(Arc::new(ViewModule {
+                        id: *id,
+                        decl: frozen.value,
+                    }))
                 }
                 Err(failure) => {
                     debug_assert_unfreezable_is_pool_full(failure, name);
@@ -664,7 +684,10 @@ impl ModuleView {
                 }
             }
         });
-        Some((idx, runtime_pos, forced.clone()))
+        let forced = forced
+            .as_ref()
+            .map(|module| (module.id, module.decl.clone()));
+        Some((idx, runtime_pos, forced))
     }
 
     /// The text `RESCRIPT_WORLD_VERIFY` compares: every table of the view
@@ -814,6 +837,10 @@ mod tests {
         records: usize,
         /// Child modules `M<n>: { type u }`.
         children: usize,
+        /// Leave out the module type `S` and the modules `Alias` and
+        /// `Inner`: no item of the unit then needs the component
+        /// substitution when the view is built.
+        bare: bool,
     }
 
     fn unit(name: &str, values: usize) -> Arc<PersStruct> {
@@ -959,29 +986,31 @@ mod tests {
                 )])),
             ));
         }
-        signature.push(SignatureItem::SigModtype(
-            Ident::create_local("S"),
-            ModtypeDeclaration {
-                mtd_type: None,
-                mtd_attributes: vec![],
-                mtd_loc: crate::types::DeclLoc::none(),
-            },
-        ));
-        signature.push(module(
-            "Alias",
-            ModuleType::MtyAlias(
-                AliasPresence::MtaAbsent,
-                Arc::new(Path::pident(Ident::create_persistent("Other_unit"))),
-            ),
-        ));
-        signature.push(module(
-            "Inner",
-            ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
-                Ident::create_local("u"),
-                Arc::new(abstract_decl()),
-                RecStatus::TrecNot,
-            )])),
-        ));
+        if !shape.bare {
+            signature.push(SignatureItem::SigModtype(
+                Ident::create_local("S"),
+                ModtypeDeclaration {
+                    mtd_type: None,
+                    mtd_attributes: vec![],
+                    mtd_loc: crate::types::DeclLoc::none(),
+                },
+            ));
+            signature.push(module(
+                "Alias",
+                ModuleType::MtyAlias(
+                    AliasPresence::MtaAbsent,
+                    Arc::new(Path::pident(Ident::create_persistent("Other_unit"))),
+                ),
+            ));
+            signature.push(module(
+                "Inner",
+                ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
+                    Ident::create_local("u"),
+                    Arc::new(abstract_decl()),
+                    RecStatus::TrecNot,
+                )])),
+            ));
+        }
         let signature = freeze(&world, &scratch, signature)
             .expect("the unit's signature freezes")
             .value;
@@ -1234,6 +1263,9 @@ mod tests {
         assert_eq!(std::mem::size_of::<ViewId>(), 4);
         assert_eq!(std::mem::size_of::<Components<'static>>(), 16);
         assert_eq!(std::mem::size_of::<ViewKey<'static>>(), 8);
+        // Stored per child module of a view.
+        // (and, in a test build, its 8-byte build counter).
+        assert_eq!(std::mem::size_of::<ViewCell>(), 32 + 8);
         // Stored per value of a view.
         assert_eq!(
             std::mem::size_of::<ViewValue>(),
@@ -1356,6 +1388,7 @@ mod tests {
             constructors: 100,
             records: 5_000,
             children: 10,
+            bare: false,
         };
         let unit = unit_of("Opened", shape);
         let view = view_of(&unit);
@@ -1413,19 +1446,47 @@ mod tests {
         }
         assert!(tables.child_components(&view, "Missing", &ctx).is_none());
         assert_eq!(scanned() - before, 10_004);
-        // Forcing one child's declaration builds the component
-        // substitution once (one pass over the signature) whatever the
-        // number of children; W5's `ViewCell::decl` owns making it one
-        // build per view.
-        let world = World::current();
-        let maps = subst_map_builds();
-        for n in [0, 5_000, 9_999] {
-            let (_, _, forced) = view
-                .lookup_forced_module(&world, &format!("M{n}"))
-                .expect("the child exists");
-            assert!(forced.is_some());
+    }
+
+    #[test]
+    fn forcing_every_child_builds_the_parents_substitution_once() {
+        // 10,000 children forced, twice over. A unit with an item that
+        // needs the component substitution has it from its build; a bare
+        // one builds it on the first force. Neither builds it again.
+        for bare in [false, true] {
+            let shape = Shape {
+                children: 10_000,
+                bare,
+                ..Shape::default()
+            };
+            let before = subst_map_builds();
+            let unit = unit_of("Forced", shape);
+            let view = view_of(&unit);
+            let built = subst_map_builds() - before;
+            // The component substitution when an item needs it, and the
+            // one the opened module types are described with.
+            assert_eq!(built, if bare { 0 } else { 2 }, "bare: {bare}");
+            let world = World::current();
+            for round in 0..2 {
+                for n in 0..10_000 {
+                    let (_, _, forced) = view
+                        .lookup_forced_module(&world, &format!("M{n}"))
+                        .expect("the child exists");
+                    let (_, md) = forced.expect("the pool has room");
+                    assert!(
+                        matches!(md.md_type, ModuleType::MtySignature(_)),
+                        "round {round}, child {n}"
+                    );
+                }
+            }
+            assert_eq!(
+                subst_map_builds() - before,
+                if bare { 1 } else { 2 },
+                "bare: {bare}"
+            );
+            // A cell per child module, none per other item.
+            assert_eq!(view.children.len(), if bare { 10_000 } else { 10_002 });
         }
-        assert_eq!(subst_map_builds() - maps, 3);
     }
 
     #[test]
