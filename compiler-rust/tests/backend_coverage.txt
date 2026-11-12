@@ -103,57 +103,52 @@
   },
   "lower": {
     "fixtures": {
-      "identical": 56,
+      "identical": 80,
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
         "await": 8,
-        "external": 248,
+        "external": 264,
         "flat make": 8,
         "jsx": 24,
         "let rec": 8,
         "loop": 16,
         "record copy": 32,
-        "static catch": 16,
-        "switch": 48,
+        "static catch": 24,
         "try": 16
       }
     },
     "runtime": {
-      "identical": 72,
+      "identical": 75,
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
         "assign": 1,
         "await": 2,
-        "external": 19,
+        "external": 20,
         "let rec": 2,
         "loop": 3,
-        "string switch": 1,
-        "switch": 3,
         "try": 10
       }
     },
     "tests/tests": {
-      "identical": 181,
+      "identical": 220,
       "shared_catch_only": 1,
-      "units": 721,
+      "units": 729,
       "unsupported": {
         "assign": 9,
-        "await": 13,
-        "external": 322,
+        "await": 14,
+        "external": 357,
         "flat make": 3,
         "import": 3,
         "jsx": 5,
-        "let rec": 53,
+        "let rec": 61,
         "loop": 19,
         "record copy": 3,
         "record rest": 2,
         "shared Lambda subtree with binder": 1,
-        "static catch": 14,
-        "string switch": 10,
-        "switch": 70,
-        "try": 13
+        "static catch": 18,
+        "try": 14
       }
     }
   }
