@@ -20,7 +20,7 @@ use crate::binary_ast::ppx;
 use crate::cmi::persistent_env::{
     CmjExportArity, CmjExportConstant, ModuleRegistry, PersistentEnv, PersistentEnvError,
 };
-use crate::cmi::portable_types::PortablePersStruct;
+use crate::cmi::portable_types::{PortablePersStruct, SignaturePublicationMode};
 use crate::context::IdGenerator;
 use crate::diagnostics::WarningConfig;
 use crate::ident::Ident;
@@ -502,16 +502,21 @@ pub enum DumpKind {
     Lambda,
     /// `-dlambda-sexp-locs`
     LambdaLocs,
+    /// The unit's exported signature in canonical form
+    /// (`types::canonical_sig`): for an interface file, and for an
+    /// implementation without one.
+    Sig,
 }
 
 impl DumpKind {
     /// Every dump kind.
-    pub const ALL: [DumpKind; 5] = [
+    pub const ALL: [DumpKind; 6] = [
         DumpKind::TypedTree,
         DumpKind::TypedTreeLocs,
         DumpKind::RawLambda,
         DumpKind::Lambda,
         DumpKind::LambdaLocs,
+        DumpKind::Sig,
     ];
 
     /// The name used on the command line and as the dump file extension.
@@ -522,6 +527,7 @@ impl DumpKind {
             DumpKind::RawLambda => "rawlambda",
             DumpKind::Lambda => "lambda",
             DumpKind::LambdaLocs => "lambda-locs",
+            DumpKind::Sig => "sig",
         }
     }
 
@@ -536,6 +542,37 @@ impl DumpKind {
             DumpKind::RawLambda | DumpKind::Lambda | DumpKind::LambdaLocs
         )
     }
+
+    /// Whether the dump prints source locations or text, so that the
+    /// compile needs a parse that stores them.
+    pub fn needs_locations(self) -> bool {
+        match self {
+            DumpKind::TypedTree
+            | DumpKind::TypedTreeLocs
+            | DumpKind::RawLambda
+            | DumpKind::Lambda
+            | DumpKind::LambdaLocs => true,
+            DumpKind::Sig => false,
+        }
+    }
+}
+
+/// The `DumpKind::Sig` dump of a unit's exported signature.
+fn canonical_signature_dump(
+    type_ctx: &TypeContext,
+    module_name: &str,
+    signature: &[crate::types::decl::SignatureItem],
+    deprecated: Option<&str>,
+    arena: &ParseArena,
+) -> (DumpKind, String) {
+    let text = crate::types::canonical_sig::canonical_signature(
+        type_ctx,
+        module_name,
+        signature,
+        deprecated,
+        Some(arena),
+    );
+    (DumpKind::Sig, latin1_dump(text.into_bytes()))
 }
 
 /// The dump's bytes, one `char` per byte. Dump printers write source text
@@ -6553,6 +6590,7 @@ fn compile_source_to_js_with_options_inner(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -7772,6 +7810,7 @@ pub fn typecheck_interface_source(
 
     // Type check
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     crate::types::typecore::prepare_typecheck_arena(parser.arena_mut());
     let mut tctx = TypeCheckContext::new(&type_ctx, parser.arena());
     tctx.experimental_let_unwrap = experimental_let_unwrap;
@@ -8124,6 +8163,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Pervasives")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Pervasives");
             // OCaml `Res_compmisc.initial_env` opens implicit modules through
@@ -8142,6 +8182,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent("Stdlib")),
             env,
             ctx,
+            None,
         ) {
             env.mark_implicit_open_root("Stdlib");
             // Same implicit-open behavior as above; keep the opened bindings,
@@ -8162,6 +8203,7 @@ pub fn load_pervasives(
             crate::types::Path::pident(crate::ident::Ident::create_persistent(module_name.as_str())),
             env,
             ctx,
+            None,
         ) {
             // OCaml compiler/core/res_compmisc.ml:42-66 applies command-line
             // `-open` modules through Typemod.type_open_ (typemod.ml:83-96),
@@ -9306,7 +9348,7 @@ pub struct InProcessCompileResult {
     /// The unit's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// The module has no top-level side effects (`.cmj` `pure`).
     pub is_pure: bool,
     /// `.cmj` constants other modules inline in place of the export.
@@ -9358,7 +9400,7 @@ pub struct InProcessPreJsCompileResult {
     /// The unit's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// Resolves the location handles of `lowered_lambda`; outlives the parse
     /// arena and typed tree.
     pub lam_locs: crate::lambda::LamLocTable,
@@ -9395,7 +9437,7 @@ pub struct InProcessJsMetadataReady {
     /// `.cmj` `persistent_closed_lambda` exports for cross-module inlining.
     pub cmj_export_lambdas: crate::lambda::CmjExportLambdas,
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
 }
 
 /// Signature payload produced after in-process implementation typechecking but
@@ -9404,7 +9446,7 @@ pub struct InProcessJsMetadataReady {
 /// (compiler/ml/typemod.ml:1779-1788; compiler/ml/translmod.ml:267).
 pub struct InProcessSignatureReady {
     /// The unit's interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
 }
 
 /// Receives a unit's signature once it is typed; may return a registry to
@@ -9425,7 +9467,7 @@ pub struct InProcessInterfaceResult {
     /// The interface's typed signature.
     pub signature: crate::types::decl::Signature,
     /// The interface, published to the modules that depend on it.
-    pub pers_struct: Option<PortablePersStruct>,
+    pub pers_struct: Option<std::sync::Arc<PortablePersStruct>>,
     /// What GenType read in the interface (GenTypeMain.ml:91-107), for the
     /// implementation's compile; `None` without GenType.
     pub gentype: Option<crate::gentype::main::InterfaceRead>,
@@ -10004,6 +10046,7 @@ pub fn compile_preprocessed_structure_in_process_with_signature_hook(
         has_interface,
         gentype_interface,
         signature_ready,
+        SignaturePublicationMode::Eager,
     )?;
 
     let refreshed_registry = if let Some(hook) = before_js {
@@ -10111,6 +10154,7 @@ pub fn typecheck_structure_for_tooling(
         ppx::collect_leading_builtin_warning_attribute_specs(structure, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10161,6 +10205,7 @@ pub fn typecheck_signature_for_tooling(
         ppx::collect_leading_builtin_warning_signature_attribute_specs(signature, arena)
             .expect("the frontend read these attributes");
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (typed, typed_arena) = {
         let (mut tctx, env) = in_process_type_check_context(
             &type_ctx,
@@ -10213,11 +10258,12 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     has_interface: bool,
     gentype_interface: Option<crate::gentype::main::InterfaceRead>,
     mut signature_ready: Option<&mut InProcessSignatureReadyHook<'_>>,
+    publication: SignaturePublicationMode,
 ) -> Result<InProcessPreJsCompileResult> {
     if !arena.stores_locations()
         && (options.source_map != crate::js_ir::source_map::SourceMapMode::None
             || options.capture_intermediates
-            || !options.dumps.is_empty())
+            || options.dumps.iter().any(|kind| kind.needs_locations()))
     {
         return Err(LocationRetry::Output.into());
     }
@@ -10252,6 +10298,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     let env_setup_span = info_span!("compiler.env_setup").entered();
     let env_setup_start = crate::timing::enabled().then(std::time::Instant::now);
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -10501,6 +10548,8 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     // the already-published interface remains the target signature for
     // `Translmod.transl_implementation`; do not replace it with the
     // implementation signature or the export coercion becomes identity.
+    let mut publication_guard =
+        (!has_interface).then(crate::perf_counters::SignaturePublication::begin);
     let (mut pers_struct, persistent_env_after_signature) = if has_interface {
         (
             None,
@@ -10554,6 +10603,22 @@ pub fn compile_preprocessed_structure_in_process_until_js(
                     &tctx.warnings,
                 )
             })?;
+        if type_ctx.compiler_counters_enabled() {
+            crate::perf_counters::census_exported_signature(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+            );
+        }
+        if options.dumps.contains(&DumpKind::Sig) {
+            dumps.push(canonical_signature_dump(
+                &type_ctx,
+                module_name,
+                &current_raw_sig,
+                deprecated.as_deref(),
+                arena,
+            ));
+        }
         internal_env.register_in_memory_signature(
             module_name,
             signature_for_save,
@@ -10575,7 +10640,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         type_ctx.register_raw_module_sig(module_name, current_raw_sig);
 
         let pers_struct = if options.publish_in_process_signature {
-            internal_env.extract_module_update(module_name, &type_ctx, Some(arena))
+            internal_env.extract_module_update(module_name, &type_ctx, Some(arena), publication)
         } else {
             None
         };
@@ -10598,6 +10663,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
         && arena.stores_locations()
         && let Some(hook) = signature_ready.take()
     {
+        drop(publication_guard.take());
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
         })?;
@@ -10626,6 +10692,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
             return Err(UserDiagnostic::new(warnings, 2).into());
         }
         if !has_interface && let Some(hook) = signature_ready {
+            drop(publication_guard.take());
             let _ = hook(InProcessSignatureReady {
                 pers_struct: pers_struct.take(),
             })?;
@@ -10945,6 +11012,7 @@ pub fn compile_preprocessed_structure_in_process_until_js(
     };
 
     if !has_interface && let Some(hook) = signature_ready {
+        drop(publication_guard.take());
         let _ = hook(InProcessSignatureReady {
             pers_struct: pers_struct.take(),
         })?;
@@ -11242,6 +11310,7 @@ pub fn typecheck_preprocessed_signature_in_process(
             .expect("the frontend read these attributes");
 
     let type_ctx = fresh_type_context();
+    type_ctx.set_location_namespace(filename);
     let (mut tctx, env) = in_process_type_check_context(
         &type_ctx,
         arena,
@@ -11434,6 +11503,7 @@ pub fn typecheck_preprocessed_signature_in_process(
         .take()
         .unwrap_or_else(PersistentEnv::new);
 
+    let _publication_guard = crate::perf_counters::SignaturePublication::begin();
     // js_implementation.ml:66: `Builtin_attributes.deprecated_of_sig ast`.
     // The raw `ps_sig` of the saved interface (env.ml:1949-1952,
     // env.ml:669-678), before registration substitutes component paths in
@@ -11468,6 +11538,18 @@ pub fn typecheck_preprocessed_signature_in_process(
                 &tctx.warnings,
             )
         })?;
+    if type_ctx.compiler_counters_enabled() {
+        crate::perf_counters::census_exported_signature(&type_ctx, module_name, &raw_signature);
+    }
+    if options.dumps.contains(&DumpKind::Sig) {
+        dumps.push(canonical_signature_dump(
+            &type_ctx,
+            module_name,
+            &raw_signature,
+            deprecated.as_deref(),
+            arena,
+        ));
+    }
     internal_env.register_in_memory_signature(
         module_name,
         saved_signature,
@@ -11478,7 +11560,13 @@ pub fn typecheck_preprocessed_signature_in_process(
     );
     type_ctx.register_raw_module_sig(module_name, raw_signature);
 
-    let pers_struct = internal_env.extract_module_update(module_name, &type_ctx, Some(arena));
+    // The implementation reads its own interface even when the module is a leaf.
+    let pers_struct = internal_env.extract_module_update(
+        module_name,
+        &type_ctx,
+        Some(arena),
+        SignaturePublicationMode::Eager,
+    );
 
     Ok(InProcessInterfaceResult {
         signature: published_signature,

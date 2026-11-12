@@ -19,7 +19,7 @@
 //! one per compilation unit.
 
 use super::asttypes::{ArgLabel, PrivateFlag};
-use super::env::Env;
+use super::env::{Env, EnvId, ScopeId};
 use super::path::Path;
 use super::type_expr::{
     AbbrevMemo, AbbrevMemoRef, FieldMutability, GENERIC_LEVEL, MutabilityRef, PackageLidsRef,
@@ -132,6 +132,25 @@ impl TypeNodes {
 
     pub(crate) fn len(&self) -> usize {
         self.len.get()
+    }
+}
+
+/// A compilation's own type nodes. With the compiler counters on, their
+/// number is reported when the compilation is dropped.
+struct OwnTypeNodes(TypeNodes);
+
+impl Deref for OwnTypeNodes {
+    type Target = TypeNodes;
+    fn deref(&self) -> &TypeNodes {
+        &self.0
+    }
+}
+
+impl Drop for OwnTypeNodes {
+    fn drop(&mut self) {
+        if crate::perf_counters::enabled() {
+            crate::perf_counters::record_local_type_nodes(self.0.len());
+        }
     }
 }
 
@@ -337,11 +356,11 @@ pub(crate) struct QualifiedModuleComponentsCacheKey {
     // that path equality while still carrying positions in the selected access
     // path. `SamePathKey` compares and hashes with that equality directly.
     path: SamePathKey,
-    env_id: Option<u64>,
+    env_id: Option<ScopeId>,
 }
 
 impl QualifiedModuleComponentsCacheKey {
-    pub(crate) fn new(path: Path, env_id: Option<u64>) -> Self {
+    pub(crate) fn new(path: Path, env_id: Option<ScopeId>) -> Self {
         Self {
             path: SamePathKey(path),
             env_id,
@@ -482,8 +501,15 @@ type ModuleDeclarations =
 /// A dotted type path resolved to its identifier and declaration.
 type ResolvedTypeItem = (Ident, Arc<super::decl::TypeDeclaration>);
 
+/// Resolved signatures keyed by their spelling and optional module scope.
+type ResolvedModuleSignatures = hashbrown::HashMap<
+    (String, Option<ScopeId>),
+    (Path, Arc<super::decl::Signature>),
+    crate::fast_hash::FastState,
+>;
+
 /// `raw_lambda::typeopt` answers by environment, type and query.
-type TypeoptAnswers = crate::fast_hash::AHashMap<(u64, TypeExprRef, u8), bool>;
+type TypeoptAnswers = crate::fast_hash::AHashMap<(EnvId, TypeExprRef, u8), bool>;
 
 /// OCaml `Ctype.reified_var_counter_key`: the next index for each base
 /// name, and the names already given.
@@ -550,7 +576,7 @@ pub struct TypeContext {
     /// created in this compilation, by the stamp of its identifier.
     existential_constructors: RefCell<crate::fast_hash::AHashMap<i32, crate::name::Name>>,
     /// Previous env ID for check_abbrev_env (OCaml ctype.ml:1272)
-    previous_env_id: Cell<u64>,
+    previous_env_id: Cell<Option<EnvId>>,
 
     /// Current abbreviation context during subst (OCaml: abbreviations = ref (ref Mnil)).
     /// Set during subst_with_memo so copy_type_cached can use find_repr to detect
@@ -558,7 +584,7 @@ pub struct TypeContext {
     current_abbreviations: Cell<AbbrevMemoRef>,
 
     /// Type expression storage. Uses UnsafeCell-based arena for zero-copy access.
-    types: TypeNodes,
+    types: OwnTypeNodes,
 
     /// Exclusive lease of the worker's persistent arena for this compilation.
     /// Returned on drop; overlapping contexts get independent stores.
@@ -651,7 +677,8 @@ pub struct TypeContext {
     /// handles.
     decl_locs: super::decl_loc::OwnedDeclLocs,
     decl_loc_owner: u32,
-    next_parse_location_scope: Cell<u32>,
+    next_identity_scope: Cell<u32>,
+    location_namespace: Cell<Option<u64>>,
 
     /// Parser warnings of the snippets error reports re-parse
     /// (`Error_message_utils.Parser.parse_source`), printed before the error
@@ -677,13 +704,18 @@ pub struct TypeContext {
     /// btype.ml `type_copy_sessions`: the active graph-copy sessions,
     /// innermost last.
     copy_sessions: RefCell<Vec<CopySession>>,
+    /// With the compiler counters on: the type nodes already counted as
+    /// copied for some cause (see `counted_copy`).
+    counted_copy_nodes: Cell<usize>,
+    /// With the compiler counters on: the next call of a counted function
+    /// is the counting code calling it again (see `counts_this_call`).
+    counted_call_reentered: Cell<bool>,
 
     /// Cache for resolved module signatures. Keyed by module path name.
     /// OCaml `compiler/ml/env.ml:1513-1514,1516-1588` stores forced module
     /// components behind lazy cells; cache hits share the already-substituted
     /// signature snapshot instead of cloning every `SignatureItem`.
-    resolved_module_sig_cache:
-        RefCell<crate::fast_hash::AHashMap<String, (Path, Arc<super::decl::Signature>)>>,
+    resolved_module_sig_cache: RefCell<ResolvedModuleSignatures>,
 
     /// Cached qualified module-component views keyed by access-path semantics.
     /// This is the Rust analogue of OCaml's lazy `components_of_module_maker`.
@@ -728,7 +760,7 @@ pub struct TypeContext {
     /// Resolved dotted type paths keyed by `Env::scope_id`, path, and whether
     /// alias targets were strengthened (see `ctype::resolve_type_item_through_env`).
     resolved_type_item_cache: RefCell<
-        hashbrown::HashMap<(u64, Path, bool), ResolvedTypeItem, crate::fast_hash::FastState>,
+        hashbrown::HashMap<(ScopeId, Path, bool), ResolvedTypeItem, crate::fast_hash::FastState>,
     >,
 
     /// Cached full normalize_path results keyed by environment identity.
@@ -764,7 +796,7 @@ pub struct TypeContext {
 
     /// Cached side-effectful type-path comparisons keyed by environment identity.
     forced_type_path_compare_cache:
-        RefCell<hashbrown::HashMap<(u64, Path, Path), bool, crate::fast_hash::FastState>>,
+        RefCell<hashbrown::HashMap<(ScopeId, Path, Path), bool, crate::fast_hash::FastState>>,
 
     /// Load paths for resolving CMI files during type alias expansion.
     load_paths: RefCell<Arc<Vec<std::path::PathBuf>>>,
@@ -870,7 +902,7 @@ pub struct TypeContext {
     typed_envs: RefCell<Vec<Rc<Env>>>,
 
     /// Reuse EnvRefs for identical logical environments.
-    typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<u64, EnvRef>>,
+    typed_envs_by_id: RefCell<crate::fast_hash::AHashMap<EnvId, EnvRef>>,
     /// `Cmt_format.value_deps` (compiler/ml/cmt_format_common.ml:149-183):
     /// implementation/specification value pairs matched by inclusion checks.
     value_deps: RefCell<Vec<(super::decl::ValueDescription, super::decl::ValueDescription)>>,
@@ -878,7 +910,7 @@ pub struct TypeContext {
     deprecated_used: RefCell<Vec<DeprecatedUse>>,
     /// The most recently stored (env id, EnvRef): consecutive typed nodes
     /// usually share their environment.
-    last_typed_env: Cell<(u64, EnvRef)>,
+    last_typed_env: Cell<Option<(EnvId, EnvRef)>>,
 }
 
 /// Effect of building shared store data on the state of the compilation that
@@ -1020,7 +1052,7 @@ impl std::hash::Hash for SamePathKey {
 /// Key of `TypeContext::pdot_expansions`.
 #[derive(PartialEq, Eq, Hash)]
 struct PdotExpansionKey {
-    scope_id: u64,
+    scope_id: ScopeId,
     mode: u8,
     arity: usize,
     path: Path,
@@ -1030,7 +1062,7 @@ struct PdotExpansionKey {
 /// Field order and hashing match the owned key.
 #[derive(Hash)]
 struct PdotExpansionKeyRef<'a> {
-    scope_id: u64,
+    scope_id: ScopeId,
     mode: u8,
     arity: usize,
     path: &'a Path,
@@ -1045,37 +1077,46 @@ impl hashbrown::Equivalent<PdotExpansionKey> for PdotExpansionKeyRef<'_> {
     }
 }
 
-/// Cache keyed by a scope/environment id and a path. Lookup-only (never
-/// iterated); probed with [`ScopedPathRef`] so lookups do not clone the path.
-type ScopedPathMap<V> = hashbrown::HashMap<(u64, Path), V, crate::fast_hash::FastState>;
+/// Borrowed signature key; hashing matches the owned tuple without allocating.
+#[derive(Hash)]
+struct ModuleSignatureKeyRef<'a>(&'a str, Option<ScopeId>);
 
-/// Borrowed form of a `(u64, Path)` key. A tuple struct hashes its fields in
+impl hashbrown::Equivalent<(String, Option<ScopeId>)> for ModuleSignatureKeyRef<'_> {
+    fn equivalent(&self, key: &(String, Option<ScopeId>)) -> bool {
+        self.0 == key.0 && self.1 == key.1
+    }
+}
+
+/// Cache keyed by a scope identity and a path, probed without cloning the path.
+type ScopedPathMap<V> = hashbrown::HashMap<(ScopeId, Path), V, crate::fast_hash::FastState>;
+
+/// Borrowed form of a `(ScopeId, Path)` key. A tuple struct hashes its fields in
 /// order exactly like the owned tuple.
 #[derive(Hash)]
-struct ScopedPathRef<'a>(u64, &'a Path);
+struct ScopedPathRef<'a>(ScopeId, &'a Path);
 
-impl hashbrown::Equivalent<(u64, Path)> for ScopedPathRef<'_> {
-    fn equivalent(&self, key: &(u64, Path)) -> bool {
+impl hashbrown::Equivalent<(ScopeId, Path)> for ScopedPathRef<'_> {
+    fn equivalent(&self, key: &(ScopeId, Path)) -> bool {
         self.0 == key.0 && *self.1 == key.1
     }
 }
 
-/// Borrowed form of a `(u64, Path, bool)` key.
+/// Borrowed form of a `(ScopeId, Path, bool)` key.
 #[derive(Hash)]
-struct ScopedPathFlagRef<'a>(u64, &'a Path, bool);
+struct ScopedPathFlagRef<'a>(ScopeId, &'a Path, bool);
 
-impl hashbrown::Equivalent<(u64, Path, bool)> for ScopedPathFlagRef<'_> {
-    fn equivalent(&self, key: &(u64, Path, bool)) -> bool {
+impl hashbrown::Equivalent<(ScopeId, Path, bool)> for ScopedPathFlagRef<'_> {
+    fn equivalent(&self, key: &(ScopeId, Path, bool)) -> bool {
         self.0 == key.0 && self.2 == key.2 && *self.1 == key.1
     }
 }
 
-/// Borrowed form of a `(u64, Path, Path)` key.
+/// Borrowed form of a `(ScopeId, Path, Path)` key.
 #[derive(Hash)]
-struct ScopedPathPairRef<'a>(u64, &'a Path, &'a Path);
+struct ScopedPathPairRef<'a>(ScopeId, &'a Path, &'a Path);
 
-impl hashbrown::Equivalent<(u64, Path, Path)> for ScopedPathPairRef<'_> {
-    fn equivalent(&self, key: &(u64, Path, Path)) -> bool {
+impl hashbrown::Equivalent<(ScopeId, Path, Path)> for ScopedPathPairRef<'_> {
+    fn equivalent(&self, key: &(ScopeId, Path, Path)) -> bool {
         self.0 == key.0 && *self.1 == key.1 && *self.2 == key.2
     }
 }
@@ -1124,9 +1165,9 @@ impl TypeContext {
             simple_abbrevs: Cell::new(AbbrevMemoRef(1)),
             reified_var_counters: RefCell::new(ReifiedNames::default()),
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
-            previous_env_id: Cell::new(0),
+            previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: TypeNodes::new(),
+            types: OwnTypeNodes(TypeNodes::new()),
             store,
             store_descs: TypeNodes::new(),
             type_lists: Default::default(),
@@ -1163,7 +1204,8 @@ impl TypeContext {
             usage: RefCell::new(super::usage::UsageTables::default()),
             decl_locs: Default::default(),
             decl_loc_owner: super::decl_loc::next_table_owner(),
-            next_parse_location_scope: Cell::new(1),
+            next_identity_scope: Cell::new(1),
+            location_namespace: Cell::new(None),
             reparse_warnings: RefCell::new(Vec::new()),
             report_warning_config: RefCell::new(None),
             variant_layouts: RefCell::new(Vec::new()),
@@ -1171,7 +1213,9 @@ impl TypeContext {
             mutabilities: RefCell::new(Vec::new()),
             mutability_overlay: RefCell::new(crate::fast_hash::AHashMap::new()),
             copy_sessions: RefCell::new(Vec::new()),
-            resolved_module_sig_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
+            counted_copy_nodes: Cell::new(0),
+            counted_call_reentered: Cell::new(false),
+            resolved_module_sig_cache: RefCell::new(hashbrown::HashMap::default()),
             qualified_module_components_cache: RefCell::new(crate::fast_hash::AHashMap::new()),
             component_alias_sources: RefCell::new(crate::fast_hash::AHashMap::new()),
             signature_indexes: RefCell::new(crate::fast_hash::AHashMap::new()),
@@ -1216,7 +1260,7 @@ impl TypeContext {
             label_families: RefCell::new(Vec::new()),
             typed_envs: RefCell::new(Vec::new()),
             typed_envs_by_id: RefCell::new(crate::fast_hash::AHashMap::new()),
-            last_typed_env: Cell::new((u64::MAX, EnvRef(0))),
+            last_typed_env: Cell::new(None),
             value_deps: RefCell::new(Vec::new()),
             deprecated_used: RefCell::new(Vec::new()),
         }
@@ -1308,12 +1352,13 @@ impl TypeContext {
     /// Store a typedtree environment snapshot and return a stable reference.
     pub fn store_typed_env(&self, env: &Env) -> EnvRef {
         self.poison_store_build_for("store_typed_env");
-        let (last_id, last_ref) = self.last_typed_env.get();
-        if last_id == env.id() {
+        if let Some((last_id, last_ref)) = self.last_typed_env.get()
+            && last_id == env.id()
+        {
             return last_ref;
         }
         if let Some(existing) = self.typed_envs_by_id.borrow().get(&env.id()).copied() {
-            self.last_typed_env.set((env.id(), existing));
+            self.last_typed_env.set(Some((env.id(), existing)));
             return existing;
         }
 
@@ -1324,7 +1369,7 @@ impl TypeContext {
             env_ref
         };
         self.typed_envs_by_id.borrow_mut().insert(env.id(), env_ref);
-        self.last_typed_env.set((env.id(), env_ref));
+        self.last_typed_env.set(Some((env.id(), env_ref)));
         env_ref
     }
 
@@ -1478,22 +1523,27 @@ impl TypeContext {
     pub fn register_resolved_module_sig(
         &self,
         path: &str,
+        scope: Option<ScopeId>,
         access_path: Path,
         sig: Arc<super::decl::Signature>,
     ) {
         self.poison_store_build_for("register_resolved_module_sig");
         self.resolved_module_sig_cache
             .borrow_mut()
-            .insert(path.to_string(), (access_path, sig));
+            .insert((path.to_string(), scope), (access_path, sig));
     }
 
     /// Look up a cached resolved module signature.
     pub fn find_resolved_module_sig(
         &self,
         path: &str,
+        scope: Option<ScopeId>,
     ) -> Option<(Path, Arc<super::decl::Signature>)> {
         self.poison_store_build_for("read:find_resolved_module_sig");
-        self.resolved_module_sig_cache.borrow().get(path).cloned()
+        self.resolved_module_sig_cache
+            .borrow()
+            .get(&ModuleSignatureKeyRef(path, scope))
+            .cloned()
     }
 
     /// Cache a lazily-built qualified module-components view.
@@ -1759,7 +1809,7 @@ impl TypeContext {
     /// Cache a dotted type lookup for a resolved module access path.
     pub(crate) fn register_resolved_module_type(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         module_path: &Path,
         type_name: &str,
         access_path: Path,
@@ -1783,7 +1833,7 @@ impl TypeContext {
     /// reusing an earlier answer while the cache is enabled.
     pub(crate) fn typeopt_answer(
         &self,
-        env_id: u64,
+        env_id: EnvId,
         ty: TypeExprRef,
         query: u8,
         compute: impl FnOnce() -> bool,
@@ -1810,7 +1860,7 @@ impl TypeContext {
     /// The cached expansion outcome of a `Pdot` head (`ctype::PdotExpansion`).
     pub(crate) fn find_pdot_expansion(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         mode: u8,
         arity: usize,
         path: &Path,
@@ -1828,7 +1878,7 @@ impl TypeContext {
 
     pub(crate) fn register_pdot_expansion(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         mode: u8,
         arity: usize,
         path: &Path,
@@ -1848,7 +1898,7 @@ impl TypeContext {
     /// Look up a cached dotted type lookup for a resolved module access path.
     pub(crate) fn find_resolved_type_item(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
         strengthen_alias_types: bool,
     ) -> Option<(Ident, Arc<super::decl::TypeDeclaration>)> {
@@ -1860,7 +1910,7 @@ impl TypeContext {
 
     pub(crate) fn register_resolved_type_item(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
         strengthen_alias_types: bool,
         id: Ident,
@@ -1873,7 +1923,7 @@ impl TypeContext {
 
     pub(crate) fn find_resolved_module_type(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         module_path: &Path,
         type_name: &str,
     ) -> Option<(Path, Ident, Arc<super::decl::TypeDeclaration>)> {
@@ -1967,7 +2017,7 @@ impl TypeContext {
     /// Cache a normalized path for a specific environment identity.
     pub(crate) fn register_normalized_path_full(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
         normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
@@ -1978,7 +2028,7 @@ impl TypeContext {
 
     pub(crate) fn find_type_newtype_level(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
     ) -> Option<Option<i32>> {
         self.type_newtype_levels
@@ -1989,7 +2039,7 @@ impl TypeContext {
 
     pub(crate) fn register_type_newtype_level(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
         level: Option<i32>,
     ) {
@@ -2000,7 +2050,7 @@ impl TypeContext {
 
     pub(crate) fn find_occur_variance_mask(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
     ) -> Option<Option<u64>> {
         self.occur_variance_masks
@@ -2011,7 +2061,7 @@ impl TypeContext {
 
     pub(crate) fn register_occur_variance_mask(
         &self,
-        scope_id: u64,
+        scope_id: ScopeId,
         path: &Path,
         mask: Option<u64>,
     ) {
@@ -2022,7 +2072,7 @@ impl TypeContext {
 
     pub(crate) fn register_normalized_path_forward(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
         normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
@@ -2033,7 +2083,7 @@ impl TypeContext {
 
     pub(crate) fn find_normalized_path_forward(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
     ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.normalized_path_forward_cache
@@ -2045,7 +2095,7 @@ impl TypeContext {
     /// Look up a cached normalized path for a specific environment identity.
     pub(crate) fn find_normalized_path_full(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
     ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.normalized_path_full_cache
@@ -2057,7 +2107,7 @@ impl TypeContext {
     /// Cache a normalized path after the side-effectful normalize path has run.
     pub(crate) fn register_forced_normalized_path_full(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
         normalized_path: Arc<super::ctype::NormRecipe>,
     ) {
@@ -2070,7 +2120,7 @@ impl TypeContext {
     /// Look up a side-effectful normalize path result for this environment.
     pub(crate) fn find_forced_normalized_path_full(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         original_path: &Path,
     ) -> Option<Arc<super::ctype::NormRecipe>> {
         self.forced_normalized_path_full_cache
@@ -2083,7 +2133,7 @@ impl TypeContext {
     /// has already forced the same lazies OCaml would force at that call site.
     pub(crate) fn register_forced_type_path_compare(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         left: &Path,
         right: &Path,
         same: bool,
@@ -2097,7 +2147,7 @@ impl TypeContext {
     /// Look up a side-effectful type-path comparison for this environment.
     pub(crate) fn find_forced_type_path_compare(
         &self,
-        env_id: u64,
+        env_id: ScopeId,
         left: &Path,
         right: &Path,
     ) -> Option<bool> {
@@ -2322,18 +2372,43 @@ impl TypeContext {
         self.alloc_type(desc, GENERIC_LEVEL)
     }
 
+    /// Count a variable made by `new_var` and its variants. A variable made
+    /// inside a copy session belongs to the copy.
+    #[cold]
+    #[inline(never)]
+    fn count_fresh_var(&self, location: &'static std::panic::Location<'static>) {
+        if self.copy_sessions.borrow().is_empty() {
+            crate::perf_counters::record_fresh_var(location);
+        }
+    }
+
     /// Create a new type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_type(TypeDesc::Tvar(name))
     }
 
     /// Create a new type variable at the global level.
+    #[track_caller]
+    #[inline]
     pub fn new_global_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.alloc_type(TypeDesc::Tvar(name), self.global_level.get())
     }
 
     /// Create a new generic type variable.
+    #[track_caller]
+    #[inline]
     pub fn new_generic_var(&self, name: Option<crate::name::Name>) -> TypeExprRef {
+        if self.compiler_counters_enabled {
+            self.count_fresh_var(std::panic::Location::caller());
+        }
         self.new_generic_type(TypeDesc::Tvar(name))
     }
 
@@ -2667,6 +2742,31 @@ impl TypeContext {
             crate::perf_counters::TypeMutationKind::Level,
         );
         self.write_level_raw(r, level);
+    }
+
+    /// Set the level of compilation-local node `r` the way [`Self::set_level`]
+    /// would right after [`Self::snapshot_type_state`]: journaled whenever a
+    /// full snapshot lives, whatever the node's age. (A new snapshot records
+    /// every existing node; without one, a node younger than the innermost
+    /// snapshot is not recorded.) For a walk that replaces one that took a
+    /// snapshot of its own, so that an enclosing snapshot restores the same
+    /// levels as before.
+    #[inline]
+    pub(crate) fn set_level_as_under_new_snapshot(&self, r: TypeExprRef, level: i32) {
+        debug_assert!(!r.is_store());
+        if self.mutation_logging.full() {
+            self.mutation_journal
+                .borrow_mut()
+                .entries
+                .push(TypeMutation::TypeLevel(r, self.types.level(r.index())));
+            if self.compiler_counters_enabled {
+                crate::perf_counters::record_type_mutation(
+                    crate::perf_counters::TypeMutationKind::Level,
+                );
+            }
+        }
+        self.poison_store_build();
+        self.types.set_level(r.index(), level);
     }
 
     /// Level write without journaling (also used to undo).
@@ -3171,9 +3271,9 @@ impl TypeContext {
     /// OCaml uses physical env inequality (!=); Rust uses env ID comparison.
     pub fn check_abbrev_env(&self, env: &crate::types::env::Env) {
         let env_id = env.id();
-        if env_id != self.previous_env_id.get() {
+        if Some(env_id) != self.previous_env_id.get() {
             self.clear_abbrev_memos();
-            self.previous_env_id.set(env_id);
+            self.previous_env_id.set(Some(env_id));
         }
     }
 
@@ -3626,6 +3726,53 @@ impl TypeContext {
         self.begin_copy_session();
         let _guard = Guard(self);
         f()
+    }
+
+    /// For the compiler counters: whether the function asking should count
+    /// this call. A counted function starts with
+    ///
+    /// ```ignore
+    /// if ctx.counts_this_call() {
+    ///     return ctx.counted_copy(cause, || this_function(same arguments));
+    /// }
+    /// ```
+    ///
+    /// so that with the counters off it pays this one test and its body is
+    /// what it was. With them on, the counting code calls the function
+    /// again, and that second call, which must not count itself, gets
+    /// `false` here.
+    #[inline]
+    pub(crate) fn counts_this_call(&self) -> bool {
+        self.compiler_counters_enabled && !self.counted_call_reentered.replace(false)
+    }
+
+    /// See [`Self::counts_this_call`]: run `again`, the calling function
+    /// called again, and count the type nodes it allocates as copied for
+    /// `cause`. Nodes of a counted copy nested in it are counted once, for
+    /// the inner cause.
+    #[cold]
+    #[inline(never)]
+    pub(crate) fn counted_copy<R>(
+        &self,
+        cause: crate::perf_counters::CopyCause,
+        again: impl FnOnce() -> R,
+    ) -> R {
+        let allocated = self.allocated_type_nodes();
+        let counted = self.counted_copy_nodes.get();
+        self.counted_call_reentered.set(true);
+        let result = again();
+        self.counted_call_reentered.set(false);
+        let nested = self.counted_copy_nodes.get() - counted;
+        let own = self.allocated_type_nodes() - allocated - nested;
+        self.counted_copy_nodes.set(counted + nested + own);
+        crate::perf_counters::record_copy(cause, own);
+        result
+    }
+
+    /// The type nodes this compilation has allocated so far, in its own
+    /// pool and in the worker store.
+    fn allocated_type_nodes(&self) -> usize {
+        self.types.len() + self.store.type_count()
     }
 
     /// btype.ml `begin_type_copy_session`.
@@ -4139,13 +4286,32 @@ impl TypeContext {
         super::Path::pdot_pos(*f(&Arc::new(*prefix)), *text, *pos)
     }
 
-    /// A scope for one parser arena or decoded interface. Uses the existing
-    /// table-owner namespace and never reuses an ordinal.
+    /// Select the stable namespace before allocating this unit's locations,
+    /// shape blocks or private interface imports.
+    pub(crate) fn set_location_namespace(&self, unit: &str) {
+        use std::hash::{Hash, Hasher};
+        assert_eq!(self.next_identity_scope.get(), 1);
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        ("source unit", unit).hash(&mut hash);
+        self.location_namespace.set(Some(hash.finish()));
+    }
+
+    /// A scope for one parser arena or decoded interface. Named compilations
+    /// use a unit-local ordinal, not the worker's table-owner counter. Anonymous
+    /// contexts (such as standalone identity tests) retain process uniqueness.
     pub(crate) fn fresh_location_scope(&self) -> u64 {
-        let next = self.next_parse_location_scope.get();
-        self.next_parse_location_scope
+        let next = self.next_identity_scope.get();
+        self.next_identity_scope
             .set(next.checked_add(1).expect("location scopes exhausted"));
-        ((self.decl_loc_owner as u64) << 32) | next as u64
+        if let Some(namespace) = self.location_namespace.get() {
+            super::variant_runtime::identity_in_namespace(namespace, next as u64)
+        } else {
+            ((self.decl_loc_owner as u64) << 32) | next as u64
+        }
+    }
+
+    pub(crate) fn fresh_shape_allocation(&self) -> super::ShapeAllocation {
+        super::ShapeAllocation::in_namespace(self.fresh_location_scope(), 0)
     }
 
     pub(crate) fn intern_loc_with_identity(
@@ -4263,7 +4429,10 @@ impl TypeContext {
         files: &'a dyn Fn(crate::intern::StrIdx) -> crate::intern::StrIdx,
     ) -> super::decl_loc::DeclLocImport<'a> {
         let mut table = table.clone();
-        let scopes = table.remap_for_import(files);
+        let namespace = self.fresh_location_scope();
+        let scopes = table.remap_for_import_with(files, |scope| {
+            super::variant_runtime::identity_in_namespace(namespace, scope)
+        });
         let (base, instances) = self.decl_locs.append_portable(&table);
         super::decl_loc::DeclLocImport {
             kind: super::decl_loc::DeclLocKind::Local,
@@ -4272,6 +4441,7 @@ impl TypeContext {
             instances,
             files,
             scopes,
+            namespace: Some(namespace),
         }
     }
 
@@ -4288,6 +4458,7 @@ impl TypeContext {
             instances: Vec::new(),
             files,
             scopes: Default::default(),
+            namespace: None,
         }
     }
 
@@ -4524,6 +4695,11 @@ impl TypeContext {
         let result = build();
         self.store_build_depth.set(depth);
         super::thread_store::set_store_build_depth(depth);
+        if depth == 0 && self.compiler_counters_enabled {
+            crate::perf_counters::record_store_build_nodes(
+                self.store.type_count() - self.store_build_type_start.get(),
+            );
+        }
         let effects = std::mem::replace(&mut *self.store_build_effects.borrow_mut(), outer_effects);
         let guards = std::mem::replace(&mut *self.store_build_guards.borrow_mut(), outer_guards);
         let mut poisoned = self.store_build_poisoned.replace(outer_poisoned);
@@ -4632,6 +4808,15 @@ impl TypeContext {
                 }
             }
         }
+    }
+
+    /// Whether there is any store binder to map when publishing a signature.
+    /// This avoids allocating the replay map just to decide whether to walk.
+    pub(crate) fn has_saved_store_stamps(&self) -> bool {
+        let origins = self.store_stamp_origins.borrow();
+        !origins.built.is_empty() || origins.replayed.iter().any(|(piece, index, _)| {
+            matches!(&piece.effects[*index], StoreEffect::Stamps(stamps) if !stamps.is_empty())
+        })
     }
 
     /// The local stamp of each store binder this compilation built or
@@ -5001,6 +5186,50 @@ mod tests {
     use proptest::prelude::*;
 
     #[test]
+    fn saved_stamp_presence_matches_built_and_replayed_maps() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        assert!(!ctx.has_saved_store_stamps());
+        let stamp = crate::ident::STORE_STAMP_BASE + 7;
+        ctx.store_stamp_origins.borrow_mut().built.push((stamp, 12));
+        assert!(ctx.has_saved_store_stamps());
+        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&12));
+        ctx.store_stamp_origins.borrow_mut().built.clear();
+        let piece = Rc::new(StorePiece {
+            id: 0,
+            effects: vec![StoreEffect::Stamps(vec![]), StoreEffect::Stamps(vec![stamp])],
+            guards: vec![],
+        });
+        ctx.store_stamp_origins.borrow_mut().replayed.push((piece.clone(), 0, 20));
+        assert!(!ctx.has_saved_store_stamps());
+        assert!(ctx.saved_store_stamps().is_empty());
+        ctx.store_stamp_origins.borrow_mut().replayed.push((piece, 1, 20));
+        assert!(ctx.has_saved_store_stamps());
+        assert_eq!(ctx.saved_store_stamps().get(&stamp), Some(&20));
+    }
+
+    #[test]
+    fn module_signature_cache_separates_scope_keys() {
+        let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
+        let env = Env::empty();
+        let mut other = env.clone();
+        other.add_gadt_instance_level();
+        let path = Path::pident(Ident::create_persistent("M"));
+        let signature = Arc::new(Vec::new());
+        ctx.register_resolved_module_sig("M", Some(env.scope_id()), path, signature.clone());
+        assert!(ctx.find_resolved_module_sig("M", None).is_none());
+        assert!(
+            ctx.find_resolved_module_sig("M", Some(other.scope_id()))
+                .is_none()
+        );
+        let (_, found) = ctx
+            .find_resolved_module_sig("M", Some(env.clone().scope_id()))
+            .unwrap();
+        assert!(Arc::ptr_eq(&found, &signature));
+        ctx.register_resolved_module_sig("M", None, path, signature);
+        assert!(ctx.find_resolved_module_sig("M", None).is_some());
+    }
+
+    #[test]
     fn typed_environment_snapshots_share_ownership() {
         let ctx = TypeContext::new(Arc::new(IdGenerator::new()));
         let env = Env::empty();
@@ -5040,17 +5269,20 @@ mod tests {
     #[test]
     fn borrowed_path_keys_find_owned_cache_entries() {
         let ctx = TypeContext::new(std::sync::Arc::new(IdGenerator::new()));
+        let scope = Env::empty().scope_id();
+        let mut other = Env::empty();
+        other.add_gadt_instance_level();
         let module = Path::pdot(super::super::predef::path_int(), "M");
         let ty = Path::pdot_pos(module, "t", 3);
-        ctx.register_type_newtype_level(7, &ty, Some(2));
-        assert_eq!(ctx.find_type_newtype_level(7, &ty), Some(Some(2)));
-        assert_eq!(ctx.find_type_newtype_level(8, &ty), None);
-        ctx.register_forced_type_path_compare(7, &module, &ty, true);
+        ctx.register_type_newtype_level(scope, &ty, Some(2));
+        assert_eq!(ctx.find_type_newtype_level(scope, &ty), Some(Some(2)));
+        assert_eq!(ctx.find_type_newtype_level(other.scope_id(), &ty), None);
+        ctx.register_forced_type_path_compare(scope, &module, &ty, true);
         assert_eq!(
-            ctx.find_forced_type_path_compare(7, &ty, &module),
+            ctx.find_forced_type_path_compare(scope, &ty, &module),
             Some(true)
         );
-        assert_eq!(ctx.find_forced_type_path_compare(7, &ty, &ty), None);
+        assert_eq!(ctx.find_forced_type_path_compare(scope, &ty, &ty), None);
     }
 
     #[test]

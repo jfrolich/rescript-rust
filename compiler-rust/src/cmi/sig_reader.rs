@@ -1190,19 +1190,19 @@ impl SigReadContext<'_> {
         let address = block_address(value).expect("a shape block");
         self.shape_blocks
             .entry(address)
-            .or_insert_with(|| (value.clone(), crate::types::ShapeAllocation::fresh()))
+            .or_insert_with(|| (value.clone(), self.ctx.fresh_shape_allocation()))
             .1
     }
 
     /// A class name: the payload string of an `@instanceOf` read before it,
     /// or a string of its own.
     fn shape_string(&mut self, value: &OcamlValue) -> crate::types::ShapeString {
-        use crate::types::{ShapeAllocation, ShapeString};
+        use crate::types::ShapeString;
         let OcamlValue::String(string) = value else {
             panic!("a class name string")
         };
         let Some(allocation) = string.allocation() else {
-            return ShapeString::Allocation(ShapeAllocation::fresh());
+            return ShapeString::Allocation(self.ctx.fresh_shape_allocation());
         };
         if let Some(string) = self.attribute_strings.get(&allocation) {
             return *string;
@@ -1210,7 +1210,7 @@ impl SigReadContext<'_> {
         *self
             .shape_strings
             .entry(allocation)
-            .or_insert_with(|| ShapeString::Allocation(ShapeAllocation::fresh()))
+            .or_insert_with(|| ShapeString::Allocation(self.ctx.fresh_shape_allocation()))
     }
 
     fn read_arg_label(&mut self, value: &OcamlValue) -> ArgLabel {
@@ -1571,18 +1571,17 @@ fn extract_str_payload_string(structure: &OcamlValue) -> Option<String> {
 /// Record fields (primitive.ml):
 /// 0: prim_name: string
 /// 1: prim_arity: int
-/// 2: prim_alloc: bool
-/// 3: prim_kind: prim_kind
-/// 4: prim_from_constructor: bool
+/// 2: prim_kind: prim_kind
+/// 3: prim_from_constructor: bool
 fn read_primitive_description(value: &OcamlValue) -> PrimitiveDescription {
     let fields = &value.as_block().1;
     PrimitiveDescription {
         prim_name: fields[0].as_string().to_string(),
         prim_arity: fields[1].as_int() as i32,
-        prim_kind: super::ffi_decode::prim_kind(&fields[3])
+        prim_kind: super::ffi_decode::prim_kind(&fields[2])
             .unwrap_or(crate::types::decl::PrimKind::KindIntrinsic),
         prim_native_float: false,
-        prim_from_constructor: fields[4].as_bool(),
+        prim_from_constructor: fields[3].as_bool(),
     }
 }
 

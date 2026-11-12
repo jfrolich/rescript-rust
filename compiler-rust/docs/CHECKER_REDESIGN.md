@@ -1,7 +1,15 @@
 # The shared world and the type checker core: design and staged plan
 
-Status: design, nothing here is implemented. This document is the spec for the
-stages in section F.
+Status: design. This document is the spec for the stages in section F. Stage
+P0 has landed and the sound part of P1 is in pull request #124.
+
+**Amended after stage P1.** P1 found that the premise of the new checker core
+is false: sharing variable-free types between uses is observable, down to the
+generated JavaScript. Section I states what is observable, chooses the design
+answer and re-derives the savings. Every passage below that section I
+changes carries a note that starts with "**Amended (I.n)**"; replaced numbers
+are struck through. Where a note and the text under it disagree, the note
+holds.
 
 ## 0. Summary
 
@@ -32,14 +40,20 @@ The gap is the cost of each call and the fixed cost of each module.
 
 ### The design in one page
 
+> **Amended (I.3).** The ground tier and every checker fast path that rests
+> on it are withdrawn: the struck-through items below. The checker core
+> stays today's representation, one node per occurrence with structure links
+> and a level on every node (I.3.3). The world keeps names, paths, segments,
+> absolute paths and the view table.
+
 **The world** is one store per build, readable from every thread without
 locks:
 
 - Names and paths are already interned process-wide (`name.rs`,
   `types/path.rs`). They stay.
-- Variable-free types are interned in a **ground tier**: equal types have
-  equal handles.
-- Each module's exported, non-ground types live in **segments**: immutable
+- ~~Variable-free types are interned in a **ground tier**: equal types have
+  equal handles.~~
+- Each module's exported ~~, non-ground~~ types live in **segments**: immutable
   pages published once through `OnceLock`, the mechanism `types/shared_store.rs`
   already uses.
 - Exported types name other modules' items by absolute path, so a reference
@@ -52,18 +66,19 @@ locks:
 (`TypeDesc`), so the backend, genType, the printer and the editor analysis do
 not change. It changes what is underneath:
 
-- A handle's two tag bits name its tier: scratch node, variable, ground,
+- ~~A handle's two tag bits name its tier: scratch node, variable, ground,
   segment. Only variables (and row-field and mutability cells) are mutable.
-  `repr` of a non-variable is a bit test, not a memory read.
-- Every node carries flags computed at construction. A ground type is
+  `repr` of a non-variable is a bit test, not a memory read.~~
+- ~~Every node carries flags computed at construction. A ground type is
   returned by `instance`, skipped by generalisation, level updates and the
-  occur check, and compared by handle.
-- Levels stay, on scratch nodes and variables only. They are not replaced by
-  variable ranks: OCaml reports an escaping type constructor when it lowers
-  the level of a *structure* node, and that decides which of two errors a
-  program gets (C.4).
-- A generalised type is a frozen term. Instantiation copies only the spine
-  that holds quantified variables.
+  occur check, and compared by handle.~~
+- Levels stay, on ~~scratch nodes and variables only~~ every node (I.4). They
+  are not replaced by variable ranks: OCaml reports an escaping type
+  constructor when it lowers the level of a *structure* node, and that
+  decides which of two errors a program gets (C.4).
+- ~~A generalised type is a frozen term. Instantiation copies only the spine
+  that holds quantified variables.~~ Instantiation copies every generic node
+  (I.3.3, rule 3).
 - An expected type that is a fresh variable is not created: the checker
   infers and lowers levels instead (C.9).
 - An environment is a scope and a position in one append-only binding log.
@@ -77,39 +92,51 @@ code:
   else goes through about 60 `ctype` operations and the `TypeContext` read
   API. The new core is implemented behind that waist, selected per
   compilation. Their own cost (walking expressions is 25% of checking) is
-  reduced in place, guided by profiles.
+  reduced in place, guided by profiles. *Amended (I.6): there is no new
+  core. The waist remains a useful description of how the layers above reach
+  the representation.*
 - **Publishing is not copy-free, and does not need to be.** Scratch nodes are
   single-threaded `Cell` storage interleaved with dead inference nodes. The
-  exported non-ground nodes are copied once into a segment. That one copy
+  exported ~~non-ground~~ nodes are copied once into a segment. That one copy
   replaces today's four (saving copy, portable encoding, decoding,
-  internalisation) and the per-lookup copies. Ground nodes, 78% of the total,
-  are never copied.
+  internalisation) and the per-lookup copies. ~~Ground nodes, 78% of the
+  total, are never copied.~~ *Amended (I.3.3, rule 5): every exported node is
+  copied, with its sharing; 368,428 nodes on the application (measured).*
 
 Also: the typed tree is already stored in flat per-module pools
 (`types/tast_arena.rs`). Only its environment snapshots change.
 
 ### The stages
 
-| # | Stage | Saving (share of today's build instructions, estimated) |
-|---|---|---|
-| P0 | Differential tooling and counters | 0 |
-| P1 | Ground flag and fast paths on today's representation | 4-6% |
-| P2 | Infer instead of unifying with a fresh variable | 1.5-2.5% |
-| P3 | Publish straight into the shared pool; encode off the critical path | 2.5-3.5% |
-| P4 | Process-wide component views; delete stamp replay | 2.5-3.5% |
-| P5 | Absolute paths in exports; no lookup copies | 3-4% |
-| P6 | Environment as a binding log | 3-4% |
-| P7 | Term store and core switch (no behaviour change) | 0 |
-| P8 | The new core operations | 4-6% when switched on |
-| P9 | Switch on per package, then by default | 0 |
-| P10 | Segments, export tables, one checker per worker | 2-3% |
-| P11 | `typecore`/`typemod` walk cost, profile-driven | 4-6% |
-| P12 | Delete the old core | 0 (code size) |
+> **Amended (I.5, I.6).** The table has a second column of savings. "Measured"
+> means instructions counted with the change built; everything else is an
+> estimate. I.5 gives the basis of each number.
 
-The estimates sum to 27-39% of the build against a needed 30% (37,000 of
-123,000 instructions per line). They are estimates with a wide error; section
-F says how each was derived. Section H holds the call-site inventory for P3
-and the API inventory for P6, with the corrections they make to both stages.
+| # | Stage | Saving, original estimate | Saving after P1's findings |
+|---|---|---|---|
+| P0 | Differential tooling and counters | 0 | 0 (landed) |
+| P1 | ~~Ground flag and fast paths~~ Level updates of plain types without a snapshot | ~~4-6%~~ | 1.4% measured (0.7-0.8% on `tests/tests`) |
+| P1b | `instance` returns a non-generic root at once (new) | | 0.9% measured (0.65% on `tests/tests`) |
+| P2 | Infer instead of unifying with a fresh variable | 1.5-2.5% | 1.5-2.5% |
+| P3 | Publish straight into the shared pool; encode off the critical path | 2.5-3.5% | 2.5-3.5% |
+| P4 | Process-wide component views; delete stamp replay | 2.5-3.5% | 2.5-3.5% |
+| P5 | Absolute paths in exports; no lookup copies | 3-4% | 3-4% |
+| P6 | Environment as a binding log | 3-4% | 3-4% |
+| P7 | Term store and core switch (no behaviour change) | 0 | dropped |
+| P8 | The new core operations | ~~4-6% when switched on~~ | 0, dropped |
+| P9 | Switch on per package, then by default | 0 | dropped |
+| P10 | Segments, export tables, one checker per worker | 2-3% | 2-3%, on today's `TypeContext` |
+| P11 | `typecore`/`typemod` walk cost, profile-driven | 4-6% | 4-6% |
+| P12 | Delete the old core | 0 (code size) | dropped |
+
+~~The estimates sum to 27-39% of the build against a needed 30% (37,000 of
+123,000 instructions per line).~~ The estimates now sum to 21-29% of the
+build against a needed 30% (37,000 of 123,000 instructions per line); 2.3
+points of that are measured. The plan no longer reaches the target on its
+own estimates (I.5). They are estimates with a wide error; section F says how
+each was derived. Section H holds the call-site inventory for P3 and the API
+inventory for P6, with the corrections they make to both stages. Section I
+holds what stage P1 found and what it changes.
 
 ## A. Survey of today's code
 
@@ -311,6 +338,13 @@ except diagnostics, which marks and names nodes in its own tables.
 
 ## B. The world
 
+> **Amended (I.3.3, rules 5 and 6).** The ground tier is withdrawn. Merging
+> equal ground types in a published interface changes which positions of an
+> exported type are one node, and a dependent can observe that (I.2.3,
+> fixture 7b). A segment holds every exported node of its unit, ground or
+> not, with the exporter's sharing. Read "non-ground" in this section as
+> "exported", and ignore the ground rows and clauses. B.5 to B.8 stand.
+
 ### B.1 What is shared and what is not
 
 | Data | Lifetime | Written by | Read by |
@@ -323,6 +357,10 @@ except diagnostics, which marks and names nodes in its own tables.
 | Scratch (inference nodes, variables, trail, binding log, typed tree) | one module | one worker | that worker, and the backend for that module |
 
 ### B.2 Handles
+
+> **Amended (I.3.3).** The tiers are today's (A.1). The `variable` and
+> `ground` tiers are not built; a segment is a tier of frozen nodes like
+> today's shared pool.
 
 `TypeExprRef` stays a `u32`. In the new core the two top bits are the tier:
 
@@ -340,6 +378,8 @@ Limits: 2^30 nodes per tier. The benchmark allocates 11.5 M nodes in total
 across all modules; the ground tier holds about 60,000.
 
 ### B.3 The ground tier
+
+> **Amended (I.3.3, rule 5).** Withdrawn. Kept for the record.
 
 ```rust
 /// One interned variable-free type.
@@ -399,6 +439,14 @@ every table keyed by ground handle that depends on declarations is per
 compilation (C.7).
 
 ### B.4 Segments and publication
+
+> **Amended (I.3.3, rules 5 and 8).** Step 1 copies every node, not only the
+> non-ground ones, and keeps sharing for all of them with one map over the
+> whole signature. Step 2 rewrites paths in the copied nodes; nothing is
+> re-interned. Step 4 hashes every node by structure. The copy visits 368,428
+> nodes on the application (measured, P0 counters), of which 49,712 are not
+> ground; at about 60 instructions per node that is still under 0.1% of the
+> build. `SegNode` needs no flags.
 
 ```rust
 /// Immutable exported data of one unit. Built by one checker, then frozen.
@@ -604,6 +652,12 @@ on the number of workers or on which worker checked which module.
 
 ## C. The checker core
 
+> **Amended (I.3).** The new core is not built. C.2, C.3, C.5, C.7 and C.8
+> are withdrawn as a design; they stay as the record of what was tried. C.4
+> stands for its argument against ranks and is otherwise replaced by I.4.
+> C.6 is a description of today's code and stands. C.9 stands with one
+> correction. C.10 and C.11 stand (with H.2 for C.10).
+
 ### C.1 The waist
 
 The new core is not a new type checker. It is a new implementation of two
@@ -636,6 +690,15 @@ and in clones, reference counts and temporary vectors, which stage P11
 removes in place.
 
 ### C.2 Terms and flags
+
+> **Amended (I.1 findings 3 and 4, I.3.3 rule 1).** Withdrawn. No flags byte:
+> set at construction it cost +3.4% of instructions on today's
+> representation (#124), and no sound fast path reads it. "A ground type
+> skips level updates" is unsound (I.2). The `HAS_SCOPED` rule below is
+> unsound for a weak variable of an earlier structure item
+> (`weak_variable_escapes_later_type.res`): the rule in use is
+> `path_is_scoped` of #124, which treats every path of the unit being
+> compiled as scoped.
 
 Tiers are in B.2. A scratch node:
 
@@ -701,6 +764,10 @@ that it would neither fail nor expand.
 
 ### C.3 Variables and the trail
 
+> **Amended (I.2.1, I.3.3 rule 2).** Withdrawn. "Structure nodes are never
+> linked" is wrong: the link is what makes an occurrence print with the
+> other side's abbreviation name. `repr` must read structure nodes.
+
 A variable is an index into `vars: Vec<VarSlot>` of the compilation. Binding
 is `vars[v].binding.set(t)`. `repr`:
 
@@ -748,6 +815,13 @@ them.
 
 ### C.4 Levels
 
+> **Amended (I.4).** Every node keeps a level cell, ground or not, and every
+> level write is made. The table of tiers, the paragraph "Why skipping ground
+> types is unobservable" and the three rules that return on a ground type
+> are withdrawn: whether `instance` copies or shares a ground node is
+> observable (I.2.3, fixtures 2 to 5). The argument against variable ranks
+> stands.
+
 Levels stay, with OCaml's meaning, on scratch nodes and variables. Ground
 and segment nodes have no level cell:
 
@@ -788,6 +862,16 @@ The rules, for a type `t` with `repr` applied:
   `generalize` has no memo chain to walk.
 
 ### C.5 Unification
+
+> **Amended (I.2.1, I.3.3 rules 1 and 2).** Steps 1 to 3 and the paragraph
+> "No structure links" are withdrawn. Step 2 ("it mutates nothing") and step
+> 3 ("no level update") change identity and levels that later output reads.
+> The third thing a structure link does is not only loop detection: it
+> decides the printed name, the stored interface and, through immediacy, the
+> JavaScript (I.2.4). Unification is `unify_types` and
+> `unify_after_expansion` as they are. The paragraphs on rows, recursive
+> types, `Tpoly`, packages and GADT constraints describe today's behaviour
+> and stand, without their references to flags and interning.
 
 `unify(t1, t2)` after `repr`, in this order:
 
@@ -914,6 +998,11 @@ partial bindings are the same.
 
 ### C.7 Abbreviation expansion
 
+> **Amended (I.5, P8).** Withdrawn. A table keyed by handle shares expansion
+> nodes between occurrences, and an expansion node is a node that
+> unification links (I.2.1, last two rows of the table). The per-node memo
+> (`AbbrevMemoRef`) stays.
+
 Today a `Tconstr` node carries an `AbbrevMemoRef`, a linked list of memoised
 expansions that `generalize` walks and `cleanup_abbrev` forgets, plus three
 context caches keyed by environment scope (`pdot_expansions`,
@@ -962,6 +1051,11 @@ whose paths are all absolute (`HAS_LOCAL_IDENT` clear), in a world table.
 It is not in the plan; measure first.
 
 ### C.8 Schemes and instantiation
+
+> **Amended (I.3.3 rule 3).** Withdrawn. `instance` copies every generic
+> node, ground or not, once per copy session, and returns every other node.
+> The one sound shortcut found is to return at once when the root is not
+> generic (P1b, I.5).
 
 A generalised type is not a new kind of value. It is a type handle whose
 flags and level say what `instance` must do:
@@ -1012,9 +1106,10 @@ OCaml does with that variable decides what the port may do:
    the end** (`rue`, `unify_exp`). Unifying a type `ty` with a fresh variable
    `v` at level `l` has these effects: `occur` (cannot fail), `occur_univar`
    on `ty`, `update_level(l, ty)`, and the link. With `Infer` the port runs
-   `occur_univar` (skipped when `HAS_UNIVAR` is clear) and
-   `update_level_checked(l, ty)` (skipped when `ty` is ground), and returns
-   `ty`. The errors those two can raise are raised from the same call with
+   `occur_univar` ~~(skipped when `HAS_UNIVAR` is clear)~~ and
+   `update_level_checked(l, ty)` ~~(skipped when `ty` is ground)~~, and
+   returns `ty`. *Amended (I.3.3 rule 4): both always run. The level update
+   of a ground type must be made; with #124 it is the cheap path.* The errors those two can raise are raised from the same call with
    the same arguments, so the diagnostics are identical.
 2. **The construct inspects the expected type for a hint** (record and
    constructor disambiguation, arity of an expected function). A fresh
@@ -1156,8 +1251,9 @@ The typed tree is already stored in flat pools owned by the compilation
 readers already take the arena next to the root. This design changes two
 things in it:
 
-- `exp_type`, `pat_type` and the other `TypeExprRef` fields hold handles of
-  the new tiers. Readers go through `TypeContext`, so they do not change.
+- ~~`exp_type`, `pat_type` and the other `TypeExprRef` fields hold handles of
+  the new tiers. Readers go through `TypeContext`, so they do not change.~~
+  *Amended (I.3): the tiers do not change.*
 - `EnvRef` resolves to an `Env` of C.10.
 
 The typed tree is not canonical across the two cores: node sharing and
@@ -1173,6 +1269,13 @@ is unchanged; absolute values change when stage P4 stops replaying the
 stamps of shared data.
 
 ## D. Diagnostics parity
+
+> **Amended (I.2).** This section missed the main dependency: the name a
+> type is printed with follows node identity, for every type, through
+> structure links and through copy-or-share at `instance`. With today's core
+> kept (I.3), D.1 to D.10 describe behaviour that does not change. Their
+> references to the new core, to flags and to the export copy of non-ground
+> nodes no longer apply.
 
 Every way the printed diagnostics depend on something this design changes,
 and what keeps each the same.
@@ -1199,6 +1302,10 @@ depends on which variable was bound to which. The new core binds in the same
 direction as `unify_var`/`unify_types` do today (C.5 step 4).
 
 ### D.2 `as 'a` and loop detection
+
+> **Amended (I.3.3 rule 2).** Structure links stay, so the
+> `unified_structure` side table is not needed. Loop detection is not the
+> only reader of structure-node identity; see I.2.
 
 `mark_loops_rec` (`printtyp.rs`) adds an alias in two situations:
 
@@ -1350,11 +1457,21 @@ the views use today.
 
 ### D.11 Things that depend on node identity and are not output
 
+> **Amended (I.2).** Incomplete. Node identity of structure nodes *is*
+> output: it decides abbreviation names in diagnostics, in the stored
+> interface and in genType output, and it decides the JavaScript of
+> comparisons through immediacy (I.2.4). The three uses listed below are
+> still free to change.
+
 For completeness, uses of `TypeExprRef` identity that do not reach rule 1 or
 rule 2 and may change freely: de-duplication in the typed-tree dump
 (`arity_aliases`, node ids), `TypeExprRefMap` copy caches, `typeopt_answers`.
 
 ## E. The differential harness
+
+> **Amended (I.6).** There is one core. E.1, E.2 and E.4 are not built. E.3
+> is the oracle for every remaining stage; I.3.5 says what its build
+> comparison catches and what it does not.
 
 ### E.1 Two cores in one binary
 
@@ -1467,28 +1584,33 @@ and `rewatch`, the four output parity scripts and the `super_errors` tests of
 E.3, and the instruction-count workflow (no increase above 0.1% without a
 stated reason). Only additions are listed per stage.
 
+> **Amended (I.5, I.6).** Savings, dependencies and the hand-off column are
+> updated in place. Struck-through text is the original.
+
 | # | Stage | Depends on | Size (lines changed) | Saving | Hand to a less capable model |
 |---|---|---|---|---|---|
-| P0 | Differential tooling and counters | - | 600 | 0 | yes |
-| P1 | Ground flag and fast paths | P0 | 900 | 4-6% | yes |
-| P2 | Infer instead of unifying with a fresh variable | P0 | 700 | 1.5-2.5% | application: yes; other constructs: one at a time, yes |
+| P0 | Differential tooling and counters | - | 600 | 0 | ~~yes~~ landed (#122) |
+| P1 | ~~Ground flag and fast paths~~ Level updates of plain types without a snapshot | P0 | ~~900~~ 400 | ~~4-6%~~ 1.4% measured | ~~yes~~ done in #124; the rest of the original stage is withdrawn. Do not hand out any "skip ground types" task |
+| P1b | `instance` returns a non-generic root at once (new, I.5) | P1; the fixtures of I.2.3 | 30 plus tests | 0.9% measured | yes: one function. Add the fixtures first; gate is no difference in `compare_checker_builds.py` on both projects |
+| P2 | Infer instead of unifying with a fresh variable | P0 | 700 | 1.5-2.5% | application: yes; other constructs: one at a time, yes. The level update is never skipped (C.9, amended) |
 | P3 | Publish into the shared pool; encode later | P0 | 1,200 | 2.5-3.5% | P3a (encode and summarise after dependents are released): yes, from H.1. P3b (build the graph and the digests without the portable form): yes, once the equality test of H.1.7 is in CI |
 | P4 | Process-wide views; delete stamp replay | P3 | 2,500, mostly deletions | 2.5-3.5% | no |
 | P5 | Absolute paths in exports; no lookup copies | P4 | 2,000 | 3-4% | no |
 | P6 | Environment as a binding log | P0 | 2,500 | 3-4% | steps 1 to 5 of H.2.8: yes. The switch (step 6 on): yes with the corrected design of H.2.7, not with C.10 as written; first confirm the cost of path moves on the benchmark |
-| P7 | Term store, closed waist, core switch | P1 | 2,000 | 0 | yes |
-| P8 | New core operations | P7 | 7,000 | 4-6% once on | split: simple types yes; rows, univars, GADT no |
-| P9 | Switch on | P8 | 500 plus fixes | 0 | no (triage) |
-| P10 | Segments, export tables, checker per worker | P5, P6, P9 | 3,000 | 2-3% | no |
+| P7 | Term store, closed waist, core switch | P1 | 2,000 | 0 | ~~yes~~ dropped: do not build |
+| P8 | New core operations | P7 | 7,000 | ~~4-6% once on~~ 0 | ~~split: simple types yes; rows, univars, GADT no~~ dropped: do not build |
+| P9 | Switch on | P8 | 500 plus fixes | 0 | ~~no (triage)~~ dropped |
+| P10 | Segments, export tables, checker per worker | P5, P6 ~~, P9~~ | 3,000 | 2-3% | no. Re-scoped onto today's `TypeContext` (I.6): harder than as written |
 | P11 | Walk cost in `typecore`/`typemod` | P2; conflicts with nothing else if kept small | 200-600 each | 4-6% total | yes, each |
-| P12 | Delete the old core | P10, soak | -10,000 | 0 | yes |
+| P12 | Delete the old core | P10, soak | -10,000 | 0 | ~~yes~~ dropped: there is no old core |
 
-Parallel tracks:
+Parallel tracks (amended; the original had `P1 -> P7 -> P8 -> P9` on track A
+and `P12` after P10):
 
 ```
-A: P0 -> P1 -> P7 -> P8 -> P9 ----------\
-B: P0 -> P3 -> P4 -> P5 -----------------+-> P10 -> P12
-C: P0 -> P6 ----------------------------/
+A: P0 -> P1 -> P1b
+B: P0 -> P3 -> P4 -> P5 ---\
+C: P0 -> P6 ----------------+-> P10
 D: P0 -> P2 -> P11 (continuous)
 ```
 
@@ -1498,8 +1620,8 @@ entry points lightly (land P1 first); P2 and P11 both edit `typecore.rs`
 `Env` (land P6 first if both are ready).
 
 Stages P1 to P6 pay for themselves on today's representation. If the work
-stopped after them, the estimated saving is about 17-23% of the build, with no
-long-lived branch.
+stopped after them, the estimated saving is about ~~17-23%~~ 15-20% of the
+build (I.5), with no long-lived branch.
 
 ### F.2 P0: differential tooling and counters
 
@@ -1521,6 +1643,18 @@ long-lived branch.
 - **Saving.** None. It answers the unknowns listed in G.
 
 ### F.3 P1: ground flag and fast paths on today's representation
+
+> **Amended (I.1, I.5).** Built in #124 as far as it is sound. Kept: the level
+> update of a plain type without a snapshot, a declaration lookup or a retry
+> (`lower_plain_levels`), writing the same levels. Withdrawn: the flags byte;
+> the fast paths in `instance`, `copy_type_cached`, `generalize_rec`,
+> `generalize_structure_rec`, `occurs`, `deep_occur`, `occur_univar` and
+> `binding_facts`; binding a variable to a ground type without the walks.
+> Invariant (3) is false: the level of a ground node decides copy or share
+> (I.4). The interaction paragraph is wrong too: a ground node can be linked
+> to `phantom<'a>` and reach an unbound variable (#124, concern (a)). Saving:
+> ~~4-6%~~ 1.4% on the application, 0.7-0.8% on `tests/tests`, measured. The
+> follow-up that is sound is P1b (I.5).
 
 - **Changes.** A flags byte per node, in a `Cell<u8>` array parallel to the
   chunks of `TypeNodes` (the 32-byte node has no spare byte; a parallel
@@ -1682,6 +1816,8 @@ long-lived branch.
 
 ### F.9 P7: term store, closed waist, core switch
 
+> **Amended (I.6).** Dropped. It existed to carry P8.
+
 - **Changes.** `CoreMode` (E.1). The term store of B.2, B.3 and C.2 to C.3
   with constructors and the read API implemented for `Terms`. The direct
   descriptor and level writes above the waist (C.1) become named `ctype`
@@ -1698,6 +1834,10 @@ long-lived branch.
 - **Saving.** None.
 
 ### F.10 P8: the new core operations
+
+> **Amended (I.5, I.6).** Dropped. None of the listed savings is both sound
+> and specific to a new core; I.5 goes through them one by one. New estimate:
+> 0.
 
 Three pull requests, in order:
 
@@ -1725,12 +1865,23 @@ Three pull requests, in order:
 
 ### F.11 P9: switch on
 
+> **Amended (I.6).** Dropped.
+
 Bring `both` mode to zero differences (E.4 steps 2 and 3), package by
 package. Each difference is either a bug in the new core or an undocumented
 dependency on sharing or order; the second kind is added to section D with
 its fix. Hand-off: no; this is triage.
 
 ### F.12 P10: segments, export tables, one checker per worker
+
+> **Amended (I.3.3 rule 5, I.6).** Kept, on today's `TypeContext` and
+> without `Terms`: one context per worker whose containers are cleared
+> between modules, a shared initial-environment prefix, export tables in
+> place of per-worker component views, and segments that hold every exported
+> node with its sharing. Depends on P4, P5 and P6, not on P9. The reset list
+> is today's context (about 100 fields, the overlays, about 40 hash maps),
+> and type marking needs a visited set for frozen nodes before the level
+> overlay can go (I.4). Saving 2-3%, estimated, not re-measured.
 
 - **Changes.** For `Terms`: publication as in B.4 (replacing P3's graph
   build), `UnitExports` (replacing the component views of P4 and P5 for
@@ -1771,9 +1922,17 @@ parity and by the instruction count, which must go down.
 
 ### F.14 P12: delete the old core
 
+> **Amended (I.6).** Dropped. The deletions that remain are P4's (stamp
+> replay) and whatever P10 makes dead.
+
 E.4 step 4. About 10,000 lines removed. Hand-off: yes.
 
 ### F.15 Does it reach the target?
+
+> **Amended (I.5).** No, not on these estimates. The stages now sum to 21-29%
+> against the needed 30%, with 2.3 points measured. P1 delivered 1.4% of its
+> 4-6%, P8's 4-6% is gone, and P1b adds a measured 0.9%. P1 to P6 with P1b
+> give 15-20%. The paragraphs below are the original reading.
 
 Type checking must go from 49,000 to about 12,000 instructions per line: a
 cut of 37,000, which is 30% of today's build. The low and high estimates sum
@@ -1792,7 +1951,10 @@ and expected types, instead of trimming it.
 
 Each with a recommended answer.
 
-**G.1 Is the `HAS_SCOPED` rule complete?** The claim is that a type
+**G.1 Is the `HAS_SCOPED` rule complete?** *Amended (I.4): answered, no. A
+weak variable of an earlier item keeps a level below a later item's types.
+#124 widened the rule to every path of the unit being compiled
+(`path_is_scoped`), with the debug cross-check.* The claim is that a type
 constructor bound by a structure item never fails a level check afterwards
 (C.2). It rests on `init_def` being called at each item and on levels never
 dropping below an earlier item's stamps. Functor bodies, recursive modules
@@ -1802,7 +1964,9 @@ builds and in one CI job over all suites and the benchmark. If the check
 ever fires, widen the flag (the safe direction) instead of adding a special
 case.
 
-**G.2 Keeping levels instead of ranks.** This design keeps OCaml's node
+**G.2 Keeping levels instead of ranks.** *Amended (I.4): settled. Levels
+stay on every node, because the level of a structure node also decides copy
+or share, which is observable.* This design keeps OCaml's node
 levels on scratch nodes (C.4) to keep the escape diagnostics exact. It
 gives up a simpler generalisation. *Recommendation:* keep them. Revisit only
 if P8's profile shows level maintenance on non-ground nodes above 3% of
@@ -1819,13 +1983,17 @@ dependency load. Identical JavaScript confirms it; a difference names the
 place to fix.
 
 **G.4 Does anything outside the printer read structure-node identity in a
-way that reaches output?** Found: only `mark_loops_rec` (D.2). Not found by
+way that reaches output?** *Amended (I.2): yes. P1 was the probe this
+paragraph proposed, and it failed: identity decides the abbreviation name
+of every type, in diagnostics, in the stored interface, in genType output
+and, through immediacy, in the JavaScript.* Found: only `mark_loops_rec` (D.2). Not found by
 exhaustive proof. *Recommendation:* P1 already changes sharing (ground types
 are shared instead of copied) on today's core, so it is the cheap probe: if
 P1 passes error parity and the benchmark comparison, the remaining risk in
 P8 is confined to non-ground nodes, where D.2's side table applies.
 
-**G.5 Recursive ground types are not interned.** A closed recursive
+**G.5 Recursive ground types are not interned.** *Amended (I.3.3 rule 5):
+moot, nothing is interned.* A closed recursive
 polymorphic variant is rebuilt in scratch by each instantiation and copied
 into each segment that exports it. *Recommendation:* accept. Count them in
 P0; intern them only if they exceed 1% of nodes.
@@ -1841,7 +2009,8 @@ grow for the life of a watch session. *Recommendation:* the rollover of B.7.
 Report the ground tier size in the watch log at debug level so that the
 threshold can be set from real sessions.
 
-**G.8 Lock contention in the ground interner.** A miss in the per-worker
+**G.8 Lock contention in the ground interner.** *Amended (I.3.3 rule 5):
+moot, there is no interner.* A miss in the per-worker
 cache takes a shard mutex. With 10 workers, 64 shards and about 60,000
 insertions plus a few hundred thousand cache misses per build, contention
 should be negligible, but it is not measured. *Recommendation:* P7's
@@ -1854,7 +2023,8 @@ in the expression walker; how much is overhead is unknown.
 attributed to `typecore.rs` functions. Size P11 from it, and decide then
 whether trimming is enough.
 
-**G.10 Two cores for several months.** Shared code above the waist must
+**G.10 Two cores for several months.** *Amended (I.6): moot, there is one
+core.* Shared code above the waist must
 work with both. A change there can break one core without the author
 noticing. *Recommendation:* from P8 on, CI runs the parity suites in `both`
 mode, so every pull request is checked against both. Keep the dual period
@@ -1879,7 +2049,13 @@ ground node 24. *Recommendation:* not in this plan. Paths are compared and
 hashed without a table read today, which an id would cost. Measure after
 P8.
 
-**G.14 The estimates.** Every saving is derived from sample shares, not
+**G.14 The estimates.** *Amended (I.5): P1 was predicted at 4-6% and
+delivered 1.4%. The share it started from was right (instantiation,
+generalisation and level updates are 9.0% of the application's build,
+against the assumed 8%); the fraction that can be removed was wrong, because
+the ground part has to be done. So the other estimates are not rescaled by
+one factor, but each one's "removable fraction" is unverified until the
+stage is built.* Every saving is derived from sample shares, not
 from a prototype. *Recommendation:* P1 is the calibration. It is small, it
 is predicted at 4-6%, and its result should rescale the others before P7
 and P8 are staffed.
@@ -2606,3 +2782,586 @@ Each step compiles, passes the gates of F.1 and is its own pull request.
     down at step 6 and does not go up at steps 1 to 5 and 7 to 8. A counter
     in `perf_counters.rs` reports path moves and entries moved; on the
     benchmark, entries moved per lookup should stay below one.
+
+## I. P1 findings and their consequences
+
+Stage P1 was implemented in pull request #124. It found that the premise of
+the new core is false. This section says what is observable, chooses a design
+answer, and re-derives the savings. Every other section that is now wrong
+carries a note that starts with "**Amended (I.n)**" and points here.
+
+Short version:
+
+- Which type nodes are one node, and which are generic, decides the name a
+  type is printed with. That reaches diagnostics, the stored interface,
+  genType output and the generated JavaScript.
+- No sound way was found to share variable-free types between uses that
+  saves more than about 1% of the build.
+- The checker core therefore keeps today's representation: one node per
+  occurrence, structure links, a level on every node. The term store, the
+  new core and its switch (P7, P8, P9, P12) are dropped.
+- The plan's estimates now sum to 21-29% of the build, against a needed 30%.
+  They summed to 27-39%.
+
+### I.1 What P1 found, and what this section adds
+
+From #124:
+
+1. Sharing a variable-free ("ground") type between uses, or leaving its
+   level alone, changes the abbreviation name an inferred type is printed
+   with.
+2. Many callers decide something from the level of a structure node.
+   Invariant (3) of F.3 does not hold.
+3. `HAS_SCOPED` as C.2 defines it is unsound for weak variables of earlier
+   structure items.
+4. A flags byte set at construction cost +3.4% of instructions on today's
+   representation. The sound part of P1 saves 0.7% on `tests/tests` and 1.4%
+   on the application, against the 4-6% of F.3.
+
+Added here, each shown below with a program that both compilers were run on:
+
+5. The generated JavaScript depends on it too, not only printed text (I.2.4).
+6. It crosses module boundaries through the stored interface (I.2.5,
+   fixture 8).
+7. Sharing inside one exported type is observable in a dependent: whether
+   two positions of `(int, int)` are one node or two (fixture 7). The ground
+   tier of B.3 would merge them, so it is unsound as well.
+8. The canonical signature of P0 does not record that sharing (I.3.5).
+
+### I.2 What is observable
+
+#### I.2.1 The three facts
+
+A type is a graph of nodes. `repr` maps a handle to its representative. Three
+facts about that graph decide every later output:
+
+- **Name.** The path stored in a representative `Tconstr` node.
+- **Identity.** Which handles have the same representative: which positions
+  in the types of expressions, of bindings in the environment and of one
+  scheme are the same node.
+- **Generic or not.** Whether a node's level is the generic level.
+
+For a ground type the design assumed that only the first matters. All three
+do, because of how the three interact.
+
+**The printer reads the name of the representative and expands nothing.**
+OCaml: `Printtyp.tree_of_typexp` (`compiler/ml/printtyp.ml`) takes `repr ty`
+and prints a `Tconstr (p, tyl, _)` with `best_type_path p`. Rust:
+`Printtyp::tree_of_typexp` (`types/printtyp.rs`) does the same. genType reads
+the same path (`translateTypeExprFromTypes_` in
+`gentype/translate_type_expr_from_types.rs`). The stored interface stores it
+(`serialize_type` in `cmi/portable_types.rs`).
+
+**Unification changes identity, and through identity the name.** OCaml,
+`compiler/ml/ctype.ml`; Rust, `types/ctype.rs`:
+
+| Case | OCaml | Rust | Effect |
+|---|---|---|---|
+| A variable against anything | `unify1_var`: `link_type t1 t2` | `unify_types`, `unify1_var_link` | the variable becomes the other node |
+| The same constructor without arguments on both sides, no cached expansion | `unify`: `link_type t1 t2` | `unify_types`, the `same_nullary_no_cached_expansion` branch | two nodes become one |
+| Two structure nodes, neither an abbreviation | `unify2`, `unify3`: `link_type t1' t2`, then the children pairwise | `unify_types` (arrow, tuple and constructor arms call `link_type` before the children) | two nodes become one, at every depth |
+| Exactly one side is an abbreviation | `unify2` picks the sides so that `unify3` links the plain node to the *unexpanded* abbreviation node | `unify_after_expansion` (`swap`, `relink_target`) | the plain node now prints with the abbreviation's name |
+| Both sides are abbreviations | `unify3` links the expansion of side 1 to side 2 | `unify_after_expansion` | both visible nodes keep their own name |
+
+A link never rewrites a path. It changes which node a handle resolves to. So
+"this occurrence is now called `myint`" is not a fact about a binding or an
+expression. It is a fact about a node, and it holds for every handle that
+resolves to that node.
+
+**Only copying separates two handles again, and whether a node is copied is
+its level.** OCaml `Ctype.copy`: `if ty.level <> generic_level && partial =
+None then ty`, otherwise a fresh node, with a `Tsubst` mark so that a generic
+node reached twice in one copy session is copied once. Rust
+`copy_type_cached`: `CopyAction::ReturnSelf` for a non-generic node,
+`CopyCache::nodes` for the once-per-session rule. `Subst.typexp_rec`
+(`compiler/ml/subst.ml`), which copies a signature when an interface is
+written and read, keeps sharing the same way. So:
+
+- a generic node gives every `instance` its own copy: a later link on one
+  copy does not touch the others;
+- a non-generic node is returned as is: every use is the same node;
+- two positions of one scheme that are the same generic node are the same
+  node in every instance of it.
+
+Which nodes are generic is decided by `generalize` (every node above the
+current level, `generalize_rec` in Rust) and `generalize_structure`
+(structure nodes become generic, variables are only lowered). The second is
+called for every type annotation (`type_pat`, `Ppat_constraint`, in
+`compiler/ml/typecore.ml`: the annotation is generalised and instantiated
+twice), for parameters and cases whose pattern is not a plain variable
+(`type_function`: `propagate`, then `generalize` of every pattern type).
+`propagate` itself reads whether the parameter type's node is generic.
+
+#### I.2.2 When two occurrences of an equal ground type must stay distinguishable
+
+Exactly when OCaml keeps them as two nodes and a later link can land on one
+of them. Leaving them distinct is always correct. Merging them is observable
+when the link's target is *spelled differently*, at that node or below it:
+
+- an abbreviation that expands to the type: `type myint = int`;
+- an abbreviation applied to it: `type id<'a> = 'a`, then `id<color>`;
+- an abbreviation with a phantom parameter: `type phantom<'a> = int`, which
+  also turns the ground occurrence into a type with a variable;
+- an abbreviation of an arrow or a tuple: `type cb = int => unit`,
+  `type pair = (int, int)`;
+- a type reached through a module alias, which is an abbreviation by its
+  manifest (and, in Rust, the `normalize_path_full` branches of
+  `unify_types`).
+
+No ground type is exempt. `type id<'a> = 'a` can respell any type, and the
+abbreviation can be declared later in the file or in any dependency. The
+standard library is full of them (`Array.t<'a>`, `String.t`, `Dict.t<'a>`).
+
+The converse matters as much: two occurrences that OCaml holds as *one* node
+must stay one node. Copying a node OCaml shares is as wrong as sharing a node
+OCaml copies.
+
+There is no shorter rule than the algorithm itself. Whether two uses are one
+node depends on levels, and levels depend on where `typecore` calls
+`begin_def`, `end_def`, `generalize` and `generalize_structure`. The shapes
+that occur most:
+
+| Two uses are one node | Two uses are distinct nodes |
+|---|---|
+| uses of a function parameter bound by a plain variable pattern, no annotation | uses of an annotated parameter |
+| uses of a `let`-bound value whose type nodes were below the level of the `let` (it is the type of an outer parameter, or the content of a weak variable) | uses of a generalised `let`-bound value, including every top-level constant |
+| positions of one scheme that were one node when it was generalised | two reads of a record field, two uses of a constructor: each instantiates the declaration |
+| | two schemes |
+
+#### I.2.3 Fixtures in prose
+
+All were compiled with the OCaml compiler and the Rust compiler of commit
+8a19c272c. Both print the same in every case. Common prelude:
+
+```rescript
+type myint = int
+let takesMyInt = (x: myint) => ignore(x)
+```
+
+The inferred type is read from a type clash forced at the end
+(`let _: string = ...`).
+
+| # | Shape | Program | Inferred | Why |
+|---|---|---|---|---|
+| 1 | function argument, plain | `let g = a => { ignore(a + 1); takesMyInt(a); a }` | `myint => myint` | every use of `a` is the node that `+` gave it; the call links that node to `myint` |
+| 2 | function argument, annotated | `let f = (a: int) => { takesMyInt(a); a }` | `int => int` | the annotation is generalised in structure; each use of `a` is a copy |
+| 3 | `let`, generalised | `let x = 1` then `takesMyInt(x)` twice, then `(x, x)` | `(int, int)` | `x` is generic; each use is a copy |
+| 4 | `let`, not generalised, in a function | `let f = a => { let b = a; ignore(b + 1); takesMyInt(b); a }` | `myint => myint` | `b` is `a`'s node, below the level of the `let` |
+| 5 | `let`, not generalised, weak | `let r = ref(None)`; `let x = 1`; `r := Some(x)`; `let y = switch r.contents { \| Some(v) => v \| None => 0 }`; `takesMyInt(y)` | `r: ref<option<myint>>`, `x: int`, `y: myint` | the weak variable holds one copy of `x`'s type; `y` is that node |
+| 6 | record field | `type r = {n: int, m: int}`; `let f = (v: r) => { let k1 = v.n; let k2 = v.n; takesMyInt(k1); (k1, k2) }` | `r => (int, int)` | each read instantiates the label; `k1` is generalised |
+| 6b | record field, built | `let mk = a => { let v = {n: a, m: 0}; takesMyInt(a); v }` | `myint => r` | `a` is the node of one label instance |
+| 7 | inside a tuple | `let pairConst = (1, 2)`; `let h = q => { ignore(q == pairConst); let (a, _) = q; takesMyInt(a); q }` | `h: ((myint, int)) => (myint, int)`, `pairConst: (int, int)` | the link lands on a node *inside* `q`'s type. A name kept per binding (`a`) would miss `q` |
+| 7b | one node at two positions | `let dup = a => { ignore(a + 1); (a, a) }` and `let two = (1, 2)`; then `h` as in 7 with `dup(1)`, and with `two` | with `dup(1)`: `(myint, myint)`; with `two`: `(myint, int)` | `dup: int => (int, int)` and `two: (int, int)` print the same, but `dup`'s two components are one node |
+| 8 | cross-module | `A` has the prelude, `let x = 1`, `dup` and `two`. `B`: `let g = a => { ignore(a == A.x); A.takesMyInt(a); a }` and 7b with `A.dup(1)`, `A.two` | `B.g: A.myint => A.myint`; `(A.myint, A.myint)` and `(A.myint, int)` | the names and the sharing of 7b pass through the stored interface |
+| 9 | phantom parameter | `type phantom<'a> = int`; `let takesP = (x: phantom<'a>, y: 'a) => ...`; `let h = (a, w) => { ignore(a == x); takesP(a, w); a }` | `(phantom<'a>, 'a) => phantom<'a>` | a ground occurrence gains a variable |
+| 9b | phantom, weak | `let cell = ref(None)`; `cell := Some(1)`; `takesP(Option.getOr(cell.contents, 0), [])` with `y: array<'a>` | accepted; `cell: ref<option<phantom<'a>>>` | `closed_schema_rec` (`ctype.ml`) expands a constructor before it reports a weak variable |
+| 10 | two abbreviations | `type a = int`, `type b = int`; `let g = v => { takesA(v); takesB(v); v }` and the calls swapped | `a => a`; swapped: `b => b` | the first link names the node; the second links only the expansion |
+| 11 | arrow and tuple abbreviations | `type cb = int => unit`; `let g = f => { plainF(f); takesCb(f); f }` | `cb => cb` | a non-constructor node is linked to the abbreviation |
+
+Fixture 1 is the one #124 adds (`alias_name_follows_unification.res`); its
+second fixture, `weak_variable_escapes_later_type.res`, is about finding 3.
+The others are not in the test suite yet. They should
+be added before any further change to instantiation, generalisation or
+levels: 1 to 7b, 9 to 11 as `super_errors` fixtures, 8 as a
+`super_errors_multi` fixture and a genType test, I.2.4 as a JavaScript test.
+
+#### I.2.4 The generated JavaScript depends on it
+
+`Ctype.maybe_pointer_type` (`compiler/ml/ctype.ml`) reads the declaration of
+the node's own path and expands nothing. `compute_immediacy`
+(`compiler/ml/typedecl.ml`) gives an abbreviation the immediacy of the head
+of its manifest only, so `type id<'a> = 'a` is not immediate while
+`type color = Red | Green` is. `Translcore.specialize_comparison` and
+`translate_unified_ops` (`compiler/ml/translcore.ml`) choose the integer
+comparison when the type is immediate. Rust:
+`RawLambdaConverter::is_immediate_type_with_env` (`raw_lambda/convert.rs`).
+
+```rescript
+type color = Red | Green
+type id<'a> = 'a
+let takesId = (x: id<color>) => ignore(x)
+let x = Red
+let g = a => { ignore(a == x); takesId(a); a > Green }
+let h = a => { ignore(a == x); a > Green }
+```
+
+Both compilers emit, for `g`, `Primitive_object.equal(a, "Red")` and
+`return Primitive_object.greaterthan(a, "Green")`, with warning 102
+(polymorphic comparison) at both comparisons. For `h` they emit
+`return a > "Green"` and no warning. The only difference is the call that
+links `a`'s node to `id<color>`. The comparison on line 5 is *before* that
+call in the source: the name is read when the module is lowered, after all
+unification.
+
+The same holds across modules. With `B.k` inferred as
+`A.id<A.color> => A.id<A.color>`, a third module that passes `p` through
+`B.k` compiles `p > A.Green` to `Primitive_object.greaterthan(p, "Green")`
+and `q > A.Green` for a plain `q` to `q > "Green"`.
+
+So this is under rule 1 (identical JavaScript), not only rule 2.
+
+#### I.2.5 Which outputs
+
+| Output | Depends on name, identity and generic-ness of ground nodes | Shown by |
+|---|---|---|
+| Diagnostic text (type clashes, and which warnings are raised) | yes | fixtures 1 to 11; warning 102 in I.2.4 |
+| Signature printing (`--dump sig`, interface files) | yes | fixture 8: `let g: A.myint => A.myint` |
+| The stored interface, and through it dependents | yes: names, and which positions are one node | fixtures 7b and 8 |
+| genType | yes | fixture 8: `export const g: (a:A_myint) => A_myint` |
+| Generated JavaScript | yes, through immediacy | I.2.4, in the module and in a dependent |
+| Accepting or rejecting a program | not found. Fixture 9b is accepted because the check expands abbreviations. Not proven for every check that reads a declaration without expanding |
+
+How often: a temporary counter on every structure link (`link_type` and the
+two direct links in `unify_after_expansion`) counted the links whose source
+and target have different head constructors. On the application: 94,819
+such links, in 2,634 of 3,735 modules (71%). On `tests/tests`: 1,592, in 138
+of 711 modules (19%). The count includes links of expansion nodes that no
+handle outside the memo holds (the "both abbreviations" row), so it is an
+upper bound on visible renamings. In total the application makes 1,587,265
+structure links and 2,769,294 variable links.
+
+### I.3 The design answer
+
+#### I.3.1 Options
+
+**Option 1: keep sharing of ground terms, carry the "printed as" name
+separately.**
+
+- *A name per binding or per expression* is unsound. Fixture 7: the link
+  lands on a node inside the type of `q`, reached through `a`. An annotation
+  on `a` does not rename `q`. Fixture 7b: whether two positions rename
+  together is a property of the scheme's graph, not of any binding.
+- *A name per occurrence* needs an identity per occurrence at every depth,
+  with the rules of the table in I.2.1 applied to it. That is a node. The
+  only saving left is to create the node late: an occurrence is one cell that
+  points at the shared term, and it is copied one level at a time when
+  something takes its children. Every reader above the waist that keeps a
+  child handle (`typecore.rs` and `typemod.rs` do, throughout) must force
+  that copy, and the unifier must handle both forms.
+
+  What it could save, measured with a temporary counter in the instance
+  census (application): 3,716,320 ground instantiations; 2,358,093 of them
+  copy nothing because the root is not generic; the others copy 2,985,418
+  nodes, of which 2,515,804 are the root or a child of the root, which the
+  application of a function or the unification of a constructor opens at
+  once. That leaves 469,614 deeper nodes, plus at most 354,746 ground nodes
+  below non-ground schemes: at most 824,360 nodes, 16.7% of the nodes
+  `instance` copies and 7.1% of all type nodes. All instantiation is 5.7% of
+  the build (callgrind, I.7). If its cost were proportional to nodes copied,
+  the bound is 0.9% of the build, before the cost of the extra indirection
+  on every read. On `tests/tests` the same bound is 0.6% (31,888 of 246,275
+  copied nodes, instantiation at 4.7%).
+
+**Option 2: share only ground terms that contain no abbreviation-capable
+constructor.** There is no such class: I.2.2. A dynamic variant (share until
+the first renaming link, then stop) cannot work either, because at that
+moment the checker has to rename exactly the occurrences OCaml holds as one
+node, and sharing has erased which those are. A variant that recompiles the
+module with the old core when a renaming link occurs would recompile 71% of
+the application's modules and keep two cores for good.
+
+**Option 3: keep occurrence identity for all types and take the savings
+elsewhere.** Today's representation. Nothing to prove: it is the
+representation the parity suites already check. It gives up every fast path
+of the new core that rested on sharing (I.5).
+
+#### I.3.2 Decision
+
+Option 3.
+
+Reasons:
+
+1. Identity is needed at every node of every type, and it reaches the
+   JavaScript. A design that is right "except in rare shapes" is not
+   available under rules 1 and 2, and the shapes are not rare (71% of the
+   application's modules).
+2. The sound form of option 1 saves at most 0.9% and touches every reader of
+   a type's children. Two measured changes on today's representation already
+   save more: 1.4% (#124) and 0.9% (I.5, P1b).
+3. With identity kept, the new core has nothing left that today's core
+   cannot do in place (I.5, P8).
+
+#### I.3.3 Rules
+
+The checker core is today's `types/ctype.rs` on today's `TypeContext`
+storage. The rules below are what any later change to it must keep.
+
+1. **One node per occurrence.** Every type the checker can unify is a node
+   with its own descriptor cell and level cell (`TypeNode`). Equal types are
+   never merged because they are equal. There is no flags byte.
+2. **Links.** Unification links as the table in I.2.1 says, in that
+   direction, before the children are unified, and restores the descriptor
+   when the children fail with a unification error (`unify_types`,
+   `unify_after_expansion`). The direction is part of the specification: it
+   decides the name.
+3. **Copy or share is the level.** `instance` and its variants copy a node
+   if and only if it is at the generic level, once per copy session, and
+   return any other node as it is (`copy_type_cached`). Whether a type is
+   ground is never consulted.
+4. **Levels are written on every node.** `generalize`, `generalize_structure`
+   and the level updates write the level of ground nodes as of any other.
+   A fast path may skip *work* (a snapshot, a declaration lookup, a retry) but
+   not a write. `lower_plain_levels` of #124 is the model.
+5. **Published nodes are frozen, not interned.** The nodes of a published
+   interface are immutable and are shared between compilations, as the
+   shared pool does today. Each exported node is one stored node. Two equal
+   ground types that were two nodes in the exporter are two stored nodes; one
+   node at two positions is one stored node (fixture 7b). The export copy
+   keeps this with one map from the exporter's handle to the stored handle,
+   over the whole signature (`serialize_type` does this today with its
+   `cache`).
+6. **A frozen node never meets an abbreviation.** A checker reaches a frozen
+   node through `instance`, which copies it when it is generic, and the copy
+   is what unification links. (A node under a weak variable that fixture 9b's
+   check lets through is stored with its own level. Whether such a node
+   reaches a dependent's unifier was not determined; if it does, the next
+   sentence covers it.) Where code unifies a frozen node directly, the
+   write goes to the compilation's overlay (`TypeContext::write_desc_raw`,
+   `set_shared_desc`) and no other compilation sees it. Measured on the
+   application: 2,789 links written to shared-pool nodes, 2,784 of them
+   restored; the ones sampled came from `matches` in `check_constraints_rec`
+   (`types/typemod.rs`), which always undoes its unification. The other 5,
+   and 123 links written to worker-store nodes, were not traced.
+7. **What the printer reads.** `repr`, then the path in that node, through
+   `best_type_path`. No expansion and no side table.
+8. **What is exported.** For each node reachable from the signature: the
+   descriptor of its representative as it stands when the module has been
+   checked (so names acquired through links are exported), whether it is
+   generic, and its identity (rule 5).
+
+#### I.3.4 Invariants a reviewer can check
+
+1. No function in `types/` reads "is ground" (or any stored summary of a
+   subtree) to decide whether to copy, link, write a level or allocate.
+2. A change that claims no behaviour change passes fixtures 1 to 11 and
+   I.2.4, as tests, with expectations written by the OCaml compiler.
+3. `scripts/compare_checker_builds.py` reports no difference between the
+   base and the candidate on `tests/tests` and on the application.
+4. A stored interface has as many nodes for a type as the exporter had, and
+   fixture 7b passes across two modules.
+5. A node of the shared pool is written only through an overlay.
+6. In a debug build, a fast path asserts on entry that the general path
+   would do the same writes (as `level_update_is_plain` does in #124).
+
+#### I.3.5 What the P0 tooling catches
+
+`scripts/compare_checker_builds.py` builds a project with two executables and
+compares, per module, the canonical signature, the diagnostics and every
+generated file.
+
+It catches, for the programs in the compared project:
+
+- a wrong name anywhere in an exported type: the canonical signature prints
+  every type by structure with its paths (`write_type` in
+  `types/canonical_sig.rs`);
+- a wrong name in a diagnostic the project emits;
+- a difference in the JavaScript or in genType output, so the immediacy case
+  of I.2.4.
+
+On the application 71% of the modules make at least one renaming link, so a
+comparison there exercises this heavily.
+
+It does not catch:
+
+- the name of a type that is not exported, is in no diagnostic and does not
+  change the JavaScript (the type of a local binding);
+- a difference in *which positions are one node* inside an exported type:
+  the canonical text of `dup: int => (int, int)` and of a version with three
+  separate `int` nodes is the same. It shows only if a dependent in the same
+  project happens to rename one position (fixture 7b). The canonical form
+  should number shared structure nodes as it numbers variables; until then,
+  invariant 4 needs its own test;
+- a difference in generic-ness of a structure node that no later
+  instantiation in the project exposes;
+- diagnostics of programs that do not compile: the application compiles
+  without errors. Those are covered by `super_errors` and
+  `scripts/test_error_output_parity.sh` only.
+
+### I.4 Levels
+
+Nothing replaces the level of a structure node. Every node keeps a level
+cell with OCaml's meaning. C.4 kept levels on scratch nodes for the escape
+errors; the reason is now wider (rule 3 of I.3.3), and it covers ground
+nodes.
+
+By caller group of the table in #124. The groups and their members are
+#124's. Re-read for this section: `copy_type_cached`, `generalize_rec`,
+`generalize_structure_rec`, `link_type`, `unify_types`, the `typecore.rs`
+callers named below, `is_non_gen`, `mark_type_node` and `serialize_type`. The
+other members were not re-read.
+
+| Group | What the level decides | In the amended design |
+|---|---|---|
+| `ctype.rs`, level machinery (`update_level*`, `generalize*`, `lower_nongen*`, `link_type`, `unify_types`) | the walks themselves; `unify_types` lowers both sides to the lower of the two structure levels | stays. The only shortcut is one that writes the same levels (rule 4) |
+| `ctype.rs`, copiers (`copy_type_cached`, `copy_sep_inner`, `subst_identity_copy_rec`, `record_label_param_subst`, `remap_label_type_to_params`) | copy or share, per node | stays, exactly. This is the observable one (fixtures 2, 3, 4) |
+| `ctype.rs`, abbreviations (`try_expand_head_with_mode`, `generic_abbrev`, `generic_private_abbrev`, `subst_with_memo`, `unroll_abbrev`) | the level an expansion is instantiated at; whether a manifest counts as generic | stays. The expansion memo stays per node (C.7 is withdrawn): an expansion node is a node that gets linked (I.2.1, last two rows) |
+| `ctype.rs`, rows, objects, subtyping | the level of new nodes | stays; unchanged by this section |
+| `ctype.rs`, `moregen*`, `closed_schema_rec`, `occur` | variables only | stays |
+| `typecore.rs`: `instance_if_generic`; `propagate` in `type_match_cases_batch_non_gadt` and `type_function_nary`; the unused-argument warning in `type_application`; `generalizable_at_level` in `type_coerce`; the generic-manifest test in `transl_type_inner`; `set_current_time` from a type's level in `type_newtype` and `type_letmodule` | is this structure node generic; is the function's node above the result's; at which level was this type made | stays. `propagate` decides whether pattern types are generalised, which is fixture 2 against fixture 1 |
+| `printtyp.rs` | weak-variable naming and the escape hint read variables; the object and row printers copy a node's level to nodes they rebuild | stays |
+| `typemod.rs`, `btype.rs` | rebuilt nodes take the original's level; type marking (`mark_type_node`) stores its mark in the level of every node | stays. On a frozen node the mark goes to the level overlay, as today. A stage that removes overlays (P10) must give marking a visited set for frozen handles first |
+| `driver.rs`, `cmi/portable_types.rs` | a variable; and every node's level is written to the stored interface | stays; the stored level is what makes a dependent's `instance` copy (rule 8) |
+
+No decision disappears. The decisions that the design removed were exactly
+the ones that turned out to be observable.
+
+`HAS_SCOPED` (finding 3) is not a stored flag any more. Its rule is the
+function `path_is_scoped` of #124: every path of the unit being compiled is
+scoped; only paths rooted in another unit and predefined types are not. This
+is the widening G.1 recommended.
+
+### I.5 Savings, re-derived
+
+Base for the shares below: trunk commit 8a19c272c, the application (82.0 G
+instructions under callgrind with one worker) and `tests/tests` (4.64 G).
+I.7 says how each number was taken.
+
+What the old estimates assumed, against what was measured:
+
+| Quantity | Assumed in F | `tests/tests` | Application | Source |
+|---|---|---|---|---|
+| Instantiation, generalisation and level updates, share of the build | 8% | 6.8% | 9.0% | callgrind, inclusive: `copy_type_cached`, `generalize_rec` and `generalize_expansive`, `update_level_checked_above` |
+| of which instantiation | | 4.7% | 5.7% | same |
+| of which level updates | | 1.7% | 2.7% | same |
+| of which generalisation | | 0.4% | 0.6% | same |
+| Ground share of `instance` calls | 66% | 57.5% | 64.1% | P0 counters |
+| Ground share of nodes `instance` copies | 78% | 59.9% | 67.6% | P0 counters |
+| Ground share of generalisation visits | 80% | 78.3% | 87.5% | P0 counters |
+| Ground share of level-update visits | 69% | 57.2% | 62.7% | P0 counters |
+| Top-level unifications of two identical ground types | 0.88 M of 3.09 M | 47,245 of 213,970 | 882,780 of 4,323,174 | P0 counters |
+| Top-level unifications of a variable with a ground type | 1.16 M | 55,344 | 1,167,904 | P0 counters |
+| Fresh variables made only to be an expected type | 0.71 M of 2.49 M | 36,842 of 124,293 | 745,558 of 2,253,969 | P0 counters |
+| Exported nodes, and the non-ground part | not measured | 32,146; 10,645 | 368,428; 49,712 | P0 counters |
+| All of type checking (`type_structure`) | 40% | 34.5% | 42.5% | callgrind, inclusive |
+| `unify`, inclusive | | 9.1% | 13.3% | callgrind |
+| `expand_head_with_mode`, inclusive | 5% of checking | 2.3% | 4.4% | callgrind |
+| `repr_chain`, self | | 0.9% | 1.2% | callgrind |
+| `TypeContext::store_desc`, self (reads of store and shared nodes) | | 1.0% | 0.8% | callgrind |
+
+The shares the plan started from were about right. What was wrong is how
+much of them can be removed: the 60-70% that P1 and P8 took from the first
+row was the ground part, and the ground part has to be done.
+
+Stage by stage. "Saving" is a share of the application's build instructions.
+
+| # | Old estimate | New estimate | What it rests on |
+|---|---|---|---|
+| P0 | 0 | 0 | landed (#122) |
+| P1 | 4-6% | **1.4%** (0.7-0.8% on `tests/tests`) | measured, #124: cachegrind, one worker, 81.72 G to 80.56 G on the application; CI instruction count -0.79% on `tests/tests`. The fast paths for `instance`, `generalize` and the occur checks, and the flags byte, are withdrawn |
+| P1b (new) | | **0.9%** (0.65% on `tests/tests`) | measured with a temporary patch, not committed: `instance` returns the representative at once when it is not generic, before it builds a `CopyCache`. This is `Ctype.copy`'s own first test, so rules 1 to 4 hold. Application: 78.12 G to 77.43 G (`perf stat`, user instructions, one worker, smallest of three). `tests/tests`: 4.643 G to 4.613 G (cachegrind, smallest of four runs a side). `compare_checker_builds.py`: no difference on either project |
+| P2 | 1.5-2.5% | 1.5-2.5% | estimated; the count it rests on is now measured (745,558 variables, 33.1% of fresh variables, 710,674 of them the two per application). It did not assume sharing, with one exception: C.9 case 1 skipped the level update for a ground type. It must run (rule 4); with #124 it is the cheap path |
+| P3 | 2.5-3.5% | 2.5-3.5% | estimated, not re-measured. Does not assume sharing in the checker |
+| P4 | 2.5-3.5% | 2.5-3.5% | estimated, not re-measured. Same |
+| P5 | 3-4% | 3-4% | estimated; lookup copies measured at 2,699,388 nodes (23.2% of all nodes) and `copy_lookup_type_expr_with_paths` at 2.4% of the build. Sound under rule 6: a lookup returns frozen generic nodes and `instance` copies them |
+| P6 | 3-4% | 3-4% | estimated, not re-measured. Independent of type representation |
+| P7 | 0 | dropped | it existed to carry P8 |
+| P8 | 4-6% once on | **0, dropped** | see below |
+| P9 | 0 | dropped | nothing to switch on |
+| P10 | 2-3% | 2-3%, on today's `TypeContext` | estimated, not re-measured: setup 1.1% and teardown 2.5% (A.6). It did not rest on sharing: type nodes have no destructor, and the export copy visits 368,428 nodes instead of 49,712, which is under 0.1% of the build either way. What changes is its base: see I.6 |
+| P11 | 4-6% | 4-6% | estimated, the least certain number in the plan (G.9). Independent of sharing |
+| P12 | 0 (code size) | dropped | there is no old core to delete |
+
+**P8, item by item.** F.10 listed what the new core would save on top of P1:
+
+| Claim in F.10 | Under I.3.3 | Bound |
+|---|---|---|
+| `repr` without a memory read | gone. A structure node can be linked (rule 2), so `repr` has to read it | `repr_chain` is 1.2% of the build (self) |
+| no structure links | gone. The links are the mechanism of I.2.1 | `link_type` is 1.4% inclusive |
+| unification of two ground types by handle (882,780 top-level) | gone. Each occurrence is its own node; the pairwise links are needed because a child may be held elsewhere (fixture 7) | part of `unify`'s 13.3%; the split is unknown |
+| expansion by table | gone as designed. A table keyed by handles shares expansion nodes between occurrences, and expansion nodes are linked (I.2.1). A per-path cache of "is this an abbreviation" exists today (`resolved_type_item_cache`) | `expand_head_with_mode` is 4.4% inclusive; how much is lookup and how much is the copy of the manifest is unknown |
+| no overlays on reads of dependency types | does not need a new core. It needs published nodes that are never written, which is rule 6 plus a replacement for the `matches` probe and for type marking on frozen nodes | `store_desc` is 0.8% (self); how much of that is the overlay test is unknown |
+| scheme instantiation that stops at ground children | gone (rule 3) | counted under option 1 in I.3.1: at most 0.9% |
+
+Nothing in the list is both sound and specific to a new core. The honest new
+estimate for P8 is zero, for 7,000 lines and months of two cores.
+
+**Totals.**
+
+| | Old | New |
+|---|---|---|
+| Sum of the stages | 27-39% | 21-29% |
+| of which measured | 0 | 2.3% (P1 and P1b) |
+| P1 to P6 (with P1b) | 17-23% | 15-20% |
+| Needed (F.15) | 30% | 30% |
+
+The plan no longer reaches the target on its own estimates, even at the top
+of every range. The gap is 1 to 9 points. P11, the least certain stage,
+carries 4-6 of the 21-29.
+
+### I.6 What to build
+
+P7, P8, P9 and P12 are not worth building. P7 and P9 have no purpose without
+P8; P8 saves nothing that is sound; P12 has nothing to delete. This removes
+the largest and riskiest part of the plan (about 9,500 lines and the
+two-core period) and, with it, 4-6 points of estimated saving that were
+never real.
+
+P10 and P11 are worth building.
+
+- **P10** is re-scoped onto today's `TypeContext`: one checker context per
+  worker whose containers are cleared between modules, a shared prefix for
+  the initial environment, and export tables built at publication (B.5) in
+  place of per-worker component views. It keeps B.4's segments in the form
+  of rule 5 (every exported node, sharing kept, no ground tier). It depends
+  on P4, P5 and P6, not on P9. It is harder than the version in F.12, because
+  the reset list is today's context (about 100 fields, overlays, about 40
+  hash maps) instead of a few dense vectors, so it stays "no" for hand-off.
+- **P11** is unchanged.
+
+Order:
+
+```
+A: P0 -> P1 (#124) -> P1b
+B: P0 -> P3 -> P4 -> P5 ---\
+C: P0 -> P6 ----------------+-> P10
+D: P0 -> P2 -> P11 (continuous)
+```
+
+1. Land #124 (P1).
+2. P1b: one function, measured, hand-off yes. Gate: the fixtures of I.2.3
+   added first, then `compare_checker_builds.py` on both projects.
+3. Tracks B, C and D as before.
+4. P10 after P5 and P6.
+
+Before any of it: add the fixtures of I.2.3 and I.2.4 to the test suite, and
+make the canonical signature record shared structure nodes (I.3.5). They are
+the only protection against the next change that assumes what P1 assumed.
+
+If the target of 30% stands, the missing points have to come from outside
+this plan's stages: from restructuring `typecore.rs` (the lever F.15
+declines), or from the parts of the build that are not type checking
+(57.5% of the application's instructions). This document does not estimate
+either.
+
+### I.7 How the numbers were measured
+
+- Machine: x86-64 Linux, 8 cores. `rescript` built from commit 8a19c272c
+  with `CARGO_PROFILE_RELEASE_LTO=thin` (not the fat-LTO or profile-guided
+  build that ships, so absolute counts are a few percent above CI's).
+- The OCaml compiler is the dune build of the same commit.
+- P0 counters: `RESCRIPT_COMPILER_COUNTERS=1 rescript build` after
+  `rescript clean`, on `tests/tests` (711 modules) and on a 3,735-module
+  application.
+- Shares of the build: `valgrind --tool=callgrind`, `RAYON_NUM_THREADS=1`,
+  inclusive cost of the named function unless "self" is said. Functions that
+  the compiler inlined are counted in their callers, so a share is a lower
+  bound for the named operation.
+- Temporary counters (not committed), added in a second checkout: in
+  `link_type` and at the two direct `Tlink` writes of
+  `unify_after_expansion`, the kind of each link and the module; in the
+  instance census, per ground instantiation, the nodes copied and how many of
+  them are the root or a child of the root; in
+  `TypeContext::write_desc_raw`, writes to shared-pool and worker-store
+  nodes, with a backtrace for a sample.
+- P1b: the temporary patch is five lines at the top of `ctype::instance`.
+  Instructions with `valgrind --tool=cachegrind --cache-sim=no` on
+  `tests/tests` and `perf stat -e instructions:u` on the application, one
+  worker, smallest run of each side; outputs compared with
+  `scripts/compare_checker_builds.py`.
+- Fixtures: each program compiled with both compilers
+  (`bsc -w +A -bs-jsx 4 -color never`); the cross-module ones with
+  `rescript build --dump sig` and with the OCaml reference build
+  (`rescript build-reference`), comparing the generated JavaScript and
+  genType files of the two.
+- Not measured: anything on the profile-guided build; the split of `unify`
+  and of `expand_head` into their parts; memory.

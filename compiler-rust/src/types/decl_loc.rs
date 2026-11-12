@@ -346,6 +346,16 @@ impl DeclLocTable {
         &mut self,
         files: &dyn Fn(StrIdx) -> StrIdx,
     ) -> crate::fast_hash::AHashMap<u64, u64> {
+        self.remap_for_import_with(files, |_| (next_table_owner() as u64) << 32)
+    }
+
+    /// The importer selects the allocation namespace. A persistent dependency
+    /// uses its unit identity; a local load uses the compilation's next scope.
+    pub(crate) fn remap_for_import_with(
+        &mut self,
+        files: &dyn Fn(StrIdx) -> StrIdx,
+        mut scope: impl FnMut(u64) -> u64,
+    ) -> crate::fast_hash::AHashMap<u64, u64> {
         for loc in &mut self.locations {
             loc.loc_start.file_name = files(loc.loc_start.file_name);
             loc.loc_end.file_name = files(loc.loc_end.file_name);
@@ -354,7 +364,7 @@ impl DeclLocTable {
         for instance in &mut self.instances {
             instance.identity.scope = *scopes
                 .entry(instance.identity.scope)
-                .or_insert_with(|| (next_table_owner() as u64) << 32);
+                .or_insert_with(|| scope(instance.identity.scope));
         }
         self.index.clear();
         self.instance_index.clear();
@@ -565,6 +575,9 @@ pub(crate) struct DeclLocImport<'a> {
     pub(crate) files: &'a dyn Fn(StrIdx) -> StrIdx,
     /// The new scope of each producer scope of the imported table.
     pub(crate) scopes: crate::fast_hash::AHashMap<u64, u64>,
+    /// The namespace used by shape blocks and attribute strings absent from
+    /// this location table. `None` is an anonymous, process-local import.
+    pub(crate) namespace: Option<u64>,
 }
 
 impl DeclLocImport<'_> {
@@ -765,6 +778,7 @@ mod tests {
             instances: Vec::new(),
             files: &renamed,
             scopes: Default::default(),
+            namespace: None,
         };
         let imported = import.import(h2);
         assert_eq!(imported.kind(), DeclLocKind::Store);

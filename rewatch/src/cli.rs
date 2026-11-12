@@ -21,6 +21,15 @@ fn parse_regex(s: &str) -> Result<Regex, regex::Error> {
     Regex::new(s)
 }
 
+/// A `.res` or `.resi` file: anything else is a usage error (exit 2).
+fn parse_source_path(path: &str) -> Result<String, String> {
+    if path.ends_with(".res") || path.ends_with(".resi") {
+        Ok(path.to_string())
+    } else {
+        Err(format!("{path} is not a .res or .resi source file"))
+    }
+}
+
 use clap::ValueEnum;
 
 #[derive(Debug, Clone, ValueEnum)]
@@ -188,7 +197,7 @@ pub struct FilterArg {
 
 #[derive(Args, Debug, Clone)]
 pub struct AfterBuildArg {
-    /// Run an additional command after build.
+    /// Run an additional command through the shell after a successful build.
     /// E.g., play a sound or run a test suite when done compiling.
     #[arg(short, long)]
     pub after_build: Option<String>,
@@ -270,7 +279,7 @@ pub struct BuildArgs {
 
     /// Debugging: write these intermediate representations of every compiled
     /// module (comma-separated: typedtree, typedtree-locs, rawlambda, lambda,
-    /// lambda-locs) to `--dump-dir`. Forces a full build.
+    /// lambda-locs, sig) to `--dump-dir`. Forces a full build.
     #[arg(long, hide = true, value_delimiter = ',', value_parser = parse_dump_kind, requires = "dump_dir")]
     pub dump: Vec<rescript_compiler::driver::DumpKind>,
 
@@ -383,6 +392,18 @@ mod tests {
             Command::Build(build_args) => assert!(build_args.no_timing),
             other => panic!("expected build command, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn compiler_args_rejects_a_file_that_is_no_source_as_a_usage_error() {
+        let err = parse(&["rescript", "compiler-args", "rescript.json"]).expect_err("expected usage error");
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
+        assert!(
+            err.to_string()
+                .contains("rescript.json is not a .res or .resi source file")
+        );
+        let cli = parse(&["rescript", "compiler-args", "src/A.resi"]).expect("expected compiler-args");
+        assert!(matches!(cli.command, Command::CompilerArgs { .. }));
     }
 
     // Subcommand flag handling.
@@ -639,7 +660,7 @@ pub enum Command {
     /// Print the compiler arguments for a ReScript source file.
     CompilerArgs {
         /// Path to a ReScript source file (.res or .resi)
-        #[command()]
+        #[arg(value_parser = parse_source_path)]
         path: String,
     },
     /// Run an editor tooling command in the project's running `rescript watch`.

@@ -12,7 +12,7 @@ use notify::event::ModifyKind;
 use notify::{Config, Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -103,7 +103,11 @@ fn finish_successful_watch_compile(
         } else {
             println!(
                 "\n{}\n",
-                build::format_finished_compilation_message(compilation_kind, outcome, timing_total_elapsed)
+                build::format_finished_compilation_message(
+                    compilation_kind,
+                    outcome,
+                    Some(timing_total_elapsed)
+                )
             );
         }
     }
@@ -144,11 +148,11 @@ fn compute_watch_paths(build_state: &BuildCommandState, root: &Path) -> Vec<(Pat
         for source in &package.source_folders {
             let dir = package.path.join(&source.dir);
             if !dir.exists() {
-                log::error!(
-                    "Could not read folder: {:?}. Specified in dependency: {}, located {:?}...",
+                eprintln!(
+                    "warning: source folder {:?} of package {} ({}) does not exist or is not a folder",
                     source.dir,
                     package.name,
-                    package.path
+                    package.path.display()
                 );
                 continue;
             }
@@ -404,7 +408,7 @@ struct WatchArgs<'a> {
     current_watches: Vec<RegisteredWatch>,
     initial_build_state: BuildCommandState,
     events: Receiver<notify::Result<Event>>,
-    ctrlc_pressed: Arc<AtomicBool>,
+    stop_status: Arc<AtomicUsize>,
     path: &'a Path,
     show_progress: bool,
     filter: &'a Option<regex::Regex>,
@@ -448,7 +452,7 @@ fn watch_loop(
         mut current_watches,
         initial_build_state,
         events: event_receiver,
-        ctrlc_pressed,
+        stop_status,
         path,
         show_progress,
         filter,
@@ -459,15 +463,15 @@ fn watch_loop(
         features,
         tooling_requests,
     }: WatchArgs<'_>,
-) -> Result<()> {
+) -> Result<i32> {
     let mut build_state = initial_build_state;
     let mut needs_compile_type = CompileType::None;
     let mut initialization_failed = false;
     loop {
         serve_tooling_requests(&build_state, tooling_requests.as_ref());
-        if ctrlc_pressed.load(Ordering::SeqCst) {
+        if let Some(status) = stop_requested(&stop_status) {
             cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
-            break Ok(());
+            break Ok(status);
         }
         let mut events: Vec<Event> = vec![];
         let mut pending = event_receiver.try_iter().peekable();
@@ -491,7 +495,7 @@ fn watch_loop(
                 && let EventKind::Remove(_) = event.kind
             {
                 exit_after_lockfile_removed(path, &build_state, show_progress);
-                return Ok(());
+                return Ok(0);
             }
 
             // Detect config-file changes and trigger a full rebuild.
@@ -615,7 +619,7 @@ fn watch_loop(
                 let timing_total = Instant::now();
                 let result = build::incremental_build(
                     &mut build_state,
-                    None,
+                    false,
                     false,
                     show_progress,
                     true,
@@ -660,7 +664,7 @@ fn watch_loop(
                         // changes left behind: record the builds this watcher made first.
                         clean::write_in_process_record(&build_state, build::CompilerInfoWrite::AfterBuild);
                         let mut next_build_state = build::initialize_build(
-                            None,
+                            false,
                             filter,
                             show_progress,
                             path,
@@ -686,7 +690,7 @@ fn watch_loop(
 
                         let result = build::incremental_build_without_lock(
                             &mut build_state,
-                            None,
+                            false,
                             false,
                             show_progress,
                             false,
@@ -741,7 +745,7 @@ fn watch_loop(
                     .exists()
                 {
                     exit_after_lockfile_removed(path, &build_state, show_progress);
-                    return Ok(());
+                    return Ok(0);
                 }
             }
             CompileType::None => {
@@ -760,6 +764,38 @@ fn watch_loop(
     }
 }
 
+/// The signals that stop a watcher. It exits with 128 plus the number of the
+/// signal, as `rescript watch --help` says (rewatch-ocaml's
+/// `Termination_signals`).
+fn stop_signals() -> Vec<i32> {
+    use signal_hook::consts::{SIGINT, SIGTERM};
+    #[cfg(unix)]
+    let signals = vec![SIGINT, SIGTERM, signal_hook::consts::SIGHUP];
+    #[cfg(not(unix))]
+    let signals = vec![SIGINT, SIGTERM];
+    signals
+}
+
+/// Register the stop signals: each sets the returned flag, which the watch
+/// loop polls, to its exit status, 128 plus its number (when signals arrive
+/// together, the last one's).
+fn register_stop_signals() -> Result<Arc<AtomicUsize>> {
+    let stop_status = Arc::new(AtomicUsize::new(0));
+    for signal in stop_signals() {
+        signal_hook::flag::register_usize(signal, Arc::clone(&stop_status), 128 + signal as usize)
+            .with_context(|| format!("Could not register a handler for signal {signal}"))?;
+    }
+    Ok(stop_status)
+}
+
+/// The exit status a stop signal requested, if one arrived.
+fn stop_requested(stop_status: &AtomicUsize) -> Option<i32> {
+    match stop_status.load(Ordering::SeqCst) {
+        0 => None,
+        status => Some(status as i32),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn start(
     filter: &Option<regex::Regex>,
@@ -771,19 +807,14 @@ pub fn start(
     clear_screen: bool,
     prod: bool,
     features: Option<Vec<String>>,
-) -> Result<()> {
+) -> Result<i32> {
     let (event_sender, event_receiver) = std::sync::mpsc::channel();
     let mut watcher =
         RecommendedWatcher::new(event_sender, Config::default()).expect("Could not create watcher");
 
     let path = Path::new(folder);
 
-    let ctrlc_pressed = Arc::new(AtomicBool::new(false));
-    let ctrlc_pressed_for_handler = Arc::clone(&ctrlc_pressed);
-    ctrlc::set_handler(move || {
-        ctrlc_pressed_for_handler.store(true, Ordering::SeqCst);
-    })
-    .expect("Error setting Ctrl-C handler");
+    let stop_status = register_stop_signals()?;
 
     // In-process builds write no typed artifacts: editor tooling asks the
     // watcher, which compiles them on demand.
@@ -800,7 +831,7 @@ pub fn start(
     let (build_state, current_watches, initial_compile_result): StartupBuildResult =
         build::with_build_lock(path, || {
             let mut build_state = build::initialize_build(
-                None,
+                false,
                 filter,
                 show_progress,
                 path,
@@ -818,7 +849,7 @@ pub fn start(
             let timing_total = Instant::now();
             let initial_compile_result = build::incremental_build_without_lock(
                 &mut build_state,
-                None,
+                false,
                 true,
                 show_progress,
                 false,
@@ -831,9 +862,9 @@ pub fn start(
             Ok::<StartupBuildResult, anyhow::Error>((build_state, current_watches, initial_compile_result))
         })?;
 
-    if ctrlc_pressed.load(Ordering::SeqCst) {
+    if let Some(status) = stop_requested(&stop_status) {
         cleanup_before_watch_exit(path, &build_state, show_progress, "\nExiting...");
-        return Ok(());
+        return Ok(status);
     }
 
     // The initial build has published the interfaces typed artifacts are
@@ -861,7 +892,7 @@ pub fn start(
         current_watches,
         initial_build_state: build_state,
         events: event_receiver,
-        ctrlc_pressed,
+        stop_status,
         path,
         show_progress,
         filter,
