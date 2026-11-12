@@ -390,6 +390,14 @@ impl Bir {
     }
     fn update_facts(&mut self, id: NodeId) -> bool {
         let mut changed = false;
+        // Only the lowering arena consumes this J-only fact. L rewrite arenas
+        // must not allocate or maintain an unused per-node J table.
+        if self.js_scope.is_some() {
+            let duplicable = j::facts::external_duplicable(self, id);
+            if self.j_duplicable.len() <= id.index() { self.j_duplicable.resize(id.index() + 1, false); }
+            changed = self.j_duplicable[id.index()] != duplicable;
+            self.j_duplicable[id.index()] = duplicable;
+        }
         for (var, fact) in self.binding_facts(id) {
             changed |= self.vars.fact[var.index()] != fact;
             self.vars.fact[var.index()] = fact;

@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
@@ -96,48 +96,46 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 729,
+      "units": 729,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 104,
+      "identical": 336,
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
-        "external": 304,
-        "let rec": 8,
-        "loop": 16,
-        "static catch": 32,
-        "try": 16
+        "assign": 16,
+        "let rec": 16,
+        "loop": 48,
+        "static catch": 40,
+        "try": 24
       }
     },
     "runtime": {
-      "identical": 75,
+      "identical": 92,
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
         "assign": 1,
-        "external": 22,
-        "let rec": 2,
-        "loop": 3,
+        "let rec": 3,
+        "loop": 7,
         "try": 10
       }
     },
     "tests/tests": {
-      "identical": 230,
+      "identical": 562,
       "shared_catch_only": 1,
       "units": 729,
       "unsupported": {
-        "assign": 9,
-        "external": 374,
-        "let rec": 62,
-        "loop": 19,
+        "assign": 20,
+        "let rec": 69,
+        "loop": 31,
         "shared Lambda subtree with binder": 1,
-        "static catch": 19,
-        "try": 15
+        "static catch": 22,
+        "try": 24
       }
     }
   }

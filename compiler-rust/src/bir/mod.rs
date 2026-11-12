@@ -46,6 +46,8 @@ pub struct Bir {
     exports: Vec<(VarId, Name)>,
     free_nodes: Vec<NodeId>,
     js_scope: Option<lower::scope::Scope>,
+    /// X:60 event-argument duplicability, maintained with construction facts.
+    j_duplicable: Vec<bool>,
     death_candidates: Vec<NodeId>,
     deaths_deferred: bool,
     func_owners: Vec<Option<NodeId>>,
