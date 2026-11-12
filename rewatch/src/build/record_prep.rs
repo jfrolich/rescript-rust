@@ -184,7 +184,21 @@ impl FreshRows {
 
     fn advance(&mut self, mut job: Waiting) {
         loop {
-            let units: AHashSet<Name> =
+            // Most imports are already complete. Filter them before building
+            // a set, so a ready module needs neither an allocation nor a full
+            // duplicate set of all its read units. Non-project units cannot
+            // block this build; memoize that fact as well.
+            let mut needs_completion = |name: &Name| {
+                if self.completed.contains(name) {
+                    false
+                } else if self.sources.contains_key(name.as_str()) {
+                    true
+                } else {
+                    self.completed.insert(*name);
+                    false
+                }
+            };
+            let missing: AHashSet<Name> =
                 match &job.stage {
                     ReadStage::Direct => {
                         job.input
@@ -195,18 +209,11 @@ impl FreshRows {
                             .chain(job.input.pending.iter().flat_map(|p| {
                                 p.resolved.keys().copied().chain(p.module_level.iter().copied())
                             }))
+                            .filter(&mut needs_completion)
                             .collect()
                     }
-                    ReadStage::Expanded(keys) => keys.keys().copied().collect(),
+                    ReadStage::Expanded(keys) => keys.keys().copied().filter(&mut needs_completion).collect(),
                 };
-            let missing: Vec<Name> = units
-                .into_iter()
-                .filter(|name| {
-                    name.as_str() != job.input.name
-                        && self.sources.contains_key(name.as_str())
-                        && !self.completed.contains(name)
-                })
-                .collect();
             if !missing.is_empty() {
                 job.remaining = missing.len();
                 for unit in missing {
