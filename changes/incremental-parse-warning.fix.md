@@ -1,1 +1,2 @@
 - Report parse warnings once when an incremental build parses sources in multiple rounds.
+- Keep parse warnings visible on later watch rebuilds after an incremental startup.
