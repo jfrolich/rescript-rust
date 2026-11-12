@@ -51,6 +51,7 @@ fn compare_with_options(mut arena: LamArena, root: Lam, resolver: Option<&crate:
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
             compiler.check_div_by_zero = checks;
+            compiler.awaited_units = crate::lambda::lam_compile_main::awaited_units(&arena, root);
             let compiled = compiler.bir_lower_oracle(&mut arena, root, cx.cont, target);
             use crate::lambda::lam_compile::OutputFinished;
             let expected_finished = match compiled.finished {

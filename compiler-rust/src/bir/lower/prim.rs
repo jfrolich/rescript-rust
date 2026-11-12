@@ -121,7 +121,8 @@ impl State {
                     return Ok(self.primitive_result(cx, statements, value));
                 }
                 self.module_paths[prim.source.index()] =
-                    nested || matches!(self.source.view(*arg), View::Global { .. });
+                    nested || matches!(self.source.view(*arg), View::Global { .. })
+                    || matches!(self.source.view(*arg), View::Var { var } if self.awaited_units[var.index()]);
             }
         }
         let value = match primitive {
@@ -716,6 +717,7 @@ impl State {
                     finished: Finished::True,
                 }));
             }
+            Primitive::Pimport(source) => self.compile_import(&source),
             Primitive::Pduprecord => self.duplicate_record(values[0]),
             Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
@@ -735,7 +737,6 @@ impl State {
             | Primitive::PjsObjectSet(_)
             | Primitive::PjsFnMethod
             | Primitive::Pjsx(_)
-            | Primitive::Pimport(_)
             => {
                 unreachable!("unsupported primitive rejected by dispatch")
             }

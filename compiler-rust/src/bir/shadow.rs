@@ -927,6 +927,7 @@ pub(crate) fn prepare_lower(
     (
         crate::js_ir::arena::JsArena,
         crate::lambda::lam_compile::Compiled,
+        Vec<crate::js_ir::ModuleId>,
     ),
     LowerFailure,
 > {
@@ -981,6 +982,7 @@ pub(crate) fn prepare_lower(
             expr,
             finished,
         },
+        lowered.dynamic_imports,
     ))
 }
 

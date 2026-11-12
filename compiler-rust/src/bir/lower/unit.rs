@@ -48,6 +48,7 @@ pub(super) fn lower(
                 node = body;
                 continue;
             };
+            state.record_awaited_unit(var, value);
             (Cx::declare(kind, var), value, Some(body))
         } else if let View::Seq { first, second } = view {
             state.source_steps += 1;

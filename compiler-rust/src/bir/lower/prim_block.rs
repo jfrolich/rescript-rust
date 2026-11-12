@@ -24,6 +24,12 @@ impl State {
                     let member = Some(self.arena.intern_text(&name));
                     return plain::node(&mut self.arena, View::JQualified { module, member }, 0);
                 }
+                View::Var { var } => {
+                    segments.reverse();
+                    let name = crate::lambda::flat_make_name(&segments).expect("nested make path");
+                    let object = self.pure_expression(View::Var { var }, 0);
+                    return self.static_member(object, &name);
+                }
                 _ => unreachable!("module path fact"),
             }
         }
