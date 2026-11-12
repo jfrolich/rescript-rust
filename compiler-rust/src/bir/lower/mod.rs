@@ -425,6 +425,8 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
+            View::Prim { primitive, args } if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::Psequand) && args.len() == 2 => return self.short_circuit(cx, true, args[0], args[1]).map(ProbePlan::Ready),
+            View::Prim { primitive, args } if matches!(self.arena.primitive(primitive).primitive, crate::lambda::lam_primitive::Primitive::Psequor) && args.len() == 2 => return self.short_circuit(cx, false, args[0], args[1]).map(ProbePlan::Ready),
             View::Prim { primitive, .. } => {
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {

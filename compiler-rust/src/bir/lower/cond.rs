@@ -309,6 +309,11 @@ impl State {
         let yes = self.save_branch(yes);
         let no = self.probe(cx, else_)?;
         let no = self.save_branch(no);
+        Ok(self.finish_return_conditional(cx, start, test, yes, no))
+    }
+
+    fn finish_return_conditional(&mut self, cx: Cx, start: Span, test: NodeId, yes: Branch, no: Branch) -> Probed {
+        let value_cx = Cx { cont: Cont::Value(Tail::No), ..cx };
         let finished = match (yes, no) {
             // Step 2: statement-free values need no return-block fallback.
             (Branch::Free(yes), Branch::Free(no)) => {
@@ -354,7 +359,7 @@ impl State {
         let span = self.statements.since(start);
         let statements = self.conditional_statements(span);
         for statement in norm::js5_unnest_block(&mut self.arena, statements) { self.statements.push(statement); }
-        Ok(Probed::Out(Out { stmts: self.statements.since(start), value: None, finished }))
+        Probed::Out(Out { stmts: self.statements.since(start), value: None, finished })
     }
 
     fn trivial_unit(&self, mut node: NodeId) -> bool {
@@ -386,6 +391,69 @@ impl State {
             result = norm::jm1_js_seq(&mut self.arena, value, result);
         }
         result
+    }
+
+    /// Section 3.7, C:2794 compile_short_circuit_expr, C:2859
+    /// compile_short_circuit_binding_block, C:5415 assignment, C:3075 return.
+    pub(super) fn short_circuit(&mut self, cx: Cx, and: bool, left: NodeId, right: NodeId) -> Result<Probed, Unsupported> {
+        if matches!(cx.cont, Cont::Effect(Tail::Return(Ret::Named { loop_: Some(_), .. }))
+            | Cont::Value(Tail::Return(Ret::Named { loop_: Some(_), .. }))) {
+            return Err(Unsupported("let rec"));
+        }
+        let start = self.statements.mark();
+        let value_cx = Cx { cont: Cont::Value(Tail::No), ..cx };
+        let left = self.probe(value_cx, left)?;
+        let left = self.realize(value_cx, left).value.unwrap();
+        if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
+            // Call the If rule with a constant branch; never manufacture L.
+            let right = self.probe(cx, right)?;
+            let right = self.save_branch(right);
+            let value = self.pure_expression(View::JBool, u16::from(!and));
+            let default = self.probe_leaf(value_cx, value);
+            let default = self.save_branch(default);
+            let (yes, no) = if and { (right, default) } else { (default, right) };
+            return Ok(self.finish_return_conditional(cx, start, left, yes, no));
+        }
+        let right = self.probe(value_cx, right)?;
+        let right = self.realize(value_cx, right);
+        let mut statements = self.conditional_statements(right.stmts);
+        if statements.is_empty() {
+            let right = right.value.unwrap();
+            let value = if and { norm::je5_js_and(&mut self.arena, left, right) }
+                else { norm::je6_js_or(&mut self.arena, left, right) };
+            let span = self.statements.since(start);
+            if !self.statements.has_statements(span) {
+                self.statements.remove_empty(span);
+                return Ok(self.probe_leaf(cx, value));
+            }
+            let out = self.leaf(cx, value);
+            return Ok(Probed::Out(Out { stmts: self.statements.since(start), ..out }));
+        }
+        let target = match cx.cont {
+            Cont::Assign(target) | Cont::Declare(_, target) => target,
+            Cont::Value(_) | Cont::Effect(_) => self.fresh_variable("tmp"),
+        };
+        if right.finished != Finished::True {
+            let assignment = crate::bir::j::assign(&mut self.arena, target, right.value.unwrap());
+            statements.push(assignment);
+        } else if let Some(value) = right.value { self.arena.release(value); }
+        let default = self.pure_expression(View::JBool, u16::from(!and));
+        let no = if matches!(cx.cont, Cont::Assign(_)) {
+            vec![crate::bir::j::assign(&mut self.arena, target, default)]
+        } else {
+            let kind = if matches!(cx.cont, Cont::Declare(..)) { LetKind::Variable } else { LetKind::Strict };
+            let declaration = crate::bir::j::declare(&mut self.arena, kind, target, default);
+            self.statements.push(declaration);
+            vec![]
+        };
+        let test = if and { left } else { norm::je8_not(&mut self.arena, left) };
+        let statement = norm::js3_simplify_if(&mut self.arena, test, statements, no);
+        self.statements.push(statement);
+        let value = match cx.cont {
+            Cont::Value(_) | Cont::Effect(_) => Some(self.pure_expression(View::Var { var: target }, 0)),
+            Cont::Declare(..) | Cont::Assign(_) => None,
+        };
+        Ok(Probed::Out(Out { stmts: self.statements.since(start), value, finished: Finished::False }))
     }
 
     /// R3, C:4873 compile_if_assignment_block and C:4895
@@ -493,6 +561,34 @@ mod tests {
     fn r4_step3_free_pure_else() { effect_case(3, 0); }
     #[test]
     fn r4_step4_nonterminal_branches() { effect_case(3, 3); }
+
+    fn short_circuit_case(context: u8) {
+        for and in [false, true] {
+            for statement in [false, true] {
+                let mut source = LamArena::new();
+                let left = source.var(Ident::new("left", 1, IdentFlags::NONE));
+                let mut right = source.var(Ident::new("right", 2, IdentFlags::NONE));
+                if statement {
+                    let value = source.const_(Constant::JsNull);
+                    right = source.let_(LetKind::Strict, Ident::new("binding", 3, IdentFlags::NONE), value, right);
+                }
+                let op = if and { crate::lambda::lam_primitive::Primitive::Psequand } else { crate::lambda::lam_primitive::Primitive::Psequor };
+                let root = source.prim_raw(op, &[left, right], crate::lambda::LamLoc::NONE);
+                compare_given(source, root, context);
+            }
+        }
+    }
+
+    #[test]
+    fn short_circuit_value() { short_circuit_case(0); }
+    #[test]
+    fn short_circuit_assignment() { short_circuit_case(1); }
+    #[test]
+    fn short_circuit_declaration() { short_circuit_case(2); }
+    #[test]
+    fn short_circuit_effect() { short_circuit_case(3); }
+    #[test]
+    fn short_circuit_return() { short_circuit_case(4); }
 
     #[test]
     fn r5_step1_effect_return_tails() {
