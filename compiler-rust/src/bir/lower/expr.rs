@@ -5,6 +5,7 @@ use crate::bir::{FuncId, VarSpan};
 /// Decoded structural operands saved across child visits; no source re-read.
 pub(super) enum Resume {
     Call(super::call::Call),
+    Prim(super::prim::Prim),
     Let {
         var: VarId,
         kind: LetKind,
@@ -30,12 +31,16 @@ impl State {
         resume: &Resume,
         into: &mut Vec<(Cx, NodeId)>,
     ) {
+        if let Resume::Prim(prim) = resume {
+            into.extend(prim.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
+            return;
+        }
         if let Resume::Call(call) = resume {
             into.extend(call.operands.iter().map(|&node| (Cx { cont: Cont::Value(Tail::No), ..cx }, node)));
             return;
         }
         match *resume {
-            Resume::Call(_) => unreachable!("call handled above"),
+            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let {
                 var,
                 kind,
@@ -80,7 +85,7 @@ impl State {
         index: usize,
         child: Probed,
     ) -> Probed {
-        if let Resume::Call(_) = resume {
+        if matches!(resume, Resume::Call(_) | Resume::Prim(_)) {
             let mut out = self.realize(cx, child);
             self.statements.reserve();
             out.stmts = self.statements.since(Span { start: out.stmts.start, len: 0 });
@@ -100,7 +105,7 @@ impl State {
             }
         }
         let force = match resume {
-            Resume::Call(_) => unreachable!("call handled above"),
+            Resume::Call(_) | Resume::Prim(_) => unreachable!("arguments handled above"),
             Resume::Let { value, .. } => value.is_some() && index == 0,
             Resume::Seq { .. } => index == 0,
             Resume::Fun { .. } => true,
@@ -120,6 +125,7 @@ impl State {
     ) -> Probed {
         match resume {
             Resume::Call(call) => self.finish_application(cx, call, children),
+            Resume::Prim(prim) => self.finish_primitive(cx, prim, children),
             Resume::Let { value, .. } => {
                 let first = value.map(|_| match children.next().expect("binding output") {
                     Probed::Out(out) => out,

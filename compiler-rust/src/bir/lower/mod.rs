@@ -4,6 +4,7 @@ mod args;
 mod call;
 mod expr;
 mod konst;
+mod prim;
 #[cfg(test)]
 mod oracle_tests;
 pub mod out;
@@ -424,7 +425,11 @@ impl ProbeRules for State {
                 return Ok(ProbePlan::Children(expr::Resume::Seq { first, second, continuation: cx.cont }));
             }
             View::LetRec { .. } => return Err(Unsupported("let rec")),
-            View::Prim { primitive, .. } => {
+            View::Prim { primitive, args } => {
+                if matches!(self.arena.primitive(primitive).primitive,
+                    crate::lambda::lam_primitive::Primitive::Pstringlength | crate::lambda::lam_primitive::Primitive::Parraylength) {
+                    return Ok(ProbePlan::Children(expr::Resume::Prim(prim::Prim { primitive, operands: args.to_vec() })));
+                }
                 use crate::lambda::lam_primitive::Primitive;
                 let reason = match &self.arena.primitive(primitive).primitive {
                     Primitive::Psequand | Primitive::Psequor => "short circuit",
