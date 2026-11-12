@@ -2229,7 +2229,7 @@ pub struct PmVarCompiled<'p> {
 /// Half-compiled pattern matching with associated info.
 ///
 /// OCaml's record also carries `matrix`, the matrix of `me`. It is a
-/// function of `me` ([`rebuild_matrix`]) and is read only when `me` becomes
+/// function of `me` (`rebuild_matrix`) and is read only when `me` becomes
 /// an entry of a default environment, that is when `me` is not the first
 /// group of its split. It is computed there and nowhere else: a split into
 /// one group, the common case, never compares its rows.
