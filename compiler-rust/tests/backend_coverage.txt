@@ -90,7 +90,13 @@
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
-        "lowering not implemented": 480
+        "apply": 24,
+        "external": 64,
+        "if": 48,
+        "loop": 8,
+        "prim": 312,
+        "record copy": 8,
+        "switch": 16
       }
     },
     "runtime": {
@@ -98,7 +104,15 @@
       "shared_catch_only": 0,
       "units": 113,
       "unsupported": {
-        "lowering not implemented": 113
+        "apply": 5,
+        "external": 4,
+        "if": 13,
+        "let rec": 1,
+        "loop": 1,
+        "prim": 78,
+        "short circuit": 1,
+        "switch": 1,
+        "try": 9
       }
     },
     "tests/tests": {
@@ -106,8 +120,23 @@
       "shared_catch_only": 1,
       "units": 711,
       "unsupported": {
-        "lowering not implemented": 710,
-        "shared Lambda subtree with binder": 1
+        "apply": 38,
+        "assign": 6,
+        "await": 7,
+        "external": 162,
+        "if": 42,
+        "import": 3,
+        "jsx": 2,
+        "let rec": 38,
+        "loop": 9,
+        "prim": 338,
+        "record copy": 2,
+        "shared Lambda subtree with binder": 1,
+        "short circuit": 4,
+        "static catch": 6,
+        "string switch": 7,
+        "switch": 42,
+        "try": 4
       }
     }
   }
