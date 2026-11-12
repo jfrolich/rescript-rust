@@ -5518,8 +5518,12 @@ impl<'a> LocCloner<'a> {
     }
 
     fn structure_item(&mut self, item: &mut StructureItem) {
+        let derived = super::derive::is_derived_item(item, self.arena);
         self.loc(&mut item.pstr_loc);
         self.structure_item_desc(&mut item.pstr_desc);
+        if derived {
+            super::derive::mark_generated_item(item, self.arena);
+        }
     }
 
     fn structure_item_desc(&mut self, desc: &mut StructureItemDesc) {

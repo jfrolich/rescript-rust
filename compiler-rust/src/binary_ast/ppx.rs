@@ -10369,14 +10369,7 @@ fn try_rewrite_structure_item(
             validate_external_attribute_errors(vd, arena, &mut Vec::new())?;
         }
         validate_nested_structure_externals(&expanded, arena)?;
-        let derived = derive::is_derived_item(&expanded, arena);
-        let rewritten = rewrite_structure_item_no_spice(&expanded, arena);
-        if derived {
-            for item in &rewritten {
-                derive::mark_generated_item(item, arena);
-            }
-        }
-        result.extend(rewritten);
+        result.extend(rewrite_structure_item_no_spice(&expanded, arena));
     }
     Ok(result)
 }
@@ -10392,6 +10385,20 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
 }
 
 fn rewrite_structure_item_no_spice(
+    item: &StructureItem,
+    arena: &mut ParseArena,
+) -> Vec<StructureItem> {
+    let derived = derive::is_derived_item(item, arena);
+    let rewritten = rewrite_structure_item_body(item, arena);
+    if derived {
+        for item in &rewritten {
+            derive::mark_generated_item(item, arena);
+        }
+    }
+    rewritten
+}
+
+fn rewrite_structure_item_body(
     item: &StructureItem,
     arena: &mut ParseArena,
 ) -> Vec<StructureItem> {
@@ -11552,6 +11559,22 @@ let e = () =>
         // Use the original tree: expanding twice would generate codecs twice.
         let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
         assert_eq!(rewritten.iter().map(|item| derive::is_derived_item(item, &arena))
+            .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
+    }
+
+    #[test]
+    fn nested_derived_value_groups_survive_frontend_rewriting() {
+        let (mut arena, source) = parse_structure(
+            "module M = { let before = 1\n@spice type a = {x: int}\n@spice type b = string\nlet after = 2 }\n",
+        );
+        let rewritten = rewrite_structure_with_warnings(&source, &mut arena, false).0.unwrap();
+        let StructureItemDesc::Pstr_module(module) = &rewritten[0].pstr_desc else {
+            panic!("expected module");
+        };
+        let ModuleExprDesc::Pmod_structure(items) = &arena.get_mod_expr(module.pmb_expr).pmod_desc else {
+            panic!("expected structure");
+        };
+        assert_eq!(items.iter().map(|item| derive::is_derived_item(item, &arena))
             .collect::<Vec<_>>(), vec![false, false, true, false, true, false]);
     }
 
