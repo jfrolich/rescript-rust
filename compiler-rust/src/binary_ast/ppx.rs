@@ -1344,6 +1344,18 @@ impl super::ast_iter::AstIter for UnusedAttributeSweep<'_> {
                     self.attributes(arena, expr.pexp_attributes.as_slice());
                 }
             }
+            ExpressionDesc::Pexp_match((scrutinee, cases)) => {
+                if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(arena, *cases) {
+                    // The old conditional expansion discarded the patterns and
+                    // visited branches in boolean order (bs_builtin_ppx.ml:138-167).
+                    self.attributes(arena, expr.pexp_attributes.as_slice());
+                    self.expr(arena, *scrutinee);
+                    self.expr(arena, yes);
+                    self.expr(arena, no);
+                } else {
+                    super::ast_iter::walk_expr(self, arena, idx);
+                }
+            }
             _ => super::ast_iter::walk_expr(self, arena, idx),
         }
     }
@@ -7324,26 +7336,6 @@ fn rewrite_expr(idx: ExprIdx, arena: &mut ParseArena) {
 
         ExpressionDesc::Pexp_match(inner) => {
             let (scrutinee, cases) = *inner;
-            // bs_builtin_ppx.ml (lines 138-167):
-            //   switch b { | true => t | false => f }
-            // becomes
-            //   if b { t } else { f }
-            if let Some((t_exp, f_exp)) = boolean_match_arms(arena, cases) {
-                let attrs = arena.get_expr(idx).pexp_attributes.clone();
-                rewrite_expr(scrutinee, arena);
-                rewrite_expr(t_exp, arena);
-                rewrite_expr(f_exp, arena);
-                let expanded = Expression {
-                    pexp_desc: ExpressionDesc::Pexp_ifthenelse(Box::new((
-                        scrutinee,
-                        t_exp,
-                        Some(f_exp),
-                    ))),
-                    pexp_loc: loc,
-                    pexp_attributes: rewrite_attributes(&attrs, arena).into(),
-                };
-                return expand(arena, idx, expanded);
-            }
             rewrite_expr(scrutinee, arena);
             rewrite_cases(cases, arena).map(|cases| ExpressionDesc::Pexp_match((scrutinee, cases)))
         }
@@ -7710,31 +7702,6 @@ fn rewrite_expr_list(list: ExprList, arena: &mut ParseArena) {
 /// in either order and without guards.
 ///
 /// Cost: constant.
-fn boolean_match_arms(arena: &ParseArena, cases: CaseList) -> Option<(ExprIdx, ExprIdx)> {
-    let [first, second] = arena.case_list(cases) else {
-        return None;
-    };
-    if first.pc_guard.is_some() || second.pc_guard.is_some() {
-        return None;
-    }
-    let is = |pat: PatIdx, name: &str| {
-        if let PatternDesc::Ppat_construct(lid, args) = &arena.get_pat(pat).ppat_desc
-            && args.txt.is_empty()
-        {
-            matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == name)
-        } else {
-            false
-        }
-    };
-    if is(first.pc_lhs, "true") && is(second.pc_lhs, "false") {
-        Some((first.pc_rhs, second.pc_rhs))
-    } else if is(first.pc_lhs, "false") && is(second.pc_lhs, "true") {
-        Some((second.pc_rhs, first.pc_rhs))
-    } else {
-        None
-    }
-}
-
 /// The rewrites of `let pattern = e; body` with one non-recursive binding
 /// (bs_builtin_ppx.ml lines 295-319): a supported `let?` is a match with an
 /// early-return case and a continuation case, and a record or dictionary
@@ -11475,8 +11442,8 @@ let e = () =>
         assert_eq!(arena.get_expr(root), &root_before);
         for (idx, before) in items.iter().zip(&before) {
             assert_eq!(arena.get_expr(*idx), before, "the node as parsed is kept");
-            if *idx == items[4] {
-                assert_eq!(arena.expanded(*idx), *idx, "integer stays as written");
+            if *idx == items[4] || *idx == items[6] {
+                assert_eq!(arena.expanded(*idx), *idx, "direct construct stays as written");
             } else {
                 assert_ne!(arena.expanded(*idx), *idx, "the rewrite is recorded");
             }
@@ -11500,7 +11467,7 @@ let e = () =>
             ExpressionDesc::Pexp_constant(Constant::Integer(_, Some('l')))
         ));
         assert!(matches!(expanded(5), ExpressionDesc::Pexp_apply(_)));
-        assert!(matches!(expanded(6), ExpressionDesc::Pexp_ifthenelse(_)));
+        assert!(matches!(expanded(6), ExpressionDesc::Pexp_match(_)));
         assert!(matches!(expanded(7), ExpressionDesc::Pexp_fun(_)));
     }
 
@@ -11534,6 +11501,15 @@ let e = () =>
         assert_eq!(arena.expanded(root), root);
         assert_eq!(arena.expanded(items[1]), items[1]);
         assert_eq!(arena.get_expr(items[1]), &before);
+    }
+
+    #[test]
+    fn ten_thousand_boolean_matches_append_nothing() {
+        let mut source = String::from("let x = [");
+        source.push_str(&"switch b { | false => 0 | true => 1 }, ".repeat(10_000));
+        source.push_str("]\n");
+        // One array, then each match and its two constant patterns.
+        assert_eq!(mapper_cost(&source), (30_001, 0));
     }
 
     #[test]

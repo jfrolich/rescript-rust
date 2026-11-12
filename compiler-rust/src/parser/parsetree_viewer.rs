@@ -1197,3 +1197,31 @@ mod tests {
         assert!(operator_precedence("&&") > operator_precedence("||"));
     }
 }
+
+/// Recognize the two unguarded, nullary boolean cases in boolean order.
+/// Cost: at most four pattern/identifier reads; no loop or allocation.
+pub(crate) fn boolean_match_arms(arena: &ParseArena, cases: crate::parse_arena::CaseList) -> Option<(ExprIdx, ExprIdx)> {
+    let [first, second] = arena.case_list(cases) else {
+        return None;
+    };
+    if first.pc_guard.is_some() || second.pc_guard.is_some() {
+        return None;
+    }
+    let is = |pat: crate::parse_arena::PatIdx, name: &str| {
+        if let PatternDesc::Ppat_construct(lid, args) = &arena.get_pat(pat).ppat_desc
+            && args.txt.is_empty()
+        {
+            matches!(arena.get_longident(lid.txt), Longident::Lident(s) if arena.get_string(*s) == name)
+        } else {
+            false
+        }
+    };
+    if is(first.pc_lhs, "true") && is(second.pc_lhs, "false") {
+        Some((first.pc_rhs, second.pc_rhs))
+    } else if is(first.pc_lhs, "false") && is(second.pc_lhs, "true") {
+        Some((second.pc_rhs, first.pc_rhs))
+    } else {
+        None
+    }
+}
+

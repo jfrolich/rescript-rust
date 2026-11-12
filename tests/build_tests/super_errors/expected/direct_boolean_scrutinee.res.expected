@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/direct_boolean_scrutinee.res[0m:[2m1:20[0m
+
+  [1;31m1[0m [2m│[0m let value = switch [1;31m0[0m { | true => 1 | false => 0 }
+  2 [2m│[0m 
+
+  This has type: [1;31mint[0m
+  But [1;33mif[0m conditions must always be of type: [1;33mbool[0m
+
+  To fix this, change the highlighted code so it evaluates to a [1;33mbool[0m.

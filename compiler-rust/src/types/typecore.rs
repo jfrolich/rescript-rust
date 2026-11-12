@@ -8497,80 +8497,8 @@ fn type_expect_with_recarg_unscoped<'a>(
                 ),
                 _ => unreachable!(),
             };
-            let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
-            // If expression
-            let bool_ty = env.type_bool(ctx);
-
-            // Condition should be bool
-            let cond = tctx.arena.get_expanded_expr(*cond_idx);
-            let typed_cond = type_expect(
-                tctx,
-                env,
-                cond,
-                bool_ty,
-                Some(ClashSite::IfCondition),
-            )?;
-            let then_branch = tctx.arena.get_expanded_expr(*then_idx);
-            let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
-
-            match else_branch {
-                Some(else_branch) => {
-                    // OCaml keeps sharing by unifying else with then.exp_type.
-                    let typed_then =
-                        type_expect(tctx, env, then_branch, expected_ty, return_context)?;
-                    let typed_else =
-                        type_expect(tctx, env, else_branch, expected_ty, return_context)?;
-                    unify_expression_types(
-                        tctx,
-                        loc,
-                        typed_else.exp_type,
-                        typed_then.exp_type,
-                        return_context,
-                    )?;
-                    let then_exp_type = typed_then.exp_type;
-
-                    Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                Some(tctx.push_expr(typed_else)),
-                            ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
-                        );
-                        tctx.typed
-                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-                    })
-                }
-                None => {
-                    // Match OCaml Pexp_ifthenelse without else:
-                    // `type_expect ... sifso Predef.type_unit`
-                    // The then-branch must be typed against the generic
-                    // predef unit scheme itself, not a fresh unit instance,
-                    // so inner applications/matches still instance it lazily.
-                    let typed_then =
-                        type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
-                    let then_exp_type = typed_then.exp_type;
-                    rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
-
-                    Ok({
-                        let typed_node = Expression::new(
-                            ExpressionDesc::Texp_ifthenelse(
-                                tctx.push_expr(typed_cond),
-                                tctx.push_expr(typed_then),
-                                None,
-                            ),
-                            loc,
-                            then_exp_type,
-                            exp_env_ref,
-                        );
-                        tctx.typed
-                            .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
-                    })
-                }
-            }
+            type_conditional(tctx, env, expr, expected_ty, context, exp_env_ref,
+                cond_idx, then_idx, else_idx, return_context)
         }
 
         ED::Pexp_while(cond_idx, body_idx) => {
@@ -8880,6 +8808,10 @@ fn type_expect_with_recarg_unscoped<'a>(
 
         ED::Pexp_match(inner) => {
             let (ref scrutinee_idx, ref cases) = *inner;
+            if let Some((yes, no)) = crate::parser::parsetree_viewer::boolean_match_arms(tctx.arena, *cases) {
+                return type_conditional(tctx, env, expr, expected_ty, context, exp_env_ref,
+                    *scrutinee_idx, yes, Some(no), Some(ClashSite::IfReturn));
+            }
             let scrutinee = tctx.arena.get_expanded_expr(*scrutinee_idx);
 
             // Normal match expression
@@ -11562,6 +11494,99 @@ fn type_match_cases_batch_non_gadt<'a>(
     }
 
     batch_result
+}
+
+/// Type a conditional, including the two-case boolean match rule.
+/// Cost: one condition and at most two branch checks, then one typed node;
+/// no parsed node, list, lookup table or traversal is allocated here.
+fn type_conditional(
+    tctx: &mut TypeCheckContext<'_>,
+    env: &Env,
+    expr: &ParsedExpression,
+    expected_ty: TypeExprRef,
+    context: Option<ClashSite>,
+    exp_env_ref: EnvRef,
+    cond_idx: crate::parse_arena::ExprIdx,
+    then_idx: crate::parse_arena::ExprIdx,
+    else_idx: Option<crate::parse_arena::ExprIdx>,
+    return_context: Option<ClashSite>,
+) -> TypeCoreResult<Expression> {
+    let ctx = tctx.type_ctx;
+    let loc = expr.pexp_loc;
+    let (cond_idx, then_idx, else_idx) = (&cond_idx, &then_idx, &else_idx);
+    // If expression
+    let bool_ty = env.type_bool(ctx);
+
+    // Condition should be bool
+    let cond = tctx.arena.get_expanded_expr(*cond_idx);
+    let typed_cond = type_expect(
+        tctx,
+        env,
+        cond,
+        bool_ty,
+        Some(ClashSite::IfCondition),
+    )?;
+    let then_branch = tctx.arena.get_expanded_expr(*then_idx);
+    let else_branch = else_idx.map(|idx| tctx.arena.get_expanded_expr(idx));
+
+    match else_branch {
+        Some(else_branch) => {
+            // OCaml keeps sharing by unifying else with then.exp_type.
+            let typed_then =
+                type_expect(tctx, env, then_branch, expected_ty, return_context)?;
+            let typed_else =
+                type_expect(tctx, env, else_branch, expected_ty, return_context)?;
+            unify_expression_types(
+                tctx,
+                loc,
+                typed_else.exp_type,
+                typed_then.exp_type,
+                return_context,
+            )?;
+            let then_exp_type = typed_then.exp_type;
+
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_ifthenelse(
+                        tctx.push_expr(typed_cond),
+                        tctx.push_expr(typed_then),
+                        Some(tctx.push_expr(typed_else)),
+                    ),
+                    loc,
+                    then_exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
+        }
+        None => {
+            // Match OCaml Pexp_ifthenelse without else:
+            // `type_expect ... sifso Predef.type_unit`
+            // The then-branch must be typed against the generic
+            // predef unit scheme itself, not a fresh unit instance,
+            // so inner applications/matches still instance it lazily.
+            let typed_then =
+                type_expect(tctx, env, then_branch, ctx.predef_unit(), return_context)?;
+            let then_exp_type = typed_then.exp_type;
+            rue_unify(tctx, loc, then_exp_type, expected_ty, context)?;
+
+            Ok({
+                let typed_node = Expression::new(
+                    ExpressionDesc::Texp_ifthenelse(
+                        tctx.push_expr(typed_cond),
+                        tctx.push_expr(typed_then),
+                        None,
+                    ),
+                    loc,
+                    then_exp_type,
+                    exp_env_ref,
+                );
+                tctx.typed
+                    .with_exp_attributes(typed_node, expr.pexp_attributes.clone())
+            })
+        }
+    }
 }
 
 /// Type check match expression.
