@@ -1,9 +1,10 @@
 # A prebuilt snapshot of the runtime and Belt: design and staged plan
 
-Status: S1 implemented; S2/S3 implementation and local evidence are recorded
-below, with final CI validation pending. Section A is historical, not a
-statement of the current layout. Snapshot commands and watch integration
-remain future stages. Sections F.1–F.3 record implementation and evidence.
+Status: S1–S4 implemented; S4 CI and local freshness/equivalence checks pass.
+Cargo detects new package sources, but cannot exclude `lib` descendants when
+watching a package directory (see the S4 notes). Section A is historical, not
+a statement of the current layout. Watch integration remains a future stage.
+Sections F.1–F.3 and the S4 notes record implementation and evidence.
 
 ## 0. Summary
 
@@ -253,6 +254,11 @@ per package:
     js offset, js length         u32, u32  per module format (0, 0 for none)
     slot offset, slot count      u32, u32  per module format (B.3)
 blobs        names, cores, JavaScript texts, slot lists
+source manifest (S4, cold; normal builds never read it):
+  per source, sorted within runtime then Belt:
+    package name, source filename   length-prefixed strings
+    source contents digest          32 bytes (BLAKE3)
+  manifest byte length              u32, at end of file
 ```
 
 All integers are little endian and all offsets are from the start of the
@@ -380,7 +386,7 @@ error; CI uses it (C.3).
 
 | Where | Command | What happens |
 |---|---|---|
-| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script lists the package directories, not single files, in `rerun-if-changed` (the `lib` output folders excluded by listing sources and the directory itself), which closes D5 |
+| Building the executable | `cargo build --manifest-path rewatch/Cargo.toml` (and `make rewatch`, `make rewatch-pgo`) | `rewatch/cli/build.rs` calls `snapshot::produce` for `packages/@rescript/runtime` and `packages/@rescript/belt` and embeds the result, as it embeds the runtime today. The build script lists package roots, Belt `src`, configurations and existing sources in `rerun-if-changed`, closing D5. Cargo recursively watches directories, so `lib` cannot be excluded this way (see S4 notes) |
 | Inspecting or checking | `rescript snapshot --write <file>` and `rescript snapshot --check` (hidden commands, like the existing `bsc` test command) | `--write` produces the snapshot from the packages on disk to a file. `--check` produces it again and compares it with the embedded one, byte for byte |
 | `make lib` | unchanged commands, one added step | after building the two packages, `rescript snapshot --check` |
 | Release pipeline | unchanged | the executable in each platform package was built from the tagged sources; `--check` runs against the packages that are about to be published |
