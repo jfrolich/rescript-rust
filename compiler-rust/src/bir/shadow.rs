@@ -679,7 +679,7 @@ pub(crate) fn run_alias(
             };
         engine.jsx_preserve = jsx_preserve;
         engine.host = Some(&mut host);
-        let _ = &mut engine;
+        engine.run(&super::l::alias::ALIAS, root_node);
         (engine.stats, facts)
     };
     if let Some(reason) = stats.unsupported {
@@ -750,9 +750,13 @@ pub fn check_alias(
         external_arity,
     );
     let table = meta.ident_tbl.clone();
-    // The round itself is compared from the commit that runs it; until
-    // then the stage compares the facts, and the tree at the cut.
-    let expected = cut;
+    let expected = crate::lambda::lam_pass_remove_alias::simplify_alias(
+        &mut legacy,
+        &mut meta,
+        cut,
+        jsx_preserve,
+        external_inline,
+    );
 
     // The Bir side: the rounds before the cut, with a collection for
     // arities where the legacy pipeline has one.
