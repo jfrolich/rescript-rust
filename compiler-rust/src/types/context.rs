@@ -4219,6 +4219,9 @@ impl TypeContext {
     /// the binder gets a store stamp so it can never be `Ident::same` as an
     /// identifier of another compilation.
     fn store_binder(&self, id: &Ident) -> Ident {
+        if self.compiler_counters_enabled {
+            crate::perf_counters::store_views::record_binder();
+        }
         let local = self.id_gen.next_stamp();
         let stamp = super::thread_store::next_store_stamp();
         let mut effects = self.store_build_effects.borrow_mut();
@@ -4709,6 +4712,12 @@ impl TypeContext {
             }
             poisoned = true;
         }
+        if self.compiler_counters_enabled {
+            crate::perf_counters::store_views::record_piece(
+                poisoned,
+                effects.is_empty() && guards.is_empty(),
+            );
+        }
         if poisoned {
             if depth > 0 {
                 // The enclosing build may hold this result.
@@ -4768,6 +4777,23 @@ impl TypeContext {
     fn replay_store_piece(&self, piece: &Rc<StorePiece>) {
         if !self.touched_store_pieces.borrow_mut().insert(piece.id) {
             return;
+        }
+        if self.compiler_counters_enabled {
+            use crate::perf_counters::store_views as counters;
+            counters::record_piece_replay();
+            for effect in &piece.effects {
+                match effect {
+                    StoreEffect::Stamps(stamps) => counters::record_stamps_replayed(stamps.len()),
+                    StoreEffect::Piece(_) => {}
+                    StoreEffect::RegisterComponents(..) => counters::record_effect_replayed(0),
+                    StoreEffect::PreparePers(_) => counters::record_effect_replayed(1),
+                    StoreEffect::TriggerRename(_) => counters::record_effect_replayed(2),
+                    StoreEffect::RegisterAliasSource(..) => counters::record_effect_replayed(3),
+                    StoreEffect::RegisterQualifiedModuleDecl(..) => {
+                        counters::record_effect_replayed(4)
+                    }
+                }
+            }
         }
         for (index, effect) in piece.effects.iter().enumerate() {
             match effect {

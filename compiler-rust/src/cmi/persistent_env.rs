@@ -2990,6 +2990,9 @@ impl PersistentEnv {
                     && let Some((components, piece)) =
                         ctx.thread_store().shared_components(&components_key)
                 {
+                    if ctx.compiler_counters_enabled() {
+                        crate::perf_counters::store_views::record_view_hit();
+                    }
                     ctx.touch_store_piece(&piece);
                     ctx.register_qualified_module_components_shared(
                         components_key.clone(),
@@ -3018,6 +3021,12 @@ impl PersistentEnv {
                     (build(), None)
                 };
                 let components = Rc::new(components);
+                if shareable && ctx.compiler_counters_enabled() {
+                    crate::perf_counters::store_views::record_view_build(
+                        module_path.name(),
+                        piece.is_some(),
+                    );
+                }
                 if shareable {
                     match piece {
                         Some(piece) => ctx.thread_store().publish_shared_components(
