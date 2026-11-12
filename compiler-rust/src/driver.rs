@@ -8467,6 +8467,10 @@ fn run_file_level_flags(
                 "-bs-no-check-div-by-zero" => overrides.no_check_div_by_zero = true,
                 "-bs-no-version-header" => overrides.no_version_header = true,
                 "-bs-no-builtin-ppx" => overrides.no_builtin_ppx = true,
+                // These print to stdout and raise `Request_exit`, which the
+                // handler's `with _` reports as invalid flags
+                // (rescript_compiler_driver.ml:209-211, 524-528, 556).
+                "-v" | "-version" | "-warn-help" => return false,
                 "-nopervasives" => overrides.nopervasives = true,
                 "-no-alias-deps" => overrides.transparent_modules = true,
                 "-keep-locs" => overrides.keep_locs = Some(true),

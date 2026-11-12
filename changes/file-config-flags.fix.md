@@ -3,3 +3,4 @@
 - Apply `-bs-jsx` and `-bs-jsx-module` from an interface's `@@config` to the JSX rewrite of that interface.
 - Honour `-bs-no-builtin-ppx` in a file's `@@config`: the builtin PPX no longer rewrites that file.
 - Honour `-open`, `-nopervasives`, `-no-alias-deps`, `-keep-locs` and `-no-keep-locs` in a file's `@@config`, in implementations and interfaces.
+- Report `-v`, `-version` and `-warn-help` in `@@config` as invalid flags for bsc, like `bsc`.
