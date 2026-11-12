@@ -90,6 +90,31 @@ class CoverageGateTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "fallback count grew"):
             check(actual, self.baseline)
 
+    def test_added_unit_may_fall_back_where_fallbacks_exist(self):
+        actual = copy.deepcopy(self.baseline)
+        actual["lambda-bridge"]["runtime"] = {"units": 11, "identical": 8,
+                                              "unsupported": {"reason": 3}}
+        check(actual, self.baseline)
+        actual["lambda-bridge"]["runtime"] = {"units": 11, "identical": 7,
+                                              "unsupported": {"reason": 4}}
+        with self.assertRaisesRegex(RuntimeError, "fallback count grew"):
+            check(actual, self.baseline)
+        actual["lambda-bridge"]["runtime"] = {"units": 12, "identical": 7,
+                                              "unsupported": {"reason": 4, "other": 1}}
+        with self.assertRaisesRegex(RuntimeError, "supported units fell"):
+            check(actual, self.baseline)
+
+    def test_fully_supported_corpus_keeps_no_fallback(self):
+        full = {stage: {"runtime": {"units": 10, "identical": 10, "unsupported": {}}}
+                for stage in coverage.STAGES}
+        actual = copy.deepcopy(full)
+        actual["lambda-bridge"]["runtime"] = {"units": 11, "identical": 11, "unsupported": {}}
+        check(actual, full)
+        actual["lambda-bridge"]["runtime"] = {"units": 11, "identical": 10,
+                                              "unsupported": {"reason": 1}}
+        with self.assertRaisesRegex(RuntimeError, "gained a fallback"):
+            check(actual, full)
+
     def test_new_reason_fails(self):
         actual = copy.deepcopy(self.baseline)
         actual["lambda-bridge"]["runtime"]["unsupported"] = {"different": 2}
