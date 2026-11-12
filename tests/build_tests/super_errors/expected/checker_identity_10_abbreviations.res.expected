@@ -1,0 +1,11 @@
+
+  [1;31mWe've found a bug for you![0m
+  [36m/.../fixtures/checker_identity_10_abbreviations.res[0m:[2m11:17-24[0m
+
+   9 [2m│[0m let h = v => { takesB(v); takesA(v); v }
+  10 [2m│[0m let observed = (g, h)
+  [1;31m11[0m [2m│[0m let _: string = [1;31mobserved[0m
+  12 [2m│[0m 
+
+  This has type: [1;31m(a => a, b => b)[0m
+  But it's expected to have type: [1;33mstring[0m

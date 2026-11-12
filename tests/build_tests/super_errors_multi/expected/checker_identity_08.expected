@@ -1,0 +1,15 @@
+We've found a bug for you!
+  /.../fixtures/checker_identity_08/B.res:5:17-24
+
+  3 │ let k = q => { ignore(q == A.two); let (a, _) = q; A.takesMyInt(a); q }
+  4 │ let observed = (g, h, k)
+  5 │ let _: string = observed
+  6 │ 
+
+  This has type:
+    (
+      A.myint => A.myint,
+      ((A.myint, A.myint)) => (A.myint, A.myint),
+      ((A.myint, int)) => (A.myint, int),
+    )
+  But it's expected to have type: string
