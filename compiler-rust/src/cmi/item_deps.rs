@@ -21,9 +21,7 @@ use std::sync::Arc;
 use smallvec::SmallVec;
 
 use super::persistent_env::InMemoryModuleInfo;
-use super::portable_types::{
-    PortablePersStruct, PortableRowField, PortableTypeDesc, PortableTypeEntry,
-};
+use super::portable_types::PortablePersStruct;
 use crate::name::Name;
 use crate::types::decl::{
     ConstructorArguments, LabelDeclaration, ModuleType, Signature, SignatureItem, TypeInlinedType,
@@ -261,20 +259,21 @@ pub fn item_digests(
 }
 
 /// Collects the references of a unit's declarations.
-struct RefWalker<'a> {
+struct RefWalker<'a, G: super::graph_hash::TypeGraph> {
     unit: Name,
     /// The unit's top-level item keys: a local identifier that names none of
     /// them is predefined (`int`, `option`) or bound inside the item being
     /// walked (a functor parameter, a sibling in a submodule).
     own_keys: &'a ahash::AHashSet<(Kind, Name)>,
-    entries: &'a [PortableTypeEntry],
+    graph: &'a G,
+    pending: Vec<G::Ref>,
     /// `seen[idx] == epoch` when entry `idx` was walked for the current item.
     seen: Vec<u32>,
     epoch: u32,
     out: Vec<UnitRead>,
 }
 
-impl RefWalker<'_> {
+impl<G: super::graph_hash::TypeGraph> RefWalker<'_, G> {
     fn path(&mut self, path: &Path, kind: Kind) {
         let start = self.out.len();
         read_of_path(path, kind, Some(self.unit), &mut self.out);
@@ -300,66 +299,44 @@ impl RefWalker<'_> {
         }
     }
 
-    fn ty(&mut self, idx: usize) {
-        if idx >= self.entries.len() || self.seen[idx] == self.epoch {
-            return;
-        }
-        self.seen[idx] = self.epoch;
-        match &self.entries[idx].desc {
-            PortableTypeDesc::Tvar(_) | PortableTypeDesc::Tunivar(_) | PortableTypeDesc::Tnil => {}
-            PortableTypeDesc::Tarrow { args, ret } => {
-                for (_, arg) in args {
-                    self.ty(*arg);
+    fn ty(&mut self, root: crate::types::type_expr::TypeExprRef) {
+        use super::graph_hash::{Node, RowFieldView};
+        let graph = self.graph;
+        self.pending.push(graph.root(root));
+        while let Some(r) = self.pending.pop() {
+            let Some(slot) = graph.slot(r) else { continue; };
+            if self.seen[slot] == self.epoch { continue; }
+            self.seen[slot] = self.epoch;
+            match graph.node(slot) {
+                Node::Tvar(_) | Node::Tunivar(_) | Node::Tnil => {}
+                Node::Tarrow { args, ret } => {
+                    self.pending.extend(args.iter().map(|a| graph.arg(a).2));
+                    self.pending.push(ret);
                 }
-                self.ty(*ret);
-            }
-            PortableTypeDesc::Ttuple(elems) => {
-                for elem in elems {
-                    self.ty(*elem);
+                Node::Ttuple(xs) => self.pending.extend_from_slice(xs),
+                Node::Tconstr { path, args } => {
+                    self.path(&path, Kind::Type); self.pending.extend_from_slice(args);
                 }
-            }
-            PortableTypeDesc::Tconstr { path, args } => {
-                self.path(path, Kind::Type);
-                for arg in args {
-                    self.ty(*arg);
-                }
-            }
-            PortableTypeDesc::Tobject { fields } => self.ty(*fields),
-            PortableTypeDesc::Tfield { typ, rest, .. } => {
-                self.ty(*typ);
-                self.ty(*rest);
-            }
-            PortableTypeDesc::Tlink(idx) | PortableTypeDesc::Tsubst(idx) => self.ty(*idx),
-            PortableTypeDesc::Tvariant(row) => {
-                for (_, field) in &row.row_fields {
-                    match field {
-                        PortableRowField::Rpresent(Some(idx)) => self.ty(*idx),
-                        PortableRowField::Reither { types, .. } => {
-                            for idx in types {
-                                self.ty(*idx);
-                            }
+                Node::Tobject { fields } => self.pending.push(fields),
+                Node::Tfield { typ, rest, .. } => { self.pending.push(typ); self.pending.push(rest); }
+                Node::Tlink(r) | Node::Tsubst(r) => self.pending.push(r),
+                Node::Tvariant(row) => {
+                    let row = graph.row(row);
+                    for (_, field) in row.fields {
+                        match graph.row_field(field) {
+                            RowFieldView::Rpresent(Some(r)) => self.pending.push(r),
+                            RowFieldView::Reither { types, .. } => self.pending.extend_from_slice(types),
+                            RowFieldView::Rpresent(None) | RowFieldView::Rabsent => {}
                         }
-                        PortableRowField::Rpresent(None) | PortableRowField::Rabsent => {}
+                    }
+                    self.pending.push(row.more);
+                    if let Some((path, args)) = row.name {
+                        self.path(&path, Kind::Type); self.pending.extend_from_slice(args);
                     }
                 }
-                self.ty(row.row_more);
-                if let Some((path, args)) = &row.row_name {
-                    self.path(path, Kind::Type);
-                    for arg in args {
-                        self.ty(*arg);
-                    }
-                }
-            }
-            PortableTypeDesc::Tpoly { body, vars } => {
-                self.ty(*body);
-                for var in vars {
-                    self.ty(*var);
-                }
-            }
-            PortableTypeDesc::Tpackage { path, args, .. } => {
-                self.path(path, Kind::Modtype);
-                for arg in args {
-                    self.ty(*arg);
+                Node::Tpoly { body, vars } => { self.pending.push(body); self.pending.extend_from_slice(vars); }
+                Node::Tpackage { path, args, .. } => {
+                    self.path(&path, Kind::Modtype); self.pending.extend_from_slice(args);
                 }
             }
         }
@@ -367,7 +344,7 @@ impl RefWalker<'_> {
 
     fn labels(&mut self, labels: &[LabelDeclaration]) {
         for label in labels {
-            self.ty(label.ld_type.index());
+            self.ty(label.ld_type);
         }
     }
 
@@ -375,7 +352,7 @@ impl RefWalker<'_> {
         match args {
             ConstructorArguments::CstrTuple(types) => {
                 for t in types {
-                    self.ty(t.index());
+                    self.ty(*t);
                 }
             }
             ConstructorArguments::CstrRecord(labels) => self.labels(labels),
@@ -407,17 +384,17 @@ impl RefWalker<'_> {
     fn item(&mut self, item: &SignatureItem) {
         match item {
             SignatureItem::SigValue(_, vd) => {
-                self.ty(vd.val_type.index());
+                self.ty(vd.val_type);
                 if let Some(path) = &vd.val_path {
                     self.path(path, Kind::Value);
                 }
             }
             SignatureItem::SigType(_, td, _) => {
                 for param in &td.type_params {
-                    self.ty(param.index());
+                    self.ty(*param);
                 }
                 if let Some(manifest) = td.type_manifest {
-                    self.ty(manifest.index());
+                    self.ty(manifest);
                 }
                 match &td.type_kind {
                     TypeKind::TypeAbstract | TypeKind::TypeOpen => {}
@@ -426,7 +403,7 @@ impl RefWalker<'_> {
                         for ctor in ctors {
                             self.cstr_args(&ctor.cd_args);
                             if let Some(res) = ctor.cd_res {
-                                self.ty(res.index());
+                                self.ty(res);
                             }
                         }
                     }
@@ -440,11 +417,11 @@ impl RefWalker<'_> {
             SignatureItem::SigTypext(_, ext, _) => {
                 self.path(&ext.ext_type_path, Kind::Type);
                 for param in &ext.ext_type_params {
-                    self.ty(param.index());
+                    self.ty(*param);
                 }
                 self.cstr_args(&ext.ext_args);
                 if let Some(ret) = ext.ext_ret_type {
-                    self.ty(ret.index());
+                    self.ty(ret);
                 }
             }
             SignatureItem::SigModule(_, md, _) => self.module_type(&md.md_type),
@@ -483,6 +460,18 @@ pub struct SignatureSummary {
 }
 
 impl SignatureSummary {
+    pub(crate) fn from_graph<G: super::graph_hash::TypeGraph>(
+        unit: &str, graph: &G, sig: &Signature,
+        hashes: Option<&[(Kind, Name, u64)]>,
+    ) -> Self {
+        crate::perf_counters::assert_signature_released();
+        let unit = Name::new(unit);
+        Self {
+            unit, item_hashes: hashes.map_or_else(|| item_declaration_hashes(graph, sig), |h| h.to_vec()),
+            refs: Arc::new(signature_refs_graph(unit, graph, sig)),
+        }
+    }
+
     /// The summary of `sig`, the published signature of `unit`.
     pub fn of(unit: &str, sig: &super::portable_types::PortableSignature) -> Self {
         Self::with_item_hashes(unit, sig, None)
@@ -539,20 +528,25 @@ fn sort_refs(refs: &mut Vec<UnitRead>) {
 /// The references of the declaration of every item of `unit`'s signature,
 /// without what inlinable bodies refer to.
 pub fn signature_refs(unit: Name, ps: &super::portable_types::PortableSignature) -> UnitRefs {
+    signature_refs_graph(unit, &super::portable_types::HashGraph::of(&ps.type_graph), &ps.ps_sig)
+}
+
+fn signature_refs_graph<G: super::graph_hash::TypeGraph>(unit: Name, graph: &G, sig: &Signature) -> UnitRefs {
     let own_keys: ahash::AHashSet<(Kind, Name)> =
-        ps.ps_sig.iter().filter_map(sig_item_kind_name).collect();
+        sig.iter().filter_map(sig_item_kind_name).collect();
     let mut refs: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
     let mut aliases: ahash::AHashMap<(Kind, Name), Vec<UnitRead>> = ahash::AHashMap::new();
     // One `seen` buffer for all items; each item's walk uses a fresh epoch.
     let mut walker = RefWalker {
         unit,
         own_keys: &own_keys,
-        entries: &ps.type_graph.entries,
-        seen: vec![0; ps.type_graph.entries.len()],
+        graph,
+        pending: Vec::new(),
+        seen: vec![0; graph.slots()],
         epoch: 0,
         out: Vec::new(),
     };
-    for item in &ps.ps_sig {
+    for item in sig {
         let Some(key) = sig_item_kind_name(item) else {
             continue;
         };

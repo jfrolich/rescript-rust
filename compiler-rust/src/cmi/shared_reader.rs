@@ -36,22 +36,39 @@ use crate::types::type_expr::{
 use crate::types::variant_runtime::{ShapeAllocation, ShapeImport};
 use crate::types::{VariantLayout, VariantLayoutRef};
 
+/// Frozen ownership for storage. Retains its graph and name table, not the
+/// pool's registry (which itself retains the publication Arc).
+#[derive(Debug)]
+pub(crate) struct PublishedGraph {
+    pub(crate) graph: std::sync::Arc<SharedGraph>,
+    pub(crate) signature: std::sync::Arc<Signature>,
+    pub(crate) names: std::sync::Arc<std::sync::RwLock<AHashMap<u32, String>>>,
+}
+
+impl PublishedGraph {
+    pub(crate) fn reader(&self) -> FrozenGraph<'_> {
+        FrozenGraph { graph: &self.graph, names: &self.names }
+    }
+    pub(crate) fn portable(&self) -> PortableSignature {
+        portable_signature(&self.reader(), &self.signature)
+    }
+}
+
 /// One published graph of the shared pool, read in place.
 pub(crate) struct FrozenGraph<'a> {
     graph: &'a SharedGraph,
-    pool: &'a SharedTypePool,
+    names: &'a std::sync::RwLock<AHashMap<u32, String>>,
 }
 
 impl<'a> FrozenGraph<'a> {
     /// The graph `pool` published at `base`.
     pub(crate) fn new(pool: &'a SharedTypePool, graph: &'a SharedGraph) -> Self {
-        FrozenGraph { graph, pool }
+        FrozenGraph { graph, names: pool.names_ref() }
     }
 
     fn portable_longident(&self, lid: &Longident) -> PortableLongident {
         let name = |idx: StrIdx| {
-            self.pool
-                .longident_name(idx)
+            self.names.read().unwrap().get(&idx.raw()).cloned()
                 .expect("a shared package constraint names its components in the pool")
         };
         match lid {
@@ -207,12 +224,13 @@ impl TypeGraph for FrozenGraph<'_> {
                 }
             }
         }
-        self.pool.with_longident_names(|names| {
+        {
+            let names = self.names.read().unwrap();
             lids.len().hash(hasher);
             for l in lids {
-                lid(l, names, hasher);
+                lid(l, &names, hasher);
             }
-        });
+        }
     }
 
     fn layout(&self, layout: VariantLayoutRef) -> Option<&VariantLayout> {
@@ -259,6 +277,19 @@ impl Carried {
         scopes: &AHashMap<u64, u64>,
         shapes: ShapeImport<'_>,
     ) {
+        self.record_maps(scopes, shapes);
+        self.link_levels = graph
+            .entries
+            .iter()
+            .enumerate()
+            .filter(|(_, entry)| {
+                matches!(entry.desc, PortableTypeDesc::Tlink(_)) && entry.level != GENERIC_LEVEL
+            })
+            .map(|(index, entry)| (index as u32, entry.level))
+            .collect();
+    }
+
+    pub(crate) fn record_maps(&mut self, scopes: &AHashMap<u64, u64>, shapes: ShapeImport<'_>) {
         let (other_scopes, allocations) = shapes.into_maps();
         for (producer, imported) in scopes.iter().chain(other_scopes.iter()) {
             let previous = self.scopes.insert(*imported, *producer);
@@ -274,15 +305,6 @@ impl Carried {
                 "two shape allocations were imported as one"
             );
         }
-        self.link_levels = graph
-            .entries
-            .iter()
-            .enumerate()
-            .filter(|(_, entry)| {
-                matches!(entry.desc, PortableTypeDesc::Tlink(_)) && entry.level != GENERIC_LEVEL
-            })
-            .map(|(index, entry)| (index as u32, entry.level))
-            .collect();
     }
 
     /// Which parts the inverse needs for this unit, by name: an empty part
@@ -344,9 +366,7 @@ pub(crate) fn portable_signature(
         .map(|(key, name)| (name.as_str(), *key))
         .collect();
     let file = |file: StrIdx| -> StrIdx {
-        frozen
-            .pool
-            .longident_name(file)
+        frozen.names.read().unwrap().get(&file.raw()).cloned()
             .and_then(|name| keys.get(name.as_str()).copied())
             .map_or(file, StrIdx::from_raw)
     };

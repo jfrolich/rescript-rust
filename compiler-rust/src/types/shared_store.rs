@@ -307,7 +307,7 @@ pub(crate) struct SharedTypePool {
     pages: SharedPages,
     next_index: AtomicU32,
     pers: Mutex<HashMap<usize, Arc<PersSlot>>>,
-    longident_names: RwLock<HashMap<u32, String>>,
+    longident_names: Arc<RwLock<HashMap<u32, String>>>,
     next_longident_idx: AtomicU32,
 }
 
@@ -333,7 +333,7 @@ impl SharedTypePool {
             pages,
             next_index: AtomicU32::new(0),
             pers: Mutex::new(HashMap::new()),
-            longident_names: RwLock::new(HashMap::new()),
+            longident_names: Arc::new(RwLock::new(HashMap::new())),
             next_longident_idx: AtomicU32::new(SHARED_LONGIDENT_IDX_BASE),
         }
     }
@@ -474,10 +474,12 @@ impl SharedTypePool {
         StrIdx::from_raw(raw)
     }
 
-    pub(crate) fn with_longident_names<T>(
-        &self, read: impl FnOnce(&HashMap<u32, String>) -> T,
-    ) -> T {
-        read(&self.longident_names.read().unwrap())
+    pub(crate) fn names(&self) -> Arc<RwLock<HashMap<u32, String>>> {
+        self.longident_names.clone()
+    }
+
+    pub(crate) fn names_ref(&self) -> &RwLock<HashMap<u32, String>> {
+        &self.longident_names
     }
 
     pub(crate) fn longident_name(&self, idx: StrIdx) -> Option<String> {

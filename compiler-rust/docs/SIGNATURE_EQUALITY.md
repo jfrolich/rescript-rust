@@ -156,3 +156,26 @@ later reader. This is necessary for shared-only hashes; storage still runs
 after release, and dependency scheduling is unchanged. The existing leaf
 regression checks that storage discards the portable graph and later lookup
 reuses the graph built for hashing, without decoding it again.
+
+## P3b slice 3: direct graph publication
+
+The signature traversal has portable and shared sinks. Normal publication
+uses the shared sink: it creates TypeDesc nodes and flat payload arrays
+directly, then relocates dense scratch indices as the immutable graph is
+frozen. This relocation is a linear array pass, not another traversal of
+the checker graph. No PortableTypeEntry for the main signature exists on
+this path. The portable sink remains for raw signatures, stored writers,
+non-shareable/full-pool fallbacks, and the check-only independent oracle.
+
+The publication owns the frozen graph and its shared name table until
+storage encodes it. It does not own the shared pool, avoiding a cycle with
+the pool's address-keyed registry. Summaries walk frozen nodes for both
+hashes and reference collection, so they do not force portable conversion.
+The storage reader uses the inverse serializer; the raw signature is still
+produced from the context as before. Counters `signature_nonshareable` and
+`signature_pool_full` report fallback units.
+
+A traversal reads each source node once, with one cache per graph; cost is
+O(nodes + edges + signature items). Step-count tests cover a 10,000-node
+chain and 10,000 parents sharing one child. The legacy recursive traversal
+uses the compiler test suite's large-stack convention for the deep chain.

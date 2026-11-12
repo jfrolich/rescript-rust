@@ -1657,11 +1657,7 @@ impl PersistentEnv {
         self.cache_lookup(module_name)
             .and_then(|opt| opt)
             .map(|ps| {
-                portable_types::publish_pers_struct(
-                    portable_types::serialize_for_publication(ps.as_ref(), ctx, arena),
-                    ctx,
-                    publication,
-                )
+                portable_types::publish_signature(ps.as_ref(), ctx, arena, publication, false).0
             })
     }
 
@@ -1678,11 +1674,10 @@ impl PersistentEnv {
         self.cache_lookup(module_name)
             .and_then(|opt| opt)
             .map(|ps| {
-                portable_types::publish_pers_struct_checked(
-                    portable_types::serialize_for_publication(ps.as_ref(), ctx, arena),
-                    ctx,
-                    publication,
-                )
+                let (pps, comparison) = portable_types::publish_signature(
+                    ps.as_ref(), ctx, arena, publication, true,
+                );
+                (pps, comparison.expect("checked publication"))
             })
     }
 

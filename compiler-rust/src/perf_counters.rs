@@ -22,6 +22,16 @@ static ENABLED: OnceLock<bool> = OnceLock::new();
 
 static PUBLISHED_SIGNATURE_DECODES: AtomicU64 = AtomicU64::new(0);
 
+static SIGNATURE_NONSHAREABLE: AtomicU64 = AtomicU64::new(0);
+static SIGNATURE_POOL_FULL: AtomicU64 = AtomicU64::new(0);
+
+pub(crate) fn record_signature_fallback(pool_full: bool) {
+    if enabled() {
+        let counter = if pool_full { &SIGNATURE_POOL_FULL } else { &SIGNATURE_NONSHAREABLE };
+        counter.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
 struct GentypeCounts {
     modules: AtomicU64,
     declarations: AtomicU64,
@@ -736,6 +746,9 @@ pub fn print_report() {
         "[compiler-counter] published_signature_decodes={}",
         PUBLISHED_SIGNATURE_DECODES.load(Ordering::Relaxed)
     );
+    eprintln!("signature_nonshareable={} signature_pool_full={}",
+        SIGNATURE_NONSHAREABLE.load(Ordering::Relaxed), SIGNATURE_POOL_FULL.load(Ordering::Relaxed));
+
     for (index, annotated) in [false, true].into_iter().enumerate() {
         let (modules, declarations) = GENTYPE_COUNTS[index].snapshot();
         eprintln!(
