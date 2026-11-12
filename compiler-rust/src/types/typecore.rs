@@ -10264,7 +10264,7 @@ fn type_application(
                     .unify_state
                     .env()
                     .filter(|saved_env| saved_env.id() != env.id())
-                    .map(crate::types::env::Env::clone);
+                    .cloned();
                 let typed_arg_result =
                     type_expect(tctx, env, expr, arg_expected_ty, Some(context.clone()));
 
@@ -12504,7 +12504,7 @@ fn type_case_pattern_impl<'a>(
         let saved = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone);
+            .cloned();
         tctx.unify_state.set_env(&case_env);
         saved
     } else {
@@ -18287,7 +18287,7 @@ fn type_letmodule(
         let saved_unify_env = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone);
+            .cloned();
         tctx.unify_state.set_env(&body_env);
         let typed_body = type_expect(tctx, &body_env, body, expected_ty, None);
         match saved_unify_env {
@@ -18647,7 +18647,7 @@ fn type_pack(
         let saved_unify_env = tctx
             .unify_state
             .env()
-            .map(crate::types::env::Env::clone);
+            .cloned();
         tctx.unify_state.set_env(&package_env);
         let mut package_arg_unify_result: TypeCoreResult<()> = Ok(());
         for (lid, package_arg) in pack_lids.iter().zip(&pack_args) {
@@ -18756,7 +18756,7 @@ fn type_pack(
     let saved_unify_env = tctx
         .unify_state
         .env()
-        .map(crate::types::env::Env::clone);
+        .cloned();
     tctx.unify_state.set_env(&package_env);
     let rue_result = rue_unify(tctx, loc, packed_type, expected_ty, context.clone());
     if let Some(saved_env) = saved_unify_env {
@@ -29020,7 +29020,7 @@ fn partial_pred(
     let saved_unify_env = tctx
         .unify_state
         .env()
-        .map(crate::types::env::Env::clone);
+        .cloned();
     tctx.unify_state.set_env(env);
     // Ctype.with_passive_variants (ctype.ml:2061-2072).
     let passive = ctx.set_passive_variants(true);

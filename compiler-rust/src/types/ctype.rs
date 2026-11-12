@@ -519,7 +519,7 @@ impl UnifyState {
             mode: self.mode,
             generate_equations: self.generate_equations,
             assume_injective: self.assume_injective,
-            env: self.env.as_ref().map(Env::clone),
+            env: self.env.as_ref().cloned(),
             recursion_depth: self.recursion_depth,
             newtype_level: self.newtype_level,
         }
@@ -8593,7 +8593,7 @@ fn unify_types(
             let args1 = *args1;
             let args2 = *args2;
 
-            let unify_env = state.env().map(Env::clone);
+            let unify_env = state.env().cloned();
             let labels_2_complete = package_type_lists_have_ocaml_same_label_completion_side_effect(
                 ctx,
                 unify_env.as_ref(),
