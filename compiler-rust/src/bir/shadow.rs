@@ -291,10 +291,12 @@ pub(crate) enum LowerFailure {
 /// Captures the same program points on both sides of the shared legacy tail.
 pub(crate) enum LowerCheck {
     Failed(LowerFailure),
-    Supported {
-        before: [crate::js_ir::arena::JsDepsProgram; 2],
-        after: [crate::js_ir::arena::JsDepsProgram; 2],
-    },
+    Supported(Box<LowerPair>),
+}
+
+pub(crate) struct LowerPair {
+    pub before: [crate::js_ir::arena::JsDepsProgram; 2],
+    pub after: [crate::js_ir::arena::JsDepsProgram; 2],
 }
 
 /// Import exactly the simplified root about to enter legacy compile_expr.
@@ -308,8 +310,10 @@ pub(crate) fn prepare_lower(
     ),
     LowerFailure,
 > {
-    let input = import_lambda(arena, root)
-        .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower input import: {error}")))?;
+    let input = import_lambda(arena, root).map_err(|reason| match reason.0 {
+        "shared Lambda subtree with binder" | "shared Lambda expansion" => LowerFailure::Unsupported(reason),
+        _ => LowerFailure::Error(anyhow::anyhow!("lower input import: {reason}")),
+    })?;
     let lowered = super::lower::lower(input).map_err(LowerFailure::Unsupported)?;
     lowered
         .program
@@ -355,7 +359,8 @@ pub(crate) fn check_lower(check: LowerCheck, unit: &str, jsx_preserve: bool) -> 
         LowerCheck::Failed(LowerFailure::Error(error)) => {
             Err(anyhow::anyhow!("{unit}: lower: {error:#}"))
         }
-        LowerCheck::Supported { before, after } => {
+        LowerCheck::Supported(pair) => {
+            let LowerPair { before, after } = *pair;
             for (text, pair) in [("lower", before), ("lower+passes", after)] {
                 let print = |p| {
                     crate::js_ir::print_deps_program_with_directives_and_options(
@@ -418,9 +423,9 @@ mod lower_tests {
             let same = [empty.clone(), empty.clone()];
             let different = [empty.clone(), changed.clone()];
             let check = if after_changed {
-                LowerCheck::Supported { before: same, after: different }
+                LowerCheck::Supported(Box::new(LowerPair { before: same, after: different }))
             } else {
-                LowerCheck::Supported { before: different, after: same }
+                LowerCheck::Supported(Box::new(LowerPair { before: different, after: same }))
             };
             let text = if after_changed { "lower+passes" } else { "lower" };
             let error = check_lower(check, "Gate.res", false).unwrap_err().to_string();
@@ -428,7 +433,7 @@ mod lower_tests {
         }
     }
     #[test]
-    fn simplified_shared_input_is_an_error_not_a_new_fallback() {
+    fn shared_binder_is_the_explicit_bridge_fallback() {
         let mut arena = LamArena::new();
         let constant = arena.const_(crate::lambda::lam_constant::Constant::JsNull);
         let id = crate::ident::Ident::new("x", 1, crate::ident::IdentFlags::NONE);
@@ -436,13 +441,9 @@ mod lower_tests {
         let binding = arena.let_(crate::lambda::lam_compat::LetKind::Strict, id, constant, body);
         let root = arena.seq_raw(binding, binding);
         let result = prepare_lower(&arena, root);
-        match result {
-            Err(LowerFailure::Error(error)) => {
-                assert_eq!(error.to_string(), "lower input import: shared Lambda subtree with binder")
-            }
-            Err(LowerFailure::Unsupported(reason)) => panic!("unlisted fallback: {reason}"),
-            Ok(_) => panic!("update this regression when the bridge supports shared input"),
-        }
+        assert!(matches!(result, Err(LowerFailure::Unsupported(
+            super::super::bridge::Unsupported("shared Lambda subtree with binder")
+        ))));
     }
     #[test]
     fn export_errors_are_not_fallbacks() {

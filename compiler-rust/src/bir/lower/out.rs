@@ -4,16 +4,21 @@ use crate::bir::{Bir, ListId, NodeId};
 
 /// K0: C:73 OutputFinished. Dummy is distinct from ordinary fallthrough.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Finished {
+pub enum Finished {
+    /// All paths terminate.
     True,
+    /// Ordinary fallthrough.
     False,
+    /// Empty output identity.
     Dummy,
 }
 /// A contiguous run in StatementStack, including unfilled reserved slots.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Span {
-    pub(crate) start: u32,
-    pub(crate) len: u32,
+pub struct Span {
+    /// First slot.
+    pub start: u32,
+    /// Number of slots, including holes.
+    pub len: u32,
 }
 impl Span {
     /// K0: C:119 append, endpoint of a run (no tree walk).
@@ -23,29 +28,34 @@ impl Span {
 }
 /// K0: C:139 Compiled, also representing outputs without a value.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct Out {
-    pub(crate) stmts: Span,
-    pub(crate) value: Option<NodeId>,
-    pub(crate) finished: Finished,
+pub struct Out {
+    /// Statement-stack run.
+    pub stmts: Span,
+    /// Deferred J expression.
+    pub value: Option<NodeId>,
+    /// Control-flow completion.
+    pub finished: Finished,
 }
 
 /// One stack per lowering. A hole is distinct from any valid node handle.
 #[derive(Default)]
-pub(crate) struct StatementStack {
+pub struct StatementStack {
     slots: Vec<Option<NodeId>>,
-    pub(crate) pushed: usize,
-    pub(crate) copied: usize,
+    /// Statements written, excluding holes.
+    pub pushed: usize,
+    /// Statements copied into final lists.
+    pub copied: usize,
 }
 impl StatementStack {
     /// K0: C:89 BlockOutput::make, start an empty output at the current top.
-    pub(crate) fn mark(&self) -> Span {
+    pub fn mark(&self) -> Span {
         Span {
             start: u32::try_from(self.slots.len()).expect("statement stack capacity"),
             len: 0,
         }
     }
     /// K0: C:89 BlockOutput::make, complete the run since a saved mark.
-    pub(crate) fn since(&self, mark: Span) -> Span {
+    pub fn since(&self, mark: Span) -> Span {
         assert!(mark.end() <= self.slots.len());
         Span {
             start: mark.start,
@@ -54,18 +64,18 @@ impl StatementStack {
         }
     }
     /// K0: C:119 append, push a statement once.
-    pub(crate) fn push(&mut self, statement: NodeId) {
+    pub fn push(&mut self, statement: NodeId) {
         self.slots.push(Some(statement));
         self.pushed += 1;
     }
     /// K12: C:6441 emit_multi_staticcatch_prelude; reserve before a child run.
-    pub(crate) fn reserve(&mut self) -> u32 {
+    pub fn reserve(&mut self) -> u32 {
         let slot = self.mark().start;
         self.slots.push(None);
         slot
     }
     /// K12: C:6441 emit_multi_staticcatch_prelude; fill without moving the run.
-    pub(crate) fn fill(&mut self, slot: u32, statement: NodeId) {
+    pub fn fill(&mut self, slot: u32, statement: NodeId) {
         let hole = &mut self.slots[slot as usize];
         assert!(hole.is_none(), "reserved slot filled twice");
         *hole = Some(statement);
@@ -73,7 +83,7 @@ impl StatementStack {
     }
     /// K0: C:119 append. Both children have already been lowered, even when
     /// the first finishes. Value combination belongs to K2's expression policy.
-    pub(crate) fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
+    pub fn append(&mut self, first: Out, second: Out, value: Option<NodeId>) -> Out {
         assert_eq!(first.stmts.end(), second.stmts.start as usize);
         assert_eq!(second.stmts.end(), self.slots.len());
         if first.finished == Finished::True
@@ -97,7 +107,7 @@ impl StatementStack {
     }
     /// K2: C:4752 compiled_to_effect_block. Copy each non-hole directly into
     /// the child-list pool once, then pop the run. Never flatten SBlock here.
-    pub(crate) fn into_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
+    pub fn take_list(&mut self, bir: &mut Bir, span: Span) -> ListId {
         assert_eq!(
             span.end(),
             self.slots.len(),
@@ -117,31 +127,45 @@ impl StatementStack {
 
 /// A linear ownership token: deferred combinations cannot be realized twice.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) struct FreeId(u32);
+pub struct FreeId(u32);
 /// Deferred combinations of J operands. No boxed trees, no L subtree retained.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Free {
+pub enum Free {
+    /// Already-lowered J expression.
     Leaf(NodeId),
+    /// Deferred conditional combination.
     Cond {
+        /// J condition.
         test: NodeId,
+        /// True branch ownership token.
         then_: FreeId,
+        /// False branch ownership token.
         else_: FreeId,
     },
+    /// Deferred comma/effect combination.
     Seq {
+        /// J effect expression.
         first: NodeId,
+        /// Tail ownership token.
         second: FreeId,
     },
 }
+/// Result of one probe: deferred expression or completed output.
 #[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Probed {
+pub enum Probed {
+    /// Statement-free result.
     Free(FreeId),
+    /// Already lowered in the requested continuation.
     Out(Out),
 }
+/// Typed storage for deferred combinations, consumed once.
 #[derive(Default)]
-pub(crate) struct FreePool {
+pub struct FreePool {
     nodes: Vec<Option<Free>>,
-    pub(crate) probes: usize,
-    pub(crate) realized: usize,
+    /// Combinations probed.
+    pub probes: usize,
+    /// Deferred nodes consumed.
+    pub realized: usize,
 }
 impl FreePool {
     /// K1/K6: C:1529 compile_expr / C:5144 compile_if_return_output; preserve
@@ -154,7 +178,7 @@ impl FreePool {
     /// K1/K2/K6: C:1529 compile_expr, C:4715 append_effect_output,
     /// C:5144 compile_if_return_output. Probe one combination of already-lowered
     /// children. A non-free child is realized for cx, not lowered again.
-    pub(crate) fn probe(&mut self, cx: Cx, input: ProbeInput, emit: &mut impl Realizer) -> Probed {
+    pub fn probe(&mut self, cx: Cx, input: ProbeInput, emit: &mut impl Realizer) -> Probed {
         self.probes += 1;
         match input {
             ProbeInput::Output(out) => {
@@ -183,7 +207,7 @@ impl FreePool {
     }
     /// K2/K6: C:4715 append_effect_output / C:5144 compile_if_return_output.
     /// Explicit postorder stack: each Free is consumed once, even at depth 10k.
-    pub(crate) fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
+    pub fn realize(&mut self, cx: Cx, probed: Probed, emit: &mut impl Realizer) -> Out {
         enum Work {
             Enter(FreeId),
             Seq(NodeId),
@@ -283,7 +307,7 @@ mod tests {
         }
         stack.fill(hole, NodeId(10_000));
         let span = stack.since(mark);
-        let list = stack.into_list(&mut bir, span);
+        let list = stack.take_list(&mut bir, span);
         assert_eq!(bir.lists.get(list).len(), 10_001);
         assert_eq!(bir.lists.get(list)[0], NodeId(10_000));
         assert_eq!(stack.pushed, 10_001);

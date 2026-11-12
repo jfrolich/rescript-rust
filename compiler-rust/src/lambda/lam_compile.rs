@@ -790,10 +790,10 @@ impl LambdaCompiler {
                     self.id_gen.restore_current_stamp(saved_stamp);
                     self.dynamic_import_modules = dynamic;
                     let new_after = self.finish_lowered_output(new_before.clone(), &possible_required_modules);
-                    crate::bir::shadow::LowerCheck::Supported {
+                    crate::bir::shadow::LowerCheck::Supported(Box::new(crate::bir::shadow::LowerPair {
                         before: [before.expect("check capture"), new_before],
                         after: [deps.clone(), new_after],
-                    }
+                    }))
                 }
                 Err(failure) => crate::bir::shadow::LowerCheck::Failed(failure),
             });
@@ -914,7 +914,7 @@ impl LambdaCompiler {
             }
             populate_required_modules(
                 self.module_path_resolver.as_ref(),
-                &possible_required_modules,
+                possible_required_modules,
                 &mut required_modules,
             );
             deps.modules = required_modules.to_vec();
