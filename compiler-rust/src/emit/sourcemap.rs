@@ -189,6 +189,81 @@ mod tests {
     }
 
     #[test]
+    fn large_synthetic_file_uses_one_start_token_per_located_literal() {
+        use crate::emit::build::Allocate;
+        use oxc_allocator::Allocator;
+        use oxc_ast::{ast::*, builder::AstBuilder};
+        use oxc_codegen::{Codegen, CodegenOptions};
+        use oxc_span::SourceType;
+        use oxc_syntax::number::NumberBase;
+
+        const N: usize = 100_000;
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("Large.res");
+        std::fs::write(&source, "0\n".repeat(N)).unwrap();
+        let mut locations = LamLocTable::located(Arc::new(HashMap::new()));
+        let handles: Vec<_> = (0..N)
+            .map(|n| {
+                locations.intern(Location::from_positions(
+                    Position::new(StrIdx(0), n as i32 + 1, n as i32 * 2, n as i32 * 2),
+                    Position::new(StrIdx(0), n as i32 + 1, n as i32 * 2, n as i32 * 2 + 1),
+                ))
+            })
+            .collect();
+        let locations = Arc::new(locations);
+        let spans = Spans::new(locations.clone(), &source);
+        let alloc = Allocator::default();
+        let b = AstBuilder::new(&alloc);
+        let mut body = b.vec();
+        for loc in handles {
+            let value = Expression::new_numeric_literal(
+                spans.span(Some(loc)).unwrap(),
+                0.0,
+                None,
+                NumberBase::Decimal,
+                &b,
+            );
+            body.push(Statement::new_expression_statement(SPAN, value, &b));
+        }
+        let text = spans.source_text();
+        let ast = Program::new(
+            SPAN,
+            SourceType::mjs(),
+            &text,
+            b.vec(),
+            None,
+            b.vec(),
+            body,
+            &b,
+        );
+        let output = Codegen::new()
+            .with_options(CodegenOptions {
+                source_map_path: Some(source.clone()),
+                ..CodegenOptions::default()
+            })
+            .build(&ast);
+        assert_eq!(output.code.lines().count(), N);
+        let mut builder =
+            SourceMapBuilder::new(&temp.path().join("Large.js"), &source, String::new(), false)
+                .with_lam_locs(locations);
+        let map = output.map.unwrap();
+        assert_eq!(map.get_tokens().count(), N);
+        for token in map.get_tokens() {
+            spans.add_token(
+                &mut builder,
+                token.get_src_line(),
+                token.get_src_col(),
+                token.get_dst_line() as usize,
+                token.get_dst_col() as usize,
+            );
+        }
+        assert_eq!(spans.operations.get(), 2 * N);
+        assert_eq!(spans.columns.borrow().len(), 1);
+        let json: serde_json::Value = serde_json::from_str(&builder.json()).unwrap();
+        assert_eq!(json["mappings"].as_str().unwrap().split(';').count(), N);
+    }
+
+    #[test]
     fn spans_and_token_rebasing_are_one_row_per_located_node() {
         let mut locations = LamLocTable::located(Arc::new(HashMap::new()));
         let mut handles = Vec::new();
