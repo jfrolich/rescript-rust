@@ -558,6 +558,16 @@ function decls(items) {
   return cat([join(items.map(prim => prim), "\n")]);
 }
 
+function module_(name, items) {
+  return cat([
+    text("module " + name + " = {\n"),
+    items,
+    {
+      c: "\n}"
+    }
+  ]);
+}
+
 let Code = {
   string: string$1,
   int: int,
@@ -580,7 +590,8 @@ let Code = {
   param: param,
   labelled: labelled,
   fn: fn,
-  decls: decls
+  decls: decls,
+  module_: module_
 };
 
 let $$var = make;

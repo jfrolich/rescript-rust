@@ -962,3 +962,37 @@ let side = Left
     assert!(expanded.contains("type points = array<point>"), "{expanded}");
     assert!(js.contains("origin"), "{js}");
 }
+
+const NAMED: &str = r#"
+open Macro
+
+// A module whose name is an argument of the macro.
+@macro
+let unit = (name: string, factor: float): decls =>
+  Code.module_(
+    name,
+    %code(
+      type t = float
+      let toBase = (value: t) => value *. ${Code.float(factor)}
+    ),
+  )
+"#;
+
+#[test]
+fn a_module_with_a_computed_name() {
+    let mut project = Project::new();
+    compile_ok(&mut project, "Named.res", NAMED);
+    let js = compile_ok(
+        &mut project,
+        "Main.res",
+        r#"
+%%Named.unit("Feet", 0.3048)
+
+let height: Feet.t = 6.0
+let meters = Feet.toBase(height)
+"#,
+    );
+    let expanded = project.expanded.clone().unwrap();
+    assert!(expanded.contains("module Feet = {"), "{expanded}");
+    assert!(js.contains("0.3048"), "{js}");
+}

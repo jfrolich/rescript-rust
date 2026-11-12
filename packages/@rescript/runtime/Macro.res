@@ -475,6 +475,10 @@ module Code = {
 
   /** Several declarations, one after the other. */
   let decls = (items: array<decls>): decls => build([join(items->Array.map(toNode), "\n")])
+
+  /** `module Name = { items }`, for a module whose name is computed. */
+  let module_ = (name: string, items: decls): decls =>
+    build([text("module " ++ name ++ " = {\n"), toNode(items), text("\n}")])
 }
 
 module Pat = {
