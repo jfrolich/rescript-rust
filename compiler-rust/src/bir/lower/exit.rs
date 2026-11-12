@@ -1213,4 +1213,111 @@ mod tests {
         let root = a.static_catch(body, 1, &[n], handler);
         compare(a, root, ALL);
     }
+
+    fn lower(a: &LamArena, root: Lam, cx: Cx) -> State {
+        let input = crate::bir::bridge::import_lambda(a, root).unwrap();
+        let source_root = input.root;
+        let mut state = State::new(input);
+        let probed = state.probe(cx, source_root).unwrap();
+        state.realize(cx, probed);
+        state
+    }
+    fn contexts() -> [Cx; 5] {
+        let var = VarId(0);
+        [
+            Cx::value(),
+            Cx::effect(),
+            Cx::declare(LetKind::Strict, var),
+            Cx::assign(var),
+            Cx::returning(),
+        ]
+    }
+
+    #[test]
+    fn ten_thousand_nested_catches_flatten_into_one_table() {
+        const N: usize = 10_000;
+        let mut a = LamArena::new();
+        // The result variable of the declare and assign continuations.
+        let result = a.var(id("result", 1));
+        let tail = x(&mut a);
+        let mut root = a.seq_raw(result, tail);
+        for label in 1..=N as i32 {
+            let handler = int(&mut a, label);
+            root = a.static_catch(root, label, &[], handler);
+        }
+        for cx in contexts() {
+            let state = lower(&a, root, cx);
+            // One flag read per catch below the first; no handler is walked.
+            assert_eq!(state.catch_flag_reads, N - 1, "{cx:?}");
+            assert_eq!(state.catch_walk_steps, 0, "{cx:?}");
+            // Each catch, each handler and the three nodes of the body once.
+            assert_eq!(state.source_steps, 2 * N + 3, "{cx:?}");
+            // Grouping the handlers: one fingerprint each, none equal.
+            assert_eq!(state.switch_visits, N, "{cx:?}");
+            assert_eq!(state.switch_comparisons, 0, "{cx:?}");
+            assert!(state.catches.is_empty() && state.catch_table.is_empty());
+        }
+    }
+
+    #[test]
+    fn ten_thousand_nested_catches_that_do_not_flatten() {
+        const N: usize = 10_000;
+        let mut a = LamArena::new();
+        let result = a.var(id("result", 1));
+        let tail = x(&mut a);
+        let mut root = a.seq_raw(result, tail);
+        // Every handler but the outermost exits to the catch around it.
+        for label in 1..=N as i32 {
+            let handler = if label == N as i32 { int(&mut a, 0) } else { a.static_raise(label + 1, &[]) };
+            root = a.static_catch(root, label, &[], handler);
+        }
+        for cx in contexts() {
+            let returns = matches!(cx.cont, Cont::Effect(Tail::Return(_)));
+            let state = lower(&a, root, cx);
+            // Per catch below the first: one flag read, and the one node of
+            // its handler read for the label. In a return continuation the
+            // outermost catch reads one more flag, for the cheap form.
+            assert_eq!(state.catch_flag_reads, N - 1 + usize::from(returns), "{cx:?}");
+            assert_eq!(state.catch_walk_steps, N - 1, "{cx:?}");
+            assert_eq!(state.source_steps, 2 * N + 3, "{cx:?}");
+            assert_eq!(state.switch_visits, 0, "{cx:?}");
+        }
+    }
+
+    #[test]
+    fn a_handler_of_forty_thousand_nodes_without_an_exit_costs_one_flag_read() {
+        const N: usize = 20_000;
+        let mut a = LamArena::new();
+        let mut big = int(&mut a, 0);
+        for i in 0..N as i32 {
+            let head = effect(&mut a, i);
+            big = a.seq_raw(head, big);
+        }
+        // 2 nodes per effect, 1 per sequence, and the constant.
+        let handler_nodes = 3 * N + 1;
+        assert!(handler_nodes >= 40_000);
+        let test = x(&mut a);
+        let (exit, other) = (a.static_raise(1, &[]), effect(&mut a, -1));
+        let body = a.if_(test, exit, other);
+        let inner = a.static_catch(body, 1, &[], big);
+        // The form of one catch in a return continuation: one read.
+        let state = lower(&a, inner, Cx::returning());
+        assert_eq!((state.catch_flag_reads, state.catch_walk_steps), (1, 0));
+        // Flattening it under another catch: one read.
+        let outer = int(&mut a, 1);
+        let root = a.static_catch(inner, 2, &[], outer);
+        let state = lower(&a, root, Cx::effect());
+        assert_eq!((state.catch_flag_reads, state.catch_walk_steps), (1, 0));
+        // 5 nodes of the body, the outer handler, the two catches.
+        assert_eq!(state.source_steps, handler_nodes + 8);
+    }
+
+    #[test]
+    fn exit_sizes() {
+        use std::mem::size_of;
+        assert_eq!(size_of::<Jump>(), 8);
+        assert_eq!(size_of::<Catch>(), 4);
+        assert_eq!(size_of::<Exit>(), 16);
+        assert_eq!(size_of::<Plan>(), 168);
+    }
 }

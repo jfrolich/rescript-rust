@@ -11,8 +11,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -28,8 +28,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -45,8 +45,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -62,8 +62,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -79,8 +79,8 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
@@ -96,22 +96,21 @@
       "unsupported": {}
     },
     "tests/tests": {
-      "identical": 721,
-      "units": 721,
+      "identical": 730,
+      "units": 730,
       "unsupported": {}
     }
   },
   "lower": {
     "fixtures": {
-      "identical": 104,
+      "identical": 120,
       "shared_catch_only": 0,
       "units": 480,
       "unsupported": {
-        "external": 304,
+        "external": 312,
         "let rec": 8,
         "loop": 16,
-        "static catch": 32,
-        "try": 16
+        "try": 24
       }
     },
     "runtime": {
@@ -127,17 +126,16 @@
       }
     },
     "tests/tests": {
-      "identical": 230,
+      "identical": 235,
       "shared_catch_only": 1,
-      "units": 729,
+      "units": 730,
       "unsupported": {
         "assign": 9,
-        "external": 374,
-        "let rec": 62,
-        "loop": 19,
+        "external": 384,
+        "let rec": 63,
+        "loop": 20,
         "shared Lambda subtree with binder": 1,
-        "static catch": 19,
-        "try": 15
+        "try": 18
       }
     }
   }
