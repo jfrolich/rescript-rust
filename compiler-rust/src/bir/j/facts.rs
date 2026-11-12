@@ -115,3 +115,16 @@ pub fn is_array_is_array(b: &Bir, id: NodeId) -> bool {
 pub fn strictly_pure(b: &Bir, id: NodeId) -> bool {
     b.node(id).flags().contains(NodeFlags::STRICT)
 }
+
+/// E:146 is_pure_subexpression, a narrower predicate than either purity flag.
+/// Cached separately so J-M0 never rescans an array/index subtree.
+pub(crate) fn subexpression(b: &Bir, id: NodeId, child: impl Fn(NodeId) -> bool) -> bool {
+    match b.view(id) {
+        View::Var { .. } | View::JQualified { .. } | View::JStr { .. } | View::JJson { .. } | View::JNumber { .. } => true,
+        View::JTemplate { .. } => b.node(id).aux() == 1,
+        View::JIndex { object, index } => child(object) && child(index),
+        View::JSeq { first, second } => child(first) && child(second),
+        View::JArray { values } => values.iter().all(|&v| child(v)),
+        _ => false,
+    }
+}

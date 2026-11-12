@@ -609,7 +609,8 @@ impl Bir {
                 let f = self.node(c).flags();
                 (f.contains(NodeFlags::PURE), f.contains(NodeFlags::NO_ALLOC))
             });
-            let old_flags = self.node(id).flags();
+            let old_node = self.node(id);
+            let old_flags = old_node.flags();
             let mut flags = old_flags;
             flags.0 &= !(NodeFlags::PURE | NodeFlags::NO_ALLOC);
             if pure {
@@ -618,12 +619,16 @@ impl Bir {
             if no_alloc {
                 flags.0 |= NodeFlags::NO_ALLOC;
             }
-            if !matches!(self.view(id), View::Var { .. }) {
+            if !matches!(old_node.view(&self.lists), View::Var { .. }) {
                 if let Some(strict) = j::facts::purity(self, id, true, |c| {
                     matches!(self.view(c), View::Var { .. }) || j::facts::strictly_pure(self, c)
                 }) {
                     flags.0 &= !NodeFlags::STRICT;
                     if strict { flags.0 |= NodeFlags::STRICT; }
+                    flags.0 &= !NodeFlags::J_SUBEXPR;
+                    if j::facts::subexpression(self, id, |c| matches!(self.view(c), View::Var { .. }) || self.node(c).flags().contains(NodeFlags::J_SUBEXPR)) {
+                        flags.0 |= NodeFlags::J_SUBEXPR;
+                    }
                 }
             }
             self.nodes[id.index()].set_flags(flags);
@@ -865,7 +870,7 @@ impl Bir {
             self.adjust_counts(replacement, -i64::from(replacement_weight));
         }
         let parent = self.parents[target.index()];
-        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT;
+        let effect_bits = NodeFlags::PURE | NodeFlags::NO_ALLOC | NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
         let effects_before = self.nodes[target.index()].flags().0 & effect_bits;
         self.release_nodes(target, Some(replacement), false);
         let content = self.nodes[replacement.index()];

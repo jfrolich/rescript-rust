@@ -848,6 +848,656 @@ pub fn js3_simplify_if(
         return raw_if(b, test, yes, no);
     }
 }
+
+fn trivial(b: &Bir, id: NodeId) -> bool {
+    matches!(b.view(id), View::JNumber { .. } | View::JUndefined)
+}
+fn clear_location(b: &mut Bir, id: NodeId) {
+    let mut flags = b.node(id).flags();
+    flags.0 &= !NodeFlags::JS_LOC_PRESENT;
+    b.nodes[id.index()].set_flags(flags);
+}
+
+/// J-M0, E:96 remove_pure_subexpression. The narrower cached J_SUBEXPR fact
+/// answers the array/index tests; only sequence spines need traversal.
+pub fn jm0_remove_pure_subexpression(b: &mut Bir, root: NodeId) -> Option<NodeId> {
+    enum Work {
+        Enter(NodeId),
+        Seq(NodeId),
+    }
+    let mut work = vec![Work::Enter(root)];
+    let mut results = vec![];
+    while let Some(w) = work.pop() {
+        match w {
+            Work::Enter(id) => {
+                if b.node(id).flags().contains(NodeFlags::J_SUBEXPR) {
+                    b.release(id);
+                    results.push(None);
+                    continue;
+                }
+                if let View::JSeq { first, second } = b.view(id) {
+                    b.detach(first);
+                    b.detach(second);
+                    work.push(Work::Seq(id));
+                    work.push(Work::Enter(second));
+                    work.push(Work::Enter(first));
+                } else {
+                    results.push(Some(id));
+                }
+            }
+            Work::Seq(id) => {
+                let right = results.pop().unwrap();
+                let left = results.pop().unwrap();
+                let result = match (left, right) {
+                    (Some(l), Some(r)) => {
+                        let value = jm1_js_seq(b, l, r);
+                        let outer = b.cold(id);
+                        let own = b.cold(value);
+                        let own_loc = b.node(value).flags().contains(NodeFlags::JS_LOC_PRESENT);
+                        let outer_loc = b.node(id).flags().contains(NodeFlags::JS_LOC_PRESENT);
+                        if let Some(outer) = outer {
+                            let cold = crate::bir::Cold {
+                                comment: own.and_then(|c| c.comment).or(outer.comment),
+                                loc: if own_loc { own.unwrap().loc } else { outer.loc },
+                            };
+                            b.set_cold(value, cold);
+                            if own_loc || outer_loc {
+                                let mut flags = b.node(value).flags();
+                                flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                                b.nodes[value.index()].set_flags(flags);
+                            }
+                        }
+                        Some(value)
+                    }
+                    (Some(v), None) | (None, Some(v)) => Some(v),
+                    (None, None) => None,
+                };
+                b.release(id);
+                results.push(result);
+            }
+        }
+    }
+    results.pop().unwrap()
+}
+
+/// J-M1, E:399 js_seq. Each loop consumes a comma shell; pending final trivial
+/// operands use a suffix stack, preserving the final expression's value.
+pub fn jm1_js_seq(b: &mut Bir, mut left: NodeId, mut right: NodeId) -> NodeId {
+    let mut suffix = vec![];
+    loop {
+        if let View::JSeq { first, second } = b.view(left) {
+            let keep = if trivial(b, second) {
+                Some(first)
+            } else if trivial(b, first) {
+                Some(second)
+            } else {
+                None
+            };
+            if let Some(keep) = keep {
+                p::retain(b, &[left], &[keep]);
+                left = keep;
+                continue;
+            }
+        }
+        if let View::JSeq { first, second } = b.view(right) {
+            if trivial(b, first) {
+                p::retain(b, &[right], &[second]);
+                right = second;
+                continue;
+            }
+            if trivial(b, second) {
+                p::retain(b, &[right], &[first, second]);
+                suffix.push(second);
+                right = first;
+                continue;
+            }
+        }
+        let value = if trivial(b, left)
+            || matches!(b.view(left), View::Var { .. } | View::JQualified { .. })
+        {
+            b.release(left);
+            right
+        } else {
+            p::seq(b, left, right)
+        };
+        if let Some(next) = suffix.pop() {
+            left = value;
+            right = next;
+        } else {
+            return value;
+        }
+    }
+}
+
+/// J-M2, E:253 compile_nullish_strict_comparison. The final comparison is raw:
+/// in particular it must not fold Optional_block === Undefined through J-E4.
+pub fn jm2_nullish_strict_comparison(
+    b: &mut Bir,
+    neq: bool,
+    left: NodeId,
+    right: NodeId,
+) -> NodeId {
+    let nullish = |id| matches!(b.view(id), View::JNull | View::JUndefined);
+    let impossible = |id| {
+        super::facts::strictly_pure(b, id)
+            && matches!(
+                b.view(id),
+                View::JBool
+                    | View::JNumber { .. }
+                    | View::JTypeof { .. }
+                    | View::JFun { .. }
+                    | View::JArray { .. }
+                    | View::JBlockLit { .. }
+            )
+    };
+    let value = if nullish(left) && nullish(right) {
+        Some((matches!(b.view(left), View::JNull) == matches!(b.view(right), View::JNull)) != neq)
+    } else if (nullish(left) && impossible(right)) || (nullish(right) && impossible(left)) {
+        Some(neq)
+    } else {
+        None
+    };
+    if let Some(value) = value {
+        p::retain(b, &[left, right], &[]);
+        p::boolean(b, value)
+    } else {
+        p::bin(
+            b,
+            if neq { BinOp::NotEqEq } else { BinOp::EqEqEq },
+            left,
+            right,
+        )
+    }
+}
+/// J-M2, E:327 compile_int_equality. Float spellings, not float values, compare.
+pub fn jm2_int_equality(b: &mut Bir, left: NodeId, right: NodeId) -> NodeId {
+    let floats = match (b.view(left), b.view(right)) {
+        (View::JNumber { value: l }, View::JNumber { value: r }) => {
+            match (b.constant(l), b.constant(r)) {
+                (crate::bir::Constant::Float(l), crate::bir::Constant::Float(r)) => {
+                    l.spelling() == r.spelling()
+                }
+                _ => false,
+            }
+        }
+        _ => false,
+    };
+    let value = if floats {
+        Some(true)
+    } else {
+        p::int_of(b, left)
+            .zip(p::int_of(b, right))
+            .map(|(l, r)| l == r)
+    };
+    if let Some(value) = value {
+        p::retain(b, &[left, right], &[]);
+        p::boolean(b, value)
+    } else {
+        p::bin(b, BinOp::EqEqEq, left, right)
+    }
+}
+
+/// J-M3, E:483 to_int32.
+pub fn jm3_to_int32(b: &mut Bir, value: NodeId) -> NodeId {
+    let zero = p::int(b, 0);
+    jm3_int32_bor(b, value, zero)
+}
+/// J-M3, E:570 int32_bor. Redundant shifts/truncations are stripped in a loop.
+pub fn jm3_int32_bor(b: &mut Bir, mut left: NodeId, mut right: NodeId) -> NodeId {
+    loop {
+        if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+            p::retain(b, &[left, right], &[]);
+            return p::int(b, l | r);
+        }
+        if let Some((inner, shift)) = p::binary(b, right, BinOp::Lsr) {
+            if p::int_of(b, shift) == Some(0) {
+                p::retain(b, &[right], &[inner]);
+                right = inner;
+                continue;
+            }
+        }
+        if let Some((inner, shift)) = p::binary(b, left, BinOp::Lsr) {
+            if p::int_of(b, shift) == Some(0) {
+                p::retain(b, &[left], &[inner]);
+                left = inner;
+                continue;
+            }
+            if p::int_of(b, right) == Some(0) && p::int_of(b, shift).is_some_and(|v| v > 0) {
+                b.release(right);
+                return left;
+            }
+        }
+        if let Some((inner, zero)) = p::binary(b, left, BinOp::Bor) {
+            if p::int_of(b, right) == Some(0) && p::int_of(b, zero) == Some(0) {
+                p::retain(b, &[left], &[inner]);
+                left = inner;
+                continue;
+            }
+        }
+        return je4_bin(b, BinOp::Bor, left, right);
+    }
+}
+/// J-M4, E:488 int32_add / E:498 int32_minus.
+pub fn jm4_int32_add_sub(b: &mut Bir, subtract: bool, left: NodeId, right: NodeId) -> NodeId {
+    if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+        p::retain(b, &[left, right], &[]);
+        return p::int(
+            b,
+            if subtract {
+                l.wrapping_sub(r)
+            } else {
+                l.wrapping_add(r)
+            },
+        );
+    }
+    let value = je4_bin(
+        b,
+        if subtract { BinOp::Minus } else { BinOp::Plus },
+        left,
+        right,
+    );
+    jm3_to_int32(b, value)
+}
+/// J-M5, E:508 int32_mul. Zero uses permissive PURE, not STRICT.
+pub fn jm5_int32_mul(b: &mut Bir, left: NodeId, right: NodeId) -> NodeId {
+    let (l, r) = (p::int_of(b, left), p::int_of(b, right));
+    if (r == Some(0) && p::pure(b, left)) || (l == Some(0) && p::pure(b, right)) {
+        p::retain(b, &[left, right], &[]);
+        return p::int(b, 0);
+    }
+    if let (Some(l), Some(r)) = (l, r) {
+        p::retain(b, &[left, right], &[]);
+        return p::int(b, l.wrapping_mul(r));
+    }
+    let power = |v: i32| {
+        (v > 0 && (v as u32).is_power_of_two()).then(|| (v as u32).trailing_zeros() as i32)
+    };
+    let selected = if let Some(r) = r {
+        power(r).map(|n| (left, right, n))
+    } else if let Some(l) = l {
+        power(l).map(|n| (right, left, n))
+    } else {
+        None
+    };
+    if let Some((value, literal, shift)) = selected {
+        b.release(literal);
+        let shift = p::int(b, shift);
+        return jm7_int32_lsl(b, value, shift);
+    }
+    let value = je4_bin(b, BinOp::Mul, left, right);
+    jm3_to_int32(b, value)
+}
+/// J-M6, E:545 int32_pow / E:535 ocaml_int32_pow, including float-to-int wrap.
+pub fn jm6_int32_pow(b: &mut Bir, left: NodeId, right: NodeId) -> NodeId {
+    if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+        let value = (l as f64).powf(r as f64);
+        let value = if value > i32::MAX as f64 || value < i32::MIN as f64 {
+            ((value.trunc() as i64 & 0xFFFF_FFFF) as u32) as i32
+        } else {
+            value.trunc() as i32
+        };
+        p::retain(b, &[left, right], &[]);
+        return p::int(b, value);
+    }
+    let value = je4_bin(b, BinOp::Pow, left, right);
+    jm3_to_int32(b, value)
+}
+/// J-M7, E:555 int32_lsl.
+pub fn jm7_int32_lsl(b: &mut Bir, left: NodeId, right: NodeId) -> NodeId {
+    if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+        p::retain(b, &[left, right], &[]);
+        p::int(b, l.wrapping_shl(r as u32))
+    } else {
+        je4_bin(b, BinOp::Lsl, left, right)
+    }
+}
+/// J-M8, E:596 int32_lsr. Literal shifts have the legacy valid-count domain.
+pub fn jm8_int32_lsr(b: &mut Bir, mut left: NodeId, right: NodeId) -> NodeId {
+    loop {
+        if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+            let value = ((l as u32) >> (r as u32)) as i32;
+            p::retain(b, &[left, right], &[]);
+            return p::int(b, value);
+        }
+        if p::binary(b, left, BinOp::Lsr).is_some() && p::int_of(b, right) == Some(0) {
+            b.release(right);
+            return left;
+        }
+        if let Some((inner, zero)) = p::binary(b, left, BinOp::Bor) {
+            if p::int_of(b, right) == Some(0) && p::int_of(b, zero) == Some(0) {
+                p::retain(b, &[left], &[inner]);
+                left = inner;
+                continue;
+            }
+        }
+        return je4_bin(b, BinOp::Lsr, left, right);
+    }
+}
+/// J-M8, E:614 int32_bxor.
+pub fn jm8_int32_bxor(b: &mut Bir, mut left: NodeId, mut right: NodeId) -> NodeId {
+    loop {
+        if let (Some(l), Some(r)) = (p::int_of(b, left), p::int_of(b, right)) {
+            p::retain(b, &[left, right], &[]);
+            return p::int(b, l ^ r);
+        }
+        if let Some((inner, zero)) = p::binary(b, right, BinOp::Lsr) {
+            if p::int_of(b, zero) == Some(0) {
+                p::retain(b, &[right], &[inner]);
+                right = inner;
+                continue;
+            }
+        }
+        if let Some((inner, zero)) = p::binary(b, left, BinOp::Lsr) {
+            if p::int_of(b, zero) == Some(0) {
+                p::retain(b, &[left], &[inner]);
+                left = inner;
+                continue;
+            }
+        }
+        return je4_bin(b, BinOp::Bxor, left, right);
+    }
+}
+/// J-M8, E:631 int32_band. Unlike xor/shift, literal operands are NOT folded.
+pub fn jm8_int32_band(b: &mut Bir, mut left: NodeId, right: NodeId) -> NodeId {
+    loop {
+        if let Some((inner, zero)) = p::binary(b, left, BinOp::Bor) {
+            if p::int_of(b, zero) == Some(0) {
+                p::retain(b, &[left], &[inner]);
+                left = inner;
+                continue;
+            }
+        }
+        return je4_bin(b, BinOp::Band, left, right);
+    }
+}
+/// J-M9, E:640 ocaml_typeof_expr. Folding is syntactic, with no purity guard.
+pub fn jm9_typeof(b: &mut Bir, value: NodeId) -> NodeId {
+    let ty = match b.view(value) {
+        View::JNumber { .. } | View::JLength { .. } => Some("number"),
+        View::JStr { .. } => Some("string"),
+        View::JTemplate { .. } if b.node(value).aux() == 1 => Some("string"),
+        View::JArray { .. } => Some("object"),
+        View::JBool => Some("boolean"),
+        _ => None,
+    };
+    if let Some(ty) = ty {
+        b.release(value);
+        p::string(b, ty)
+    } else {
+        clear_location(b, value);
+        p::node(b, View::JTypeof { value }, 0)
+    }
+}
+/// J-M10, E:835 int_bnot.
+pub fn jm10_int_bnot(b: &mut Bir, value: NodeId) -> NodeId {
+    if let Some(n) = p::int_of(b, value) {
+        b.release(value);
+        p::int(b, !n)
+    } else {
+        p::node(b, View::JBnot { value }, 0)
+    }
+}
+
+/// J-M11, E:664/E:695/E:711 pure literal projections. `field` is authoritative
+/// on records; a missing named record field never falls back to the index.
+/// On success consumes the target and returns its retained element; on failure
+/// leaves the target unchanged for the caller's plain field-access constructor.
+pub fn jm11_projection(
+    b: &mut Bir,
+    target: NodeId,
+    field: Option<&str>,
+    index: Option<i32>,
+) -> Option<NodeId> {
+    if !super::facts::strictly_pure(b, target) {
+        return None;
+    }
+    let value = match b.view(target) {
+        View::JBlockLit { values, info } => {
+            let crate::bir::JsPayload::Block(tag) = b.javascript(info) else {
+                unreachable!()
+            };
+            if let (Some(field), Some(fields)) = (field, tag.record_fields()) {
+                values
+                    .iter()
+                    .zip(fields)
+                    .find_map(|(&v, (name, _))| (name == field).then_some(v))
+            } else {
+                values.get(usize::try_from(index?).ok()?).copied()
+            }
+        }
+        View::JArray { values } => values.get(usize::try_from(index?).ok()?).copied(),
+        _ => None,
+    }?;
+    p::retain(b, &[target], &[value]);
+    Some(value)
+}
+/// J-M11, E:740/E:750 poly_var_tag_access / poly_var_value_access.
+pub fn jm11_poly_var_access(b: &mut Bir, target: NodeId, payload: bool) -> NodeId {
+    let idx = usize::from(payload);
+    if let View::JBlockLit { values, .. } = b.view(target) {
+        if super::facts::strictly_pure(b, target) {
+            let value = values.get(idx).copied().expect("polyvariant field exists");
+            p::retain(b, &[target], &[value]);
+            return value;
+        }
+    }
+    let property = b.intern_text(if payload { "VAL" } else { "NAME" });
+    p::node(
+        b,
+        View::JDot {
+            object: target,
+            property,
+            position: crate::js_ir::arena::FieldPos::new(Some(idx as i32)),
+        },
+        0,
+    )
+}
+
+/// J-M12, E:844 interpolated_template. Segment utilities operate on literal
+/// text only; no legacy expression builder is called. Comments inhibit merging.
+pub fn jm12_interpolated_template(
+    b: &mut Bir,
+    segments: Vec<crate::string_literal::TemplateSegment>,
+    values: Vec<NodeId>,
+) -> NodeId {
+    use crate::string_literal::{StringLiteral, concat_template, template_from_semantic};
+    assert_eq!(segments.len(), values.len() + 1);
+    let mut segments = segments.into_iter();
+    let mut parts = vec![segments.next().unwrap()];
+    let mut merged = vec![];
+    let mut kept = vec![];
+    for (next, value) in segments.zip(values) {
+        let literal = if b.cold(value).and_then(|c| c.comment).is_some() {
+            None
+        } else {
+            match b.view(value) {
+                View::JStr { text } => Some(template_from_semantic(b.text(text))),
+                View::JTemplate { info, .. } if b.node(value).aux() == 1 => {
+                    let crate::bir::JsPayload::Template(p) = b.javascript(info) else {
+                        unreachable!()
+                    };
+                    Some(match p[0].cooked {
+                        Some(s) => StringLiteral::Valid {
+                            source: b.text(p[0].raw).to_owned().into(),
+                            semantic: b.text(s).to_owned().into(),
+                        },
+                        None => StringLiteral::InvalidSource(b.text(p[0].raw).to_owned().into()),
+                    })
+                }
+                _ => None,
+            }
+        };
+        if let Some(literal) = literal {
+            parts.push(literal);
+            parts.push(next);
+            b.release(value);
+        } else {
+            merged.push(concat_template(&parts));
+            kept.push(value);
+            parts = vec![next];
+        }
+    }
+    merged.push(concat_template(&parts));
+    let parts = merged
+        .into_iter()
+        .map(|part| match part {
+            StringLiteral::Valid { source, semantic } => crate::bir::TemplatePart {
+                raw: b.intern_text(&source),
+                cooked: Some(b.intern_text(&semantic)),
+            },
+            StringLiteral::InvalidSource(source) => crate::bir::TemplatePart {
+                raw: b.intern_text(&source),
+                cooked: None,
+            },
+        })
+        .collect();
+    let info = b.js_info(crate::bir::JsPayload::Template(parts));
+    p::node(
+        b,
+        View::JTemplate {
+            values: &kept,
+            info,
+        },
+        u16::from(kept.is_empty()),
+    )
+}
+
+fn integer_runtime_call(b: &mut Bir, modulo: bool, left: NodeId, right: NodeId) -> NodeId {
+    let name = "Primitive_int";
+    let module = if let Some(i) = b
+        .pools
+        .j_modules
+        .iter()
+        .position(|m| m.id.name() == name && matches!(m.kind, crate::js_ir::Kind::Runtime))
+    {
+        crate::bir::ImportId(i as u32)
+    } else {
+        let id = crate::bir::ImportId(b.pools.imports.len() as u32);
+        let path = b.intern_text(name);
+        b.pools.imports.push(crate::bir::Import {
+            name: crate::name::Name::new(name),
+            path,
+        });
+        b.pools.j_modules.push(crate::js_ir::ModuleId {
+            id: crate::ident::Ident::create_persistent(name),
+            kind: crate::js_ir::Kind::Runtime,
+            dynamic_import: false,
+        });
+        id
+    };
+    let member = Some(b.intern_text(if modulo { "mod_" } else { "div" }));
+    let callee = p::node(b, View::JQualified { module, member }, 0);
+    let info = b.js_info(crate::bir::JsPayload::Call(crate::js_ir::CallInfo {
+        kind: crate::js_ir::CallKind::BuiltinRuntime,
+        arity: crate::js_ir::CallArity::Full,
+        ..Default::default()
+    }));
+    p::node(
+        b,
+        View::JCall {
+            callee,
+            args: &[left, right],
+            info,
+        },
+        0,
+    )
+}
+/// J-M13, C:6174 int32_div_expr (formerly C:6033). The checked runtime call
+/// is selected only when the divisor is not a known nonzero integer literal.
+pub fn jm13_int32_div(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId) -> NodeId {
+    if matches!(b.view(left), View::JLength { .. }) && p::int_of(b, right) == Some(2) {
+        b.release(right);
+        let one = p::int(b, 1);
+        return je4_bin(b, BinOp::Asr, left, one);
+    }
+    if let Some(r) = p::int_of(b, right).filter(|r| *r != 0) {
+        if let Some(l) = p::int_of(b, left) {
+            p::retain(b, &[left, right], &[]);
+            return p::int(b, l.wrapping_div(r));
+        }
+    } else if check_zero {
+        return integer_runtime_call(b, false, left, right);
+    }
+    let value = je4_bin(b, BinOp::Div, left, right);
+    jm3_to_int32(b, value)
+}
+/// J-M13, C:6190 int32_mod_expr (formerly C:6049). Legacy modulo has neither
+/// a two-literal fold nor int32 coercion; its unchecked result stays raw `%`.
+pub fn jm13_int32_mod(b: &mut Bir, check_zero: bool, left: NodeId, right: NodeId) -> NodeId {
+    if !p::int_of(b, right).is_some_and(|r| r != 0) && check_zero {
+        return integer_runtime_call(b, true, left, right);
+    }
+    je4_bin(b, BinOp::Mod, left, right)
+}
+
+/// J-M14, O:339 push_effect_expression. Split sequences left-to-right, drop
+/// strictly pure values, and preserve assignment locations carried by unit pairs.
+pub fn jm14_push_effect_expression(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
+    let mut work = vec![value];
+    while let Some(value) = work.pop() {
+        if let View::JSeq { first, second } = b.view(value) {
+            if p::undefined(b, second)
+                && b.node(second).aux() == 0
+                && p::binary(b, first, BinOp::Eq).is_some()
+                && b.node(value).flags().contains(NodeFlags::JS_LOC_PRESENT)
+                && !b.node(first).flags().contains(NodeFlags::JS_LOC_PRESENT)
+            {
+                let outer = b.cold(value).unwrap();
+                let comment = b.cold(first).and_then(|c| c.comment).or(outer.comment);
+                b.set_cold(
+                    first,
+                    crate::bir::Cold {
+                        loc: outer.loc,
+                        comment,
+                    },
+                );
+                let mut flags = b.node(first).flags();
+                flags.0 |= NodeFlags::JS_LOC_PRESENT;
+                b.nodes[first.index()].set_flags(flags);
+            }
+            p::retain(b, &[value], &[first, second]);
+            work.push(second);
+            work.push(first);
+        } else if super::facts::strictly_pure(b, value) {
+            discard_pure_effect(b, value);
+        } else {
+            statements.push(js1_exp(b, value));
+        }
+    }
+}
+/// J-M14, O:368 push_s_exp: only numbers/undefined and trivial comma arms drop.
+pub fn jm14_push_s_exp(b: &mut Bir, mut value: NodeId, statements: &mut Vec<NodeId>) {
+    loop {
+        if trivial(b, value) {
+            b.release(value);
+            return;
+        }
+        if let View::JSeq { first, second } = b.view(value) {
+            let keep = if trivial(b, first) {
+                Some(second)
+            } else if trivial(b, second) {
+                Some(first)
+            } else {
+                None
+            };
+            if let Some(keep) = keep {
+                p::retain(b, &[value], &[keep]);
+                value = keep;
+                continue;
+            }
+        }
+        statements.push(js1_exp(b, value));
+        return;
+    }
+}
+/// J-M14, O:359 push_s_if_empty uses permissive PURE, not STRICT.
+pub fn jm14_push_s_if_empty(b: &mut Bir, value: NodeId, statements: &mut Vec<NodeId>) {
+    if p::pure(b, value) {
+        b.release(value);
+    } else {
+        jm14_push_s_exp(b, value, statements);
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;

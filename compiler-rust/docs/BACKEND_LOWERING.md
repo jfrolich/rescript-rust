@@ -1893,12 +1893,12 @@ of 1.3.
 | | | a literal positive power of two | a left shift (J-M7) |
 | J-M6 | `int32_pow` (E:545) | two integer literals | `ocaml_int32_pow` (E:535) |
 | J-M7 | `int32_lsl` (E:555) | two integer literals | the result |
-| J-M8 | `int32_lsr` (E:596), `int32_bxor` (E:614), `int32_band` (E:631) | two integer literals; `(x >>> n) >>> 0`; `(x \| 0) >>> 0`; `x ^ (y >>> 0)`; `(x \| 0) & y` | the result; the redundant operation dropped |
+| J-M8 | `int32_lsr` (E:596), `int32_bxor` (E:614), `int32_band` (E:631) | two integer literals for lsr/xor only (band does not fold literals); `(x >>> n) >>> 0`; `(x \| 0) >>> 0`; `x ^ (y >>> 0)`; `(x \| 0) & y` | the result; the redundant operation dropped |
 | J-M9 | `ocaml_typeof_expr` (E:640) | a number or length; a string; an array; a boolean | `"number"`, `"string"`, `"object"`, `"boolean"` |
 | J-M10 | `int_bnot` (E:835) | an integer literal | the result |
 | J-M11 | `pure_indexed_block_item` (E:664), `pure_record_field_item` (E:695), `direct_projection_from_pure_literal` (E:711), `poly_var_tag_access` (E:740), `poly_var_value_access` (E:750) (called from `compile_field_access` (K:186)) | a field of a strictly pure array or block literal | the element |
 | J-M12 | `interpolated_template` (E:844) | a value that is a string or template literal without a comment | merged into the neighbouring segments; with no value left, a template literal |
-| J-M13 | `int32_div_expr` (C:6033), `int32_mod_expr` (C:6049) | `len / 2`; a non-zero literal divisor; two literals | `len >> 1`; the plain operation with `\| 0`; the result. A divisor that may be zero: `Primitive_int.div`/`mod_` when checks are on |
+| J-M13 | `int32_div_expr` (C:6174, formerly C:6033), `int32_mod_expr` (C:6190, formerly C:6049) | `len / 2`; nonzero integer divisor; two integer literals | Division: `len >> 1`; plain division with `\| 0`; wrapped quotient. Modulo stays a plain `%`, without coercion or literal folding. A divisor that may be zero: `Primitive_int.div`/`mod_` when checks are on |
 | J-M14 | `push_effect_expression` (O:339), `push_s_if_empty` (O:359), `push_s_exp` (O:368) | a value used as a statement | a sequence split into statements; strictly pure parts dropped (`push_effect_expression`), or only numbers and `undefined` dropped (`push_s_exp`) |
 
 Not rewriting: the comparison helpers of E (`comparison_to_binop` (E:161),
@@ -1955,6 +1955,7 @@ positions.
 | `arena_assigned_variables` (whole unit, and per inlined body in `extend_assignable` (A:280)) | `delay_safe` (A:28) | `ASSIGNED` |
 | `expression_has_no_side_effects` (B:102) | J-E2, J-E4, J-E5, J-E6, J-E7, J-S3 | J flag `PURE` |
 | `js_expr_no_side_effects` (E:15) | the lowering, the M rows | J flag `STRICT` (pure, and no `**`, `/`, `%` that may throw) |
+| `is_pure_subexpression` (E:146) | J-M0 | J flag `J_SUBEXPR`, reusing L `DEAD`; distinct from both purity predicates |
 | `delay_safe` (A:28) | sequencing | J flag `DELAY_SAFE`. It depends on `ASSIGNED` of the variables in the expression, which is final before lowering starts |
 | `runs_no_code` (A:90) | sequencing | a walk of a chain of member reads only: bounded by the chain |
 | `lam_subst::subst` of a handler per raise (`resolve_static_raise` (C:6113)) | K15 | removed (Q1) |

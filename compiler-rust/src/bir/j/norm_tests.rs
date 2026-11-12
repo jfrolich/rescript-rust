@@ -538,3 +538,263 @@ fn js4_literal_integer_switch_match_and_default() {
         );
     }
 }
+
+#[test]
+fn jm1_sequences_all_literal_boundaries() {
+    for i in 0..12 {
+        for j in 0..12 {
+            oracle(
+                |a| vec![atom(a, i), atom(a, j)],
+                |a, v| crate::lambda::js_exp_make::js_seq(v[0], v[1], a),
+                |b, v| n::jm1_js_seq(b, v[0], v[1]),
+            );
+        }
+    }
+}
+#[test]
+fn jm2_nullish_and_integer_equality() {
+    for i in 0..12 {
+        for j in 0..12 {
+            for neq in [false, true] {
+                oracle(
+                    |a| vec![atom(a, i), atom(a, j)],
+                    |a, v| {
+                        crate::lambda::js_exp_make::compile_nullish_strict_comparison(
+                            if neq {
+                                crate::lambda::lam_compat::Comparison::Neq
+                            } else {
+                                crate::lambda::lam_compat::Comparison::Eq
+                            },
+                            v[0],
+                            v[1],
+                            a,
+                        )
+                    },
+                    |b, v| n::jm2_nullish_strict_comparison(b, neq, v[0], v[1]),
+                );
+            }
+            oracle(
+                |a| vec![atom(a, i), atom(a, j)],
+                |a, v| crate::lambda::js_exp_make::compile_int_equality(v[0], v[1], a),
+                |b, v| n::jm2_int_equality(b, v[0], v[1]),
+            );
+        }
+    }
+}
+#[test]
+fn jm3_through_jm8_arithmetic_matrix() {
+    use crate::lambda::js_exp_make as old;
+    type Old = fn(Expr, Expr, &mut JsArena) -> Expr;
+    type New = fn(&mut Bir, NodeId, NodeId) -> NodeId;
+    let rows: [(Old, New); 9] = [
+        (old::int32_bor, n::jm3_int32_bor),
+        (old::int32_add, |b, l, r| {
+            n::jm4_int32_add_sub(b, false, l, r)
+        }),
+        (old::int32_minus, |b, l, r| {
+            n::jm4_int32_add_sub(b, true, l, r)
+        }),
+        (old::int32_mul, n::jm5_int32_mul),
+        (old::int32_pow, n::jm6_int32_pow),
+        (old::int32_lsl, n::jm7_int32_lsl),
+        (old::int32_lsr, n::jm8_int32_lsr),
+        (old::int32_bxor, n::jm8_int32_bxor),
+        (old::int32_band, n::jm8_int32_band),
+    ];
+    for (row, (old, new)) in rows.into_iter().enumerate() {
+        for i in 0..12 {
+            for j in 0..12 {
+                if row == 6 && j == 3 {
+                    continue;
+                }
+                oracle(
+                    |a| vec![atom(a, i), atom(a, j)],
+                    |a, v| old(v[0], v[1], a),
+                    |b, v| new(b, v[0], v[1]),
+                );
+            }
+        }
+    }
+    for shift in [0, 1, 2, 30] {
+        for left in [i32::MIN, -1, 0, 1, i32::MAX] {
+            oracle(
+                |a| vec![e::int(left, a), e::int(shift, a)],
+                |a, v| old::int32_lsr(v[0], v[1], a),
+                |b, v| n::jm8_int32_lsr(b, v[0], v[1]),
+            );
+        }
+    }
+}
+#[test]
+fn jm0_jm9_jm10_unary_matrix() {
+    for i in 0..12 {
+        oracle(
+            |a| vec![atom(a, i)],
+            |a, v| {
+                crate::lambda::js_exp_make::remove_pure_subexpression(v[0], a)
+                    .unwrap_or_else(|| e::undefined(false, a))
+            },
+            |b, v| {
+                n::jm0_remove_pure_subexpression(b, v[0])
+                    .unwrap_or_else(|| p::node(b, View::JUndefined, 0))
+            },
+        );
+        oracle(
+            |a| vec![atom(a, i)],
+            |a, v| crate::lambda::js_exp_make::ocaml_typeof_expr(v[0], a),
+            |b, v| n::jm9_typeof(b, v[0]),
+        );
+        oracle(
+            |a| vec![atom(a, i)],
+            |a, v| crate::lambda::js_exp_make::int_bnot(v[0], a),
+            |b, v| n::jm10_int_bnot(b, v[0]),
+        );
+    }
+}
+#[test]
+fn jm11_array_projection_purity_and_bounds() {
+    for i in 0..12 {
+        for index in [-1, 0, 1, 2] {
+            oracle(
+                |a| {
+                    let x = atom(a, i);
+                    let y = e::int(9, a);
+                    let items = a.expr_list(&[x, y]);
+                    vec![a.expr(ExprKind::Array(items, crate::js_ir::MutableFlag::Immutable))]
+                },
+                |a, v| {
+                    crate::lambda::js_exp_make::pure_indexed_block_item(a, v[0], index)
+                        .unwrap_or_else(|| {
+                            let idx = e::int(index, a);
+                            a.expr(ExprKind::ArrayIndex(v[0], idx))
+                        })
+                },
+                |b, v| {
+                    n::jm11_projection(b, v[0], None, Some(index)).unwrap_or_else(|| {
+                        let index = p::int(b, index);
+                        p::node(
+                            b,
+                            View::JIndex {
+                                object: v[0],
+                                index,
+                            },
+                            0,
+                        )
+                    })
+                },
+            );
+        }
+    }
+}
+#[test]
+fn jm12_template_literals_comments_and_values() {
+    for i in 0..12 {
+        for comment in [false, true] {
+            oracle(
+                |a| {
+                    let value = atom(a, i);
+                    vec![if comment {
+                        a.with_expr_comment(value, Some("keep"))
+                    } else {
+                        value
+                    }]
+                },
+                |a, v| {
+                    crate::lambda::js_exp_make::interpolated_template(
+                        vec![
+                            crate::string_literal::template_from_semantic("before"),
+                            crate::string_literal::template_from_semantic("after"),
+                        ],
+                        v.to_vec(),
+                        a,
+                    )
+                },
+                |b, v| {
+                    n::jm12_interpolated_template(
+                        b,
+                        vec![
+                            crate::string_literal::template_from_semantic("before"),
+                            crate::string_literal::template_from_semantic("after"),
+                        ],
+                        v.to_vec(),
+                    )
+                },
+            );
+        }
+    }
+}
+#[test]
+fn jm13_checked_and_unchecked_division_and_modulo() {
+    for modulo in [false, true] {
+        for checks in [false, true] {
+            for i in 0..12 {
+                for j in 0..12 {
+                    oracle(
+                        |a| vec![atom(a, i), atom(a, j)],
+                        |a, v| {
+                            let mut compiler = crate::lambda::lam_compile::LambdaCompiler::new();
+                            compiler.j = std::mem::take(a);
+                            compiler.check_div_by_zero = checks;
+                            let value = if modulo {
+                                compiler.int32_mod_expr(v[0], v[1])
+                            } else {
+                                compiler.int32_div_expr(v[0], v[1])
+                            };
+                            *a = compiler.j;
+                            value
+                        },
+                        |b, v| {
+                            if modulo {
+                                n::jm13_int32_mod(b, checks, v[0], v[1])
+                            } else {
+                                n::jm13_int32_div(b, checks, v[0], v[1])
+                            }
+                        },
+                    );
+                }
+            }
+        }
+    }
+}
+#[test]
+fn jm14_statement_modes_and_sequence_boundaries() {
+    for mode in 0..3 {
+        for i in 0..12 {
+            for j in 0..12 {
+                stmt_oracle(
+                    |a| {
+                        let l = atom(a, i);
+                        let r = atom(a, j);
+                        let value = e::seq(l, r, a);
+                        a.stmt(StmtKind::Exp(value))
+                    },
+                    |a, s| {
+                        let StmtKind::Exp(v) = a.sk(s) else { panic!() };
+                        let mut out = vec![];
+                        match mode {
+                            0 => {
+                                crate::lambda::lam_coercion::push_effect_expression(a, &mut out, v)
+                            }
+                            1 => crate::lambda::lam_coercion::push_s_exp(a, &mut out, v),
+                            _ => crate::lambda::lam_coercion::push_s_if_empty(a, &mut out, v),
+                        };
+                        crate::js_ir::build::stmt::block(&out, a)
+                    },
+                    |b, s| {
+                        let View::SExp { value } = b.view(s) else {
+                            panic!()
+                        };
+                        p::retain(b, &[s], &[value]);
+                        let mut out = vec![];
+                        match mode {
+                            0 => n::jm14_push_effect_expression(b, value, &mut out),
+                            1 => n::jm14_push_s_exp(b, value, &mut out),
+                            _ => n::jm14_push_s_if_empty(b, value, &mut out),
+                        };
+                        n::js2_block(b, out)
+                    },
+                );
+            }
+        }
+    }
+}

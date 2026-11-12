@@ -1625,6 +1625,7 @@ mod tests {
             let expected_pure = js::build::expression_has_no_side_effects(&a, e);
             let expected_strict = crate::lambda::js_exp_make::js_expr_no_side_effects(&a, e);
             let expected_equal = js::build::ocaml_eq_expression(&a, e, e);
+            let expected_subexpression = crate::lambda::js_exp_make::is_pure_subexpression(&a, e);
             let s = a.stmt(S::Exp(e));
             let p = program(a, vec![s]);
             let imported = import_js(&p).unwrap();
@@ -1633,6 +1634,7 @@ mod tests {
             assert_eq!(imported.arena.node(value).flags().contains(NodeFlags::PURE), expected_pure);
             assert_eq!(crate::bir::j::facts::strictly_pure(&imported.arena, value), expected_strict);
             assert_eq!(crate::bir::j::equal::equal(&imported.arena, value, value, &mut 0), expected_equal);
+            assert_eq!(imported.arena.node(value).flags().contains(NodeFlags::J_SUBEXPR), expected_subexpression);
             roundtrip(&p);
         }
     }

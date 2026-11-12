@@ -25,6 +25,7 @@ pub(crate) fn pure_expression(bir: &mut Bir, view: View<'_>, aux: u16) -> NodeId
     let node = bir.new_node(view, aux);
     let mut flags = bir.node(node).flags();
     flags.0 |= NodeFlags::STRICT;
+    if matches!(bir.view(node), View::Var { .. }) { flags.0 |= NodeFlags::J_SUBEXPR; }
     if delay_safe {
         flags.0 |= NodeFlags::DELAY_SAFE;
     }

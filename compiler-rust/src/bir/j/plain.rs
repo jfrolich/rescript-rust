@@ -8,7 +8,7 @@ pub fn node(b: &mut Bir, view: View<'_>, aux: u16) -> NodeId {
     let id = b.new_node(view, aux);
     if var {
         let mut flags = b.node(id).flags();
-        flags.0 |= NodeFlags::STRICT;
+        flags.0 |= NodeFlags::STRICT | NodeFlags::J_SUBEXPR;
         b.nodes[id.index()].set_flags(flags);
     }
     id
