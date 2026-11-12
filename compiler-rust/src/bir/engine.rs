@@ -447,7 +447,9 @@ impl<'a> Engine<'a> {
         let mut lists = Lists::default();
         let node = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists);
         let cold = self.bir.cold(n);
-        for c in self.bir.view(n).children() { self.detach(c); }
+        for c in self.bir.view(n).children() {
+            self.detach(c);
+        }
         let value = self.intern_const(Constant::Undefined(true));
         self.put(n, View::Const { value }, 0);
         Shell { node, lists, cold }
@@ -456,7 +458,9 @@ impl<'a> Engine<'a> {
     /// Restore a vacated shell around its detached, rewritten children.
     pub fn close_shell(&mut self, n: NodeId, shell: Shell) {
         self.put(n, shell.node.view(&shell.lists), shell.node.aux());
-        if let Some(cold) = shell.cold { self.bir.set_cold(n, cold); }
+        if let Some(cold) = shell.cold {
+            self.bir.set_cold(n, cold);
+        }
     }
 
     /// Copy a binder-free exit handler without allocating new identities.
@@ -474,7 +478,14 @@ impl<'a> Engine<'a> {
             if !done {
                 assert!(self.bir.binders(n).is_empty());
                 work.push((n, true));
-                work.extend(self.bir.view(n).children().into_iter().rev().map(|c| (c, false)));
+                work.extend(
+                    self.bir
+                        .view(n)
+                        .children()
+                        .into_iter()
+                        .rev()
+                        .map(|c| (c, false)),
+                );
                 continue;
             }
             if let View::Fun { header, .. } = self.bir.view(n) {
@@ -484,11 +495,17 @@ impl<'a> Engine<'a> {
                 self.bir.pools.funcs[fresh.index()].flags = h.flags;
                 funcs.insert(header, fresh);
             }
-            let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists)
-                .remap(&mut lists, &super::node::Renaming {
-                nodes: &nodes, vars: &empty, funcs: &funcs,
-                catches: &HashMap::new(), labels: &HashMap::new(), js: &HashMap::new(),
-            });
+            let packed = Node::pack(self.bir.view(n), self.bir.node(n).aux(), &mut lists).remap(
+                &mut lists,
+                &super::node::Renaming {
+                    nodes: &nodes,
+                    vars: &empty,
+                    funcs: &funcs,
+                    catches: &HashMap::new(),
+                    labels: &HashMap::new(),
+                    js: &HashMap::new(),
+                },
+            );
             let new = self.node(packed.view(&lists), packed.aux(), 1);
             if let Some(cold) = self.bir.cold(n) {
                 self.bir.set_cold(new, cold);

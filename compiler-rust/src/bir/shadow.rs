@@ -285,7 +285,9 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
             return report(unit, "lambda-exits", Some(reason.0), None);
         }
     }
-    imported.arena.validate(Some(imported.root), false)
+    imported
+        .arena
+        .validate(Some(imported.root), false)
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-exits validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
@@ -294,10 +296,13 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
     let generator = crate::context::IdGenerator::new();
     generator.set_current_stamp(stamp);
     let mut legacy = arena.clone();
-    let expected = crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
+    let expected =
+        crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
     let legacy_counts: std::collections::BTreeMap<_, _> =
         crate::lambda::lam_pass_exits::count_helper(&legacy, expected)
-            .into_iter().map(|(label, count)| (label as u32, count)).collect();
+            .into_iter()
+            .map(|(label, count)| (label as u32, count))
+            .collect();
     if counts != legacy_counts {
         anyhow::bail!("{unit}: lambda-exits ordered count mismatch");
     }
@@ -314,18 +319,30 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
     if before != after {
         let before = String::from_utf8_lossy(&before);
         let after = String::from_utf8_lossy(&after);
-        let line = before.lines().zip(after.lines()).position(|(a,b)| a != b)
-            .unwrap_or_else(|| before.lines().count().min(after.lines().count())) + 1;
-        anyhow::bail!("{unit}: lambda-exits mismatch at line {line}: expected {:?}, got {:?}",
-            before.lines().nth(line - 1), after.lines().nth(line - 1));
+        let line = before
+            .lines()
+            .zip(after.lines())
+            .position(|(a, b)| a != b)
+            .unwrap_or_else(|| before.lines().count().min(after.lines().count()))
+            + 1;
+        anyhow::bail!(
+            "{unit}: lambda-exits mismatch at line {line}: expected {:?}, got {:?}",
+            before.lines().nth(line - 1),
+            after.lines().nth(line - 1)
+        );
     }
-    report(unit, "lambda-exits", None, Some(NormReport {
-        calls: stats.entered,
-        replayed: Default::default(),
-        renormalised: Default::default(),
-        compared: stats.compared,
-        rules: stats.rules,
-    }))
+    report(
+        unit,
+        "lambda-exits",
+        None,
+        Some(NormReport {
+            calls: stats.entered,
+            replayed: Default::default(),
+            renormalised: Default::default(),
+            compared: stats.compared,
+            rules: stats.rules,
+        }),
+    )
 }
 
 #[cfg(test)]
