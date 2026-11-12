@@ -735,7 +735,9 @@ impl Output {
             Output::Write {
                 output_file,
                 contents,
-            } => crate::gentype::generated_files::write_file_if_required(&output_file, &contents),
+            } => crate::timing::measure(crate::timing::Phase::GentypeFileWrite, || {
+                crate::gentype::generated_files::write_file_if_required(&output_file, &contents)
+            }),
             Output::TypeError { output_file } => {
                 crate::gentype::generated_files::log_file_action(
                     crate::gentype::generated_files::FileAction::TypeError,
@@ -744,14 +746,16 @@ impl Output {
                 Ok(())
             }
             Output::NoMatch { output_file } => {
-                crate::gentype::generated_files::log_file_action(
-                    crate::gentype::generated_files::FileAction::NoMatch,
-                    &output_file,
-                );
-                if Path::new(&output_file).exists() {
-                    std::fs::remove_file(&output_file)?;
-                }
-                Ok(())
+                crate::timing::measure(crate::timing::Phase::GentypeFileNoMatch, || {
+                    crate::gentype::generated_files::log_file_action(
+                        crate::gentype::generated_files::FileAction::NoMatch,
+                        &output_file,
+                    );
+                    if Path::new(&output_file).exists() {
+                        std::fs::remove_file(&output_file)?;
+                    }
+                    Ok(())
+                })
             }
         }
     }
