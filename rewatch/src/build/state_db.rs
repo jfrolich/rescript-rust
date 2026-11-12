@@ -396,7 +396,16 @@ fn ensure_sqlite_initialized() {
     });
 }
 
+fn pending_path(path: &Path) -> PathBuf {
+    path.with_extension("sqlite.pending")
+}
+
 fn open_existing(path: &Path) -> Option<Connection> {
+    // With a memory journal, the database alone cannot prove that a writer
+    // finished. Check the external marker before even reading the schema.
+    if pending_path(path).try_exists().unwrap_or(true) {
+        return None;
+    }
     ensure_sqlite_initialized();
     let conn = Connection::open_with_flags(
         path,
@@ -412,28 +421,38 @@ fn open_for_write(package: &Package) -> rusqlite::Result<Connection> {
 }
 
 fn open_path_for_write(path: &Path) -> rusqlite::Result<Connection> {
+    open_path_for_write_with_journal(path, None)
+}
+
+fn open_path_for_write_with_journal(path: &Path, journal: Option<&str>) -> rusqlite::Result<Connection> {
     ensure_sqlite_initialized();
     if let Some(parent) = path.parent() {
         let _ = std::fs::create_dir_all(parent);
     }
-    let mut conn = Connection::open(path)?;
+    let existed = path.exists();
+    let open = || -> rusqlite::Result<Connection> {
+        let conn = Connection::open(path)?;
+        // Schema creation is a cache write too. Apply this before its commit,
+        // not afterwards (which left fresh databases using synchronous=FULL).
+        conn.pragma_update(None, "synchronous", "OFF")?;
+        if let Some(journal) = journal {
+            conn.pragma_update(None, "journal_mode", journal)?;
+        }
+        Ok(conn)
+    };
+    let mut conn = open()?;
     let version: i64 = conn.query_row("PRAGMA user_version", [], |row| row.get(0))?;
     if version != SCHEMA_VERSION {
-        drop(conn);
-        let _ = std::fs::remove_file(path);
-        conn = Connection::open(path)?;
-        // Larger pages: rows hold encoded interfaces of several KB, and a
-        // build writes tens of MB, which 4 KB pages split into many more
-        // pages and writes. Takes effect only before the first table.
+        if existed {
+            drop(conn);
+            let _ = std::fs::remove_file(path);
+            conn = open()?;
+        }
         conn.pragma_update(None, "page_size", 16384)?;
-        // One transaction: each statement on its own would create and
-        // delete the rollback journal, once per table.
         conn.execute_batch(&format!(
             "BEGIN;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nCOMMIT;"
         ))?;
     }
-    // A lost write only costs a rebuild, so don't wait for the disk.
-    conn.pragma_update(None, "synchronous", "OFF")?;
     // A record write is one transaction of up to tens of MB; with SQLite's
     // default 2 MB page cache, dirty pages spill to the file mid-transaction
     // and are written again on commit.
@@ -459,8 +478,8 @@ fn read_meta_from(conn: &Connection) -> rusqlite::Result<BTreeMap<String, String
 pub fn read(package: &Package) -> Option<PackageState> {
     let db = path(package);
     let conn = open_existing(&db)?;
-    // Check before reading any build rows. An interrupted writer leaves zero
-    // committed outside its transaction, even if SQLite rolls back the rows.
+    // Check before reading any build rows. open_existing already rejected an
+    // external incomplete marker, including a kill during the SQLite commit.
     let complete: String = conn.query_row(
         "SELECT value FROM meta WHERE key = ?1", [META_RECORD_COMPLETE], |row| row.get(0),
     ).ok()?;
@@ -743,13 +762,46 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
             };
             (key, row, encoded)
         }).collect::<Vec<_>>());
-    let write = || -> rusqlite::Result<()> {
-        let mut conn = timing::measure(Phase::RecordSqlOpen, || open_for_write(package))?;
-        timing::measure(Phase::RecordSqlMeta, || conn.execute(
+    let db = path(package);
+    let pending = pending_path(&db);
+    // Two roots can share a dependency database. A pending marker is stale
+    // only after its writer has released this per-database lock (also on kill).
+    let guard = (|| -> std::io::Result<std::fs::File> {
+        std::fs::create_dir_all(package.get_build_path())?;
+        let file = std::fs::OpenOptions::new().read(true).write(true).create(true)
+            .truncate(false).open(db.with_extension("sqlite.guard"))?;
+        fs2::FileExt::lock_exclusive(&file)?;
+        Ok(file)
+    })();
+    let _guard = match guard {
+        Ok(guard) => guard,
+        Err(err) => {
+            log::warn!("Could not lock the build state of {}: {err}", package.name);
+            return;
+        }
+    };
+    let write = || -> anyhow::Result<()> {
+        if pending.try_exists()? {
+            // A killed memory-journal writer may have spilled incomplete pages.
+            // Its database is a cache miss, never a base for difference writes.
+            let mut journal = db.as_os_str().to_owned();
+            journal.push("-journal");
+            for file in [db.clone(), PathBuf::from(journal)] {
+                match std::fs::remove_file(file) {
+                    Ok(()) => (),
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => (),
+                    Err(err) => return Err(err.into()),
+                }
+            }
+        }
+        std::fs::write(&pending, b"incomplete")?;
+        let mut conn = timing::measure(Phase::RecordSqlOpen, ||
+            open_path_for_write_with_journal(&db, Some("MEMORY")))?;
+        let tx = conn.transaction()?;
+        timing::measure(Phase::RecordSqlMeta, || tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')",
             [META_RECORD_COMPLETE],
         ))?;
-        let tx = conn.transaction()?;
         {
             let table_timer = RecordTimer::start(Phase::RecordSqlMeta);
             let mut set_meta = tx.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)")?;
@@ -841,8 +893,14 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
                             row.interface_warnings,
                             row.interface_digest.map(|digest| digest as i64),
                             imports
-                        ])
-                        .map(drop)
+                        ])?;
+                    #[cfg(debug_assertions)]
+                    if std::env::var("RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
+                        // Spill partial updates before the other modules' rows.
+                        tx.cache_flush()?;
+                        std::process::abort();
+                    }
+                    Ok(())
                 },
             )?;
 
@@ -878,13 +936,22 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
         if std::env::var("RESCRIPT_TEST_ABORT_RECORD_WRITE").ok().as_deref() == Some(&package.name) {
             std::process::abort();
         }
-        // Last row in the transaction: neither partially updated rows nor the
-        // previous successful record can be trusted after an interrupted write.
+        // Keep the in-database completion row too. The external marker protects
+        // the commit itself, which a memory journal cannot recover after a kill.
         tx.execute(
             "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')",
             [META_RECORD_COMPLETE],
         )?;
-        timing::measure(Phase::RecordSqlCommit, || tx.commit())
+        #[cfg(debug_assertions)]
+        if std::env::var("RESCRIPT_TEST_ABORT_AFTER_RECORD_MARKER").ok().as_deref() == Some(&package.name) {
+            tx.cache_flush()?;
+            std::process::abort();
+        }
+        timing::measure(Phase::RecordSqlCommit, || tx.commit())?;
+        // This is the trust boundary, after all SQLite pages have been written.
+        // No fsync: loss of this cache is allowed; process-crash reuse is not.
+        std::fs::remove_file(&pending)?;
+        Ok(())
     };
     if let Err(err) = write() {
         log::warn!("Could not record the build state of {}: {err}", package.name);
@@ -1053,6 +1120,23 @@ mod tests {
         let package = test_package(dir.path());
         assert!(read(&package).is_none());
         assert!(read_meta(&package).is_none());
+    }
+
+    #[test]
+    fn incomplete_marker_rejects_and_replaces_even_an_unreadable_database() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let first = state(1, None);
+        write_record(&package, None, &first);
+        assert_eq!(read(&package).as_ref(), Some(&first));
+        let pending = pending_path(&path(&package));
+        std::fs::write(&pending, b"incomplete").unwrap();
+        assert!(read(&package).is_none());
+        assert!(read_meta(&package).is_none());
+        std::fs::write(path(&package), b"incomplete SQLite pages").unwrap();
+        write_record(&package, None, &first);
+        assert!(!pending.exists());
+        assert_eq!(read(&package).as_ref(), Some(&first));
     }
 
     #[test]

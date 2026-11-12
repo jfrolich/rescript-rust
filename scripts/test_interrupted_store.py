@@ -30,11 +30,15 @@ with tempfile.TemporaryDirectory(prefix="interrupted-store-") as tmp:
     expected = {p.relative_to(project): p.read_bytes() for p in project.rglob("*.mjs")}
     assert expected
     assert "Compiled 0 modules" in build()
-    aborted = build({"RESCRIPT_FULL_BUILD": "1", "RESCRIPT_TEST_ABORT_RECORD_WRITE": "interrupted-store"}, False)
-    assert "Finished compilation" in aborted, aborted
-    recovered = build()
-    assert "Compiled 2 modules" in recovered, recovered
-    actual = {p.relative_to(project): p.read_bytes() for p in project.rglob("*.mjs")}
-    assert actual == expected
-    assert "Compiled 0 modules" in build()
-    print("Aborted after result; recovery compiled both modules with identical JS; next build compiled zero modules")
+    for hook in ("RESCRIPT_TEST_ABORT_RECORD_WRITE", "RESCRIPT_TEST_ABORT_DURING_RECORD_WRITE",
+                 "RESCRIPT_TEST_ABORT_AFTER_RECORD_MARKER"):
+        aborted = build({"RESCRIPT_FULL_BUILD": "1", hook: "interrupted-store"}, False)
+        assert "Finished compilation" in aborted, aborted
+        assert (project / "lib/rescript/rescript.sqlite.pending").exists()
+        recovered = build()
+        assert "Compiled 2 modules" in recovered, recovered
+        actual = {p.relative_to(project): p.read_bytes() for p in project.rglob("*.mjs")}
+        assert actual == expected
+        assert not (project / "lib/rescript/rescript.sqlite.pending").exists()
+        assert "Compiled 0 modules" in build()
+        print(f"{hook}: full recovery with identical JS, then zero-module incremental build")
