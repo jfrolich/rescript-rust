@@ -726,15 +726,20 @@ pub fn incremental_build_without_lock(
     let timing_ast_elapsed = timing_ast.elapsed();
 
     let result_asts = result_asts.and_then(|mut warnings| {
-        let deleted = build_state.deleted_modules.clone();
-        deps::get_deps(build_state, &deleted);
-        deps::plan_gentype(build_state);
-        if incremental::mark_missing_gentype_declarations(build_state) {
-            warnings.push_str(&parse::generate_asts(
-                build_state,
-                || pb.inc(1),
-                parse::ParseWarningLog::Append,
-            )?);
+        // Incremental planning already computed the closure before choosing
+        // its second parse round. Other builds (including watch updates)
+        // plan it here, once their changed sources have been parsed.
+        if !incremental {
+            let deleted = build_state.deleted_modules.clone();
+            deps::get_deps(build_state, &deleted);
+            deps::plan_gentype(build_state);
+            if incremental::mark_missing_gentype_declarations(build_state) {
+                warnings.push_str(&parse::generate_asts(
+                    build_state,
+                    || pb.inc(1),
+                    parse::ParseWarningLog::Append,
+                )?);
+            }
         }
         Ok(warnings)
     });
