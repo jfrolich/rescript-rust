@@ -4564,6 +4564,68 @@ Other concrete boundaries for implementation:
   copying type nodes. Reusing the old lazy component object as a companion
   is not, by itself, the required deletion of the old covered-key path.
 
+##### W4 as built: what the inventory got wrong, and what is left
+
+Checked against the code at ef7984c353 while building the slice. The
+inventory's reason names and its six effect kinds are right. These rows
+were wrong or incomplete:
+
+| Inventory said | The code |
+| --- | --- |
+| `alias_sources_for_component_path` must be derived from world-owned data for a covered path | A component path is registered only for a child that is a path (`register_component_alias_source`, from a parent's table). A unit's own path is never one, so the read answers nothing while a unit view is built. What a unit view owes other tables is the reverse: the pairs for its own alias children, which `adopt_view` registers |
+| `has_component_paths_for_alias_source` classifies the path | It decides only whether `build_module_components_from_parent_path` skips a child lookup, for a dotted path. The classification of a unit path is `PersistentEnv::qualified_alias_path_for_flattened_head`, which reads the alias rewrites the *compilation* has collected so far. The same unit is therefore a W4 key in one compilation and a namespace key in another; W5 has to make that a fact of the world |
+| The scratch context needs a persistent environment | Building a unit view loads no unit and reads no registry: `units` is the unit itself, which the adopter loads to find the view cell, and `nested` is empty. `flattened_backing_sources_for_alias_source` does read the registry, but it runs when a compilation registers a pair, not in the build |
+| Forced child declarations: boundary with W5 open | Forcing a child declaration in a store build registers it with the compilation (`force_component_module_declaration_thunk` calls `register_qualified_module_decl`, replayed as `RegisterQualifiedModuleDecl`). W4 forces a child once per build in a cell of the parent view and registers it with each compilation that reads it |
+| Opened layers "assemble tables from frozen entries" | `open` does not install the tables a qualified lookup reads. `add_signature_to_env_with_options_inner` describes the constructors again and installs the declared value types, not the substituted ones. A view therefore carries both: the lookup tables and the opened items |
+| Unit loading must be resolved independently of the adopter | The adopter's `find_pers_struct` is the unit load, and it is the same call the old build made |
+
+Not in the inventory:
+
+- `TypeContext::create_ident` and `rename_ident_stamp` take a stamp of the
+  compilation's counter unless a store build is active. A scratch context
+  takes store-range stamps always (`set_world_scratch`).
+- `build_constructors_for_name` and the label lookup scan the whole
+  signature per name, and `substitute_sig_path` and
+  `freshen_component_modtype_declaration_bound_idents` rebuild the component
+  substitution per call. Forcing every name that way is quadratic; the view
+  build has one-pass forms (`build_all_constructors`, `ComponentSubst`).
+- The worker store's `label_families` is a third per-worker table a view's
+  labels would have named. Frozen label arrays live in a table of
+  write-once cells in the world (`LabelArrayRef::frozen`).
+
+Where W4 as built differs from the text above:
+
+- **Keys.** Built: the path of a unit the world owns. **Not built: chains
+  of structure-typed children.** A child's signature is qualified by
+  `build_local_module_components` against a seed environment scanned from
+  its ancestors, and its own children's tables capture that environment;
+  doing it on a scratch context needs that scan rebuilt from the parent
+  view. Children of a unit view are still built as store builds, once per
+  worker, from tables the worker keeps per view (`env_lazy::ViewTables`).
+- **The view table.** There is no table of paths. A unit's cell is a field
+  of the unit (`PersStruct::ps_view`), set when the world takes the unit,
+  so reading a built view is one load of a write-once cell. The unit table
+  is unchanged (two mutex-guarded maps): the view table does not need its
+  index. A table of child cells indexed by signature item belongs with the
+  child keys.
+- **The scratch context.** One fresh context per view build, dropped after
+  it (`ViewScratch::fresh`), not one per worker that is reset: a build then
+  sees nothing of an earlier build, and a build that needs another view
+  holds no borrow while that one is built.
+- **Sharing without a copy.** Not built: every value of a view is copied
+  and substituted. `world_view_nodes` reports the copied nodes and
+  `shared=0`.
+- **`build_shared_persistent_root_components`** is gone. A unit the world
+  does not own (one loaded from disk, or met when the pool is full) has no
+  view; its components are built for the compilation by
+  `build_private_unit_components`, as any local path's are.
+- **A bridge to store builds.** A store build that reads a unit view
+  records `StoreEffect::AdoptView`, so a compilation that reuses the
+  build's result adopts the view too. W6 deletes it with the mechanism.
+- **`RESCRIPT_WORLD_VERIFY`** describes the view again on the adopting
+  worker and compares the prints without freezing the copy: freezing one
+  per adoption fills the pool on the application.
+
 #### W5. Alias and namespace views; adoption replaces replay
 
 - **Files.** `types/module_view.rs`, `types/typecore.rs`
