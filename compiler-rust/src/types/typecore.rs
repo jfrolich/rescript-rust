@@ -26138,13 +26138,13 @@ fn module_components_cache_key(
 }
 
 fn with_resolved_child_module_components<R>(
-    parent_components: &crate::types::env_lazy::QualifiedModuleComponents,
+    parent_components: crate::types::env_lazy::Components<'_>,
     child_name: &str,
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
-    f: impl FnOnce(i32, &crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(i32, crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let step_pos = |path: &Path| match path.view() {
@@ -26185,7 +26185,10 @@ fn with_resolved_child_module_components<R>(
         );
         return stored.with_components(pers_env, ctx, cache_mode, |components| {
             (f.take()
-                .expect("qualified child module components callback reused"))(pos, components)
+                .expect("qualified child module components callback reused"))(
+                pos,
+                crate::types::env_lazy::Components::Local(components),
+            )
         });
     }
 
@@ -26235,7 +26238,10 @@ fn with_resolved_child_module_components<R>(
     };
     let result = (f
         .take()
-        .expect("qualified child module components callback reused"))(pos, &components);
+        .expect("qualified child module components callback reused"))(
+        pos,
+        crate::types::env_lazy::Components::Local(&components),
+    );
     if let Some(module_key) = module_key {
         ctx.register_qualified_module_components(module_key, components);
     }
@@ -26532,7 +26538,7 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
     mode: LidComponentLookup,
     f: &mut dyn FnMut(
         Option<&Path>,
-        &crate::types::env_lazy::QualifiedModuleComponents,
+        crate::types::env_lazy::Components<'_>,
     ) -> Option<R>,
 ) -> Option<R> {
     let LidComponentLookup {
@@ -26551,7 +26557,10 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                     if let Some(result) = env
                         .with_local_module_components(&pident_path, |stored| {
                             stored.with_components(pers_env, ctx, api, |components| {
-                                f(lookup_path.as_ref(), components)
+                                f(
+                                    lookup_path.as_ref(),
+                                    crate::types::env_lazy::Components::Local(components),
+                                )
                             })
                         })
                         .flatten()
@@ -26593,10 +26602,10 @@ fn with_resolved_module_components_for_lid_inner<'a, R>(
                 pers_env,
                 ctx,
                 mode,
-                &mut |path, components| Some((path.cloned(), components.clone())),
+                &mut |path, components| Some((path.cloned(), components.to_held())),
             )?;
             with_resolved_child_module_components(
-                &parent_components,
+                parent_components.components(),
                 child_name.as_str(),
                 env,
                 pers_env,
@@ -26622,11 +26631,11 @@ pub(crate) fn with_module_descr_for_lid<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&Path, &crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(&Path, crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let mut wrapper = |path: Option<&Path>,
-                       components: &crate::types::env_lazy::QualifiedModuleComponents| {
+                       components: crate::types::env_lazy::Components<'_>| {
         Some((f.take().expect("module descriptor callback reused"))(
             path.expect("lookup path requested"),
             components,
@@ -26652,11 +26661,11 @@ pub(crate) fn with_resolved_module_components_for_lid<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     let mut f = Some(f);
     let mut wrapper =
-        |_: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        |_: Option<&Path>, components: crate::types::env_lazy::Components<'_>| {
             Some((f.take().expect(
                 "qualified module components by lid callback reused",
             ))(components))
@@ -26716,7 +26725,7 @@ pub(crate) fn open_module_lid_components_into_env(
     }
     // The open's root is the path `Env.lookup_module` builds for `lid`.
     let mut wrapper =
-        |path: Option<&Path>, components: &crate::types::env_lazy::QualifiedModuleComponents| {
+        |path: Option<&Path>, components: crate::types::env_lazy::Components<'_>| {
             let path = *path.expect("lookup path requested");
             crate::cmi::persistent_env::open_module_components_into_env(
                 components, path, target_env, ctx, slot,
@@ -26971,7 +26980,58 @@ fn flattened_alias_component_parent(
         || ctx.has_component_paths_for_alias_source(&source_path)
 }
 
-fn build_shared_persistent_root_components(
+/// The world's view of unit `ps`, adopted by this compilation under `key`
+/// (see `TypeContext::adopt_view`); `None` when the world does not own the
+/// unit. One load of the unit's view cell when the view is built already.
+pub(crate) fn adopt_unit_view(
+    ps: &std::sync::Arc<crate::cmi::persistent_env::PersStruct>,
+    key: crate::types::context::QualifiedModuleComponentsCacheKey,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    use crate::types::module_view::{ViewKey, verify_view, world_verify_enabled};
+    let world = ctx.world();
+    let view_key = ViewKey::Unit(ps);
+    let view = world.views().get_or_build(world, &view_key)?;
+    if world_verify_enabled() {
+        verify_view(world, &view_key, &view);
+    }
+    ctx.adopt_view(key, view.clone());
+    Some(view)
+}
+
+/// The world's view of `module_path` when it is the path of a unit that is
+/// not the flattened backing unit of a namespace alias. Loads the unit as
+/// any lookup of it does.
+fn adopt_persistent_root_view(
+    module_path: &Path,
+    key: &crate::types::context::QualifiedModuleComponentsCacheKey,
+    pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
+    ctx: &crate::types::context::TypeContext,
+) -> Option<std::sync::Arc<crate::types::module_view::ModuleView>> {
+    if !ctx.persistent_env_is_in_process() {
+        return None;
+    }
+    let PathView::Pident(id) = module_path.view() else {
+        return None;
+    };
+    if !id.is_persistent() {
+        return None;
+    }
+    let pers = pers_env.as_mut()?;
+    if pers
+        .qualified_alias_path_for_flattened_head(id.name())
+        .is_some()
+        || !pers.unit_visible(id.name())
+    {
+        return None;
+    }
+    let ps = pers.find_pers_struct(id.name(), ctx)?;
+    adopt_unit_view(&ps, key.clone(), ctx)
+}
+
+/// The components of a unit only this compilation holds (the world owns no
+/// copy of it): built for this compilation, like any other local path.
+fn build_private_unit_components(
     module_path: &Path,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
@@ -27034,7 +27094,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
     cache_mode: ComponentLookupApi,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     // OCaml compiler/ml/env.ml:781-788 path-based `Pident` lookup is exact
     // (`IdTbl.find_same`). Source `Longident.Lident` name lookup is handled
@@ -27048,7 +27108,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
             stored.with_components(pers_env, ctx, cache_mode, |components| {
                 (f.take()
                     .expect("qualified module components callback reused"))(
-                    components
+                    crate::types::env_lazy::Components::Local(components),
                 )
             })
         })
@@ -27069,9 +27129,21 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         return Some(result);
     }
 
-    // A persistent-rooted view is the same for every compilation (OCaml
-    // builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678), so it
-    // is built once per worker as a store build and shared.
+    // The view of a unit's own path is the same for every compilation
+    // (OCaml builds `ps_comps` from `Env.empty`, compiler/ml/env.ml:669-678):
+    // the world holds it, built once per build.
+    if let Some(module_key) = module_key.as_ref()
+        && let Some(view) = adopt_persistent_root_view(module_path, module_key, pers_env, ctx)
+    {
+        return Some((f
+            .take()
+            .expect("qualified module components callback reused"))(
+            crate::types::env_lazy::Components::World(&view),
+        ));
+    }
+
+    // Any other persistent-rooted view is the same for every compilation
+    // too; it is built once per worker as a store build and shared.
     let shared_key = module_key
         .as_ref()
         .filter(|key| {
@@ -27119,7 +27191,9 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
         ctx.touch_store_piece(&piece);
         let result =
             (f.take()
-                .expect("qualified module components callback reused"))(&components);
+                .expect("qualified module components callback reused"))(
+                crate::types::env_lazy::Components::Local(&components),
+            );
         ctx.register_qualified_module_components_shared(shared_key.clone(), components);
         return Some(result);
     }
@@ -27129,7 +27203,7 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
             .or_else(|| {
                 build_functor_application_components(module_path, env, pers_env, ctx, cache_mode)
             })
-            .or_else(|| build_shared_persistent_root_components(module_path, pers_env, ctx))
+            .or_else(|| build_private_unit_components(module_path, pers_env, ctx))
             .or_else(|| {
                 let (access_path, sig) =
                     build_module_signature_for_path(module_path, env, pers_env, ctx, cache_mode)?;
@@ -27151,7 +27225,9 @@ pub(crate) fn with_resolved_module_components_for_path_with_cache_mode<R>(
     }
     let result = (f
         .take()
-        .expect("qualified module components callback reused"))(&components);
+        .expect("qualified module components callback reused"))(
+                crate::types::env_lazy::Components::Local(&components),
+            );
     if let Some(module_key) = module_key {
         if crate::types::context::store_debug_enabled() && shared_key.is_some() {
             eprintln!(
@@ -27187,7 +27263,7 @@ pub(crate) fn with_resolved_module_components_for_path<R>(
     env: &Env,
     pers_env: &mut Option<crate::cmi::persistent_env::PersistentEnv>,
     ctx: &crate::types::context::TypeContext,
-    f: impl FnOnce(&crate::types::env_lazy::QualifiedModuleComponents) -> R,
+    f: impl FnOnce(crate::types::env_lazy::Components<'_>) -> R,
 ) -> Option<R> {
     with_resolved_module_components_for_path_with_cache_mode(
         module_path,

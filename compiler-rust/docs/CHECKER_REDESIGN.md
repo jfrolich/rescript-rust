@@ -4340,7 +4340,7 @@ deletes the old one is named.
 | W2 | Frozen writes in one exception table; delete the overlays | 700 | W1 | yes | 0.3% (est.) | same |
 | W3 | The world object; unit table; frozen predefined environment | 1,200 | W2 | no | about 0 | below 0.1% |
 | W4 | `ModuleView` and the view table for paths without an alias | 1,500 | W3 | no | with W5 | with W5 |
-| W5 | Alias and namespace views; adoption replaces replay | 1,500 | W4 | no | 0.5-1.0% (est.) with W4 | plus 1.5-2.2% (est.; 2.4% measured as the bound) |
+| W5 | Structure-typed children, alias and namespace views; adoption replaces replay | 1,500 | W4 | no | 0.5-1.0% (est.) with W4 | plus 1.5-2.2% (est.; 2.4% measured as the bound) |
 | W6 | Delete store builds, pieces, replay, guards and poisoning | 1,500, nearly all deletions | W5 | yes | 0.7% (measured on `tests/tests`) | same |
 | W7 | Delete the worker-store tier of handles and `thread_store.rs` | 1,200, mostly deletions | W6 | yes | below 0.1% | same |
 | W8 | Publication is one export walk; delete the three save copies | 900 | #154, W3 | no | 0.9-1.4% (est.) | same |
@@ -4473,8 +4473,8 @@ deletes the old one is named.
   view build can reach today (the named `poison_store_build_for` reasons and
   the five `StoreEffect` kinds), each with its world replacement.
 - **Old path still present.** Store builds, for keys with an alias or a
-  functor application on the path. W5 moves the alias keys; W6 deletes the
-  mechanism.
+  functor application on the path, and (as built) for the children of a
+  unit. W5 moves the child and alias keys; W6 deletes the mechanism.
 - **Grep.** `rg -n 'build_shared_persistent_root_components' src` gives 0.
   `rg -n 'Rc<|RefCell<|Cell<|OnceCell<|Mutex<' src/types/module_view.rs`
   gives 0.
@@ -4493,7 +4493,219 @@ deletes the old one is named.
   different evaluation order and must show the order is unobservable (which
   unit loads happen, D.8's lookup-time warnings, D.10's printed paths).
 
-#### W5. Alias and namespace views; adoption replaces replay
+##### W4 inventory: what a view build can read of a compilation today
+
+This is an inventory for the rewrite, not an implementation report. The
+world replacements below are requirements still to implement and verify.
+The current builders take a compilation's `TypeContext` and, for child
+components, an `Env` and a `PersistentEnv`. Moving their calls onto an empty
+scratch context alone does not establish that their results are independent
+of the compilation.
+
+Named poison reasons (`poison_store_build_for`), grouped by state:
+
+| Reason | Current dependency | Required world replacement |
+| --- | --- | --- |
+| `local-read`, including unnamed `poison_store_build()` calls in node accessors | Compilation-local type nodes, row fields, abbreviation memos and mutability cells | Only scratch-owned or frozen handles may reach a builder; freeze the scratch-owned result before publishing it |
+| `local-decl-loc` | Compilation-owned declaration locations | Carry the unit's shared locations; handle or reject scratch-local locations explicitly (`freeze` currently rejects a local arrow-label location) |
+| `unit-signature` | A signature not resident in shared storage | Establish membership in the world's unit table before selecting the world path; a persistent identifier alone is insufficient |
+| `local-stored-components` | A child table kept private to a compilation | Construct structure-child views from world-owned parent data, not `StoredModuleComponents` cached in a compilation |
+| `find_pers_struct:load`, `find_pers_struct:disk`, `find_pers_struct:prepare` | Unit loading, visibility and preparation in the compilation's persistent environment | Resolve world units independently of the adopting compilation; adoption must enforce visibility and replay required unit preparation |
+| `read:with_qualified_module_components`, `register_qualified_module_components` | The compilation's component cache | World view cells during construction; the adopted-view map during checking |
+| `read:find_qualified_module_decl` | Forced child module declarations | Explicit world-owned declarations or worker-owned thunks with frozen inputs; forcing order and lifetime need validation before choosing the boundary with W5 |
+| `read:component_paths_for_alias_source`, `read:find_module_alias_in_components` | Reverse alias registrations and component tables | World facts derived from the key and parent views; retain the old mechanism only for keys outside W4 |
+| `read:find_resolved_module_sig`, `register_resolved_module_sig`, `read:has_raw_module_sig`, `get_or_load_raw_module_sig`, `register_raw_module_sig`, `register_gentype_raw_module_sig`, `register_gentype_portable_raw_module_sig`, `read:renamed_module_sig`, `materialize-renamed-sig`, `rename_one_module_sig` | Resolved, raw and renamed signature caches | Build covered structure paths from frozen signatures; do not consult a compilation's renamed or raw signature caches |
+| `intern_cmi_longident_name`, `register_arena_longident_names`, `import_cmi_longident_names` | The compilation's package-constraint name table | Pool-owned names; `freeze` re-interns resolvable names and rejects unresolved ones |
+| `next_reified_abstract_name`, `set_arity_alias`, `store_typed_env`, `register_forced_normalized_path_full`, `register_forced_type_path_compare` | Expression-checking counters and memo tables | Keep these outside view construction; verify that the new builder cannot reach them |
+
+Reads not identified by a poison reason also matter:
+
+| Read | Current caller or dependency | Required world replacement |
+| --- | --- | --- |
+| `alias_sources_for_component_path` | `persistent_env::component_alias_sources`, called by `substitute_type_paths_in_value_with_maps` and alias rerooting; also child-declaration forcing in `env_lazy.rs` | Derive the sources from world-owned parent/key data. Do not assume this read disappears merely because the path has no explicit alias: the current helper still executes it |
+| `has_component_paths_for_alias_source` | `typecore::flattened_alias_component_parent`; recorded in `StorePiece::guards` rather than poisoning | Classify the path using world-owned alias/namespace facts, not the presence of earlier registrations in the adopting compilation |
+| `qualified_alias_path_for_flattened_head` | Persistent-root component construction and persistent opens | Include the resolved alias/namespace classification when selecting W4 versus W5 keys |
+| `flattened_alias_heads_for_path` | `TypeContext::flattened_backing_sources_for_alias_source`, reached while registering an alias source | Derive flattened backing relations from world-owned registry facts; adoption must preserve registrations visible to existing readers |
+| Child seed `Env` and parent signature | `scan_child_component_from_signature` and `StoredModuleComponents::build_components` | Build the required prefix environment from the parent's frozen data without capturing the adopter's environment |
+| Node descriptors and levels | Copy/substitution helpers read through `TypeContext`, including its frozen-write exceptions | Use a scratch context with no adopting compilation's exception entries; publish only the completed immutable graph |
+| Identifier allocation and handle/name caches | Substitution and declaration freshening through `TypeContext` | Scratch-owned allocation; schedule-dependent identifiers must not affect canonical output or stored interfaces |
+
+The code has **six**, not five, `StoreEffect` variants in
+`types/context.rs`:
+
+| Effect | Required world replacement |
+| --- | --- |
+| `Piece` | Explicit nested-view dependencies and transitive adoption; retain a bridge when a remaining store build consumes a world view |
+| `RegisterComponents` | Insert a view in the compilation's adopted-view map once |
+| `PreparePers` | Prepare each required unit on adoption, preserving visibility and lookup-time diagnostics |
+| `TriggerRename` | Keep compilation-visible rename effects outside immutable construction; demonstrate whether covered keys produce none |
+| `RegisterAliasSource` | Carry alias-source facts in the view and register them on adoption |
+| `RegisterQualifiedModuleDecl` | Preserve the lifetime and observable forcing behavior of child declarations; W5 specifies `ViewCell::decl` |
+
+Do not assume `ModuleView::units` or `ModuleView::nested` is empty until the
+new builder's dependency recording and output tests establish it. The
+current registration/replay behavior is the contract to preserve.
+
+Other concrete boundaries for implementation:
+
+- `World` currently indexes units by portable-object and signature addresses
+  in two mutex-protected maps; no dense unit handle or root view field exists
+  on `PersStruct`. W4 must choose and document its unit/view indexing scheme.
+- `ViewScratch::with` holds its thread-local `RefCell` borrow throughout the
+  build. Nested builds must be arranged outside that borrow or the ownership
+  API changed; directly nesting the existing API panics.
+- `FrozenExport for LabelDescription` does not relocate `lbl_all`.
+  A published label family needs a frozen storage tier and frozen handles.
+- Persistent opens have their own component-cache/store path in
+  `PersistentEnv::open_module`, as well as
+  `open_components_into_env`. Replacing qualified lookups alone leaves a
+  second path for the same keys.
+- Per-worker opened layers must assemble tables from frozen entries without
+  copying type nodes. Reusing the old lazy component object as a companion
+  is not, by itself, the required deletion of the old covered-key path.
+
+##### W4 as built: what the inventory got wrong, and what is left
+
+Checked against the code at ef7984c353 while building the slice. The
+inventory's reason names and its six effect kinds are right. These rows
+were wrong or incomplete:
+
+| Inventory said | The code |
+| --- | --- |
+| `alias_sources_for_component_path` must be derived from world-owned data for a covered path | A component path is registered only for a child that is a path (`register_component_alias_source`, from a parent's table). A unit's own path is never one, so the read answers nothing while a unit view is built. What a unit view owes other tables is the reverse: the pairs for its own alias children, which `adopt_view` registers |
+| `has_component_paths_for_alias_source` classifies the path | It decides only whether `build_module_components_from_parent_path` skips a child lookup, for a dotted path. The classification of a unit path is `PersistentEnv::qualified_alias_path_for_flattened_head`, which reads the alias rewrites the *compilation* has collected so far. The same unit is therefore a W4 key in one compilation and a namespace key in another; W5 has to make that a fact of the world |
+| The scratch context needs a persistent environment | Building a unit view loads no unit and reads no registry: `units` is the unit itself, which the adopter loads to find the view cell, and `nested` is empty. `flattened_backing_sources_for_alias_source` does read the registry, but it runs when a compilation registers a pair, not in the build |
+| Forced child declarations: boundary with W5 open | Forcing a child declaration in a store build registers it with the compilation (`force_component_module_declaration_thunk` calls `register_qualified_module_decl`, replayed as `RegisterQualifiedModuleDecl`). W4 forces a child once per build in a cell of the parent view and registers it with each compilation that reads it |
+| Opened layers "assemble tables from frozen entries" | `open` does not install the tables a qualified lookup reads. `add_signature_to_env_with_options_inner` describes the constructors again and installs the declared value types, not the substituted ones. A view therefore carries both: the lookup tables and the opened items |
+| Unit loading must be resolved independently of the adopter | The adopter's `find_pers_struct` is the unit load, and it is the same call the old build made |
+
+Not in the inventory:
+
+- `TypeContext::create_ident` and `rename_ident_stamp` take a stamp of the
+  compilation's counter unless a store build is active. A scratch context
+  takes store-range stamps always (`set_world_scratch`).
+- `build_constructors_for_name` and the label lookup scan the whole
+  signature per name, and `substitute_sig_path` and
+  `freshen_component_modtype_declaration_bound_idents` rebuild the component
+  substitution per call. Forcing every name that way is quadratic; the view
+  build has one-pass forms (`build_all_constructors`, `ComponentSubst`).
+- The worker store's `label_families` is a third per-worker table a view's
+  labels would have named. Frozen label arrays live in a table of
+  write-once cells in the world (`LabelArrayRef::frozen`).
+
+Where W4 as built differs from the text above:
+
+- **Keys.** Built: the path of a unit the world owns. **Not built: chains
+  of structure-typed children.** A child's signature is qualified by
+  `build_local_module_components` against a seed environment scanned from
+  its ancestors, and its own children's tables capture that environment;
+  doing it on a scratch context needs that scan rebuilt from the parent
+  view. Children of a unit view are still built as store builds, once per
+  worker, from tables the worker keeps per view (`env_lazy::ViewTables`).
+- **The view table.** There is no table of paths. A unit's cell is a field
+  of the unit (`PersStruct::ps_view`), set when the world takes the unit,
+  so reading a built view is one load of a write-once cell. The unit table
+  is unchanged (two mutex-guarded maps): the view table does not need its
+  index. A table of child cells indexed by signature item belongs with the
+  child keys.
+- **The scratch context.** One fresh context per view build, dropped after
+  it (`ViewScratch::fresh`), not one per worker that is reset: a build then
+  sees nothing of an earlier build, and a build that needs another view
+  holds no borrow while that one is built.
+- **Sharing without a copy.** Not built: every value of a view is copied
+  and substituted. `world_view_nodes` reports the copied nodes and
+  `shared=0`.
+- **`build_shared_persistent_root_components`** is gone. A unit the world
+  does not own (one loaded from disk, or met when the pool is full) has no
+  view; its components are built for the compilation by
+  `build_private_unit_components`, as any local path's are.
+- **A bridge to store builds.** A store build that reads a unit view
+  records `StoreEffect::AdoptView`, so a compilation that reuses the
+  build's result adopts the view too. W6 deletes it with the mechanism.
+- **`RESCRIPT_WORLD_VERIFY`** describes the view again on the adopting
+  worker and compares the prints without freezing the copy: freezing one
+  per adoption fills the pool on the application.
+- **A view the pool has no room for** is a failure stored in its cell
+  (J.3.6, point 4): no worker builds it again, and every compilation builds
+  the unit's components for itself (`build_private_unit_components`, in a
+  store build of its worker, as before W4). A forced child the pool has no
+  room for is forced by each compilation that reads it. A full pool is the
+  only reachable reason a freeze of a view fails; the others are a debug
+  assertion (`debug_assert_unfreezable_is_pool_full` says why).
+- **Memory.** A view holds every item of its unit, used or not, and both
+  the tables a qualified lookup reads and the items `open` installs. On the
+  application (2,580 views, 30,497 signature items): 198,287 copied nodes
+  (32 bytes each, plus their lists), 22,997 values twice, 3,696
+  constructor descriptions twice (152 bytes), 15,113 label descriptions
+  three times (88 bytes: the lookup table, the opened items, the frozen
+  array), 4,687 opened type declarations (208 bytes plus their vectors) and
+  one 32-byte forced-child cell and one 72-byte value slot per signature
+  item. That is about 20 MB by these counts (an estimate from the counter
+  `world_view_items` and the struct sizes, not a heap profile), which is
+  the rise in peak memory measured on arm64 with one worker and with ten.
+  Pool pages are index space: a page costs one 16-byte slot.
+
+##### What W5 starts from
+
+W5 takes over the structure-typed children of a unit together with the
+alias and namespace paths. What W4 found that W5 has to know:
+
+1. **Which unit paths are W4 keys depends on the compilation.**
+   `PersistentEnv::qualified_alias_path_for_flattened_head` reads the alias
+   rewrites the asking compilation has collected so far, so one unit is a
+   unit key in one compilation and a namespace's backing unit in another.
+   The second kind is built for the compilation or as a store build
+   (`private=24` to `34` on the application, 4 before W4). W5 must make the
+   classification a fact of the world.
+2. **`open` does not install what a qualified lookup reads.**
+   `add_signature_to_env_with_options_inner` describes the constructors
+   again and installs the declared value types, not the substituted ones.
+   A view carries both sets (`OpenedItems` beside the lookup tables); see
+   Memory above for what that costs.
+3. **Forcing a child declaration is an effect on the compilation.**
+   `force_component_module_declaration_thunk` registers the declaration
+   (`register_qualified_module_decl`), and the tables of an alias path to
+   the same module look for it. W4 forces once per build in a cell of the
+   parent view (`ModuleView::lookup_forced_module`) and registers once per
+   compilation (`TypeContext::note_forced_view_module`, one bit per view
+   and child). Each force builds the component substitution of the parent
+   again, one pass over its signature, so forcing every child of a view is
+   quadratic; `ViewCell::decl` should build it once per view.
+4. **A seventh effect kind.** A store build that reads a view records
+   `StoreEffect::AdoptView`, so that a compilation reusing the build adopts
+   the view. W6 deletes it with the mechanism.
+5. **Verification must not freeze.** Freezing the rebuilt copy on every
+   adoption filled the pool on the application; `verify_view` compares
+   prints of a description that stays on its scratch context.
+6. **Pool pages.** A graph takes whole pages of index space: each view and
+   each forced child at least one. The application uses 3,835 pages for
+   views and forced children beside 3,061 for units, of 65,536. Child and
+   alias views multiply that; J.3.1's larger index space (2^28) is needed
+   before they are per-path graphs, or several views share a graph.
+7. **`scripts/bench_project.sh` on `tests/tests`** leaves an untracked
+   `tests/tests/.rescript-pkgs`.
+8. **Give the benchmark scripts the resolved project path.** Through a
+   symlinked directory the build reports warnings configured as errors and
+   fails. Two measurements must not run in one project directory at the
+   same time: each cleans it.
+
+Two more, found by the step-count tests:
+
+- **The substitution maps degenerate to lists on x86-64.**
+  `SUBST_MAP_STATE` in `cmi/persistent_env.rs` (trunk, not this slice) is
+  `ahash::RandomState::with_seeds` over four constants for which the
+  fallback hasher returns 0 for every key (integers, names and paths were
+  tried), so every insert and lookup in a `SubstMaps` table walks one
+  bucket. Building the maps for a signature of 10,000 types takes 0.4 s in
+  a debug build where a default-seeded map takes 1 ms. Every component
+  substitution pays it, in views and outside them. Not changed here: the
+  fix is a different seed, with its own output and instruction-count gate.
+  Whether the AES hasher of arm64 has the same result was not checked.
+- **A child's own tables** are still `StoredModuleComponents` kept per
+  worker and view (`env_lazy::ViewTables`), built in a store build with an
+  empty piece. The child scan visits each signature item once per worker.
+
+#### W5. Structure-typed children, alias and namespace views; adoption replaces replay
 
 - **Files.** `types/module_view.rs`, `types/typecore.rs`
   (`qualify_resolved_signature_for_access_path_inner`,
@@ -4501,7 +4713,9 @@ deletes the old one is named.
   (`strengthen_view_types`, `lookup_qualified_module_shared_inner`),
   `cmi/persistent_env.rs` (`freshen_component_module_declaration_bound_idents`,
   the alias-rewrite helpers), `types/context.rs`.
-- **Added.** `build_module_view` for a path that crosses a module alias
+- **Added.** `build_module_view` for a chain of structure-typed children
+  of a unit (moved here from W4, which built unit paths only; see "What W5
+  starts from" above), and for a path that crosses a module alias
   (including the alias modules of a namespace and `Stdlib.Array`): the
   target's signature strengthened and prefixed as B.6 says. `ViewCell::decl`
   for forced child declarations. `alias_sources`, `units` and `nested` in the
