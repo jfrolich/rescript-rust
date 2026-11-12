@@ -805,7 +805,7 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     }
     if !partial {
         let write = || -> anyhow::Result<()> {
-            let record = MemoryRecord::from_previous(package, previous)?;
+            let record = TemporaryRecord::from_previous(package, previous)?;
             apply_record_rows(&record.conn, previous, new, "")?;
             record.publish(package)
         };
@@ -865,36 +865,80 @@ pub fn write_record(package: &Package, previous: Option<&PackageState>, new: &Pa
     }
 }
 
-/// An unpublished whole record. Its transaction and pages never touch disk.
-/// Batches are inserted on the preparation thread; publication owns the
-/// connection and may run concurrently with other packages' publication.
-pub(super) struct MemoryRecord {
+/// An unpublished whole record, progressively written to a private file.
+/// Its journal is disabled: incomplete pages are never reachable at the live
+/// database path, and a killed preparation is discarded rather than recovered.
+pub(super) struct TemporaryRecord {
     conn: Connection,
+    temp: tempfile::NamedTempFile,
+    package_name: String,
+    pending_modules: usize,
+    pending_bytes: usize,
+    batch_modules: usize,
+    batch_bytes: usize,
+    commits: usize,
 }
 
-impl MemoryRecord {
-    pub(super) fn new(seed: &PackageState, runtime: &[(String, Vec<u8>)]) -> anyhow::Result<Self> {
-        let conn = timing::measure(Phase::RecordSqlOpen, || -> rusqlite::Result<Connection> {
+const TEMP_RECORD_PREFIX: &str = ".rescript-record-";
+
+fn private_record_file(package: &Package) -> anyhow::Result<tempfile::NamedTempFile> {
+    // Root build locks do not exclude another root sharing this package. Hold
+    // the package guard across discovery/creation, and lock each private file
+    // for its lifetime so startup cannot unlink a live preparation. The short
+    // creation guard is released before schema creation or row insertion.
+    let _guard = lock_writer(&path(package))?;
+    for entry in std::fs::read_dir(package.get_build_path())? {
+        let entry = entry?;
+        let name = entry.file_name();
+        let name = name.to_string_lossy();
+        if !name.starts_with(TEMP_RECORD_PREFIX) || !name.ends_with(".sqlite") { continue; }
+        let file = match std::fs::OpenOptions::new().read(true).write(true).open(entry.path()) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(err) => return Err(err.into()),
+        };
+        match fs2::FileExt::try_lock_exclusive(&file) {
+            Ok(()) => std::fs::remove_file(entry.path())?,
+            Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => (),
+            Err(err) => return Err(err.into()),
+        }
+    }
+    let temp = tempfile::Builder::new().prefix(TEMP_RECORD_PREFIX).suffix(".sqlite")
+        .tempfile_in(package.get_build_path())?;
+    fs2::FileExt::lock_exclusive(temp.as_file())?;
+    Ok(temp)
+}
+
+impl TemporaryRecord {
+    pub(super) fn new(package: &Package, seed: &PackageState, runtime: &[(String, Vec<u8>)]) -> anyhow::Result<Self> {
+        let (temp, conn) = timing::measure(Phase::RecordSqlOpen, || -> anyhow::Result<_> {
             ensure_sqlite_initialized();
-            // A private memdb VFS keeps its image contiguous. serialize() can
-            // borrow it (SQLITE_SERIALIZE_NOCOPY) instead of allocating a
-            // second database-sized buffer. No leading slash: not shared.
-            let conn = Connection::open_with_flags("file:rescript?vfs=memdb",
-                OpenFlags::SQLITE_OPEN_READ_WRITE | OpenFlags::SQLITE_OPEN_CREATE | OpenFlags::SQLITE_OPEN_URI)?;
+            let temp = private_record_file(package)?;
+            let conn = Connection::open(temp.path())?;
             conn.set_prepared_statement_cache_capacity(32);
-            conn.pragma_update(None, "page_size", 16384)?;
+            conn.pragma_update(None, "journal_mode", "OFF")?;
             conn.pragma_update(None, "synchronous", "OFF")?;
-            conn.execute_batch(&format!("{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};\nBEGIN;"))?;
-            Ok(conn)
+            conn.pragma_update(None, "page_size", 16384)?;
+            // Bound the dirty pages remaining for the final commit, including
+            // index pages not counted by the prepared-payload byte threshold.
+            conn.pragma_update(None, "cache_size", -256)?;
+            conn.execute_batch(&format!("BEGIN;\n{SCHEMA}\nPRAGMA user_version = {SCHEMA_VERSION};"))?;
+            Ok((temp, conn))
         })?;
         apply_record_rows(&conn, &PackageState::default(), seed, "")?;
         {
             let mut insert = conn.prepare_cached("INSERT INTO runtime_interfaces (module, data) VALUES (?1, ?2)")?;
-            for (name, data) in runtime {
-                insert.execute(params![name, data])?;
-            }
+            for (name, data) in runtime { insert.execute(params![name, data])?; }
         }
-        Ok(Self { conn })
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '0')", [META_RECORD_COMPLETE])?;
+        conn.execute_batch("COMMIT; BEGIN")?;
+        // Diagnostic tuning controls; they do not affect the stored schema or
+        // the publication protocol. Zero is rejected to keep bounded batches.
+        let threshold = |name, default| std::env::var(name).ok()
+            .and_then(|value| value.parse::<usize>().ok()).filter(|value| *value > 0).unwrap_or(default);
+        Ok(Self { conn, temp, package_name: package.name.clone(), pending_modules: 0,
+            pending_bytes: 0, batch_modules: threshold("RESCRIPT_STORE_BATCH_MODULES", 64),
+            batch_bytes: threshold("RESCRIPT_STORE_BATCH_BYTES", 128 * 1024), commits: 0 })
     }
 
     fn from_previous(package: &Package, previous: &PackageState) -> anyhow::Result<Self> {
@@ -903,8 +947,8 @@ impl MemoryRecord {
                 .ok_or_else(|| anyhow::anyhow!("previous database unavailable for whole-record snapshot"))?;
             // Whole-record fallback can keep unchanged interfaces that
             // are intentionally absent from interface_updates. Copy their
-            // pages into memory, never update the live database in place.
-            let mut record = Self::new(&PackageState::default(), &[])?;
+            // pages into the private file, never update the live database in place.
+            let mut record = Self::new(package, &PackageState::default(), &[])?;
             record.conn.execute_batch("ROLLBACK")?;
             let backup = rusqlite::backup::Backup::new(&old, &mut record.conn)?;
             anyhow::ensure!(backup.step(-1)? == rusqlite::backup::StepResult::Done, "database snapshot busy");
@@ -915,10 +959,10 @@ impl MemoryRecord {
         let meta = read_meta(package).unwrap_or_default();
         let runtime = meta.get(META_RUNTIME_KEY)
             .and_then(|key| read_runtime_interfaces(&path(package), key)).unwrap_or_default();
-        Self::new(&PackageState { meta, ..PackageState::default() }, &runtime)
+        Self::new(package, &PackageState { meta, ..PackageState::default() }, &runtime)
     }
 
-    pub(super) fn insert(&self, rows: &PackageState) -> anyhow::Result<()> {
+    pub(super) fn insert(&mut self, rows: &PackageState) -> anyhow::Result<()> {
         // Fresh batches only add rows. Do not build a difference against an
         // empty record or prepare deletion statements for each completed module.
         debug_assert!(rows.partial && rows.meta.is_empty() && rows.reads_updates.is_empty()
@@ -928,25 +972,34 @@ impl MemoryRecord {
             let _timer = RecordTimer::start(Phase::RecordSqlSources);
             let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO sources (path, module) VALUES (?1, ?2)")?;
             for (path, module) in &rows.sources {
+                self.pending_bytes += path.as_os_str().len() + module.len();
                 stmt.execute(params![path.to_string_lossy(), module])?;
             }
         }
         if !rows.encoded_reads.is_empty() {
             let _timer = RecordTimer::start(Phase::RecordSqlReads);
             let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO reads (module, data) VALUES (?1, ?2)")?;
-            for (module, data) in &rows.encoded_reads { stmt.execute(params![module, data])?; }
+            for (module, data) in &rows.encoded_reads {
+                self.pending_bytes += module.len() + data.len();
+                stmt.execute(params![module, data])?;
+            }
         }
         if !rows.encoded_items.is_empty() {
             let _timer = RecordTimer::start(Phase::RecordSqlItems);
             let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO items (module, data) VALUES (?1, ?2)")?;
-            for (module, data) in &rows.encoded_items { stmt.execute(params![module, data])?; }
+            for (module, data) in &rows.encoded_items {
+                self.pending_bytes += module.len() + data.len();
+                stmt.execute(params![module, data])?;
+            }
         }
         if !rows.interface_updates.is_empty() {
             let _timer = RecordTimer::start(Phase::RecordSqlInterfaces);
             let mut core = conn.prepare_cached("INSERT OR REPLACE INTO interfaces (module, hash, data) VALUES (?1, ?2, ?3)")?;
             for (module, interface) in &rows.interface_updates {
+                self.pending_bytes += module.len() + interface.core.len();
                 core.execute(params![module, interface.hash as i64, interface.core])?;
                 if let Some(extras) = &interface.extras {
+                    self.pending_bytes += extras.len();
                     conn.prepare_cached("INSERT OR REPLACE INTO interface_extras (module, data) VALUES (?1, ?2)")?
                         .execute(params![module, extras])?;
                 }
@@ -958,6 +1011,9 @@ impl MemoryRecord {
                 (module, js_confirmed_at, implementation_warnings, interface_warnings, interface_digest, imports)
                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)")?;
             for (module, row) in &rows.modules {
+                self.pending_bytes += module.len() + row.imports.as_ref().map_or(0, |imports| imports.encode().len())
+                    + row.implementation_warnings.as_ref().map_or(0, String::len)
+                    + row.interface_warnings.as_ref().map_or(0, String::len);
                 stmt.execute(params![module, row.js_confirmed_at.map(nanos_from_time),
                     row.implementation_warnings, row.interface_warnings,
                     row.interface_digest.map(|digest| digest as i64), row.imports.as_ref().map(Imports::encode)])?;
@@ -968,15 +1024,23 @@ impl MemoryRecord {
             let mut stmt = conn.prepare_cached("INSERT OR REPLACE INTO deps
                 (source, mtime, deps, gentype_annotations, gentype_declarations) VALUES (?1, ?2, ?3, ?4, ?5)")?;
             for (source, row) in &rows.deps {
+                self.pending_bytes += source.len() + rows.encoded_deps[source].len();
                 stmt.execute(params![source, row.mtime, rows.encoded_deps.get(source).expect("encoded fresh dependencies"),
                     row.gentype_annotations, row.gentype_declarations])?;
             }
+        }
+        self.pending_modules += rows.modules.len();
+        if self.pending_modules >= self.batch_modules || self.pending_bytes >= self.batch_bytes {
+            timing::measure(Phase::RecordBatchCommit, || self.conn.execute_batch("COMMIT; BEGIN"))?;
+            self.commits += 1;
+            self.pending_modules = 0;
+            self.pending_bytes = 0;
+            publication_test_hook(&self.package_name, "progressive");
         }
         Ok(())
     }
 
     pub(super) fn publish(self, package: &Package) -> anyhow::Result<()> {
-        use std::io::Write;
         let mut last = timing::enabled().then(std::time::Instant::now);
         let mut checkpoints = Vec::new();
         let mut checkpoint = |name| {
@@ -986,33 +1050,26 @@ impl MemoryRecord {
                 *start = now;
             }
         };
-        publication_test_hook(package, "before-commit");
+        publication_test_hook(&package.name, "before-commit");
         self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, '1')", [META_RECORD_COMPLETE])?;
         timing::measure(Phase::RecordSqlCommit, || self.conn.execute_batch("COMMIT"))?;
         checkpoint("commit");
-        publication_test_hook(package, "after-commit");
-        let image = timing::measure(Phase::RecordSerialize, || self.conn.serialize(rusqlite::DatabaseName::Main))?;
-        checkpoint("serialize");
-        let bytes = image.len();
-        publication_test_hook(package, "after-serialize");
-        let db = path(package);
-        std::fs::create_dir_all(package.get_build_path())?;
-        let mut temp = tempfile::NamedTempFile::new_in(package.get_build_path())?;
-        timing::measure(Phase::RecordImageWrite, || temp.write_all(&image))?;
-        checkpoint("write");
-        drop(image);
-        drop(self);
+        publication_test_hook(&package.name, "after-commit");
+        let Self { conn, temp, commits, pending_bytes, .. } = self;
+        let bytes = temp.as_file().metadata()?.len();
+        conn.close().map_err(|(_, err)| err)?;
         checkpoint("close");
-        publication_test_hook(package, "after-write");
+        publication_test_hook(&package.name, "after-close");
+        let db = path(package);
         let _guard = timing::measure(Phase::RecordPublishLock, || lock_writer(&db))?;
         checkpoint("lock");
-        publication_test_hook(package, "after-lock");
+        publication_test_hook(&package.name, "after-lock");
         timing::measure(Phase::RecordRecover, || recover_before_replace(&db))?;
         checkpoint("recover");
-        publication_test_hook(package, "before-rename");
+        publication_test_hook(&package.name, "before-rename");
         timing::measure(Phase::RecordRename, || temp.persist(&db))?;
         checkpoint("rename");
-        publication_test_hook(package, "after-rename");
+        publication_test_hook(&package.name, "after-rename");
         // Compatibility with a killed writer using the incremental path's
         // external marker. This path never creates a marker of its own.
         match std::fs::remove_file(pending_path(&db)) {
@@ -1024,16 +1081,16 @@ impl MemoryRecord {
             let phases = checkpoints.iter().map(|(name, duration)|
                 format!("{name}_ms={:.3}", duration.as_secs_f64() * 1000.0))
                 .collect::<Vec<_>>().join(" ");
-            eprintln!("[store-publish] bytes={bytes} {phases}");
+            eprintln!("[store-publish] bytes={bytes} progressive_commits={commits} final_batch_bytes={pending_bytes} {phases}");
         }
         Ok(())
     }
 }
 
-fn publication_test_hook(_package: &Package, _phase: &str) {
+fn publication_test_hook(_package: &str, _phase: &str) {
     #[cfg(debug_assertions)]
     if std::env::var("RESCRIPT_TEST_ABORT_PUBLICATION").ok().as_deref()
-        == Some(&format!("{}:{_phase}", _package.name)) {
+        == Some(&format!("{_package}:{_phase}")) {
         std::process::abort();
     }
 }
@@ -1374,12 +1431,12 @@ mod tests {
     }
 
     #[test]
-    fn memory_image_matches_file_pragmas_and_accepts_incremental_updates() {
+    fn private_file_matches_persistent_pragmas_and_accepts_incremental_updates() {
         let dir = TempDir::new().unwrap();
         let package = test_package(dir.path());
         let first = state(17, Some("warning"));
         // Explicitly select the file-created sparse path: whole records now
-        // use MemoryRecord too, so they are not an independent pragma oracle.
+        // use TemporaryRecord too, so they are not an independent pragma oracle.
         let mut file_record = first.clone();
         file_record.partial = true;
         write_record(&package, None, &file_record);
@@ -1388,10 +1445,7 @@ mod tests {
             .map(|key| conn.query_row(&format!("PRAGMA {key}"), [], |row| Ok(format!("{:?}", row.get_ref(0)?))).unwrap());
         let file_pragmas = pragmas(&old_reader);
         let second = state(23, None);
-        let record = MemoryRecord::new(&second, &[]).unwrap();
-        record.conn.execute_batch("COMMIT").unwrap();
-        assert!(matches!(record.conn.serialize(rusqlite::DatabaseName::Main).unwrap(), rusqlite::serialize::Data::Shared(_)));
-        record.conn.execute_batch("BEGIN").unwrap();
+        let record = TemporaryRecord::new(&package, &second, &[]).unwrap();
         record.publish(&package).unwrap();
         let conn = Connection::open(path(&package)).unwrap();
         assert_eq!(pragmas(&conn), file_pragmas);
@@ -1403,8 +1457,26 @@ mod tests {
         assert_eq!(read(&package).as_ref(), Some(&third));
     }
 
+    #[test]
+    fn private_cleanup_removes_abandoned_files_but_not_live_preparations() {
+        let dir = TempDir::new().unwrap();
+        let package = test_package(dir.path());
+        let first = TemporaryRecord::new(&package, &state(17, None), &[]).unwrap();
+        let first_path = first.temp.path().to_owned();
+        let abandoned = package.get_build_path().join(format!("{TEMP_RECORD_PREFIX}abandoned.sqlite"));
+        std::fs::write(&abandoned, b"incomplete pages").unwrap();
+        let second = TemporaryRecord::new(&package, &state(23, None), &[]).unwrap();
+        assert!(first_path.exists(), "another root's live private file must survive");
+        assert!(!abandoned.exists());
+        assert!(!PathBuf::from(format!("{}-journal", first_path.display())).exists());
+        drop(second);
+        assert!(first_path.exists());
+        drop(first);
+        assert!(!first_path.exists());
+    }
+
     // Subprocess entry point: the parent kills the writer while its transaction
-    // is open, then lets a real MemoryRecord publisher recover under the guard.
+    // is open, then lets a real TemporaryRecord publisher recover under the guard.
     #[test]
     fn publication_process() {
         let Ok(root) = std::env::var("RESCRIPT_PUBLICATION_TEST_ROOT") else { return };
@@ -1422,8 +1494,8 @@ mod tests {
                 panic!("parent should kill writer");
             }
             "publisher" => {
-                let record = MemoryRecord::new(&state(23, None), &[]).unwrap();
                 std::fs::write(Path::new(&root).join("publisher-ready"), b"").unwrap();
+                let record = TemporaryRecord::new(&package, &state(23, None), &[]).unwrap();
                 record.publish(&package).unwrap();
             }
             role => panic!("unknown test role {role}"),

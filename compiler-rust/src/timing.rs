@@ -91,10 +91,8 @@ pub enum Phase {
     RecordRecover,
     /// Whole-record publication: publish lock.
     RecordPublishLock,
-    /// Whole-record publication: image write.
-    RecordImageWrite,
-    /// Whole-record publication: serialize.
-    RecordSerialize,
+    /// Whole-record preparation: progressive commit.
+    RecordBatchCommit,
     /// GenType child buckets. They are reported separately, not added again
     /// to the top-level recorded total. Counts are artifact-phase invocations.
     GentypePrepare,
@@ -165,8 +163,7 @@ impl PhaseTimingSnapshot {
             record_rename: phase(Phase::RecordRename),
             record_recover: phase(Phase::RecordRecover),
             record_publish_lock: phase(Phase::RecordPublishLock),
-            record_image_write: phase(Phase::RecordImageWrite),
-            record_serialize: phase(Phase::RecordSerialize),
+            record_batch_commit: phase(Phase::RecordBatchCommit),
 
         }
     }
@@ -251,10 +248,8 @@ pub struct PhaseTimingSnapshot {
     pub record_recover: Duration,
     /// Whole-record publication: publish lock.
     pub record_publish_lock: Duration,
-    /// Whole-record publication: image write.
-    pub record_image_write: Duration,
-    /// Whole-record publication: serialize.
-    pub record_serialize: Duration,
+    /// Whole-record preparation: progressive commit.
+    pub record_batch_commit: Duration,
 
 }
 
@@ -522,8 +517,7 @@ pub fn print_report() {
     print_phase("record_rename", snapshot.record_rename, total);
     print_phase("record_recover", snapshot.record_recover, total);
     print_phase("record_publish_lock", snapshot.record_publish_lock, total);
-    print_phase("record_image_write", snapshot.record_image_write, total);
-    print_phase("record_serialize", snapshot.record_serialize, total);
+    print_phase("record_batch_commit", snapshot.record_batch_commit, total);
     print_phase("overhead", snapshot.overhead(), total);
     for (name, phase) in [
         ("gentype_prepare", Phase::GentypePrepare),

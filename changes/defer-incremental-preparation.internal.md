@@ -1,1 +1,1 @@
-- Stream fresh-build incremental-store rows into private in-memory SQLite databases and atomically publish each completed package, preserving sparse incremental updates and recovery from interrupted writers.
+- Stream whole-build incremental-store rows into private SQLite files with bounded progressive commits, then publish each completed package atomically while preserving sparse updates and interrupted-writer recovery.

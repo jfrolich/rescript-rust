@@ -39,7 +39,7 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
 
     def build(full=False):
         result = subprocess.run([str(exe), "build"], cwd=project,
-                                env=env | ({"RESCRIPT_FULL_BUILD": "1"} if full else {}),
+                                env=env | ({"RESCRIPT_FULL_BUILD": "1", "RESCRIPT_TEST_FINAL_RECORD": "1"} if full else {}),
                                 capture_output=True, text=True, timeout=10)
         assert result.returncode == 0, result.stdout + result.stderr
         return result.stdout
@@ -58,7 +58,7 @@ with tempfile.TemporaryDirectory(prefix="prepared-record-") as tmp:
 
     build()
     fresh = rows()
-    build(full=True)  # Existing records disable fresh-build preparation.
+    build(full=True)  # Explicitly exercise final-state construction in a debug build.
     assert fresh == rows(), "fresh preparation and final-state fallback differ"
     assert "Compiled 0 modules" in build()
     (project / "src/C.res").write_text("let value = B.f(4)\n")

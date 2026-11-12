@@ -50,7 +50,7 @@ struct Waiting {
 struct PackageWriter {
     package: super::packages::Package,
     seed: Option<(PackageState, Vec<(String, Vec<u8>)>)>,
-    record: Option<state_db::MemoryRecord>,
+    record: Option<state_db::TemporaryRecord>,
     remaining: usize,
     outputs_remaining: usize,
     valid: bool,
@@ -82,14 +82,19 @@ pub(super) struct FinishedRows {
 
 impl FreshRows {
     pub(super) fn new(state: &BuildCommandState) -> Option<Self> {
-        // Incremental rounds and watch edits may replace a dependency's metadata
-        // after a dependent completed. Keep their existing final-state path.
+        // Incremental rounds may replace a dependency's metadata after a
+        // dependent completed. Stream only when every source will compile in
+        // this pass (including forced full builds with an existing record).
+        #[cfg(debug_assertions)]
+        if std::env::var_os("RESCRIPT_TEST_FINAL_RECORD").is_some() { return None; }
         if state.check_only
             || state.in_memory_only
             || state
                 .previous_in_process
                 .as_ref()
                 .is_some_and(|p| !p.packages.is_empty())
+                && state.modules.values().any(|module|
+                    matches!(module.source_type, SourceType::SourceFile(_)) && !module.compile_dirty)
             || !state.module_registry.lock().unwrap().is_empty() && !state.written_modules.is_empty()
         {
             return None;
@@ -139,8 +144,8 @@ impl FreshRows {
         let source_map_args = super::compiler_info::source_map_args(state);
         let writers = packages.iter_mut().map(|(name, record)| {
             // Snapshot only the metadata/runtime that whole-record replacement
-            // must preserve. This runs before compilation; the worker does no
-            // file IO until publication.
+            // must preserve. This runs before compilation; the worker creates
+            // and progressively commits only its private file during compilation.
             let package = &state.packages[name];
             record.meta = state_db::read_meta(package).unwrap_or_default();
             let runtime = record.meta.get(state_db::META_RUNTIME_KEY)
@@ -186,7 +191,7 @@ impl FreshRows {
     pub(super) fn start(&mut self) {
         for writer in self.writers.values_mut() {
             let (seed, runtime) = writer.seed.take().expect("unstarted writer");
-            match state_db::MemoryRecord::new(&seed, &runtime) {
+            match state_db::TemporaryRecord::new(&writer.package, &seed, &runtime) {
                 Ok(record) => writer.record = Some(record),
                 Err(err) => {
                     log::warn!("Could not prepare {}: {err}", writer.package.name);
@@ -202,7 +207,7 @@ impl FreshRows {
     fn flush(&mut self, package: &str) {
         let rows = self.packages.get_mut(package).expect("known package");
         let writer = self.writers.get_mut(package).expect("known writer");
-        if let Some(record) = &writer.record {
+        if let Some(record) = &mut writer.record {
             if let Err(err) = record.insert(rows) {
                 log::warn!("Could not prepare {package}: {err}");
                 writer.valid = false;

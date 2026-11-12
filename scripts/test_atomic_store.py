@@ -14,7 +14,7 @@ root = Path(__file__).resolve().parents[1]
 exe = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else root / "rewatch/target/debug/rescript"
 env = dict(os.environ, RESCRIPT_RUNTIME=str(root / "packages/@rescript/runtime"))
 resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-for stage in ("before-commit", "after-commit", "after-serialize", "after-write",
+for stage in ("progressive", "before-commit", "after-commit", "after-close",
               "after-lock", "before-rename", "after-rename"):
     with tempfile.TemporaryDirectory(prefix="atomic-store-") as tmp:
         project = Path(tmp)
@@ -40,7 +40,10 @@ for stage in ("before-commit", "after-commit", "after-serialize", "after-write",
         # A changed source inventory forces whole-record replacement even
         # though the previous complete database is still present.
         (project / "src/C.res").write_text("let added = 4\n")
-        build({"RESCRIPT_FULL_BUILD": "1", "RESCRIPT_TEST_ABORT_PUBLICATION": f"atomic-store:{stage}"}, True)
+        build({"RESCRIPT_FULL_BUILD": "1", "RESCRIPT_STORE_BATCH_MODULES": "1",
+               "RESCRIPT_TEST_ABORT_PUBLICATION": f"atomic-store:{stage}"}, True)
+        leftovers = list(db.parent.glob(".rescript-record-*.sqlite"))
+        assert len(leftovers) == (0 if stage == "after-rename" else 1), leftovers
         assert (db.read_bytes() == old) == (stage != "after-rename"), stage
         with sqlite3.connect(db) as conn:
             assert conn.execute("PRAGMA integrity_check").fetchone() == ("ok",)
@@ -48,6 +51,7 @@ for stage in ("before-commit", "after-commit", "after-serialize", "after-write",
         for suffix in ("-journal", "-wal"):
             assert not Path(str(db) + suffix).exists()
         build()
+        assert not list(db.parent.glob(".rescript-record-*.sqlite")), "next build must remove abandoned private files"
         expected = (project / "src/A.mjs").read_bytes()
         assert b"3" in expected
         assert "Compiled 0 modules" in build()
