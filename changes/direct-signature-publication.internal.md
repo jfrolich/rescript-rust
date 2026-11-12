@@ -1,0 +1,1 @@
+- Build published signatures directly into shared nodes and defer their portable representation to storage.

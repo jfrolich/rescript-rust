@@ -216,6 +216,14 @@ impl PartialEq for DeclLocTable {
 impl Eq for DeclLocTable {}
 
 impl DeclLocTable {
+    /// Frozen readers need coordinates and identities, not the construction
+    /// indexes. A later mutable copy reconstructs these indexes on demand.
+    pub(crate) fn without_interning_indexes(mut self) -> Self {
+        self.index = Default::default();
+        self.instance_index = Default::default();
+        self
+    }
+
     /// Whether the table holds no locations.
     pub fn is_empty(&self) -> bool {
         self.locations.is_empty()
@@ -609,6 +617,23 @@ mod tests {
             loc_ghost: ghost,
             origin: LocationOrigin::default(),
         }
+    }
+
+    #[test]
+    fn frozen_table_drops_index_capacity_and_can_be_interned_again() {
+        let mut table = DeclLocTable::default();
+        let loc = crate::location::Location::none();
+        let identity = LocationIdentity { scope: 17, location: 3, start: 4, end: 5 };
+        let handle = table.intern_with_identity(loc, identity);
+        assert!(table.index.capacity() > 0);
+        assert!(table.instance_index.capacity() > 0);
+        let mut frozen = table.without_interning_indexes();
+        assert_eq!(frozen.index.capacity(), 0);
+        assert_eq!(frozen.instance_index.capacity(), 0);
+        assert_eq!(frozen.resolve(handle), loc);
+        assert_eq!(frozen.identity(handle.index()), Some(identity));
+        assert_eq!(frozen.intern_with_identity(loc, identity), handle);
+        assert_eq!(frozen.len(), 1);
     }
 
     #[test]

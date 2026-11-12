@@ -77,8 +77,7 @@ covers it).
 
 | `shared_graph` | When | Graph compared |
 |---|---|---|
-| `published` | the unit has a dependent in this build, or is an interface | the one dependents read |
-| `forced: no dependent in this build` | `SignaturePublicationMode::OnDemand` | check mode publishes it at once; a normal build builds the same graph from the decoded bytes when a later reader asks |
+| `published` | every shareable unit, including units without dependents | the one dependents read; publication computes its fingerprint and item digests here |
 | `forced: not shareable` | the graph holds a `Tsubst` | a graph of the pool that no reader is given |
 
 Only a full pool leaves a unit without a comparison (`not_applicable`, "the
@@ -87,20 +86,20 @@ shared pool is full").
 The raw signature (`PortableRawSignature`) is not compared: it has no shared
 graph. P3b keeps writing it from the `TypeContext` (H.1.5, step 9).
 
-## What the frozen graph does not hold
+## What the node arrays do not hold
 
 `internalize_signature_into_shared` drops or rewrites four things one way.
-The inverse is exact only when it is given them (`shared_reader::Carried`,
-recorded during the import in check mode). The comparison never changes
+The inverse reads them from `SharedGraph::carried`, recorded during every
+import, not just in check mode. The comparison never changes
 either side to make them agree: it carries the missing data and lists, per
 unit, which of it was not empty.
 
-| `carried` | What the import does | What P3b must carry or change |
+| `carried` | What the import does | What the frozen graph retains |
 |---|---|---|
 | `file names` | A location names its file by a pool index allocated at import. The portable signature holds `cmi_longident_names`: the names with their portable keys, in order of first use, including names only the raw signature uses | the `(key, name)` list of the publication |
-| `allocation scopes` | The scope of a location identity and of a shape's attribute string becomes a hash of the unit and the scope (`identity_in_namespace`) | the producer's scope of each imported scope, or an import that keeps the pair |
-| `shape allocations` | A shape allocation becomes a hash of the unit and the allocation | the producer's allocation of each imported one, likewise |
-| `link levels` | Every `Tlink` entry is stored at the generic level | the level of each link that is not generic, or portable bytes that store links at the generic level (a link's level is dead state) |
+| `allocation scopes` | The scope of a location identity and of a shape's attribute string becomes a hash of the unit and the scope (`identity_in_namespace`) | the producer's scope of each imported scope |
+| `shape allocations` | A shape allocation becomes a hash of the unit and the allocation | the producer's allocation of each imported one |
+| `link levels` | Every `Tlink` entry is stored at the generic level | the level of each link that is not generic (a link's level is dead state) |
 
 Exact without carried data: node order and descriptors, type lists, arrow
 parameters with their labels, rows, package constraints, object-field
@@ -121,3 +120,102 @@ by reason for each comparison, where the shared graphs came from, and how
 many units needed each kind of carried data. It fails on a failed build, on
 zero reports, on fewer units than `tests/signature_equality_minimum.json`,
 on any difference and on a report that is missing a field.
+
+## P3b slice 1: ownership of serialization metadata
+
+The four kinds of metadata now live in a cold record in each frozen graph,
+not in the equality check. `portable_signature` accepts only the frozen
+graph reader and shared signature; the portable comparison cannot supply
+its missing inputs. Both normal and checked publication populate the record.
+
+- File names retain their original keys and order, including raw-only names.
+  Pool names alone cannot reconstruct this table. Cost: one list per graph.
+- Allocation scopes and shape allocations retain inverse import maps.
+  Reversing the namespace hash is impossible; keeping these sparse maps
+  preserves existing identities without changing any dependent's view.
+- Link levels retain a sparse list of non-generic entries. Type readers
+  continue seeing generic links; stored bytes retain their original levels.
+
+None of these fields enlarges a type node. Their lifetime is the graph's,
+so inverse serialization needs neither the producer's context nor its
+portable signature. Capture and reconstruction are linear in graph size
+and metadata size, with maps per graph, not per node.
+
+## P3b slice 2: publication hashes
+
+`prepare_publication` builds the shared graph before creating the registry
+Arc, computes its fingerprint and item hashes through `FrozenGraph`, then
+registers that same Arc in the pool. The item hashes are retained until the
+summary uses them; reference collection still reads the portable signature
+in this slice. Stored units and the non-shareable/full-pool fallback retain
+the portable hash. Check mode computes the portable oracle independently
+and compares it against the actual published fingerprint and item hashes.
+
+Leaf publications now also build a shared graph, rather than waiting for a
+later reader. This is necessary for shared-only hashes; storage still runs
+after release, and dependency scheduling is unchanged. The existing leaf
+regression checks that storage discards the portable graph and later lookup
+reuses the graph built for hashing, without decoding it again.
+
+## P3b slice 3: direct graph publication
+
+The signature traversal has portable and shared sinks. Normal publication
+uses the shared sink: it creates TypeDesc nodes and flat payload arrays
+directly, then relocates dense scratch indices as the immutable graph is
+frozen. This relocation is a linear array pass, not another traversal of
+the checker graph. No PortableTypeEntry for the main signature exists on
+this path. The portable sink remains for raw signatures, stored writers,
+non-shareable/full-pool fallbacks, and the check-only independent oracle.
+
+The publication owns the frozen graph and its shared name table until
+storage encodes it. It does not own the shared pool, avoiding a cycle with
+the pool's address-keyed registry. Summaries walk frozen nodes for both
+hashes and reference collection, so they do not force portable conversion.
+The storage reader uses the inverse serializer; the raw signature is still
+produced from the context as before. Counters `signature_nonshareable` and
+`signature_pool_full` report fallback units.
+
+A traversal reads each source node once, with one cache per graph; cost is
+O(nodes + edges + signature items). Step-count tests cover a 10,000-node
+chain and 10,000 parents sharing one child. The legacy recursive traversal
+uses the compiler test suite's large-stack convention for the deep chain.
+
+### Comparing separately built executables
+
+The embedded runtime retains the allocation namespaces of its build-time
+source paths. Two binaries built in different directories can therefore
+produce different stored allocation identities even when their source and
+output behavior are identical. This does not affect the same-build oracle
+comparison above. For a cross-binary byte comparison, give both binaries
+the same runtime compiled from the same paths: copy the runtime package and
+change only whitespace in its configuration to select source compilation
+instead of either embedded image. Compare the runtime entries as well as
+the application's entries; do not normalize or ignore differing bytes.
+
+### Importer demand and storage
+
+Publication now retains a detached frozen graph. Its references and location
+handles are local to those arrays. Fingerprints and item digests read this graph;
+storage needs them for interface comparison and item-level invalidation. Storage
+streams descriptors and payloads through a borrowed serialization view,
+without constructing portable node arrays. Check mode compares this actual wire
+view against the independent portable oracle, including variant/field ordering.
+
+Only the first importer installs a graph in the pool, under the per-publication
+OnceLock. That step assigns pool addresses and imports file names and allocation
+identities. Unique arrays are moved; a shared source is copied. Reserving before
+moving leaves the source intact on pool exhaustion. Storage and promotion share
+the publication's lock, so either order produces the same bytes. A registry that
+outlives its pool generation imports from its retained graph, not stale addresses.
+
+The serializer memoizes source handles with the existing pooled type-node table:
+dense pages for local nodes, a multiplicative-hash table for store handles. First
+visit order is still determined by the signature walk, never table iteration.
+The chain/shared-child step-count tests continue to enforce a linear traversal.
+
+Opt-in counters report publication IDs (not allocator addresses), distinct
+current-build publications acquired by persistent lookup, nodes installed in the
+pool, and hash node visits across fingerprint/item scopes. Stored-runtime imports
+contribute pool nodes but not current-build publication acquisitions. Detached
+arrays needed for storage are not counted as pool installations. No counter run
+used for this diagnosis enables the check-only oracle.

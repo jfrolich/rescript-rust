@@ -625,6 +625,12 @@ impl<T> Encoded<T> {
 impl<T: Serialize> Encoded<T> {
     /// Encode a value once for shared storage and deferred decoding.
     pub fn encode(value: &T) -> Self {
+        Self::encode_from(value)
+    }
+
+    /// Encode a borrowed view with exactly T's wire representation. Callers
+    /// must pin compatibility with a byte-for-byte test against `encode`.
+    pub(crate) fn encode_from(value: &impl Serialize) -> Self {
         #[cfg(debug_assertions)]
         if std::any::type_name::<T>()
             == std::any::type_name::<crate::cmi::portable_types::PortableSignature>()
