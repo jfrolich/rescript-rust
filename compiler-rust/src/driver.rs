@@ -802,18 +802,21 @@ pub fn experimental_let_unwrap_for_structure(
 fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
+    file_config: &FileConfigOverrides,
     let_unwrap: bool,
     arena: &mut crate::parse_arena::ParseArena,
     source: &str,
     filename: &str,
     builtin_ppx_warnings: &mut Vec<ppx::PpxWarning>,
 ) -> Result<Signature> {
-    let signature = if let Some(jsx_version) = options.jsx_version {
+    // Ppx_entry.rewrite_signature reads the JSX settings after
+    // `Ast_config.process_sig` (compiler/frontend/ppx_entry.ml:27-37).
+    let signature = if let Some(jsx_version) = options.jsx_version.or(file_config.jsx_version) {
         // The JSX warnings come first, those raised before an error included.
         let (signature, jsx_warnings) = jsx_ppx::transform_signature_collecting_warnings(
             signature,
             jsx_version,
-            jsx_module_name(options, None),
+            jsx_module_name(options, Some(file_config)),
             arena,
         );
         builtin_ppx_warnings.extend(jsx_preprocessor_warnings_to_ppx(arena, jsx_warnings));
@@ -7394,6 +7397,7 @@ pub fn run_interface_frontend(
     let signature = preprocess_signature_for_typecheck_with_source(
         signature,
         options,
+        &file_config,
         experimental_let_unwrap,
         parser.arena_mut(),
         source,
