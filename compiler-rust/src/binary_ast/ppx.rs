@@ -10384,6 +10384,9 @@ fn rewrite_structure_item(item: &StructureItem, arena: &mut ParseArena) -> Vec<S
     })
 }
 
+/// Rewrite one item and preserve its provenance.
+/// Cost: the existing recursive rewrite plus O(1) provenance lookup and O(k)
+/// bitmap writes for a derived item's k output groups; no extra AST traversal.
 fn rewrite_structure_item_no_spice(
     item: &StructureItem,
     arena: &mut ParseArena,
@@ -10398,6 +10401,9 @@ fn rewrite_structure_item_no_spice(
     rewritten
 }
 
+/// The existing structure rewrite, without the provenance transfer wrapper.
+/// Cost is proportional to the visited subtree and generated output; retained
+/// certified expression subtrees take O(1). Allocations are the existing mapper's.
 fn rewrite_structure_item_body(
     item: &StructureItem,
     arena: &mut ParseArena,

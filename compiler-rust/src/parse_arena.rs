@@ -2858,6 +2858,9 @@ impl ParseArena {
     }
 
     /// Mark a structure value group produced by a derive.
+    /// Cost: one bitmap write plus O(new words) zero initialization on growth.
+    /// Across all marks, at most ceil(highest binding slot / 64) words are
+    /// initialized; remarking a group never grows or scans the table.
     pub(crate) fn mark_derived_value_group(&mut self, list: VbList) {
         assert!(!list.is_empty());
         let index = list.start() as usize;
@@ -2868,6 +2871,7 @@ impl ParseArena {
     }
 
     /// Provenance of a structure value group, independent of names and locations.
+    /// Cost: O(1), at most one word read, with no allocation or synchronization.
     pub fn is_derived_value_group(&self, list: VbList) -> bool {
         let index = list.start() as usize;
         !list.is_empty() && self.derived_value_groups.get(index / 64)
@@ -4354,4 +4358,29 @@ mod tests {
         assert!(!arena.expr_needs_no_attribute_sweep(reserved));
     }
 
+}
+
+#[cfg(test)]
+#[test]
+fn derived_group_bitmap_growth_is_linear_at_ten_thousand_slots() {
+    let mut arena = ParseArena::new();
+    let mut initialized_words = 0;
+    for slot in 0..10_000 {
+        let before = arena.derived_value_groups.len();
+        let group = VbList::from_range(slot, 1);
+        arena.mark_derived_value_group(group);
+        initialized_words += arena.derived_value_groups.len() - before;
+        assert!(arena.is_derived_value_group(group));
+        assert!(!arena.is_derived_value_group(VbList::from_range(slot + 1, 1)));
+    }
+    // 10,000 direct bit writes; resize initializes each word exactly once.
+    assert_eq!(initialized_words, 157);
+    assert_eq!(arena.derived_value_groups.len(), 157);
+    for slot in 0..10_000 {
+        arena.mark_derived_value_group(VbList::from_range(slot, 1));
+    }
+    assert_eq!(arena.derived_value_groups.len(), initialized_words);
+    assert!(!arena.is_derived_value_group(VbList::EMPTY));
+    // Provenance does not enlarge the handle passed through the frontend.
+    assert_eq!(std::mem::size_of::<VbList>(), 8);
 }
