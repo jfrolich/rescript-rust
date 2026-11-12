@@ -5,23 +5,49 @@ use crate::parse_arena::*;
 use crate::parser::ast::*;
 use crate::parser::longident::Longident;
 
-// Sorted semantic-name tables: distinct StrIdx values can spell the same name.
-// Each entry is sixteen bytes; no hashing or allocation in the visitor.
+// Semantic names can have multiple arena handles. Compare borrowed spellings,
+// including virtual affixes, rather than allocating generated-name strings.
+#[derive(Clone, Copy)]
+enum Spelling { Plain, Field, Path, Encode, EncodeJson, Decode, Encoder, Decoder }
+impl Spelling {
+    /// O(1): select static affixes; no formatting or interning.
+    fn affixes(self) -> (&'static str, &'static str) {
+        match self {
+            Self::Plain => ("", ""), Self::Field => ("spice_field_", ""),
+            Self::Path => (".", ""), Self::Encode => ("", "_encode"),
+            Self::EncodeJson => ("", "_encodeJson"), Self::Decode => ("", "_decode"),
+            Self::Encoder => ("encoder_", ""), Self::Decoder => ("decoder_", ""),
+        }
+    }
+}
+struct Name<'a> { text: &'a str, id: u64, spelling: Spelling }
+impl<'a> Name<'a> {
+    /// O(1): borrow a source spelling and attach a virtual affix.
+    fn new(text: &'a str, id: u64, spelling: Spelling) -> Self { Self { text, id, spelling } }
+    /// O(1) construction; O(spelling bytes) to exhaust, with no allocation.
+    fn bytes(&self) -> impl Iterator<Item = u8> + '_ {
+        let (prefix, suffix) = self.spelling.affixes();
+        prefix.bytes().chain(self.text.bytes()).chain(suffix.bytes())
+    }
+}
 #[derive(Default)]
-struct Names { fields: Vec<(StrIdx, u64)>, constructors: Vec<(StrIdx, u64)>,
-    values: Vec<(StrIdx, u64)>, literals: Vec<(StrIdx, u64)>, types: Vec<(StrIdx, u64)> }
-impl Names {
-    /// O(names log names), once per declaration; sorted Vecs avoid hashing non-unique string handles.
-    fn sort(&mut self, arena: &ParseArena) {
+struct Names<'a> { fields: Vec<Name<'a>>, constructors: Vec<Name<'a>>,
+    values: Vec<Name<'a>>, literals: Vec<Name<'a>>, types: Vec<Name<'a>> }
+impl Names<'_> {
+    /// O(names log names * spelling bytes), once per declaration; no string allocation.
+    fn sort(&mut self) { self.sort_with(|a, b| a.bytes().cmp(b.bytes())); }
+    /// O(names log names) comparisons plus a linear deduplication. The comparator
+    /// is specialized away in production; tests count its actual invocations.
+    fn sort_with(&mut self, mut cmp: impl FnMut(&Name<'_>, &Name<'_>) -> std::cmp::Ordering) {
         for table in [&mut self.fields, &mut self.constructors, &mut self.values, &mut self.literals, &mut self.types] {
-            table.sort_by(|a, b| arena.get_string(a.0).cmp(arena.get_string(b.0)));
-            table.dedup_by(|a, b| arena.get_string(a.0) == arena.get_string(b.0));
+            table.sort_by(&mut cmp);
+            table.dedup_by(|a, b| cmp(a, b).is_eq());
         }
     }
 }
 struct Body { bytes: Vec<u8>, nodes: u64, complete: bool }
-struct Visitor<'a> { body: &'a mut Body, names: &'a Names }
-impl Visitor<'_> {
+struct Visitor<'a, 'source> { body: &'a mut Body, names: &'a Names<'source> }
+impl Visitor<'_, '_> {
     /// O(text bytes), append to the single binding buffer; no temporary string allocation.
     fn token(&mut self, text: &str) {
         write!(self.body.bytes, "{}:", text.len()).unwrap();
@@ -29,18 +55,18 @@ impl Visitor<'_> {
     }
     /// O(encoded scalar size), append directly without an allocated formatted string.
     fn flag(&mut self, flag: impl std::fmt::Debug) { write!(self.body.bytes, "{flag:?};").unwrap(); }
-    /// O(log names) string comparisons; no allocations, locks or thread-local access.
-    fn name(&mut self, arena: &ParseArena, name: StrIdx, table: &[(StrIdx, u64)]) {
+    /// O(log names * spelling bytes) comparisons; no allocations, locks or thread-local access.
+    fn name(&mut self, arena: &ParseArena, name: StrIdx, table: &[Name<'_>]) {
         self.named_text(arena, arena.get_string(name), table);
     }
-    /// O(log names) string comparisons; source names can have multiple arena handles.
-    fn named_text(&mut self, arena: &ParseArena, text: &str, table: &[(StrIdx, u64)]) {
-        if let Ok(i) = table.binary_search_by(|entry| arena.get_string(entry.0).cmp(text)) {
-            self.flag(table[i].1);
+    /// O(log names * spelling bytes) comparisons; source names can have multiple arena handles.
+    fn named_text(&mut self, _arena: &ParseArena, text: &str, table: &[Name<'_>]) {
+        if let Ok(i) = table.binary_search_by(|entry| entry.bytes().cmp(text.bytes())) {
+            self.flag(table[i].id);
         } else { self.body.bytes.push(b's'); self.token(text); }
     }
     /// O(path length times log names), traversing borrowed path segments without allocating.
-    fn lid(&mut self, arena: &ParseArena, lid: &Longident, table: &[(StrIdx, u64)]) {
+    fn lid(&mut self, arena: &ParseArena, lid: &Longident, table: &[Name<'_>]) {
         match lid {
             Longident::Lident(name) => { self.body.bytes.push(b'i'); self.name(arena, *name, table); }
             Longident::Ldot(prefix, name) => {
@@ -51,7 +77,7 @@ impl Visitor<'_> {
             }
         }
     }
-    /// O(log names) comparisons and one scalar tag; no allocation.
+    /// O(log names * spelling bytes) comparisons and one scalar tag; no allocation.
     fn label(&mut self, arena: &ParseArena, label: &ArgLabel) {
         self.flag(std::mem::discriminant(label));
         if let Some(name) = label.name_idx() { self.name(arena, name, &[]); }
@@ -69,7 +95,7 @@ impl Visitor<'_> {
         }
     }
 }
-impl AstIter for Visitor<'_> {
+impl AstIter for Visitor<'_, '_> {
     /// O(visited subtree occurrences times log names); each child is visited once, no per-node allocation.
     fn expr(&mut self, arena: &ParseArena, idx: ExprIdx) {
         self.body.nodes += 1;
@@ -188,41 +214,43 @@ fn renamed(attrs: &Attributes, name: &str, arena: &ParseArena) -> bool {
     attrs.iter().any(|a| arena.get_string(a.0.txt) == name)
 }
 /// O(fields + their attributes): build compact name tables once per declaration.
-fn fields(names: &mut Names, fields: &[LabelDeclaration], arena: &mut ParseArena) {
+fn fields<'a>(names: &mut Names<'a>, fields: &[LabelDeclaration], arena: &'a ParseArena) {
     for field in fields {
         let id = names.fields.len() as u64;
-        names.fields.push((field.pld_name.txt, id));
-        let variable = arena.intern_string(&format!("spice_field_{}", arena.get_string(field.pld_name.txt)));
-        names.values.push((variable, (1 << 32) + id));
+        let text = arena.get_string(field.pld_name.txt);
+        names.fields.push(Name::new(text, id, Spelling::Plain));
+        names.values.push(Name::new(text, (1 << 32) + id, Spelling::Field));
         if !renamed(&field.pld_attributes, "spice.key", arena) {
-            names.literals.push((field.pld_name.txt, id));
-            let path = arena.intern_string(&format!(".{}", arena.get_string(field.pld_name.txt)));
-            names.literals.push((path, (1 << 32) + id));
+            names.literals.push(Name::new(text, id, Spelling::Plain));
+            names.literals.push(Name::new(text, (1 << 32) + id, Spelling::Path));
         }
     }
 }
 
-/// O(fields log fields + body occurrences log names), with one output buffer per
+/// O(names log names * spelling bytes + body occurrences * lookup cost), where
+/// names include fields, constructors, parameters and declarations in the group.
+/// Attribute inspection is linear in their count. One output buffer per
 /// binding, never per visited node. Exact keys are stored rather than hashes;
 /// unsupported scalar payloads produce null, never a guessed template identity.
 pub(crate) fn record(decl: &TypeDeclaration, group: &[TypeDeclaration], recursive: bool,
     bindings: &[ValueBinding], arena: &mut ParseArena) {
+    if bindings.is_empty() { return; }
     let Some(mut census) = arena.derived_census.take() else { return; };
     let started = std::time::Instant::now();
     let mut names = Names::default();
     for (i, declaration) in std::iter::once(decl).chain(group.iter().filter(|d| d.ptype_name.txt != decl.ptype_name.txt)).enumerate() {
-        names.types.push((declaration.ptype_name.txt, i as u64));
-        for (j, suffix) in ["_encode", "_encodeJson", "_decode"].iter().enumerate() {
-            let name = arena.intern_string(&format!("{}{suffix}", arena.get_string(declaration.ptype_name.txt)));
-            names.values.push((name, (i * 3 + j) as u64));
+        let text = arena.get_string(declaration.ptype_name.txt);
+        names.types.push(Name::new(text, i as u64, Spelling::Plain));
+        for (j, spelling) in [Spelling::Encode, Spelling::EncodeJson, Spelling::Decode].into_iter().enumerate() {
+            names.values.push(Name::new(text, (i * 3 + j) as u64, spelling));
         }
     }
     for (i, (typ, _)) in decl.ptype_params.iter().enumerate() {
         if let CoreTypeDesc::Ptyp_var(name) = arena.get_core_type(*typ).ptyp_desc {
-            names.types.push((name, (1 << 32) + i as u64));
-            for (j, prefix) in ["encoder_", "decoder_"].iter().enumerate() {
-                let variable = arena.intern_string(&format!("{prefix}{}", arena.get_string(name)));
-                names.values.push((variable, (2 << 32) + (i * 2 + j) as u64));
+            let text = arena.get_string(name);
+            names.types.push(Name::new(text, (1 << 32) + i as u64, Spelling::Plain));
+            for (j, spelling) in [Spelling::Encoder, Spelling::Decoder].into_iter().enumerate() {
+                names.values.push(Name::new(text, (2 << 32) + (i * 2 + j) as u64, spelling));
             }
         }
     }
@@ -230,8 +258,8 @@ pub(crate) fn record(decl: &TypeDeclaration, group: &[TypeDeclaration], recursiv
         TypeKind::Ptype_record(labels) => { fields(&mut names, labels, arena); "record" }
         TypeKind::Ptype_variant(constructors) => {
             for (i, ctor) in constructors.iter().enumerate() {
-                names.constructors.push((ctor.pcd_name.txt, i as u64));
-                if !renamed(&ctor.pcd_attributes, "spice.as", arena) { names.literals.push((ctor.pcd_name.txt, (2 << 32) + i as u64)); }
+                names.constructors.push(Name::new(arena.get_string(ctor.pcd_name.txt), i as u64, Spelling::Plain));
+                if !renamed(&ctor.pcd_attributes, "spice.as", arena) { names.literals.push(Name::new(arena.get_string(ctor.pcd_name.txt), (2 << 32) + i as u64, Spelling::Plain)); }
                 if let ConstructorArguments::Pcstr_record(labels) = &ctor.pcd_args { fields(&mut names, labels, arena); }
             }
             "variant"
@@ -244,17 +272,16 @@ pub(crate) fn record(decl: &TypeDeclaration, group: &[TypeDeclaration], recursiv
         },
     };
     if let Some(manifest) = decl.ptype_manifest {
-        if let CoreTypeDesc::Ptyp_variant(inner) = arena.get_core_type(manifest).ptyp_desc.clone() {
+        if let CoreTypeDesc::Ptyp_variant(inner) = &arena.get_core_type(manifest).ptyp_desc {
             for (i, row) in inner.0.iter().enumerate() {
                 if let RowField::Rtag(label, attrs, _, _) = row {
-                    let name = arena.intern_string(&label.txt);
-                    names.constructors.push((name, i as u64));
-                    if !renamed(attrs, "spice.as", arena) { names.literals.push((name, (2 << 32) + i as u64)); }
+                    names.constructors.push(Name::new(&label.txt, i as u64, Spelling::Plain));
+                    if !renamed(attrs, "spice.as", arena) { names.literals.push(Name::new(&label.txt, (2 << 32) + i as u64, Spelling::Plain)); }
                 }
             }
         }
     }
-    names.sort(arena);
+    names.sort();
     for binding in bindings {
         let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
         Visitor { body: &mut body, names: &names }.expr(arena, binding.pvb_expr);
@@ -309,5 +336,102 @@ mod tests {
         assert!(body.complete);
     }
     #[test]
-    fn visitor_layout() { assert_eq!(std::mem::size_of::<Visitor<'_>>(), 16); }
+    fn visitor_layout() {
+        assert_eq!(std::mem::size_of::<Visitor<'_, '_>>(), 16);
+        assert_eq!(std::mem::size_of::<Name<'_>>(), 32);
+        assert_eq!(std::mem::size_of::<Spelling>(), 1);
+    }
+    #[test]
+    fn virtual_names_sort_and_scan_ten_thousand_elements() {
+        let stems: Vec<_> = (0..10_000).map(|i| format!("name{i:05}")).collect();
+        let mut names = Names::default();
+        for (i, stem) in stems.iter().enumerate().rev() {
+            names.values.push(Name::new(stem, i as u64, Spelling::Encode));
+        }
+        let mut comparisons = 0;
+        names.sort_with(|a, b| { comparisons += 1; a.bytes().cmp(b.bytes()) });
+        assert!((19_998..=280_000).contains(&comparisons), "{comparisons}");
+        for (i, name) in names.values.iter().enumerate() {
+            assert_eq!(name.id, i as u64);
+            assert!(name.bytes().eq(format!("name{i:05}_encode").bytes()));
+        }
+        let text = "x".repeat(10_000);
+        let name = Name::new(&text, 0, Spelling::Plain);
+        let mut steps = 0;
+        assert!(name.bytes().inspect(|_| steps += 1).eq(text.bytes()));
+        assert_eq!(steps, 10_000);
+    }
+    #[test]
+    fn wide_syntax_walks_visit_ten_thousand_children_once() {
+        let zeros = vec!["0"; 10_000].join(",");
+        let vars = (0..10_000).map(|i| format!("p{i}")).collect::<Vec<_>>().join(",");
+        let fields = (0..10_000).map(|i| format!("f{i}:0")).collect::<Vec<_>>().join(",");
+        for (source, expected) in [
+            (format!("let f = unknown({zeros})"), 10_002),
+            (format!("let f = ({vars}) => 0"), 10_002),
+            (format!("let f = {{{fields}}}"), 10_001),
+        ] {
+            let mut parser = crate::parser::Parser::new("wide.res", &source);
+            let items = crate::parser::module::parse_structure(&mut parser);
+            assert!(!parser.has_errors());
+            let StructureItemDesc::Pstr_value((_, group)) = items[0].pstr_desc else { panic!() };
+            let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
+            let names = Names::default();
+            Visitor { body: &mut body, names: &names }.expr(parser.arena(), parser.arena().vb_list(group)[0].pvb_expr);
+            assert_eq!(body.nodes, expected);
+            assert!(body.complete);
+        }
+        let source = format!("let ({vars}) = unknown");
+        let mut parser = crate::parser::Parser::new("pattern.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let StructureItemDesc::Pstr_value((_, group)) = items[0].pstr_desc else { panic!() };
+        let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
+        let names = Names::default();
+        Visitor { body: &mut body, names: &names }.pat(parser.arena(), parser.arena().vb_list(group)[0].pvb_pat);
+        assert_eq!(body.nodes, 10_001);
+        let source = format!("type t = ({})", vec!["int"; 10_000].join(","));
+        let mut parser = crate::parser::Parser::new("type.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else { panic!() };
+        let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
+        Visitor { body: &mut body, names: &names }.typ(parser.arena(), inner.1[0].ptype_manifest.unwrap());
+        assert_eq!(body.nodes, 10_001);
+    }
+    #[test]
+    fn path_encoder_visits_ten_thousand_segments_once() {
+        // The borrowed recursive source representation also drops recursively;
+        // give this deliberately adversarial test one sufficiently large stack.
+        std::thread::Builder::new().stack_size(32 * 1024 * 1024).spawn(|| {
+            let mut arena = ParseArena::default();
+            let x = arena.intern_string("x");
+            let mut path = Longident::Lident(x);
+            for _ in 1..10_000 { path = Longident::Ldot(Box::new(path), x); }
+            let mut body = Body { bytes: Vec::new(), nodes: 0, complete: true };
+            Visitor { body: &mut body, names: &Names::default() }.lid(&arena, &path, &[]);
+            assert_eq!(body.bytes.iter().filter(|b| **b == b'd').count(), 9_999);
+            assert_eq!(body.bytes.iter().filter(|b| **b == b'i').count(), 1);
+            assert_eq!(body.bytes.len(), 50_000);
+        }).unwrap().join().unwrap();
+    }
+
+    #[test]
+    fn declaration_preparation_borrows_ten_thousand_fields() {
+        let source = format!("type t = {{{}}}", (0..10_000).map(|i| format!("f{i}:int")).collect::<Vec<_>>().join(","));
+        let mut parser = crate::parser::Parser::new("fields.res", &source);
+        let items = crate::parser::module::parse_structure(&mut parser);
+        assert!(!parser.has_errors());
+        let StructureItemDesc::Pstr_type(inner) = &items[0].pstr_desc else { panic!() };
+        let TypeKind::Ptype_record(labels) = &inner.1[0].ptype_kind else { panic!() };
+        let mut names = Names::default();
+        fields(&mut names, labels, parser.arena());
+        assert_eq!(names.fields.len(), 10_000);
+        assert_eq!(names.values.len(), 10_000);
+        assert_eq!(names.literals.len(), 20_000);
+        for (label, name) in labels.iter().zip(&names.fields) {
+            assert!(std::ptr::eq(name.text, parser.arena().get_string(label.pld_name.txt)));
+        }
+    }
+
 }

@@ -347,3 +347,18 @@ they remain labelled observations, not silently updated measurements. Unsupporte
 than guessed. These limitations are not hidden by the phase reconciliation
 or the small allocation saving. The stricter +0.02% default-path CI budget also
 must be verified on the final published head, not inferred from fixture data.
+
+
+### Census engineering follow-up
+
+Declaration-name preparation now borrows source spellings and represents codec
+prefixes/suffixes virtually. It no longer formats and interns a string per field,
+codec name or parameter, or clones a polymorphic-variant declaration. The single
+binding buffer remains the destination for encoded bytes. This is opt-in census
+work: **no default-path speedup is claimed** for this cleanup. A before/after
+fixture check preserves every template byte, shape and node count in 35 records.
+Additional 10,000-element tests cover field preparation (including borrowed
+pointer identity), name-sort comparison bounds, spelling iteration, qualified
+paths, function parameters, application arguments, records, patterns and types.
+The visitor remains 16 bytes; virtual-name entries and their spelling tag have
+size assertions as well.

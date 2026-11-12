@@ -9,17 +9,20 @@ pub(super) use shape::record as record_shapes;
 use crate::parse_arena::ParseArena;
 use crate::parser::ast::{SignatureItem, StructureItem};
 
-/// Detect derives in a structure.
+/// Detect derives in a structure. O(items and visited attributes), delegating to
+/// the existing mapper scan; no additional traversal.
 pub fn structure_uses_spice_mapper(items: &[StructureItem], arena: &ParseArena) -> bool {
     super::spice_ppx::structure_uses_spice_mapper(items, arena)
 }
 
-/// Detect derives in a signature.
+/// Detect derives in a signature. O(items and visited attributes), delegating to
+/// the existing mapper scan; no additional traversal.
 pub fn signature_uses_spice_mapper(items: &[SignatureItem], arena: &ParseArena) -> bool {
     super::spice_ppx::signature_uses_spice_mapper(items, arena)
 }
 
-/// Expand built-in derives on a structure item.
+/// Expand built-in derives on a structure item. O(generated syntax plus mapper
+/// work), with O(1) timing overhead only when the census is enabled.
 pub fn expand_structure_item_with_mapper(
     item: &StructureItem,
     arena: &mut ParseArena,
@@ -34,7 +37,8 @@ pub fn expand_structure_item_with_mapper(
     result
 }
 
-/// Expand built-in derives on a signature item.
+/// Expand built-in derives on a signature item. O(generated declarations plus
+/// mapper work); no additional traversal.
 pub fn expand_signature_item_with_mapper(
     item: &SignatureItem,
     arena: &mut ParseArena,
