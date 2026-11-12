@@ -803,7 +803,6 @@ fn preprocess_signature_for_typecheck_with_source(
     signature: Signature,
     options: &CompilerOptions,
     file_config: &FileConfigOverrides,
-    let_unwrap: bool,
     arena: &mut crate::parse_arena::ParseArena,
     source: &str,
     filename: &str,
@@ -830,7 +829,11 @@ fn preprocess_signature_for_typecheck_with_source(
     } else {
         arena.set_builtin_spice(options.builtin_spice());
         let (rewritten, warnings) =
-            ppx::rewrite_signature_with_warnings(&signature, arena, let_unwrap);
+            ppx::rewrite_signature_with_warnings(
+                &signature,
+                arena,
+                options.experimental_let_unwrap || file_config.let_unwrap,
+            );
         builtin_ppx_warnings.extend(warnings);
         rewritten.map_err(|e| ppx_error_to_anyhow(e, arena, source, filename))
     }
@@ -7398,7 +7401,6 @@ pub fn run_interface_frontend(
         signature,
         options,
         &file_config,
-        experimental_let_unwrap,
         parser.arena_mut(),
         source,
         filename,
