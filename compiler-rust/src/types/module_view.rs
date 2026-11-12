@@ -14,9 +14,13 @@
 //! of its key whichever worker builds it. A compilation uses a view through
 //! `TypeContext::adopt_view`.
 //!
-//! Covered keys: the path of a unit the world owns (`ViewKey::Unit`). Paths
-//! with a module alias or a functor application on them, and child paths,
-//! are built by `types/env_lazy.rs` (see `Components::Local`).
+//! Covered keys: the path of a unit the world owns (`ViewKey::Unit`); the
+//! path of a child that a unit's view, or such a child's, declares with a
+//! signature (`ViewKey::Child`); the path of a child that is an alias of a
+//! unit the world owns (`ViewKey::Alias`). A structure child of an alias
+//! view, an alias of a path that is not a unit, a child that is a module
+//! type name, and any path with a functor application on it are built by
+//! `types/env_lazy.rs` (see `Components::Local`).
 
 use super::context::TypeContext;
 use super::decl::{
