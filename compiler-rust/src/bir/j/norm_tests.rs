@@ -2056,16 +2056,20 @@ fn ten_thousand_nested_ifs_rewrite_without_branch_vectors_or_list_pushes() {
     let capacity = (b.free_nodes.capacity(), b.release_stack.capacity());
     let pushes = b.lists.pushes;
     b.steps.set(0);
-    for _ in 0..10_000 {
-        let View::SIf { condition, then_, else_: Some(no) } = b.view(root) else { panic!() };
-        let yes = b.node(then_).block_list_id().unwrap();
-        let no = b.node(no).block_list_id().unwrap();
-        let child = b.lists.get(yes)[0];
-        b.detach(condition);
-        b.detach(child);
-        b.release(root);
-        root = n::js3_simplify_if(&mut b, condition, yes, no);
-    }
+    let allocations = allocation_counter::measure(|| {
+        for _ in 0..10_000 {
+            let View::SIf { condition, then_, else_: Some(no) } = b.view(root) else { panic!() };
+            let yes = b.node(then_).block_list_id().unwrap();
+            let no = b.node(no).block_list_id().unwrap();
+            let child = b.lists.get(yes)[0];
+            b.detach(condition);
+            b.detach(child);
+            b.release(root);
+            root = n::js3_simplify_if(&mut b, condition, yes, no);
+        }
+    });
+    assert_eq!(allocations.count_total, 0, "{allocations:?}");
+    println!("10,000 nested if rewrites: {} heap allocations", allocations.count_total);
     assert_eq!(b.lists.pushes - pushes, 0, "no temporary branch lists");
     assert_eq!((b.free_nodes.capacity(), b.release_stack.capacity()), capacity);
     assert!(b.steps.get() < 1_000_000);
