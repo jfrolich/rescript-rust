@@ -1,5 +1,5 @@
 //! Compile the runtime package of this repository into the executable (see
-//! `rescript::build::embedded_runtime`), so builds that use it need not
+//! `rescript::build::snapshot`), so builds that use it need not
 //! compile it. Without the package, or when it does not compile, the
 //! executable embeds nothing and compiles the runtime at run time.
 
@@ -16,7 +16,15 @@ fn main() {
     let bytes = match runtime_root.filter(|root| root.join("rescript.json").is_file()) {
         Some(root) => {
             watch_sources(&root);
-            rescript::build::embedded_runtime::compile(&root).unwrap_or_else(|err| {
+            let belt = root.parent().expect("package parent").join("belt");
+            if belt.join("rescript.json").is_file() {
+                println!("cargo:rerun-if-changed={}", belt.join("rescript.json").display());
+                println!("cargo:rerun-if-changed={}", belt.join("src").display());
+            }
+            rescript::build::snapshot::compile(&root).unwrap_or_else(|err| {
+                if rescript::build::snapshot::is_belt_proof_failure(&err) {
+                    panic!("snapshot production and proof builds: {err:#}");
+                }
                 println!("cargo:warning=not embedding the runtime, which failed to compile: {err:#}");
                 Vec::new()
             })

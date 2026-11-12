@@ -78,7 +78,8 @@ $(YARN_INSTALL_STAMP): $(YARN_INSTALL_SOURCES)
 # Rewatch
 
 REWATCH_SOURCES = $(shell find rewatch/src rewatch/cli -name '*.rs') rewatch/Cargo.toml rewatch/cli/Cargo.toml rewatch/Cargo.lock \
-	$(wildcard packages/@rescript/runtime/*.res packages/@rescript/runtime/*.resi) packages/@rescript/runtime/rescript.json
+	$(wildcard packages/@rescript/runtime/*.res packages/@rescript/runtime/*.resi) packages/@rescript/runtime/rescript.json \
+	$(wildcard packages/@rescript/belt/src/*.res packages/@rescript/belt/src/*.resi) packages/@rescript/belt/rescript.json
 RESCRIPT_EXE = $(BIN_DIR)/rescript.exe
 RESCRIPT_OCAML_EXE := $(BIN_DIR)/rescript-ocaml.exe
 ifdef CI
@@ -192,6 +193,11 @@ test: lib
 test-analysis: lib
 	make -C tests/analysis_tests clean test
 
+# The Rust editor analysis (`rescript analysis`, served by `rescript watch`)
+# against the OCaml analysis snapshots; see tests/analysis_tests/README.md.
+test-analysis-rust: lib
+	make -C tests/analysis_tests test-rust
+
 test-reanalyze: lib
 	make -C tests/analysis_tests/tests-reanalyze/deadcode test
 
@@ -219,9 +225,11 @@ test-gentype: lib
 
 test-rewatch: lib
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-rewatch-rust: lib rewatch
 	./rewatch/tests/suite.sh $(RESCRIPT_EXE)
+	RESCRIPT_EXECUTABLE=$(RESCRIPT_EXE) ./scripts/test_snapshot_equivalence.sh
 
 test-all: test test-gentype test-analysis test-tools test-rewatch
 
@@ -417,4 +425,4 @@ clean: clean-lib clean-compiler clean-rewatch clean-coverage
 
 .DEFAULT_GOAL := build
 
-.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts test test-analysis test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean
+.PHONY: yarn-install build rewatch rewatch-pgo compiler lib artifacts test test-analysis test-analysis-rust test-reanalyze benchmark-reanalyze test-tools test-syntax test-syntax-roundtrip test-gentype test-rewatch test-rewatch-rust test-all rust-compiler rust-test rust-test-parser clean-rust-compiler playground playground-compiler playground-test playground-cmijs playground-release format checkformat semantic-diff clean-rewatch clean-compiler clean-lib clean-gentype clean-tests clean

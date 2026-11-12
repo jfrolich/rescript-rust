@@ -1,0 +1,1 @@
+- Fix a documentation link from a public item to a private function, which failed the compiler documentation check.
