@@ -1084,7 +1084,7 @@ mod tests {
             engine.normalise(imported.root);
             engine.stats.fired
         };
-        imported.arena.validate(Some(imported.root), false).unwrap();
+        imported.arena.validate(Some(imported.root)).unwrap();
         let exported = export_lambda(&imported).unwrap();
         assert_eq!(dump(&exported.arena, exported.root), expected);
         fired
@@ -1818,7 +1818,7 @@ mod cost_tests {
             e.steps()
         );
         assert!(e.steps() <= 64, "{}", e.steps());
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     fn pass(name: &str, a: &LamArena, root: Lam, nodes: u64, row: usize, rewrites: u32) {
@@ -1831,7 +1831,7 @@ mod cost_tests {
         );
         assert_eq!(e.stats.fired[row], rewrites);
         assert!(e.steps() <= 32 * nodes, "{}", e.steps());
-        unit.arena.validate(Some(unit.root), false).unwrap();
+        unit.arena.validate(Some(unit.root)).unwrap();
     }
 
     #[test]
@@ -2037,7 +2037,7 @@ mod cost_tests {
                 (e.stats.fired[N13], e.stats.fired[N2]),
                 (cascaded, cascaded)
             );
-            unit.arena.validate(Some(unit.root), false).unwrap();
+            unit.arena.validate(Some(unit.root)).unwrap();
         }
     }
 }

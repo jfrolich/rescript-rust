@@ -1718,7 +1718,7 @@ mod tests {
             lowered
                 .program
                 .arena
-                .validate(Some(lowered.program.root), false)
+                .validate(Some(lowered.program.root))
                 .unwrap();
             let program = bridge_j::export_js(&lowered.program).unwrap();
             crate::js_ir::print_deps_program_with_directives_and_options(
@@ -1906,7 +1906,7 @@ mod tests {
             lowered
                 .program
                 .arena
-                .validate(Some(lowered.program.root), false)
+                .validate(Some(lowered.program.root))
                 .unwrap();
         }
         counts

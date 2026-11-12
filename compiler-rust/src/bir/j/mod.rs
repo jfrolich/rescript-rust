@@ -112,7 +112,7 @@ mod sequencing_tests {
                     assert!(!bir.node(field).flags().contains(NodeFlags::DELAY_SAFE));
                     let getter = member(&mut bir, field, property, FieldPos::NONE, 0);
                     assert!(!facts::runs_no_code(&bir, getter));
-                    bir.validate(Some(getter), false).unwrap();
+                    bir.validate(Some(getter)).unwrap();
                 }
             }
         }
@@ -136,6 +136,6 @@ mod sequencing_depth_tests {
         assert!(facts::runs_no_code(&b, root));
         assert!(b.steps.get() <= 30_003);
         b.finish_bulk(root);
-        b.validate(Some(root), false).unwrap();
+        b.validate(Some(root)).unwrap();
     }
 }

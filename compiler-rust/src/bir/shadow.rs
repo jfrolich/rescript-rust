@@ -156,7 +156,7 @@ pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<(
     };
     imported
         .arena
-        .validate(Some(imported.root), false)
+        .validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-bridge validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
@@ -226,7 +226,7 @@ pub fn check_js(
         Ok(imported) => imported,
         Err(reason) => return report(unit, "js-bridge", Some(reason.0), None),
     };
-    imported.arena.validate(Some(imported.root), false)
+    imported.arena.validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: js-bridge validation: {message}"))?;
     let exported = match super::bridge_j::export_js(&imported) {
         Ok(exported) => exported,
@@ -268,7 +268,7 @@ pub fn check_flatten(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<
             return report(unit, "lambda-flatten", Some(reason.0), None);
         }
     }
-    imported.arena.validate(Some(imported.root), false)
+    imported.arena.validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-flatten validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
@@ -331,7 +331,7 @@ pub fn check_exits(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()
     }
     imported
         .arena
-        .validate(Some(imported.root), false)
+        .validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: lambda-exits validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
@@ -829,7 +829,7 @@ pub fn check_alias(
     };
     imported
         .arena
-        .validate(Some(imported.root), false)
+        .validate(Some(imported.root))
         .map_err(|message| anyhow::anyhow!("{unit}: {STAGE} validation: {message}"))?;
     let exported = match export_lambda(&imported) {
         Ok(exported) => exported,
@@ -939,7 +939,7 @@ pub(crate) fn prepare_lower(
     lowered
         .program
         .arena
-        .validate(Some(lowered.program.root), false)
+        .validate(Some(lowered.program.root))
         .map_err(|error| LowerFailure::Error(anyhow::anyhow!("lower validation: {error}")))?;
     // bridge_j's exporter uses expr_with/stmt_with and alloc_* only: no
     // smart constructor and no normalize. The last SExp transports Out::value.

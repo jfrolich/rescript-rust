@@ -58,9 +58,18 @@ fn compare_oracle(mut arena: LamArena, root: Lam, resolver: Option<&crate::js_ir
             lowered
                 .program
                 .arena
-                .validate(Some(lowered.program.root), false)
+                .validate(Some(lowered.program.root))
                 .unwrap();
             let actual = bridge_j::export_js(&lowered.program).unwrap();
+            let mut counts = crate::lambda::js_pass_tailcall_inline::UseCounts::default();
+            crate::js_ir::walk::walk_block(&mut counts, &actual.program.arena, &actual.program.block);
+            let scope = lowered.program.arena.js_scope.as_ref().unwrap();
+            for (index, row) in scope.uses.iter().enumerate() {
+                let ident = lowered.program.idents[index];
+                assert_eq!(row.built as usize, counts.counts.get(&ident).copied().unwrap_or(0),
+                    "built occurrences for {ident:?}, context {cx:?}");
+                assert_eq!(row.remaining, row.built);
+            }
             let mut compiler = LambdaCompiler::new();
             compiler.module_path_resolver = resolver.cloned();
             if let Some(locations) = locations {
@@ -384,7 +393,7 @@ fn ten_thousand_deep_supported_nodes_use_linear_work() {
         lowered
             .program
             .arena
-            .validate(Some(lowered.program.root), false)
+            .validate(Some(lowered.program.root))
             .unwrap();
     }
 }
@@ -537,7 +546,7 @@ fn application_width_and_na_spines_have_linear_step_counts() {
         assert_eq!(state.source_steps, nodes);
         assert_eq!(state.sequence_steps, if shape == 1 { 20_001 } else { 10_001 });
         let lowered = state.complete(Cx::value(), probed);
-        lowered.program.arena.validate(Some(lowered.program.root), false).unwrap();
+        lowered.program.arena.validate(Some(lowered.program.root)).unwrap();
     }
 }
 
@@ -611,4 +620,44 @@ fn eligible_cross_module_inline_has_its_named_fallback() {
         state.cross_module_inline = true;
         assert!(matches!(state.probe(cx, root), Err(Unsupported("cross-module inline"))));
     }
+}
+
+#[test]
+fn block_substitution_and_dead_removal_do_not_commute_with_tailcall_inlining() {
+    // THREE_TREES.md T1/T4 boundary: the old tailcall pass counts the original tree.
+    // Substituting pair[0] and physically dropping pair first removes a use of
+    // pair_0, so rerunning the unchanged counter enables an additional inline.
+    // This is a pass-order probe, not a replacement for the byte-exact gate.
+    use crate::lambda::{ApInfo, ApplyStatus, LamLoc, TagInfo};
+    use crate::lambda::lam_primitive::{Primitive, Mutable};
+    use crate::lambda::lam_compat::FieldDbgInfo;
+    use crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_and_mark_dead_pass as dead;
+    use crate::lambda::js_pass_tailcall_inline::apply_js_tailcall_inline_pass as inline;
+    use crate::lambda::js_shake::apply_js_shake_pass as shake;
+    let mut a = LamArena::new();
+    let p = Ident::new("pair", 10, IdentFlags::NONE);
+    let x = Ident::new("x", 11, IdentFlags::NONE);
+    let exported = Ident::new("run", 12, IdentFlags::NONE);
+    let arg = a.var(x);
+    let fun = a.function_(1, &[x], arg, Default::default(), LamLoc::NONE);
+    let one = a.const_(C::Int { i: 1, comment: None });
+    let block = a.prim_raw(Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Immutable), &[fun, one], LamLoc::NONE);
+    let target = a.var(p);
+    let field = a.prim_raw(Primitive::Pfield(0, FieldDbgInfo::Tuple), &[target], LamLoc::NONE);
+    let arg = a.const_(C::Int { i: 2, comment: None });
+    let call = a.apply_raw(field, &[arg], ApInfo { loc: LamLoc::NONE, status: ApplyStatus::InferFull });
+    let wrapper = a.function_(0, &[], call, Default::default(), LamLoc::NONE);
+    let root = a.let_(LetKind::Strict, p, block, wrapper);
+    let mut compiler = LambdaCompiler::new();
+    let compiled = compiler.bir_lower_oracle(&mut a, root, Cont::Declare(LetKind::Strict, VarId(0)), exported);
+    let program = JsDepsProgram { program: JsProgram::new_in(compiled.prelude, vec![exported], compiler.j), modules: vec![], side_effect: None };
+    let old = shake(dead(inline(program.clone()), false));
+    let mut moved = crate::lambda::js_pass_flatten_and_mark_dead::apply_js_flatten_pass(dead(program, false));
+    let j = &moved.program.arena;
+    moved.program.block.retain(|&stmt| !matches!(j.sk(stmt), StmtKind::Variable(v)
+        if j.var(v).ident_info.used_stats == crate::js_ir::op::UsedStats::DeadPure));
+    let new = shake(inline(moved));
+    let print = |p: &JsDepsProgram| crate::js_ir::print_deps_program_with_directives_and_options(p, None, &[], false, false, false);
+    assert_eq!(print(&old), "\n\n\nfunction pair_0(x) {\n  return x;\n}\n\nfunction run() {\n  return pair_0(2);\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
+    assert_eq!(print(&new), "\n\n\nfunction run() {\n  return 2;\n}\n\nexport {\n  run,\n}\n/* No side effect */\n");
 }

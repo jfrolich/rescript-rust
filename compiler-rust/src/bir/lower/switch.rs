@@ -1214,7 +1214,7 @@ mod tests {
             result
                 .program
                 .arena
-                .validate(Some(result.program.root), false)
+                .validate(Some(result.program.root))
                 .unwrap();
         }
     }
@@ -1262,7 +1262,7 @@ mod tests {
             result
                 .program
                 .arena
-                .validate(Some(result.program.root), false)
+                .validate(Some(result.program.root))
                 .unwrap();
         }
     }
