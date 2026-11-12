@@ -74,6 +74,9 @@ type SharedComponents = (
 
 /// Shared dependency state for one worker thread.
 pub(crate) struct ThreadTypeStore {
+    /// The private store of a view build's scratch context: dropped with
+    /// it, never kept as the worker's store.
+    scratch: bool,
     types: TypeNodes,
     /// Initial memo values of store `Tconstr` nodes (always `Mnil` after
     /// internalization, like `compiler/ml/subst.ml:173-177` on save). Writes go
@@ -107,14 +110,25 @@ impl ThreadTypeStore {
 
 
     fn new() -> Self {
+        Self::with_storage(
+            TypeNodes::new(),
+            super::type_expr::TypePayloadPool::with_tag(super::type_expr::STORE_REF_TAG),
+            false,
+        )
+    }
+
+    fn with_storage(
+        types: TypeNodes,
+        type_lists: super::type_expr::TypePayloadPool,
+        scratch: bool,
+    ) -> Self {
         let generation = BUILD_GENERATION.load(Ordering::SeqCst);
         ThreadTypeStore {
-            types: TypeNodes::new(),
+            scratch,
+            types,
             abbrevs: RefCell::new(Vec::new()),
             row_fields: RefCell::new(Vec::new()),
-            type_lists: super::type_expr::TypePayloadPool::with_tag(
-                super::type_expr::STORE_REF_TAG,
-            ),
+            type_lists,
             variant_layouts: RefCell::new(Vec::new()),
             next_type_id: Cell::new(STORE_TYPE_ID_BASE),
             shared_components: RefCell::new(HashMap::new()),
@@ -490,7 +504,7 @@ impl Deref for StoreLease {
 impl Drop for StoreLease {
     fn drop(&mut self) {
         // A panic may leave a mark traversal unfinished. Do not reuse its graph.
-        if !std::thread::panicking() {
+        if !std::thread::panicking() && !self.scratch {
             let store = self.0.take();
             // TLS may already be gone during thread shutdown.
             let _returned = THREAD_TYPE_STORE.try_with(|slot| slot.replace(store));
@@ -504,6 +518,18 @@ impl Drop for StoreLease {
 fn fresh_store_per_compilation() -> bool {
     static FRESH: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *FRESH.get_or_init(|| std::env::var_os("RESCRIPT_FRESH_STORE").is_some())
+}
+
+/// The private store of a view build's scratch context: empty, ladder-only
+/// (no first array is initialised) and dropped with the context, so the
+/// worker's own store, leased by the compilation that started the build,
+/// is not replaced. One store is created per view build.
+pub(crate) fn scratch() -> StoreLease {
+    StoreLease(Some(Box::new(ThreadTypeStore::with_storage(
+        TypeNodes::ladder_only(),
+        super::type_expr::TypePayloadPool::ladder_only(super::type_expr::STORE_REF_TAG),
+        true,
+    ))))
 }
 
 pub(crate) fn current() -> StoreLease {

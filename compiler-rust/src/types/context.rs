@@ -49,7 +49,10 @@ pub(crate) struct TypeNodes {
     /// FIRST_LEN normally, zero while a store build must observe local reads.
     fast_limit: Cell<u32>,
     chunks: [std::cell::OnceCell<Box<[TypeNode]>>; TypeNodes::CHUNKS],
+    /// One past the last node's index.
     len: Cell<usize>,
+    /// Index of the first node: 0, or `FIRST_LEN` for a ladder-only store.
+    start: usize,
 }
 
 /// One node of [`TypeNodes`]. A node's descriptor and level are usually
@@ -116,6 +119,20 @@ pub(crate) fn lease_first_array<T, const N: usize>(
     array
 }
 
+/// The first retained array of the thread, shared and never read or written
+/// by the caller: a pool that keeps everything in its ladder still has to
+/// hold an array of the type. Only a thread that has none yet creates one
+/// (a later exclusive lease then takes it). One list read.
+pub(crate) fn placeholder_first_array<T, const N: usize>(
+    arrays: &RefCell<Vec<Rc<[T; N]>>>,
+    init: impl FnMut() -> T,
+) -> Rc<[T; N]> {
+    if let Some(array) = arrays.borrow().first() {
+        return Rc::clone(array);
+    }
+    lease_first_array(arrays, init)
+}
+
 impl TypeNodes {
     // Smaller measured arrays exceed the 0.2% instruction budget versus 65536.
     const FIRST_LEN: usize = 1 << 16;
@@ -140,6 +157,30 @@ impl TypeNodes {
             fast_limit: Cell::new(Self::FIRST_LEN as u32),
             chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
             len: Cell::new(0),
+            start: 0,
+        }
+    }
+
+    /// A store whose nodes are all in the ladder, which grows from 256
+    /// nodes: for a short-lived context that creates few nodes (a view
+    /// build's scratch context), where a first array of its own would be
+    /// 2 MB initialised per thread and kept. Its indices start at
+    /// `FIRST_LEN`, so every read takes the far path and the first array it
+    /// holds is never touched. One list read; initialises no node.
+    pub(crate) fn ladder_only() -> Self {
+        let first = FIRST_NODE_ARRAYS.with(|arrays| {
+            placeholder_first_array(arrays, || TypeNode {
+                desc: Cell::new(TypeDesc::Tnil),
+                level: Cell::new(0),
+                id: Cell::new(0),
+            })
+        });
+        TypeNodes {
+            first,
+            fast_limit: Cell::new(Self::FIRST_LEN as u32),
+            chunks: std::array::from_fn(|_| std::cell::OnceCell::new()),
+            len: Cell::new(Self::FIRST_LEN),
+            start: Self::FIRST_LEN,
         }
     }
 
@@ -238,8 +279,14 @@ impl TypeNodes {
         idx
     }
 
+    /// One past the last node's index.
     pub(crate) fn len(&self) -> usize {
         self.len.get()
+    }
+
+    /// Number of nodes.
+    pub(crate) fn count(&self) -> usize {
+        self.len.get() - self.start
     }
 }
 
@@ -257,7 +304,7 @@ impl Deref for OwnTypeNodes {
 impl Drop for OwnTypeNodes {
     fn drop(&mut self) {
         if crate::perf_counters::enabled() {
-            crate::perf_counters::record_local_type_nodes(self.0.len());
+            crate::perf_counters::record_local_type_nodes(self.0.count());
         }
     }
 }
@@ -1050,7 +1097,7 @@ pub struct TypeContext {
     /// are shared with later compilations, hence the `Arc` element.
     label_families: RefCell<Vec<Arc<Vec<super::decl::LabelDescription>>>>,
     /// Set on the scratch context of a view build: binders take store-range
-    /// stamps (see `set_world_scratch`).
+    /// stamps (see `new_scratch`).
     world_scratch: Cell<bool>,
 
     /// Stored typedtree environment snapshots, keyed by EnvRef.
@@ -1264,7 +1311,36 @@ impl super::decl_loc::DeclLocs for TypeContext {
 impl TypeContext {
     /// Create a new type context.
     pub fn new(id_gen: Arc<IdGenerator>) -> Self {
-        let store = super::thread_store::current();
+        Self::with_storage(
+            id_gen,
+            super::thread_store::current(),
+            TypeNodes::new(),
+            Default::default(),
+        )
+    }
+
+    /// The scratch context of a view build (`world::ViewScratch`): its
+    /// nodes, its lists and its private store are all ladder-only, so
+    /// creating one initialises no first array, and its binders take stamps
+    /// of the process-wide store range. The private store is dropped with
+    /// the context.
+    pub(crate) fn new_scratch(id_gen: Arc<IdGenerator>) -> Self {
+        let ctx = Self::with_storage(
+            id_gen,
+            super::thread_store::scratch(),
+            TypeNodes::ladder_only(),
+            super::type_expr::TypePayloadPool::ladder_only(0),
+        );
+        ctx.world_scratch.set(true);
+        ctx
+    }
+
+    fn with_storage(
+        id_gen: Arc<IdGenerator>,
+        store: super::thread_store::StoreLease,
+        types: TypeNodes,
+        type_lists: super::type_expr::TypePayloadPool,
+    ) -> Self {
         let shared_pages = store.shared_pool().pages();
         TypeContext {
             id_gen,
@@ -1280,10 +1356,10 @@ impl TypeContext {
             existential_constructors: RefCell::new(crate::fast_hash::AHashMap::new()),
             previous_env_id: Cell::new(None),
             current_abbreviations: Cell::new(AbbrevMemoRef::nil()),
-            types: OwnTypeNodes(TypeNodes::new()),
+            types: OwnTypeNodes(types),
             frozen_writes: FrozenWrites::default(),
             store,
-            type_lists: Default::default(),
+            type_lists,
             shared_pages,
             store_build_depth: Cell::new(0),
             store_build_type_start: Cell::new(0),
@@ -2905,7 +2981,7 @@ impl TypeContext {
 
     /// Number of allocated type expressions.
     pub fn type_expr_count(&self) -> usize {
-        self.types.len()
+        self.types.count()
     }
 
     /// Preserve absence, not a copy of the published value, on the trail.
@@ -4774,12 +4850,6 @@ impl TypeContext {
         }
     }
 
-    /// Make this the scratch context of a view build (`world::ViewScratch`):
-    /// its binders take stamps of the process-wide store range.
-    pub(crate) fn set_world_scratch(&self) {
-        self.world_scratch.set(true);
-    }
-
     /// Whether allocations currently go to the worker store.
     #[inline(always)]
     pub(crate) fn in_store_build(&self) -> bool {
@@ -5709,6 +5779,63 @@ mod tests {
             assert_eq!(reused.types.level(idx), 4);
             assert_eq!(reused.types.id(idx), 5);
         }).join().unwrap();
+    }
+
+    /// A view build's scratch context creates no first array: the arrays of
+    /// the thread are those of the compilation that started the build,
+    /// however many scratch contexts follow and however much they allocate.
+    #[test]
+    fn scratch_contexts_take_no_first_array() {
+        // A fresh thread gives this test a fresh lease list.
+        std::thread::spawn(|| {
+            let arrays = || {
+                (
+                    FIRST_NODE_ARRAYS.with(|arrays| arrays.borrow().len()),
+                    super::super::type_expr::first_list_arrays(),
+                )
+            };
+            let compilation = TypeContext::new(Arc::new(IdGenerator::new()));
+            let marker = compilation.types.push(TypeDesc::Tvar(None), 37, 91);
+            let before = arrays();
+            // The compilation's nodes and its store's nodes.
+            assert_eq!(before, (2, (2, 2)));
+            for _ in 0..3 {
+                let scratch = TypeContext::new_scratch(Arc::new(IdGenerator::new()));
+                assert_eq!(scratch.type_expr_count(), 0);
+                let mut tuples = Vec::new();
+                for n in 0..10_000usize {
+                    let var = scratch.new_var(None);
+                    let items = vec![var; n % 3 + 1];
+                    tuples.push((scratch.new_tuple(items), var, n % 3 + 1));
+                }
+                let (stored, piece) = scratch.build_in_store(|| {
+                    let var = scratch.new_generic_var(None);
+                    scratch.new_generic_type(TypeDesc::Ttuple(scratch.new_type_list(&[var, var])))
+                });
+                assert!(stored.is_store() && piece.is_some());
+                assert_eq!(scratch.type_expr_count(), 20_000);
+                for (tuple, var, len) in tuples {
+                    let TypeDesc::Ttuple(list) = *scratch.get_desc(tuple) else {
+                        panic!("expected a tuple");
+                    };
+                    let items = scratch.type_list(list);
+                    assert_eq!(items.len(), len);
+                    assert!((0..len).all(|i| items.get(i) == Some(var)));
+                }
+                assert_eq!(arrays(), before);
+            }
+            // The array the scratch contexts held was not written.
+            assert_eq!(compilation.types.level(marker), 37);
+            assert_eq!(compilation.types.len(), 1);
+            // The worker's store is still the compilation's: a new
+            // compilation gets a second one, as before.
+            drop(compilation);
+            let next = TypeContext::new(Arc::new(IdGenerator::new()));
+            assert_eq!(next.types.len(), 0);
+            assert_eq!(arrays(), before);
+        })
+        .join()
+        .unwrap();
     }
 
     #[test]

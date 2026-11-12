@@ -942,7 +942,7 @@ impl ViewScratch {
     fn new() -> Self {
         ViewScratch {
             generation: super::thread_store::build_generation(),
-            ctx: TypeContext::new(Arc::new(crate::context::IdGenerator::new())),
+            ctx: TypeContext::new_scratch(Arc::new(crate::context::IdGenerator::new())),
         }
     }
 
@@ -957,11 +957,10 @@ impl ViewScratch {
     /// Binders created on it take stamps of the process-wide store range,
     /// so none is `Ident::same` as an identifier of a compilation.
     ///
-    /// One checker context is created and dropped per view build.
+    /// One checker context is created and dropped per view build. It takes
+    /// no first node or list array (`TypeContext::new_scratch`).
     pub(crate) fn fresh() -> Self {
-        let scratch = ViewScratch::new();
-        scratch.ctx.set_world_scratch();
-        scratch
+        ViewScratch::new()
     }
 
     /// Run `build` on this worker's scratch context, creating it on first
