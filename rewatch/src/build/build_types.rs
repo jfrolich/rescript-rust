@@ -403,8 +403,6 @@ pub struct BuildCommandState {
     // In-process compiler options shared by every module of a package (keyed
     // by package path and whether the module is a dev source); immutable
     // within one compile wave like the GenType contexts.
-    /// Printer selection and coverage are shared across all project packages.
-    pub js_printer: rescript_compiler::emit::PrinterMode,
     pub package_compiler_options:
         Mutex<AHashMap<(PathBuf, bool), Arc<rescript_compiler::driver::CompilerOptions>>>,
     // Command-line --features override. `None` means all features are active; `Some(list)`
@@ -543,7 +541,6 @@ impl BuildCommandState {
             loaded_modules: AHashSet::new(),
             written_modules: AHashSet::new(),
             gentype_contexts: Mutex::new(AHashMap::new()),
-            js_printer: rescript_compiler::emit::PrinterMode::from_env(),
             package_compiler_options: Mutex::new(AHashMap::new()),
             features,
             previous_in_process: None,

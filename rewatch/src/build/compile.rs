@@ -2294,7 +2294,6 @@ fn build_package_compiler_options(
         };
 
     Ok(rescript_compiler::driver::CompilerOptions {
-        js_printer: build_command_state.js_printer.clone(),
         backend: rescript_compiler::bir::shadow::BackendMode::from_env(),
         check_only: build_command_state.check_only,
         include_paths,
