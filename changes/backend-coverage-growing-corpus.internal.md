@@ -1,0 +1,1 @@
+- Let the backend coverage ratchet accept a test added to a corpus: a new unit may be one more fallback where the stage already has fallbacks, while no existing unit may become one and a fully supported corpus keeps none.
