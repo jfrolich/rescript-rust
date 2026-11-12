@@ -363,11 +363,6 @@ impl ThreadTypeStore {
         self.types.level(r.store_index())
     }
 
-    #[inline]
-    pub(crate) fn id(&self, r: TypeExprRef) -> i32 {
-        self.types.id(r.store_index())
-    }
-
     /// Allocate a type list in the worker store.
     pub(crate) fn alloc_type_list(&self, items: &[TypeExprRef]) -> super::type_expr::TypeRefList {
         self.type_lists.alloc(items)

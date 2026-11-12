@@ -105,8 +105,8 @@ impl TypeNodes {
         self.node(idx).level.set(level);
     }
 
-    #[inline]
-    pub(crate) fn id(&self, idx: usize) -> i32 {
+    #[cfg(test)]
+    fn id(&self, idx: usize) -> i32 {
         self.node(idx).id.get()
     }
 

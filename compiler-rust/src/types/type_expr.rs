@@ -1520,12 +1520,6 @@ impl AbbrevMemoRef {
         self.0 & SHARED_REF_BITS == SHARED_REF_BITS
     }
 
-    #[inline]
-    pub(crate) fn shared_index(self) -> usize {
-        debug_assert!(self.is_shared());
-        (self.0 & !SHARED_REF_BITS) as usize
-    }
-
     /// Whether this memo cell belongs to a per-thread store node.
     #[inline]
     pub(crate) fn is_store(self) -> bool {
