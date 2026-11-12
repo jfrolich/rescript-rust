@@ -11,30 +11,38 @@ pub(super) struct Switch(pub u32);
 
 /// Legacy small string cases are selected before grouping.
 #[derive(Clone, Copy, PartialEq, Eq)]
-enum Form {
+pub(super) enum Form {
     General,
     Body,
     If,
 }
 
+/// Runtime dispatch representation; named sides share the general string code.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Kind {
+    Integer,
+    String,
+    Named,
+}
+
 /// Cold per-switch data, not copied down the source walk.
 pub(super) struct Plan {
-    scrutinee: NodeId,
-    header: SwitchId,
+    pub(super) scrutinee: NodeId,
+    pub(super) header: SwitchId,
     groups: Vec<usize>,
     next: Vec<usize>,
-    bodies: Vec<NodeId>,
-    default: Option<NodeId>,
+    pub(super) bodies: Vec<NodeId>,
+    pub(super) default: Option<NodeId>,
     output: Vec<NodeId>,
     clauses: Vec<ClauseMeta>,
-    start: Span,
-    value: Option<NodeId>,
+    pub(super) start: Span,
+    pub(super) value: Option<NodeId>,
     target: Option<VarId>,
     runs: [Span; 2],
     declaration: Option<u32>,
-    head: u32,
-    form: Form,
-    string: bool,
+    pub(super) head: u32,
+    pub(super) form: Form,
+    kind: Kind,
     pending_value: bool,
 }
 
@@ -58,7 +66,7 @@ impl State {
         {
             return Err(Unsupported("switch"));
         }
-        self.plan_switch(cx, scrutinee, operands, header, false)
+        self.plan_switch(cx, scrutinee, operands, header, Kind::Integer)
     }
 
     /// V: compile_string_switch_inner and C: compile_string_switch_*_block_inner.
@@ -70,25 +78,27 @@ impl State {
         operands: crate::bir::ListId,
         header: SwitchId,
     ) -> Result<Switch, Unsupported> {
-        self.plan_switch(cx, scrutinee, operands, header, true)
+        self.plan_switch(cx, scrutinee, operands, header, Kind::String)
     }
 
     /// Select the legacy form and prepare its single child schedule.
     /// O(c + compared nodes), with amortized payload fingerprinting.
-    fn plan_switch(
+    pub(super) fn plan_switch(
         &mut self,
         cx: Cx,
         scrutinee: NodeId,
         operands: crate::bir::ListId,
         header: SwitchId,
-        string: bool,
+        kind: Kind,
     ) -> Result<Switch, Unsupported> {
         let h = self.arena.switch(header);
         let count = h.keys.len();
         let default = h
             .has_default
             .then(|| self.source.lists.get(operands)[count]);
-        let complete = default.is_none() && !matches!(cx.cont, Cont::Effect(Tail::No));
+        let string = kind != Kind::Integer;
+        let complete = default.is_none()
+            && (kind == Kind::Named || !matches!(cx.cont, Cont::Effect(Tail::No)));
         let form = if !string {
             Form::General
         } else if count == 0 || count == 1 && complete {
@@ -124,7 +134,7 @@ impl State {
             self.statements.push(declaration);
         }
         let frame = Switch(self.switches.len() as u32);
-        self.switches.push(Plan {
+        self.switches.push(Some(Plan {
             scrutinee,
             header,
             groups,
@@ -140,9 +150,9 @@ impl State {
             declaration,
             head: 0,
             form,
-            string,
+            kind,
             pending_value: string && matches!(cx.cont, Cont::Value(_)),
-        });
+        }));
         Ok(frame)
     }
 }
@@ -477,15 +487,18 @@ impl State {
         same
     }
 
+    /// Read a live cold switch plan by its dense handle. O(1).
+    pub(super) fn switch_plan(&self, frame: Switch) -> &Plan {
+        self.switches[frame.0 as usize].as_ref().unwrap()
+    }
+
     /// Resolve the result allocated after a string scrutinee. O(1).
     pub(super) fn switch_child_context(&self, cx: Cx, frame: Switch, index: usize) -> Cx {
         if index == 0 {
             cx
         } else {
             Cx {
-                cont: self.switches[frame.0 as usize]
-                    .target
-                    .map_or(cx.cont, Cont::Assign),
+                cont: self.switch_plan(frame).target.map_or(cx.cont, Cont::Assign),
                 ..cx
             }
         }
@@ -494,7 +507,7 @@ impl State {
     /// C: compile_switch_*_block_inner: scrutinee V, then groups, then default.
     /// O(number of groups); no body is offered to the traversal twice.
     pub(super) fn switch_children(&self, cx: Cx, frame: Switch, into: &mut Vec<(Cx, NodeId)>) {
-        let plan = &self.switches[frame.0 as usize];
+        let plan = self.switch_plan(frame);
         into.push((
             Cx {
                 cont: Cont::Value(Tail::No),
@@ -504,7 +517,8 @@ impl State {
         ));
         let body_cx = Cx {
             cont: plan.target.map_or(cx.cont, Cont::Assign),
-            switch_depth: cx.switch_depth + 1,
+            switch_depth: cx.switch_depth
+                + u32::from(plan.kind != Kind::Named || plan.form == Form::General),
             ..cx
         };
         into.extend(
@@ -525,34 +539,34 @@ impl State {
         child: Probed,
     ) -> Probed {
         let mut out = self.realize(cx, child);
-        let plan = &mut self.switches[frame.0 as usize];
+        let plan = self.switches[frame.0 as usize].as_mut().unwrap();
         if index == 0 {
             plan.value = out.value.take();
             if plan.pending_value {
                 let target = self.fresh_variable("tmp");
                 let declaration = self.statements.reserve();
-                let plan = &mut self.switches[frame.0 as usize];
+                let plan = self.switches[frame.0 as usize].as_mut().unwrap();
                 plan.target = Some(target);
                 plan.declaration = Some(declaration);
             }
-            if self.switches[frame.0 as usize].form != Form::General {
-                self.switches[frame.0 as usize].head = self.statements.reserve();
+            if self.switch_plan(frame).form != Form::General {
+                self.switches[frame.0 as usize].as_mut().unwrap().head = self.statements.reserve();
             }
         } else {
             let start = out.stmts.start;
             if let Some(value) = out.value.take() {
                 self.drop_pure_effect(value);
             }
-            if self.switches[frame.0 as usize].form != Form::General {
+            if self.switch_plan(frame).form != Form::General {
                 let run = self.statements.trim(Span { start, len: 0 });
-                self.switches[frame.0 as usize].runs[index - 1] = run;
+                self.switches[frame.0 as usize].as_mut().unwrap().runs[index - 1] = run;
                 return Probed::Out(Out {
                     stmts: self.statements.mark(),
                     value: None,
                     finished: out.finished,
                 });
             }
-            let plan = &self.switches[frame.0 as usize];
+            let plan = self.switch_plan(frame);
             let is_default = index > plan.bodies.len();
             let should_break = !is_default
                 && out.finished != Finished::True
@@ -575,7 +589,7 @@ impl State {
             let run = self.statements.since(Span { start, len: 0 });
             let list = self.statements.take_list(&mut self.arena, run);
             let block = self.arena.block_from_list(list);
-            let plan = &mut self.switches[frame.0 as usize];
+            let plan = self.switches[frame.0 as usize].as_mut().unwrap();
             plan.output.push(block);
             plan.clauses.push(ClauseMeta {
                 should_break: should_break && !explicit,
@@ -595,18 +609,19 @@ impl State {
     /// C: compile_switch_assignment/effect/return_block_inner. O(case count).
     /// Direct integers retain switch syntax, including zero/one/two cases.
     pub(super) fn finish_switch(&mut self, cx: Cx, frame: Switch) -> Probed {
-        let plan = self
-            .switches
-            .pop()
-            .expect("switch frames close in stack order");
-        assert_eq!(frame.0 as usize, self.switches.len());
+        let plan = self.switches[frame.0 as usize]
+            .take()
+            .expect("live switch frame");
+        while self.switches.last().is_some_and(Option::is_none) {
+            self.switches.pop();
+        }
         if plan.form != Form::General {
             return self.finish_small_switch(cx, plan);
         }
         let scrutinee = plan.value.expect("lowered scrutinee");
         let body_cont = plan.target.map_or(cx.cont, Cont::Assign);
         let empty = plan.output.iter().all(|&body| matches!(self.arena.view(body), View::SBlock { statements } if statements.is_empty()));
-        if empty && matches!(cx.cont, Cont::Effect(Tail::No)) {
+        if empty && plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::No)) {
             for &body in &plan.output {
                 self.arena.release(body);
             }
@@ -670,7 +685,7 @@ impl State {
                     actions: &actions,
                     header,
                 },
-                u16::from(plan.string),
+                u16::from(plan.kind != Kind::Integer),
             );
             self.statements.push(statement);
         }
@@ -729,7 +744,7 @@ impl State {
                 self.statements.fill(slot, declaration);
             }
         }
-        if matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
+        if plan.kind != Kind::Named && matches!(cx.cont, Cont::Effect(Tail::Return(_))) {
             self.unnest(plan.start.start);
         }
         let value = match cx.cont {
@@ -889,10 +904,8 @@ impl State {
         if plan.form == Form::Body {
             self.arena.release(scrutinee);
         } else {
-            let CaseKey::String(key) = self.arena.switch(plan.header).keys[0] else {
-                unreachable!()
-            };
-            let key = plain::node(&mut self.arena, View::JStr { text: key }, 0);
+            let key = self.arena.switch(plan.header).keys[0].clone();
+            let key = self.switch_key_expression(&key);
             let test = norm::je4_bin(&mut self.arena, crate::js_ir::BinOp::EqEqEq, scrutinee, key);
             let yes = plan.runs[0];
             let no = if plan.bodies.len() + usize::from(plan.default.is_some()) == 2 {
