@@ -335,6 +335,15 @@ pub(crate) fn label_descrs_array(
     handle
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Constructors described by `build_type_constructors` on this thread.
+    pub(crate) static CONSTRUCTOR_DESCRIPTIONS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// Signature items scanned for the children of world views on this
+    /// thread.
+    pub(crate) static CHILD_SCAN_STEPS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 /// Describe the constructors of `decl` (those named `constructor_name`, or
 /// all), in declaration order, handing each to `emit`. One description per
 /// constructor.
@@ -354,6 +363,8 @@ fn build_type_constructors(
         if constructor_name.is_some_and(|name| cd.cd_id.name() != name) {
             continue;
         }
+        #[cfg(test)]
+        CONSTRUCTOR_DESCRIPTIONS.with(|count| count.set(count.get() + 1));
 
         let (cstr_args, cstr_arity, cstr_inlined) = match &cd.cd_args {
             super::decl::ConstructorArguments::CstrTuple(args) => {
@@ -2599,7 +2610,7 @@ impl ViewTables {
         }
         // The children's tables are shared by the compilations of this
         // worker: they are created in a store build, like their contents.
-        let (found, _) = ctx.build_in_store(|| {
+        let ((found, _scanned), _) = ctx.build_in_store(|| {
             scan_child_component_from_signature(
                 &self.access_path,
                 None,
@@ -2609,8 +2620,9 @@ impl ViewTables {
                 name,
                 ctx,
             )
-            .0
         });
+        #[cfg(test)]
+        CHILD_SCAN_STEPS.with(|steps| steps.set(steps.get() + _scanned as u64));
         found
     }
 
@@ -2808,8 +2820,28 @@ impl<'a> Components<'a> {
     ) -> Option<(usize, Ident, Arc<ModuleDeclaration>)> {
         match self {
             Components::World(view) => {
-                let (item, runtime_pos, id, md) = view.lookup_forced_module(ctx.world(), name)?;
-                ctx.note_forced_view_module(view, item, name, id, &md);
+                let (item, runtime_pos, forced) = view.lookup_forced_module(ctx.world(), name)?;
+                if let Some((id, md)) = forced {
+                    ctx.note_forced_view_module(view, item, name, id, &md);
+                    return Some((runtime_pos, id, md));
+                }
+                // The pool had no room for the declaration: this
+                // compilation forces its own, once (the force registers it).
+                if let Some((id, md)) = ctx.find_qualified_module_decl(view.access_path(), name) {
+                    return Some((runtime_pos, id, md));
+                }
+                let SignatureItem::SigModule(id, md, _) = &view.signature()[item] else {
+                    return None;
+                };
+                let (id, md) = force_component_module_declaration_thunk(
+                    view.access_path(),
+                    name,
+                    view.access_path(),
+                    view.signature(),
+                    *id,
+                    md.clone(),
+                    ctx,
+                );
                 Some((runtime_pos, id, md))
             }
             Components::Local(components) => components.lookup_qualified_module_shared(name, ctx),

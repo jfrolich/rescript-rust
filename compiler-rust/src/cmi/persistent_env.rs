@@ -1598,6 +1598,12 @@ impl PersistentEnv {
         resolve_first_char_case_key(&cache, name).is_some()
     }
 
+    /// Make `unit` the loaded unit of its name, as a build's registry does.
+    #[cfg(test)]
+    pub(crate) fn insert_loaded_unit(&self, unit: Arc<PersStruct>) {
+        self.cache_insert(unit.ps_name.clone(), Some(unit));
+    }
+
     fn cache_insert(&self, name: String, value: Option<Arc<PersStruct>>) {
         self.cache.lock().unwrap().insert(name, value);
     }

@@ -53,7 +53,9 @@ impl ViewId {
 /// reaches it without a table.
 #[derive(Default)]
 pub(crate) struct ViewCell {
-    /// `None` inside: the build failed, for every adopter alike.
+    /// `None` inside: the pool had no room for the view. Every compilation
+    /// then builds the unit's components for itself, as it does for a unit
+    /// the world does not own.
     view: OnceLock<Option<Arc<ModuleView>>>,
     /// Builds of this cell's view.
     #[cfg(test)]
@@ -105,7 +107,8 @@ impl ViewTable {
     /// The view of `key`, built on the calling worker the first time any
     /// worker asks; a second worker asking meanwhile waits for it. `None`
     /// when the key has no cell (the world does not own the unit) or the
-    /// build failed.
+    /// pool had no room for the view; the failure is stored, so no worker
+    /// tries again and every compilation gets the same answer.
     ///
     /// A view that is built already costs one load of a write-once cell and
     /// one reference-count increment: no lock, no hash.
@@ -159,8 +162,13 @@ pub(crate) struct OpenedItems {
 }
 
 /// The forced declaration of one child module (`comp_modules`, env.ml:1568),
-/// built by the first worker that looks the child up with `find_module`.
-type ForcedChild = OnceLock<Option<(Ident, Arc<ModuleDeclaration>)>>;
+/// built by the first worker that looks the child up with `find_module`;
+/// `None` inside when the pool had no room for it.
+type ForcedChild = OnceLock<ForcedDeclaration>;
+
+/// A forced child declaration with its identifier; `None` when the pool had
+/// no room for it.
+pub(crate) type ForcedDeclaration = Option<(Ident, Arc<ModuleDeclaration>)>;
 
 impl std::fmt::Debug for ModuleView {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -267,16 +275,34 @@ pub(crate) fn build_module_view(
     scratch: &ViewScratch,
     key: &ViewKey<'_>,
 ) -> Option<ModuleView> {
-    let mut view = describe_view(world, scratch, key)?;
-    view.id = ViewId(world.views().next_id.fetch_add(1, Ordering::Relaxed));
+    let view = describe_view(world, scratch, key)?;
     let frozen = match freeze(world, scratch, view) {
         Ok(frozen) => frozen,
-        Err(failure) => panic!("the view of {} cannot be frozen: {failure:?}", key.name()),
+        Err(failure) => {
+            debug_assert_unfreezable_is_pool_full(failure, key.name());
+            crate::perf_counters::world::record_view_failure();
+            return None;
+        }
     };
     let mut view = frozen.value;
+    view.id = ViewId(world.views().next_id.fetch_add(1, Ordering::Relaxed));
     view.nodes = frozen.nodes;
     crate::perf_counters::world::record_view_build(frozen.nodes);
     Some(view)
+}
+
+/// A full pool is the one reason a view or a forced child cannot be frozen.
+/// The others cannot happen: a unit the world owns has only frozen nodes
+/// (`World::unit` refuses any other), so the build reaches no worker-store
+/// node; no copy session is open when a description is complete; the build
+/// interns no location (it copies the unit's shared ones); package
+/// constraint names of a unit are the pool's; and every label array a view
+/// names was created on its scratch context.
+fn debug_assert_unfreezable_is_pool_full(failure: super::world::Unfreezable, name: &str) {
+    debug_assert!(
+        failure == super::world::Unfreezable::PoolFull,
+        "the view of {name} cannot be frozen: {failure:?}"
+    );
 }
 
 /// The tables of the view of `key`, described on `scratch`: what the build
@@ -572,19 +598,23 @@ impl ModuleView {
     /// scratch context of the first worker that asks.
     ///
     /// Forced already: one probe of the name index and one load of a
-    /// write-once cell. Forcing: one copy of the child's module type.
-    /// Returns the child's signature item, runtime position, identifier and
-    /// declaration.
+    /// write-once cell. Forcing: one pass over this view's signature (the
+    /// component substitution is built for each force, as before this
+    /// view existed) and one copy of the child's module type, so forcing
+    /// every child of a view is quadratic in the signature.
+    /// Returns the child's signature item, runtime position, and its
+    /// identifier and declaration; `None` for those when the pool had no
+    /// room for the declaration (the caller then forces it for itself).
     pub(crate) fn lookup_forced_module(
         &self,
         world: &World,
         name: &str,
-    ) -> Option<(usize, usize, Ident, Arc<ModuleDeclaration>)> {
+    ) -> Option<(usize, usize, ForcedDeclaration)> {
         let (idx, runtime_pos) = self.index.module(name)?;
+        let SignatureItem::SigModule(id, md, _) = &self.signature[idx] else {
+            return None;
+        };
         let forced = self.forced_children[idx].get_or_init(|| {
-            let SignatureItem::SigModule(id, md, _) = &self.signature[idx] else {
-                return None;
-            };
             let scratch = ViewScratch::fresh();
             let (id, md) = super::env_lazy::force_component_module_declaration_thunk(
                 &self.access_path,
@@ -600,14 +630,13 @@ impl ModuleView {
                     crate::perf_counters::world::record_forced_child(frozen.nodes);
                     Some((id, frozen.value))
                 }
-                Err(failure) => panic!(
-                    "the declaration of {}.{name} cannot be frozen: {failure:?}",
-                    self.access_path.name()
-                ),
+                Err(failure) => {
+                    debug_assert_unfreezable_is_pool_full(failure, name);
+                    None
+                }
             }
         });
-        let (id, md) = forced.as_ref()?;
-        Some((idx, runtime_pos, *id, md.clone()))
+        Some((idx, runtime_pos, forced.clone()))
     }
 
     /// The text `RESCRIPT_WORLD_VERIFY` compares: every table of the view
@@ -744,11 +773,37 @@ mod tests {
         TypeContext::new(Arc::new(IdGenerator::new()))
     }
 
+    /// What a test unit holds besides its fixed items.
+    #[derive(Default, Clone, Copy)]
+    struct Shape {
+        /// Values `v<n>: t`.
+        values: usize,
+        /// Variant types `k<n>`, each with `constructors` constructors
+        /// `C<n>_<m>(int)`.
+        variants: usize,
+        constructors: usize,
+        /// Record types `r<n> = {a<n>: int, b<n>: int}`.
+        records: usize,
+        /// Child modules `M<n>: { type u }`.
+        children: usize,
+    }
+
+    fn unit(name: &str, values: usize) -> Arc<PersStruct> {
+        unit_of(
+            name,
+            Shape {
+                values,
+                ..Shape::default()
+            },
+        )
+    }
+
     /// A unit the current world owns, named `name`, with:
-    /// `type t = {first: int, second: t}`, `values` values `v<n>: t`,
+    /// `type t = {first: int, second: t}`, what `shape` asks for,
     /// a module type `S`, and child modules `Alias = Other_unit` and
     /// `Inner: { type u }`.
-    fn unit(name: &str, values: usize) -> Arc<PersStruct> {
+    fn unit_of(name: &str, shape: Shape) -> Arc<PersStruct> {
+        let values = shape.values;
         static NEXT: AtomicUsize = AtomicUsize::new(0);
         let name = format!("{name}{}", NEXT.fetch_add(1, Ordering::Relaxed));
         let world = World::current();
@@ -819,6 +874,61 @@ mod tests {
                     val_attributes: Default::default(),
                     val_path: None,
                 },
+            ));
+        }
+        for n in 0..shape.variants {
+            let constructors: Vec<_> = (0..shape.constructors)
+                .map(|m| crate::types::decl::ConstructorDeclaration {
+                    cd_id: Ident::create_local(format!("C{n}_{m}")),
+                    cd_runtime_tag: None,
+                    cd_args: crate::types::decl::ConstructorArguments::CstrTuple(vec![int]),
+                    cd_res: None,
+                    cd_loc: crate::types::DeclLoc::none(),
+                    cd_attributes: vec![],
+                })
+                .collect();
+            let layout = crate::types::variant_runtime::plain_layout(
+                ctx,
+                constructors
+                    .iter()
+                    .map(|constructor| (constructor.cd_id.name().to_string(), true)),
+            );
+            signature.push(SignatureItem::SigType(
+                Ident::create_local(format!("k{n}")),
+                Arc::new(TypeDeclaration {
+                    type_kind: TypeKind::TypeVariant(
+                        crate::types::decl::SharedVec::from(constructors),
+                        layout,
+                    ),
+                    ..abstract_decl()
+                }),
+                RecStatus::TrecNot,
+            ));
+        }
+        for n in 0..shape.records {
+            signature.push(SignatureItem::SigType(
+                Ident::create_local(format!("r{n}")),
+                Arc::new(TypeDeclaration {
+                    type_kind: TypeKind::TypeRecord(
+                        crate::types::decl::SharedVec::from(vec![
+                            label(&format!("a{n}"), int),
+                            label(&format!("b{n}"), int),
+                        ]),
+                        RecordRepresentation::RecordRegular,
+                    ),
+                    ..abstract_decl()
+                }),
+                RecStatus::TrecNot,
+            ));
+        }
+        for n in 0..shape.children {
+            signature.push(module(
+                &format!("M{n}"),
+                ModuleType::MtySignature(Arc::new(vec![SignatureItem::SigType(
+                    Ident::create_local("u"),
+                    Arc::new(abstract_decl()),
+                    RecStatus::TrecNot,
+                )])),
             ));
         }
         signature.push(SignatureItem::SigModtype(
@@ -1019,9 +1129,11 @@ mod tests {
             })
             .collect();
         let forced: Vec<_> = threads.into_iter().map(|t| t.join().unwrap()).collect();
-        for (_, _, id, md) in &forced {
-            assert!(Arc::ptr_eq(md, &forced[0].3));
-            assert!(id.same(&forced[0].2));
+        let first = forced[0].2.as_ref().expect("the pool has room");
+        for (_, _, forced) in &forced {
+            let (id, md) = forced.as_ref().expect("the pool has room");
+            assert!(Arc::ptr_eq(md, &first.1));
+            assert!(id.same(&first.0));
         }
         assert!(view.lookup_forced_module(&world, "Missing").is_none());
         // A compilation registers the forced declaration once.
@@ -1075,7 +1187,8 @@ mod tests {
         let view = view_of(&unit);
         let world = World::current();
         let ctx = compilation();
-        let (item, _, id, md) = view.lookup_forced_module(&world, "Inner").unwrap();
+        let (item, _, forced) = view.lookup_forced_module(&world, "Inner").unwrap();
+        let (id, md) = forced.expect("the pool has room");
         for round in 0..2 {
             for child in 0..10_000 {
                 ctx.note_forced_view_module(&view, item + child, "Inner", id, &md);
@@ -1120,5 +1233,264 @@ mod tests {
             // holds the unpublished number.
             assert_eq!(rebuilt.id, ViewId(u32::MAX));
         }
+    }
+
+    fn constructor_descriptions() -> u64 {
+        crate::types::env_lazy::CONSTRUCTOR_DESCRIPTIONS.with(|count| count.get())
+    }
+
+    fn label_array_copies() -> u64 {
+        crate::types::world::LABEL_ARRAY_COPIES.with(|copies| copies.get())
+    }
+
+    /// Steps of one view build of a unit of `shape`: signature items
+    /// visited, substitution builds, constructors described by the lookup
+    /// tables, label arrays copied by the freeze.
+    fn build_counts(name: &str, shape: Shape) -> (u64, u64, u64, u64, Arc<ModuleView>) {
+        let unit = unit_of(name, shape);
+        let before = (
+            build_steps(),
+            subst_map_builds(),
+            constructor_descriptions(),
+            label_array_copies(),
+        );
+        let view = view_of(&unit);
+        (
+            build_steps() - before.0,
+            subst_map_builds() - before.1,
+            constructor_descriptions() - before.2,
+            label_array_copies() - before.3,
+            view,
+        )
+    }
+
+    #[test]
+    fn view_build_describes_each_constructor_once_per_table() {
+        // 10,000 constructors in one variant type, and 10,000 variant
+        // types of one constructor: the lookup table describes each
+        // constructor once and the opened items hold each once.
+        for (name, variants, constructors) in
+            [("One_variant", 1, 10_000), ("Many_variants", 10_000, 1)]
+        {
+            let (steps, maps, described, _, view) = build_counts(
+                name,
+                Shape {
+                    variants,
+                    constructors,
+                    ..Shape::default()
+                },
+            );
+            assert_eq!(steps, variants as u64 + 4, "{name}");
+            assert_eq!(described, 10_000, "{name}");
+            assert!(maps <= 4, "{name}: {maps} substitution builds");
+            assert_eq!(view.opened_items().constructors.len(), 10_000, "{name}");
+            assert_eq!(view.constructors.len(), 10_000, "{name}");
+            let last = format!("C{}_{}", variants - 1, constructors - 1);
+            let found = view.lookup_constructors(&last);
+            assert_eq!(found.len(), 1, "{name}");
+            assert!(found[0].cstr_res.is_shared(), "{name}");
+        }
+    }
+
+    #[test]
+    fn view_build_copies_each_label_array_once() {
+        // 10,000 record types of two labels. Every array is named by its
+        // two labels in the label table, by the family table and by the
+        // two opened labels; the freeze copies it once.
+        let (steps, _, _, copies, view) = build_counts(
+            "Records",
+            Shape {
+                records: 10_000,
+                ..Shape::default()
+            },
+        );
+        assert_eq!(steps, 10_004);
+        // The fixed record type `t` and the 10,000.
+        assert_eq!(copies, 10_001);
+        assert_eq!(view.label_families.len(), 10_001);
+        assert_eq!(view.opened_items().labels.len(), 20_002);
+        let family = view.type_label_family("r9999").expect("the record's array");
+        let world = World::current();
+        let Some(LabelArrayTier::Frozen(index)) = family.tier() else {
+            panic!("a view's label array is frozen");
+        };
+        let labels = world.label_array(index).expect("published");
+        assert_eq!(labels.len(), 2);
+        assert!(labels.iter().all(|label| label.lbl_all == family));
+        assert_eq!(view.lookup_labels("b9999")[0].lbl_all, family);
+    }
+
+    #[test]
+    fn opened_layers_take_one_insert_per_item() {
+        let shape = Shape {
+            values: 10_000,
+            variants: 100,
+            constructors: 100,
+            records: 5_000,
+            children: 10,
+        };
+        let unit = unit_of("Opened", shape);
+        let view = view_of(&unit);
+        let ctx = compilation();
+        let tables = ctx.thread_store().view_tables(&view);
+        let inserts = || crate::types::env::OPEN_TABLE_INSERTS.with(|inserts| inserts.get());
+        let (before, nodes) = (inserts(), ctx.type_expr_count());
+        let layers = tables.opened_layers(&view, &ctx);
+        let items = view.opened_items();
+        // Values, types, constructors, labels, modules, module types, and
+        // the component tables of the children (`Alias`, `Inner` and the
+        // ten).
+        let expected = items.values.len()
+            + items.types.len()
+            + items.constructors.len()
+            + items.labels.len()
+            + items.modules.len()
+            + items.modtypes.len()
+            + 12;
+        assert_eq!(items.values.len(), 10_000);
+        assert_eq!(items.constructors.len(), 10_000);
+        assert_eq!(items.labels.len(), 10_002);
+        assert_eq!((inserts() - before) as usize, expected);
+        // No type node, and the second open reads the worker's tables.
+        assert_eq!(ctx.type_expr_count(), nodes);
+        let again = tables.opened_layers(&view, &ctx);
+        assert!(std::rc::Rc::ptr_eq(&layers, &again));
+        assert_eq!((inserts() - before) as usize, expected);
+    }
+
+    #[test]
+    fn child_lookups_scan_the_signature_once() {
+        // 10,000 children looked up last to first, then all again: the
+        // scan visits each signature item once in total.
+        let shape = Shape {
+            children: 10_000,
+            ..Shape::default()
+        };
+        let (steps, maps, _, _, view) = build_counts("Children", shape);
+        assert_eq!(steps, 10_004);
+        assert!(maps <= 4, "{maps} substitution builds");
+        let ctx = compilation();
+        let tables = ctx.thread_store().view_tables(&view);
+        let scanned = || crate::types::env_lazy::CHILD_SCAN_STEPS.with(|steps| steps.get());
+        let before = scanned();
+        for round in 0..2 {
+            for n in (0..10_000).rev() {
+                assert!(
+                    tables
+                        .child_components(&view, &format!("M{n}"), &ctx)
+                        .is_some(),
+                    "round {round}, child {n}"
+                );
+            }
+        }
+        assert!(tables.child_components(&view, "Missing", &ctx).is_none());
+        assert_eq!(scanned() - before, 10_004);
+        // Forcing one child's declaration builds the component
+        // substitution once (one pass over the signature) whatever the
+        // number of children; W5's `ViewCell::decl` owns making it one
+        // build per view.
+        let world = World::current();
+        let maps = subst_map_builds();
+        for n in [0, 5_000, 9_999] {
+            let (_, _, forced) = view
+                .lookup_forced_module(&world, &format!("M{n}"))
+                .expect("the child exists");
+            assert!(forced.is_some());
+        }
+        assert_eq!(subst_map_builds() - maps, 3);
+    }
+
+    #[test]
+    fn a_view_the_pool_has_no_room_for_fails_once_for_every_compilation() {
+        use crate::types::world::FAIL_NEXT_FREEZE;
+        let failed = unit("No_room", 3);
+        let world = World::current();
+        FAIL_NEXT_FREEZE.with(|fail| fail.set(true));
+        assert!(
+            world
+                .views()
+                .get_or_build(&world, &ViewKey::Unit(&failed))
+                .is_none()
+        );
+        assert!(!FAIL_NEXT_FREEZE.with(|fail| fail.get()), "the build ran");
+        // The failure is stored: no worker builds again.
+        let threads: Vec<_> = (0..8)
+            .map(|_| {
+                let (failed, world) = (failed.clone(), world.clone());
+                std::thread::spawn(move || {
+                    world
+                        .views()
+                        .get_or_build(&world, &ViewKey::Unit(&failed))
+                        .is_none()
+                })
+            })
+            .collect();
+        assert!(threads.into_iter().all(|t| t.join().unwrap()));
+        let cell = failed.ps_view.get().unwrap();
+        assert_eq!(cell.builds.load(Ordering::Relaxed), 1);
+
+        // A compilation looking the unit up builds its components for
+        // itself, and reads the same value type through them as through
+        // the view of a unit that did fit.
+        let fits = unit("Room", 3);
+        let ctx = compilation();
+        let mut pers = crate::cmi::persistent_env::PersistentEnv::new();
+        pers.set_in_process_mode(true);
+        pers.insert_loaded_unit(failed.clone());
+        pers.insert_loaded_unit(fits.clone());
+        ctx.set_persistent_env(pers.clone());
+        let mut pers = Some(pers);
+        let env = crate::types::env::Env::empty();
+        let mut lookup = |unit: &PersStruct| {
+            let path = Path::pident(Ident::create_persistent(&unit.ps_name));
+            crate::types::typecore::with_resolved_module_components_for_path(
+                &path,
+                &env,
+                &mut pers,
+                &ctx,
+                |components| {
+                    let (_, _, desc) = components
+                        .lookup_value_for_access("v2", &ctx)
+                        .expect("the value is found");
+                    let printed = match ctx.get_desc(desc.val_type).into_desc() {
+                        crate::types::type_expr::TypeDesc::Tconstr { path, .. } => path.name(),
+                        _ => panic!("a constructor type"),
+                    };
+                    (matches!(components, Components::World(_)), printed)
+                },
+            )
+            .expect("the unit has components")
+        };
+        assert_eq!(lookup(&failed), (false, format!("{}.t", failed.ps_name)));
+        assert_eq!(lookup(&fits), (true, format!("{}.t", fits.ps_name)));
+        assert_eq!(ctx.view_adoptions.get(), 1);
+    }
+
+    #[test]
+    fn a_child_the_pool_has_no_room_for_is_forced_by_the_compilation() {
+        use crate::types::world::FAIL_NEXT_FREEZE;
+        let unit = unit("No_room_child", 1);
+        let view = view_of(&unit);
+        let world = World::current();
+        FAIL_NEXT_FREEZE.with(|fail| fail.set(true));
+        let (_, _, forced) = view.lookup_forced_module(&world, "Inner").unwrap();
+        assert!(forced.is_none());
+        // Stored: a later lookup does not try the pool again.
+        let (_, _, forced) = view.lookup_forced_module(&world, "Inner").unwrap();
+        assert!(forced.is_none());
+        let ctx = compilation();
+        ctx.adopt_view(key_of(&unit), view.clone());
+        let components = Components::World(&view);
+        let (_, id, md) = components
+            .lookup_qualified_module_shared("Inner", &ctx)
+            .expect("the compilation forces the child");
+        let maps = subst_map_builds();
+        let (_, again_id, again) = components
+            .lookup_qualified_module_shared("Inner", &ctx)
+            .expect("the compilation forces the child");
+        // Forced once per compilation.
+        assert!(Arc::ptr_eq(&md, &again) && id.same(&again_id));
+        assert_eq!(subst_map_builds(), maps);
+        assert!(matches!(md.md_type, ModuleType::MtySignature(_)));
     }
 }

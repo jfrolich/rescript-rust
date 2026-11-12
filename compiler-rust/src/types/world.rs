@@ -148,6 +148,14 @@ thread_local! {
     static FREEZE_PROBES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Makes the next [`freeze`] on this thread fail as a full pool does.
+    pub(crate) static FAIL_NEXT_FREEZE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Label arrays copied by freezes on this thread.
+    pub(crate) static LABEL_ARRAY_COPIES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 #[inline]
 fn count_unit_probe() {
     #[cfg(test)]
@@ -686,6 +694,8 @@ impl SignatureRefMap for Freezer<'_> {
         };
         // The array's labels name the array itself: their `lbl_all` finds
         // the position recorded above.
+        #[cfg(test)]
+        LABEL_ARRAY_COPIES.with(|copies| copies.set(copies.get() + 1));
         let mut labels = family.as_ref().clone();
         labels.rewrite_handles(self);
         self.graph.borrow_mut().families[position] = labels;
@@ -835,6 +845,10 @@ pub(crate) fn freeze<T: FrozenExport>(
     scratch: &ViewScratch,
     mut value: T,
 ) -> Result<Frozen<T>, Unfreezable> {
+    #[cfg(test)]
+    if FAIL_NEXT_FREEZE.with(|fail| fail.take()) {
+        return Err(Unfreezable::PoolFull);
+    }
     let freezer = Freezer {
         ctx: &scratch.ctx,
         pool: &world.pool,

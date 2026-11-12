@@ -701,6 +701,7 @@ pub(crate) mod world {
 
     static VIEWS_BUILT: AtomicU64 = AtomicU64::new(0);
     static VIEWS_ADOPTED: AtomicU64 = AtomicU64::new(0);
+    static VIEWS_FAILED: AtomicU64 = AtomicU64::new(0);
     static VIEW_NODES_COPIED: AtomicU64 = AtomicU64::new(0);
     static CHILDREN_FORCED: AtomicU64 = AtomicU64::new(0);
     static CHILD_NODES: AtomicU64 = AtomicU64::new(0);
@@ -710,6 +711,13 @@ pub(crate) mod world {
         if super::enabled() {
             VIEWS_BUILT.fetch_add(1, Ordering::Relaxed);
             VIEW_NODES_COPIED.fetch_add(nodes as u64, Ordering::Relaxed);
+        }
+    }
+
+    /// The pool had no room for a module view.
+    pub(crate) fn record_view_failure() {
+        if super::enabled() {
+            VIEWS_FAILED.fetch_add(1, Ordering::Relaxed);
         }
     }
 
@@ -731,6 +739,7 @@ pub(crate) mod world {
         PREDEF_NODES.store(0, Ordering::Relaxed);
         VIEWS_BUILT.store(0, Ordering::Relaxed);
         VIEWS_ADOPTED.store(0, Ordering::Relaxed);
+        VIEWS_FAILED.store(0, Ordering::Relaxed);
         VIEW_NODES_COPIED.store(0, Ordering::Relaxed);
         CHILDREN_FORCED.store(0, Ordering::Relaxed);
         CHILD_NODES.store(0, Ordering::Relaxed);
@@ -743,9 +752,10 @@ pub(crate) mod world {
             PREDEF_NODES.load(Ordering::Relaxed),
         );
         eprintln!(
-            "[compiler-counter] world_views built={} adopted={} children_forced={}",
+            "[compiler-counter] world_views built={} adopted={} failed={} children_forced={}",
             VIEWS_BUILT.load(Ordering::Relaxed),
             VIEWS_ADOPTED.load(Ordering::Relaxed),
+            VIEWS_FAILED.load(Ordering::Relaxed),
             CHILDREN_FORCED.load(Ordering::Relaxed),
         );
         eprintln!(

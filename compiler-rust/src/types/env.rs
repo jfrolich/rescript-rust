@@ -227,9 +227,22 @@ pub fn check_value_name(name: &str, loc: Location) -> EnvResult<()> {
 // Binding Tables
 // ============================================================================
 
+#[cfg(test)]
+thread_local! {
+    /// Items put into opened layer tables on this thread.
+    pub(crate) static OPEN_TABLE_INSERTS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[inline]
+fn count_open_table_insert() {
+    #[cfg(test)]
+    OPEN_TABLE_INSERTS.with(|inserts| inserts.set(inserts.get() + 1));
+}
+
 fn id_open_table<T>(components: Vec<(Ident, T, i32)>) -> OpenedMap<(Ident, T, i32)> {
     let mut table = OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value, pos) in components {
+        count_open_table_insert();
         table.insert(id.name_atom(), (id, value, pos));
     }
     table
@@ -239,6 +252,7 @@ fn tycomp_open_table<T>(components: Vec<(Ident, T)>) -> OpenedMap<Vec<(Ident, T)
     let mut table: OpenedMap<Vec<(Ident, T)>> =
         OpenedMap::with_capacity_and_hasher(components.len(), Default::default());
     for (id, value) in components {
+        count_open_table_insert();
         let name = id.name_atom();
         match table.get_mut(&name) {
             Some(entries) => entries.insert(0, (id, value)),
