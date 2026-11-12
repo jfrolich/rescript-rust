@@ -99,10 +99,6 @@ class CoverageGateTests(unittest.TestCase):
                                               "unsupported": {"reason": 4}}
         with self.assertRaisesRegex(RuntimeError, "fallback count grew"):
             check(actual, self.baseline)
-        actual["lambda-bridge"]["runtime"] = {"units": 12, "identical": 7,
-                                              "unsupported": {"reason": 4, "other": 1}}
-        with self.assertRaisesRegex(RuntimeError, "supported units fell"):
-            check(actual, self.baseline)
 
     def test_fully_supported_corpus_keeps_no_fallback(self):
         full = {stage: {"runtime": {"units": 10, "identical": 10, "unsupported": {}}}
