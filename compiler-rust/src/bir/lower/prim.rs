@@ -90,12 +90,28 @@ impl State {
 
     /// P: compile_primitive_js. O(a + emitted metadata bytes), plus sequencing
     /// holds and the named J-rule costs. Arguments are decoded once; dictionary
-    /// extraction visits each immediate entry once. Payload cloning copies cold
-    /// tag/template data, not expression trees.
+    /// extraction visits each immediate entry once. The payload pool is borrowed
+    /// while the output arena is mutated; moving its Vec header costs O(1).
     pub(super) fn finish_primitive(
         &mut self,
         cx: Cx,
         prim: Prim,
+        children: impl Iterator<Item = Probed>,
+    ) -> Result<Probed, Unsupported> {
+        let payloads = std::mem::take(&mut self.arena.pools.prims);
+        let payload = &payloads[prim.primitive.index()];
+        let result = self.finish_primitive_payload(cx, prim, payload, children);
+        self.arena.pools.prims = payloads;
+        result
+    }
+
+    /// P: compile_primitive_js. O(a + emitted metadata bytes + J-rule costs).
+    /// Borrow source metadata; only metadata owned by the output is copied.
+    fn finish_primitive_payload(
+        &mut self,
+        cx: Cx,
+        prim: Prim,
+        payload: &crate::bir::PrimPayload,
         children: impl Iterator<Item = Probed>,
     ) -> Result<Probed, Unsupported> {
         let outputs = children
@@ -106,8 +122,7 @@ impl State {
             .collect();
         let (statements, values) = self.sequence_arguments(false, outputs);
         self.primitive_steps += values.len() + 1;
-        let payload = self.arena.primitive(prim.primitive).clone();
-        let primitive = payload.primitive;
+        let primitive = &payload.primitive;
         let value = match primitive {
             // P: compile_primitive_js, dictionaries: extract only literal-key
             // tuple entries, exactly as the legacy filter_map does.
@@ -168,31 +183,32 @@ impl State {
                 let mut kept = Vec::new();
                 for arg in values {
                     self.primitive_steps += 1;
-                    let entries = if let View::JObject { info, values } = self.arena.view(arg) {
+                    let start = kept.len();
+                    let flatten = if let View::JObject { info, values } = self.arena.view(arg) {
                         let crate::bir::JsPayload::Object(props) = self.arena.javascript(info)
                         else {
                             unreachable!()
                         };
-                        props
-                            .iter()
-                            .all(|p| {
-                                matches!(
-                                    p,
-                                    crate::bir::PropertyKey::Literal(_)
-                                        | crate::bir::PropertyKey::Symbol
-                                )
-                            })
-                            .then(|| (props.clone(), values.to_vec()))
+                        let literal = props.iter().all(|p| {
+                            matches!(
+                                p,
+                                crate::bir::PropertyKey::Literal(_)
+                                    | crate::bir::PropertyKey::Symbol
+                            )
+                        });
+                        if literal {
+                            keys.extend_from_slice(props);
+                            kept.extend_from_slice(values);
+                        }
+                        literal
                     } else {
-                        None
+                        false
                     };
-                    if let Some((props, values)) = entries {
-                        for &value in &values {
+                    if flatten {
+                        for &value in &kept[start..] {
                             self.arena.detach(value);
                         }
                         self.arena.release(arg);
-                        keys.extend(props);
-                        kept.extend(values);
                     } else {
                         keys.push(crate::bir::PropertyKey::Spread);
                         kept.push(arg);
@@ -240,7 +256,7 @@ impl State {
             }
             // P: compile_primitive_js, blocks and fields (K: compile_field_access).
             Primitive::Pmakeblock(tag, mutable) => {
-                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag));
+                let info = self.arena.js_info(crate::bir::JsPayload::Block(tag.clone()));
                 plain::node(
                     &mut self.arena,
                     View::JBlockLit {
@@ -270,9 +286,9 @@ impl State {
             Primitive::Pmakearray => {
                 plain::node(&mut self.arena, View::JArray { values: &values }, 1)
             }
-            Primitive::Pfield(idx, info) => self.primitive_field(idx, info, values[0]),
+            Primitive::Pfield(idx, info) => self.primitive_field(*idx, info, values[0]),
             Primitive::Psetfield(idx, info) => {
-                self.primitive_set_field(idx, info.name(), values[0], values[1])
+                self.primitive_set_field(*idx, info.name(), values[0], values[1])
             }
             Primitive::Pobjtag => {
                 let property = self.arena.intern_text("TAG");
@@ -339,13 +355,13 @@ impl State {
             }
             // P: compile_primitive_js, template arms; J-M12 preserves raw spelling.
             Primitive::Ptemplate(segments) => {
-                norm::jm12_interpolated_template(&mut self.arena, segments, values.into_vec())
+                norm::jm12_interpolated_template(&mut self.arena, segments.clone(), values.into_vec())
             }
             Primitive::PtaggedTemplate(segments) => {
                 let parts = segments
-                    .into_iter()
+                    .iter()
                     .map(|s| crate::bir::TemplatePart {
-                        raw: self.arena.intern_text(&s),
+                        raw: self.arena.intern_text(s),
                         cooked: None,
                     })
                     .collect();
@@ -459,22 +475,22 @@ impl State {
                 }
             }
             // P: compile_primitive_js, comparison arms.
-            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(cmp, values[0], values[1]),
-            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(cmp, values[0], values[1]),
+            Primitive::Pintcomp(cmp) => self.primitive_int_comparison(*cmp, values[0], values[1]),
+            Primitive::Pboolcomp(cmp) => self.primitive_bool_comparison(*cmp, values[0], values[1]),
             Primitive::Pstringcomp(cmp) => {
-                self.primitive_literal_comparison(cmp, values[0], values[1], false)
+                self.primitive_literal_comparison(*cmp, values[0], values[1], false)
             }
             Primitive::Pbigintcomp(cmp) => {
-                self.primitive_literal_comparison(cmp, values[0], values[1], true)
+                self.primitive_literal_comparison(*cmp, values[0], values[1], true)
             }
-            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(cmp, values[0], values[1]),
+            Primitive::Pobjcomp(cmp) => self.primitive_object_comparison(*cmp, values[0], values[1]),
             Primitive::Pfloatcomp(
                 cmp @ (crate::lambda::lam_compat::Comparison::Eq
                 | crate::lambda::lam_compat::Comparison::Neq),
-            ) => self.primitive_int_comparison(cmp, values[0], values[1]),
+            ) => self.primitive_int_comparison(*cmp, values[0], values[1]),
             Primitive::Pfloatcomp(cmp) | Primitive::Pjscomp(cmp) => norm::je4_bin(
                 &mut self.arena,
-                super::prim_cmp::comparison_op(cmp, true),
+                super::prim_cmp::comparison_op(*cmp, true),
                 values[0],
                 values[1],
             ),
@@ -654,7 +670,7 @@ impl State {
                 )
             }
             Primitive::PcreateExtension(name) => {
-                let name = plain::string(&mut self.arena, &name);
+                let name = plain::string(&mut self.arena, name);
                 let call = self.primitive_runtime("Primitive_exceptions", "create", &[name]);
                 let comment = Some(self.arena.intern_text("@__PURE__"));
                 self.arena.set_cold(
@@ -700,10 +716,10 @@ impl State {
                     finished: Finished::True,
                 }));
             }
-            Primitive::Pjsx(jsx) => self.compile_jsx(&jsx, values),
-            Primitive::Pimport(source) => self.compile_import(&source),
+            Primitive::Pjsx(jsx) => self.compile_jsx(jsx, values),
+            Primitive::Pimport(source) => self.compile_import(source),
             Primitive::Pduprecord => self.duplicate_record(values[0]),
-            Primitive::PrecordRest(excluded) => self.record_rest(values[0], &excluded),
+            Primitive::PrecordRest(excluded) => self.record_rest(values[0], excluded),
             // P: compile_primitive_js, Pawait. O(1): one owned J node.
             Primitive::Pawait => plain::node(&mut self.arena, View::JAwait { value: values[0] }, 0),
             Primitive::Pstringlength => {
@@ -727,6 +743,21 @@ impl State {
                 unreachable!("PextensionSlotEq is lowered in raw_lambda::lower")
             }
         };
+        // C: primitive_uses_default_compilation / with_source_loc. Preserve
+        // a child's existing location when a normalizer returns that child.
+        let located = match primitive {
+            Primitive::Pdebugger => false,
+            Primitive::Pfield(_,crate::lambda::FieldDbgInfo::Module { .. }) =>
+                !matches!(self.source.lists.get(prim.operands),[arg] if matches!(self.source.view(*arg),View::Global { .. })),
+            _ => true,
+        };
+        if located && !self.arena.node(value).flags().contains(crate::bir::NodeFlags::JS_LOC_PRESENT)
+            && self.locations.as_ref().and_then(|t|t.get(payload.loc)).is_some_and(|loc| !loc.loc_ghost && loc.loc_start.cnum >= 0) {
+            let comment = self.arena.cold(value).and_then(|c|c.comment);
+            self.arena.set_cold(value,crate::bir::Cold { loc:payload.loc,comment });
+            let mut flags = self.arena.node(value).flags(); flags.0 |= crate::bir::NodeFlags::JS_LOC_PRESENT;
+            self.arena.nodes[value.index()].set_flags(flags);
+        }
         Ok(self.primitive_result(
             cx,
             self.statements.since(Span {
@@ -760,6 +791,19 @@ impl State {
 mod tests {
     use super::*;
     use crate::lambda::{LamLoc, arena::LamArena, lam_constant::Constant};
+
+    #[test]
+    fn interned_payload_is_reusable_after_lowering() {
+        let mut a = LamArena::new();
+        let primitive = Primitive::PrawJsCode(crate::lambda::lam_primitive::JsRawInfo {
+            code: "payload()".into(),
+            is_stmt: false,
+        });
+        let first = a.prim_raw(primitive.clone(), &[], LamLoc::NONE);
+        let second = a.prim_raw(primitive, &[], LamLoc::NONE);
+        let root = a.prim_raw(Primitive::Pmakearray, &[first, second], LamLoc::NONE);
+        super::super::oracle_tests::compare(a, root);
+    }
 
     #[test]
     fn primitive_resume_is_two_handles() {

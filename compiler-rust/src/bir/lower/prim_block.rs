@@ -47,7 +47,7 @@ impl State {
     pub(super) fn primitive_field(
         &mut self,
         idx: i32,
-        info: FieldDbgInfo,
+        info: &FieldDbgInfo,
         target: NodeId,
     ) -> NodeId {
         if let FieldDbgInfo::Module { name } = info {
@@ -111,7 +111,7 @@ impl State {
         }
         let field = match info {
             FieldDbgInfo::Module { name } => {
-                crate::js_ir::printer::convert_ident_cow(&name).into_owned()
+                crate::js_ir::printer::convert_ident_cow(name).into_owned()
             }
             FieldDbgInfo::Record { name }
             | FieldDbgInfo::RecordInline { name }
