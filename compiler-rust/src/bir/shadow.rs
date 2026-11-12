@@ -47,6 +47,8 @@ struct NormReport {
     calls: u64,
     replayed: std::collections::BTreeMap<&'static str, u32>,
     renormalised: std::collections::BTreeMap<&'static str, u32>,
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    rules: std::collections::BTreeMap<&'static str, u64>,
     compared: u64,
 }
 
@@ -99,6 +101,11 @@ fn report(
 /// dumps. Unsupported is a recorded legacy fallback; a difference is an error.
 #[cold]
 pub fn check_lambda(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()> {
+    // This hook already runs only off the default path. S4 rounds are Check
+    // only: New still exercises the bridges without running rewrite rounds.
+    if BackendMode::from_env() == BackendMode::Check {
+        check_flatten(arena, root, unit)?;
+    }
     let imported = match import_lambda(arena, root) {
         Ok(imported) => imported,
         Err(reason) => return report(unit, "lambda-bridge", Some(reason.0), None),
@@ -152,6 +159,7 @@ pub fn check_norm(arena: &LamArena, raw: Lam, unit: &str) -> anyhow::Result<()> 
                 replayed: rows(stats.replayed),
                 renormalised: rows(stats.renormalised),
                 compared: stats.compared,
+                rules: Default::default(),
             }),
         ),
         Err(reason) => report(unit, "lambda-norm", Some(reason.0), None),
@@ -191,6 +199,64 @@ pub fn check_js(
         anyhow::bail!("{unit}: js-bridge mismatch at line {line}");
     }
     report(unit, "js-bridge", None, None)
+}
+
+/// The first deep_flatten cut in simplify_in_arena: its input is the lowered,
+/// alias-collapsed root passed to check_lambda. Run the same first call on a
+/// private legacy arena, with exactly its ident_stamp_bound counter seed.
+/// Neither path touches the live pipeline or the legacy thread-local counter.
+#[cold]
+pub fn check_flatten(arena: &LamArena, root: Lam, unit: &str) -> anyhow::Result<()> {
+    let mut imported = match import_lambda(arena, root) {
+        Ok(imported) => imported,
+        Err(reason) => return report(unit, "lambda-flatten", Some(reason.0), None),
+    };
+    let stamp = arena.ident_stamp_bound();
+    let stats = {
+        let mut engine = super::engine::Engine::new(&mut imported.arena);
+        engine.set_current_stamp(stamp as u32);
+        engine.run(&super::l::flatten::FLATTEN, imported.root);
+        engine.stats
+    };
+    for (var, source) in stats.renames {
+        if let Err(reason) = imported.register_rename(var, source) {
+            return report(unit, "lambda-flatten", Some(reason.0), None);
+        }
+    }
+    imported.arena.validate(Some(imported.root), false)
+        .map_err(|message| anyhow::anyhow!("{unit}: lambda-flatten validation: {message}"))?;
+    let exported = match export_lambda(&imported) {
+        Ok(exported) => exported,
+        Err(reason) => return report(unit, "lambda-flatten", Some(reason.0), None),
+    };
+    let generator = crate::context::IdGenerator::new();
+    generator.set_current_stamp(stamp);
+    let mut legacy = arena.clone();
+    let expected = crate::lambda::lam_pass_deep_flatten::deep_flatten(&mut legacy, root, &generator);
+    if super::l::flatten::identities(&legacy, expected)
+        != super::l::flatten::identities(&exported.arena, exported.root)
+    {
+        anyhow::bail!("{unit}: lambda-flatten identifier mismatch (name, stamp or flags)");
+    }
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    crate::lambda::sexp_lambda::print_lambda(&legacy.export(expected), &mut before)?;
+    crate::lambda::sexp_lambda::print_lambda(&exported.to_tree(), &mut after)?;
+    if before != after {
+        let before = String::from_utf8_lossy(&before);
+        let after = String::from_utf8_lossy(&after);
+        let line = before.lines().zip(after.lines()).position(|(a,b)| a != b)
+            .unwrap_or_else(|| before.lines().count().min(after.lines().count())) + 1;
+        anyhow::bail!("{unit}: lambda-flatten mismatch at line {line}: expected {:?}, got {:?}",
+            before.lines().nth(line - 1), after.lines().nth(line - 1));
+    }
+    report(unit, "lambda-flatten", None, Some(NormReport {
+        calls: stats.entered,
+        replayed: Default::default(),
+        renormalised: Default::default(),
+        compared: stats.compared,
+        rules: stats.rules,
+    }))
 }
 
 #[cfg(test)]
