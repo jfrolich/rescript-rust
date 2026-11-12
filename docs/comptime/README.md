@@ -487,6 +487,9 @@ type userPatch = %Partial.t(user)
 
 <!-- /example -->
 
+A type a macro built can also be the body of a type declaration in a quote:
+`%code(type row = ${Type.record(fields)})` declares the record type `row`.
+
 ### Optional fields
 
 The `typ` of a field is the type of `value.field`. For `nickname?: string`
@@ -855,6 +858,7 @@ compile-time parameter has to be called directly.
 | `Code.print(code)` | The source text of a piece of code. |
 | `Code.raw(text)` | Code from source text. Nothing checks it until the macro's result is compiled. |
 | `Code.decls(items)` | Several declarations in a row. |
+| `Code.module_(name, items)` | `module Name = { items }`, for a module whose name is computed. |
 | `Pat.var(name)`, `Pat.any`, `Pat.string`, `Pat.int` | Patterns. |
 | `Pat.constructor(c)` | The pattern that matches a constructor and binds its arguments, and the code of each bound argument with its type. |
 | `Attr.find`, `has`, `string` | Look up an attribute of a field, constructor or declaration. |
@@ -1008,11 +1012,12 @@ implemented:
 - **Splice holes in patterns and types.** `${...items}` stands in lists of
   expressions. The fields of a record type are built with `Type.record`,
   and the arguments of a constructor pattern with `Pat.constructor`.
-- **Type declarations in a quote.** A hole is written in parentheses, so
-  `type t = ${row}` is not a record type declaration, and a type of the
-  macro's own file is not resolved in that file the way a value is. The
-  `sql` example writes its row types with `Code.raw` and names `Sql.db` in
-  full.
+- **Types of the macro's file in a quote.** A value of the macro's own file
+  is resolved in that file, and a type is not: the `sql` example names
+  `Sql.db` in full.
+- **Holes for the name of a type or a module.** A hole stands for the name
+  of a `let`, as `Pat.var`. The name of a type or a module in a quote is
+  written out; `Code.module_` is for a module whose name is computed.
 - **Attribute payloads beyond one string.** `@Json.key("user_age")` reaches
   the macro; `@Json.codec({strict: true})` does not yet pass its argument.
 - **Parametric types.** `Type.info` of `result<a, b>` or a record with type

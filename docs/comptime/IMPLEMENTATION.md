@@ -148,9 +148,11 @@ the macro (an argument arrives with `$o`, the compiler's name for its range).
 character of the expanded text gets its origin. `__holeCode`, `__holeType`
 and `__holePat` are identity functions whose types make the hole's
 expression check as `code<'a>`, `typ` or `pat`; `__holeItem` is for a hole
-that stands where a whole declaration does. A quote of declarations lowers
-to `__quoteDecls`. At run time a quote is string concatenation, with
-parentheses around each filled hole except a declaration.
+that stands where a whole declaration does, and `__holeTypeBody` for one
+that is the body of a type declaration (`type t = ${body}`). A quote of
+declarations lowers to `__quoteDecls`. At run time a quote is string
+concatenation, with parentheses around each filled hole except those two:
+a record or a variant type cannot be written in parentheses.
 
 A splice hole is lowered by the list it is an item of, which the scan of a
 quote records for each one (`SplicePlace`):
