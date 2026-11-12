@@ -152,3 +152,44 @@ fn replacing_divisor_repairs_strict_ancestors() {
     assert!(!facts::strictly_pure(&b, root));
     b.validate(Some(root), false).unwrap();
 }
+
+#[test]
+fn array_is_array_identity_arity_and_effect_boundaries() {
+    use crate::ident::{Ident, IdentFlags};
+    for (stamp, flags) in [
+        (0, IdentFlags::GLOBAL),
+        (17, IdentFlags::JS),
+        (17, IdentFlags::NONE),
+    ] {
+        for arity in 0..3 {
+            for effect in [false, true] {
+                for field in ["isArray", "other"] {
+                    for position in [FieldPos::NONE, FieldPos::new(Some(0))] {
+                        let mut a = JsArena::new();
+                        let id = a.ident_id(Ident::new("Array", stamp, flags));
+                        let target = a.expr(ExprKind::Var(id));
+                        let key = a.str(field);
+                        let callee = a.expr(ExprKind::StaticIndex(target, key, position));
+                        let mut args = vec![];
+                        for _ in 0..arity {
+                            let arg = if effect {
+                                let raw = a.raw_id(crate::js_ir::JsRawInfo {
+                                    code: "effect()".into(),
+                                    is_stmt: false,
+                                });
+                                a.expr(ExprKind::RawJsCode(raw))
+                            } else {
+                                a.expr(ExprKind::Null)
+                            };
+                            args.push(arg);
+                        }
+                        let args = a.expr_list(&args);
+                        let info = a.call_id(crate::js_ir::CallInfo::default());
+                        let call = a.expr(ExprKind::Call(callee, args, info));
+                        check(a, &[call]);
+                    }
+                }
+            }
+        }
+    }
+}

@@ -1819,7 +1819,11 @@ mod tests {
                 source_loc: Some(LamLoc::for_test(19)),
             },
         );
-        roundtrip(&program(a, vec![s]));
+        let p = program(a, vec![s]);
+        let imported = import_js(&p).unwrap();
+        let expected = js::build::ocaml_eq_block(&p.program.arena, &p.program.block, &p.program.block);
+        assert_eq!(crate::bir::j::equal::equal(&imported.arena, imported.root, imported.root, &mut 0), expected);
+        roundtrip(&p);
     }
     macro_rules! stmt_case {
         ($name:ident,|$a:ident,$x:ident,$b:ident|$body:expr) => {
