@@ -1071,12 +1071,783 @@ fn run(e: &mut Engine<'_>, root: NodeId) -> Changed {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::bir::bridge::import_lambda;
+    use crate::bir::bridge::{export_lambda, import_lambda};
+    use crate::bir::engine::Stats;
     use crate::bir::engine::testing::{call, id, prim};
-    use crate::lambda::arena::LamArena;
+    use crate::bir::l::beta::testing::*;
+    use crate::ident::Ident;
+    use crate::lambda::arena::{Lam, LamArena};
     use crate::lambda::lam_compat::LetKind;
     use crate::lambda::lam_constant::Constant as C;
-    use crate::lambda::lam_tag_info::TagInfo;
+    use crate::lambda::{FunctionAttribute, InlineAttribute, Lambda};
+    use crate::name::Name;
+
+    #[derive(Default)]
+    struct Setup {
+        jsx_preserve: bool,
+        exports: Vec<Ident>,
+        externals: Vec<(&'static str, &'static str, Lambda)>,
+    }
+
+    fn dump(a: &LamArena, root: Lam) -> String {
+        let mut out = Vec::new();
+        crate::lambda::sexp_lambda::print_lambda(&a.export(root), &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    /// The same input to `collect_info` + `simplify_alias` and to the round:
+    /// every binder's fact, the dumps and every identifier are compared.
+    fn compare_with(a: LamArena, root: Lam, setup: &Setup) -> Stats {
+        let tree = a.export(root);
+        let mut a = LamArena::new();
+        let root = a.import(&tree);
+        let mut imported = import_lambda(&a, root).unwrap();
+        crate::bir::shadow::mark_exports(&mut imported, &setup.exports);
+        let mut arities = crate::bir::l::arity::Arities::default();
+        crate::bir::shadow::collect_arities(&mut imported, &mut arities, &mut |_, _| None);
+        let stamp = a.ident_stamp_bound();
+        let mut meta = crate::lambda::lam_stats::LamStats::new(setup.exports.clone());
+        meta.id_gen.set_current_stamp(stamp);
+        crate::lambda::lam_pass_collect::collect_info(&a, &mut meta, root);
+        let table = meta.ident_tbl.clone();
+        let mut resolver = |module: &Ident, field: &str| {
+            setup
+                .externals
+                .iter()
+                .find(|(m, f, _)| *m == module.name() && *f == field)
+                .map(|(_, _, lambda)| lambda.clone())
+        };
+        let expected = crate::lambda::lam_pass_remove_alias::simplify_alias(
+            &mut a,
+            &mut meta,
+            root,
+            setup.jsx_preserve,
+            &mut resolver,
+        );
+        let (stats, _) = crate::bir::shadow::run_alias(
+            &mut imported,
+            &setup.exports,
+            stamp as u32,
+            setup.jsx_preserve,
+            &mut resolver,
+            &arities,
+            &a,
+            &table,
+            "test",
+        )
+        .unwrap()
+        .unwrap();
+        imported.arena.validate(Some(imported.root), false).unwrap();
+        let actual = export_lambda(&imported).unwrap();
+        assert_eq!(dump(&actual.arena, actual.root), dump(&a, expected));
+        assert_eq!(
+            super::super::flatten::identities(&actual.arena, actual.root),
+            super::super::flatten::identities(&a, expected)
+        );
+        stats
+    }
+    fn compare(a: LamArena, root: Lam) -> Stats {
+        compare_with(a, root, &Setup::default())
+    }
+
+    fn count(stats: &Stats, rule: &str) -> u64 {
+        stats.rules.get(rule).copied().unwrap_or(0)
+    }
+
+    // ------------------------------------------------------ field reads
+
+    /// `field_flatten_get` on a block (lam_util.rs:139-142): each simple
+    /// form, a form that is not simple, and an index outside the block.
+    #[test]
+    fn a_field_of_a_known_block_is_its_simple_element() {
+        for index in [0, 1, 2, 3, 4, 9, -1] {
+            let mut a = LamArena::new();
+            let (b, y, m) = (id("b", 1), id("y", 2), id("m", 3));
+            let e0 = a.var(y);
+            let e1 = int(&mut a, 7);
+            let g = global(&mut a, "M");
+            let e2 = module_field(&mut a, "f", g);
+            let vm = a.var(m);
+            let e3 = module_field(&mut a, "g", vm);
+            let e4 = call(&mut a, "effect", 4);
+            let block = tuple(&mut a, &[e0, e1, e2, e3, e4]);
+            let vb = a.var(b);
+            let got = field(&mut a, index, vb);
+            let other = call(&mut a, "use", 5);
+            let body = a.seq_raw(got, other);
+            let root = a.let_(LetKind::Strict, b, block, body);
+            let stats = compare(a, root);
+            assert_eq!(count(&stats, "field-of-block"), u64::from((0..4).contains(&index)));
+        }
+    }
+
+    /// lam_util.rs:134-137: a field of a variable bound to a module.
+    #[test]
+    fn a_field_of_a_module_alias_reads_the_module() {
+        let mut a = LamArena::new();
+        let m = id("m", 1);
+        let g = global(&mut a, "M");
+        let vm = a.var(m);
+        let got = module_field(&mut a, "f", vm);
+        let root = a.let_(LetKind::Alias, m, g, got);
+        assert_eq!(count(&compare(a, root), "field-of-module"), 1);
+    }
+
+    /// lam_util.rs:143-175: a record constant is read by field name, another
+    /// block by position, and an element that allocates is not copied.
+    #[test]
+    fn a_field_of_a_constant_block_is_its_element_unless_it_allocates() {
+        let inner = C::Block {
+            tag_info: Box::new(TagInfo::Tuple),
+            elements: vec![C::int(1)],
+        };
+        for (record, index, name) in [
+            (true, 0, "second"),
+            (true, 1, "first"),
+            (true, 0, "missing"),
+            (true, 2, "nested"),
+            (false, 1, "x"),
+            (false, 2, "x"),
+            (false, 7, "x"),
+        ] {
+            let mut a = LamArena::new();
+            let c = id("c", 1);
+            let tag = if record {
+                TagInfo::record(
+                    vec![
+                        ("first".into(), false),
+                        ("second".into(), false),
+                        ("nested".into(), false),
+                    ],
+                    crate::parser::ast::MutableFlag::Immutable,
+                )
+            } else {
+                TagInfo::Tuple
+            };
+            let constant = a.const_(C::Block {
+                tag_info: Box::new(tag),
+                elements: vec![C::int(10), C::string("s"), inner.clone()],
+            });
+            let vc = a.var(c);
+            let info = if record {
+                FieldDbgInfo::Record {
+                    name: Name::new(name),
+                }
+            } else {
+                FieldDbgInfo::Tuple
+            };
+            let got = prim(&mut a, Primitive::Pfield(index, info), &[vc]);
+            let root = a.let_(LetKind::Alias, c, constant, got);
+            compare(a, root);
+        }
+    }
+
+    /// C.2 row 1: an element is read as it was when the round started. The
+    /// block's element `m.f` is rewritten to `M.f` earlier in the same
+    /// sweep; the read of the block still gives `m.f`.
+    #[test]
+    fn a_block_element_rewritten_earlier_in_the_sweep_is_read_as_it_was() {
+        let mut a = LamArena::new();
+        let (m, b) = (id("m", 1), id("b", 2));
+        let g = global(&mut a, "M");
+        let vm = a.var(m);
+        let element = module_field(&mut a, "f", vm);
+        let block = tuple(&mut a, &[element]);
+        let vb = a.var(b);
+        let got = field(&mut a, 0, vb);
+        let inner = a.let_(LetKind::Strict, b, block, got);
+        let root = a.let_(LetKind::Alias, m, g, inner);
+        let stats = compare(a, root);
+        assert_eq!(count(&stats, "field-of-module"), 1);
+        assert_eq!(count(&stats, "field-of-block"), 1);
+    }
+
+    // ------------------------------------------------ optional values
+
+    fn option_values(a: &mut LamArena, which: usize, x: Ident) -> Lam {
+        let vx = a.var(x);
+        match which {
+            0 => prim(a, Primitive::Psome, &[vx]),
+            1 => prim(a, Primitive::PsomeNotNest, &[vx]),
+            2 => {
+                let c = int(a, 3);
+                prim(a, Primitive::Psome, &[c])
+            }
+            3 => {
+                let c = a.const_(C::Block {
+                    tag_info: Box::new(TagInfo::Tuple),
+                    elements: vec![C::int(1)],
+                });
+                prim(a, Primitive::Psome, &[c])
+            }
+            4 => {
+                let inner = call(a, "effect", 9);
+                prim(a, Primitive::Psome, &[inner])
+            }
+            5 => prim(a, Primitive::PnullToOpt, &[vx]),
+            6 => prim(a, Primitive::PnullUndefinedToOpt, &[vx]),
+            7 => {
+                let inner = call(a, "effect", 9);
+                prim(a, Primitive::PnullToOpt, &[inner])
+            }
+            8 => a.const_(C::Some(Box::new(C::int(1)))),
+            9 => tuple(a, &[vx]),
+            10 => prim(
+                a,
+                Primitive::Pmakeblock(TagInfo::Tuple, Mutable::Mutable),
+                &[vx],
+            ),
+            11 => {
+                let c = a.const_(C::JsFalse);
+                prim(a, Primitive::Psome, &[c])
+            }
+            _ => call(a, "unknown", 9),
+        }
+    }
+
+    /// lam_pass_remove_alias.rs:272-293: both unwrapping primitives on each
+    /// kind of binding.
+    #[test]
+    fn unwrapping_a_known_optional_gives_its_payload() {
+        for which in 0..13 {
+            for not_nest in [false, true] {
+                let mut a = LamArena::new();
+                let (v, x) = (id("v", 1), id("x", 2));
+                let value = option_values(&mut a, which, x);
+                let vv = a.var(v);
+                let p = if not_nest {
+                    Primitive::PvalFromOptionNotNest
+                } else {
+                    Primitive::PvalFromOption
+                };
+                let got = prim(&mut a, p, &[vv]);
+                let root = a.let_(LetKind::Strict, v, value, got);
+                compare(a, root);
+            }
+        }
+    }
+
+    /// lam_pass_remove_alias.rs:160-193: `if Pis_not_none v` on each kind
+    /// of binding.
+    #[test]
+    fn a_none_test_of_a_known_binding_is_decided() {
+        for which in 0..13 {
+            let mut a = LamArena::new();
+            let (v, x) = (id("v", 1), id("x", 2));
+            let value = option_values(&mut a, which, x);
+            let vv = a.var(v);
+            let test = prim(&mut a, Primitive::PisNotNone, &[vv]);
+            let yes = call(&mut a, "yes", 3);
+            let no = call(&mut a, "no", 4);
+            let cond = a.if_raw(test, yes, no);
+            let root = a.let_(LetKind::Strict, v, value, cond);
+            let stats = compare(a, root);
+            assert_eq!(count(&stats, "if-nullable"), u64::from(matches!(which, 5 | 6)));
+            assert_eq!(
+                count(&stats, "if-known"),
+                u64::from(matches!(which, 0..=4 | 8 | 9 | 11))
+            );
+        }
+    }
+
+    /// lam_pass_remove_alias.rs:194-200 with `id_is_for_sure_true_in_boolean`.
+    #[test]
+    fn a_condition_bound_to_a_constant_is_decided() {
+        let constants = [
+            Some(C::JsTrue),
+            Some(C::JsFalse),
+            Some(C::int(0)),
+            Some(C::int(5)),
+            Some(C::JsNull),
+            Some(C::JsUndefined { is_unit: false }),
+            Some(C::string("text")),
+            None,
+        ];
+        for (index, constant) in constants.into_iter().enumerate() {
+            for optional in [false, true] {
+                let mut a = LamArena::new();
+                let v = id("v", 1);
+                let mut value = match constant.clone() {
+                    Some(c) => a.const_(c),
+                    None => call(&mut a, "unknown", 5),
+                };
+                if optional {
+                    value = prim(&mut a, Primitive::Psome, &[value]);
+                }
+                let vv = a.var(v);
+                let yes = call(&mut a, "yes", 3);
+                let no = call(&mut a, "no", 4);
+                let cond = a.if_raw(vv, yes, no);
+                let root = a.let_(LetKind::Strict, v, value, cond);
+                let stats = compare(a, root);
+                let decided = if optional {
+                    matches!(index, 1 | 4 | 5)
+                } else {
+                    index < 6
+                };
+                assert_eq!(count(&stats, "if-known"), u64::from(decided), "{index} {optional}");
+            }
+        }
+    }
+
+    /// lam_pass_remove_alias.rs:206-218.
+    #[test]
+    fn a_string_switch_on_a_bound_constant_switches_on_the_constant() {
+        for constant in [C::string("b"), C::string("z"), C::int(1)] {
+            for default in [false, true] {
+                let mut a = LamArena::new();
+                let s = id("s", 1);
+                let value = a.const_(constant.clone());
+                let vs = a.var(s);
+                let first = call(&mut a, "a", 2);
+                let second = call(&mut a, "b", 3);
+                let other = call(&mut a, "other", 4);
+                let info = a.add_str_switch(["a", "b"], default);
+                let actions = if default {
+                    a.add_list(&[first, second, other])
+                } else {
+                    a.add_list(&[first, second])
+                };
+                let switch = a.string_switch_raw(vs, actions, info);
+                let root = a.let_(LetKind::Alias, s, value, switch);
+                assert_eq!(count(&compare(a, root), "switch-on-constant"), 1);
+            }
+        }
+    }
+
+    /// The alias entry (`alias_ident_or_global`): what is known about `y`
+    /// is known about `let x = y`.
+    #[test]
+    fn an_alias_has_the_entry_of_what_it_names() {
+        let mut a = LamArena::new();
+        let (b, x, y) = (id("b", 1), id("x", 2), id("y", 3));
+        let vy = a.var(y);
+        let block = tuple(&mut a, &[vy]);
+        let vb = a.var(b);
+        let vx = a.var(x);
+        let got = field(&mut a, 0, vx);
+        let inner = a.let_(LetKind::Alias, x, vb, got);
+        let root = a.let_(LetKind::Strict, b, block, inner);
+        assert_eq!(count(&compare(a, root), "field-of-block"), 1);
+    }
+
+    // --------------------------------------------------- applications
+
+    /// `simpl_apply` on a bound function with `propagate_beta_reduce_with_map`
+    /// and `simple_beta_reduce`: every body shape against every pair of
+    /// argument shapes.
+    #[test]
+    fn an_application_of_a_bound_function_agrees_for_every_body_and_argument() {
+        let mut inlined = 0;
+        for body in 0..BODIES {
+            for first in 0..ARGUMENTS {
+                for second in 0..ARGUMENTS {
+                    let mut a = LamArena::new();
+                    let (f, x, y) = (id("f", 1), id("x", 2), id("y", 3));
+                    let b = bodies(&mut a, body, x, y);
+                    let function = fun(&mut a, &[x, y], b);
+                    let vf = a.var(f);
+                    let a1 = arguments(&mut a, first);
+                    let a2 = arguments(&mut a, second);
+                    let applied = app(&mut a, vf, &[a1, a2]);
+                    let root = a.let_(LetKind::Strict, f, function, applied);
+                    let stats = compare(a, root);
+                    inlined += count(&stats, "inline-application");
+                }
+            }
+        }
+        assert!(inlined > 500, "{inlined}");
+    }
+
+    /// The decisions of lam_pass_remove_alias.rs:341-415 other than size:
+    /// attributes, the kind of binding, exports, arity, an argument that
+    /// names the function.
+    #[test]
+    fn the_decision_to_inline_follows_attributes_binding_and_exports() {
+        let attrs = |which: usize| FunctionAttribute {
+            inline: match which {
+                1 => InlineAttribute::Always,
+                2 => InlineAttribute::Never,
+                _ => InlineAttribute::Default,
+            },
+            is_a_functor: which == 3,
+            async_: which == 4,
+            directive: (which == 5).then(|| "use server".to_string()),
+            ..Default::default()
+        };
+        for attr in 0..6 {
+            for binding in 0..5 {
+                for body in [0, 4, 11] {
+                    for shape in 0..4 {
+                        let mut a = LamArena::new();
+                        let (f, g, x, y, w) =
+                            (id("f", 1), id("g", 4), id("x", 2), id("y", 3), id("w", 5));
+                        let mut b = bodies(&mut a, body, x, y);
+                        if binding == 3 {
+                            // Not closed: uses a variable that is not a parameter.
+                            let vw = a.var(w);
+                            b = prim(&mut a, Primitive::Paddint, &[b, vw]);
+                        }
+                        let function = fun_attr(&mut a, &[x, y], b, attrs(attr));
+                        let vf = a.var(f);
+                        let a1 = match shape {
+                            // An argument that names the function.
+                            1 => a.var(f),
+                            _ => arguments(&mut a, 0),
+                        };
+                        let a2 = arguments(&mut a, 1);
+                        let applied = match shape {
+                            // Too few and too many arguments.
+                            2 => app(&mut a, vf, &[a1]),
+                            3 => app(&mut a, vf, &[a1, a2, a2]),
+                            _ => app(&mut a, vf, &[a1, a2]),
+                        };
+                        let tree = a.export(applied);
+                        let applied = a.import(&tree);
+                        let mut setup = Setup::default();
+                        let root = match binding {
+                            0 => a.let_(LetKind::Strict, f, function, applied),
+                            1 => a.letrec(&[(f, function)], applied),
+                            2 => {
+                                let vx = a.var(id("p", 6));
+                                let other = fun(&mut a, &[id("p", 6)], vx);
+                                a.letrec(&[(f, function), (g, other)], applied)
+                            }
+                            _ => {
+                                setup.exports = vec![f];
+                                let one = int(&mut a, 1);
+                                let bound = a.let_(LetKind::Strict, f, function, applied);
+                                a.let_(LetKind::Strict, w, one, bound)
+                            }
+                        };
+                        compare_with(a, root, &setup);
+                    }
+                }
+            }
+        }
+    }
+
+    /// lam_pass_remove_alias.rs:416-423: a function applied where it is
+    /// written is reduced on the arguments as they are.
+    #[test]
+    fn an_applied_function_is_reduced() {
+        for body in 0..BODIES {
+            for first in [0, 1, 2, 4] {
+                let mut a = LamArena::new();
+                let (x, y) = (id("x", 2), id("y", 3));
+                let b = bodies(&mut a, body, x, y);
+                let function = fun(&mut a, &[x, y], b);
+                let a1 = arguments(&mut a, first);
+                let a2 = arguments(&mut a, 2);
+                let root = app(&mut a, function, &[a1, a2]);
+                assert_eq!(count(&compare(a, root), "inline-applied-function"), 1);
+            }
+        }
+    }
+
+    /// Fresh identifiers and their order: every binder of the copied body
+    /// (function, `let`, `let rec`, handler, exception, the three loops) is
+    /// renamed in the order `Lam_bounded_vars.rewrite` does it, a `for`
+    /// loop's start expression twice. The comparison checks each stamp.
+    #[test]
+    fn a_copied_body_renames_every_binder_in_the_legacy_order() {
+        let mut a = LamArena::new();
+        let (f, x) = (id("f", 1), id("x", 2));
+        let body = every_binder(&mut a, x);
+        let attr = FunctionAttribute {
+            inline: InlineAttribute::Always,
+            ..Default::default()
+        };
+        let function = fun_attr(&mut a, &[x], body, attr);
+        let vf = a.var(f);
+        let argument = call(&mut a, "argument", 20);
+        let first = app(&mut a, vf, &[argument]);
+        let vf = a.var(f);
+        let argument = call(&mut a, "argument", 20);
+        let second = app(&mut a, vf, &[argument]);
+        let both = a.seq_raw(first, second);
+        let root = a.let_(LetKind::Strict, f, function, both);
+        let stats = compare(a, root);
+        assert_eq!(count(&stats, "inline-application"), 2);
+        // x, h, exn, i, t (twice), r, p, item: nine renames a copy.
+        assert_eq!(stats.renames.len(), 18);
+        assert_eq!(stats.labels.len(), 2);
+    }
+
+    /// C.2 row 1 for functions. `small`'s body is a string switch on a bound
+    /// constant: too big to inline. The sweep folds it to a constant before
+    /// it reaches the application; the decision still reads the body as it
+    /// was. `inlined` is small, and its body is rewritten before the
+    /// application is reached: what is inlined is the body as it was.
+    #[test]
+    fn a_function_rewritten_earlier_in_the_sweep_is_read_as_it_was() {
+        let mut a = LamArena::new();
+        let (s, small) = (id("s", 1), id("small", 2));
+        let value = a.const_(C::string("a"));
+        let vs = a.var(s);
+        let one = int(&mut a, 1);
+        let two = int(&mut a, 2);
+        let info = a.add_str_switch(["a"], true);
+        let actions = a.add_list(&[one, two]);
+        let switch = a.string_switch_raw(vs, actions, info);
+        let unit = id("unit", 3);
+        let function = fun(&mut a, &[unit], switch);
+        let vf = a.var(small);
+        let argument = a.unit();
+        let applied = app(&mut a, vf, &[argument]);
+        let bound = a.let_(LetKind::Strict, small, function, applied);
+        let root = a.let_(LetKind::Alias, s, value, bound);
+        let stats = compare(a, root);
+        assert_eq!(count(&stats, "switch-on-constant"), 1);
+        assert_eq!(count(&stats, "inline-application"), 0);
+
+        let mut a = LamArena::new();
+        let (m, inlined, x) = (id("m", 1), id("inlined", 2), id("x", 3));
+        let g = global(&mut a, "M");
+        let vm = a.var(m);
+        let got = module_field(&mut a, "f", vm);
+        let vx = a.var(x);
+        let body = app(&mut a, got, &[vx]);
+        let function = fun(&mut a, &[x], body);
+        let vf = a.var(inlined);
+        let argument = call(&mut a, "argument", 9);
+        let applied = app(&mut a, vf, &[argument]);
+        let bound = a.let_(LetKind::Strict, inlined, function, applied);
+        let root = a.let_(LetKind::Alias, m, g, bound);
+        let stats = compare(a, root);
+        assert_eq!(stats.snapshots, 1);
+        // Once in the definition, once more in the inlined copy.
+        assert_eq!(count(&stats, "field-of-module"), 2);
+    }
+
+    /// C.2 row 2: inlining nests at most `MAX_INLINE_DEPTH` deep. Each
+    /// function of the chain calls the one before; a function marked
+    /// `@inline` is inlined at any depth.
+    #[test]
+    fn inlining_nests_at_most_four_deep() {
+        for always in [false, true] {
+            let mut a = LamArena::new();
+            let n = 9;
+            let argument = call(&mut a, "argument", 99);
+            let last = a.var(id("f", n));
+            let mut root = app(&mut a, last, &[argument]);
+            for level in (1..=n).rev() {
+                let vx = a.var(id("x", 100 + level));
+                let body = if level == 1 {
+                    let one = int(&mut a, 1);
+                    prim(&mut a, Primitive::Paddint, &[vx, one])
+                } else {
+                    let previous = a.var(id("f", level - 1));
+                    let call = app(&mut a, previous, &[vx]);
+                    let effect = call_(&mut a);
+                    a.seq_raw(effect, call)
+                };
+                let attr = FunctionAttribute {
+                    inline: if always {
+                        InlineAttribute::Always
+                    } else {
+                        InlineAttribute::Default
+                    },
+                    ..Default::default()
+                };
+                let function = fun_attr(&mut a, &[id("x", 100 + level)], body, attr);
+                root = a.let_(LetKind::Strict, id("f", level), function, root);
+            }
+            let stats = compare(a, root);
+            // Without the limit every body would hold the whole chain below
+            // it: 8 + 7 + ... + 1 applications inlined in the definitions and
+            // 9 at the call. With it, a definition inlines at most 5 levels.
+            let unbounded = 8 * 9 / 2 + 9;
+            if always {
+                assert_eq!(count(&stats, "inline-application"), unbounded);
+            } else {
+                assert!(count(&stats, "inline-application") < unbounded);
+            }
+        }
+    }
+    fn call_(a: &mut LamArena) -> Lam {
+        call(a, "effect", 200)
+    }
+
+    /// lam_pass_remove_alias.rs:319-339: a function another module exports.
+    #[test]
+    fn an_application_of_an_exported_function_of_another_module_is_inlined() {
+        let external = |which: usize| {
+            let mut a = LamArena::new();
+            let (p, t) = (id("p", 900), id("t", 901));
+            let vp = a.var(p);
+            let one = int(&mut a, 1);
+            let sum = prim(&mut a, Primitive::Paddint, &[vp, one]);
+            let body = if which == 0 {
+                sum
+            } else {
+                let vt = a.var(t);
+                let vt2 = a.var(t);
+                let twice = prim(&mut a, Primitive::Pmulint, &[vt, vt2]);
+                let g = global(&mut a, "Other");
+                let got = module_field(&mut a, "h", g);
+                let called = app(&mut a, got, &[twice]);
+                a.let_(LetKind::Strict, t, sum, called)
+            };
+            let attr = FunctionAttribute {
+                async_: which == 2,
+                ..Default::default()
+            };
+            let function = fun_attr(&mut a, &[p], body, attr);
+            a.export(function)
+        };
+        for which in 0..3 {
+            for shape in 0..4 {
+                let mut a = LamArena::new();
+                let g = global(&mut a, "M");
+                let callee = module_field(&mut a, "f", g);
+                let outer = id("outer", 1);
+                let argument = match shape {
+                    0 => call(&mut a, "argument", 2),
+                    // A parameter is not passed to an inlined body.
+                    1 => a.var(outer),
+                    _ => a.var(id("free", 3)),
+                };
+                let applied = match shape {
+                    3 => {
+                        let extra = int(&mut a, 2);
+                        app(&mut a, callee, &[argument, extra])
+                    }
+                    _ => app(&mut a, callee, &[argument]),
+                };
+                let root = fun(&mut a, &[outer], applied);
+                let setup = Setup {
+                    externals: vec![("M", "f", external(which)), ("M", "constant", Lambda::unit())],
+                    ..Default::default()
+                };
+                let stats = compare_with(a, root, &setup);
+                assert_eq!(
+                    count(&stats, "inline-external"),
+                    u64::from(which < 2 && matches!(shape, 0 | 2)),
+                    "{which} {shape}"
+                );
+            }
+        }
+    }
+
+    // ---------------------------------------------------- step counts
+
+    fn steps(a: &LamArena, root: Lam) -> (u64, Stats) {
+        let mut imported = crate::bir::engine::testing::import(a, root);
+        let (steps, stats) = {
+            let mut e = Engine::new(&mut imported.arena);
+            e.run(&ALIAS, imported.root);
+            (e.steps(), e.stats.clone())
+        };
+        assert_eq!(stats.unsupported, None);
+        imported.arena.validate(Some(imported.root), false).unwrap();
+        (steps, stats)
+    }
+
+    /// 10,000 aliases in a chain, the last one a condition: the chain is
+    /// followed once.
+    #[test]
+    fn ten_thousand_aliases_in_a_chain_are_followed_once() {
+        let mut a = LamArena::new();
+        let n = 10_000;
+        let last = a.var(id("x", n));
+        let yes = call(&mut a, "yes", n + 1);
+        let no = call(&mut a, "no", n + 2);
+        let mut root = a.if_raw(last, yes, no);
+        for i in (1..=n).rev() {
+            let previous = a.var(id("x", i - 1));
+            root = a.let_(LetKind::Alias, id("x", i), previous, root);
+        }
+        let truth = a.const_(C::JsTrue);
+        root = a.let_(LetKind::Alias, id("x", 0), truth, root);
+        let (steps, stats) = steps(&a, root);
+        assert_eq!(count(&stats, "if-known"), 1);
+        let nodes = 2 * (n as u64 + 1) + 7;
+        assert!(steps <= 40 * nodes, "{steps}");
+        eprintln!("alias chain: {steps} steps for {nodes} nodes");
+    }
+
+    /// A 10,000-field block read 10,000 times: the entry is built once and
+    /// each read is constant.
+    #[test]
+    fn a_ten_thousand_field_block_read_ten_thousand_times_is_linear() {
+        let mut a = LamArena::new();
+        let n = 10_000;
+        let b = id("b", 1);
+        let elements: Vec<Lam> = (0..n).map(|i| a.var(id("e", 10 + i))).collect();
+        let block = tuple(&mut a, &elements);
+        let mut body = a.unit();
+        for i in 0..n {
+            let vb = a.var(b);
+            let got = field(&mut a, i, vb);
+            let user = a.var(id("use", 5));
+            let used = app(&mut a, user, &[got]);
+            body = a.seq_raw(used, body);
+        }
+        let root = a.let_(LetKind::Strict, b, block, body);
+        let (steps, stats) = steps(&a, root);
+        assert_eq!(count(&stats, "field-of-block"), n as u64);
+        let nodes = 6 * n as u64 + 3;
+        assert!(steps <= 40 * nodes, "{steps}");
+        eprintln!("block reads: {steps} steps for {nodes} nodes");
+    }
+
+    /// 10,000 call sites of one small function: each costs the body.
+    #[test]
+    fn ten_thousand_inlined_call_sites_of_one_small_function_are_linear() {
+        let mut a = LamArena::new();
+        let n = 10_000;
+        let (f, x) = (id("f", 1), id("x", 2));
+        let vx = a.var(x);
+        let t = id("t", 3);
+        let negated = prim(&mut a, Primitive::Pnegint, &[vx]);
+        let vt = a.var(t);
+        let body = a.let_(LetKind::Strict, t, negated, vt);
+        let function = fun(&mut a, &[x], body);
+        let mut rest = a.unit();
+        for i in 0..n {
+            let vf = a.var(f);
+            let argument = call(&mut a, "argument", 10 + i);
+            let applied = app(&mut a, vf, &[argument]);
+            rest = a.seq_raw(applied, rest);
+        }
+        let root = a.let_(LetKind::Strict, f, function, rest);
+        let (steps, stats) = steps(&a, root);
+        assert_eq!(count(&stats, "inline-application"), n as u64);
+        assert_eq!(stats.renames.len(), 2 * n as usize);
+        let nodes = 5 * n as u64 + 9;
+        assert!(steps <= 150 * nodes, "{steps}");
+        eprintln!("inlined call sites: {steps} steps for {nodes} nodes");
+    }
+
+    /// The skip rule: a unit with no application, primitive, conditional or
+    /// string switch is not swept at all; in a unit that has some, a subtree
+    /// without them is not entered.
+    #[test]
+    fn a_unit_with_nothing_to_do_is_not_entered() {
+        let mut a = LamArena::new();
+        let mut root = a.var(id("x", 0));
+        for i in 1..=100 {
+            let value = a.const_(C::int(i));
+            root = a.let_(LetKind::Strict, id("x", i), value, root);
+        }
+        let (_, stats) = steps(&a, root);
+        assert_eq!(stats.entered, 0);
+
+        // One primitive at the bottom of the same chain: the spine is
+        // entered (101 nodes), the 100 constants are not.
+        let mut a = LamArena::new();
+        let v = a.var(id("x", 0));
+        let mut root = prim(&mut a, Primitive::Pnegint, &[v]);
+        for i in 1..=100 {
+            let value = a.const_(C::int(i));
+            root = a.let_(LetKind::Strict, id("x", i), value, root);
+        }
+        let (_, stats) = steps(&a, root);
+        assert_eq!(stats.entered, 101);
+        assert_eq!(stats.pruned, 101);
+        assert!(stats.rules.is_empty());
+    }
 
     /// Where the maintained fact and the legacy entry differ by design
     /// (`Table::build`): the fact exists, the legacy table has no entry.
@@ -1092,7 +1863,7 @@ mod tests {
         );
         let effect = call(&mut a, "effect", 5);
         let nullable = prim(&mut a, Primitive::PnullToOpt, &[effect]);
-        let one = a.const_(C::int(1));
+        let one = int(&mut a, 1);
         let raise = a.static_raise(1, &[one]);
         let vh = a.var(h);
         let caught = a.static_catch(raise, 1, &[h], vh);
